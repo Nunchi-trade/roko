@@ -1,4 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
+import { getCssVar, hexToRgba } from '../lib/color';
+import { useCanvasSetup } from '../hooks/useCanvasSetup';
 import Pane from './Pane';
 import './KnowledgeFlowPanel.css';
 
@@ -41,14 +43,8 @@ interface Particle {
   color: string;
 }
 
-/* ── Resolved CSS variable cache ── */
-let _resolved: Record<string, string> = {};
-function cssVar(name: string): string {
-  if (_resolved[name]) return _resolved[name];
-  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  _resolved[name] = v || '#888';
-  return _resolved[name];
-}
+/* ── Resolved CSS variable accessor ── */
+const cssVar = getCssVar;
 
 /* ── Bezier helper (quadratic) ── */
 function quadBezier(
@@ -159,22 +155,8 @@ export default function KnowledgeFlowPanel({
     });
   }, [insights, leftAgent, rightAgent, spawnParticle]);
 
-  /* ── Canvas draw loop ── */
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
+  /** Core scene renderer — called by useCanvasSetup (DPR-adjusted) and by animation continuation. */
+  const drawScene = useCallback((ctx: CanvasRenderingContext2D, w: number, h: number) => {
     const lay = getLayout(w, h);
     const now = performance.now();
 
@@ -187,7 +169,7 @@ export default function KnowledgeFlowPanel({
 
     // Are edges glowing gold?
     const edgeGold = now < ahaEdgeRef.current;
-    const edgeColor = edgeGold ? cssVar('--bone-bright') : 'rgba(255,255,255,0.08)';
+    const edgeColor = edgeGold ? cssVar('--bone-bright') : cssVar('--border-soft');
     const edgeWidth = edgeGold ? 2.5 : 1.5;
 
     // ── Draw edges (bezier curves) ──
@@ -232,7 +214,7 @@ export default function KnowledgeFlowPanel({
     const cr = 8;
     ctx.beginPath();
     ctx.roundRect(cx, cy, lay.centerW, lay.centerH, cr);
-    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+    ctx.fillStyle = cssVar('--border-soft');
     ctx.fill();
     ctx.strokeStyle = cssVar('--bone-dim');
     ctx.lineWidth = 1;
@@ -342,32 +324,26 @@ export default function KnowledgeFlowPanel({
 
     // Continue animation if particles or gold edges are active
     if (alive.length > 0 || edgeGold) {
-      rafRef.current = requestAnimationFrame(draw);
+      rafRef.current = requestAnimationFrame(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const c = canvas.getContext('2d');
+        if (!c) return;
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        c.setTransform(dpr, 0, 0, dpr, 0, 0);
+        drawScene(c, rect.width, rect.height);
+      });
     }
   }, [getLayout, leftAgent, rightAgent, insights, mode]);
 
-  /* ── Start/restart draw loop on data change ── */
-  useEffect(() => {
+  /* ── useCanvasSetup for initial draw + resize handling ── */
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
     cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(draw);
-
-    const ro = new ResizeObserver(() => {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(draw);
-    });
-    if (canvasRef.current) ro.observe(canvasRef.current);
-
-    return () => {
-      cancelAnimationFrame(rafRef.current);
-      ro.disconnect();
-    };
-  }, [draw]);
-
-  /* ── Kick animation when particles spawn ── */
-  useEffect(() => {
-    cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(draw);
-  }, [insights.length, draw]);
+    drawScene(ctx, w, h);
+  }, [drawScene, insights.length]);
 
   /* ── Badge for pane header ── */
   const totalInsights = insights.length;
@@ -415,13 +391,3 @@ export default function KnowledgeFlowPanel({
   );
 }
 
-/* ── Utility ── */
-
-function hexToRgba(hex: string, alpha: number): string {
-  // Handle CSS variables or named values
-  if (!hex.startsWith('#')) return hex;
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}

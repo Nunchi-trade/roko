@@ -396,10 +396,7 @@
   box-shadow: none;
   animation: none;
 }
-@keyframes benchlive-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(122,138,120,.5); }
-  50% { opacity: 0.5; box-shadow: 0 0 12px rgba(122,138,120,.8); }
-}
+/* benchlive-pulse → shared: src/styles/animations.css */
 
 .bench-live-error-banner {
   background: rgba(170, 80, 80, 0.15);

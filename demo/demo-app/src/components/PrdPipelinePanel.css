@@ -10,6 +10,8 @@
   font-family: var(--sans);
   font-size: var(--text-sm);
   line-height: 1.5;
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* ── Reveal animation ── */
@@ -32,6 +34,7 @@
   padding: var(--sp-4);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
+  min-width: 0;
   background:
     radial-gradient(circle at 20% 10%, rgba(184, 122, 148, 0.12), transparent 50%),
     linear-gradient(135deg, rgba(30, 20, 28, 0.8), rgba(12, 12, 16, 0.7));
@@ -58,6 +61,8 @@
   font-weight: 600;
   line-height: 1.2;
   color: var(--text-strong);
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .pp-quote {
@@ -69,6 +74,8 @@
   line-height: 1.5;
   background: rgba(184, 122, 148, 0.05);
   border-radius: 0 6px 6px 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .pp-idea {
@@ -82,22 +89,6 @@
   overflow: hidden;
 }
 
-.pp-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.pp-tags span {
-  font-size: var(--text-xs);
-  line-height: 1.3;
-  padding: 4px 8px;
-  color: var(--text-soft);
-  border: 1px solid var(--glass-border);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.03);
-}
 
 /* ── Controls row (button + score) ── */
 
@@ -253,6 +244,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 
 .pp-examples button {
@@ -268,6 +260,8 @@
   color: var(--text-dim);
   cursor: pointer;
   transition: border-color 200ms var(--ease), background 200ms var(--ease);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .pp-examples button:hover:not(:disabled) {
@@ -385,6 +379,8 @@
   background: rgba(10, 10, 13, 0.5);
   padding: 14px 16px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .pp-section-head {
@@ -410,6 +406,8 @@
   font-size: var(--text-md);
   font-weight: 500;
   color: var(--text-strong);
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .pp-excerpt {
@@ -467,6 +465,8 @@
   border-radius: 6px;
   padding: 12px 14px;
   background: rgba(16, 14, 20, 0.6);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .pp-plan-head {
@@ -482,6 +482,9 @@
   font-size: var(--text-sm);
   font-weight: 500;
   color: var(--text-strong);
+  overflow-wrap: break-word;
+  word-break: break-word;
+  min-width: 0;
 }
 
 .pp-plan-id {
@@ -614,6 +617,8 @@
   border-radius: 6px;
   background: rgba(16, 14, 20, 0.6);
   transition: border-color 300ms var(--ease);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .pp-task-dot {
@@ -636,7 +641,7 @@
 }
 
 .pp-task-done .pp-task-dot { background: var(--success); }
-.pp-task-failed .pp-task-dot { background: var(--danger, #cc6f6f); }
+.pp-task-failed .pp-task-dot { background: var(--danger); }
 .pp-task-blocked .pp-task-dot { background: var(--warning); }
 
 .pp-task-body {
@@ -658,6 +663,9 @@
   font-weight: 500;
   color: var(--text-strong);
   line-height: 1.3;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  min-width: 0;
 }
 
 .pp-task p {
@@ -701,7 +709,7 @@
 
 .pp-task-active .pp-task-status-label { color: var(--rose-bright); }
 .pp-task-done .pp-task-status-label { color: var(--success); }
-.pp-task-failed .pp-task-status-label { color: var(--danger, #cc6f6f); }
+.pp-task-failed .pp-task-status-label { color: var(--danger); }
 
 .pp-task-meta {
   display: flex;
@@ -799,4 +807,4 @@
 
 .pp-event-success p { color: var(--success); }
 .pp-event-warning p { color: var(--warning); }
-.pp-event-error p { color: var(--danger, #cc6f6f); }
+.pp-event-error p { color: var(--danger); }

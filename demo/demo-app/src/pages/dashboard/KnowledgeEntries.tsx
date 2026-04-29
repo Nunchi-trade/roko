@@ -2,6 +2,8 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { getCssVar } from '../../lib/color';
+import { domainColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 
@@ -19,18 +21,6 @@ const pageStyle: CSSProperties = {
   gap: 10,
   minHeight: '100%',
 };
-
-const DOMAIN_COLORS: Record<string, string> = {
-  gate: '#CC90A8',
-  agent: '#C8B890',
-  knowledge: '#9494B4',
-  plan: '#7A8A78',
-  config: '#C89A68',
-};
-
-function domainColor(domain?: string): string {
-  return DOMAIN_COLORS[domain ?? ''] ?? '#706070';
-}
 
 function percent(value?: number) {
   if (typeof value !== 'number' || Number.isNaN(value)) return '—';
@@ -87,7 +77,7 @@ function DomainChart({ entries, height = 140 }: { entries: KnowledgeEntry[]; hei
       const color = domainColor(domain);
 
       // Label
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '10px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
@@ -108,7 +98,7 @@ function DomainChart({ entries, height = 140 }: { entries: KnowledgeEntry[]; hei
       ctx.globalAlpha = 1;
 
       // Value
-      ctx.fillStyle = '#c4b4c4';
+      ctx.fillStyle = getCssVar('--text-soft');
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillText(`${count} (${(pct * 100).toFixed(0)}%)`, pad.left + barW + 8, y + barH / 2);
@@ -204,14 +194,14 @@ function ConfidenceHistogram({ entries, height = 140 }: { entries: KnowledgeEntr
       ctx.fill();
 
       // X-axis labels
-      ctx.fillStyle = '#6a5a68';
+      ctx.fillStyle = getCssVar('--text-ghost');
       ctx.font = '8px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
       ctx.fillText(`${i * 10}`, x + barW / 2, h - pad.bottom + 12);
     });
 
     // Y-axis labels
-    ctx.fillStyle = '#6a5a68';
+    ctx.fillStyle = getCssVar('--text-ghost');
     ctx.font = '8px "JetBrains Mono", monospace';
     ctx.textAlign = 'right';
     ctx.fillText('0', pad.left - 6, pad.top + plotH + 3);

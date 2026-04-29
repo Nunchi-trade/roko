@@ -52,7 +52,7 @@ export function useBenchSSE({ benchId, enabled = true }: UseBenchSSEOptions = {}
           const eventBenchId = 'bench_id' in parsed ? parsed.bench_id : undefined;
           if (benchId && eventBenchId && eventBenchId !== benchId) return;
           setLastEvent(parsed);
-          setEvents((prev) => [...prev, parsed]);
+          setEvents((prev) => [...prev.slice(-499), parsed]);
         } catch {
           // Ignore unparseable events
         }

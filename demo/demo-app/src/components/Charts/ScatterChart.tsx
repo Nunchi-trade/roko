@@ -1,4 +1,6 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef } from 'react';
+import { getCssVar, hexToRgba } from '../../lib/color';
+import { useCanvasSetup } from '../../hooks/useCanvasSetup';
 import './Charts.css';
 
 interface ScatterPoint {
@@ -27,21 +29,9 @@ export default function ScatterChart({
 }: ScatterChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || points.length === 0) return;
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    if (points.length === 0) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
     const pad = { top: 16, right: 24, bottom: 36, left: 56 };
     const plotW = w - pad.left - pad.right;
     const plotH = h - pad.top - pad.bottom;
@@ -75,7 +65,7 @@ export default function ScatterChart({
       ctx.moveTo(pad.left, yPx);
       ctx.lineTo(pad.left + plotW, yPx);
       ctx.stroke();
-      ctx.fillStyle = '#6a5a68';
+      ctx.fillStyle = getCssVar('--text-ghost');
       ctx.textAlign = 'right';
       ctx.fillText(yVal.toPrecision(3), pad.left - 8, yPx + 3);
 
@@ -86,13 +76,13 @@ export default function ScatterChart({
       ctx.moveTo(xPx, pad.top);
       ctx.lineTo(xPx, pad.top + plotH);
       ctx.stroke();
-      ctx.fillStyle = '#6a5a68';
+      ctx.fillStyle = getCssVar('--text-ghost');
       ctx.textAlign = 'center';
       ctx.fillText(xVal.toPrecision(3), xPx, pad.top + plotH + 16);
     }
 
     // Axis labels
-    ctx.fillStyle = '#8a7a88';
+    ctx.fillStyle = getCssVar('--text-dim');
     ctx.font = '10px "General Sans", sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(xLabel, pad.left + plotW / 2, h - 4);
@@ -121,7 +111,7 @@ export default function ScatterChart({
         const x0 = originX;
         const x1 = originX + rangeX;
         ctx.beginPath();
-        ctx.strokeStyle = 'rgba(220,165,189,0.5)';
+        ctx.strokeStyle = hexToRgba(getCssVar('--rose-glow'), 0.5);
         ctx.lineWidth = 1.5;
         ctx.setLineDash([4, 4]);
         ctx.moveTo(toCanvasX(x0), toCanvasY(slope * x0 + intercept));
@@ -135,13 +125,13 @@ export default function ScatterChart({
     for (const pt of points) {
       const cx = toCanvasX(pt.x);
       const cy = toCanvasY(pt.y);
-      const color = pt.color ?? '#AA7088';
+      const color = pt.color ?? getCssVar('--rose');
       const r = pt.size ?? 4;
 
       // Glow
       ctx.beginPath();
       ctx.arc(cx, cy, r * 2, 0, Math.PI * 2);
-      ctx.fillStyle = color + '26';
+      ctx.fillStyle = hexToRgba(color, 0.15);
       ctx.fill();
 
       // Dot
@@ -151,19 +141,12 @@ export default function ScatterChart({
       ctx.fill();
 
       // Label
-      ctx.fillStyle = '#c4b4c4';
+      ctx.fillStyle = getCssVar('--text-soft');
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillText(pt.label, cx + r + 4, cy + 3);
     }
   }, [points, xLabel, yLabel, showTrendLine]);
-
-  useEffect(() => {
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [draw]);
 
   return (
     <div className="chart-container" style={{ height }}>

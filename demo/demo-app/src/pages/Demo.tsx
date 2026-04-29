@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { SCENARIOS, type ScenarioContext } from '../lib/scenarios';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../lib/playback-controller';
 import { useTerminal, type TerminalHandle } from '../hooks/useTerminal';
-import { setSpeedMultiplier } from '../hooks/useTerminalSession';
+import { setSpeedMultiplier } from '../lib/terminal-session';
 import { useServerHealth } from '../hooks/useServerHealth';
 import { useRokoConfig } from '../hooks/useRokoConfig';
 import { useWorkspace } from '../hooks/useWorkspace';
@@ -81,8 +81,8 @@ export default function Demo() {
 
   // Knowledge Transfer panel state
   const [kfInsights, setKfInsights] = useState<InsightEvent[]>([]);
-  const [kfLeftAgent, setKfLeftAgent] = useState<AgentInfo>({ name: 'Alpha', color: '#e5918e', posts: 0, confirms: 0 });
-  const [kfRightAgent, setKfRightAgent] = useState<AgentInfo>({ name: 'Beta', color: '#8eb5e5', posts: 0, confirms: 0 });
+  const [kfLeftAgent, setKfLeftAgent] = useState<AgentInfo>({ name: 'Alpha', color: 'var(--rose-bright)', posts: 0, confirms: 0 });
+  const [kfRightAgent, setKfRightAgent] = useState<AgentInfo>({ name: 'Beta', color: 'var(--dream-bright)', posts: 0, confirms: 0 });
   const [kfMetrics, setKfMetrics] = useState<EfficiencyMetric[]>([
     { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
     { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
@@ -153,7 +153,7 @@ export default function Demo() {
   const ciLeftAgent: AgentInfo = useMemo(
     () => ({
       name: 'Alpha',
-      color: '#e5918e',
+      color: 'var(--rose-bright)',
       posts: ciInsights.filter((i) => i.agent === 'yield-scout' || i.agent === 'agent-alpha').length,
       confirms: ciInsights.filter(
         (i) => i.type === 'confirmed' && (i.agent === 'yield-scout' || i.agent === 'agent-alpha'),
@@ -165,7 +165,7 @@ export default function Demo() {
   const ciRightAgent: AgentInfo = useMemo(
     () => ({
       name: 'Beta',
-      color: '#8eb5e5',
+      color: 'var(--dream-bright)',
       posts: ciInsights.filter((i) => i.agent === 'risk-hedger' || i.agent === 'agent-beta').length,
       confirms: ciInsights.filter(
         (i) => i.type === 'confirmed' && (i.agent === 'risk-hedger' || i.agent === 'agent-beta'),
@@ -341,8 +341,8 @@ export default function Demo() {
     setProgressLabel('--');
     setPipeline(SCENARIOS[idx]?.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
     setKfInsights([]);
-    setKfLeftAgent({ name: 'Alpha', color: '#e5918e', posts: 0, confirms: 0 });
-    setKfRightAgent({ name: 'Beta', color: '#8eb5e5', posts: 0, confirms: 0 });
+    setKfLeftAgent({ name: 'Alpha', color: 'var(--rose-bright)', posts: 0, confirms: 0 });
+    setKfRightAgent({ name: 'Beta', color: 'var(--dream-bright)', posts: 0, confirms: 0 });
     setKfMetrics([
       { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
       { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
@@ -391,8 +391,8 @@ export default function Demo() {
     setGates([]);
     setPipeline(scenario.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
     setKfInsights([]);
-    setKfLeftAgent({ name: 'Alpha', color: '#e5918e', posts: 0, confirms: 0 });
-    setKfRightAgent({ name: 'Beta', color: '#8eb5e5', posts: 0, confirms: 0 });
+    setKfLeftAgent({ name: 'Alpha', color: 'var(--rose-bright)', posts: 0, confirms: 0 });
+    setKfRightAgent({ name: 'Beta', color: 'var(--dream-bright)', posts: 0, confirms: 0 });
     setKfMetrics([
       { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
       { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },

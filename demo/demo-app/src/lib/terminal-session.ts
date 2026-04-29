@@ -6,9 +6,9 @@
  *
  * Reference: demo-web/demo.html setupWorkspace/joinWorkspace/showCmd/detectFromOutput
  */
-import type { TerminalHandle } from './useTerminal';
-import { lookupCmdDesc } from '../lib/cmd-descriptions';
-import { ABSOLUTE_SERVE_URL } from '../lib/serve-url';
+import type { TerminalHandle } from '../hooks/useTerminal';
+import { lookupCmdDesc } from './cmd-descriptions';
+import { ABSOLUTE_SERVE_URL } from './serve-url';
 
 // ── Speed multiplier ─────────────────────────────────────────
 
@@ -35,24 +35,24 @@ let rokoResolved = false;
 
 /**
  * Detect whether `roko` is on PATH, in ./target/release, or ./target/debug.
- * Caches the result globally.
+ * Caches the result globally. Uses execCmd (marker-based) to avoid leaving
+ * visible shell garbage in the terminal.
  */
 export async function resolveRoko(handle: TerminalHandle): Promise<string> {
   if (rokoResolved) return resolvedRoko;
 
-  const marker = '__ROKO_DONE__';
   handle.outputBuffer = '';
-  handle.sendRaw(
-    'command -v roko >/dev/null 2>&1 && echo __ROKO_PATH__ || { test -x ./target/release/roko && echo __ROKO_REL__ || { test -x ./target/debug/roko && echo __ROKO_DBG__ || echo __ROKO_NONE__; }; }; echo ' +
-      marker +
-      '\r',
+  const ok = await handle.execCmd(
+    'command -v roko >/dev/null 2>&1 && echo __ROKO_PATH__ || { test -x ./target/release/roko && echo __ROKO_REL__ || { test -x ./target/debug/roko && echo __ROKO_DBG__ || echo __ROKO_NONE__; }; }',
+    4000,
   );
-  await handle.waitForMarker(marker, 4000);
-  const buf = handle.outputBuffer;
-  if (buf.includes('__ROKO_PATH__')) resolvedRoko = 'roko';
-  else if (buf.includes('__ROKO_REL__')) resolvedRoko = './target/release/roko';
-  else if (buf.includes('__ROKO_DBG__')) resolvedRoko = './target/debug/roko';
-  else resolvedRoko = 'roko';
+  if (ok) {
+    const buf = handle.outputBuffer;
+    if (buf.includes('__ROKO_PATH__')) resolvedRoko = 'roko';
+    else if (buf.includes('__ROKO_REL__')) resolvedRoko = './target/release/roko';
+    else if (buf.includes('__ROKO_DBG__')) resolvedRoko = './target/debug/roko';
+    else resolvedRoko = 'roko';
+  }
   rokoResolved = true;
   return resolvedRoko;
 }
@@ -105,12 +105,14 @@ export async function setupWorkspace(
     rokoResolved = true;
   }
 
-  handle.clearTerminal();
+  // Clear only the output buffer, not the visible terminal.
+  // The terminal now shows the setup commands which is better than a blank screen.
+  handle.outputBuffer = '';
   return dir;
 }
 
 /**
- * Join an existing workspace: cd into it and clear.
+ * Join an existing workspace: cd into it.
  */
 export async function joinWorkspace(
   handle: TerminalHandle,
@@ -124,7 +126,7 @@ export async function joinWorkspace(
     rokoResolved = true;
   }
   await handle.execCmd(`cd ${dir}`, 3000);
-  handle.clearTerminal();
+  handle.outputBuffer = '';
 }
 
 // ── Fast workspace entry (server-created) ────────────────────
@@ -132,6 +134,9 @@ export async function joinWorkspace(
 /**
  * Enter a workspace that was already created server-side via POST /api/workspaces.
  * Much faster than setupWorkspace() since it only needs to `cd` into the directory.
+ *
+ * Note: Does NOT clear the terminal afterwards — the scenario should control when
+ * clearing is appropriate. Aggressive clearing caused blank terminal panes.
  */
 export async function enterWorkspace(
   handle: TerminalHandle,
@@ -142,7 +147,9 @@ export async function enterWorkspace(
   await handle.waitForPrompt(5000);
   await resolveRoko(handle);
   await handle.execCmd(`cd ${dir}`, 3000);
-  handle.clearTerminal();
+  // Only clear the output buffer (for prompt detection), not the visible terminal.
+  // Scenarios can call handle.clearTerminal() explicitly when they want a clean slate.
+  handle.outputBuffer = '';
 }
 
 // ── Command execution with logging ──────────────────────────

@@ -358,12 +358,9 @@
   background: var(--text-ghost);
 }
 .conn-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
-.conn-dot.connecting { background: var(--warning, #c8a030); animation: conn-blink 1s infinite; }
+.conn-dot.connecting { background: var(--warning, #c8a030); animation: status-blink 1s infinite; }
 .conn-dot.disconnected { background: var(--text-ghost); }
-@keyframes conn-blink {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
-}
+/* conn-blink → merged into status-blink: src/styles/animations.css */
 
 /* ── Autocomplete dropdown ── */
 .builder-autocomplete {

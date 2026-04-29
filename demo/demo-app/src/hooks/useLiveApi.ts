@@ -5,7 +5,6 @@ import { SERVE_URL } from '../lib/serve-url';
 // Shared server reachability state. It is intentionally re-probed because the
 // demo UI is commonly opened before `roko serve` is ready.
 let _serverLive: boolean | null = null; // null = unknown
-let _healthPoll: ReturnType<typeof setInterval> | null = null;
 let _healthProbeInFlight: Promise<void> | null = null;
 const _healthListeners = new Set<() => void>();
 
@@ -37,14 +36,6 @@ function probeServer(): Promise<void> {
   return _healthProbeInFlight;
 }
 
-function ensureHealthPolling(): void {
-  void probeServer();
-  if (_healthPoll) return;
-  _healthPoll = setInterval(() => {
-    void probeServer();
-  }, 5_000);
-}
-
 export function useLiveApi() {
   const api = useApi();
   const [isLive, setIsLive] = useState(_serverLive === true);
@@ -55,11 +46,17 @@ export function useLiveApi() {
     };
 
     _healthListeners.add(listener);
-    ensureHealthPolling();
+    void probeServer();
     listener();
+
+    // Start polling while at least one subscriber exists.
+    const interval = setInterval(() => {
+      void probeServer();
+    }, 5_000);
 
     return () => {
       _healthListeners.delete(listener);
+      clearInterval(interval);
     };
   }, []);
 

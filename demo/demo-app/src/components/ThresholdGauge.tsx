@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { getCssVar, hexToRgba } from '../lib/color';
 import './Charts/Charts.css';
 
 export interface RungThreshold {
@@ -20,33 +21,26 @@ export interface ThresholdGaugeProps {
 
 const THRESHOLD_RUNGS = ['compile', 'clippy', 'test', 'diff', 'fmt', 'custom', 'judge'] as const;
 
-const PALETTE = {
-  success: '#8A9C86',
-  warning: '#D8A878',
-  rose: '#D89AB2',
-  bone: '#E4D8B0',
-  dim: '#7A6A78',
-  ghost: '#443844',
-};
+function getPalette() {
+  return {
+    success: getCssVar('--success'),
+    warning: getCssVar('--warning'),
+    rose: getCssVar('--rose-bright'),
+    bone: getCssVar('--bone-bright'),
+    dim: getCssVar('--text-dim'),
+    ghost: getCssVar('--text-ghost'),
+  };
+}
 
 function clamp01(value: number): number {
   if (Number.isNaN(value)) return 0;
   return Math.max(0, Math.min(1, value));
 }
 
-function hexToRgba(hex: string, alpha: number): string {
-  const normalized = hex.replace('#', '');
-  if (normalized.length !== 6) return hex;
-  const r = Number.parseInt(normalized.slice(0, 2), 16);
-  const g = Number.parseInt(normalized.slice(2, 4), 16);
-  const b = Number.parseInt(normalized.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
-function pickValueColor(meanPassRate: number, threshold: number): string {
-  if (meanPassRate >= threshold) return PALETTE.success;
-  if (meanPassRate >= Math.max(0, threshold - 0.05)) return PALETTE.warning;
-  return PALETTE.rose;
+function pickValueColor(meanPassRate: number, threshold: number, palette: ReturnType<typeof getPalette>): string {
+  if (meanPassRate >= threshold) return palette.success;
+  if (meanPassRate >= Math.max(0, threshold - 0.05)) return palette.warning;
+  return palette.rose;
 }
 
 /**
@@ -78,10 +72,11 @@ export default function ThresholdGauge({ rung, data, size = 120 }: ThresholdGaug
     const radius = Math.min(w / 2 - 12, h * 0.52);
     const lineW = Math.max(7, Math.min(10, w * 0.065));
 
+    const PALETTE = getPalette();
     const meanPassRate = clamp01(data.mean_pass_rate);
     const threshold = clamp01(data.ema_threshold);
     const amberFloor = clamp01(threshold - 0.05);
-    const valueColor = pickValueColor(meanPassRate, threshold);
+    const valueColor = pickValueColor(meanPassRate, threshold, PALETTE);
 
     const startAngle = Math.PI;
     const endAngle = 0;
@@ -135,12 +130,9 @@ export default function ThresholdGauge({ rung, data, size = 120 }: ThresholdGaug
     // Endpoint glow.
     const endX = cx + Math.cos(valueAngle) * radius;
     const endY = cy + Math.sin(valueAngle) * radius;
-    const vr = Number.parseInt(valueColor.slice(1, 3), 16);
-    const vg = Number.parseInt(valueColor.slice(3, 5), 16);
-    const vb = Number.parseInt(valueColor.slice(5, 7), 16);
     ctx.beginPath();
     ctx.arc(endX, endY, lineW / 2 + 2, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(${vr}, ${vg}, ${vb}, 0.30)`;
+    ctx.fillStyle = hexToRgba(valueColor, 0.30);
     ctx.fill();
 
     // Threshold marker.

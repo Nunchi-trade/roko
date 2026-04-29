@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useLiveApi } from '../hooks/useLiveApi';
+import { fmtUptime, relativeTime } from '../lib/format';
+import { getCssVar } from '../lib/color';
 import FlatIcon, { inferIcon } from '../components/FlatIcon';
 import './Explorer.css';
 
@@ -44,10 +46,10 @@ interface StateEvent {
    ═══════════════════════════════════════════════════════════ */
 
 const KIND_COLORS: Record<string, string> = {
-  agent_turn: '#b87a94',
-  gate_result: '#8a9c86',
-  tool_call: '#d4c89c',
-  plan_step: '#8888a8',
+  agent_turn: 'var(--rose)',       // --rose
+  gate_result: 'var(--success)',   // --success
+  tool_call: 'var(--bone)',        // --bone
+  plan_step: 'var(--dream)',       // --dream
 };
 
 const KIND_LABELS: Record<string, string> = {
@@ -71,20 +73,6 @@ const BLOCK_R = 4;
 /* ═══════════════════════════════════════════════════════════
    HELPERS
    ═══════════════════════════════════════════════════════════ */
-
-function fmtUptime(secs: number): string {
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  return `${h}h ${m}m`;
-}
-
-function relativeTime(ms: number): string {
-  const delta = Date.now() - ms;
-  if (delta < 60000) return `${Math.floor(delta / 1000)}s ago`;
-  if (delta < 3600000) return `${Math.floor(delta / 60000)}m ago`;
-  if (delta < 86400000) return `${Math.floor(delta / 3600000)}h ago`;
-  return new Date(ms).toLocaleDateString();
-}
 
 function getProviders(health: HealthData | null): Record<string, { healthy: boolean }> {
   if (!health) return {};
@@ -118,8 +106,22 @@ function safePayload(payload: unknown): string {
   }
 }
 
+/** Resolve kind to a CSS var for inline styles. */
 function kindColor(kind: string): string {
-  return KIND_COLORS[kind] ?? '#8888a8';
+  return KIND_COLORS[kind] ?? 'var(--dream)';
+}
+
+/** Resolve kind to computed color for canvas 2D contexts. */
+const KIND_CANVAS_COLORS: Record<string, string> = {
+  agent_turn: '--rose',
+  gate_result: '--success',
+  tool_call: '--bone',
+  plan_step: '--dream',
+};
+
+function kindCanvasColor(kind: string): string {
+  const token = KIND_CANVAS_COLORS[kind];
+  return token ? getCssVar(token) : getCssVar('--dream');
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -316,7 +318,7 @@ export default function Explorer() {
     ctx.clearRect(0, 0, w, h);
 
     // Background
-    ctx.fillStyle = '#06060a';
+    ctx.fillStyle = getCssVar('--bg-void');
     ctx.fillRect(0, 0, w, h);
 
     // Grid lines
@@ -337,7 +339,7 @@ export default function Explorer() {
 
     if (episodes.length === 0) {
       ctx.font = '12px JetBrains Mono, monospace';
-      ctx.fillStyle = '#7a6a78';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.textAlign = 'center';
       ctx.fillText('No episodes yet', w / 2, h / 2);
       epRectsRef.current = [];
@@ -370,7 +372,7 @@ export default function Explorer() {
     ctx.textBaseline = 'middle';
     for (let i = 0; i < agents.length; i++) {
       const y = LANE_PAD_TOP + i * laneH + laneH / 2;
-      ctx.fillStyle = '#7a6a78';
+      ctx.fillStyle = getCssVar('--text-dim');
       const label = agents[i].length > 14 ? agents[i].slice(0, 13) + '\u2026' : agents[i];
       ctx.fillText(label, LANE_PAD_LEFT - 10, y);
 
@@ -386,7 +388,7 @@ export default function Explorer() {
     // Time axis
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillStyle = '#7a6a78';
+    ctx.fillStyle = getCssVar('--text-dim');
     ctx.font = '12px JetBrains Mono, monospace';
     const numLabels = Math.max(Math.floor(drawW / 100), 3);
     for (let i = 0; i <= numLabels; i++) {
@@ -439,7 +441,7 @@ export default function Explorer() {
       const y = ay(ep.agent_id ?? 'system') - BLOCK_H / 2;
       const dur = ep.duration_secs ?? 1;
       const bw = Math.max((dur / maxDur) * drawW * 0.15, MIN_BLOCK_W);
-      const color = kindColor(ep.kind);
+      const color = kindCanvasColor(ep.kind);
 
       // Glow for hovered
       const isHovered = hoveredEp?.id === ep.id;
@@ -478,14 +480,14 @@ export default function Explorer() {
     ctx.font = '12px JetBrains Mono, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    const kinds = Object.keys(KIND_COLORS);
+    const kinds = Object.keys(KIND_CANVAS_COLORS);
     for (let i = 0; i < kinds.length; i++) {
       const ky = ly + 16 + i * 20;
-      ctx.fillStyle = KIND_COLORS[kinds[i]];
+      ctx.fillStyle = kindCanvasColor(kinds[i]);
       ctx.beginPath();
       ctx.arc(lx + 14, ky, 4, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#c4b4c4';
+      ctx.fillStyle = getCssVar('--text-soft');
       ctx.fillText(KIND_LABELS[kinds[i]] ?? kinds[i], lx + 26, ky);
     }
 
@@ -510,12 +512,12 @@ export default function Explorer() {
       ctx.font = '13px JetBrains Mono, monospace';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillStyle = '#e0d4e0';
+      ctx.fillStyle = getCssVar('--text-primary');
       ctx.fillText(hoveredEp.agent_id ?? 'system', tipX + 12, tipY + 10);
-      ctx.fillStyle = '#7a6a78';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.fillText(`kind: ${hoveredEp.kind}`, tipX + 12, tipY + 28);
       ctx.fillText(`task: ${(hoveredEp.task_id ?? '-').slice(0, 22)}`, tipX + 12, tipY + 44);
-      ctx.fillStyle = '#d4c89c';
+      ctx.fillStyle = getCssVar('--bone');
       ctx.fillText(
         `cost: $${(hoveredEp.usage?.cost_usd ?? 0).toFixed(4)}  dur: ${(hoveredEp.duration_secs ?? 0).toFixed(1)}s`,
         tipX + 12,
@@ -542,19 +544,19 @@ export default function Explorer() {
   // Draw sparklines whenever data changes
   useEffect(() => {
     if (epSparkRef.current && sparkData.epBuckets.length >= 2) {
-      drawSparkline(epSparkRef.current, sparkData.epBuckets, '#b87a94');
+      drawSparkline(epSparkRef.current, sparkData.epBuckets, getCssVar('--rose'));
     }
     if (costSparkRef.current && sparkData.costBuckets.length >= 2) {
-      drawSparkline(costSparkRef.current, sparkData.costBuckets, '#d4c89c');
+      drawSparkline(costSparkRef.current, sparkData.costBuckets, getCssVar('--bone'));
     }
     if (agentSparkRef.current && sparkData.agentBuckets.length >= 2) {
-      drawSparkline(agentSparkRef.current, sparkData.agentBuckets, '#8888a8');
+      drawSparkline(agentSparkRef.current, sparkData.agentBuckets, getCssVar('--dream'));
     }
     if (gateSparkRef.current && sparkData.gateBuckets.length >= 2) {
-      drawSparkline(gateSparkRef.current, sparkData.gateBuckets, '#8a9c86');
+      drawSparkline(gateSparkRef.current, sparkData.gateBuckets, getCssVar('--success'));
     }
     if (durSparkRef.current && sparkData.durBuckets.length >= 2) {
-      drawSparkline(durSparkRef.current, sparkData.durBuckets, '#d89ab2');
+      drawSparkline(durSparkRef.current, sparkData.durBuckets, getCssVar('--rose-bright'));
     }
   }, [sparkData]);
 

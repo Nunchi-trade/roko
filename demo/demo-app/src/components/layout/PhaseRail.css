@@ -1,0 +1,120 @@
+/* ===================================================================
+   PhaseRail
+   Horizontal step indicator showing progress through pipeline phases.
+   =================================================================== */
+
+.phase-rail {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+/* ── single phase segment: dot + label + connecting line ── */
+.phase-rail__step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* connecting line between steps */
+.phase-rail__line {
+  width: 24px;
+  height: 2px;
+  background: var(--border-soft);
+  transition: background 300ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1));
+  transform-origin: left;
+}
+
+.phase-rail__line--done {
+  background: var(--status-success);
+}
+
+.phase-rail__line--current {
+  background: var(--rose-glow);
+}
+
+.phase-rail__line--enter {
+  animation: lineDrawIn 300ms cubic-bezier(0, 0, 0.2, 1) forwards;
+}
+
+@keyframes lineDrawIn {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+/* ── dot ── */
+.phase-rail__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 200ms, box-shadow 200ms, border-color 200ms;
+}
+
+/* pending: outline-only */
+.phase-rail__dot--pending {
+  background: transparent;
+  border: 2px solid var(--text-ghost);
+}
+
+/* done: filled success */
+.phase-rail__dot--done {
+  background: var(--status-success);
+  border: 2px solid var(--status-success);
+}
+
+/* current: rose ring + pulse */
+.phase-rail__dot--current {
+  background: var(--rose-glow);
+  border: 2px solid var(--rose-glow);
+  box-shadow: 0 0 8px rgba(232, 181, 206, 0.5);
+  animation: phasePulseDot 2.4s ease-in-out infinite;
+}
+
+@keyframes phasePulseDot {
+  0%, 100% { box-shadow: 0 0 8px rgba(232, 181, 206, 0.5); }
+  50%      { box-shadow: 0 0 16px rgba(232, 181, 206, 0.7); }
+}
+
+/* dot enter animation */
+.phase-rail__dot--enter {
+  animation: dotScaleIn 200ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+@keyframes dotScaleIn {
+  from { transform: scale(0.4); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+
+/* failed: error glow */
+.phase-rail__dot--failed {
+  background: var(--status-error);
+  border: 2px solid var(--status-error);
+  box-shadow: 0 0 10px rgba(251, 113, 133, 0.5);
+}
+
+/* ── label ── */
+.phase-rail__label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: color 200ms;
+  white-space: nowrap;
+}
+
+.phase-rail__label--pending {
+  color: var(--text-ghost);
+}
+
+.phase-rail__label--done {
+  color: var(--text-soft);
+}
+
+.phase-rail__label--current {
+  color: var(--rose-glow);
+}
+
+.phase-rail__label--failed {
+  color: var(--status-error);
+}

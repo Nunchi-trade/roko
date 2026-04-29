@@ -1,4 +1,6 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef } from 'react';
+import { getCssVar, hexToRgba } from '../../lib/color';
+import { useCanvasSetup } from '../../hooks/useCanvasSetup';
 import './Charts.css';
 
 interface DataPoint {
@@ -14,24 +16,13 @@ interface CostChartProps {
 }
 
 /** Cumulative cost chart using Canvas 2D. */
-export default function CostChart({ data, title, color = '#C8B890', height = 200 }: CostChartProps) {
+export default function CostChart({ data, title, color: colorProp, height = 200 }: CostChartProps) {
+  const color = colorProp ?? getCssVar('--bone');
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || data.length === 0) return;
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    if (data.length === 0) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
     const pad = { top: 24, right: 16, bottom: 28, left: 52 };
     const plotW = w - pad.left - pad.right;
     const plotH = h - pad.top - pad.bottom;
@@ -41,7 +32,7 @@ export default function CostChart({ data, title, color = '#C8B890', height = 200
 
     // Title
     if (title) {
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '11px "General Sans", sans-serif';
       ctx.fillText(title, pad.left, 16);
     }
@@ -65,7 +56,7 @@ export default function CostChart({ data, title, color = '#C8B890', height = 200
       ctx.lineTo(pad.left + plotW, y);
       ctx.stroke();
 
-      ctx.fillStyle = '#6a5a68';
+      ctx.fillStyle = getCssVar('--text-ghost');
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.fillText(`$${((maxVal * i) / 4).toFixed(2)}`, pad.left - 6, y + 3);
@@ -90,17 +81,10 @@ export default function CostChart({ data, title, color = '#C8B890', height = 200
       ctx.lineTo(lastX, pad.top + plotH);
       ctx.lineTo(pad.left, pad.top + plotH);
       ctx.closePath();
-      ctx.fillStyle = `${color}14`;
+      ctx.fillStyle = hexToRgba(color, 0.08);
       ctx.fill();
     }
   }, [data, title, color]);
-
-  useEffect(() => {
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [draw]);
 
   return (
     <div className="chart-container" style={{ height }}>

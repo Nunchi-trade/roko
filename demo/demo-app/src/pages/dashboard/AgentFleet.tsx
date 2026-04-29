@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { hexToRgba } from '../../lib/color';
+import { ROLE_COLORS } from '../../lib/palette';
 import { useLiveApi } from '../../hooks/useLiveApi';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
@@ -100,31 +102,6 @@ interface SimState {
 }
 
 const EMPTY_TOPOLOGY: TopoData = { nodes: [], edges: [] };
-
-const ROLE_COLORS: Record<string, string> = {
-  implementer: '#C8B890',
-  researcher: '#9A8AB8',
-  reviewer: '#8A9C86',
-  planner: '#D8A878',
-  auditor: '#AA7088',
-};
-
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-  const clean = hex.replace('#', '');
-  const normalized = clean.length === 3
-    ? clean.split('').map((part) => part + part).join('')
-    : clean;
-  return {
-    r: Number.parseInt(normalized.slice(0, 2), 16),
-    g: Number.parseInt(normalized.slice(2, 4), 16),
-    b: Number.parseInt(normalized.slice(4, 6), 16),
-  };
-}
-
-function rgbaFromHex(hex: string, alpha: number): string {
-  const { r, g, b } = hexToRgb(hex);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
 
 function sameTopology(a: TopoData, b: TopoData): boolean {
   if (a === b) return true;
@@ -354,11 +331,10 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
       positions.forEach((point, index) => {
         const node = data.nodes[index];
         const color = ROLE_COLORS[node.role] ?? ROLE_COLORS.auditor;
-        const { r, g, b } = hexToRgb(color);
 
         const halo = ctx.createRadialGradient(point.x, point.y, 2, point.x, point.y, nodeRadius + 12);
-        halo.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.36)`);
-        halo.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+        halo.addColorStop(0, hexToRgba(color, 0.36));
+        halo.addColorStop(1, hexToRgba(color, 0));
 
         ctx.beginPath();
         ctx.arc(point.x, point.y, nodeRadius + 12, 0, Math.PI * 2);
@@ -367,7 +343,7 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
 
         ctx.beginPath();
         ctx.arc(point.x, point.y, nodeRadius, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.24)`;
+        ctx.fillStyle = hexToRgba(color, 0.24);
         ctx.fill();
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
@@ -377,7 +353,7 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
         ctx.textBaseline = 'middle';
 
         ctx.font = '10px "JetBrains Mono", monospace';
-        ctx.fillStyle = rgbaFromHex(color, 0.95);
+        ctx.fillStyle = hexToRgba(color, 0.95);
         ctx.fillText(node.role, point.x, point.y - nodeRadius - 12);
 
         ctx.font = '11px "JetBrains Mono", monospace';

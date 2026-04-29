@@ -1,4 +1,5 @@
 import type { BenchModel, ConfigPreset } from '../lib/bench-types';
+import { shortModel } from '../lib/format';
 import type { MatrixCell, MatrixCellStatus, MatrixStatus } from '../hooks/useMatrixBench';
 import { DEFAULT_PRESETS } from '../hooks/useMatrixBench';
 import './MatrixBuilder.css';
@@ -15,10 +16,6 @@ interface MatrixBuilderProps {
   estimatedCostPerLane: number;
   onLaunch: () => void;
   disabled: boolean;
-}
-
-function shortModel(id: string): string {
-  return id.split('-').slice(0, 2).join('-');
 }
 
 function cellStatusClass(status: MatrixCellStatus): string {

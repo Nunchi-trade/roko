@@ -1,0 +1,42 @@
+/* Tabs — horizontal tab navigation primitive */
+
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--duration-snap), border-color var(--duration-snap);
+  margin-bottom: -1px;
+}
+
+.tabs__tab:hover {
+  color: var(--text-soft);
+}
+
+.tabs__tab--active {
+  color: var(--rose-glow);
+  border-bottom-color: var(--rose-glow);
+  box-shadow: 0 1px 8px rgba(220, 165, 189, 0.15);
+}
+
+.tabs__badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-ghost);
+  margin-left: 2px;
+}

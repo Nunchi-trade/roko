@@ -1,4 +1,6 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef } from 'react';
+import { getCssVar } from '../../lib/color';
+import { useCanvasSetup } from '../../hooks/useCanvasSetup';
 import './Charts.css';
 
 interface GateVerdict {
@@ -19,33 +21,23 @@ interface TimelineChartProps {
   height?: number;
 }
 
-const STATUS_COLORS: Record<TimelineTask['status'], string> = {
-  pass: '#5A9A6A',    // --success
-  fail: '#AA7088',    // --rose-dim
-  running: '#C8B890', // --bone
-  pending: '#6a5a68', // dim
-  skipped: '#6a5a68', // dim
-};
+function getStatusColors(): Record<TimelineTask['status'], string> {
+  return {
+    pass: getCssVar('--success'),
+    fail: getCssVar('--rose'),
+    running: getCssVar('--bone'),
+    pending: getCssVar('--text-ghost'),
+    skipped: getCssVar('--text-ghost'),
+  };
+}
 
 /** Gantt-style waterfall chart using Canvas 2D. */
 export default function TimelineChart({ tasks, height = 300 }: TimelineChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || tasks.length === 0) return;
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    if (tasks.length === 0) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
     const pad = { top: 8, right: 16, bottom: 28, left: 100 };
     const plotW = w - pad.left - pad.right;
     const rowH = Math.min(24, (h - pad.top - pad.bottom) / tasks.length - 4);
@@ -74,7 +66,7 @@ export default function TimelineChart({ tasks, height = 300 }: TimelineChartProp
       ctx.stroke();
 
       // Label
-      ctx.fillStyle = '#6a5a68';
+      ctx.fillStyle = getCssVar('--text-ghost');
       const label = ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
       ctx.fillText(label, x, h - 8);
     }
@@ -85,10 +77,11 @@ export default function TimelineChart({ tasks, height = 300 }: TimelineChartProp
       const y = pad.top + i * (rowH + 4);
       const barX = pad.left + ((task.startMs - minStart) / totalMs) * plotW;
       const barW = Math.max(2, (task.durationMs / totalMs) * plotW);
-      const color = STATUS_COLORS[task.status];
+      const statusColors = getStatusColors();
+      const color = statusColors[task.status];
 
       // Task name
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '10px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
@@ -114,19 +107,12 @@ export default function TimelineChart({ tasks, height = 300 }: TimelineChartProp
           const gx = barX + spacing * (g + 1);
           const gy = y + rowH / 2;
           const size = 4;
-          ctx.fillStyle = task.gateVerdicts[g].passed ? '#5A9A6A' : '#AA7088';
+          ctx.fillStyle = task.gateVerdicts[g].passed ? getCssVar('--success') : getCssVar('--rose');
           ctx.fillRect(gx - size / 2, gy - size / 2, size, size);
         }
       }
     }
   }, [tasks]);
-
-  useEffect(() => {
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [draw]);
 
   return (
     <div className="chart-container" style={{ height }}>

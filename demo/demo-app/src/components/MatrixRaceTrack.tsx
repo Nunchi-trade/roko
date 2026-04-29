@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useRef } from 'react';
+import { getCssVar, hexToRgba } from '../lib/color';
+import { shortModel } from '../lib/format';
+import { useCanvasSetup } from '../hooks/useCanvasSetup';
 import type { MatrixCell } from '../hooks/useMatrixBench';
 
 interface MatrixRaceTrackProps {
@@ -9,21 +12,11 @@ interface MatrixRaceTrackProps {
   height?: number;
 }
 
-const LANE_COLORS = [
-  '#C8B890', '#8A9C86', '#AA7088', '#D8A878',
-  '#9A8AB8', '#7FA8A4', '#B7918F', '#C49B6E',
-];
-
-function shortModel(id: string): string {
-  return id.split('-').slice(0, 2).join('-');
-}
-
-function hexToRgba(hex: string, alpha: number): string {
-  const n = hex.replace('#', '');
-  const r = parseInt(n.slice(0, 2), 16);
-  const g = parseInt(n.slice(2, 4), 16);
-  const b = parseInt(n.slice(4, 6), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
+function getLaneColors(): string[] {
+  return [
+    getCssVar('--bone'), getCssVar('--success'), getCssVar('--rose'), getCssVar('--warning'),
+    getCssVar('--status-blocked'), '#7FA8A4', '#B7918F', '#C49B6E', // TODO: add design tokens for last 3
+  ];
 }
 
 /** Canvas-based animated horizontal race track for matrix lanes. */
@@ -54,21 +47,9 @@ export default function MatrixRaceTrack({
 
   const computedHeight = heightProp ?? Math.max(200, lanes.length * 32 + 48);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = Math.max(1, rect.width * dpr);
-    canvas.height = Math.max(1, rect.height * dpr);
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
-    const muted = '#6a5a68';
+  /** Core scene renderer — called by useCanvasSetup (DPR-adjusted) and by animation continuation. */
+  const drawScene = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    const muted = getCssVar('--text-ghost');
     const labelPad = Math.min(Math.max(w * 0.28, 100), 180);
     const valuePad = Math.min(Math.max(w * 0.22, 100), 160);
     const pad = { top: 32, right: valuePad, bottom: 12, left: labelPad };
@@ -76,8 +57,10 @@ export default function MatrixRaceTrack({
 
     ctx.clearRect(0, 0, w, h);
 
+    const LANE_COLORS = getLaneColors();
+
     // Title
-    ctx.fillStyle = '#8a7a88';
+    ctx.fillStyle = getCssVar('--text-dim');
     ctx.font = '11px "General Sans", sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
@@ -129,7 +112,7 @@ export default function MatrixRaceTrack({
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
       ctx.font = '10px "JetBrains Mono", monospace';
-      ctx.fillStyle = index === 0 ? '#c4b4c4' : '#8a7a88';
+      ctx.fillStyle = index === 0 ? getCssVar('--text-soft') : getCssVar('--text-dim');
 
       let label = lane.label;
       while (label.length > 4 && ctx.measureText(label).width > pad.left - 16) {
@@ -189,30 +172,31 @@ export default function MatrixRaceTrack({
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
       rafRef.current = requestAnimationFrame(() => {
         rafRef.current = null;
-        draw();
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const c = canvas.getContext('2d');
+        if (!c) return;
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = Math.max(1, rect.width * dpr);
+        canvas.height = Math.max(1, rect.height * dpr);
+        c.setTransform(dpr, 0, 0, dpr, 0, 0);
+        drawScene(c, rect.width, rect.height);
       });
     } else if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-  }, [lanes]);
+  };
 
-  useEffect(() => {
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    // Cancel any pending animation frame — the hook is redrawing from scratch
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => {
-      if (rafRef.current != null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-      ro.disconnect();
-    };
-  }, [draw]);
+    drawScene(ctx, w, h);
+  }, [lanes]);
 
   return (
     <div
@@ -222,7 +206,7 @@ export default function MatrixRaceTrack({
         height: computedHeight,
         overflow: 'hidden',
         borderRadius: 12,
-        border: '1px solid rgba(255,255,255,0.04)',
+        border: '1px solid var(--border-soft)',
         background: 'linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01))',
       }}
     >

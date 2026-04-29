@@ -180,12 +180,9 @@
   flex-shrink: 0;
 }
 .term-conn-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
-.term-conn-dot.connecting { background: var(--warning, #c8a030); animation: term-dot-blink 1s infinite; }
+.term-conn-dot.connecting { background: var(--warning, #c8a030); animation: status-blink 1s infinite; }
 .term-conn-dot.disconnected { background: var(--text-ghost); }
-@keyframes term-dot-blink {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
-}
+/* term-dot-blink → merged into status-blink: src/styles/animations.css */
 .term-pane-label {
   font-family: var(--mono);
   font-size: 15px;

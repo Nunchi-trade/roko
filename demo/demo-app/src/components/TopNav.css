@@ -8,11 +8,12 @@
   justify-content: space-between;
   padding: 0 var(--sp-6);
   height: var(--nav-h);
-  background: rgba(8, 8, 12, .82);
+  background: var(--bg-void);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(16px);
   will-change: auto;
-  position: relative;
+  position: sticky;
+  flex-shrink: 0;
 }
 
 /* Gradient accent line along the bottom border */
@@ -171,7 +172,7 @@
   border-radius: 50%;
   background: var(--success);
   box-shadow: 0 0 6px rgba(122, 138, 120, .6);
-  animation: pulse-dot 2s ease-in-out infinite;
+  animation: pulse-dot 2.4s ease-in-out infinite;
 }
 
 .topnav .status-pill.demo {
@@ -187,10 +188,7 @@
   box-shadow: 0 0 6px rgba(200, 154, 104, .4);
 }
 
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
+/* pulse-dot → shared: src/styles/animations.css */
 
 @media (max-width: 900px) {
   .topnav .links { display: none }

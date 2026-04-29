@@ -9,8 +9,7 @@ import {
   showCmd,
   trackMetrics,
   getRoko,
-  resetRokoResolution,
-} from '../hooks/useTerminalSession';
+} from './terminal-session';
 import { PlaybackController, TimelineStepper } from './playback-controller';
 import {
   type PipelineDemoState,
@@ -1899,12 +1898,3 @@ export const SCENARIOS: Scenario[] = [
   chainIntelligence,
   mirage,
 ];
-
-export const SCENARIO_MAP: Record<string, Scenario> = Object.fromEntries(
-  SCENARIOS.map(s => [s.id, s]),
-);
-
-/** Reset shared state when switching scenarios. */
-export function resetScenarioState() {
-  resetRokoResolution();
-}

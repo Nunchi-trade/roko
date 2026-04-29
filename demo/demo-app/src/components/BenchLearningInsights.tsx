@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useLiveApi } from '../hooks/useLiveApi';
+import { shortModel } from '../lib/format';
 import type { BenchLearningEvent, BenchRun } from '../lib/bench-types';
 import Pane from './Pane';
 import Mosaic, { MosaicCell } from './Mosaic';
@@ -110,10 +111,6 @@ function computeRecommendations(history: BenchRun[]): Recommendation[] {
   }
 
   return recs;
-}
-
-function shortModel(model: string): string {
-  return model.split('-').slice(0, 2).join('-');
 }
 
 /* ── Gate insights (from completed runs) ── */

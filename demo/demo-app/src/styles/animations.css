@@ -1,0 +1,60 @@
+/* ===================================================================
+   SHARED ANIMATIONS
+   Consolidated keyframes used across multiple components.
+   Design-system-only keyframes (ambientShift, shimmerMove, etc.)
+   live in rosedust.css.
+   =================================================================== */
+
+/* ── fadeIn ──
+   Used by: rosedust.css (entrance), Explorer.css (.expl-card-detail)
+   Unified duration: 200ms (set at call site via animation shorthand)
+*/
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ── pulse-dot ──
+   Used by: rosedust.css, TopNav.css (.status-dot), Explorer.css (pulse-dot),
+            CostDashboard.tsx (inline style)
+   Unified: 2.4s ease-in-out at call site
+*/
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ── benchlive-pulse ──
+   Used by: Bench.css (.benchlive-dot, .task-running),
+            MatrixBuilder.css (.matrix-cell--running),
+            MatrixDetailView.css (.chip-running)
+*/
+@keyframes benchlive-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(122,138,120,.5); }
+  50% { opacity: 0.5; box-shadow: 0 0 12px rgba(122,138,120,.8); }
+}
+
+/* ── status-blink ──
+   Merged from: conn-blink (Builder.css) + term-dot-blink (Terminal.css)
+   Used by: Builder.css (.conn-dot.connecting), Terminal.css (.term-conn-dot.connecting)
+*/
+@keyframes status-blink {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* ── scaleIn ──
+   Used by: motion/Transition.tsx
+*/
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* ── slideRight ──
+   Used by: motion/Transition.tsx
+*/
+@keyframes slideRight {
+  from { opacity: 0; transform: translateX(-20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}

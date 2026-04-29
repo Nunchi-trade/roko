@@ -1,0 +1,15 @@
+/* ===================================================================
+   AnimatedNumber
+   Spring-interpolated numeric display with flash-on-change.
+   =================================================================== */
+
+.animated-number {
+  font-variant-numeric: tabular-nums;
+  transition: color 300ms var(--ease, cubic-bezier(0, 0, 0.2, 1)),
+              text-shadow 300ms var(--ease, cubic-bezier(0, 0, 0.2, 1));
+}
+
+.animated-number.flash {
+  color: var(--bone-bright);
+  text-shadow: 0 0 8px rgba(216, 200, 160, 0.3);
+}

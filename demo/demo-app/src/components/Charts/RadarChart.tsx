@@ -1,4 +1,6 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef } from 'react';
+import { getCssVar, hexToRgba } from '../../lib/color';
+import { useCanvasSetup } from '../../hooks/useCanvasSetup';
 import './Charts.css';
 
 interface RadarDataset {
@@ -17,21 +19,9 @@ interface RadarChartProps {
 export default function RadarChart({ axes, datasets, height = 320 }: RadarChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || axes.length < 3) return;
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    if (axes.length < 3) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
     const legendH = datasets.length > 0 ? 28 : 0;
     const cx = w / 2;
     const cy = (h - legendH) / 2 + 8;
@@ -56,7 +46,7 @@ export default function RadarChart({ axes, datasets, height = 320 }: RadarChartP
         else ctx.lineTo(x, y);
       }
       ctx.closePath();
-      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.strokeStyle = getCssVar('--border-soft');
       ctx.lineWidth = 1;
       ctx.stroke();
     }
@@ -67,13 +57,13 @@ export default function RadarChart({ axes, datasets, height = 320 }: RadarChartP
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       ctx.lineTo(x, y);
-      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.strokeStyle = getCssVar('--border-soft');
       ctx.lineWidth = 1;
       ctx.stroke();
 
       // Label
       const [lx, ly] = vertex(i, radius + 16);
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '10px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -93,7 +83,7 @@ export default function RadarChart({ axes, datasets, height = 320 }: RadarChartP
         else ctx.lineTo(x, y);
       }
       ctx.closePath();
-      ctx.fillStyle = ds.color + '4D'; // 30% alpha
+      ctx.fillStyle = hexToRgba(ds.color, 0.30);
       ctx.fill();
 
       // Stroke
@@ -118,7 +108,7 @@ export default function RadarChart({ axes, datasets, height = 320 }: RadarChartP
       for (const ds of datasets) {
         ctx.fillStyle = ds.color;
         ctx.fillRect(lx, legendY - 8, 10, 10);
-        ctx.fillStyle = '#8a7a88';
+        ctx.fillStyle = getCssVar('--text-dim');
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText(ds.label, lx + 14, legendY - 3);
@@ -126,13 +116,6 @@ export default function RadarChart({ axes, datasets, height = 320 }: RadarChartP
       }
     }
   }, [axes, datasets]);
-
-  useEffect(() => {
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [draw]);
 
   return (
     <div className="chart-container" style={{ height }}>

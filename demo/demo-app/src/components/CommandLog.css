@@ -1,8 +1,10 @@
 .command-log {
   overflow-y: auto;
+  overflow-x: hidden;
   font-family: var(--mono);
   font-size: 1.05rem;
   padding: 10px 16px;
+  min-width: 0;
 }
 .log-entry {
   display: flex;
@@ -11,6 +13,13 @@
   line-height: 1.5;
   border-radius: 2px;
   animation: logFadeIn 0.25s ease both;
+  min-width: 0;
+}
+
+.log-text {
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 @keyframes logFadeIn {

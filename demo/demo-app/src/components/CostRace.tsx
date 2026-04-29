@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { getCssVar, hexToRgba } from '../lib/color';
+import { MODEL_COLORS } from '../lib/palette';
 import { useLiveApi } from '../hooks/useLiveApi';
 import { useBenchSSE } from '../hooks/useBenchSSE';
+import { useCanvasSetup } from '../hooks/useCanvasSetup';
 
 export interface CostRaceModel {
   model: string;
@@ -21,15 +24,6 @@ export interface CostRaceProps {
 interface CostRaceResponse {
   models?: CostRaceModel[];
 }
-
-const MODEL_COLORS: Record<string, string> = {
-  'claude-sonnet-4': '#C8B890',
-  'claude-haiku-3': '#8A9C86',
-  'claude-opus-4': '#AA7088',
-  'gpt-5.4': '#D8A878',
-  'gpt-5.4-mini': '#D8C098',
-  'gemini-2.5-pro': '#9A8AB8',
-};
 
 function isCostRaceModel(value: unknown): value is CostRaceModel {
   if (!value || typeof value !== 'object') return false;
@@ -105,24 +99,11 @@ function getModelColor(model: string, explicit?: string): string {
   for (const [needle, color] of Object.entries(MODEL_COLORS)) {
     if (model.includes(needle)) return color;
   }
-  const palette = ['#C8B890', '#8A9C86', '#AA7088', '#D8A878', '#9A8AB8', '#7FA8A4', '#B7918F'];
-  return palette[hashString(model) % palette.length];
-}
-
-function hexToRgb(hex: string): [number, number, number] | null {
-  const normalized = hex.trim().replace(/^#/, '');
-  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return null;
-  return [
-    Number.parseInt(normalized.slice(0, 2), 16),
-    Number.parseInt(normalized.slice(2, 4), 16),
-    Number.parseInt(normalized.slice(4, 6), 16),
+  const palette = [
+    getCssVar('--bone'), getCssVar('--success'), getCssVar('--rose'),
+    getCssVar('--warning'), getCssVar('--status-blocked'), '#7FA8A4', '#B7918F', // TODO: add design tokens for last 2
   ];
-}
-
-function rgba(hex: string, alpha: number): string {
-  const rgb = hexToRgb(hex);
-  if (!rgb) return hex;
-  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
+  return palette[hashString(model) % palette.length];
 }
 
 function formatTokens(tokens: number): string {
@@ -215,23 +196,10 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
     });
   }, [lastEvent]);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = Math.max(1, rect.width * dpr);
-    canvas.height = Math.max(1, rect.height * dpr);
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
-    const titleColor = '#8a7a88';
-    const muted = '#6a5a68';
+  /** Core scene renderer — called by useCanvasSetup (DPR-adjusted) and by animation continuation. */
+  const drawScene = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    const titleColor = getCssVar('--text-dim');
+    const muted = getCssVar('--text-ghost');
     const labelPad = Math.min(Math.max(w * 0.30, 112), 170);
     const valuePad = Math.min(Math.max(w * 0.32, 132), 180);
     const pad = { top: 36, right: valuePad, bottom: 18, left: labelPad };
@@ -292,7 +260,7 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
       if (Math.abs(next - row.cost_usd) > 0.0005) needsNextFrame = true;
 
       const color = getModelColor(row.model, row.color);
-      const labelColor = index === 0 ? '#c4b4c4' : '#8a7a88';
+      const labelColor = index === 0 ? getCssVar('--text-soft') : getCssVar('--text-dim');
       const valueX = pad.left + plotW + 10;
       const maxLabelWidth = Math.max(pad.left - 18, 40);
       ctx.textAlign = 'right';
@@ -311,38 +279,29 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
 
       if (barW > 0) {
         const tipColor = getModelColor(row.model, row.color);
-        const rgb = hexToRgb(tipColor);
-        const fillColor = rgb ? rgba(tipColor, 1) : tipColor;
         const barGradient = ctx.createLinearGradient(pad.left, 0, pad.left + barW, 0);
-        if (rgb) {
-          barGradient.addColorStop(0, rgba(tipColor, 0.38));
-          barGradient.addColorStop(1, rgba(tipColor, 0.88));
-        } else {
-          barGradient.addColorStop(0, fillColor);
-          barGradient.addColorStop(1, fillColor);
-        }
+        barGradient.addColorStop(0, hexToRgba(tipColor, 0.38));
+        barGradient.addColorStop(1, hexToRgba(tipColor, 0.88));
 
         ctx.fillStyle = barGradient;
         ctx.beginPath();
         ctx.roundRect(pad.left, y + 2, barW, barH, 4);
         ctx.fill();
 
-        if (rgb) {
-          const glow = ctx.createRadialGradient(
-            pad.left + barW,
-            centerY,
-            0,
-            pad.left + barW,
-            centerY,
-            Math.max(barH * 0.9, 12),
-          );
-          glow.addColorStop(0, rgba(tipColor, 0.28));
-          glow.addColorStop(1, rgba(tipColor, 0));
-          ctx.fillStyle = glow;
-          ctx.beginPath();
-          ctx.arc(pad.left + barW, centerY, Math.max(barH * 0.7, 8), 0, Math.PI * 2);
-          ctx.fill();
-        }
+        const glow = ctx.createRadialGradient(
+          pad.left + barW,
+          centerY,
+          0,
+          pad.left + barW,
+          centerY,
+          Math.max(barH * 0.9, 12),
+        );
+        glow.addColorStop(0, hexToRgba(tipColor, 0.28));
+        glow.addColorStop(1, hexToRgba(tipColor, 0));
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(pad.left + barW, centerY, Math.max(barH * 0.7, 8), 0, Math.PI * 2);
+        ctx.fill();
       }
 
       ctx.textAlign = 'left';
@@ -361,33 +320,31 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
       rafRef.current = requestAnimationFrame(() => {
         rafRef.current = null;
-        draw();
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const c = canvas.getContext('2d');
+        if (!c) return;
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = Math.max(1, rect.width * dpr);
+        canvas.height = Math.max(1, rect.height * dpr);
+        c.setTransform(dpr, 0, 0, dpr, 0, 0);
+        drawScene(c, rect.width, rect.height);
       });
     } else if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-  }, [rows]);
+  };
 
-  useEffect(() => {
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    // Cancel any pending animation frame — the hook is redrawing from scratch
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-
-    draw();
-
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-
-    return () => {
-      if (rafRef.current != null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-      ro.disconnect();
-    };
-  }, [draw]);
+    drawScene(ctx, w, h);
+  }, [rows]);
 
   return (
     <div
@@ -397,7 +354,7 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
         height,
         overflow: 'hidden',
         borderRadius: 12,
-        border: '1px solid rgba(255,255,255,0.04)',
+        border: '1px solid var(--border-soft)',
         background: 'linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01))',
       }}
     >
@@ -409,7 +366,7 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
           zIndex: 1,
           padding: '2px 8px',
           borderRadius: 999,
-          border: '1px solid rgba(255,255,255,0.08)',
+          border: '1px solid var(--border-soft)',
           background: 'rgba(16, 16, 18, 0.55)',
           color: liveStatus === 'LIVE' ? 'var(--success)' : 'var(--text-soft)',
           fontFamily: 'var(--mono)',

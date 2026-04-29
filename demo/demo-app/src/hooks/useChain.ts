@@ -167,6 +167,7 @@ export function useChainWs(enabled = true): ChainWsState {
       // Schedule reconnect with exponential backoff
       const delay = backoffRef.current;
       backoffRef.current = Math.min(delay * 2, MAX_BACKOFF_MS);
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       reconnectTimer.current = setTimeout(() => {
         if (mountedRef.current) connect();
       }, delay);
@@ -209,36 +210,4 @@ export function useChainWs(enabled = true): ChainWsState {
   }, [connect, enabled]);
 
   return { connected, insights, pheromones, stats, error, refresh };
-}
-
-// ---------------------------------------------------------------------------
-// useChain — backward-compatible wrapper
-// ---------------------------------------------------------------------------
-
-export function useChain() {
-  const { connected, stats, error, refresh } = useChainWs();
-  return {
-    status: connected ? { connected, insights: stats.insights, confirms: stats.confirms } : null,
-    blocks: [] as never[],
-    loading: !connected && !error,
-    error,
-    refresh,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// mirageRpc — JSON-RPC utility for mirage-rs
-// ---------------------------------------------------------------------------
-
-let rpcId = 0;
-
-export async function mirageRpc<T = unknown>(method: string, params: unknown[] = []): Promise<T> {
-  const res = await fetch(`http://${MIRAGE_HOST}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', method, params, id: ++rpcId }),
-  });
-  const json = await res.json();
-  if (json.error) throw new Error(json.error.message ?? JSON.stringify(json.error));
-  return json.result as T;
 }

@@ -1,4 +1,6 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef } from 'react';
+import { getCssVar, hexToRgba } from '../lib/color';
+import { useCanvasSetup } from '../hooks/useCanvasSetup';
 import './Charts/Charts.css';
 
 export interface GateRung {
@@ -19,17 +21,21 @@ interface GateWaterfallProps {
   height?: number;
 }
 
-const STATUS_COLORS = {
-  passed: '#8A9C86',
-  failed: '#CC90A8',
-  skipped: 'rgba(255,255,255,0.06)',
-} as const;
+function getStatusColors() {
+  return {
+    passed: getCssVar('--success'),
+    failed: getCssVar('--rose-bright'),
+    skipped: 'rgba(255,255,255,0.06)',
+  } as const;
+}
 
-const STATUS_BORDER = {
-  passed: 'rgba(138,156,134,0.6)',
-  failed: 'rgba(204,144,168,0.6)',
-  skipped: 'rgba(255,255,255,0.08)',
-} as const;
+function getStatusBorder() {
+  return {
+    passed: hexToRgba(getCssVar('--success'), 0.6),
+    failed: hexToRgba(getCssVar('--rose-bright'), 0.6),
+    skipped: 'rgba(255,255,255,0.08)',
+  } as const;
+}
 
 function formatDuration(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
@@ -65,26 +71,12 @@ function drawRoundedRect(
 export default function GateWaterfall({ runs, height = 360 }: GateWaterfallProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
     if (runs.length === 0) {
-      const c = canvas.getContext('2d');
-      if (c) c.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, w, h);
       return;
     }
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
     const pad = { top: 30, right: 20, bottom: 30, left: 160 };
     const plotW = Math.max(w - pad.left - pad.right, 1);
     const rowH = Math.min(28, Math.max((h - pad.top - pad.bottom - 18) / runs.length - 4, 18));
@@ -96,14 +88,17 @@ export default function GateWaterfall({ runs, height = 360 }: GateWaterfallProps
       1,
     );
 
-    ctx.fillStyle = '#8a7a88';
+    const STATUS_COLORS = getStatusColors();
+    const STATUS_BORDER = getStatusBorder();
+
+    ctx.fillStyle = getCssVar('--text-dim');
     ctx.font = '11px "General Sans", sans-serif';
     ctx.textAlign = 'left';
     ctx.fillText('GATE WATERFALL', pad.left, 16);
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.strokeStyle = getCssVar('--border-soft');
     ctx.lineWidth = 1;
-    ctx.fillStyle = '#6a5a68';
+    ctx.fillStyle = getCssVar('--text-ghost');
     ctx.font = '8px "JetBrains Mono", monospace';
     ctx.textAlign = 'center';
     for (let i = 0; i <= 4; i++) {
@@ -121,7 +116,7 @@ export default function GateWaterfall({ runs, height = 360 }: GateWaterfallProps
       const y = pad.top + runIndex * (rowH + 4);
       const totalMs = run.rungs.reduce((sum, rung) => sum + rung.duration_ms, 0);
 
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       const label = run.task_id.length > 20 ? `${run.task_id.slice(0, 20)}...` : run.task_id;
@@ -147,7 +142,7 @@ export default function GateWaterfall({ runs, height = 360 }: GateWaterfallProps
           ctx.stroke();
 
           if (drawWidth > 28) {
-            ctx.fillStyle = rung.status === 'skipped' ? '#6a5a68' : '#1a1418';
+            ctx.fillStyle = rung.status === 'skipped' ? getCssVar('--text-ghost') : '#1a1418'; // #1a1418: dark text on colored bar
             ctx.font = '8px "JetBrains Mono", monospace';
             ctx.textAlign = 'left';
             ctx.fillText(rung.name, x + 4, y + rowH / 2 + 3);
@@ -160,7 +155,7 @@ export default function GateWaterfall({ runs, height = 360 }: GateWaterfallProps
       const totalLabel = formatDuration(totalMs);
       const totalX = pad.left + (totalMs / maxTotal) * plotW + 8;
       if (totalX + 48 < w) {
-        ctx.fillStyle = '#6a5a68';
+        ctx.fillStyle = getCssVar('--text-ghost');
         ctx.font = '9px "JetBrains Mono", monospace';
         ctx.textAlign = 'left';
         ctx.fillText(totalLabel, totalX, y + rowH / 2 + 3);
@@ -178,23 +173,16 @@ export default function GateWaterfall({ runs, height = 360 }: GateWaterfallProps
     legendItems.forEach((item) => {
       ctx.fillStyle = item.color;
       ctx.fillRect(legendX, legendY, 10, 10);
-      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.strokeStyle = getCssVar('--border');
       ctx.lineWidth = 0.5;
       ctx.strokeRect(legendX, legendY, 10, 10);
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillText(item.label, legendX + 14, legendY + 9);
       legendX += 72;
     });
   }, [runs]);
-
-  useEffect(() => {
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [draw]);
 
   return (
     <div className="chart-container" style={{ height }}>

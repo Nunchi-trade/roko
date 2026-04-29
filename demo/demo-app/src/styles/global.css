@@ -1,10 +1,6 @@
 @import './fonts.css';
 @import './rosedust.css';
 
-*::-webkit-scrollbar { width: 5px; }
-*::-webkit-scrollbar-track { background: transparent; }
-*::-webkit-scrollbar-thumb { background: var(--glass-border); border-radius: 3px; }
-
 html, body, #root {
   background: var(--bg-void);
   color: var(--text-primary);

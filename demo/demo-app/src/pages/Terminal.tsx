@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useTerminal } from '../hooks/useTerminal';
 import { useWorkspace } from '../hooks/useWorkspace';
-import { enterWorkspace } from '../hooks/useTerminalSession';
+import { enterWorkspace } from '../lib/terminal-session';
 import './Terminal.css';
 
 /** Individual terminal pane using useTerminal hook internally. */

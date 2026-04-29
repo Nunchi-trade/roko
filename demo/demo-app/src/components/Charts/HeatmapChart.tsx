@@ -1,4 +1,6 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef } from 'react';
+import { getCssVar, hexToRgba } from '../../lib/color';
+import { useCanvasSetup } from '../../hooks/useCanvasSetup';
 import './Charts.css';
 
 interface HeatmapChartProps {
@@ -12,21 +14,9 @@ interface HeatmapChartProps {
 export default function HeatmapChart({ rows, columns, values, height = 280 }: HeatmapChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || rows.length === 0 || columns.length === 0) return;
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    if (rows.length === 0 || columns.length === 0) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
     const pad = { top: 32, right: 16, bottom: 8, left: 80 };
     const plotW = w - pad.left - pad.right;
     const plotH = h - pad.top - pad.bottom;
@@ -37,7 +27,7 @@ export default function HeatmapChart({ rows, columns, values, height = 280 }: He
 
     // Column headers
     ctx.font = '9px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#8a7a88';
+    ctx.fillStyle = getCssVar('--text-dim');
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     for (let c = 0; c < columns.length; c++) {
@@ -51,7 +41,7 @@ export default function HeatmapChart({ rows, columns, values, height = 280 }: He
       const y = pad.top + r * cellH;
 
       // Row label
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '10px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
@@ -66,9 +56,9 @@ export default function HeatmapChart({ rows, columns, values, height = 280 }: He
 
         // Cell fill
         if (val === true) {
-          ctx.fillStyle = 'rgba(90,154,106,0.4)'; // --success at 40%
+          ctx.fillStyle = hexToRgba(getCssVar('--success'), 0.4);
         } else if (val === false) {
-          ctx.fillStyle = 'rgba(170,112,136,0.4)'; // --rose-dim at 40%
+          ctx.fillStyle = hexToRgba(getCssVar('--rose-dim'), 0.4);
         } else {
           ctx.fillStyle = 'rgba(255,255,255,0.03)'; // null/missing
         }
@@ -81,13 +71,6 @@ export default function HeatmapChart({ rows, columns, values, height = 280 }: He
       }
     }
   }, [rows, columns, values]);
-
-  useEffect(() => {
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [draw]);
 
   return (
     <div className="chart-container" style={{ height }}>

@@ -1,0 +1,62 @@
+/* SplitView — resizable two-pane layout with draggable divider */
+
+.split-view {
+  display: grid;
+  height: 100%;
+  overflow: hidden;
+}
+
+.split-view--horizontal {
+  grid-template-columns: 1fr;
+}
+
+.split-view--vertical {
+  grid-template-rows: 1fr;
+}
+
+.split-view__pane {
+  overflow: auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Divider — horizontal (column separator) */
+.split-view--horizontal .split-view__divider {
+  width: 4px;
+  cursor: col-resize;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.split-view--horizontal .split-view__divider-line {
+  width: 1px;
+  background: var(--border);
+  transition: background var(--duration-snap);
+}
+
+.split-view--horizontal .split-view__divider:hover .split-view__divider-line {
+  background: var(--border-strong);
+}
+
+/* Divider — vertical (row separator) */
+.split-view--vertical .split-view__divider {
+  height: 4px;
+  cursor: row-resize;
+  display: flex;
+  align-items: center;
+  justify-content: stretch;
+  flex-shrink: 0;
+}
+
+.split-view--vertical .split-view__divider-line {
+  height: 1px;
+  width: 100%;
+  background: var(--border);
+  transition: background var(--duration-snap);
+}
+
+.split-view--vertical .split-view__divider:hover .split-view__divider-line {
+  background: var(--border-strong);
+}

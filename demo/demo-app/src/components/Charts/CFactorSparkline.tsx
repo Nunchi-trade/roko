@@ -1,4 +1,6 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef } from 'react';
+import { getCssVar, hexToRgba } from '../../lib/color';
+import { useCanvasSetup } from '../../hooks/useCanvasSetup';
 import './Charts.css';
 
 interface TrendBucket {
@@ -15,27 +17,14 @@ interface CFactorSparklineProps {
   height?: number;
 }
 
-const WOOLLEY_KEYS: { key: string; label: string; color: string }[] = [
-  { key: 'turn_taking_equality', label: 'Turn-Taking', color: '#C8B890' },
-  { key: 'social_perceptiveness', label: 'Perception', color: '#AA7088' },
-  { key: 'citation_reciprocity', label: 'Reciprocity', color: '#8A9C86' },
-  { key: 'delivery_rate', label: 'Delivery', color: '#D8A878' },
-  { key: 'hdc_diversity', label: 'HDC Diversity', color: '#9A8AB8' },
-];
-
-function hexToRgba(hex: string, alpha: number): string {
-  const normalized = hex.trim();
-  if (!normalized.startsWith('#')) return normalized;
-
-  const expanded = normalized.length === 4
-    ? `#${normalized[1]}${normalized[1]}${normalized[2]}${normalized[2]}${normalized[3]}${normalized[3]}`
-    : normalized;
-
-  const value = Number.parseInt(expanded.slice(1), 16);
-  const r = (value >> 16) & 255;
-  const g = (value >> 8) & 255;
-  const b = value & 255;
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+function getWoolleyKeys(): { key: string; label: string; color: string }[] {
+  return [
+    { key: 'turn_taking_equality', label: 'Turn-Taking', color: getCssVar('--bone') },
+    { key: 'social_perceptiveness', label: 'Perception', color: getCssVar('--rose') },
+    { key: 'citation_reciprocity', label: 'Reciprocity', color: getCssVar('--success') },
+    { key: 'delivery_rate', label: 'Delivery', color: getCssVar('--warning') },
+    { key: 'hdc_diversity', label: 'HDC Diversity', color: getCssVar('--status-blocked') },
+  ];
 }
 
 function drawMiniSparkline(
@@ -57,7 +46,7 @@ function drawMiniSparkline(
   const lineH = Math.max(8, h - 14);
 
   ctx.save();
-  ctx.fillStyle = '#6a5a68';
+  ctx.fillStyle = getCssVar('--text-ghost');
   ctx.font = '9px "JetBrains Mono", monospace';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
@@ -106,37 +95,21 @@ function drawMiniSparkline(
 export default function CFactorSparkline({ trend, woolley, height = 320 }: CFactorSparklineProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
     const pad = { top: 28, right: 16, bottom: 12, left: 52 };
     const plotW = w - pad.left - pad.right;
     const availableH = h - pad.top - pad.bottom;
 
     ctx.clearRect(0, 0, w, h);
 
-    ctx.fillStyle = '#8a7a88';
+    ctx.fillStyle = getCssVar('--text-dim');
     ctx.font = '11px "General Sans", sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
     ctx.fillText('C-FACTOR TREND (24h)', pad.left, 16);
 
     if (trend.length === 0) {
-      ctx.fillStyle = '#6a5a68';
+      ctx.fillStyle = getCssVar('--text-ghost');
       ctx.font = '10px "JetBrains Mono", monospace';
       ctx.fillText('No trend data available', pad.left, pad.top + 20);
       return;
@@ -151,7 +124,7 @@ export default function CFactorSparkline({ trend, woolley, height = 320 }: CFact
     const mainH = Math.max(104, Math.min(136, Math.floor(availableH * 0.43)));
     const latest = trend[trend.length - 1];
 
-    ctx.fillStyle = '#6a5a68';
+    ctx.fillStyle = getCssVar('--text-ghost');
     ctx.font = '9px "JetBrains Mono", monospace';
     ctx.textAlign = 'right';
     ctx.fillText(`avg ${latest.avg.toFixed(3)} · p95 ${latest.p95.toFixed(3)} · n ${latest.samples}`, pad.left + plotW, 16);
@@ -165,7 +138,7 @@ export default function CFactorSparkline({ trend, woolley, height = 320 }: CFact
       ctx.lineTo(pad.left + plotW, yy);
       ctx.stroke();
 
-      ctx.fillStyle = '#6a5a68';
+      ctx.fillStyle = getCssVar('--text-ghost');
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.fillText((minVal + (range * i) / 3).toFixed(3), pad.left - 6, yy + 3);
@@ -184,11 +157,11 @@ export default function CFactorSparkline({ trend, woolley, height = 320 }: CFact
       ctx.lineTo(x, y);
     }
     ctx.closePath();
-    ctx.fillStyle = hexToRgba('#DCA5BD', 0.08);
+    ctx.fillStyle = hexToRgba(getCssVar('--rose-glow'), 0.08);
     ctx.fill();
 
     ctx.beginPath();
-    ctx.strokeStyle = 'rgba(220,165,189,0.35)';
+    ctx.strokeStyle = hexToRgba(getCssVar('--rose-glow'), 0.35);
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 3]);
     for (let i = 0; i < p95Values.length; i += 1) {
@@ -201,7 +174,7 @@ export default function CFactorSparkline({ trend, woolley, height = 320 }: CFact
     ctx.setLineDash([]);
 
     ctx.beginPath();
-    ctx.strokeStyle = '#DCA5BD';
+    ctx.strokeStyle = getCssVar('--rose-glow');
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
     for (let i = 0; i < avgValues.length; i += 1) {
@@ -216,14 +189,14 @@ export default function CFactorSparkline({ trend, woolley, height = 320 }: CFact
     const lastY = pad.top + mainH * (1 - (avgValues[avgValues.length - 1] - minVal) / range);
     ctx.beginPath();
     ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
-    ctx.fillStyle = '#DCA5BD';
-    ctx.shadowColor = hexToRgba('#DCA5BD', 0.45);
+    ctx.fillStyle = getCssVar('--rose-glow');
+    ctx.shadowColor = hexToRgba(getCssVar('--rose-glow'), 0.45);
     ctx.shadowBlur = 8;
     ctx.fill();
     ctx.shadowBlur = 0;
     ctx.shadowColor = 'transparent';
 
-    const woolleyKeys = WOOLLEY_KEYS.filter((entry) => Array.isArray(woolley?.[entry.key]) && (woolley?.[entry.key]?.length ?? 0) > 1);
+    const woolleyKeys = getWoolleyKeys().filter((entry) => Array.isArray(woolley?.[entry.key]) && (woolley?.[entry.key]?.length ?? 0) > 1);
     if (woolleyKeys.length === 0) return;
 
     const sparkTop = pad.top + mainH + 18;
@@ -237,13 +210,6 @@ export default function CFactorSparkline({ trend, woolley, height = 320 }: CFact
       drawMiniSparkline(ctx, values, pad.left, rowY, plotW, rowH, entry.color, entry.label);
     });
   }, [trend, woolley]);
-
-  useEffect(() => {
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [draw]);
 
   return (
     <div className="chart-container" style={{ height }}>

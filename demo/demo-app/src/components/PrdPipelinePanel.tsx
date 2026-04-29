@@ -161,13 +161,6 @@ export default function PrdPipelinePanel({
           )}
           {state.example && <p className="pp-idea">{state.example.idea}</p>}
 
-          {state.example && state.example.why.length > 0 && (
-            <div className="pp-tags">
-              {state.example.why.map((w) => (
-                <span key={w}>{w}</span>
-              ))}
-            </div>
-          )}
         </div>
 
         {/* Right: controls + progress */}

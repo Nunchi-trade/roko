@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { fmtUptime } from '../../lib/format';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
@@ -107,15 +108,6 @@ const STATUS_DOT_STYLES: Record<ProviderStatus, { bg: string; glow: string; anim
   degraded: { bg: 'var(--warning)', glow: '0 0 6px rgba(216,168,120,.6)', anim: 'pulse-dot 1.5s ease-in-out infinite' },
   unhealthy: { bg: 'var(--rose-bright)', glow: '0 0 6px rgba(204,144,168,.6)', anim: 'none' },
 };
-
-/* ── Helpers ─────────────────────────────────────────────── */
-
-function fmtUptime(secs: number): string {
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  if (h === 0) return `${m}m`;
-  return `${h}h ${m}m`;
-}
 
 /* ── Metric bar config ───────────────────────────────────── */
 

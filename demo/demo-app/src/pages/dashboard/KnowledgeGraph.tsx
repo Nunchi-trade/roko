@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { DOMAIN_COLORS, domainColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
@@ -18,20 +19,6 @@ interface KnowledgeEdge {
   source: string;
   target: string;
   frequency?: number;
-}
-
-/* ── Domain color map ────────────────────────────────────── */
-
-const DOMAIN_COLORS: Record<string, string> = {
-  gate:      '#cc90a8', // rose
-  agent:     '#c8b890', // bone
-  knowledge: '#9494b4', // dream
-  plan:      '#7a8a78', // success
-  config:    '#c89a68', // warning
-};
-
-function domainColor(domain?: string): string {
-  return DOMAIN_COLORS[domain ?? ''] ?? '#706070';
 }
 
 /* ── Force graph simulation ──────────────────────────────── */

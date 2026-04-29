@@ -46,7 +46,7 @@ const TABS: { id: Tab; label: string }[] = [
 
 const RUN_COLORS = [
   'var(--rose-bright)', 'var(--bone-bright)', 'var(--success)',
-  'var(--dream-bright)', '#9B8EC4', '#C49B6E',
+  'var(--dream-bright)', 'var(--dream)', 'var(--warning)',
 ];
 
 function formatEta(ms: number | null): string {

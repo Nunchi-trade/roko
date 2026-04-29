@@ -1,0 +1,53 @@
+/* PageShell — standard page wrapper with title, subtitle, and actions */
+
+@keyframes pageShellFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.page-shell {
+  padding: var(--sp-6);
+}
+
+.page-shell__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.page-shell__titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.page-shell__title {
+  font-family: var(--display);
+  font-weight: 300;
+  font-style: italic;
+  font-size: var(--text-2xl);
+  color: var(--text-strong);
+  letter-spacing: -0.012em;
+  line-height: 1.1;
+  animation: pageShellFadeIn 200ms ease-out;
+}
+
+.page-shell__subtitle {
+  font-family: var(--sans);
+  font-size: var(--text-md);
+  color: var(--text-soft);
+  margin-top: var(--sp-1);
+  line-height: 1.5;
+}
+
+.page-shell__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+.page-shell__content {
+  margin-top: var(--sp-6);
+}

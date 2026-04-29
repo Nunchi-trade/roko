@@ -1,4 +1,5 @@
 import type { BenchTask } from '../lib/bench-types';
+import { shortModel } from '../lib/format';
 import type { MatrixCell } from '../hooks/useMatrixBench';
 import './MatrixDetailView.css';
 
@@ -7,10 +8,6 @@ interface MatrixDetailViewProps {
   selectedModels: string[];
   presetLabels: string[];
   tasks: BenchTask[];
-}
-
-function shortModel(id: string): string {
-  return id.split('-').slice(0, 2).join('-');
 }
 
 /** Side-by-side detail view: columns per lane, rows per task. */

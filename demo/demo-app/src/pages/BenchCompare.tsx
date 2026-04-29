@@ -7,7 +7,12 @@ import RadarChart from '../components/Charts/RadarChart';
 import './Bench.css';
 
 const RUN_COLORS = [
-  '#AA7088', '#C8B890', '#8A9C86', '#D8A878', '#9A8AB8', '#6BA0A0',
+  'var(--rose)',          // --rose
+  'var(--bone)',          // --bone
+  'var(--success)',       // --success
+  'var(--warning)',       // --warning
+  'var(--dream-bright)',  // --dream-bright
+  'var(--dream)',         // --dream (teal-ish)
 ];
 
 const RADAR_AXES = ['Pass Rate', 'Speed', 'Cost Eff.', 'Token Eff.', 'Gate Pass'];

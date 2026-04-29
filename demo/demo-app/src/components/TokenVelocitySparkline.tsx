@@ -1,4 +1,6 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef } from 'react';
+import { getCssVar, hexToRgba } from '../lib/color';
+import { useCanvasSetup } from '../hooks/useCanvasSetup';
 
 export interface TokenVelocityPoint {
   taskId: string;
@@ -10,39 +12,14 @@ export interface TokenVelocitySparklineProps {
   height?: number;
 }
 
-function hexToRgba(hex: string, alpha: number): string {
-  const normalized = hex.trim().replace(/^#/, '');
-  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return hex;
-  const r = Number.parseInt(normalized.slice(0, 2), 16);
-  const g = Number.parseInt(normalized.slice(2, 4), 16);
-  const b = Number.parseInt(normalized.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
 /** Canvas-based sparkline showing token velocity per task. */
 export default function TokenVelocitySparkline({ points, height = 120 }: TokenVelocitySparklineProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
-    const lineColor = '#8A9C86';
-    const titleColor = '#8a7a88';
-    const muted = '#6a5a68';
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    const lineColor = getCssVar('--success');
+    const titleColor = getCssVar('--text-dim');
+    const muted = getCssVar('--text-ghost');
     const pad = { top: 36, right: 16, bottom: 16, left: 16 };
     const plotW = w - pad.left - pad.right;
     const plotH = h - pad.top - pad.bottom;
@@ -139,13 +116,6 @@ export default function TokenVelocitySparkline({ points, height = 120 }: TokenVe
     ctx.shadowBlur = 0;
     ctx.shadowColor = 'transparent';
   }, [points]);
-
-  useEffect(() => {
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [draw]);
 
   return (
     <div className="chart-container" style={{ height }}>

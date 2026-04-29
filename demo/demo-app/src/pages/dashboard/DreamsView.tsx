@@ -3,6 +3,7 @@ import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import DreamPhaseViz from '../../components/DreamPhaseViz';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { domainColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 
@@ -105,12 +106,12 @@ export default function DreamsView() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
             {(journal?.phases ?? []).map((phase, i, arr) => {
               const phaseColors: Record<string, string> = {
-                Hypnagogia: '#9A8AB8',
-                NREM: '#7A8AA8',
-                REM: '#CC90A8',
-                Integration: '#8A9C86',
+                Hypnagogia: 'var(--dream-bright)',
+                NREM: 'var(--dream)',
+                REM: 'var(--rose-bright)',
+                Integration: 'var(--success)',
               };
-              const color = phaseColors[phase.name] ?? '#706070';
+              const color = phaseColors[phase.name] ?? 'var(--text-ghost)';
               const isComplete = phase.status === 'completed';
 
               return (
@@ -194,14 +195,7 @@ export default function DreamsView() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
               {recentEntries.map((entry, i) => {
-                const DOMAIN_COLORS: Record<string, string> = {
-                  gate: '#CC90A8',
-                  agent: '#C8B890',
-                  knowledge: '#9494B4',
-                  plan: '#7A8A78',
-                  config: '#C89A68',
-                };
-                const color = DOMAIN_COLORS[entry.domain ?? ''] ?? '#706070';
+                const color = domainColor(entry.domain);
 
                 return (
                   <div

@@ -1,4 +1,6 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef } from 'react';
+import { getCssVar } from '../../lib/color';
+import { useCanvasSetup } from '../../hooks/useCanvasSetup';
 import './Charts.css';
 
 interface BarData {
@@ -17,21 +19,9 @@ interface BarChartProps {
 export default function BarChart({ data, title, height = 200 }: BarChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || data.length === 0) return;
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    if (data.length === 0) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
     const pad = { top: 24, right: 16, bottom: 8, left: 80 };
     const plotW = w - pad.left - pad.right;
     const barH = Math.min(24, (h - pad.top - pad.bottom) / data.length - 4);
@@ -40,7 +30,7 @@ export default function BarChart({ data, title, height = 200 }: BarChartProps) {
     ctx.clearRect(0, 0, w, h);
 
     if (title) {
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '11px "General Sans", sans-serif';
       ctx.fillText(title, pad.left, 16);
     }
@@ -48,10 +38,10 @@ export default function BarChart({ data, title, height = 200 }: BarChartProps) {
     data.forEach((d, i) => {
       const y = pad.top + i * (barH + 4);
       const barW = (d.value / maxVal) * plotW;
-      const color = d.color ?? '#AA7088';
+      const color = d.color ?? getCssVar('--rose');
 
       // Label
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '10px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.fillText(d.label, pad.left - 8, y + barH / 2 + 3);
@@ -69,19 +59,12 @@ export default function BarChart({ data, title, height = 200 }: BarChartProps) {
       ctx.fill();
 
       // Value
-      ctx.fillStyle = '#c4b4c4';
+      ctx.fillStyle = getCssVar('--text-soft');
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillText(d.value.toFixed(1), pad.left + barW + 6, y + barH / 2 + 3);
     });
   }, [data, title]);
-
-  useEffect(() => {
-    draw();
-    const ro = new ResizeObserver(draw);
-    if (canvasRef.current) ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [draw]);
 
   return (
     <div className="chart-container" style={{ height }}>

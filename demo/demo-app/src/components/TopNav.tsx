@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Link } from 'react-router';
 import { useApi } from '../hooks/useApi';
+import { fmtUptime } from '../lib/format';
 import { useServerHealth } from '../hooks/useServerHealth';
 import FlatIcon, { type FlatIconName } from './FlatIcon';
 import './TopNav.css';
@@ -18,14 +19,6 @@ const NAV_LINKS = [
 interface HealthResponse {
   status?: string;
   uptime_secs?: number;
-}
-
-function fmtUptime(secs: number): string {
-  if (secs < 60) return `${Math.floor(secs)}s`;
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  if (h === 0) return `${m}m`;
-  return `${h}h ${m}m`;
 }
 
 export default function TopNav() {

@@ -1,0 +1,10 @@
+/* ===================================================================
+   AnimatedList
+   Enter animation with per-item stagger via CSS custom property.
+   =================================================================== */
+
+.animated-list-item {
+  animation: fadeUp 200ms var(--ease-expo, cubic-bezier(0.16, 1, 0.3, 1)) forwards;
+  animation-delay: calc(var(--i, 0) * 40ms);
+  opacity: 0; /* starts hidden; fadeUp keyframe sets to 1 */
+}

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { relativeTime } from '../lib/format';
 import Pane from './Pane';
 import './ChainActivityPanel.css';
 
@@ -21,13 +22,6 @@ interface ChainActivityProps {
 }
 
 /* ── Helpers ── */
-function relativeTime(ts: number): string {
-  const delta = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (delta < 60) return `${delta}s ago`;
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  return `${Math.floor(delta / 3600)}h ago`;
-}
-
 function truncateHash(hash: string): string {
   if (hash.length <= 8) return hash;
   return `${hash.slice(0, 6)}..`;

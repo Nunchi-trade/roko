@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { getCssVar, hexToRgba } from '../lib/color';
+import { useCanvasSetup } from '../hooks/useCanvasSetup';
 import { useLiveApi } from '../hooks/useLiveApi';
 
 interface DreamPhase {
@@ -20,49 +22,37 @@ interface DreamJournal {
 
 const PHASE_SEQUENCE = ['Hypnagogia', 'NREM', 'REM', 'Integration'] as const;
 
-const PHASE_STYLES: Record<string, { color: string; bg: string; border: string; glow: string }> = {
-  Hypnagogia: {
-    color: '#9A8AB8',
-    bg: 'rgba(154,138,184,0.06)',
-    border: 'rgba(154,138,184,0.15)',
-    glow: 'rgba(154,138,184,0.5)',
-  },
-  NREM: {
-    color: '#7A8AA8',
-    bg: 'rgba(122,138,168,0.06)',
-    border: 'rgba(122,138,168,0.15)',
-    glow: 'rgba(122,138,168,0.5)',
-  },
-  REM: {
-    color: '#CC90A8',
-    bg: 'rgba(204,144,168,0.06)',
-    border: 'rgba(204,144,168,0.15)',
-    glow: 'rgba(204,144,168,0.5)',
-  },
-  Integration: {
-    color: '#8A9C86',
-    bg: 'rgba(138,156,134,0.06)',
-    border: 'rgba(138,156,134,0.15)',
-    glow: 'rgba(138,156,134,0.5)',
-  },
-};
-
-function hexToRgba(hex: string, alpha: number): string {
-  const normalized = hex.replace('#', '');
-  const expanded =
-    normalized.length === 3
-      ? normalized
-          .split('')
-          .map((segment) => `${segment}${segment}`)
-          .join('')
-      : normalized;
-
-  const r = Number.parseInt(expanded.slice(0, 2), 16);
-  const g = Number.parseInt(expanded.slice(2, 4), 16);
-  const b = Number.parseInt(expanded.slice(4, 6), 16);
-
-  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return hex;
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+function getPhaseStyles(): Record<string, { color: string; bg: string; border: string; glow: string }> {
+  const hypnagogia = getCssVar('--status-blocked');
+  const nrem = getCssVar('--dream');
+  const rem = getCssVar('--rose-bright');
+  const integration = getCssVar('--success');
+  return {
+    Hypnagogia: {
+      color: hypnagogia,
+      bg: hexToRgba(hypnagogia, 0.06),
+      border: hexToRgba(hypnagogia, 0.15),
+      glow: hexToRgba(hypnagogia, 0.5),
+    },
+    NREM: {
+      color: nrem,
+      bg: hexToRgba(nrem, 0.06),
+      border: hexToRgba(nrem, 0.15),
+      glow: hexToRgba(nrem, 0.5),
+    },
+    REM: {
+      color: rem,
+      bg: hexToRgba(rem, 0.06),
+      border: hexToRgba(rem, 0.15),
+      glow: hexToRgba(rem, 0.5),
+    },
+    Integration: {
+      color: integration,
+      bg: hexToRgba(integration, 0.06),
+      border: hexToRgba(integration, 0.15),
+      glow: hexToRgba(integration, 0.5),
+    },
+  };
 }
 
 function formatCycleTime(iso: string): string {
@@ -80,7 +70,6 @@ function formatCycleTime(iso: string): string {
 function PhaseSparkline({
   data,
   color,
-  width = 132,
   height = 34,
 }: {
   data: number[];
@@ -90,35 +79,20 @@ function PhaseSparkline({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    const resolvedWidth = rect.width || width;
-    const resolvedHeight = rect.height || height;
-
-    canvas.width = resolvedWidth * dpr;
-    canvas.height = resolvedHeight * dpr;
-    ctx.scale(dpr, dpr);
-
-    ctx.clearRect(0, 0, resolvedWidth, resolvedHeight);
+  useCanvasSetup(canvasRef, (ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
 
     const pad = 2;
-    const plotW = resolvedWidth - pad * 2;
-    const plotH = resolvedHeight - pad * 2;
+    const plotW = w - pad * 2;
+    const plotH = h - pad * 2;
 
     if (data.length < 2) {
       ctx.strokeStyle = 'rgba(255,255,255,0.08)';
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 4]);
       ctx.beginPath();
-      ctx.moveTo(pad, resolvedHeight / 2);
-      ctx.lineTo(resolvedWidth - pad, resolvedHeight / 2);
+      ctx.moveTo(pad, h / 2);
+      ctx.lineTo(w - pad, h / 2);
       ctx.stroke();
       ctx.setLineDash([]);
       return;
@@ -160,14 +134,7 @@ function PhaseSparkline({
     ctx.arc(lastX, lastY, 2, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
-  }, [data, color, width, height]);
-
-  useEffect(() => {
-    draw();
-    const observer = new ResizeObserver(draw);
-    if (canvasRef.current) observer.observe(canvasRef.current);
-    return () => observer.disconnect();
-  }, [draw]);
+  }, [data, color]);
 
   return (
     <canvas
@@ -324,7 +291,8 @@ export default function DreamPhaseViz() {
         }}
       >
         {PHASE_SEQUENCE.map((phaseName, index) => {
-          const style = PHASE_STYLES[phaseName];
+          const phaseStyles = getPhaseStyles();
+          const style = phaseStyles[phaseName];
           const phase = phasesByName.get(phaseName);
           const ready = hasJournal && Boolean(phase);
 

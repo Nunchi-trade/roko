@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router';
 import { useLiveApi } from '../hooks/useLiveApi';
+import { getCssVar } from '../lib/color';
 import type { BenchRun, BenchTaskResult } from '../lib/bench-types';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
@@ -140,11 +141,11 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
     const maxCost = Math.max(...segments.map((segment) => segment.inputCost + segment.outputCost), 0.001);
     const rowGap = 4;
     const barHeight = Math.max(4, Math.min(24, plotH / segments.length - rowGap));
-    const bone = '#C8B890';
-    const roseDim = '#D4918F';
-    const labelColor = '#BDAEB8';
-    const mutedColor = '#85707D';
-    const costColor = '#F0E4E3';
+    const bone = getCssVar('--bone');
+    const roseDim = getCssVar('--rose-bright');
+    const labelColor = getCssVar('--text-soft');
+    const mutedColor = getCssVar('--text-dim');
+    const costColor = getCssVar('--text-strong');
 
     ctx.lineWidth = 1;
     ctx.strokeStyle = 'rgba(255,255,255,0.05)';
@@ -284,8 +285,8 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
     const maxTokens = Math.max(...results.map((r) => r.tokens_in + r.tokens_out), 1);
     const rowGap = 4;
     const barHeight = Math.max(4, Math.min(22, plotH / results.length - rowGap));
-    const inColor = '#7A8A78'; // --success muted
-    const outColor = '#C8B890'; // --bone
+    const inColor = getCssVar('--success');
+    const outColor = getCssVar('--bone');
 
     // Grid lines
     ctx.lineWidth = 1;
@@ -324,7 +325,7 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
       ctx.font = '10px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       const nameText = r.task_name.length > 12 ? r.task_name.slice(0, 11) + '\u2026' : r.task_name;
       ctx.fillText(nameText, pad.left - 8, centerY);
 
@@ -332,7 +333,7 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
       const total = r.tokens_in + r.tokens_out;
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
-      ctx.fillStyle = '#BDAEB8';
+      ctx.fillStyle = getCssVar('--text-soft');
       const barEnd = pad.left + inW + outW;
       ctx.fillText(total.toLocaleString(), Math.min(barEnd + 6, pad.left + plotW - 40), centerY);
     });
@@ -350,7 +351,7 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
     legendItems.forEach((item) => {
       ctx.fillStyle = item.color;
       ctx.fillRect(legendX, legendY - 5, 10, 10);
-      ctx.fillStyle = '#85707D';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.fillText(item.label, legendX + 14, legendY);
       legendX += ctx.measureText(item.label).width + 34;
     });

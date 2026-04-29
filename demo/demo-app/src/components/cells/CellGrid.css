@@ -1,0 +1,25 @@
+/* CellGrid — responsive grid layout for cells */
+
+.cell-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--cell-grid-min, 280px), 1fr));
+}
+
+/* ── Staggered entrance ── */
+
+.cell-grid > .cell-grid__item {
+  opacity: 0;
+  animation: cellGridFadeUp 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation-delay: calc(var(--i, 0) * 40ms);
+}
+
+@keyframes cellGridFadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

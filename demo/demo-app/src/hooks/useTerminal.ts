@@ -200,13 +200,13 @@ export function useTerminal(sessionId?: string) {
 
     // Register terminal I/O handlers once — they read from the handle's
     // current `ws` so they survive reconnects without stacking.
-    term.onData((data) => {
+    const onDataDisposable = term.onData((data) => {
       if (handle.ws && handle.ws.readyState === WebSocket.OPEN) {
         handle.ws.send(data);
       }
     });
 
-    term.onResize(({ cols, rows }) => {
+    const onResizeDisposable = term.onResize(({ cols, rows }) => {
       if (!disposed && handle.ws && handle.ws.readyState === WebSocket.OPEN) {
         handle.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
       }
@@ -251,6 +251,7 @@ export function useTerminal(sessionId?: string) {
         handle.status = 'disconnected';
         if (!disposed) setStatus('disconnected');
         if (!disposed && mountedRef.current) {
+          if (reconnectTimer) clearTimeout(reconnectTimer);
           reconnectTimer = setTimeout(connectWs, 500);
         }
       };
@@ -271,6 +272,8 @@ export function useTerminal(sessionId?: string) {
       mountedRef.current = false;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       ro.disconnect();
+      onDataDisposable.dispose();
+      onResizeDisposable.dispose();
       handle.ws?.close();
       term.dispose();
       handleRef.current = null;

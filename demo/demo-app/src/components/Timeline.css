@@ -3,6 +3,8 @@
   flex-direction: column;
   gap: 0;
   padding: 10px 16px;
+  min-width: 0;
+  overflow: hidden;
 }
 .timeline-step {
   display: flex;

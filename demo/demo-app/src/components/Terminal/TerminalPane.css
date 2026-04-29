@@ -1,5 +1,5 @@
 .terminal-pane {
-  background: #0e0c10;
+  background: var(--bg-deeper);
   border: 1px solid var(--glass-border);
   border-radius: 4px;
   overflow: hidden;

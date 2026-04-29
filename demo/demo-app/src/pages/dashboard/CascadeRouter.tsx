@@ -2,6 +2,8 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { getCssVar } from '../../lib/color';
+import { roleColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 
@@ -26,21 +28,6 @@ const pageStyle: CSSProperties = {
   gap: 10,
   minHeight: '100%',
 };
-
-const ROLE_COLORS: Record<string, string> = {
-  implementer: '#C8B890',
-  researcher: '#9A8AB8',
-  reviewer: '#8A9C86',
-  planner: '#D8A878',
-  auditor: '#AA7088',
-  executor: '#CC90A8',
-  composer: '#7A8AA8',
-};
-
-function roleColor(role: string): string {
-  const key = Object.keys(ROLE_COLORS).find((k) => role.toLowerCase().includes(k));
-  return ROLE_COLORS[key ?? ''] ?? '#706070';
-}
 
 /* ── Confidence bar chart canvas ─────────────────────────── */
 
@@ -82,10 +69,10 @@ function ModelConfidenceChart({ rows, height = 200 }: { rows: [string, Confidenc
       const barW = conf * plotW;
 
       // Color based on confidence
-      const color = conf >= 0.9 ? '#8A9C86' : conf >= 0.7 ? '#D8A878' : '#CC90A8';
+      const color = conf >= 0.9 ? getCssVar('--success') : conf >= 0.7 ? getCssVar('--warning') : getCssVar('--rose-bright');
 
       // Label
-      ctx.fillStyle = '#8a7a88';
+      ctx.fillStyle = getCssVar('--text-dim');
       ctx.font = '10px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
@@ -116,7 +103,7 @@ function ModelConfidenceChart({ rows, height = 200 }: { rows: [string, Confidenc
       ctx.shadowColor = 'transparent';
 
       // Value
-      ctx.fillStyle = '#c4b4c4';
+      ctx.fillStyle = getCssVar('--text-soft');
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillText(`${(conf * 100).toFixed(1)}%`, pad.left + barW + 8, y + barH / 2);

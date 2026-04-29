@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useTerminal } from '../hooks/useTerminal';
-import { enterWorkspace, showCmd, getRoko } from '../hooks/useTerminalSession';
+import { enterWorkspace, showCmd, getRoko } from '../lib/terminal-session';
 import { useRokoConfig } from '../hooks/useRokoConfig';
 import { useWorkspace } from '../hooks/useWorkspace';
 import GateBar from '../components/GateBar';
@@ -134,7 +134,8 @@ export default function Builder() {
     setFiles([]);
     setGates(g => g.map(gate => ({ ...gate, status: 'pending' as const })));
 
-    const cmd = `${getRoko()} run "${text.trim()}" --model ${selectedModel}`;
+    const escaped = text.trim().replace(/["\\`$]/g, '\\$&');
+    const cmd = `${getRoko()} run "${escaped}" --model ${selectedModel}`;
 
     await showCmd(h, cmd, {
       timeout: 120000,
@@ -167,7 +168,7 @@ export default function Builder() {
 
     setStatusText('complete');
     setRunning(false);
-  }, [running, handle]);
+  }, [running, handle, selectedModel]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

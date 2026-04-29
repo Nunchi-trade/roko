@@ -1,0 +1,96 @@
+/* StatusBadge — universal status indicator */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+}
+
+.status-badge--sm {
+  font-size: 11px;
+}
+
+.status-badge--md {
+  font-size: 12px;
+}
+
+/* ── Dot ── */
+
+.status-badge__dot {
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+
+.status-badge--sm .status-badge__dot {
+  width: 6px;
+  height: 6px;
+}
+
+.status-badge--md .status-badge__dot {
+  width: 8px;
+  height: 8px;
+}
+
+/* ── Icon ── */
+
+.status-badge__icon {
+  flex-shrink: 0;
+  font-size: inherit;
+  line-height: 1;
+}
+
+/* ── Status colors ── */
+
+.status-badge--idle {
+  color: var(--text-ghost);
+}
+
+.status-badge--idle .status-badge__dot {
+  background: var(--text-ghost);
+}
+
+.status-badge--active {
+  color: var(--status-active);
+}
+
+.status-badge--active .status-badge__dot {
+  background: var(--status-active);
+  box-shadow: 0 0 6px var(--status-active);
+  animation: pulse-dot 2.4s ease-in-out infinite;
+}
+
+.status-badge--success {
+  color: var(--status-success);
+}
+
+.status-badge--success .status-badge__dot {
+  background: var(--status-success);
+}
+
+.status-badge--error {
+  color: var(--status-error);
+}
+
+.status-badge--error .status-badge__dot {
+  background: var(--status-error);
+}
+
+.status-badge--blocked {
+  color: var(--status-blocked);
+}
+
+.status-badge--blocked .status-badge__dot {
+  background: var(--status-blocked);
+}
+
+.status-badge--warning {
+  color: var(--status-warning);
+}
+
+.status-badge--warning .status-badge__dot {
+  background: var(--status-warning);
+}
