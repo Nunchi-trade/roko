@@ -151,6 +151,9 @@ impl BridgeEventsError {
 /// Result alias for ACP event bridge operations.
 pub type Result<T> = std::result::Result<T, BridgeEventsError>;
 
+/// Maximum assistant response bytes stored in one history turn.
+const MAX_HISTORY_ASSISTANT_BYTES: usize = 10_240;
+
 // ── Cognitive events ─────────────────────────────────────────────────
 
 /// Events emitted by the cognitive loop and mapped to ACP session updates.
@@ -190,6 +193,22 @@ pub struct StreamResult {
     pub prompt_result: SessionPromptResult,
     /// Accumulated assistant text from TokenChunk events.
     pub assistant_text: String,
+}
+
+fn truncate_assistant_history(text: &str) -> String {
+    if text.len() <= MAX_HISTORY_ASSISTANT_BYTES {
+        return text.to_owned();
+    }
+
+    let mut end = MAX_HISTORY_ASSISTANT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut truncated = String::with_capacity(end + "...[truncated]".len());
+    truncated.push_str(&text[..end]);
+    truncated.push_str("...[truncated]");
+    truncated
 }
 
 /// Maps cognitive events to ACP `session/update` notifications and streams them to the editor.
@@ -560,7 +579,7 @@ where
     // Push assistant turn after streaming completes (skip slash commands).
     match &stream_result {
         Ok(sr) if !is_slash_command && !sr.assistant_text.is_empty() => {
-            session.push_assistant_turn(sr.assistant_text.clone());
+            session.push_assistant_turn(truncate_assistant_history(&sr.assistant_text));
         }
         _ => {}
     }
@@ -1745,6 +1764,19 @@ mod tests {
                 format!("session '{session_id}' already has an active prompt")
             ))
         );
+    }
+
+    #[test]
+    fn assistant_history_truncation_caps_bytes_and_preserves_boundaries() {
+        let text = "é".repeat(6_000);
+        let truncated = truncate_assistant_history(&text);
+        let suffix = "...[truncated]";
+        let prefix_len = truncated.len() - suffix.len();
+
+        assert!(truncated.ends_with(suffix));
+        assert!(truncated.len() <= MAX_HISTORY_ASSISTANT_BYTES + suffix.len());
+        assert!(truncated.len() < text.len());
+        assert!(truncated[..prefix_len].chars().all(|c| c == 'é'));
     }
 
     #[test]
