@@ -59,7 +59,6 @@ const KIND_LABELS: Record<string, string> = {
   plan_step: 'Plan Step',
 };
 
-const HERO_HEIGHT = 360;
 const LANE_PAD_TOP = 48;
 const LANE_PAD_BOTTOM = 40;
 const LANE_PAD_LEFT = 120;
@@ -618,7 +617,7 @@ export default function Explorer() {
           <span className="expl-pill">
             <FlatIcon name="status" size={13} tone={health?.status === 'ok' ? 'success' : 'warning'} />
             <span className="expl-pill-label">Status</span>
-            <span className="expl-pill-value" style={{ color: health?.status === 'ok' ? 'var(--success)' : 'var(--rose-bright)' }}>
+            <span className={`expl-pill-value ${health?.status === 'ok' ? 'expl-pill-value--online' : 'expl-pill-value--error'}`}>
               {health?.status === 'ok' ? 'online' : (health?.status ?? 'ok')}
             </span>
           </span>
@@ -656,7 +655,6 @@ export default function Explorer() {
           className="expl-hero-canvas"
           role="img"
           aria-label="Signal flow graph"
-          style={{ width: '100%', height: HERO_HEIGHT }}
           onMouseMove={handleHeroMouse}
           onMouseLeave={handleHeroLeave}
         />

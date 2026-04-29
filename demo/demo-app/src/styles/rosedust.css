@@ -53,6 +53,11 @@
   --status-warning: #fbbf24;
   --status-blocked: #a78bfa;
 
+  /* ── chart lane palette (extended) ── */
+  --lane-sage: #7FA8A4;
+  --lane-clay: #B7918F;
+  --lane-camel: #C49B6E;
+
   /* ── fonts ── */
   --sans: 'General Sans', 'Inter', system-ui, sans-serif;
   --serif: 'Instrument Serif', Georgia, serif;

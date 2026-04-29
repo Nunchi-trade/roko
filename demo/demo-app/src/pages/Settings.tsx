@@ -246,10 +246,10 @@ export default function Settings() {
           <label>Max Iterations</label>
           <input
             type="text"
+            className="input-narrow"
             value={gateMaxIter}
             onChange={e => setGateMaxIter(Number(e.target.value) || 1)}
             disabled={!isLive}
-            style={{ maxWidth: 80 }}
           />
         </div>
       </div>

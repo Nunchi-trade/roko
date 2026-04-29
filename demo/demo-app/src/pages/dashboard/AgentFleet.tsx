@@ -6,6 +6,7 @@ import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
+import './dashboard.css';
 
 /* ── Keyframes ───────────────────────────────────────────── */
 const FLEET_STYLES = `
@@ -396,8 +397,8 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
   }, [draw, stopAnimation]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} role="img" aria-label="Agent fleet topology network" style={{ width: '100%', height: '100%', display: 'block' }} />
+    <div className="dash-canvas-wrap" style={{ height }}>
+      <canvas ref={canvasRef} role="img" aria-label="Agent fleet topology network" className="dash-canvas" />
     </div>
   );
 }
@@ -435,9 +436,9 @@ export default function AgentFleet() {
   const totalTasks = agents.reduce((s, a) => s + agentTasks(a), 0);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div className="dash-page">
       <style>{FLEET_STYLES}</style>
-      {/* ═══ TOP MOSAIC ═══ */}
+      {/* TOP MOSAIC */}
       <Mosaic columns={4}>
         <MosaicCell label="TOTAL" value={agents.length} color="bone" mono />
         <MosaicCell label="ACTIVE" value={active} color="success" mono />
@@ -445,22 +446,16 @@ export default function AgentFleet() {
         <MosaicCell label="TASKS DONE" value={totalTasks} color="rose" mono />
       </Mosaic>
 
-      {/* ═══ TOPOLOGY + AGENT CARDS SIDE BY SIDE ═══ */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, flex: 1, minHeight: 0 }}>
+      {/* TOPOLOGY + AGENT CARDS SIDE BY SIDE */}
+      <div className="dash-agent-grid">
         <Pane
           title="AGENT TOPOLOGY"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>force-directed</span>}
+          badge={<span className="dash-badge">force-directed</span>}
         >
           <TopologyGraph data={topology} height={240} />
         </Pane>
 
-        <div style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-          overflowY: 'auto',
-          maxHeight: 320,
-        }}>
+        <div className="dash-agent-list">
         {agents.map((agent) => {
           const rep = agent.performance?.reputation ?? agent.reputation ?? 0;
           const active = isAgentActive(agent);
@@ -475,123 +470,61 @@ export default function AgentFleet() {
               className="agent-card"
               title={agentDisplayName(agent).toUpperCase()}
               badge={
-                <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{
-                    fontFamily: 'var(--mono)',
-                    fontSize: 15,
-                    color: 'var(--text-dim)',
-                    letterSpacing: '.06em',
-                  }}>
+                <span className="dash-inline">
+                  <span className="dash-model-label">
                     {agent.model ?? 'unknown'}
                   </span>
-                  <span style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    background: active ? 'var(--success)' : isIdle ? 'var(--warning)' : 'var(--bone)',
-                    animation: active
-                      ? 'fleet-pulse-green 2.4s ease-in-out infinite'
-                      : isIdle
-                        ? 'fleet-pulse-amber 3s ease-in-out infinite'
-                        : 'none',
-                    boxShadow: active
-                      ? '0 0 4px 1px rgba(138,156,134,.6)'
-                      : isIdle
-                        ? '0 0 4px 1px rgba(216,168,120,.6)'
-                        : '0 0 4px rgba(200,184,144,.3)',
-                  }} />
+                  <span
+                    className="dash-dot"
+                    style={{
+                      background: active ? 'var(--success)' : isIdle ? 'var(--warning)' : 'var(--bone)',
+                      animation: active
+                        ? 'fleet-pulse-green 2.4s ease-in-out infinite'
+                        : isIdle
+                          ? 'fleet-pulse-amber 3s ease-in-out infinite'
+                          : 'none',
+                      boxShadow: active
+                        ? '0 0 4px 1px rgba(138,156,134,.6)'
+                        : isIdle
+                          ? '0 0 4px 1px rgba(216,168,120,.6)'
+                          : '0 0 4px rgba(200,184,144,.3)',
+                    }}
+                  />
                 </span>
               }
               foot={
-                <span style={{
-                  fontFamily: 'var(--mono)',
-                  fontSize: 15,
-                  color: 'var(--text-ghost)',
-                  letterSpacing: '.06em',
-                }}>
+                <span className="dash-ghost">
                   {active ? 'active now' : `last active ${fmtLastSeen(agent)}`}
                 </span>
               }
             >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div className="dash-flex-col--gap8">
                 {/* Capability tags */}
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                <div className="dash-tags-wrap">
                   {(agent.capabilities ?? []).map((cap) => (
-                    <span key={cap} style={{
-                      fontFamily: 'var(--mono)',
-                      fontSize: 15,
-                      letterSpacing: '.06em',
-                      padding: '3px 8px',
-                      borderRadius: 4,
-                      background: 'var(--glass-bg)',
-                      border: '1px solid var(--glass-border)',
-                      color: 'var(--text-soft)',
-                    }}>
-                      {cap}
-                    </span>
+                    <span key={cap} className="dash-tag">{cap}</span>
                   ))}
                   {(agent.domain_tags ?? []).map((tag) => (
-                    <span key={tag} style={{
-                      fontFamily: 'var(--mono)',
-                      fontSize: 15,
-                      letterSpacing: '.06em',
-                      padding: '3px 8px',
-                      borderRadius: 4,
-                      background: 'rgba(220,165,189,.06)',
-                      border: '1px solid rgba(220,165,189,.12)',
-                      color: 'var(--rose-dim)',
-                    }}>
-                      {tag}
-                    </span>
+                    <span key={tag} className="dash-tag--rose">{tag}</span>
                   ))}
                 </div>
 
                 {/* Reputation bar */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                    <span style={{
-                      fontFamily: 'var(--sans)',
-                      fontSize: '0.6rem',
-                      letterSpacing: '.08em',
-                      textTransform: 'uppercase',
-                      color: 'var(--text-dim)',
-                    }}>
-                      Reputation
-                    </span>
-                    <span style={{
-                      fontFamily: 'var(--mono)',
-                      fontSize: '0.72rem',
-                      fontWeight: 500,
-                      color: 'var(--rose-glow)',
-                      textShadow: '0 0 14px rgba(220,165,189,.6)',
-                    }}>
-                      {rep}
-                    </span>
+                <div className="dash-flex-col--gap4">
+                  <div className="dash-row-item--between">
+                    <span className="dash-label-sans">Reputation</span>
+                    <span className="dash-value--glow">{rep}</span>
                   </div>
-                  <div style={{
-                    height: 4,
-                    background: 'rgba(255,255,255,.04)',
-                    borderRadius: 2,
-                    overflow: 'hidden',
-                  }}>
-                    <div style={{
-                      height: '100%',
-                      width: `${rep}%`,
-                      background: 'linear-gradient(to right, var(--rose-dim), var(--rose-bright))',
-                      borderRadius: 2,
-                      transition: 'width .6s cubic-bezier(.22,1,.36,1)',
-                      boxShadow: '0 0 10px rgba(220,165,189,.5), 0 0 4px rgba(220,165,189,.7)',
-                    }} />
+                  <div className="dash-bar-track">
+                    <div
+                      className="dash-bar-fill dash-bar-fill--rose"
+                      style={{ width: `${rep}%` }}
+                    />
                   </div>
                 </div>
 
                 {/* Stats row */}
-                <div style={{
-                  display: 'flex',
-                  gap: 16,
-                  paddingTop: 6,
-                  borderTop: '1px solid rgba(255,255,255,.04)',
-                }}>
+                <div className="dash-stats-row">
                   <StatPill label="tasks" value={String(tasks)} />
                   <StatPill label="cost" value={`$${cost.toFixed(2)}`} />
                   <StatPill label="failed" value={String(failed)} />
@@ -610,23 +543,9 @@ export default function AgentFleet() {
 
 function StatPill({ label, value }: { label: string; value: string }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-      <span style={{
-        fontFamily: 'var(--mono)',
-        fontSize: '0.5rem',
-        letterSpacing: '.12em',
-        textTransform: 'uppercase',
-        color: 'var(--text-dim)',
-      }}>
-        {label}
-      </span>
-      <span style={{
-        fontFamily: 'var(--mono)',
-        fontSize: '0.78rem',
-        color: 'var(--text-strong)',
-      }}>
-        {value}
-      </span>
+    <div className="dash-stat-pill">
+      <span className="dash-label-xs">{label}</span>
+      <span className="dash-value">{value}</span>
     </div>
   );
 }

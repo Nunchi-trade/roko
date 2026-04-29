@@ -1,4 +1,4 @@
-import { useMemo, useEffect } from 'react';
+import { useMemo } from 'react';
 import { useChainWs, type ChainWsState, type PheromoneEvent } from './useChain';
 import type { BlockData, TxData } from '../components/ChainActivityPanel';
 import type { AgentPosition } from '../components/LivePositionsPanel';

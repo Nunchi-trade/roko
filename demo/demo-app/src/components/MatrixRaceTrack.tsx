@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useMemo } from 'react';
 import { getCssVar, hexToRgba } from '../lib/color';
 import { shortModel } from '../lib/format';
 import { useCanvasSetup } from '../hooks/useCanvasSetup';
@@ -15,7 +15,7 @@ interface MatrixRaceTrackProps {
 function getLaneColors(): string[] {
   return [
     getCssVar('--bone'), getCssVar('--success'), getCssVar('--rose'), getCssVar('--warning'),
-    getCssVar('--status-blocked'), '#7FA8A4', '#B7918F', '#C49B6E', // TODO: add design tokens for last 3
+    getCssVar('--status-blocked'), getCssVar('--lane-sage'), getCssVar('--lane-clay'), getCssVar('--lane-camel'),
   ];
 }
 
@@ -30,6 +30,10 @@ export default function MatrixRaceTrack({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
   const displayRef = useRef<Map<string, number>>(new Map());
+  const prefersReducedMotion = useMemo(
+    () => window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    [],
+  );
 
   // Flatten cells into lanes
   const lanes = cells.flatMap((row, ri) =>
@@ -100,10 +104,10 @@ export default function MatrixRaceTrack({
       const centerY = y + rowH / 2;
       const targetFrac = lane.total > 0 ? lane.completed / lane.total : 0;
       const current = display.get(lane.key) ?? 0;
-      const next = current + (targetFrac - current) * 0.16;
+      const next = prefersReducedMotion ? targetFrac : current + (targetFrac - current) * 0.16;
       display.set(lane.key, next);
 
-      if (Math.abs(next - targetFrac) > 0.001) needsNextFrame = true;
+      if (!prefersReducedMotion && Math.abs(next - targetFrac) > 0.001) needsNextFrame = true;
 
       const color = LANE_COLORS[lane.colorIndex % LANE_COLORS.length];
       const barW = Math.max(next * plotW, next > 0 ? 2 : 0);

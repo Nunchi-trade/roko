@@ -142,6 +142,10 @@
   font-family: inherit;
 }
 
+.settings-field input.input-narrow {
+  max-width: 80px;
+}
+
 .settings-field select:focus,
 .settings-field input[type="text"]:focus {
   outline: none;

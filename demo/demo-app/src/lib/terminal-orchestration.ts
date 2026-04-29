@@ -7,8 +7,6 @@ export {
   setSpeedMultiplier,
   resolveRoko,
   getRoko,
-  setupWorkspace,
-  joinWorkspace,
   enterWorkspace,
   showCmd,
   trackMetrics,

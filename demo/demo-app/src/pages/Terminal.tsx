@@ -24,6 +24,11 @@ function TerminalPaneReal({ sessionId, label, onClose, workspacePath }: {
       <div className="term-pane-header">
         <span className={`term-conn-dot ${status}`} />
         <span className="term-pane-label">{label}</span>
+        {workspacePath && (
+          <span className="term-ws-badge" title={workspacePath}>
+            {workspacePath.split('/').filter(Boolean).slice(-2).join('/')}
+          </span>
+        )}
         <span className="term-pane-status">{status}</span>
         {workspacePath && (
           <button className="term-init-btn" onClick={handleCdWorkspace} title={`cd ${workspacePath}`}>cd ws</button>

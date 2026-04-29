@@ -286,3 +286,15 @@
   border-color: var(--rose-dim);
   color: var(--rose-bright);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .matrix-model-item,
+  .matrix-preset-chip,
+  .matrix-grid-cell,
+  .bench-mode-btn {
+    transition: none;
+  }
+  .matrix-cell--running .matrix-cell-indicator {
+    animation: none;
+  }
+}

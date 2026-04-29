@@ -1,9 +1,11 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from 'react';
 import { useLiveApi } from '../hooks/useLiveApi';
 import type { BenchRun } from '../lib/bench-types';
+import { handleRowKeyDown } from '../lib/a11y';
 import Pane from '../components/Pane';
 import ConfigDiff from '../components/ConfigDiff';
 import RadarChart from '../components/Charts/RadarChart';
+import { ComponentErrorBoundary } from '../components/design';
 import './Bench.css';
 
 const RUN_COLORS = [
@@ -342,22 +344,26 @@ export default function BenchCompare() {
 
             {/* ── Radar Chart Overlay ── */}
             {radarDatasets.length >= 2 && (
-              <Pane title="RADAR OVERLAY">
-                <RadarChart axes={RADAR_AXES} datasets={radarDatasets} height={360} />
-              </Pane>
+              <ComponentErrorBoundary name="RadarOverlay">
+                <Pane title="RADAR OVERLAY">
+                  <RadarChart axes={RADAR_AXES} datasets={radarDatasets} height={360} />
+                </Pane>
+              </ComponentErrorBoundary>
             )}
 
             {/* ── Task-by-Task N-way Matrix ── */}
+            <ComponentErrorBoundary name="TaskMatrix">
             <Pane title="TASK-BY-TASK MATRIX">
               <div className="task-table-wrap">
-                <table className="task-table">
+                <table className="task-table" role="table" tabIndex={0}>
                   <thead>
                     <tr>
-                      <th rowSpan={2} style={{ cursor: 'default' }}>Task</th>
+                      <th rowSpan={2} role="columnheader" style={{ cursor: 'default' }}>Task</th>
                       {fullRuns.map((run, i) => (
                         <th
                           key={run.id}
                           colSpan={2}
+                          role="columnheader"
                           style={{
                             cursor: 'default',
                             borderBottom: `2px solid ${RUN_COLORS[i % RUN_COLORS.length]}`,
@@ -370,15 +376,20 @@ export default function BenchCompare() {
                     <tr>
                       {fullRuns.map((run) => (
                         <Fragment key={run.id}>
-                          <th style={{ cursor: 'default' }}>Status</th>
-                          <th style={{ cursor: 'default' }}>Cost</th>
+                          <th role="columnheader" style={{ cursor: 'default' }}>Status</th>
+                          <th role="columnheader" style={{ cursor: 'default' }}>Cost</th>
                         </Fragment>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {taskMatrix.map((row) => (
-                      <tr key={row.taskId}>
+                      <tr
+                        key={row.taskId}
+                        tabIndex={0}
+                        role="row"
+                        onKeyDown={(e) => handleRowKeyDown(e, () => {})}
+                      >
                         <td className="task-name" title={row.taskId}>{row.name}</td>
                         {row.results.map((r, i) => (
                           <Fragment key={fullRuns[i].id}>
@@ -425,6 +436,7 @@ export default function BenchCompare() {
                 </table>
               </div>
             </Pane>
+            </ComponentErrorBoundary>
           </>
         ) : (
           <div className="bench-empty">

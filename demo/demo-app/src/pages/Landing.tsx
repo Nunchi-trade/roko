@@ -18,7 +18,7 @@ export default function Landing() {
   }, []);
 
   return (
-    <div style={{ height: 'calc(100vh - 48px)', overflow: 'hidden', position: 'relative' }}>
+    <div className="landing-wrapper">
       {/* 3D scene — full viewport */}
       <HeroScene activeStep={activeStep} />
 

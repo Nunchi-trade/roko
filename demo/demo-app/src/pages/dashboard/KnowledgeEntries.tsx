@@ -6,6 +6,7 @@ import { getCssVar } from '../../lib/color';
 import { domainColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
+import './dashboard.css';
 
 interface KnowledgeEntry {
   id: string;
@@ -14,13 +15,6 @@ interface KnowledgeEntry {
   label?: string;
   confidence?: number;
 }
-
-const pageStyle: CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 10,
-  minHeight: '100%',
-};
 
 function percent(value?: number) {
   if (typeof value !== 'number' || Number.isNaN(value)) return '—';
@@ -113,8 +107,8 @@ function DomainChart({ entries, height = 140 }: { entries: KnowledgeEntry[]; hei
   }, [draw]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} role="img" aria-label="Knowledge entry frequency chart" style={{ width: '100%', height: '100%', display: 'block' }} />
+    <div className="dash-canvas-wrap" style={{ height }}>
+      <canvas ref={canvasRef} role="img" aria-label="Knowledge entry frequency chart" className="dash-canvas" />
     </div>
   );
 }
@@ -216,8 +210,8 @@ function ConfidenceHistogram({ entries, height = 140 }: { entries: KnowledgeEntr
   }, [draw]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} role="img" aria-label="Knowledge tier distribution chart" style={{ width: '100%', height: '100%', display: 'block' }} />
+    <div className="dash-canvas-wrap" style={{ height }}>
+      <canvas ref={canvasRef} role="img" aria-label="Knowledge tier distribution chart" className="dash-canvas" />
     </div>
   );
 }
@@ -299,8 +293,8 @@ export default function KnowledgeEntries() {
   }, [entries]);
 
   return (
-    <div style={pageStyle}>
-      {/* ═══ TOP MOSAIC ═══ */}
+    <div className="dash-page--full">
+      {/* TOP MOSAIC */}
       <Mosaic columns={5}>
         <MosaicCell label="TOTAL ENTRIES" value={entries.length} color="rose" mono sub={loading ? 'loading' : `updated ${lastLoaded}`} />
         <MosaicCell label="DOMAINS" value={stats.domains} color="bone" mono />
@@ -309,55 +303,36 @@ export default function KnowledgeEntries() {
         <MosaicCell label="HIGH CONFIDENCE" value={stats.highConfidence} color="warning" mono sub=">= 80%" />
       </Mosaic>
 
-      {/* ═══ CHARTS ROW ═══ */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+      {/* CHARTS ROW */}
+      <div className="dash-grid-2">
         <Pane
           title="DOMAIN DISTRIBUTION"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{stats.domains} domains</span>}
+          badge={<span className="dash-badge">{stats.domains} domains</span>}
         >
           <DomainChart entries={entries} height={110} />
         </Pane>
 
         <Pane
           title="CONFIDENCE DISTRIBUTION"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>histogram</span>}
+          badge={<span className="dash-badge">histogram</span>}
         >
           <ConfidenceHistogram entries={entries} height={110} />
         </Pane>
       </div>
 
-      {/* ═══ ENTRIES TABLE ═══ */}
+      {/* ENTRIES TABLE */}
       <Pane
         title="ALL ENTRIES"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{entries.length} rows</span>}
+        badge={<span className="dash-badge">{entries.length} rows</span>}
         flat
       >
-        <div style={{ maxHeight: 280, overflow: 'auto' }}>
+        <div className="dash-table-scroll--280">
           {loading ? (
-            <div style={{
-              padding: 36,
-              color: 'var(--text-ghost)',
-              fontFamily: 'var(--mono)',
-              fontSize: '0.75rem',
-              textAlign: 'center',
-            }}>
-              Loading knowledge entries...
-            </div>
+            <div className="dash-placeholder--lg">Loading knowledge entries...</div>
           ) : entries.length === 0 ? (
-            <div style={{
-              padding: 36,
-              color: 'var(--text-ghost)',
-              fontFamily: 'var(--mono)',
-              fontSize: '0.75rem',
-              textAlign: 'center',
-            }}>
-              No knowledge entries found
-            </div>
+            <div className="dash-placeholder--lg">No knowledge entries found</div>
           ) : (
-            <table style={{
-              width: '100%',
-              borderCollapse: 'collapse',
-            }}>
+            <table className="dash-table--plain">
               <thead>
                 <tr>
                   <th style={thStyle}>Label</th>
@@ -372,9 +347,7 @@ export default function KnowledgeEntries() {
                     key={entry.id}
                     tabIndex={0}
                     role="row"
-                    style={{ transition: 'background .15s' }}
-                    onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,.03)'; }}
-                    onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                    className="dash-table-row"
                     onKeyDown={(e) => {
                       if (e.key === 'ArrowDown') { e.preventDefault(); (e.currentTarget.nextElementSibling as HTMLElement | null)?.focus(); }
                       if (e.key === 'ArrowUp') { e.preventDefault(); (e.currentTarget.previousElementSibling as HTMLElement | null)?.focus(); }
@@ -382,34 +355,28 @@ export default function KnowledgeEntries() {
                   >
                     <td style={tdStyle}>{entry.label ?? entry.id}</td>
                     <td style={tdStyle}>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                        <span style={{
-                          width: 5, height: 5, borderRadius: '50%',
-                          background: domainColor(entry.domain),
-                          display: 'inline-block',
-                          boxShadow: `0 0 6px ${domainColor(entry.domain)}80`,
-                        }} />
+                      <span className="dash-inline">
+                        <span
+                          className="dash-dot--5"
+                          style={{
+                            background: domainColor(entry.domain),
+                            boxShadow: `0 0 6px ${domainColor(entry.domain)}80`,
+                          }}
+                        />
                         <span style={{ color: domainColor(entry.domain) }}>{entry.domain ?? '—'}</span>
                       </span>
                     </td>
                     <td style={tdStyle}>{entry.citations ?? 0}</td>
                     <td style={tdStyle}>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                        <span style={{
-                          display: 'inline-block',
-                          width: 48,
-                          height: 4,
-                          background: 'rgba(255,255,255,.04)',
-                          borderRadius: 2,
-                          overflow: 'hidden',
-                        }}>
-                          <span style={{
-                            display: 'block',
-                            height: '100%',
-                            width: `${((entry.confidence ?? 0) * 100)}%`,
-                            background: (entry.confidence ?? 0) >= 0.8 ? 'var(--success)' : (entry.confidence ?? 0) >= 0.5 ? 'var(--warning)' : 'var(--rose-bright)',
-                            borderRadius: 2,
-                          }} />
+                      <span className="dash-inline--8">
+                        <span className="dash-minibar">
+                          <span
+                            className="dash-minibar__fill"
+                            style={{
+                              width: `${((entry.confidence ?? 0) * 100)}%`,
+                              background: (entry.confidence ?? 0) >= 0.8 ? 'var(--success)' : (entry.confidence ?? 0) >= 0.5 ? 'var(--warning)' : 'var(--rose-bright)',
+                            }}
+                          />
                         </span>
                         {percent(entry.confidence)}
                       </span>

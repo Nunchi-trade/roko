@@ -10,6 +10,7 @@ import CFactorSparkline from '../../components/Charts/CFactorSparkline';
 import BarChart from '../../components/Charts/BarChart';
 import { ThresholdGaugeRow } from '../../components/ThresholdGauge';
 import type { AdaptiveThresholdsResponse } from '../../components/ThresholdGauge';
+import './dashboard.css';
 
 /* ── useCountUp: animates from 0 → target on first mount ─── */
 
@@ -217,21 +218,22 @@ export default function CostDashboard() {
   const gatePassRate = gateTotal > 0 ? `${((gatesPassed / gateTotal) * 100).toFixed(1)}%` : '—';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {/* ═══ TOP MOSAIC: 6 stats ═══ */}
+    <div className="dash-page">
+      {/* TOP MOSAIC: 6 stats */}
       <Mosaic columns={6}>
         <MosaicCell
           label="STATUS"
           value={
-            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{
-                width: 6, height: 6, borderRadius: '50%',
-                background: isOnline ? 'var(--success)' : 'var(--rose-bright)',
-                boxShadow: isOnline ? '0 0 6px rgba(122,138,120,.6)' : '0 0 6px rgba(204,144,168,.5)',
-                animation: isOnline ? 'pulse-dot 2s ease-in-out infinite' : 'none',
-                display: 'inline-block',
-              }} />
-              <span style={{ fontFamily: 'var(--mono)', letterSpacing: '.04em' }}>{isOnline ? 'Online' : 'Offline'}</span>
+            <span className="dash-inline">
+              <span
+                className="dash-dot"
+                style={{
+                  background: isOnline ? 'var(--success)' : 'var(--rose-bright)',
+                  boxShadow: isOnline ? '0 0 6px rgba(122,138,120,.6)' : '0 0 6px rgba(204,144,168,.5)',
+                  animation: isOnline ? 'pulse-dot 2s ease-in-out infinite' : 'none',
+                }}
+              />
+              <span className="dash-mono-label">{isOnline ? 'Online' : 'Offline'}</span>
             </span>
           }
           color="success"
@@ -274,62 +276,37 @@ export default function CostDashboard() {
         />
       </Mosaic>
 
-      {/* ═══ MIDDLE ROW: C-Factor + Model Routing ═══ */}
-      <div style={{ display: 'flex', gap: 10 }}>
+      {/* MIDDLE ROW: C-Factor + Model Routing */}
+      <div className="dash-flex-row">
         {/* Left: C-Factor breakdown */}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="dash-flex-1">
           <Pane
             title="C-FACTOR BREAKDOWN"
-            badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, textShadow: '0 0 16px rgba(220,165,189,.5)' }}>{animComposite.toFixed(3)}</span>}
+            badge={<span className="dash-badge--glow">{animComposite.toFixed(3)}</span>}
           >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+            <div className="dash-flex-col">
               {METRICS.map((m, i) => {
                 const val = subMetrics[m.key] ?? 0;
                 const pct = Math.min(val * 100, 100);
                 return (
-                  <div key={m.key} style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    padding: '6px 0',
-                    borderBottom: i < METRICS.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
-                  }}>
-                    <span style={{
-                      fontFamily: 'var(--sans)',
-                      fontSize: '0.75rem',
-                      color: 'var(--text-primary)',
-                      flex: 1,
-                      minWidth: 0,
-                      letterSpacing: '.01em',
-                    }}>
-                      {m.label}
-                    </span>
+                  <div key={m.key} className={`dash-row-item${i < METRICS.length - 1 ? ' dash-row-sep' : ''}`}>
+                    <span className="dash-label-sans-md">{m.label}</span>
                     {/* Bar track */}
-                    <div style={{
-                      flex: 2,
-                      height: 4,
-                      background: 'rgba(255,255,255,.04)',
-                      borderRadius: 2,
-                      overflow: 'hidden',
-                    }}>
-                      <div style={{
-                        height: '100%',
-                        width: `${pct}%`,
-                        background: `linear-gradient(to right, var(--rose-dim), var(--rose-bright))`,
-                        borderRadius: 2,
-                        transition: 'width .6s cubic-bezier(.22,1,.36,1)',
-                        boxShadow: pct > 0 ? '0 0 10px rgba(220,165,189,.45), 0 0 4px rgba(220,165,189,.6)' : 'none',
-                      }} />
+                    <div className="dash-bar-track" style={{ flex: 2 }}>
+                      <div
+                        className="dash-bar-fill dash-bar-fill--rose"
+                        style={{
+                          width: `${pct}%`,
+                          boxShadow: pct > 0 ? '0 0 10px rgba(220,165,189,.45), 0 0 4px rgba(220,165,189,.6)' : 'none',
+                        }}
+                      />
                     </div>
-                    <span style={{
-                      fontFamily: 'var(--mono)',
-                      fontSize: '0.78rem',
-                      fontWeight: 500,
-                      color: 'var(--bone-bright)',
-                      minWidth: 52,
-                      textAlign: 'right',
-                      textShadow: pct > 0 ? '0 0 12px rgba(228,216,176,.5)' : 'none',
-                    }}>
+                    <span
+                      className="dash-value--bone"
+                      style={{
+                        textShadow: pct > 0 ? '0 0 12px rgba(228,216,176,.5)' : 'none',
+                      }}
+                    >
                       {(val * 100).toFixed(1)}%
                     </span>
                   </div>
@@ -340,30 +317,26 @@ export default function CostDashboard() {
         </div>
 
         {/* Right: Model Routing */}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <Pane title="MODEL ROUTING" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{currentModel}</span>}>
+        <div className="dash-flex-1">
+          <Pane title="MODEL ROUTING" badge={<span className="dash-badge">{currentModel}</span>}>
             <BarChart data={routerBars} height={140} />
           </Pane>
         </div>
       </div>
 
-      {/* ═══ BOTTOM ROW: Cost Over Time + Activity ═══ */}
-      <div style={{ display: 'flex', gap: 10 }}>
+      {/* BOTTOM ROW: Cost Over Time + Activity */}
+      <div className="dash-flex-row">
         {/* Left: Cost Over Time */}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <Pane title="COST OVER TIME" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>${totalCost.toFixed(2)} total</span>}>
+        <div className="dash-flex-1">
+          <Pane title="COST OVER TIME" badge={<span className="dash-badge">${totalCost.toFixed(2)} total</span>}>
             <CostChart data={costPoints} height={130} color="var(--bone)" />
           </Pane>
         </div>
 
         {/* Right: Activity mini stats */}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <Pane title="ACTIVITY" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>realtime</span>}>
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
-              gap: 8,
-            }}>
+        <div className="dash-flex-1">
+          <Pane title="ACTIVITY" badge={<span className="dash-badge">realtime</span>}>
+            <div className="dash-grid-activity">
               <ActivityBlock
                 label="Active Plans"
                 value={String(health?.active_plans ?? 0)}
@@ -389,10 +362,10 @@ export default function CostDashboard() {
         </div>
       </div>
 
-      {/* ═══ C-FACTOR TREND ═══ */}
+      {/* C-FACTOR TREND */}
       <Pane
         title="C-FACTOR TREND"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>24h window</span>}
+        badge={<span className="dash-badge">24h window</span>}
       >
         <CFactorSparkline
           trend={cfactorTrend?.trend ?? []}
@@ -401,30 +374,26 @@ export default function CostDashboard() {
         />
       </Pane>
 
-      {/* ═══ PROVIDER HEALTH ═══ */}
+      {/* PROVIDER HEALTH */}
       <Pane
         title="PROVIDER HEALTH"
         badge={
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>
+          <span className="dash-badge">
             {providerHealth ? `${healthyProviders}/${providers.length} healthy` : 'loading'}
           </span>
         }
       >
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-          gap: 8,
-        }}>
+        <div className="dash-grid-auto">
           {providers.map((p) => (
             <ProviderCell key={p.name} provider={p} />
           ))}
         </div>
       </Pane>
 
-      {/* ═══ ADAPTIVE THRESHOLDS ═══ */}
+      {/* ADAPTIVE THRESHOLDS */}
       <Pane
         title="ADAPTIVE GATE THRESHOLDS"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>7-rung EMA</span>}
+        badge={<span className="dash-badge">7-rung EMA</span>}
       >
         <ThresholdGaugeRow thresholds={thresholds?.thresholds ?? {}} />
       </Pane>
@@ -436,32 +405,12 @@ export default function CostDashboard() {
 
 function ActivityBlock({ label, value, color }: { label: string; value: string; color: string }) {
   return (
-    <div style={{
-      background: 'rgba(255,255,255,.04)',
-      border: '1px solid rgba(255,255,255,.07)',
-      borderRadius: 8,
-      padding: '10px 12px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 6,
-    }}>
-      <span style={{
-        fontFamily: 'var(--mono)',
-        fontSize: '0.55rem',
-        letterSpacing: '.14em',
-        textTransform: 'uppercase',
-        color: 'var(--text-soft)',
-      }}>
-        {label}
-      </span>
-      <span style={{
-        fontFamily: 'var(--mono)',
-        fontSize: '1.2rem',
-        fontWeight: 600,
-        lineHeight: 1,
-        color,
-        textShadow: `0 0 16px ${color}50`,
-      }}>
+    <div className="dash-card">
+      <span className="dash-label-sm">{label}</span>
+      <span
+        className="dash-value--lg"
+        style={{ color, textShadow: `0 0 16px ${color}50` }}
+      >
         {value}
       </span>
     </div>
@@ -472,24 +421,9 @@ function ActivityBlock({ label, value, color }: { label: string; value: string; 
 
 function ProviderStat({ label, value, color }: { label: string; value: string; color: string }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <span style={{
-        fontFamily: 'var(--mono)',
-        fontSize: '0.5rem',
-        letterSpacing: '.1em',
-        textTransform: 'uppercase',
-        color: 'var(--text-dim)',
-      }}>
-        {label}
-      </span>
-      <span style={{
-        fontFamily: 'var(--mono)',
-        fontSize: '0.72rem',
-        fontWeight: 500,
-        color,
-      }}>
-        {value}
-      </span>
+    <div className="dash-flex-col--gap2">
+      <span className="dash-provider-label">{label}</span>
+      <span className="dash-provider-value" style={{ color }}>{value}</span>
     </div>
   );
 }
@@ -513,61 +447,26 @@ function ProviderCell({ provider }: { provider: Provider }) {
       : 'var(--rose-bright)';
 
   return (
-    <div style={{
-      background: 'rgba(255,255,255,.04)',
-      border: '1px solid rgba(255,255,255,.07)',
-      borderRadius: 10,
-      padding: '10px 12px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 6,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-        <span style={{
-          fontFamily: 'var(--display)',
-          fontSize: 13,
-          fontWeight: 500,
-          color: 'var(--text-strong)',
-          letterSpacing: '.01em',
-        }}>
-          {provider.name}
-        </span>
-        <span style={{
-          width: 7,
-          height: 7,
-          borderRadius: '50%',
-          background: dot.bg,
-          boxShadow: dot.glow,
-          animation: dot.anim,
-          display: 'inline-block',
-          flexShrink: 0,
-        }} />
+    <div className="dash-card--lg">
+      <div className="dash-card__header">
+        <span className="dash-display-name">{provider.name}</span>
+        <span
+          className="dash-dot--7"
+          style={{
+            background: dot.bg,
+            boxShadow: dot.glow,
+            animation: dot.anim,
+          }}
+        />
       </div>
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+      <div className="dash-card__tags">
         {provider.models.map((m) => (
-          <span key={m} style={{
-            fontFamily: 'var(--mono)',
-            fontSize: 15,
-            letterSpacing: '.04em',
-            padding: '2px 6px',
-            borderRadius: 3,
-            background: 'var(--glass-bg)',
-            border: '1px solid var(--glass-border)',
-            color: 'var(--text-soft)',
-          }}>
-            {m}
-          </span>
+          <span key={m} className="dash-tag--sm">{m}</span>
         ))}
       </div>
 
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 1fr',
-        gap: '6px 12px',
-        borderTop: '1px solid rgba(255,255,255,.04)',
-        paddingTop: 8,
-      }}>
+      <div className="dash-card__stats">
         <ProviderStat label="Success" value={`${(provider.success_rate * 100).toFixed(1)}%`} color={successColor} />
         <ProviderStat label="Avg Latency" value={`${provider.avg_latency_ms}ms`} color={latencyColor} />
         <ProviderStat

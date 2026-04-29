@@ -191,8 +191,14 @@
 
 .expl-hero-canvas {
   display: block;
+  width: 100%;
+  height: 360px;
   cursor: crosshair;
 }
+
+/* Status pill value conditional colors */
+.expl-pill-value--online { color: var(--success); }
+.expl-pill-value--error  { color: var(--rose-bright); }
 
 /* ═══════════════════════════════════════════════════════════
    3. STAT STRIP with sparklines

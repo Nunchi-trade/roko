@@ -3,6 +3,7 @@ import { useLiveApi } from '../../hooks/useLiveApi';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import GateWaterfall, { type GateRun } from '../../components/GateWaterfall';
+import './dashboard.css';
 
 /* ── Types ───────────────────────────────────────────────── */
 
@@ -168,8 +169,8 @@ function HashChainViz({
   }, [draw]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} role="img" aria-label="Integrity verification timeline" style={{ width: '100%', height: '100%', display: 'block' }} />
+    <div className="dash-canvas-wrap" style={{ height }}>
+      <canvas ref={canvasRef} role="img" aria-label="Integrity verification timeline" className="dash-canvas" />
     </div>
   );
 }
@@ -249,7 +250,7 @@ export default function IntegrityView() {
   const passRate = gateTotal > 0 ? (gatesPassed / gateTotal) * 100 : 0;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div className="dash-page--wide">
       <style>{`
         @keyframes blink-cursor {
           0%, 100% { opacity: 1; }
@@ -257,7 +258,7 @@ export default function IntegrityView() {
         }
       `}</style>
 
-      {/* ═══ TOP MOSAIC ═══ */}
+      {/* TOP MOSAIC */}
       <Mosaic columns={5}>
         <MosaicCell label="STATUS" value={latestHash ? 'Live' : 'No data'} color={latestHash ? 'success' : 'warning'} />
         <MosaicCell label="EPISODES" value={episodes.toLocaleString()} color="rose" mono sub="hashed" />
@@ -266,57 +267,40 @@ export default function IntegrityView() {
         <MosaicCell label="PASS RATE" value={`${passRate.toFixed(1)}%`} color="bone" mono />
       </Mosaic>
 
-      {/* ═══ HASH CHAIN VIZ ═══ */}
+      {/* HASH CHAIN VIZ */}
       <Pane
         title="HASH TRAIL"
         badge={
-          <code style={{ fontFamily: 'var(--mono)', fontSize: 15, color: 'var(--text-dim)', letterSpacing: '.02em' }}>
+          <code className="dash-hash-code">
             {typedHash.slice(0, 24)}...
-            <span style={{ display: 'inline-block', width: 1, height: '1em', background: 'var(--rose-dim)', marginLeft: 1, verticalAlign: 'text-bottom', animation: 'blink-cursor .8s step-end infinite' }} />
+            <span className="dash-blink-cursor" />
           </code>
         }
       >
         <HashChainViz episodes={episodes} hash={latestHash} height={90} />
       </Pane>
 
-      {/* ═══ MIDDLE ROW: Features + Gate Waterfall ═══ */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+      {/* MIDDLE ROW: Features + Gate Waterfall */}
+      <div className="dash-grid-2--gap12">
         <Pane title="CRYPTOGRAPHIC AGENT TRAIL">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <p style={{
-              fontFamily: 'var(--display)',
-              fontSize: 15,
-              fontWeight: 300,
-              color: 'var(--text-soft)',
-              lineHeight: 1.7,
-              margin: '0 0 4px',
-            }}>
+          <div className="dash-flex-col--gap2">
+            <p className="dash-feature-desc-block">
               Agent episode rows are hashed from live runtime data. When a witness
               backend is connected, these records can be anchored for external verification.
             </p>
             {FEATURES.map((f) => (
-              <div key={f.label} style={{
-                display: 'flex',
-                alignItems: 'flex-start',
-                gap: 8,
-                padding: '6px 0',
-                borderBottom: '1px solid rgba(255,255,255,.03)',
-              }}>
-                <span style={{ color: 'var(--success)', fontSize: 14, marginTop: 1, flexShrink: 0 }}>&#x2713;</span>
+              <div key={f.label} className="dash-row-item--start dash-row-sep--light">
+                <span className="dash-feature-check">&#x2713;</span>
                 <div>
-                  <div style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text-primary)' }}>
-                    {f.label}
-                  </div>
-                  <div style={{ fontFamily: 'var(--mono)', fontSize: 15, color: 'var(--text-ghost)', letterSpacing: '.02em', marginTop: 2 }}>
-                    {f.desc}
-                  </div>
+                  <div className="dash-feature-label">{f.label}</div>
+                  <div className="dash-feature-desc">{f.desc}</div>
                 </div>
               </div>
             ))}
           </div>
         </Pane>
 
-        <Pane title="GATE PIPELINE WATERFALL" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>7-rung</span>}>
+        <Pane title="GATE PIPELINE WATERFALL" badge={<span className="dash-badge">7-rung</span>}>
           <GateWaterfall runs={gateHistory} height={200} />
         </Pane>
       </div>

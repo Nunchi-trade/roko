@@ -5,6 +5,7 @@ import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
+import './dashboard.css';
 
 /* ── Types ───────────────────────────────────────────────── */
 
@@ -247,8 +248,8 @@ export default function KnowledgeGraph() {
   const sortedDomains = Object.entries(domainCounts).sort(([, a], [, b]) => b - a);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {/* ═══ TOP MOSAIC ═══ */}
+    <div className="dash-page">
+      {/* TOP MOSAIC */}
       <Mosaic columns={5}>
         <MosaicCell label="NODES" value={entries.length} color="rose" mono />
         <MosaicCell label="EDGES" value={edges.length} color="bone" mono />
@@ -257,56 +258,40 @@ export default function KnowledgeGraph() {
         <MosaicCell label="AVG CITATIONS" value={avgCitations.toFixed(1)} color="success" mono />
       </Mosaic>
 
-      {/* ═══ GRAPH + DOMAIN BREAKDOWN ═══ */}
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
-        <Pane title="KNOWLEDGE GRAPH" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>force-directed</span>}>
-          <div style={{ position: 'relative', height: 260 }}>
+      {/* GRAPH + DOMAIN BREAKDOWN */}
+      <div className="dash-grid-2-1">
+        <Pane title="KNOWLEDGE GRAPH" badge={<span className="dash-badge">force-directed</span>}>
+          <div className="dash-relative" style={{ height: 260 }}>
             <canvas
               ref={canvasRef}
               role="img"
               aria-label="Knowledge graph network visualization"
-              style={{ width: '100%', height: '100%', display: 'block' }}
+              className="dash-canvas"
             />
             {/* HUD overlays */}
-            <div style={{
-              position: 'absolute', top: 8, left: 12,
-              fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text-dim)',
-              letterSpacing: '.08em',
-            }}>
+            <div className="dash-hud-tl">
               {entries.length} NODES / {edges.length} EDGES
             </div>
-            <div style={{
-              position: 'absolute', top: 8, right: 12,
-              display: 'flex', gap: 10,
-            }}>
+            <div className="dash-hud-tr">
               {Object.entries(DOMAIN_COLORS).map(([d, c]) => (
-                <span key={d} style={{
-                  display: 'flex', alignItems: 'center', gap: 4,
-                  fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text-dim)',
-                  letterSpacing: '.06em',
-                }}>
-                  <span style={{
-                    width: 5, height: 5, borderRadius: '50%',
-                    background: c, display: 'inline-block',
-                    boxShadow: `0 0 4px ${c}80`,
-                  }} />
+                <span key={d} className="dash-hud-legend">
+                  <span
+                    className="dash-dot--5"
+                    style={{ background: c, boxShadow: `0 0 4px ${c}80` }}
+                  />
                   {d}
                 </span>
               ))}
             </div>
-            <div style={{
-              position: 'absolute', bottom: 8, left: 12,
-              fontFamily: 'var(--mono)', fontSize: 15, color: 'var(--text-dim)',
-              letterSpacing: '.06em',
-            }}>
+            <div className="dash-hud-bl">
               FORCE-DIRECTED / 2D
             </div>
           </div>
         </Pane>
 
         {/* Domain Breakdown */}
-        <Pane title="DOMAIN BREAKDOWN" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{sortedDomains.length} domains</span>}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+        <Pane title="DOMAIN BREAKDOWN" badge={<span className="dash-badge">{sortedDomains.length} domains</span>}>
+          <div className="dash-flex-col">
             {sortedDomains.map(([domain, count], i) => {
               const total = entries.length || 1;
               const pct = (count / total) * 100;
@@ -315,62 +300,32 @@ export default function KnowledgeGraph() {
               return (
                 <div
                   key={domain}
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 6,
-                    padding: '6px 0',
-                    borderBottom: i < sortedDomains.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
-                  }}
+                  className={`dash-domain-row${i < sortedDomains.length - 1 ? ' dash-row-sep' : ''}`}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{
-                        width: 6, height: 6, borderRadius: '50%',
-                        background: color,
-                        boxShadow: `0 0 6px ${color}60`,
-                        display: 'inline-block',
-                      }} />
-                      <span style={{
-                        fontFamily: 'var(--display)',
-                        fontSize: 15,
-                        fontWeight: 500,
-                        color,
-                        letterSpacing: '.02em',
-                      }}>
+                  <div className="dash-row-item--between">
+                    <span className="dash-inline">
+                      <span
+                        className="dash-dot"
+                        style={{ background: color, boxShadow: `0 0 6px ${color}60` }}
+                      />
+                      <span className="dash-display-label" style={{ color }}>
                         {domain}
                       </span>
                     </span>
-                    <span style={{
-                      fontFamily: 'var(--mono)',
-                      fontSize: '0.7rem',
-                      fontWeight: 500,
-                      color: 'var(--text-primary)',
-                    }}>
-                      {count}
-                    </span>
+                    <span className="dash-domain-count">{count}</span>
                   </div>
-                  <div style={{
-                    height: 4,
-                    background: 'rgba(255,255,255,.04)',
-                    borderRadius: 2,
-                    overflow: 'hidden',
-                  }}>
-                    <div style={{
-                      height: '100%',
-                      width: `${pct}%`,
-                      background: color,
-                      borderRadius: 2,
-                      opacity: 0.7,
-                      boxShadow: `0 0 8px ${color}40`,
-                      transition: 'width .6s cubic-bezier(.22,1,.36,1)',
-                    }} />
+                  <div className="dash-bar-track">
+                    <div
+                      className="dash-bar-fill"
+                      style={{
+                        width: `${pct}%`,
+                        background: color,
+                        opacity: 0.7,
+                        boxShadow: `0 0 8px ${color}40`,
+                      }}
+                    />
                   </div>
-                  <span style={{
-                    fontFamily: 'var(--mono)',
-                    fontSize: '0.55rem',
-                    color: 'var(--text-ghost)',
-                  }}>
+                  <span className="dash-domain-pct">
                     {pct.toFixed(0)}% of graph
                   </span>
                 </div>
@@ -380,29 +335,14 @@ export default function KnowledgeGraph() {
         </Pane>
       </div>
 
-      {/* ═══ ENTRIES TABLE ═══ */}
-      <Pane title="ALL ENTRIES" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{entries.length} nodes</span>} flat>
-        <div style={{ maxHeight: 200, overflow: 'auto' }}>
-          <table style={{
-            width: '100%',
-            borderCollapse: 'collapse',
-            fontFamily: 'var(--mono)',
-            fontSize: 14,
-          }}>
+      {/* ENTRIES TABLE */}
+      <Pane title="ALL ENTRIES" badge={<span className="dash-badge">{entries.length} nodes</span>} flat>
+        <div className="dash-table-scroll">
+          <table className="dash-table">
             <thead>
-              <tr style={{ borderBottom: '1px solid rgba(255,255,255,.06)' }}>
+              <tr>
                 {['ID', 'DOMAIN', 'LABEL', 'CITATIONS'].map((h) => (
-                  <th key={h} style={{
-                    textAlign: 'left',
-                    padding: '8px 12px',
-                    fontWeight: 600,
-                    letterSpacing: '.1em',
-                    color: 'var(--text-dim)',
-                    fontSize: 13,
-                    textTransform: 'uppercase',
-                  }}>
-                    {h}
-                  </th>
+                  <th key={h}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -410,31 +350,24 @@ export default function KnowledgeGraph() {
               {entries.map((e) => (
                 <tr
                   key={e.id}
-                  style={{
-                    borderBottom: '1px solid rgba(255,255,255,.03)',
-                    cursor: 'pointer',
-                    transition: 'background .15s',
-                  }}
-                  onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,.03)'; }}
-                  onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                  className="dash-table-row dash-row-sep--light"
+                  style={{ cursor: 'pointer' }}
                 >
-                  <td style={{ padding: '8px 12px', color: 'var(--text-dim)' }}>{e.id}</td>
-                  <td style={{ padding: '8px 12px' }}>
-                    <span style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 6,
-                      color: domainColor(e.domain),
-                    }}>
-                      <span style={{
-                        width: 5, height: 5, borderRadius: '50%',
-                        background: domainColor(e.domain),
-                        display: 'inline-block',
-                        boxShadow: `0 0 4px ${domainColor(e.domain)}60`,
-                      }} />
+                  <td style={{ color: 'var(--text-dim)' }}>{e.id}</td>
+                  <td>
+                    <span className="dash-inline" style={{ color: domainColor(e.domain) }}>
+                      <span
+                        className="dash-dot--5"
+                        style={{
+                          background: domainColor(e.domain),
+                          boxShadow: `0 0 4px ${domainColor(e.domain)}60`,
+                        }}
+                      />
                       {e.domain ?? 'unknown'}
                     </span>
                   </td>
-                  <td style={{ padding: '8px 12px', color: 'var(--text-primary)' }}>{e.label ?? '-'}</td>
-                  <td style={{ padding: '8px 12px', color: 'var(--bone-bright)' }}>{e.citations ?? 0}</td>
+                  <td style={{ color: 'var(--text-primary)' }}>{e.label ?? '-'}</td>
+                  <td style={{ color: 'var(--bone-bright)' }}>{e.citations ?? 0}</td>
                 </tr>
               ))}
             </tbody>

@@ -23,6 +23,7 @@ import BenchLearningInsights from '../components/BenchLearningInsights';
 import MatrixBuilder from '../components/MatrixBuilder';
 import MatrixRaceTrack from '../components/MatrixRaceTrack';
 import MatrixDetailView from '../components/MatrixDetailView';
+import { ComponentErrorBoundary } from '../components/design';
 import { useMatrixBench } from '../hooks/useMatrixBench';
 import './Bench.css';
 
@@ -267,32 +268,34 @@ export default function Bench() {
                 </div>
               </div>
             ) : (
-              <Pane title="MATRIX BUILDER">
-                <MatrixBuilder
-                  models={models}
-                  selectedModels={matrix.selectedModels}
-                  toggleModel={matrix.toggleModel}
-                  presets={matrix.presets}
-                  togglePreset={matrix.togglePreset}
-                  cells={matrix.cells}
-                  totalLanes={matrix.totalLanes}
-                  matrixStatus={matrix.status}
-                  estimatedCostPerLane={selectedSuite?.estimated_cost_usd ?? 0}
-                  onLaunch={() => {
-                    if (selectedSuiteId) {
-                      matrix.startMatrix(selectedSuiteId, {
-                        temperature: config.temperature,
-                        max_tokens: config.maxTokens,
-                        timeout_secs: config.timeoutSecs,
-                        retries: config.retries,
-                        gates: config.gates,
-                      });
-                      setTab('live');
-                    }
-                  }}
-                  disabled={connectionState === 'offline'}
-                />
-              </Pane>
+              <ComponentErrorBoundary name="MatrixBuilder">
+                <Pane title="MATRIX BUILDER">
+                  <MatrixBuilder
+                    models={models}
+                    selectedModels={matrix.selectedModels}
+                    toggleModel={matrix.toggleModel}
+                    presets={matrix.presets}
+                    togglePreset={matrix.togglePreset}
+                    cells={matrix.cells}
+                    totalLanes={matrix.totalLanes}
+                    matrixStatus={matrix.status}
+                    estimatedCostPerLane={selectedSuite?.estimated_cost_usd ?? 0}
+                    onLaunch={() => {
+                      if (selectedSuiteId) {
+                        matrix.startMatrix(selectedSuiteId, {
+                          temperature: config.temperature,
+                          max_tokens: config.maxTokens,
+                          timeout_secs: config.timeoutSecs,
+                          retries: config.retries,
+                          gates: config.gates,
+                        });
+                        setTab('live');
+                      }
+                    }}
+                    disabled={connectionState === 'offline'}
+                  />
+                </Pane>
+              </ComponentErrorBoundary>
             )}
           </>
         )}
@@ -314,23 +317,27 @@ export default function Bench() {
                 </div>
 
                 {liveViewMode === 'race' ? (
-                  <Pane title="MATRIX RACE TRACK">
-                    <MatrixRaceTrack
-                      cells={matrix.cells}
-                      selectedModels={matrix.selectedModels}
-                      presetLabels={matrix.presets.map((p) => p.label)}
-                      totalTasksPerLane={selectedSuite?.tasks.length ?? 0}
-                    />
-                  </Pane>
+                  <ComponentErrorBoundary name="MatrixRaceTrack">
+                    <Pane title="MATRIX RACE TRACK">
+                      <MatrixRaceTrack
+                        cells={matrix.cells}
+                        selectedModels={matrix.selectedModels}
+                        presetLabels={matrix.presets.map((p) => p.label)}
+                        totalTasksPerLane={selectedSuite?.tasks.length ?? 0}
+                      />
+                    </Pane>
+                  </ComponentErrorBoundary>
                 ) : (
-                  <Pane title="MATRIX DETAIL">
-                    <MatrixDetailView
-                      cells={matrix.cells}
-                      selectedModels={matrix.selectedModels}
-                      presetLabels={matrix.presets.map((p) => p.label)}
-                      tasks={selectedSuite?.tasks ?? []}
-                    />
-                  </Pane>
+                  <ComponentErrorBoundary name="MatrixDetailView">
+                    <Pane title="MATRIX DETAIL">
+                      <MatrixDetailView
+                        cells={matrix.cells}
+                        selectedModels={matrix.selectedModels}
+                        presetLabels={matrix.presets.map((p) => p.label)}
+                        tasks={selectedSuite?.tasks ?? []}
+                      />
+                    </Pane>
+                  </ComponentErrorBoundary>
                 )}
 
                 <Pane title="ACTIVITY FEED">
@@ -384,18 +391,20 @@ export default function Bench() {
                 </div>
 
                 {activeRun.results.length > 0 && (
-                  <Pane title="TASK TIMELINE">
-                    <TimelineChart
-                      tasks={activeRun.results.map((r, i) => ({
-                        name: r.task_name,
-                        startMs: activeRun.results.slice(0, i).reduce((s, prev) => s + prev.duration_ms, 0),
-                        durationMs: r.duration_ms,
-                        status: r.status as 'pass' | 'fail' | 'pending' | 'running' | 'skipped',
-                        gateVerdicts: r.gate_verdicts.map((g) => ({ gate: g.gate, passed: g.passed })),
-                      }))}
-                      height={Math.max(200, activeRun.results.length * 28 + 48)}
-                    />
-                  </Pane>
+                  <ComponentErrorBoundary name="TaskTimeline">
+                    <Pane title="TASK TIMELINE">
+                      <TimelineChart
+                        tasks={activeRun.results.map((r, i) => ({
+                          name: r.task_name,
+                          startMs: activeRun.results.slice(0, i).reduce((s, prev) => s + prev.duration_ms, 0),
+                          durationMs: r.duration_ms,
+                          status: r.status as 'pass' | 'fail' | 'pending' | 'running' | 'skipped',
+                          gateVerdicts: r.gate_verdicts.map((g) => ({ gate: g.gate, passed: g.passed })),
+                        }))}
+                        height={Math.max(200, activeRun.results.length * 28 + 48)}
+                      />
+                    </Pane>
+                  </ComponentErrorBoundary>
                 )}
 
                 <div className="benchlive-grid">
@@ -425,25 +434,33 @@ export default function Bench() {
                 </div>
 
                 <div className="bench-live-visualizations">
-                  <Pane title="AGENT OUTPUT">
-                    <AgentOutputStream lines={agentOutput} agentId={currentAgentId} />
-                  </Pane>
-                  <Pane title="GATE VERDICTS">
-                    <GateVerdictTicker
-                      verdicts={gateVerdicts}
-                      currentTaskId={activeRun.results.length < activeRun.total
-                        ? feed.find((f) => f.type === 'start')?.text.replace('Started: ', '')
-                        : undefined}
-                    />
-                  </Pane>
-                  <Pane title="TOKEN VELOCITY">
-                    <TokenVelocitySparkline points={tokenVelocity} height={120} />
-                  </Pane>
+                  <ComponentErrorBoundary name="AgentOutputStream">
+                    <Pane title="AGENT OUTPUT">
+                      <AgentOutputStream lines={agentOutput} agentId={currentAgentId} />
+                    </Pane>
+                  </ComponentErrorBoundary>
+                  <ComponentErrorBoundary name="GateVerdictTicker">
+                    <Pane title="GATE VERDICTS">
+                      <GateVerdictTicker
+                        verdicts={gateVerdicts}
+                        currentTaskId={activeRun.results.length < activeRun.total
+                          ? feed.find((f) => f.type === 'start')?.text.replace('Started: ', '')
+                          : undefined}
+                      />
+                    </Pane>
+                  </ComponentErrorBoundary>
+                  <ComponentErrorBoundary name="TokenVelocitySparkline">
+                    <Pane title="TOKEN VELOCITY">
+                      <TokenVelocitySparkline points={tokenVelocity} height={120} />
+                    </Pane>
+                  </ComponentErrorBoundary>
                 </div>
 
-                <Pane title="COST RACE (LIVE)">
-                  <CostRace live height={260} />
-                </Pane>
+                <ComponentErrorBoundary name="CostRace">
+                  <Pane title="COST RACE (LIVE)">
+                    <CostRace live height={260} />
+                  </Pane>
+                </ComponentErrorBoundary>
               </>
             )}
           </div>
@@ -474,14 +491,18 @@ export default function Bench() {
                     const gateNames = [...new Set(displayResults.flatMap((r) => r.gate_verdicts.map((g) => g.gate)))];
                     const heatValues = displayResults.map((r) => gateNames.map((gate) => { const v = r.gate_verdicts.find((g) => g.gate === gate); return v ? v.passed : null; }));
                     return (
-                      <Pane title="GATE PASS HEATMAP">
-                        <HeatmapChart rows={displayResults.map((r) => r.task_name.slice(0, 20))} columns={gateNames} values={heatValues} height={Math.max(200, displayResults.length * 24 + 48)} />
-                      </Pane>
+                      <ComponentErrorBoundary name="GateHeatmap">
+                        <Pane title="GATE PASS HEATMAP">
+                          <HeatmapChart rows={displayResults.map((r) => r.task_name.slice(0, 20))} columns={gateNames} values={heatValues} height={Math.max(200, displayResults.length * 24 + 48)} />
+                        </Pane>
+                      </ComponentErrorBoundary>
                     );
                   })()}
-                  <Pane title="COST PER TASK">
-                    <BarChart data={displayResults.slice(-30).map((r) => ({ label: r.task_name.slice(0, 20), value: r.cost_usd, color: r.status === 'pass' ? 'var(--success)' : 'var(--rose-dim)' }))} height={250} />
-                  </Pane>
+                  <ComponentErrorBoundary name="CostPerTask">
+                    <Pane title="COST PER TASK">
+                      <BarChart data={displayResults.slice(-30).map((r) => ({ label: r.task_name.slice(0, 20), value: r.cost_usd, color: r.status === 'pass' ? 'var(--success)' : 'var(--rose-dim)' }))} height={250} />
+                    </Pane>
+                  </ComponentErrorBoundary>
                 </div>
 
                 {displayResults.some((r) => r.status === 'fail') && (
@@ -621,18 +642,20 @@ export default function Bench() {
         {/* ── Analysis ── */}
         {tab === 'analysis' && (
           <div className="bench-analysis">
-            <Pane title="PARETO FRONTIER">
-              {(() => {
-                const pts = pareto?.points ?? [];
-                const histPts = history.filter((r) => r.summary);
-                const scatterData = pts.length > 0
-                  ? pts.map((p) => ({ x: p.cost_usd, y: p.pass_rate, label: p.label ?? p.run_id.slice(0, 8), color: p.provider?.includes('Anthropic') ? 'var(--rose-bright)' : 'var(--success)' }))
-                  : histPts.map((r) => ({ x: r.summary!.total_cost_usd, y: r.summary!.pass_rate, label: r.config.model.split('-').slice(0, 2).join('-'), color: r.config.model.includes('sonnet') ? 'var(--rose-bright)' : 'var(--success)' }));
-                return scatterData.length > 0
-                  ? <ScatterChart points={scatterData} xLabel="Cost (USD)" yLabel="Pass Rate" showTrendLine height={400} />
-                  : <p className="bench-empty-text">Run benchmarks to see the Pareto frontier.</p>;
-              })()}
-            </Pane>
+            <ComponentErrorBoundary name="ParetoFrontier">
+              <Pane title="PARETO FRONTIER">
+                {(() => {
+                  const pts = pareto?.points ?? [];
+                  const histPts = history.filter((r) => r.summary);
+                  const scatterData = pts.length > 0
+                    ? pts.map((p) => ({ x: p.cost_usd, y: p.pass_rate, label: p.label ?? p.run_id.slice(0, 8), color: p.provider?.includes('Anthropic') ? 'var(--rose-bright)' : 'var(--success)' }))
+                    : histPts.map((r) => ({ x: r.summary!.total_cost_usd, y: r.summary!.pass_rate, label: r.config.model.split('-').slice(0, 2).join('-'), color: r.config.model.includes('sonnet') ? 'var(--rose-bright)' : 'var(--success)' }));
+                  return scatterData.length > 0
+                    ? <ScatterChart points={scatterData} xLabel="Cost (USD)" yLabel="Pass Rate" showTrendLine height={400} />
+                    : <p className="bench-empty-text">Run benchmarks to see the Pareto frontier.</p>;
+                })()}
+              </Pane>
+            </ComponentErrorBoundary>
 
             {history.filter((r) => r.summary).length > 0 && (
               <>
@@ -681,19 +704,23 @@ export default function Bench() {
               </>
             )}
 
-            <Pane title="MODEL COST RACE">
-              <CostRace height={300} />
-            </Pane>
+            <ComponentErrorBoundary name="ModelCostRace">
+              <Pane title="MODEL COST RACE">
+                <CostRace height={300} />
+              </Pane>
+            </ComponentErrorBoundary>
           </div>
         )}
 
         {/* ── Learning ── */}
         {tab === 'learning' && (
-          <BenchLearningInsights
-            history={history}
-            learningEvents={activeRunLearning}
-            isRunning={activeRun?.status === 'running'}
-          />
+          <ComponentErrorBoundary name="BenchLearningInsights">
+            <BenchLearningInsights
+              history={history}
+              learningEvents={activeRunLearning}
+              isRunning={activeRun?.status === 'running'}
+            />
+          </ComponentErrorBoundary>
         )}
 
       </div>

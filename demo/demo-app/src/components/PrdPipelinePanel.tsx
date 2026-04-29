@@ -10,6 +10,7 @@ import type {
   PipelineTaskStatus,
 } from '../lib/prd-pipeline-types';
 import type { ServerStatus } from '../hooks/useServerHealth';
+import { ConfidenceMeter } from './inference';
 import './PrdPipelinePanel.css';
 
 /* ── Constants ── */
@@ -122,6 +123,7 @@ export default function PrdPipelinePanel({
   onRun,
   isRunning = false,
   serverHealth = 'checking',
+  learningStats,
 }: {
   state: PipelineDemoState;
   examples?: PipelineScenarioExample[];
@@ -131,6 +133,8 @@ export default function PrdPipelinePanel({
   onRun?: () => void;
   isRunning?: boolean;
   serverHealth?: ServerStatus;
+  /** T6.2 / T7.58: Learning feedback stats for ConfidenceMeter. */
+  learningStats?: { routerConfidence: number; confidenceTrend: 'improving' | 'stable' | 'declining'; totalDecisions: number };
 }) {
   const progress = useMemo(() => totalProgress(state.plans), [state.plans]);
   const currentPhase = phaseIndex(state.phase);
@@ -304,6 +308,18 @@ export default function PrdPipelinePanel({
                       <b>{g.phase}</b> {g.count}
                     </span>
                   ))}
+                </div>
+              )}
+              {/* T7.58: Router confidence meter in routing section */}
+              {learningStats && learningStats.totalDecisions > 0 && (
+                <div className="pp-router-confidence" style={{ marginTop: 8 }}>
+                  <ConfidenceMeter
+                    confidence={learningStats.routerConfidence}
+                    trend={learningStats.confidenceTrend}
+                    decisions={learningStats.totalDecisions}
+                    label="ROUTER"
+                    compact
+                  />
                 </div>
               )}
             </section>

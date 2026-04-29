@@ -6,6 +6,7 @@ import { useLiveApi } from '../../hooks/useLiveApi';
 import { domainColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
+import './dashboard.css';
 
 /* ── Types ────────────────────────────────────────────────── */
 
@@ -75,8 +76,8 @@ export default function DreamsView() {
   const recentEntries = entries.slice(-8).reverse();
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {/* ═══ TOP MOSAIC ═══ */}
+    <div className="dash-page">
+      {/* TOP MOSAIC */}
       <Mosaic columns={6}>
         <MosaicCell label="CYCLES" value={journal?.cycle_count ?? 0} color="dream" mono sub={journal?.last_cycle ? `last: ${new Date(journal.last_cycle).toLocaleDateString()}` : 'none'} />
         <MosaicCell label="PHASES" value={`${completedPhases}/${journal?.phases.length ?? 0}`} color="success" mono />
@@ -86,24 +87,24 @@ export default function DreamsView() {
         <MosaicCell label="PLAYBOOKS" value={totalPlaybooks} color="dream" mono />
       </Mosaic>
 
-      {/* ═══ PHASE VISUALIZATION ═══ */}
+      {/* PHASE VISUALIZATION */}
       <Pane
         title="DREAM PHASE PIPELINE"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>
+        badge={<span className="dash-badge">
           {totalDuration > 0 ? `${totalDuration}s total` : 'consolidation cycle'}
         </span>}
       >
         <DreamPhaseViz />
       </Pane>
 
-      {/* ═══ BOTTOM ROW ═══ */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+      {/* BOTTOM ROW */}
+      <div className="dash-grid-2">
         {/* Consolidation Summary */}
         <Pane
           title="CONSOLIDATION SUMMARY"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>per-phase</span>}
+          badge={<span className="dash-badge">per-phase</span>}
         >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+          <div className="dash-flex-col">
             {(journal?.phases ?? []).map((phase, i, arr) => {
               const phaseColors: Record<string, string> = {
                 Hypnagogia: 'var(--dream-bright)',
@@ -117,58 +118,36 @@ export default function DreamsView() {
               return (
                 <div
                   key={phase.name}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                    padding: '7px 0',
-                    borderBottom: i < arr.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
-                  }}
+                  className={`dash-consolidation-row${i < arr.length - 1 ? ' dash-row-sep' : ''}`}
                 >
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
-                    <span style={{
-                      width: 7, height: 7, borderRadius: '50%',
-                      background: isComplete ? color : 'rgba(255,255,255,.15)',
-                      boxShadow: isComplete ? `0 0 8px ${color}80` : 'none',
-                      display: 'inline-block',
-                      flexShrink: 0,
-                    }} />
-                    <span style={{
-                      fontFamily: 'var(--display)',
-                      fontSize: 15,
-                      fontWeight: 500,
-                      color,
-                      letterSpacing: '.02em',
-                    }}>
+                  <span className="dash-inline--10">
+                    <span
+                      className="dash-dot--7"
+                      style={{
+                        background: isComplete ? color : 'rgba(255,255,255,.15)',
+                        boxShadow: isComplete ? `0 0 8px ${color}80` : 'none',
+                      }}
+                    />
+                    <span className="dash-display-label" style={{ color }}>
                       {phase.name}
                     </span>
                   </span>
 
-                  <span style={{
-                    display: 'flex',
-                    gap: 14,
-                    fontFamily: 'var(--mono)',
-                    fontSize: '0.6rem',
-                    color: 'var(--text-dim)',
-                    letterSpacing: '.04em',
-                  }}>
+                  <span className="dash-phase-stats">
                     <span>{phase.episodes_processed}ep</span>
                     <span>{phase.clusters_formed}cl</span>
                     <span>{phase.knowledge_entries_written}kn</span>
                     <span>{phase.duration_secs}s</span>
                   </span>
 
-                  <span style={{
-                    fontFamily: 'var(--mono)',
-                    fontSize: 15,
-                    padding: '2px 8px',
-                    borderRadius: 3,
-                    background: isComplete ? `${color}15` : 'rgba(255,255,255,.04)',
-                    border: `1px solid ${isComplete ? `${color}30` : 'rgba(255,255,255,.06)'}`,
-                    color: isComplete ? color : 'var(--text-ghost)',
-                    letterSpacing: '.06em',
-                  }}>
+                  <span
+                    className="dash-status-badge"
+                    style={{
+                      background: isComplete ? `${color}15` : 'rgba(255,255,255,.04)',
+                      border: `1px solid ${isComplete ? `${color}30` : 'rgba(255,255,255,.06)'}`,
+                      color: isComplete ? color : 'var(--text-ghost)',
+                    }}
+                  >
                     {phase.status}
                   </span>
                 </div>
@@ -180,68 +159,38 @@ export default function DreamsView() {
         {/* Recent Knowledge Artifacts */}
         <Pane
           title="RECENT DREAM ARTIFACTS"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>knowledge entries</span>}
+          badge={<span className="dash-badge">knowledge entries</span>}
         >
           {recentEntries.length === 0 ? (
-            <div style={{
-              padding: 36,
-              color: 'var(--text-ghost)',
-              fontFamily: 'var(--mono)',
-              fontSize: '0.75rem',
-              textAlign: 'center',
-            }}>
+            <div className="dash-placeholder--lg">
               Artifacts emerge after dream consolidation cycles
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+            <div className="dash-flex-col">
               {recentEntries.map((entry, i) => {
                 const color = domainColor(entry.domain);
 
                 return (
                   <div
                     key={entry.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 10,
-                      padding: '5px 0',
-                      borderBottom: i < recentEntries.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
-                    }}
+                    className={`dash-row-item${i < recentEntries.length - 1 ? ' dash-row-sep' : ''}`}
+                    style={{ gap: 10, padding: '5px 0' }}
                   >
-                    <span style={{
-                      width: 5, height: 5, borderRadius: '50%',
-                      background: color,
-                      boxShadow: `0 0 6px ${color}60`,
-                      display: 'inline-block',
-                      flexShrink: 0,
-                    }} />
-                    <span style={{
-                      fontFamily: 'var(--mono)',
-                      fontSize: 14,
-                      color: 'var(--text-primary)',
-                      flex: 1,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}>
+                    <span
+                      className="dash-dot--5"
+                      style={{
+                        background: color,
+                        boxShadow: `0 0 6px ${color}60`,
+                      }}
+                    />
+                    <span className="dash-ellipsis">
                       {entry.label ?? entry.id}
                     </span>
-                    <span style={{
-                      fontFamily: 'var(--mono)',
-                      fontSize: 15,
-                      color: 'var(--text-ghost)',
-                      letterSpacing: '.06em',
-                      flexShrink: 0,
-                    }}>
+                    <span className="dash-ghost">
                       {entry.domain ?? 'unknown'}
                     </span>
                     {entry.citations != null && (
-                      <span style={{
-                        fontFamily: 'var(--mono)',
-                        fontSize: 15,
-                        color: 'var(--bone-bright)',
-                        flexShrink: 0,
-                      }}>
+                      <span className="dash-bone">
                         {entry.citations}
                       </span>
                     )}

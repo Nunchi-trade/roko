@@ -6,7 +6,6 @@ import {
   type PipelineDemoState,
   type PipelinePhase,
   type PipelineScenarioExample,
-  type PipelineStreamState,
 } from '../prd-pipeline-types';
 import {
   createPipelineIntroState,

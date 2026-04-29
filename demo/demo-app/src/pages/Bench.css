@@ -1786,3 +1786,28 @@
   color: var(--text-dim);
   flex-shrink: 0;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   REDUCED MOTION
+   ═══════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  .bench-tab-active::after,
+  .benchlive-dot,
+  .task-running,
+  .bench-skeleton,
+  .bench-learning-pulse,
+  .run-spinner {
+    animation: none;
+  }
+  .feed-item,
+  .bench-learning-event {
+    animation: none;
+  }
+  .feed-item:first-child::after {
+    animation: none;
+  }
+  .bench-progress-fill,
+  .task-cell {
+    transition: none;
+  }
+}

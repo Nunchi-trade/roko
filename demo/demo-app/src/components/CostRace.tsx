@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { getCssVar, hexToRgba } from '../lib/color';
 import { MODEL_COLORS } from '../lib/palette';
 import { useLiveApi } from '../hooks/useLiveApi';
@@ -101,7 +101,7 @@ function getModelColor(model: string, explicit?: string): string {
   }
   const palette = [
     getCssVar('--bone'), getCssVar('--success'), getCssVar('--rose'),
-    getCssVar('--warning'), getCssVar('--status-blocked'), '#7FA8A4', '#B7918F', // TODO: add design tokens for last 2
+    getCssVar('--warning'), getCssVar('--status-blocked'), getCssVar('--lane-sage'), getCssVar('--lane-clay'),
   ];
   return palette[hashString(model) % palette.length];
 }
@@ -128,6 +128,10 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
   const valuesRef = useRef<Map<string, number>>(new Map());
   const [rows, setRows] = useState<CostRaceModel[]>([]);
   const { get, isLive } = useLiveApi();
+  const prefersReducedMotion = useMemo(
+    () => window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    [],
+  );
   const { connected, lastEvent } = useBenchSSE({ enabled: live && isLive });
 
   const liveStatus = !live ? 'API' : isLive ? (connected ? 'LIVE' : 'CONNECTING') : 'OFFLINE';
@@ -254,10 +258,10 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
       const y = pad.top + index * (rowH + rowGap);
       const centerY = y + rowH / 2;
       const current = displayValues.get(row.model) ?? 0;
-      const next = current + (row.cost_usd - current) * 0.16;
+      const next = prefersReducedMotion ? row.cost_usd : current + (row.cost_usd - current) * 0.16;
       displayValues.set(row.model, next);
 
-      if (Math.abs(next - row.cost_usd) > 0.0005) needsNextFrame = true;
+      if (!prefersReducedMotion && Math.abs(next - row.cost_usd) > 0.0005) needsNextFrame = true;
 
       const color = getModelColor(row.model, row.color);
       const labelColor = index === 0 ? getCssVar('--text-soft') : getCssVar('--text-dim');

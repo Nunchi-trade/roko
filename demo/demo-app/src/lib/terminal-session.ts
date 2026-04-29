@@ -4,11 +4,10 @@
  * Provides workspace management, command execution with typing animation,
  * output detection (gates, cost, tokens), and roko binary resolution.
  *
- * Reference: demo-web/demo.html setupWorkspace/joinWorkspace/showCmd/detectFromOutput
+ * Reference: demo-web/demo.html showCmd/detectFromOutput
  */
 import type { TerminalHandle } from '../hooks/useTerminal';
 import { lookupCmdDesc } from './cmd-descriptions';
-import { ABSOLUTE_SERVE_URL } from './serve-url';
 
 // ── Speed multiplier ─────────────────────────────────────────
 
@@ -68,72 +67,11 @@ export function getRoko(): string {
   return resolvedRoko;
 }
 
-// ── Workspace management ─────────────────────────────────────
-
-/**
- * Create an ephemeral workspace: mktemp, cd, roko init, fetch live config, clear terminal.
- * Returns the workspace directory path.
- *
- * Optimized to use a SINGLE PTY round-trip for all setup steps (mkdir, cd,
- * roko init, config copy) instead of 5 sequential commands.
- */
-export async function setupWorkspace(
-  handle: TerminalHandle,
-  dirPrefix: string,
-): Promise<string> {
-  // Wait for WS connection + initial prompt
-  const wsOk = await waitForOpen(handle);
-  if (!wsOk) return '/tmp/roko-unavailable';
-  await handle.waitForPrompt(5000);
-
-  const dir = `/tmp/${dirPrefix}-${Date.now()}`;
-  const ROKO = rokoResolved ? resolvedRoko : 'roko';
-
-  // Single atomic command: resolve roko path + create workspace + init + copy config.
-  // This replaces 5 sequential PTY round-trips with 1.
-  const setupCmd = [
-    `mkdir -p ${dir}`,
-    `cd ${dir}`,
-    `${ROKO} init`,
-    `curl -sf --connect-timeout 2 --max-time 5 ${ABSOLUTE_SERVE_URL}/api/config/toml -o roko.toml 2>/dev/null; true`,
-  ].join(' && ');
-
-  await handle.execCmd(setupCmd, 30000);
-
-  if (!rokoResolved) {
-    resolvedRoko = ROKO;
-    rokoResolved = true;
-  }
-
-  // Clear only the output buffer, not the visible terminal.
-  // The terminal now shows the setup commands which is better than a blank screen.
-  handle.outputBuffer = '';
-  return dir;
-}
-
-/**
- * Join an existing workspace: cd into it.
- */
-export async function joinWorkspace(
-  handle: TerminalHandle,
-  dir: string,
-): Promise<void> {
-  const wsOk = await waitForOpen(handle);
-  if (!wsOk) return;
-  await handle.waitForPrompt(5000);
-  if (!rokoResolved) {
-    resolvedRoko = 'roko';
-    rokoResolved = true;
-  }
-  await handle.execCmd(`cd ${dir}`, 3000);
-  handle.outputBuffer = '';
-}
-
-// ── Fast workspace entry (server-created) ────────────────────
+// ── Workspace entry ──────────────────────────────────────────
 
 /**
  * Enter a workspace that was already created server-side via POST /api/workspaces.
- * Much faster than setupWorkspace() since it only needs to `cd` into the directory.
+ * Only needs to `cd` into the directory and resolve the roko binary.
  *
  * Note: Does NOT clear the terminal afterwards — the scenario should control when
  * clearing is appropriate. Aggressive clearing caused blank terminal panes.

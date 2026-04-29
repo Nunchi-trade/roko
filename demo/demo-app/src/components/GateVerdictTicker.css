@@ -97,3 +97,9 @@
   padding: 6px 0;
   letter-spacing: 0.04em;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .gate-verdict-chip {
+    animation: none;
+  }
+}

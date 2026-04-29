@@ -3,6 +3,7 @@ import { SCENARIOS, type ScenarioContext } from '../lib/scenarios';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../lib/playback-controller';
 import { useTerminal, type TerminalHandle } from '../hooks/useTerminal';
 import { setSpeedMultiplier } from '../lib/terminal-session';
+import { markStart, markEnd, measure, clearMarks } from '../lib/perf-markers';
 import { useServerHealth } from '../hooks/useServerHealth';
 import { useRokoConfig } from '../hooks/useRokoConfig';
 import { useWorkspace } from '../hooks/useWorkspace';
@@ -11,7 +12,6 @@ import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
 import Timeline from '../components/Timeline';
 import CommandLog from '../components/CommandLog';
-import GateBar from '../components/GateBar';
 import GateVerdictCard, { type GateEntry } from '../components/GateVerdictCard';
 import PrdPipelinePanel from '../components/PrdPipelinePanel';
 import KnowledgeFlowPanel, { type InsightEvent, type AgentInfo } from '../components/KnowledgeFlowPanel';
@@ -412,7 +412,13 @@ export default function Demo() {
       { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
     ]);
 
+    markStart('terminal-connect');
     const entries = await waitForTerminalReadiness();
+    markEnd('terminal-connect');
+    const termConnectMs = measure('terminal-connect');
+    if (termConnectMs !== null) {
+      console.debug(`[perf] terminal-connect: ${termConnectMs.toFixed(1)}ms`);
+    }
     if (!entries) {
       const connected = getReadyTerminalEntries().length;
       const now = new Date();
@@ -437,12 +443,33 @@ export default function Demo() {
     try {
       setProgressLabel('Workspace');
       setProgressText(`creating live workspace for ${scenario.title}`);
+      markStart('workspace-create');
       const ws = await ensureWorkspace(`roko-${scenario.id}`);
+      markEnd('workspace-create');
+      const wsMs = measure('workspace-create');
+      if (wsMs !== null) {
+        console.debug(`[perf] workspace-create: ${wsMs.toFixed(1)}ms`);
+      }
       workspaceDirRef.current = ws.path;
       const ctx = buildContext(ws.path, entries);
+      markStart('scenario-run');
       await scenario.run(ctx);
+      markEnd('scenario-run');
+      const scenarioMs = measure('scenario-run');
+      if (scenarioMs !== null) {
+        console.debug(`[perf] scenario-run: ${scenarioMs.toFixed(1)}ms`);
+      }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       console.error('Scenario error:', err);
+      const now = new Date();
+      const ts = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+      setProgressLabel('Error');
+      setProgressText(msg);
+      setLogEntries((prev) => [
+        ...prev,
+        { ts, text: `Workspace creation failed: ${msg}`, type: 'error' as const },
+      ]);
     }
 
     runningRef.current = false;
@@ -466,6 +493,7 @@ export default function Demo() {
     setIsPaused(false);
     playback.reset();
     timeline.reset();
+    clearMarks();
     selectScenario(activeIdx);
   }, [activeIdx, selectScenario]);
 

@@ -8,6 +8,7 @@ import Mosaic, { MosaicCell } from '../components/Mosaic';
 import TimelineChart from '../components/Charts/TimelineChart';
 import HeatmapChart from '../components/Charts/HeatmapChart';
 import TaskTable from '../components/TaskTable';
+import { ComponentErrorBoundary } from '../components/design';
 import './Bench.css';
 
 /* ═══════════════════════════════════════════════════════════
@@ -571,12 +572,14 @@ export default function BenchRunDetail() {
       <div className="bench-body">
         {/* ── Task Timeline Waterfall ── */}
         {timelineTasks.length > 0 && (
-          <Pane title="TASK TIMELINE">
-            <TimelineChart
-              tasks={timelineTasks}
-              height={Math.max(200, timelineTasks.length * 28 + 48)}
-            />
-          </Pane>
+          <ComponentErrorBoundary name="TaskTimeline">
+            <Pane title="TASK TIMELINE">
+              <TimelineChart
+                tasks={timelineTasks}
+                height={Math.max(200, timelineTasks.length * 28 + 48)}
+              />
+            </Pane>
+          </ComponentErrorBoundary>
         )}
 
         {/* ── Task Results Table ── */}
@@ -585,37 +588,45 @@ export default function BenchRunDetail() {
         </Pane>
 
         {/* ── Cost Attribution ── */}
-        <Pane title="COST ATTRIBUTION">
-          <CostBreakdownChart
-            results={run.results}
-            height={Math.max(280, run.results.length * 28 + 48)}
-          />
-        </Pane>
+        <ComponentErrorBoundary name="CostBreakdown">
+          <Pane title="COST ATTRIBUTION">
+            <CostBreakdownChart
+              results={run.results}
+              height={Math.max(280, run.results.length * 28 + 48)}
+            />
+          </Pane>
+        </ComponentErrorBoundary>
 
         {/* ── Token Flow ── */}
-        <Pane title="TOKEN FLOW">
-          <TokenFlowChart
-            results={run.results}
-            height={Math.max(200, run.results.length * 26 + 40)}
-          />
-        </Pane>
+        <ComponentErrorBoundary name="TokenFlow">
+          <Pane title="TOKEN FLOW">
+            <TokenFlowChart
+              results={run.results}
+              height={Math.max(200, run.results.length * 26 + 40)}
+            />
+          </Pane>
+        </ComponentErrorBoundary>
 
         {/* ── Gate Heatmap ── */}
         {gateNames.length > 0 && (
-          <Pane title="GATE HEATMAP">
-            <HeatmapChart
-              rows={heatRows}
-              columns={gateNames}
-              values={heatValues}
-              height={Math.max(200, heatRows.length * 28 + 48)}
-            />
-          </Pane>
+          <ComponentErrorBoundary name="GateHeatmap">
+            <Pane title="GATE HEATMAP">
+              <HeatmapChart
+                rows={heatRows}
+                columns={gateNames}
+                values={heatValues}
+                height={Math.max(200, heatRows.length * 28 + 48)}
+              />
+            </Pane>
+          </ComponentErrorBoundary>
         )}
 
         {/* ── Output Previews ── */}
-        <Pane title="OUTPUT PREVIEWS">
-          <OutputPreviewPanel results={run.results} />
-        </Pane>
+        <ComponentErrorBoundary name="OutputPreviews">
+          <Pane title="OUTPUT PREVIEWS">
+            <OutputPreviewPanel results={run.results} />
+          </Pane>
+        </ComponentErrorBoundary>
 
         {/* ── Compare Button ── */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16, marginBottom: 8 }}>

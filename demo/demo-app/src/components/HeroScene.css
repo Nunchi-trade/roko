@@ -2,6 +2,12 @@
    HeroScene · NieR-inspired title screen
    ═══════════════════════════════════════════════════════════ */
 
+.landing-wrapper {
+  height: calc(100vh - 48px);
+  overflow: hidden;
+  position: relative;
+}
+
 .hero-scene-canvas {
   position: absolute;
   inset: 0;

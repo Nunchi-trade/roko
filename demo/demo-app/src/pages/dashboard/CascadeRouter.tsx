@@ -6,6 +6,7 @@ import { getCssVar } from '../../lib/color';
 import { roleColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
+import './dashboard.css';
 
 /* ── Types ────────────────────────────────────────────────── */
 
@@ -21,13 +22,6 @@ interface CascadeState {
   confidence_stats?: Record<string, ConfidenceStat>;
   total_observations?: number;
 }
-
-const pageStyle: CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 10,
-  minHeight: '100%',
-};
 
 /* ── Confidence bar chart canvas ─────────────────────────── */
 
@@ -118,8 +112,8 @@ function ModelConfidenceChart({ rows, height = 200 }: { rows: [string, Confidenc
   }, [draw]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} role="img" aria-label="Cascade router model distribution" style={{ width: '100%', height: '100%', display: 'block' }} />
+    <div className="dash-canvas-wrap" style={{ height }}>
+      <canvas ref={canvasRef} role="img" aria-label="Cascade router model distribution" className="dash-canvas" />
     </div>
   );
 }
@@ -207,8 +201,8 @@ export default function CascadeRouter() {
   }, [rows]);
 
   return (
-    <div style={pageStyle}>
-      {/* ═══ TOP MOSAIC ═══ */}
+    <div className="dash-page--full">
+      {/* TOP MOSAIC */}
       <Mosaic columns={5}>
         <MosaicCell label="MODELS" value={rows.length} color="rose" mono />
         <MosaicCell label="OBSERVATIONS" value={state.total_observations ?? stats.totalTrials} color="bone" mono />
@@ -217,18 +211,12 @@ export default function CascadeRouter() {
         <MosaicCell label="ROLES ASSIGNED" value={roleEntries.length} color="warning" mono />
       </Mosaic>
 
-      {/* ═══ MAIN CONTENT: 3-column layout ═══ */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 1.2fr 1fr',
-        gap: 12,
-        flex: 1,
-        minHeight: 0,
-      }}>
+      {/* MAIN CONTENT: 3-column layout */}
+      <div className="dash-grid-3col">
         {/* Model Confidence Chart */}
         <Pane
           title="MODEL CONFIDENCE"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>success rate</span>}
+          badge={<span className="dash-badge">success rate</span>}
         >
           <ModelConfidenceChart rows={rows} height={Math.max(80, rows.length * 30 + 16)} />
         </Pane>
@@ -236,30 +224,14 @@ export default function CascadeRouter() {
         {/* Model Statistics Table */}
         <Pane
           title="MODEL STATISTICS"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>detailed breakdown</span>}
+          badge={<span className="dash-badge">detailed breakdown</span>}
           flat
         >
-          <div style={{ overflow: 'auto', flex: 1 }}>
+          <div className="dash-scroll">
             {loading ? (
-              <div style={{
-                padding: 24,
-                color: 'var(--text-ghost)',
-                fontFamily: 'var(--mono)',
-                fontSize: '0.75rem',
-                textAlign: 'center',
-              }}>
-                Loading cascade router...
-              </div>
+              <div className="dash-placeholder">Loading cascade router...</div>
             ) : rows.length === 0 ? (
-              <div style={{
-                padding: 24,
-                color: 'var(--text-ghost)',
-                fontFamily: 'var(--mono)',
-                fontSize: '0.75rem',
-                textAlign: 'center',
-              }}>
-                No model stats found
-              </div>
+              <div className="dash-placeholder">No model stats found</div>
             ) : (
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
@@ -277,28 +249,19 @@ export default function CascadeRouter() {
                     return (
                       <tr
                         key={model}
-                        style={{ transition: 'background .15s' }}
-                        onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,.03)'; }}
-                        onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                        className="dash-table-row"
                       >
                         <td style={tdStyle}>{model}</td>
                         <td style={tdStyle}>
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{
-                              display: 'inline-block',
-                              width: 48,
-                              height: 4,
-                              background: 'rgba(255,255,255,.04)',
-                              borderRadius: 2,
-                              overflow: 'hidden',
-                            }}>
-                              <span style={{
-                                display: 'block',
-                                height: '100%',
-                                width: `${conf * 100}%`,
-                                background: conf >= 0.9 ? 'var(--success)' : conf >= 0.7 ? 'var(--warning)' : 'var(--rose-bright)',
-                                borderRadius: 2,
-                              }} />
+                          <span className="dash-inline--8">
+                            <span className="dash-minibar">
+                              <span
+                                className="dash-minibar__fill"
+                                style={{
+                                  width: `${conf * 100}%`,
+                                  background: conf >= 0.9 ? 'var(--success)' : conf >= 0.7 ? 'var(--warning)' : 'var(--rose-bright)',
+                                }}
+                              />
                             </span>
                             {`${(conf * 100).toFixed(1)}%`}
                           </span>
@@ -318,71 +281,30 @@ export default function CascadeRouter() {
         {/* Role Assignments */}
         <Pane
           title="ROLE ASSIGNMENTS"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{roleEntries.length} roles</span>}
+          badge={<span className="dash-badge">{roleEntries.length} roles</span>}
         >
           {loading ? (
-            <div style={{
-              padding: 24,
-              color: 'var(--text-ghost)',
-              fontFamily: 'var(--mono)',
-              fontSize: '0.75rem',
-              textAlign: 'center',
-            }}>
-              Loading...
-            </div>
+            <div className="dash-placeholder">Loading...</div>
           ) : roleEntries.length === 0 ? (
-            <div style={{
-              padding: 24,
-              color: 'var(--text-ghost)',
-              fontFamily: 'var(--mono)',
-              fontSize: '0.75rem',
-              textAlign: 'center',
-            }}>
-              No role assignments
-            </div>
+            <div className="dash-placeholder">No role assignments</div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 0, overflow: 'auto', flex: 1 }}>
+            <div className="dash-flex-col dash-scroll">
               {roleEntries.map(([role, model], i) => (
                 <div
                   key={role}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 8,
-                    padding: '5px 0',
-                    borderBottom: i < roleEntries.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
-                  }}
+                  className={`dash-role-row${i < roleEntries.length - 1 ? ' dash-row-sep' : ''}`}
                 >
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{
-                      width: 5, height: 5, borderRadius: '50%',
-                      background: roleColor(role),
-                      boxShadow: `0 0 6px ${roleColor(role)}60`,
-                      display: 'inline-block',
-                      flexShrink: 0,
-                    }} />
-                    <span style={{
-                      fontFamily: 'var(--display)',
-                      fontSize: 14,
-                      fontWeight: 500,
-                      color: 'var(--text-primary)',
-                      letterSpacing: '.01em',
-                    }}>
-                      {role}
-                    </span>
+                  <span className="dash-inline">
+                    <span
+                      className="dash-dot--5"
+                      style={{
+                        background: roleColor(role),
+                        boxShadow: `0 0 6px ${roleColor(role)}60`,
+                      }}
+                    />
+                    <span className="dash-display-sm">{role}</span>
                   </span>
-                  <span style={{
-                    fontFamily: 'var(--mono)',
-                    fontSize: 15,
-                    padding: '2px 6px',
-                    borderRadius: 3,
-                    background: 'var(--glass-bg)',
-                    border: '1px solid var(--glass-border)',
-                    color: 'var(--text-soft)',
-                    letterSpacing: '.04em',
-                    flexShrink: 0,
-                  }}>
+                  <span className="dash-tag--sm" style={{ flexShrink: 0 }}>
                     {model.replace(/^claude-/, '')}
                   </span>
                 </div>

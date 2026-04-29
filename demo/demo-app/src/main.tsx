@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route } from 'react-router';
 import ErrorBoundary from './components/ErrorBoundary';
 import AppShell from './components/AppShell';
+import { WorkspaceProvider } from './hooks/useWorkspace';
 import { bootstrapTransport } from './app/bootstrap';
 import './styles/rosedust.css';
 import './styles/animations.css';
@@ -53,6 +54,7 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
       <ErrorBoundary>
+        <WorkspaceProvider>
         <Suspense fallback={<RouteLoading />}>
           <Routes>
             <Route element={<AppShell />}>
@@ -78,6 +80,7 @@ createRoot(document.getElementById('root')!).render(
             </Route>
           </Routes>
         </Suspense>
+        </WorkspaceProvider>
       </ErrorBoundary>
     </BrowserRouter>
   </StrictMode>,
