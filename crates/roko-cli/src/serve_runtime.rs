@@ -13,8 +13,8 @@ use roko_core::config::schema::RokoConfig;
 use roko_learn::playbook::PlaybookStore;
 use roko_serve::bench::{BenchConfigOverrides, BenchStrategy};
 use roko_serve::runtime::{
-    CliRuntime, DashboardInfo, PlanExecutionResult, PlanGenerationResult, RepoInfo, RunResult,
-    RuntimeGateResult, SessionStatusInfo,
+    CliRuntime, DashboardInfo, PlanExecutionResult, PlanGenerationResult, RepoInfo,
+    RunResult, RunResultUsage, RuntimeGateResult, SessionStatusInfo,
 };
 use roko_neuro::KnowledgeStore;
 
@@ -56,10 +56,16 @@ impl RokoCliRuntime {
 impl CliRuntime for RokoCliRuntime {
     async fn run_once(&self, workdir: &Path, prompt: &str) -> anyhow::Result<RunResult> {
         let report = run_once(workdir, &self.config, prompt, None, None).await?;
+        let success = report.overall_success();
+        let usage = report.usage.map(|usage| RunResultUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+        });
+        let output_text = report.output_text;
         Ok(RunResult {
-            success: report.overall_success(),
-            output_text: report.output_text,
-            usage: None,
+            success,
+            output_text,
+            usage,
         })
     }
 
@@ -82,6 +88,10 @@ impl CliRuntime for RokoCliRuntime {
         } else {
             None
         };
+        let usage = report.usage.map(|usage| RunResultUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+        });
         let output_text = report.output_text;
 
         if let Some(gate_name) = failed_gate.as_deref() {
@@ -129,7 +139,7 @@ impl CliRuntime for RokoCliRuntime {
         Ok(RunResult {
             success,
             output_text,
-            usage: None,
+            usage,
         })
     }
 

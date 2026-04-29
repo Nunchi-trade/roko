@@ -192,6 +192,7 @@ mod tests {
             gate_verdicts: vec![("compile".into(), true), ("test".into(), true)],
             total_signals: 7,
             output_text: Some("The analysis shows **strong results**.".into()),
+            usage: None,
         }
     }
 
@@ -223,6 +224,7 @@ mod tests {
             gate_verdicts: vec![("test".into(), false)],
             total_signals: 3,
             output_text: None,
+            usage: None,
         };
         let md =
             render_markdown_transcript(&report, "Fix bug", "fixer", "implementer", "fail1234", 5.2);

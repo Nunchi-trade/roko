@@ -77,6 +77,18 @@ pub struct RunReport {
     pub total_signals: usize,
     /// Final agent output text, if it was a text payload.
     pub output_text: Option<String>,
+    /// Token usage reported by the agent dispatch, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RunUsage>,
+}
+
+/// Token usage captured from a single run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunUsage {
+    /// Input (prompt) tokens consumed.
+    pub input_tokens: u64,
+    /// Output (completion) tokens produced.
+    pub output_tokens: u64,
 }
 
 impl RunReport {
@@ -129,11 +141,8 @@ pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow
         gates: report.gate_verdicts.clone(),
         output: report.output_text.clone(),
         cost_usd: None,
-        // GAP: RunReport only carries total gate verdicts and the episode id; per-token
-        // input/output breakdown is not available in this legacy path. To populate these
-        // fields, RunReport would need to carry an AgentResult or Usage struct.
-        input_tokens: None,
-        output_tokens: None,
+        input_tokens: report.usage.map(|usage| usage.input_tokens),
+        output_tokens: report.usage.map(|usage| usage.output_tokens),
         model: None,
         duration_s: None,
         episode_id: Some(report.episode_id.clone()),
@@ -1275,6 +1284,10 @@ pub async fn run_once(
         .len()
         .await
         .map_err(|e| anyhow!("count signals: {e}"))?;
+    let usage = Some(RunUsage {
+        input_tokens: u64::from(agent_result.usage.input_tokens),
+        output_tokens: u64::from(agent_result.usage.output_tokens),
+    });
 
     Ok(RunReport {
         episode_id: episode.id.to_hex(),
@@ -1284,6 +1297,7 @@ pub async fn run_once(
         gate_verdicts: verdict_summary,
         total_signals,
         output_text: final_output_sig.body.as_text().ok().map(ToOwned::to_owned),
+        usage,
     })
 }
 
@@ -2993,6 +3007,7 @@ mod tests {
             gate_verdicts: vec![("g1".into(), true), ("g2".into(), true)],
             total_signals: 5,
             output_text: Some("done".into()),
+            usage: None,
         };
         assert!(r.overall_success());
 
@@ -3017,6 +3032,7 @@ mod tests {
             ],
             total_signals: 5,
             output_text: Some("done".into()),
+            usage: None,
         };
 
         assert_eq!(r.first_failed_gate(), Some("clippy"));
@@ -3035,6 +3051,7 @@ mod tests {
             gate_verdicts: vec![],
             total_signals: 3,
             output_text: Some("done".into()),
+            usage: None,
         };
         let token = write_shared_run(&tmp, &report).unwrap();
         assert!(

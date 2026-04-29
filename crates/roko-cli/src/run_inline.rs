@@ -202,6 +202,7 @@ mod tests {
             gate_verdicts: vec![("compile".into(), true), ("test".into(), success)],
             total_signals: 5,
             output_text: Some("Hello **world**".into()),
+            usage: None,
         }
     }
 
