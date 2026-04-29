@@ -1,11 +1,23 @@
 //! In-process agent dispatch — no HTTP intermediary required.
 //!
-//! Dispatches prompts directly via:
-//! - Claude CLI subprocess (`claude --print --output-format stream-json`)
-//! - Anthropic Messages API (`POST api.anthropic.com/v1/messages`)
-//! - OpenAI-compatible chat completions
+//! **DEPRECATED** — This module is no longer on the happy path.
 //!
-//! Returns a unified [`DispatchResult`] regardless of backend.
+//! `dispatch_prompt` and `dispatch_via_model_call_service` are deprecated.
+//! Use `ChatAgentSession` (in `chat_session.rs`) for interactive and one-shot
+//! dispatch. Use `ClaudeCliAgent` (in `roko-agent`) for plan execution.
+//!
+//! This module remains for backward compatibility. Types `DispatchResult`
+//! and `ToolOutput` may still be imported by callers. No happy path
+//! (interactive, one-shot, or plan-run) should call through it.
+//!
+//! # Migration
+//!
+//! - Interactive (`roko` no args): use `ChatAgentSession::send_turn_streaming`
+//!   (wired in R3_D01)
+//! - One-shot (`roko "prompt"`): use `ChatAgentSession::send_turn_oneshot`
+//!   (wired in R3_D02)
+//! - Plan execution (`roko plan run`): uses `ClaudeCliAgent` directly in
+//!   `orchestrate.rs`
 
 #![cfg(feature = "legacy-orchestrate")]
 
@@ -19,7 +31,17 @@ use crate::chat::extract_clean_text;
 pub use crate::dispatch_v2::{DispatchResult, ToolOutput};
 
 /// Dispatch a prompt using the detected auth method.
+///
+/// **Deprecated** — use `ChatAgentSession` from `chat_session.rs` instead.
+#[deprecated(
+    since = "0.1.0",
+    note = "Use ChatAgentSession::send_turn_oneshot or send_turn_streaming instead"
+)]
 pub async fn dispatch_prompt(auth: &AuthMethod, prompt: &str) -> Result<DispatchResult> {
+    tracing::warn!(
+        "dispatch_direct::dispatch_prompt called — this path is deprecated; \
+         use ChatAgentSession instead (see crates/roko-cli/src/chat_session.rs)"
+    );
     match auth {
         AuthMethod::ClaudeCli => dispatch_claude_cli(prompt).await,
         AuthMethod::AnthropicApi { key, model } => {
@@ -32,6 +54,24 @@ pub async fn dispatch_prompt(auth: &AuthMethod, prompt: &str) -> Result<Dispatch
         } => dispatch_openai_compat(key, base_url, model.as_deref(), prompt).await,
         AuthMethod::NeedsSetup => bail!("no auth configured"),
     }
+}
+
+/// Dispatch a prompt through ModelCallService (v2 path).
+///
+/// Uses the ModelCaller trait that WorkflowEngine uses, giving cost tracking
+/// and feedback recording for free.
+///
+/// **Deprecated** — use `ChatAgentSession` from `chat_session.rs` instead.
+#[deprecated(
+    since = "0.1.0",
+    note = "Use ChatAgentSession::send_turn_oneshot or send_turn_streaming instead"
+)]
+pub async fn dispatch_via_model_call_service(prompt: &str) -> Result<DispatchResult> {
+    tracing::warn!(
+        "dispatch_direct::dispatch_via_model_call_service called — this path is deprecated; \
+         use ChatAgentSession instead (see crates/roko-cli/src/chat_session.rs)"
+    );
+    crate::dispatch_v2::dispatch_via_model_call_service(prompt).await
 }
 
 // ---------------------------------------------------------------------------
