@@ -17792,6 +17792,7 @@ impl PlanRunner {
             model: model.to_string(),
             plan_id: plan_id.to_string(),
             task_id: task_id.to_string(),
+            // Success events use the parsed provider usage from the agent result.
             input_tokens: u64::from(result.usage.input_tokens),
             output_tokens: u64::from(result.usage.output_tokens),
             reasoning_tokens: 0,
@@ -17906,6 +17907,8 @@ impl PlanRunner {
             model: model.to_string(),
             plan_id: plan_id.to_string(),
             task_id: task_id.to_string(),
+            // Failure events have no agent result, so usage and cost remain unknown.
+            // These zero values are intentional and mean "not available", not "free".
             input_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: 0,
