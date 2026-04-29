@@ -3,6 +3,7 @@ import { useApiWithFallback } from '../../hooks/useApiWithFallback';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import CostChart from '../../components/Charts/CostChart';
+import CFactorSparkline from '../../components/Charts/CFactorSparkline';
 import BarChart from '../../components/Charts/BarChart';
 import { ThresholdGaugeRow } from '../../components/ThresholdGauge';
 import type { AdaptiveThresholdsResponse } from '../../components/ThresholdGauge';
@@ -59,6 +60,11 @@ interface EfficiencyResponse {
 interface CFactorResponse {
   composite: { overall: number; episode_count: number };
   sub_metrics: Record<string, number>;
+}
+
+interface CFactorTrendResponse {
+  trend: { start: string; samples: number; avg: number; p50: number; p95: number }[];
+  woolley?: Record<string, number[]>;
 }
 
 interface RouterResponse {
@@ -119,6 +125,7 @@ export default function CostDashboard() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [efficiency, setEfficiency] = useState<EfficiencyResponse | null>(null);
   const [cfactor, setCfactor] = useState<CFactorResponse | null>(null);
+  const [cfactorTrend, setCfactorTrend] = useState<CFactorTrendResponse | null>(null);
   const [router, setRouter] = useState<RouterResponse | null>(null);
   const [providerHealth, setProviderHealth] = useState<ProviderHealthResponse | null>(null);
   const [thresholds, setThresholds] = useState<AdaptiveThresholdsResponse | null>(null);
@@ -126,10 +133,11 @@ export default function CostDashboard() {
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const [h, e, c, r, ph, th] = await Promise.all([
+      const [h, e, c, t, r, ph, th] = await Promise.all([
         get<HealthResponse>('/api/health'),
         get<EfficiencyResponse>('/api/learn/efficiency'),
         get<CFactorResponse>('/api/metrics/c_factor'),
+        get<CFactorTrendResponse>('/api/c-factor/trend?window=24h'),
         get<RouterResponse>('/api/learn/cascade-router'),
         get<ProviderHealthResponse>('/api/learn/provider-outcomes'),
         get<AdaptiveThresholdsResponse>('/api/learn/adaptive-thresholds'),
@@ -138,6 +146,7 @@ export default function CostDashboard() {
       setHealth(h);
       setEfficiency(e);
       setCfactor(c);
+      setCfactorTrend(t);
       setRouter(r);
       setProviderHealth(ph);
       setThresholds(th);
@@ -378,6 +387,18 @@ export default function CostDashboard() {
           </Pane>
         </div>
       </div>
+
+      {/* ═══ C-FACTOR TREND ═══ */}
+      <Pane
+        title="C-FACTOR TREND"
+        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>24h window</span>}
+      >
+        <CFactorSparkline
+          trend={cfactorTrend?.trend ?? []}
+          woolley={cfactorTrend?.woolley}
+          height={320}
+        />
+      </Pane>
 
       {/* ═══ PROVIDER HEALTH ═══ */}
       <Pane
