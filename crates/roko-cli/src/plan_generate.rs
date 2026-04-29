@@ -206,6 +206,7 @@ allowed_tools = ["read_file", "grep"]
 denied_tools = []
 mcp_servers = ["filesystem"] # MCP servers this task needs
 depends_on = []
+role = "implementer"      # REQUIRED: implementer | architect | researcher | strategist | quick-reviewer | scribe
 
 # SURGICAL CONTEXT: exactly what the agent needs to read
 [task.context]
@@ -233,6 +234,21 @@ command = "cargo check -p <crate>"
 phase = "test"
 command = "cargo test -p <crate> -- <test_name>"
 ```
+
+## Role selection
+
+Every `[[task]]` MUST include a `role` field. Choose the most specific role:
+
+| Role | Use when |
+|------|----------|
+| `"implementer"` | Writing code, adding fields, modifying functions, creating files |
+| `"architect"` | Designing APIs, planning module structure, major refactors |
+| `"researcher"` | Gathering information, analyzing existing code, reading docs |
+| `"strategist"` | Decomposing requirements, planning approach, making design decisions |
+| `"scribe"` | Writing documentation, updating comments, generating markdown |
+| `"quick-reviewer"` | Code review tasks, auditing for correctness |
+
+Missing or misspelled roles will be rejected by `roko plan validate`. The `role` field is REQUIRED.
 
 ## Before generating tasks, you MUST:
 
