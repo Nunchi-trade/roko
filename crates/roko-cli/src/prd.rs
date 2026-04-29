@@ -688,7 +688,9 @@ async fn maybe_generate_plan_after_promote(
         slug.to_string(),
         prd_path.to_path_buf(),
         auto_execute,
-        |slug, path, dry_run| async move { generate_plan_from_prd(&slug, &path, dry_run).await },
+        |slug, path, dry_run| async move {
+            generate_plan_from_prd(&slug, &path, dry_run, None).await
+        },
     )
     .await
 }
@@ -769,7 +771,18 @@ fn auto_plan_enabled(workdir: &Path) -> Result<bool> {
 
 /// Generate implementation plans from a published PRD file.
 pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) -> Result<PathBuf> {
-    generate_plan_from_prd_with_failure_context(slug, prd_path, dry_run, None).await
+    generate_plan_from_prd_with_failure_context(slug, prd_path, dry_run, None, None).await
+}
+
+/// Generate implementation plans from a published PRD file using an
+/// explicit resolved model key from the caller.
+pub async fn generate_plan_from_prd_with_model(
+    slug: &str,
+    prd_path: &Path,
+    dry_run: bool,
+    model: Option<&str>,
+) -> Result<PathBuf> {
+    generate_plan_from_prd_with_failure_context(slug, prd_path, dry_run, None, model).await
 }
 
 /// Generate implementation plans from a published PRD file with optional
@@ -779,6 +792,7 @@ pub async fn generate_plan_from_prd_with_failure_context(
     prd_path: &Path,
     dry_run: bool,
     failure_context: Option<&str>,
+    model: Option<&str>,
 ) -> Result<PathBuf> {
     let workdir = prd_workdir(prd_path)?;
     let result = async {
@@ -823,14 +837,14 @@ pub async fn generate_plan_from_prd_with_failure_context(
         let task_id = format!("prd:plan:{slug}");
         let exit_code = run_agent_logged(
             AgentExecOpts {
-                prompt: &task_prompt,
-                workdir: workdir_ref,
-                model: resolved.config.agent.model.as_deref(),
-                effort: Some(resolved.config.agent.effort.as_str()),
-                system_prompt: Some(&system),
-                resume_session: None,
-                env_vars: &resolved.config.agent.env,
-                role: Some("strategist"),
+            prompt: &task_prompt,
+            workdir: workdir_ref,
+            model: model.or_else(|| resolved.config.agent.model.as_deref()),
+            effort: Some(resolved.config.agent.effort.as_str()),
+            system_prompt: Some(&system),
+            resume_session: None,
+            env_vars: &resolved.config.agent.env,
+            role: Some("strategist"),
             },
             AgentExecEpisode {
                 task_kind: "prd-plan-generate",
@@ -849,7 +863,7 @@ pub async fn generate_plan_from_prd_with_failure_context(
         if !dry_run {
             regenerate_old_format_plans(
                 workdir_ref,
-                resolved.config.agent.model.as_deref(),
+                model.or_else(|| resolved.config.agent.model.as_deref()),
                 Some(resolved.config.agent.effort.as_str()),
                 &resolved.config.agent.env,
                 &plans_root,

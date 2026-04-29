@@ -405,13 +405,11 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             })
         }
         PlanCmd::Generate { source, from_file } => {
-            use roko_cli::agent_config::{load_gateway_env, model_from_config};
+            use roko_cli::agent_config::load_gateway_env;
             use roko_cli::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
             let gw = load_gateway_env(&workdir);
-            let model = model_from_config(&workdir);
-            let model_ref = model.as_deref();
 
             // Get the source content: either from a file or inline text
             let source_text = if let Some(ref path) = from_file {
@@ -444,6 +442,12 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 &source_text,
                 source_type,
             );
+            let model_key = resolve_effective_model_key(
+                &workdir,
+                cli.model.clone(),
+                Some("strategist"),
+                "plan generate",
+            )?;
 
             let task_prompt = format!(
                 "Read the source below and generate implementation plan directories under .roko/plans/. \
@@ -457,7 +461,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 AgentExecOpts {
                     prompt: &task_prompt,
                     workdir: &workdir,
-                    model: model_ref,
+                    model: Some(model_key.as_str()),
                     effort: Some("high"),
                     system_prompt: Some(&system),
                     resume_session: None,
@@ -472,7 +476,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             .await
         }
         PlanCmd::Regenerate { plan_dir, dry_run } => {
-            use roko_cli::agent_config::{load_gateway_env, model_from_config};
+            use roko_cli::agent_config::load_gateway_env;
             use roko_cli::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
@@ -487,6 +491,12 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let source_path = find_plan_source_document(&plan_dir)?;
             let source_content = std::fs::read_to_string(&source_path)
                 .with_context(|| format!("read {}", source_path.display()))?;
+            let model_key = resolve_effective_model_key(
+                &workdir,
+                cli.model.clone(),
+                Some("strategist"),
+                "plan regenerate",
+            )?;
 
             if dry_run {
                 let system = roko_cli::plan_generate::build_generation_prompt(
@@ -514,8 +524,6 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
 
             let gw = load_gateway_env(&workdir);
-            let model = model_from_config(&workdir);
-            let model_ref = model.as_deref();
 
             let system =
                 roko_cli::plan_generate::build_generation_prompt(&workdir, &source_content, "prd");
@@ -539,7 +547,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 AgentExecOpts {
                     prompt: &task_prompt,
                     workdir: &workdir,
-                    model: model_ref,
+                    model: Some(model_key.as_str()),
                     effort: Some("high"),
                     system_prompt: Some(&system),
                     resume_session: None,
@@ -610,6 +618,25 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
     }
+}
+
+fn resolve_effective_model_key(
+    workdir: &Path,
+    cli_model: Option<String>,
+    role: Option<&str>,
+    context: &str,
+) -> Result<String> {
+    let config = crate::load_roko_config(workdir)?;
+    let selection = roko_cli::model_selection::resolve_effective_model(
+        cli_model,
+        None,
+        role,
+        None,
+        &config,
+    )
+    .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
+    eprintln!("[{context}] effective selection: {}", selection.reason);
+    Ok(selection.effective_model_key)
 }
 
 /// Parse and display a plan directory without executing anything.
