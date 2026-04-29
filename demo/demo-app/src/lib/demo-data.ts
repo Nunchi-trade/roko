@@ -31,6 +31,28 @@ export const DEMO_AGENTS = [
   { id: 'a5', label: 'auditor', domain_tags: ['security'], status: 'registered', model: 'claude-opus', capabilities: ['security', 'audit', 'review'], reputation: 95, performance: { completed_tasks: 67, failed_tasks: 0, active_tasks: 0, reputation: 95 }, costs: { cumulative_usd: 0.21 }, last_seen_at: Math.floor(Date.now() / 1000) - 1800 },
 ];
 
+// Agent topology (force-directed graph data)
+export const DEMO_AGENT_TOPOLOGY = {
+  nodes: [
+    { agent_id: 'a1', role: 'implementer', endpoints: ['/message', '/tools'] },
+    { agent_id: 'a2', role: 'implementer', endpoints: ['/message', '/tools'] },
+    { agent_id: 'a3', role: 'implementer', endpoints: ['/message', '/tools', '/stream'] },
+    { agent_id: 'a4', role: 'researcher', endpoints: ['/message', '/research'] },
+    { agent_id: 'a5', role: 'reviewer', endpoints: ['/message', '/review'] },
+  ],
+  edges: [
+    { from: 'a1', to: 'a4', weight: 5 },
+    { from: 'a1', to: 'a5', weight: 3 },
+    { from: 'a2', to: 'a4', weight: 4 },
+    { from: 'a2', to: 'a5', weight: 2 },
+    { from: 'a3', to: 'a4', weight: 6 },
+    { from: 'a3', to: 'a1', weight: 2 },
+    { from: 'a4', to: 'a5', weight: 3 },
+    { from: 'a5', to: 'a1', weight: 4 },
+    { from: 'a5', to: 'a2', weight: 3 },
+  ],
+};
+
 // 18 knowledge entries across domains
 export const DEMO_KNOWLEDGE_ENTRIES = [
   { id: 'k01', domain: 'gate', citations: 6, label: 'Gate Pipeline' },

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useApiWithFallback } from '../../hooks/useApiWithFallback';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
@@ -64,17 +64,382 @@ function fmtLastSeen(a: Agent): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+/* ── Topology types ─────────────────────────────────────── */
+
+interface TopoNode {
+  agent_id: string;
+  role: string;
+  endpoints: string[];
+}
+
+interface TopoEdge {
+  from: string;
+  to: string;
+  weight?: number;
+}
+
+interface TopoData {
+  nodes: TopoNode[];
+  edges: TopoEdge[];
+}
+
+interface SimNode {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+}
+
+interface SimState {
+  positions: SimNode[];
+  frame: number;
+  width: number;
+  height: number;
+}
+
+const EMPTY_TOPOLOGY: TopoData = { nodes: [], edges: [] };
+
+const ROLE_COLORS: Record<string, string> = {
+  implementer: '#C8B890',
+  researcher: '#9A8AB8',
+  reviewer: '#8A9C86',
+  planner: '#D8A878',
+  auditor: '#AA7088',
+};
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const clean = hex.replace('#', '');
+  const normalized = clean.length === 3
+    ? clean.split('').map((part) => part + part).join('')
+    : clean;
+  return {
+    r: Number.parseInt(normalized.slice(0, 2), 16),
+    g: Number.parseInt(normalized.slice(2, 4), 16),
+    b: Number.parseInt(normalized.slice(4, 6), 16),
+  };
+}
+
+function rgbaFromHex(hex: string, alpha: number): string {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function sameTopology(a: TopoData, b: TopoData): boolean {
+  if (a === b) return true;
+  if (a.nodes.length !== b.nodes.length || a.edges.length !== b.edges.length) return false;
+
+  for (let i = 0; i < a.nodes.length; i++) {
+    const left = a.nodes[i];
+    const right = b.nodes[i];
+    if (
+      left.agent_id !== right.agent_id ||
+      left.role !== right.role ||
+      left.endpoints.length !== right.endpoints.length
+    ) {
+      return false;
+    }
+
+    for (let j = 0; j < left.endpoints.length; j++) {
+      if (left.endpoints[j] !== right.endpoints[j]) return false;
+    }
+  }
+
+  for (let i = 0; i < a.edges.length; i++) {
+    const left = a.edges[i];
+    const right = b.edges[i];
+    if (
+      left.from !== right.from ||
+      left.to !== right.to ||
+      (left.weight ?? 1) !== (right.weight ?? 1)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/* ── Force-directed graph canvas ────────────────────────── */
+
+function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const simRef = useRef<SimState | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const runIdRef = useRef(0);
+
+  const stopAnimation = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+  }, []);
+
+  const draw = useCallback(function draw(runId = runIdRef.current) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const w = rect.width;
+    const h = rect.height;
+    const cx = w / 2;
+    const cy = h / 2;
+    const nodeRadius = 14;
+    const margin = 36;
+
+    if (data.nodes.length === 0) {
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = 'rgba(9, 11, 15, 0.76)';
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = 'rgba(194, 184, 201, 0.7)';
+      ctx.font = '10px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('topology unavailable', cx, cy);
+      return;
+    }
+
+    const nodeIndex = new Map<string, number>();
+    data.nodes.forEach((node, index) => nodeIndex.set(node.agent_id, index));
+
+    if (
+      !simRef.current ||
+      simRef.current.positions.length !== data.nodes.length ||
+      simRef.current.width !== w ||
+      simRef.current.height !== h
+    ) {
+      simRef.current = {
+        width: w,
+        height: h,
+        frame: 0,
+        positions: data.nodes.map((_, index) => {
+          const angle = (index / data.nodes.length) * Math.PI * 2 - Math.PI / 2;
+          const radius = Math.min(w, h) * 0.26;
+          return {
+            x: cx + Math.cos(angle) * radius,
+            y: cy + Math.sin(angle) * radius,
+            vx: 0,
+            vy: 0,
+          };
+        }),
+      };
+    }
+
+    const sim = simRef.current;
+    if (!sim) return;
+
+    const renderFrame = function renderFrame() {
+      if (runId !== runIdRef.current) return;
+
+      const positions = sim.positions;
+
+      for (let tick = 0; tick < 3; tick++) {
+        const damping = 0.86;
+        const springLength = Math.max(70, Math.min(w, h) * 0.25);
+        const springStrengthBase = 0.0036;
+        const chargeStrength = 2200;
+        const centerPull = 0.0018;
+        const maxSpeed = 7.5;
+
+        for (const point of positions) {
+          point.vx *= damping;
+          point.vy *= damping;
+        }
+
+        for (let i = 0; i < positions.length; i++) {
+          for (let j = i + 1; j < positions.length; j++) {
+            let dx = positions[j].x - positions[i].x;
+            let dy = positions[j].y - positions[i].y;
+            const distSq = Math.max(dx * dx + dy * dy, 36);
+            const dist = Math.sqrt(distSq);
+            const force = chargeStrength / distSq;
+            const fx = (dx / dist) * force;
+            const fy = (dy / dist) * force;
+
+            positions[i].vx -= fx;
+            positions[i].vy -= fy;
+            positions[j].vx += fx;
+            positions[j].vy += fy;
+
+            const minDist = nodeRadius * 2.1;
+            if (dist < minDist) {
+              const overlap = minDist - dist;
+              const push = overlap * 0.025;
+              positions[i].vx -= (dx / dist) * push;
+              positions[i].vy -= (dy / dist) * push;
+              positions[j].vx += (dx / dist) * push;
+              positions[j].vy += (dy / dist) * push;
+            }
+          }
+        }
+
+        for (const edge of data.edges) {
+          const sourceIndex = nodeIndex.get(edge.from);
+          const targetIndex = nodeIndex.get(edge.to);
+          if (sourceIndex === undefined || targetIndex === undefined) continue;
+
+          const source = positions[sourceIndex];
+          const target = positions[targetIndex];
+          let dx = target.x - source.x;
+          let dy = target.y - source.y;
+          const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+          const weight = edge.weight ?? 1;
+          const targetLength = Math.max(58, springLength - weight * 4);
+          const stiffness = springStrengthBase + weight * 0.00045;
+          const force = (dist - targetLength) * stiffness;
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+
+          source.vx += fx;
+          source.vy += fy;
+          target.vx -= fx;
+          target.vy -= fy;
+        }
+
+        for (const point of positions) {
+          point.vx += (cx - point.x) * centerPull;
+          point.vy += (cy - point.y) * centerPull;
+
+          point.vx = Math.max(-maxSpeed, Math.min(maxSpeed, point.vx));
+          point.vy = Math.max(-maxSpeed, Math.min(maxSpeed, point.vy));
+
+          point.x = Math.max(margin, Math.min(w - margin, point.x + point.vx));
+          point.y = Math.max(margin, Math.min(h - margin, point.y + point.vy));
+        }
+      }
+
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = 'rgba(9, 11, 15, 0.78)';
+      ctx.fillRect(0, 0, w, h);
+
+      const background = ctx.createRadialGradient(cx, cy, 18, cx, cy, Math.max(w, h) * 0.75);
+      background.addColorStop(0, 'rgba(220, 165, 189, 0.09)');
+      background.addColorStop(0.6, 'rgba(138, 156, 134, 0.04)');
+      background.addColorStop(1, 'rgba(9, 11, 15, 0)');
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.save();
+      ctx.lineCap = 'round';
+      for (const edge of data.edges) {
+        const sourceIndex = nodeIndex.get(edge.from);
+        const targetIndex = nodeIndex.get(edge.to);
+        if (sourceIndex === undefined || targetIndex === undefined) continue;
+
+        const source = positions[sourceIndex];
+        const target = positions[targetIndex];
+        const weight = edge.weight ?? 1;
+        const alpha = Math.min(0.42, 0.09 + weight * 0.05);
+
+        ctx.beginPath();
+        ctx.moveTo(source.x, source.y);
+        ctx.lineTo(target.x, target.y);
+        ctx.strokeStyle = `rgba(200, 184, 144, ${alpha})`;
+        ctx.lineWidth = 0.7 + weight * 0.28;
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      positions.forEach((point, index) => {
+        const node = data.nodes[index];
+        const color = ROLE_COLORS[node.role] ?? ROLE_COLORS.auditor;
+        const { r, g, b } = hexToRgb(color);
+
+        const halo = ctx.createRadialGradient(point.x, point.y, 2, point.x, point.y, nodeRadius + 12);
+        halo.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.36)`);
+        halo.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, nodeRadius + 12, 0, Math.PI * 2);
+        ctx.fillStyle = halo;
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, nodeRadius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.24)`;
+        ctx.fill();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        ctx.font = '8px "JetBrains Mono", monospace';
+        ctx.fillStyle = rgbaFromHex(color, 0.95);
+        ctx.fillText(node.role, point.x, point.y - nodeRadius - 11);
+
+        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.fillStyle = 'rgba(232, 226, 234, 0.92)';
+        ctx.fillText(node.agent_id, point.x, point.y + nodeRadius + 12);
+      });
+
+      sim.frame += 1;
+      if (sim.frame < 120 && runId === runIdRef.current) {
+        rafRef.current = requestAnimationFrame(renderFrame);
+      } else if (runId === runIdRef.current) {
+        rafRef.current = null;
+      }
+    };
+
+    renderFrame();
+  }, [data]);
+
+  useEffect(() => {
+    stopAnimation();
+    runIdRef.current += 1;
+    simRef.current = null;
+    draw(runIdRef.current);
+
+    const ro = new ResizeObserver(() => {
+      stopAnimation();
+      runIdRef.current += 1;
+      simRef.current = null;
+      draw(runIdRef.current);
+    });
+
+    if (canvasRef.current) ro.observe(canvasRef.current);
+
+    return () => {
+      runIdRef.current += 1;
+      stopAnimation();
+      ro.disconnect();
+    };
+  }, [draw, stopAnimation]);
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
+      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+    </div>
+  );
+}
+
 /* ── Component ───────────────────────────────────────────── */
 
 export default function AgentFleet() {
   const { get } = useApiWithFallback();
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [topology, setTopology] = useState<TopoData>(EMPTY_TOPOLOGY);
 
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
       const data = await get<Agent[]>('/api/managed-agents');
       if (!cancelled) setAgents(Array.isArray(data) ? data : []);
+
+      const topo = await get<TopoData>('/api/agents/topology');
+      if (!cancelled) {
+        setTopology((prev) => (sameTopology(prev, topo) ? prev : topo));
+      }
     };
     poll();
     const id = setInterval(poll, 5_000);
@@ -98,6 +463,14 @@ export default function AgentFleet() {
         <MosaicCell label="AVG REPUTATION" value={avgRep} color="warning" mono />
         <MosaicCell label="TASKS DONE" value={totalTasks || 827} color="rose" mono />
       </Mosaic>
+
+      {/* ═══ TOPOLOGY GRAPH ═══ */}
+      <Pane
+        title="AGENT TOPOLOGY"
+        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>force-directed</span>}
+      >
+        <TopologyGraph data={topology} height={280} />
+      </Pane>
 
       {/* ═══ AGENT GRID ═══ */}
       <div style={{
