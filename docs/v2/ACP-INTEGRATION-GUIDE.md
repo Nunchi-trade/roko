@@ -15,8 +15,8 @@ Roko implements ACP spec version **0.12.2**, protocol version **1**.
 
 The server speaks JSON-RPC 2.0 over newline-delimited stdio — one JSON object per
 line, with a trailing `\n` after every message. Stdout is the protocol channel.
-All diagnostics and traces go to a log file (`.roko/acp.log` by default). Never
-read or write any non-protocol content to stdout when ACP is active.
+All diagnostics and traces go to `.roko/acp.log` by default. Never read or write
+any non-protocol content to stdout when ACP is active.
 
 ### Supported editors
 
@@ -31,14 +31,14 @@ ACP. Known working targets:
 
 ### Capabilities advertised by Roko
 
-| Capability | Value |
-|---|---|
-| `loadSession` | `true` — persisted sessions can be resumed |
-| `promptCapabilities.image` | `false` |
-| `promptCapabilities.audio` | `false` |
-| `promptCapabilities.embeddedContext` | `true` |
-| `mcpCapabilities.http` | `true` |
-| `mcpCapabilities.sse` | `true` |
+| Capability | Value | Notes |
+|---|---|---|
+| `loadSession` | `true` | Persisted sessions can be resumed |
+| `promptCapabilities.image` | `false` | Image input not supported |
+| `promptCapabilities.audio` | `false` | Audio input not supported |
+| `promptCapabilities.embeddedContext` | `true` | Resource/diff blocks supported |
+| `mcpCapabilities.http` | `true` | HTTP MCP servers supported |
+| `mcpCapabilities.sse` | `true` | SSE MCP servers supported |
 
 ---
 
@@ -54,116 +54,88 @@ roko acp
 roko acp --workdir /path/to/project
 
 # With explicit config file
-roko acp --workdir /path/to/project --config /path/to/roko.toml
+roko acp --config /path/to/roko.toml
 
-# Override log file location
-roko acp --workdir /path/to/project --log-file /tmp/roko-acp.log
-
-# Named profile (matches a section in roko.toml)
-roko acp --profile staging
+# With custom log file
+roko acp --log-file /tmp/roko-acp.log
 ```
 
-The process exits when stdin reaches EOF. Exit code 0 means clean shutdown;
-non-zero means a fatal transport or initialization error.
+The `AcpConfig` struct governs all server-side paths:
 
-### Connecting from an editor plugin
+```rust
+pub struct AcpConfig {
+    pub workdir: PathBuf,       // default: current directory
+    pub profile: String,        // default: "default"
+    pub config_path: Option<PathBuf>,   // default: None (loads workdir/roko.toml)
+    pub log_file: PathBuf,      // default: .roko/acp.log
+}
+```
 
-Your editor plugin should:
+On startup the server:
 
-1. Spawn `roko acp --workdir <project-root>` as a child process.
-2. Send one JSON object per line on stdin.
-3. Read one JSON object per line from stdout.
-4. Send `initialize` first, before any other message.
-5. Call `session/new` to get a session ID for the workspace.
-6. Use `session/prompt` to drive the agent. Handle `session/update` notifications
-   while the prompt is in flight.
-
----
-
-## Protocol
+1. Initialises file logging at `log_file` (no ansi, level `roko_acp=debug`).
+2. Loads `workdir/roko.toml` (or `config_path` if explicit). Falls back to
+   defaults if the file is missing.
+3. Garbage-collects persisted sessions older than 7 days from `.roko/sessions/`.
+4. Enters the read-dispatch loop on stdin.
 
 ### Wire format
 
-Every message is a complete JSON object on a single line terminated by `\n`.
-Messages may arrive interleaved (notifications can come between a request and its
-response). Parse each line independently.
+One JSON object per line. The server sends and receives three message shapes:
 
 ```
-{...}\n
-{...}\n
+// Request (client → server)
+{"jsonrpc":"2.0","id":1,"method":"session/new","params":{...}}\n
+
+// Response (server → client)
+{"jsonrpc":"2.0","id":1,"result":{...}}\n
+{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"..."}}\n
+
+// Notification (either direction, no id)
+{"jsonrpc":"2.0","method":"session/update","params":{...}}\n
 ```
 
-### Message types
-
-**Request** (client → server, expects a response):
-
-```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}
-```
-
-**Response** (server → client, success):
-
-```json
-{"jsonrpc":"2.0","id":1,"result":{...}}
-```
-
-**Response** (server → client, failure):
-
-```json
-{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"..."}}
-```
-
-**Notification** (either direction, no response expected):
-
-```json
-{"jsonrpc":"2.0","method":"session/update","params":{...}}
-```
-
-The `id` field is a number or string. Null is only used in parse-level error
-responses when no id could be parsed.
+The `id` field can be a number (`u64`) or a string. Null id is used internally
+for parse-level failures only.
 
 ---
 
-## Session Lifecycle
+## Error Codes
 
-The complete lifecycle for a single coding session looks like this:
+| Code | Constant | Meaning |
+|---|---|---|
+| `-32700` | `PARSE_ERROR` | Message could not be parsed as valid JSON |
+| `-32600` | `INVALID_REQUEST` | Not a valid JSON-RPC 2.0 object |
+| `-32601` | `METHOD_NOT_FOUND` | Method name is not implemented |
+| `-32602` | `INVALID_PARAMS` | Params failed deserialization for the method |
+| `-32603` | `INTERNAL_ERROR` | Unexpected server-side error |
+| `-32000` | `SESSION_NOT_FOUND` | `session_id` does not exist in memory or on disk |
+| `-32001` | `SESSION_BUSY` | A prompt is already in-flight for this session |
 
-```
-Client                                  Server
-  |                                       |
-  |--- initialize --->                    |
-  |<-- initialize result ---              |
-  |                                       |
-  |--- session/new --->                   |
-  |<-- session/new result ---             |
-  |<-- session/update (commands) ---      |
-  |                                       |
-  |--- session/prompt --->                |
-  |<-- session/update (tool_call) ---     |  (knowledge card)
-  |<-- session/update (chunk) ---         |  (streaming tokens)
-  |<-- session/update (tool_call) ---     |  (tool invocations)
-  |<-- session/update (plan) ---          |  (progress plan)
-  |<-- session/prompt result ---          |
-  |                                       |
-  |--- session/prompt --->                |  (follow-up turn)
-  |   ...                                 |
-  |                                       |
-  |--- session/cancel (notification) -->  |  (optional, any time during prompt)
-  |<-- session/prompt result (cancelled)  |
-  |                                       |
-  |   [stdin closed / process exits]      |
+All error responses have this shape:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32001,
+    "message": "session 'sess_abc' already has an active prompt",
+    "data": null
+  }
+}
 ```
 
 ---
 
-## Request Types
+## Methods
 
 ### `initialize`
 
-Sent once, before any other request. Negotiates protocol version and exchanges
-capabilities.
+**Direction:** Client → Server
+**Required:** Must be sent first before any other request.
 
-**Request params:**
+#### Request
 
 ```json
 {
@@ -175,23 +147,48 @@ capabilities.
     "clientCapabilities": {
       "fs": {
         "readTextFile": true,
-        "writeTextFile": true
+        "writeTextFile": false
       },
       "terminal": true,
       "mcpServers": true
     },
     "clientInfo": {
-      "name": "my-editor-plugin",
-      "version": "0.1.0",
+      "name": "my-editor",
+      "version": "1.0.0",
       "title": "My Editor"
     }
   }
 }
 ```
 
-`clientCapabilities` is optional. Omit `clientInfo` for anonymous clients.
+#### Params type
 
-**Response:**
+```rust
+pub struct InitializeParams {
+    pub protocol_version: u32,
+    pub client_capabilities: ClientCapabilities,  // default: all false
+    pub client_info: Option<ClientInfo>,
+}
+
+pub struct ClientCapabilities {
+    pub fs: Option<FsCapabilities>,
+    pub terminal: Option<bool>,
+    pub mcp_servers: Option<bool>,
+}
+
+pub struct FsCapabilities {
+    pub read_text_file: bool,
+    pub write_text_file: bool,
+}
+
+pub struct ClientInfo {
+    pub name: String,
+    pub version: Option<String>,
+    pub title: Option<String>,
+}
+```
+
+#### Response
 
 ```json
 {
@@ -221,15 +218,37 @@ capabilities.
 }
 ```
 
+#### Result type
+
+```rust
+pub struct InitializeResult {
+    pub protocol_version: u32,
+    pub agent_capabilities: AgentCapabilities,
+    pub auth_methods: Vec<serde_json::Value>,  // always empty currently
+    pub agent_info: Option<AgentInfo>,
+}
+
+pub struct AgentCapabilities {
+    pub load_session: bool,
+    pub prompt_capabilities: PromptCapabilities,
+    pub mcp_capabilities: McpCapabilities,
+}
+
+pub struct AgentInfo {
+    pub name: String,      // always "roko"
+    pub version: String,   // from CARGO_PKG_VERSION
+    pub title: Option<String>,  // always "Roko"
+}
+```
+
 ---
 
 ### `session/new`
 
-Creates a new ACP session. Returns a session ID used in all subsequent calls.
-After a successful `session/new`, the server immediately sends a
-`session/update` notification containing the available slash commands.
+Creates a new conversation session. After the response, the server immediately
+sends a `session/update` notification carrying the available slash commands.
 
-**Request params:**
+#### Request
 
 ```json
 {
@@ -237,24 +256,24 @@ After a successful `session/new`, the server immediately sends a
   "id": 2,
   "method": "session/new",
   "params": {
-    "sessionName": "my-workspace",
+    "sessionName": "My coding session",
     "clientCapabilities": {
       "terminal": true
     },
     "mcpServers": [
       {
-        "name": "code-intel",
+        "name": "filesystem",
         "transport": {
           "type": "stdio",
-          "command": "roko",
-          "args": ["mcp-code"]
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/"]
         }
       },
       {
-        "name": "remote-api",
+        "name": "my-api",
         "transport": {
           "type": "http",
-          "url": "http://localhost:9000"
+          "url": "http://localhost:3000/mcp"
         }
       }
     ]
@@ -262,10 +281,28 @@ After a successful `session/new`, the server immediately sends a
 }
 ```
 
-All fields are optional. `sessionName` is displayed in session lists.
-`mcpServers` attaches MCP tools to the session.
+#### Params type
 
-**Response:**
+```rust
+pub struct SessionNewParams {
+    pub session_name: Option<String>,
+    pub client_capabilities: Option<ClientCapabilities>,
+    pub mcp_servers: Vec<McpServerConfig>,   // default: []
+}
+
+pub struct McpServerConfig {
+    pub name: String,
+    pub transport: McpTransport,
+}
+
+// Tag: "type"
+pub enum McpTransport {
+    Http { url: String },
+    Stdio { command: String, args: Vec<String> },
+}
+```
+
+#### Response
 
 ```json
 {
@@ -276,222 +313,277 @@ All fields are optional. `sessionName` is displayed in session lists.
     "modes": {
       "currentModeId": "code",
       "availableModes": [
-        {
-          "id": "code",
-          "name": "Code",
-          "description": "Implement and edit code directly."
-        },
-        {
-          "id": "plan",
-          "name": "Plan",
-          "description": "Focus on planning before execution."
-        },
-        {
-          "id": "research",
-          "name": "Research",
-          "description": "Gather context and analyze options."
-        }
+        {"id": "code",     "name": "Code",     "description": "Implement and edit code directly"},
+        {"id": "plan",     "name": "Plan",     "description": "Plan without writing code"},
+        {"id": "research", "name": "Research", "description": "Gather context and analyze"}
       ]
     },
-    "configOptions": [
-      {
-        "id": "model",
-        "name": "Model",
-        "type": "select",
-        "category": "agent",
-        "currentValue": "sonnet",
-        "description": "Language model",
-        "options": [
-          {"value": "sonnet", "name": "sonnet (anthropic)", "description": "claude-sonnet-4-6"}
-        ]
-      },
-      {
-        "id": "workflow",
-        "name": "Workflow",
-        "type": "select",
-        "category": "execution",
-        "currentValue": "none",
-        "description": "Pipeline workflow for prompts",
-        "options": [
-          {"value": "none", "name": "None", "description": "Single agent, no pipeline"},
-          {"value": "express", "name": "Express", "description": "Implement → gate → commit (fastest)"},
-          {"value": "standard", "name": "Standard", "description": "Implement → gate → review → commit"},
-          {"value": "full", "name": "Full", "description": "Strategy → implement → gate → multi-review → commit"},
-          {"value": "auto", "name": "Auto", "description": "Select pipeline based on complexity"}
-        ]
-      }
-    ]
+    "configOptions": [ ... ]
   }
 }
 ```
 
-Session IDs always start with `sess_` followed by a UUID.
-
-**Follow-up notification (sent immediately after response):**
+Immediately after the response, the server sends:
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "session/update",
   "params": {
-    "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000",
+    "sessionId": "sess_...",
     "update": {
       "sessionUpdate": "available_commands_update",
       "availableCommands": [
-        {"name": "status", "description": "Workspace status: signals, agents, runs, knowledge"},
-        {"name": "research", "description": "Deep research a topic with citations (Perplexity)", "input": {"hint": "topic to research"}},
-        ...
+        {"name": "/help",     "description": "Show available slash commands"},
+        {"name": "/status",   "description": "Show active workflow status"},
+        {"name": "/cancel",   "description": "Cancel the active prompt"},
+        {"name": "/mode",     "description": "Show or set the agent mode", "input": {"hint": "code | plan | research"}},
+        {"name": "/workflow", "description": "Show or set the workflow pipeline"},
+        {"name": "/model",    "description": "Show or set the active model"},
+        {"name": "/clear",    "description": "Clear conversation history"}
       ]
     }
   }
 }
 ```
 
----
+#### Result type
 
-### `session/prompt`
+```rust
+pub struct SessionNewResult {
+    pub session_id: String,
+    pub modes: Option<ModesInfo>,
+    pub config_options: Option<Vec<ConfigOption>>,
+}
 
-Sends a user message to the agent. This is the main interaction method.
+pub struct ModesInfo {
+    pub current_mode_id: String,
+    pub available_modes: Vec<ModeInfo>,
+}
 
-During execution the server sends `session/update` notifications on stdout.
-The `session/prompt` response arrives after all notifications for that turn
-are complete.
-
-**Request params:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "session/prompt",
-  "params": {
-    "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000",
-    "prompt": [
-      {
-        "type": "text",
-        "text": "Add input validation to the login form"
-      }
-    ],
-    "includeContext": true
-  }
+pub struct ModeInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
 }
 ```
 
-**Prompt content blocks:**
-
-The `prompt` array can contain multiple blocks:
-
-```json
-[
-  {"type": "text", "text": "Review this file for security issues:"},
-  {"type": "resource", "resource": {"type": "file", "uri": "file:///path/to/auth.rs"}},
-  {"type": "diff", "path": "src/main.rs", "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n..."}
-]
-```
-
-- `text` — plain text instruction
-- `resource` — file reference (the server reads the file at `uri`)
-- `diff` — unified diff for the agent to review
-
-`includeContext` tells the server to automatically include workspace context
-(current file, open buffers) in the agent's context window. Set `false` to send
-only what you explicitly provide in `prompt`.
-
-**Response:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "stopReason": "end_turn"
-  }
-}
-```
-
-`stopReason` values:
-
-| Value | Meaning |
-|---|---|
-| `end_turn` | Agent completed normally |
-| `max_tokens` | Hit token limit |
-| `max_turn_requests` | Hit max turns limit |
-| `refusal` | Agent refused to answer |
-| `cancelled` | Cancelled via `session/cancel` |
+The session ID has the prefix `sess_` followed by a UUID v4.
 
 ---
 
 ### `session/list`
 
-Returns all known sessions (in-memory and persisted on disk).
+Lists all sessions known to the server: in-memory plus any persisted in
+`.roko/sessions/` that are not already loaded.
 
-**Request:**
-
-```json
-{"jsonrpc":"2.0","id":4,"method":"session/list","params":{}}
-```
-
-**Response:**
+#### Request
 
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 4,
+  "id": 3,
+  "method": "session/list"
+}
+```
+
+#### Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
   "result": {
     "sessions": [
       {
-        "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000",
-        "sessionName": "my-workspace",
-        "createdAt": "2026-04-29T10:30:00Z"
-      },
-      {
-        "sessionId": "sess_661f9511-f30c-52e5-b827-557766551111",
-        "sessionName": null,
-        "createdAt": "2026-04-28T14:22:00Z"
+        "sessionId": "sess_abc123",
+        "sessionName": "My coding session",
+        "createdAt": "2025-01-15T10:30:00Z"
       }
     ]
   }
 }
 ```
 
-Sessions are sorted by creation time, oldest first.
+#### Result type
+
+```rust
+pub struct SessionListResult {
+    pub sessions: Vec<SessionInfo>,
+}
+
+pub struct SessionInfo {
+    pub session_id: String,
+    pub session_name: Option<String>,
+    pub created_at: String,   // RFC 3339
+}
+```
+
+Sessions are sorted ascending by `created_at`, then by `session_id`.
 
 ---
 
 ### `session/load`
 
-Loads a persisted session back into memory. Returns the same shape as
-`session/new`. Use this to resume a previous session after restart.
+Loads an existing session (from memory or disk) and returns its state in
+`SessionNewResult` shape. Enables session resume across editor restarts.
 
-**Request:**
+#### Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "session/load",
+  "params": {
+    "sessionId": "sess_abc123"
+  }
+}
+```
+
+#### Response
+
+Same shape as `session/new` result. Returns `-32000 SESSION_NOT_FOUND` if the
+session is not in memory and not on disk.
+
+#### On-disk persistence
+
+After every successful `session/prompt`, the server writes the session to:
+
+```
+.roko/sessions/{session_id}.json
+```
+
+This includes the full `AcpSession` struct:
+
+- `session_id`, `session_name`, `created_at`
+- `config_state` (current model, effort, workflow, etc.)
+- `conversation_history` (up to 40 turns / 64,000 chars)
+- `mcp_servers` attachment list
+- `config_options` list
+- `active_run` (the last `WorkflowRun` if a pipeline was used)
+
+Sessions 7 days old or older are GC'd at server startup.
+
+---
+
+### `session/prompt`
+
+Sends a user prompt to a session. This is the primary method. It blocks until
+the agent completes or is cancelled, streaming `session/update` notifications
+throughout.
+
+#### Request
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 5,
-  "method": "session/load",
+  "method": "session/prompt",
   "params": {
-    "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000"
+    "sessionId": "sess_abc123",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Add error handling to the login function"
+      },
+      {
+        "type": "resource",
+        "resource": {
+          "type": "file",
+          "uri": "file:///path/to/project/src/auth/login.rs"
+        }
+      }
+    ],
+    "includeContext": false
   }
 }
 ```
 
-**Response:** Same shape as `session/new` result, including `modes` and
-`configOptions`.
+#### Params type
 
-**Error:** `-32000` (`SESSION_NOT_FOUND`) if the session does not exist in memory
-or on disk.
+```rust
+pub struct SessionPromptParams {
+    pub session_id: String,
+    pub prompt: Vec<ContentBlock>,
+    pub include_context: bool,   // default: false
+}
+
+// Tag: "type" (snake_case)
+pub enum ContentBlock {
+    Text { text: String },
+    Resource { resource: ResourceRef },
+    Diff { path: String, diff: String },
+}
+
+// Tag: "type" (snake_case)
+pub enum ResourceRef {
+    File { uri: String },
+}
+```
+
+When `include_context` is `true`, the server resolves all `@`-mentions and
+file references in the prompt into inline file content injected into the system
+prompt. When `false`, only explicit `resource` blocks are resolved.
+
+The server returns an error with code `-32001 SESSION_BUSY` if a prompt is
+already in-flight.
+
+#### Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "result": {
+    "stopReason": "end_turn"
+  }
+}
+```
+
+```rust
+pub struct SessionPromptResult {
+    pub stop_reason: StopReason,
+}
+
+pub enum StopReason {
+    EndTurn,          // Agent completed normally
+    MaxTokens,        // Model hit token limit
+    MaxTurnRequests,  // Max turn loop exceeded
+    Refusal,          // Agent refused to answer
+    Cancelled,        // session/cancel notification was received
+}
+```
+
+All `session/update` notifications are streamed before the response arrives.
+The editor should treat the response as the completion signal.
+
+#### Slash commands
+
+If the prompt text starts with `/`, it is dispatched as a slash command instead
+of forwarded to the model:
+
+| Command | Effect |
+|---|---|
+| `/help` | Streams a text chunk listing available commands |
+| `/status` | Streams the active `WorkflowRun` status summary |
+| `/cancel` | Cancels the active prompt |
+| `/mode [code\|plan\|research]` | Gets or sets the agent mode; clears history on change |
+| `/workflow [none\|express\|standard\|full\|auto]` | Gets or sets pipeline workflow |
+| `/model [key]` | Gets or sets the active model key |
+| `/clear` | Clears conversation history |
+
+Slash commands produce `TokenChunk` events (plain text) and do not write
+episodes or query the knowledge store.
 
 ---
 
 ### `session/config/update`
 
-Updates a single session configuration option. The server applies the change
-immediately and returns the full updated set of options.
+Updates a single config option for a session. Also accepted as the legacy alias
+`session/set_config_option`.
 
-Also accepted as `session/set_config_option` (legacy alias).
-
-**Request:**
+#### Request
 
 ```json
 {
@@ -499,45 +591,52 @@ Also accepted as `session/set_config_option` (legacy alias).
   "id": 6,
   "method": "session/config/update",
   "params": {
-    "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000",
-    "optionId": "workflow",
-    "newValue": "standard"
+    "sessionId": "sess_abc123",
+    "optionId": "model",
+    "newValue": "sonnet"
   }
 }
 ```
 
-**Response:**
+#### Params type
+
+```rust
+pub struct ConfigUpdateParams {
+    pub session_id: String,
+    pub option_id: String,
+    pub new_value: serde_json::Value,
+}
+```
+
+#### Response
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 6,
   "result": {
-    "configOptions": [
-      {
-        "id": "workflow",
-        "name": "Workflow",
-        "type": "select",
-        "category": "execution",
-        "currentValue": "standard",
-        ...
-      },
-      ...
-    ]
+    "configOptions": [ ... ]
   }
 }
 ```
 
-See the [Configuration](#configuration) section for all option IDs and values.
+```rust
+pub struct ConfigUpdateResult {
+    pub config_options: Vec<ConfigOption>,
+}
+```
+
+Returns the full updated options list so the editor can redraw its settings UI.
 
 ---
 
 ### `session/set_mode`
 
-Legacy method. Changes the agent interaction mode. Switching modes clears
-conversation history.
+Legacy method to change the interaction mode. Prefer `session/config/update`
+with `optionId: "workflow"` for pipeline control. Mode change clears conversation
+history.
 
-**Request:**
+#### Request
 
 ```json
 {
@@ -545,931 +644,1092 @@ conversation history.
   "id": 7,
   "method": "session/set_mode",
   "params": {
-    "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000",
+    "sessionId": "sess_abc123",
     "modeId": "plan"
   }
 }
 ```
 
-**Response:** Same shape as `session/config/update` — returns updated
-`configOptions`.
+#### Params type
 
-Mode IDs: `code`, `plan`, `research`.
+```rust
+pub struct SessionSetModeParams {
+    pub session_id: String,
+    pub mode_id: String,   // "code" | "plan" | "research"
+}
+```
+
+#### Response
+
+Same shape as `session/config/update` result.
 
 ---
 
-### `session/cancel` (notification)
+## Notifications
 
-Sent by the client to cancel the in-flight `session/prompt` request. This is a
-notification — no response is expected or sent.
+### `session/cancel` (client → server)
+
+Cooperative cancellation. Sent as a notification (no `id`), so no response is
+expected. During an active `session/prompt`, the server reads incoming messages
+concurrently; it processes `session/cancel` immediately and sets the cancel
+token. The `session/prompt` response will then arrive with
+`stopReason: "cancelled"`.
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "session/cancel",
   "params": {
-    "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000"
+    "sessionId": "sess_abc123"
   }
 }
 ```
 
-The server signals the running cognitive task to stop. The pending
-`session/prompt` response will arrive with `stopReason: "cancelled"` (or
-`end_turn` if the task finished before the cancel was processed).
+```rust
+pub struct SessionCancelParams {
+    pub session_id: String,
+}
+```
 
-You can send `session/cancel` at any point while a `session/prompt` is in flight.
-The server reads from stdin concurrently during streaming, so this notification
-is processed without waiting for the current turn to finish.
+Cancellation is cooperative. The server's cancel token is an `Arc<AtomicBool>`
+paired with a `Notify`. On `cancel()`, the flag is set and all waiters are
+notified. The streaming loop polls it with `tokio::select!` on every iteration.
 
 ---
 
-## Session Update Notifications
+### `session/update` (server → client)
 
-While a `session/prompt` is executing, the server sends `session/update`
-notifications for every significant event. Each notification looks like:
+The primary streaming notification. Sent repeatedly during `session/prompt`
+execution. All variants are discriminated by the `sessionUpdate` field.
+
+The notification envelope:
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "session/update",
   "params": {
-    "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000",
+    "sessionId": "sess_abc123",
     "update": { ... }
   }
 }
 ```
 
-The `update` object has a `sessionUpdate` discriminant field that identifies the
-variant.
+---
+
+## Session Update Variants (`SessionUpdate`)
+
+All variants share the tag field `sessionUpdate` (snake_case).
 
 ### `agent_message_chunk`
 
-Streaming text output from the agent. Concatenate these to build the full
-assistant response.
+A streamed text token from the agent.
 
 ```json
 {
   "sessionUpdate": "agent_message_chunk",
   "content": {
     "type": "text",
-    "text": "I'll add input validation to the login "
+    "text": "Here is the fix for the login function:\n\n"
   }
 }
 ```
 
-```json
-{
-  "sessionUpdate": "agent_message_chunk",
-  "content": {
-    "type": "text",
-    "text": "form by checking..."
-  }
+```rust
+SessionUpdate::AgentMessageChunk {
+    content: ContentBlock,
+    _meta: Option<serde_json::Value>,   // reserved, always null
 }
 ```
+
+Accumulate these in order to reconstruct the full response. The assistant text
+is also stored in conversation history (truncated to 10,240 bytes per turn).
 
 ### `agent_thought_chunk`
 
-Internal reasoning from the model (extended thinking mode). Render separately
-from message chunks, typically collapsed or hidden by default.
+Internal reasoning/thinking text from the model. Not part of the visible
+response.
 
 ```json
 {
   "sessionUpdate": "agent_thought_chunk",
   "content": {
     "type": "text",
-    "text": "The user wants validation. I should check what fields exist..."
+    "text": "I need to look at the current error handling..."
   }
+}
+```
+
+```rust
+SessionUpdate::AgentThoughtChunk {
+    content: ContentBlock,
 }
 ```
 
 ### `tool_call`
 
-A new tool card has been created. The tool is pending or in progress.
+A new tool call card has started. The editor should render this as an expandable
+card showing the tool name and status.
 
 ```json
 {
   "sessionUpdate": "tool_call",
-  "toolCallId": "gate-compile",
-  "title": "Gate: compile",
-  "kind": "other",
-  "status": "pending",
+  "toolCallId": "toolu_01abc",
+  "title": "Edit src/auth/login.rs",
+  "kind": "edit",
+  "status": "in_progress",
   "content": []
 }
 ```
 
-Tool call kinds: `edit`, `create`, `delete`, `terminal`, `other`.
+```rust
+SessionUpdate::ToolCall {
+    tool_call_id: String,
+    title: String,
+    kind: ToolCallKind,
+    status: ToolCallStatus,
+    content: Vec<ContentBlock>,
+}
 
-Tool call statuses: `pending`, `in_progress`, `completed`, `failed`.
+pub enum ToolCallKind {
+    Edit,
+    Create,
+    Delete,
+    Terminal,
+    Other,
+}
 
-Common tool call IDs you will see:
-
-| `toolCallId` | What it means |
-|---|---|
-| `gate-compile` | `cargo build` gate running |
-| `gate-test` | `cargo test` gate running |
-| `gate-clippy` | `cargo clippy` gate running |
-| `gate-fmt` | `cargo fmt` gate running |
-| `<uuid>` (agent ID) | An agent is running (implementer, reviewer, etc.) |
-| `knowledge` | Prior knowledge lookup |
-| `provenance` | Source provenance lookup |
+pub enum ToolCallStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+}
+```
 
 ### `tool_call_update`
 
-Status or content update for an existing tool card.
+An update to an existing tool call card. Match by `toolCallId`.
 
 ```json
 {
   "sessionUpdate": "tool_call_update",
-  "toolCallId": "gate-compile",
+  "toolCallId": "toolu_01abc",
   "status": "completed",
   "content": [
-    {"type": "text", "text": "compile passed"}
+    {
+      "type": "diff",
+      "path": "src/auth/login.rs",
+      "diff": "@@ -10,6 +10,10 @@\n..."
+    }
   ]
 }
 ```
 
-```json
-{
-  "sessionUpdate": "tool_call_update",
-  "toolCallId": "gate-test",
-  "status": "failed",
-  "content": [
-    {"type": "text", "text": "test failed\nerror[E0001]: ..."}
-  ]
+```rust
+SessionUpdate::ToolCallUpdate {
+    tool_call_id: String,
+    status: ToolCallStatus,
+    content: Vec<ContentBlock>,
 }
 ```
+
+The `content` field can include `diff` blocks for file edits, showing the actual
+unified diff applied.
 
 ### `plan`
 
-A structured plan update. Emitted when a workflow pipeline produces a plan of
-work. Render this as a progress list in your UI.
+A structured plan update. Sent when the agent produces a multi-step action plan.
 
 ```json
 {
   "sessionUpdate": "plan",
   "entries": [
-    {
-      "content": "Analyze login form fields",
-      "priority": "high",
-      "status": "completed"
-    },
-    {
-      "content": "Add validation for email field",
-      "priority": "high",
-      "status": "in_progress"
-    },
-    {
-      "content": "Add validation for password field",
-      "priority": "medium",
-      "status": "pending"
-    }
+    {"content": "Read the current login function",       "priority": "high",   "status": "completed"},
+    {"content": "Add try/catch around the DB call",      "priority": "high",   "status": "in_progress"},
+    {"content": "Add tests for the error path",          "priority": "medium", "status": "pending"}
   ]
 }
 ```
 
-Plan entry priorities: `high`, `medium`, `low`.
-Plan entry statuses: `pending`, `in_progress`, `completed`.
+```rust
+SessionUpdate::Plan {
+    entries: Vec<PlanEntry>,
+}
+
+pub struct PlanEntry {
+    pub content: String,
+    pub priority: Priority,   // high | medium | low
+    pub status: PlanStatus,   // pending | in_progress | completed
+}
+```
 
 ### `available_commands_update`
 
-Sent once after `session/new` completes, listing all available slash commands
-for the session.
+Sent after `session/new` and whenever the command set changes.
 
 ```json
 {
   "sessionUpdate": "available_commands_update",
   "availableCommands": [
-    {
-      "name": "status",
-      "description": "Workspace status: signals, agents, runs, knowledge"
-    },
-    {
-      "name": "research",
-      "description": "Deep research a topic with citations (Perplexity)",
-      "input": {"hint": "topic to research"}
-    }
+    {"name": "/help",   "description": "Show available slash commands"},
+    {"name": "/status", "description": "Show active workflow status"},
+    {"name": "/mode",   "description": "Show or set the agent mode",
+     "input": {"hint": "code | plan | research"}}
   ]
 }
 ```
 
-Use this list to drive slash-command autocompletion in your editor.
+```rust
+SessionUpdate::AvailableCommandsUpdate {
+    available_commands: Vec<SlashCommand>,
+}
+
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+    pub input: Option<CommandInput>,
+}
+
+pub struct CommandInput {
+    pub hint: Option<String>,
+}
+```
 
 ### `config_option_update`
 
-Sent when config options change (e.g., after model routing selects a different
-model automatically).
+Sent when config options change mid-session.
 
 ```json
 {
   "sessionUpdate": "config_option_update",
-  "configOptions": [
-    {
-      "id": "model",
-      "name": "Model",
-      "type": "select",
-      "category": "agent",
-      "currentValue": "opus",
-      ...
-    }
-  ]
+  "configOptions": [ ... ]
+}
+```
+
+```rust
+SessionUpdate::ConfigOptionUpdate {
+    config_options: Vec<ConfigOption>,
 }
 ```
 
 ### `usage_update`
 
-Token usage and cost information.
+Token and cost update, emitted after model calls complete.
 
 ```json
 {
   "sessionUpdate": "usage_update",
-  "used": 4821,
+  "used": 4250,
   "size": 200000,
   "cost": {
-    "amount": 0.0241,
+    "amount": 0.0085,
     "currency": "USD"
   }
 }
 ```
 
-`used` is tokens consumed, `size` is the context window capacity.
+```rust
+SessionUpdate::UsageUpdate {
+    used: u64,
+    size: u64,
+    cost: Option<CostInfo>,
+}
+
+pub struct CostInfo {
+    pub amount: f64,
+    pub currency: String,   // ISO code, e.g. "USD"
+}
+```
 
 ### `session_info_update`
 
-Session metadata update (session name change, etc.).
+Metadata update for the session itself.
 
 ```json
 {
   "sessionUpdate": "session_info_update",
-  "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000",
-  "sessionName": "login-validation-work"
+  "sessionId": "sess_abc123",
+  "sessionName": "New session name"
+}
+```
+
+```rust
+SessionUpdate::SessionInfoUpdate {
+    session_id: String,
+    session_name: Option<String>,
 }
 ```
 
 ---
 
-## CognitiveEvent to SessionUpdate Mapping
+## Session Config Options
 
-Internally, the server runs cognitive tasks that emit `CognitiveEvent` values.
-These are mapped to `session/update` notifications for the editor:
+The session exposes a fixed set of configurable options. The current values
+come from `roko.toml` at session creation time. All options are returned in
+`session/new`, `session/load`, and `session/config/update` responses.
 
-| CognitiveEvent | SessionUpdate variant |
-|---|---|
-| `TokenChunk(text)` | `agent_message_chunk` with `text` content |
-| `ThinkingChunk(text)` | `agent_thought_chunk` with `text` content |
-| `ToolCallStart { id, title, kind }` | `tool_call` with `status: pending` |
-| `ToolCallComplete { id, status, content }` | `tool_call_update` |
-| `PlanUpdate { entries }` | `plan` |
-| `Complete { stop_reason, usage }` | (triggers final `session/prompt` response) |
-| `MaxTokens` | (triggers response with `stopReason: max_tokens`) |
+### Option IDs and valid values
 
-The `RuntimeEvent` adapter additionally maps workflow engine events:
+| `optionId` | Category | Type | Valid values |
+|---|---|---|---|
+| `model` | `agent` | select | Keys from `[models.*]` in `roko.toml` |
+| `effort` | `agent` | select | `low`, `medium`, `high`, `max` |
+| `temperament` | `agent` | select | `conservative`, `balanced`, `aggressive`, `exploratory` |
+| `routing_mode` | `routing` | select | `auto_override`, `manual` |
+| `clippy` | `gates` | select | `on`, `off` |
+| `tests` | `gates` | select | `on`, `off` |
+| `workflow` | `execution` | select | `none`, `express`, `standard`, `full`, `auto` |
+| `review_strictness` | `execution` | select | `none`, `quick`, `standard`, `thorough` |
+| `max_iterations` | `execution` | select | `"1"`, `"2"`, `"3"` |
 
-| RuntimeEvent | CognitiveEvent |
+### ConfigOption shape
+
+```rust
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    pub option_type: ConfigOptionType,   // select | toggle
+    pub category: String,
+    pub current_value: serde_json::Value,
+    pub description: Option<String>,
+    pub options: Option<Vec<ConfigOptionValue>>,
+}
+
+pub struct ConfigOptionValue {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+```
+
+### `SessionConfigState` (server-side)
+
+All option changes update this struct, which is persisted with the session:
+
+```rust
+pub struct SessionConfigState {
+    pub agent_mode: String,       // "code" | "plan" | "research"
+    pub model: String,            // model key from roko.toml
+    pub effort: String,           // "low" | "medium" | "high" | "max"
+    pub temperament: String,      // "conservative" | "balanced" | "aggressive" | "exploratory"
+    pub routing_mode: String,     // "auto_override" | "manual"
+    pub clippy_enabled: bool,
+    pub tests_enabled: bool,
+    pub workflow: String,         // "none" | "express" | "standard" | "full" | "auto"
+    pub review_strictness: String, // "none" | "quick" | "standard" | "thorough"
+    pub max_iterations: u32,      // 1–3
+}
+```
+
+Defaults (from `roko.toml`, falling back to these if unconfigured):
+
+- `agent_mode`: `"code"`
+- `effort`: `"medium"`
+- `temperament`: `"balanced"`
+- `routing_mode`: `"auto_override"`
+- `clippy_enabled`: `true`
+- `tests_enabled`: `true`
+- `workflow`: `"none"`
+- `review_strictness`: `"none"`
+- `max_iterations`: `2`
+
+---
+
+## CognitiveEvent Enum
+
+`CognitiveEvent` is the internal event type produced by the cognitive loop and
+consumed by the stream bridge. Understanding it helps trace how model output
+maps to `session/update` notifications.
+
+```rust
+pub enum CognitiveEvent {
+    /// A streamed agent-visible text chunk (maps to AgentMessageChunk)
+    TokenChunk(String),
+
+    /// A streamed internal reasoning chunk (maps to AgentThoughtChunk)
+    ThinkingChunk(String),
+
+    /// A tool call has started (maps to ToolCall)
+    ToolCallStart {
+        tool_call_id: String,
+        title: String,
+        kind: ToolCallKind,
+    },
+
+    /// A tool call has finished (maps to ToolCallUpdate)
+    ToolCallComplete {
+        tool_call_id: String,
+        status: ToolCallStatus,
+        content: Vec<ContentBlock>,
+    },
+
+    /// A plan update with structured entries (maps to Plan)
+    PlanUpdate {
+        entries: Vec<PlanEntry>,
+    },
+
+    /// Prompt execution completed normally (terminal)
+    Complete {
+        stop_reason: StopReason,
+        usage: Option<UsageInfo>,
+    },
+
+    /// Token budget exhausted (terminal)
+    MaxTokens,
+}
+```
+
+The streaming loop uses `tokio::select!` with three arms:
+1. Cancel token — returns `Cancelled` stop reason.
+2. Event channel receive — processes cognitive events.
+3. Inbound transport read — handles `session/cancel` notifications mid-stream.
+
+The loop terminates when a `Complete` or `MaxTokens` event arrives, or when
+the event channel closes without a terminal event (treated as `EndTurn`).
+
+### AcpAdapter: RuntimeEvent → CognitiveEvent
+
+For workflow pipeline dispatches, `AcpAdapter` implements `EventConsumer` and
+translates `RuntimeEvent` from the workflow engine into `CognitiveEvent`:
+
+| `RuntimeEvent` | `CognitiveEvent` |
 |---|---|
 | `AgentOutput { chunk }` | `TokenChunk(chunk)` |
-| `AgentSpawned { agent_id, role }` | `ToolCallStart` with `kind: other` |
-| `AgentCompleted { agent_id, output }` | `ToolCallComplete` with `status: completed` |
-| `AgentFailed { agent_id, error }` | `ToolCallComplete` with `status: failed` |
-| `GateStarted { gate_name }` | `ToolCallStart` with `kind: other` |
-| `GatePassed { gate_name }` | `ToolCallComplete` with `status: completed` |
-| `GateFailed { gate_name, output }` | `ToolCallComplete` with `status: failed` |
+| `AgentSpawned { agent_id, role }` | `ToolCallStart { title: "Agent: {role}", kind: Other }` |
+| `AgentCompleted { agent_id, output }` | `ToolCallComplete { status: Completed, content: [text] }` |
+| `AgentFailed { agent_id, error }` | `ToolCallComplete { status: Failed, content: [text] }` |
+| `GateStarted { gate_name }` | `ToolCallStart { title: "Gate: {gate_name}", kind: Other }` |
+| `GatePassed { gate_name }` | `ToolCallComplete { status: Completed, content: ["{gate_name} passed"] }` |
+| `GateFailed { gate_name, output }` | `ToolCallComplete { status: Failed, content: [output] }` |
 | `PhaseTransition { from, to }` | `TokenChunk("[Phase: {from} -> {to}]\n")` |
-| `WorkflowCompleted { outcome }` | `Complete` |
+| `WorkflowCompleted { outcome: Cancelled }` | `Complete { stop_reason: Cancelled }` |
+| `WorkflowCompleted { outcome: Success/Halted }` | `Complete { stop_reason: EndTurn }` |
+| `WorkflowStarted`, `FeedbackRecorded`, `StateCheckpointed` | (ignored) |
+
+The adapter filters by `run_id` to avoid receiving events from concurrent runs.
 
 ---
 
-## Configuration
+## Pipeline State Machine
 
-Every session has a `SessionConfigState` that controls model selection,
-workflow pipelines, gates, and agent behavior. Config options are returned in
-`session/new` and updated with `session/config/update`.
+When `workflow` is set to anything other than `"none"`, a `PipelineState`
+is created and drives the multi-agent execution loop.
 
-### Option reference
+### `PipelinePhase` states
 
-**Category: `agent`**
+```rust
+pub enum PipelinePhase {
+    Pending,        // Created, not started
+    Strategizing,   // Strategist agent analysing the prompt
+    Implementing,   // Implementer agent writing code
+    AutoFixing,     // Auto-fixer agent patching gate failures
+    Gating,         // Gates (compile, test, clippy) running
+    Reviewing,      // Reviewer agent(s) checking the diff
+    Committing,     // Creating a git commit
+    Complete,       // Terminal: pipeline succeeded
+    Halted { reason: String },  // Terminal: timeout, budget, or max iterations exceeded
+    Cancelled,      // Terminal: user cancelled
+}
+```
 
-| `optionId` | Type | Values | Default | Description |
-|---|---|---|---|---|
-| `model` | `select` | Keys from `[models.*]` in `roko.toml` | First available | Language model to use |
-| `effort` | `select` | `low`, `medium`, `high`, `max` | `medium` | Agent reasoning depth |
-| `temperament` | `select` | `conservative`, `balanced`, `aggressive`, `exploratory` | `balanced` | Risk appetite |
+Terminal states: `Complete`, `Halted { .. }`, `Cancelled`.
 
-**Category: `routing`**
+### `WorkflowTemplate` and phases run
 
-| `optionId` | Type | Values | Default | Description |
-|---|---|---|---|---|
-| `routing_mode` | `select` | `auto_override`, `manual` | `auto_override` | Model routing strategy |
+```rust
+pub enum WorkflowTemplate {
+    Express,   // Implement → Gate → Commit
+    Standard,  // Implement → Gate → Review → Commit
+    Full,      // Strategy → Implement → Gate → Review → Commit
+}
+```
 
-`auto_override` lets the cascade router pick the best model based on task
-complexity and past performance. `manual` always uses the selected model.
+Auto-selection heuristics (used when `workflow = "auto"`):
 
-**Category: `gates`**
+- `Express`: prompt contains `fix`, `typo`, `rename`, `update`, or `bump`
+  AND word count < 15.
+- `Full`: prompt contains `files`, `modules`, `system`, `architecture`, or
+  `refactor`, OR word count > 50.
+- `Standard`: everything else.
 
-| `optionId` | Type | Values | Default | Description |
-|---|---|---|---|---|
-| `clippy` | `select` | `on`, `off` | `on` | Run `cargo clippy` after changes |
-| `tests` | `select` | `on`, `off` | `on` | Run `cargo test` after changes |
+### State transitions
 
-**Category: `execution`**
+```
+Pending ──Start──► Strategizing (Full)
+Pending ──Start──► Implementing (Express, Standard)
 
-| `optionId` | Type | Values | Default | Description |
-|---|---|---|---|---|
-| `workflow` | `select` | `none`, `express`, `standard`, `full`, `auto` | `none` | Pipeline workflow |
-| `review_strictness` | `select` | `none`, `quick`, `standard`, `thorough` | `none` | Review depth |
-| `max_iterations` | `select` | `1`, `2`, `3` | `2` | Max retry iterations on failure |
+Strategizing ──StrategyComplete──► Implementing
+Strategizing ──StrategySkipped──► Implementing
 
-### Example: switch to express workflow
+Implementing ──AgentCompleted──► Gating
+Implementing ──AgentFailed──► Implementing (retry, if iterations remain)
+Implementing ──AgentFailed──► Halted (no iterations left)
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 10,
-  "method": "session/config/update",
-  "params": {
-    "sessionId": "sess_550e8400-e29b-41d4-a716-446655440000",
-    "optionId": "workflow",
-    "newValue": "express"
-  }
+AutoFixing ──AgentCompleted──► Gating
+AutoFixing ──AgentFailed──► Implementing (retry with gate+autofix context)
+AutoFixing ──AgentFailed──► Halted (no iterations left)
+
+Gating ──GatesPassed──► Reviewing (Standard, Full)
+Gating ──GatesPassed──► Committing (Express)
+Gating ──GateFailed──► AutoFixing (if iterations remain)
+Gating ──GateFailed──► Halted (no iterations left)
+
+Reviewing ──ReviewApproved──► Committing
+Reviewing ──ReviewRevise──► Implementing (retry with review feedback)
+Reviewing ──ReviewRevise──► Committing (no iterations left: accept with caveats)
+
+Committing ──CommitDone──► Complete
+
+Any ──UserCancel──► Cancelled
+Any ──Timeout──► Halted
+Any ──BudgetExceeded──► Halted
+```
+
+### `PipelineConfig`
+
+The runner receives this configuration per-dispatch:
+
+```rust
+pub struct PipelineConfig {
+    pub template: WorkflowTemplate,
+    pub max_iterations: u32,     // from session config_state.max_iterations (1–3)
+    pub clippy_enabled: bool,
+    pub tests_enabled: bool,
+    pub review_strictness: String,  // "none" | "quick" | "standard" | "thorough"
+}
+```
+
+### `WorkflowRun`
+
+A `WorkflowRun` wraps `PipelineState` with timing and cost metadata. It is
+stored as `session.active_run` after each pipeline execution:
+
+```rust
+pub struct WorkflowRun {
+    pub run_id: String,          // "run_{uuid}"
+    pub pipeline: PipelineState,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub total_cost_usd: f64,
+    pub total_tokens: u64,
+    pub agents_spawned: u32,
+}
+```
+
+### Gate error classification
+
+When a gate fails, the runner classifies the error for targeted auto-fix context:
+
+```rust
+enum GateErrorType {
+    CompileError { file: String, line: u32, message: String },
+    TestFailure  { test_name: String, expected: Option<String>, actual: Option<String> },
+    ClippyWarning { lint: String, location: String },
+    RuntimePanic  { message: String },
+    Unknown,
+}
+```
+
+Gate results are also expressed as `GateResult` in `workflow.rs`:
+
+```rust
+pub struct GateResult {
+    pub gate: String,        // "compile" | "test" | "clippy" | "fmt"
+    pub passed: bool,
+    pub output: String,
+    pub duration_ms: u64,
+}
+```
+
+And review findings as:
+
+```rust
+pub struct ReviewFinding {
+    pub severity: String,    // "major" | "minor" | "nit"
+    pub description: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
 }
 ```
 
 ---
 
-## Workflow Templates
+## Session Lifecycle
 
-When `workflow` is set to anything other than `none`, the server runs a
-multi-phase pipeline instead of a single agent dispatch.
-
-### Express (`express`)
-
-Fastest path. Suitable for small focused changes.
+### Full message sequence
 
 ```
-Implement → Gate (compile + test + clippy) → Commit
+Client                                     Server
+  │                                           │
+  │──initialize ──────────────────────────► │
+  │◄── result: InitializeResult ──────────── │
+  │                                           │
+  │──session/new ──────────────────────────► │
+  │◄── result: SessionNewResult ──────────── │
+  │◄── notification: session/update ───────── │  (available_commands_update)
+  │                                           │
+  │──session/config/update ───────────────► │  (set workflow = "standard")
+  │◄── result: ConfigUpdateResult ─────────── │
+  │                                           │
+  │──session/prompt ───────────────────────► │
+  │◄── notification: session/update ───────── │  (tool_call: knowledge card)
+  │◄── notification: session/update ───────── │  (tool_call: Agent: implementer — in_progress)
+  │◄── notification: session/update ───────── │  (agent_message_chunk: "...")
+  │◄── notification: session/update ───────── │  (tool_call_update: Agent — completed)
+  │◄── notification: session/update ───────── │  (tool_call: Gate: compile — in_progress)
+  │◄── notification: session/update ───────── │  (tool_call_update: Gate: compile — completed)
+  │◄── notification: session/update ───────── │  (tool_call: Agent: reviewer — in_progress)
+  │◄── notification: session/update ───────── │  (tool_call_update: Agent: reviewer — completed)
+  │◄── notification: session/update ───────── │  (token_chunk: commit message)
+  │◄── notification: session/update ───────── │  (usage_update)
+  │◄── result: SessionPromptResult ────────── │  (stopReason: "end_turn")
+  │                                           │
+  │──session/cancel (notification) ────────► │  (if user cancels mid-prompt)
+  │                                           │
+  │──session/list ─────────────────────────► │
+  │◄── result: SessionListResult ─────────── │
+  │                                           │
+  │──session/load ─────────────────────────► │
+  │◄── result: SessionNewResult ──────────── │
+  │                                           │
+  EOF (stdin close)                           │ server shuts down gracefully
 ```
 
-- No strategist phase
-- No review phase
-- Single agent does the work
-- Gates validate before commit
+### Conversation history
 
-### Standard (`standard`)
+The server maintains in-session multi-turn history:
 
-Balanced quality/speed. Good for feature additions and bug fixes.
+- Max turns: 40
+- Max total characters: 64,000
+- Oldest turns dropped first (FIFO) when either limit is exceeded
+- History is cleared when the mode changes via `session/set_mode`
+- Assistant response text is truncated to 10,240 bytes before storage
 
-```
-Implement → Gate → Review → Commit
-```
+For CLI-based providers (Claude CLI), history is serialised as XML:
 
-- No strategist phase
-- Single review pass before commit
-- If review finds issues, implementation retries (up to `max_iterations`)
-
-### Full (`full`)
-
-Highest quality. Suitable for complex, cross-file changes.
-
-```
-Strategy → Implement → Gate → Multi-review → Commit
+```xml
+<conversation_history>
+<user>
+First user message
+</user>
+<assistant>
+First assistant response
+</assistant>
+</conversation_history>
 ```
 
-- Strategist agent analyzes the prompt and produces a brief
-- Implementation receives the brief as context
-- Review can request revisions (up to `max_iterations`)
+For API-based providers, history becomes the standard messages array:
 
-### Auto (`auto`)
+```json
+[
+  {"role": "system", "content": "...system prompt..."},
+  {"role": "user",   "content": "First user message"},
+  {"role": "assistant", "content": "First assistant response"},
+  {"role": "user",   "content": "Current prompt"}
+]
+```
 
-The server selects Express, Standard, or Full automatically based on prompt
-characteristics:
+### Busy state
 
-- **Express**: prompt contains "fix", "typo", "rename", "update", "bump" and is
-  fewer than 15 words
-- **Full**: prompt contains "files", "modules", "system", "architecture",
-  "refactor", or is more than 50 words
-- **Standard**: everything else
+A session allows only one in-flight prompt at a time. The `busy` flag is an
+`Arc<AtomicBool>`. On `session/prompt` arrival:
 
-### Pipeline phases
+1. Check `busy` — if true, return `-32001 SESSION_BUSY`.
+2. Reset the cancel token (a new `CancelToken` is created).
+3. Set `busy = true`.
+4. Run the cognitive task.
+5. Set `busy = false` (even on error/cancel).
+6. Persist the session to disk.
 
-| Phase | Description |
+---
+
+## Knowledge Integration (roko-neuro)
+
+Before every non-slash-command `session/prompt`, the server runs two parallel
+knowledge lookups:
+
+### 1. roko-neuro knowledge store
+
+```rust
+KnowledgeStore::for_workdir(&workdir).query_hits(&prompt_text, 5)
+```
+
+Returns up to 5 `KnowledgeQueryHit` entries ranked by `total_score`:
+
+```rust
+pub struct KnowledgeQueryHit {
+    pub entry: KnowledgeEntry,
+    pub total_score: f64,
+    pub breakdown: KnowledgeQueryBreakdown,
+}
+
+pub struct KnowledgeEntry {
+    pub id: String,
+    pub kind: KnowledgeKind,     // see below
+    pub content: String,
+    pub confidence: f64,
+    pub tier: KnowledgeTier,     // see below
+    pub created_at: DateTime<Utc>,
+    // ...
+}
+
+pub struct KnowledgeQueryBreakdown {
+    pub keyword_score: f64,
+    pub effective_confidence: f64,
+    pub recency_factor: f64,
+    pub emotional_boost: f64,
+    pub hdc_similarity: Option<f64>,
+}
+```
+
+Knowledge tiers (shown as single-letter labels):
+
+| `KnowledgeTier` | Label | Meaning |
+|---|---|---|
+| `Persistent` | `P` | Long-lived, high-confidence facts |
+| `Consolidated` | `C` | Distilled from working memory |
+| `Working` | `W` | Recent session knowledge |
+| `Transient` | `T` | Ephemeral, not yet validated |
+
+Knowledge kinds:
+
+| `KnowledgeKind` | Label |
 |---|---|
-| `Pending` | Created but not started |
-| `Strategizing` | Strategist agent analyzing the prompt |
-| `Implementing` | Implementer agent writing code |
-| `AutoFixing` | Auto-fixer agent patching gate failures |
-| `Gating` | Gates (compile, test, clippy) running |
-| `Reviewing` | Reviewer agent analyzing changes |
-| `Committing` | Creating the commit |
-| `Complete` | Success |
-| `Halted` | Stopped due to timeout, budget, or too many failures |
-| `Cancelled` | Cancelled by user |
+| `Insight` | `insight` |
+| `Heuristic` | `heuristic` |
+| `AntiKnowledge` | `anti-pattern` |
+| `Warning` | `warning` |
+| `CausalLink` | `causal` |
+| `StrategyFragment` | `strategy` |
+
+### 2. Playbook store (roko-learn)
+
+```rust
+PlaybookStore::new(workdir.join(".roko/learn/playbooks"))
+    .relevant(&prompt_text, 3)
+    .await
+```
+
+Returns up to 3 relevant `Playbook` entries. A `Playbook` records a
+successful multi-step task pattern:
+
+```rust
+pub struct Playbook {
+    pub name: String,
+    pub goal: String,
+    pub steps: Vec<PlaybookStep>,
+    pub success_count: u32,
+    pub failure_count: u32,
+}
+
+pub struct PlaybookStep {
+    pub index: u32,
+    pub description: String,
+    pub action_kind: String,        // "edit_file" | "run_command" | etc.
+    pub expected_signals: Vec<String>,
+}
+```
+
+### Rendering
+
+Results are rendered two ways:
+
+**Visible card** — sent as a `tool_call` / `tool_call_update` pair before the
+main agent turn:
+
+```
+Title: "Prior knowledge - 3 results"
+Body:
+  **Playbooks:**
+    - Resolve Send + Sync errors (75% success)
+  **Knowledge:**
+    - [P] 0.91 - Prefer smaller retries after gate failures...
+```
+
+**Prompt context** — injected into the system prompt:
+
+```
+## Relevant playbooks from past tasks:
+
+### fix-concurrency
+Goal: Resolve Send + Sync errors
+Success rate: 75% success
+Steps:
+  1. Replace shared HashMap with DashMap [edit_file] -> compile_ok
+  2. Run cargo test to confirm the fix [run_command] -> tests_pass
+
+## Relevant knowledge:
+
+- [heuristic / P] 0.91
+  Prefer smaller retries after gate failures because they keep the feedback loop tight.
+```
+
+Knowledge and playbook lookups run in parallel via `tokio::join!`. If either
+store is unavailable or the query fails, the error is logged and an empty result
+is returned so dispatch can continue.
 
 ---
 
-## Agent Modes
+## Episode Logging
 
-Each session has an active mode that controls the system prompt and agent
-behavior. Switch with `session/set_mode` or by including `/plan` or `/research`
-in the prompt as a slash command.
+After every completed `session/prompt` (including pipeline dispatches), the
+server appends an `Episode` to `.roko/episodes.jsonl`. This is the same
+episode format used by the orchestrator.
 
-| Mode ID | Behavior |
+### Episode fields written by ACP
+
+```rust
+pub struct Episode {
+    pub id: String,
+    pub episode_id: String,
+    pub kind: String,          // "acp-dispatch" or "acp-pipeline-{workflow}"
+    pub agent_template: String, // same as agent_mode ("code" | "plan" | "research")
+    pub model: String,          // resolved model slug
+    pub backend: String,        // provider label (e.g. "claude-cli", "anthropic")
+    pub trigger_kind: String,   // "acp_dispatch" or "acp_pipeline"
+    pub trigger_signal_hash: String,  // SHA-256 of prompt bytes (hex)
+    pub input_signal_hash: String,
+    pub output_signal_hash: String,   // SHA-256 of assistant response bytes
+    pub duration_secs: f64,
+    pub success: bool,
+    pub failure_reason: Option<String>,
+    pub usage: EpUsage {
+        pub wall_ms: u64,
+        // ... other usage fields default to 0
+    },
+    pub extra: HashMap<String, serde_json::Value>,
+}
+```
+
+The `extra` map contains:
+
+| Key | Value |
 |---|---|
-| `code` | Expert code implementer: minimal targeted changes, follows existing patterns |
-| `plan` | Software architect: decomposes tasks, no implementation, structured plans with numbered steps |
-| `research` | Technical researcher: broad search, cites files and line numbers, recommends options, no changes |
+| `entry_point` | `"acp"` |
+| `model` | resolved model slug |
+| `mode` | agent mode string |
+| `session_id` | session ID |
+| `routing_mode` | `"auto_override"` or `"manual"` |
+| `workflow` | workflow config string |
+| `provider_kind` | provider label |
 
-Switching modes clears conversation history.
+The `kind` field encodes the dispatch type:
+- Single-agent: `"acp-dispatch"`
+- Pipeline express: `"acp-pipeline-express"`
+- Pipeline standard: `"acp-pipeline-standard"`
+- Pipeline full: `"acp-pipeline-full"`
+
+Success is `true` only when `stop_reason == EndTurn` and no errors occurred.
 
 ---
 
-## Knowledge Integration
+## File Change Notifications
 
-On every non-slash-command prompt, the server automatically queries:
+After a pipeline commit phase, the server detects changed files via:
 
-1. **Durable knowledge store** (`roko-neuro`): `.roko/learn/` — ranked hits from
-   the workspace knowledge base. Hit scores include keyword matching, confidence,
-   recency, and HDC vector similarity.
+```
+git diff --name-status HEAD~1 HEAD
+```
 
-2. **Playbook store** (`roko-learn`): `.roko/learn/playbooks/` — past successful
-   task sequences, up to 3 most relevant playbooks.
+And emits a `FileChangeNotification` per changed file (skipping lock files and
+images). These are rendered as `tool_call` updates in the stream, but they are
+also available in the internal struct for integration testing:
 
-The results appear as a tool card in the editor:
+```rust
+pub struct FileChangeNotification {
+    pub path: String,
+    pub change_type: FileChangeType,
+}
 
-```json
-{
-  "sessionUpdate": "tool_call",
-  "toolCallId": "knowledge",
-  "title": "Prior knowledge - 3 results",
-  "kind": "other",
-  "status": "completed",
-  "content": [
-    {
-      "type": "text",
-      "text": "**Playbooks:**\n  - fix-concurrency: Resolve Send + Sync errors (75% success)\n**Knowledge:**\n  - [P] 0.91 - Prefer smaller retries after gate failures..."
-    }
-  ]
+pub enum FileChangeType {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
 }
 ```
 
-The knowledge context is also injected into the agent's system prompt
-(invisible to the editor). The injection is bounded to keep prompts compact.
+---
 
-Knowledge tiers:
+## Transport Implementation Details
 
-| Tier label | Tier |
+The `StdioTransport` uses:
+- `BufReader` over stdin for newline-delimited JSON parsing.
+- `Arc<AsyncMutex<W>>` for the writer, enabling clones to share it.
+- `Arc<AtomicU64>` for auto-incrementing outbound request IDs (starting at 1).
+- `Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>` for tracking
+  pending outbound requests.
+
+The transport can send requests *to the client* (for bridging scenarios) and
+match incoming responses via `handle_incoming_response`. This is used for
+`fs/read_text_file` and `fs/write_text_file` when `clientCapabilities.fs` is set.
+
+Every message is flushed immediately after writing. No framing headers are used.
+
+### Reading
+
+```rust
+let mut line = String::new();
+reader.read_line(&mut line).await?;   // blocks until \n
+let message = serde_json::from_str::<JsonRpcMessage>(&line)?;
+```
+
+### Writing
+
+```rust
+let bytes = serde_json::to_vec(message)?;
+writer.write_all(&bytes).await?;
+writer.write_all(b"\n").await?;
+writer.flush().await?;
+```
+
+---
+
+## Building an Editor Integration: Quick Reference
+
+### Minimum viable sequence
+
+```jsonc
+// 1. Start: roko acp --workdir /path/to/project
+
+// 2. Initialize
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}
+
+// 3. Create session
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}
+
+// 4. Send prompt
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{
+  "sessionId":"sess_...",
+  "prompt":[{"type":"text","text":"Add error handling to the main function"}],
+  "includeContext":false
+}}
+
+// 5. Stream updates until result arrives
+
+// 6. Cancel if needed (notification, no id)
+{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess_..."}}
+```
+
+### What to render from updates
+
+| `sessionUpdate` value | UI action |
 |---|---|
-| `P` | Persistent — high-confidence long-term knowledge |
-| `C` | Consolidated — distilled from multiple episodes |
-| `W` | Working — recent session knowledge |
-| `T` | Transient — ephemeral, not persisted |
+| `agent_message_chunk` | Append `content.text` to the chat message |
+| `agent_thought_chunk` | Optionally show in a collapsible "Thinking..." section |
+| `tool_call` | Create a new tool card with the given `title`, `kind`, `status` |
+| `tool_call_update` | Update the card matching `toolCallId` |
+| `plan` | Render a checklist of plan entries |
+| `available_commands_update` | Update slash command autocomplete list |
+| `config_option_update` | Re-render the settings panel |
+| `usage_update` | Show token/cost usage in status bar |
+| `session_info_update` | Update the session display name |
 
----
+### Config option update example
 
-## Session Persistence
-
-Sessions are automatically persisted to disk after every `session/prompt`
-completes. The storage location is:
-
-```
-<workdir>/.roko/sessions/<session_id>.json
-```
-
-For example:
-```
-/path/to/project/.roko/sessions/sess_550e8400-e29b-41d4-a716-446655440000.json
-```
-
-Each session file contains the full `AcpSession` state as JSON, including:
-- Session ID, name, and creation timestamp
-- Config state (model, workflow, gates, etc.)
-- Conversation history (up to 40 turns, capped at 64,000 characters)
-- Active workflow run state (pipeline phase, iteration count, etc.)
-
-**Session GC:** At startup the server garbage-collects session files older than
-7 days.
-
-**Resuming a session:**
+To switch to the full pipeline workflow with thorough review:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}
+{"jsonrpc":"2.0","id":10,"method":"session/config/update","params":{
+  "sessionId":"sess_...",
+  "optionId":"workflow",
+  "newValue":"full"
+}}
 
-{"jsonrpc":"2.0","id":2,"method":"session/list","params":{}}
+{"jsonrpc":"2.0","id":11,"method":"session/config/update","params":{
+  "sessionId":"sess_...",
+  "optionId":"review_strictness",
+  "newValue":"thorough"
+}}
 ```
 
-Pick the session ID you want from the `sessions` array, then:
+### Resuming across restarts
 
 ```json
-{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"sess_550e8400..."}}
-```
-
-The server loads the session from disk into memory and returns its config
-options and modes. Continue with `session/prompt` as normal.
-
----
-
-## Error Handling
-
-All errors follow the JSON-RPC 2.0 error object format:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": -32601,
-    "message": "method 'nope/method' is not supported"
-  }
-}
-```
-
-### Error codes
-
-| Code | Constant | Cause |
-|---|---|---|
-| `-32700` | `PARSE_ERROR` | Malformed JSON on stdin |
-| `-32600` | `INVALID_REQUEST` | Not a valid JSON-RPC request |
-| `-32601` | `METHOD_NOT_FOUND` | Unknown method name |
-| `-32602` | `INVALID_PARAMS` | Request params failed to deserialize |
-| `-32603` | `INTERNAL_ERROR` | Unexpected server-side failure |
-| `-32000` | `SESSION_NOT_FOUND` | Session ID not in memory or on disk |
-| `-32001` | `SESSION_BUSY` | Session already has an active prompt in flight |
-
-### Parse errors
-
-If the server cannot parse a line of JSON, it responds with a parse error and
-continues. The server does not exit on bad input.
-
-```
-Client sends: {bad json
-Server sends: {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"failed to parse JSON-RPC message: ..."}}
-```
-
-### Session busy
-
-Attempting to send a second `session/prompt` while one is in flight:
-
-```json
-{
-  "error": {
-    "code": -32001,
-    "message": "session 'sess_550e8400...' already has an active prompt"
-  }
-}
-```
-
-Cancel the in-flight prompt with `session/cancel`, wait for its response, then
-send the next prompt.
-
-### Recovery strategy
-
-- **`PARSE_ERROR`**: Fix the JSON encoding in your client.
-- **`SESSION_NOT_FOUND`**: Call `session/new` to create a fresh session, or
-  `session/load` if you have a persisted session ID.
-- **`SESSION_BUSY`**: Send `session/cancel` and wait for the in-flight response
-  before retrying.
-- **Internal errors**: Log the full error message. The server continues running;
-  retry the request.
-- **EOF/process exit**: Restart `roko acp`.
-
----
-
-## Slash Commands
-
-Slash commands are sent as plain text prompts starting with `/`. The server
-handles them internally (they do not dispatch to the LLM) and stream results
-back as `agent_message_chunk` notifications.
-
-Format: `/command-name [argument]`
-
-Example prompt block:
-
-```json
-{
-  "type": "text",
-  "text": "/research async runtime design patterns in Rust"
-}
-```
-
-### Status and diagnostics
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/status` | — | Workspace status: signals, agents, runs, knowledge |
-| `/doctor` | — | Diagnose workspace bootstrap state |
-| `/config` | — | Show `roko.toml` configuration |
-| `/learn` | — | Learning state: episodes, routing, experiments, efficiency |
-
-### Research (foraging phase)
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/research` | `<topic>` | Deep research with citations via Perplexity |
-| `/search` | `<query>` | Quick web search |
-| `/enhance-prd` | `<slug>` | Enrich a PRD with web research |
-| `/analyze` | — | Analyze execution data |
-
-### Specification (PRD lifecycle)
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/prd-idea` | `<text>` | Capture a new work item idea |
-| `/prd-draft` | `<slug>` | Draft a new PRD from an idea |
-| `/prd-list` | — | List all PRDs and their status |
-| `/prd-status` | — | PRD pipeline coverage report |
-| `/prd-plan` | `<slug>` | Generate implementation plan from a published PRD |
-| `/prd-consolidate` | — | Scan PRDs for gaps and duplicates |
-
-### Planning
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/plan-list` | — | List all plans in the workspace |
-| `/plan-show` | `<name>` | Show a specific plan |
-| `/plan-generate` | `<description>` | Generate a plan from a prompt |
-| `/plan-validate` | `<path>` | Lint `tasks.toml` without executing |
-| `/plan-run` | `<path>` | Execute a plan (orchestrate agents, gates, persistence) |
-| `/plan-resume` | `<state-path>` | Resume an interrupted plan run |
-
-### Implementation and execution
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/run` | `<prompt>` | Single prompt → universal loop (compose→agent→gate→persist) |
-| `/agents` | — | List agents and their status |
-| `/agent-chat` | `<name>` | Interactive chat REPL with a specific agent |
-| `/agent-start` | `<name>` | Start a named agent |
-| `/agent-stop` | `<name>` | Stop a running agent |
-
-### Verification and gates
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/review` | `[ref]` | Review recent changes (`git diff`, default `HEAD~1`) |
-| `/build` | — | `cargo build --workspace` |
-| `/test` | — | `cargo test --workspace` |
-| `/clippy` | — | `cargo clippy --workspace --no-deps -- -D warnings` |
-| `/fmt` | — | `cargo +nightly fmt --all --check` |
-| `/gate` | — | Run full gate pipeline (compile + test + clippy + diff) |
-
-### Knowledge and dreams
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/knowledge` | `<topic>` | Query the durable knowledge store |
-| `/knowledge-stats` | — | Knowledge store statistics and health |
-| `/knowledge-gc` | — | Garbage collect knowledge store |
-| `/knowledge-backup` | — | Backup knowledge store |
-| `/dream` | — | Run dream consolidation cycle (NREM → REM → integration) |
-
-### Code intelligence
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/index` | `build \| search <q> \| stats` | Code intelligence index operations |
-| `/explain` | `<topic>` | Explain a codebase concept at 3 depth levels |
-| `/replay` | `<hash>` | Walk signal DAG by hash (episode replay) |
-
-### Feedback and learning
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/learn-router` | — | Inspect cascade router state and model routing |
-| `/learn-episodes` | — | Recent episode log (agent turns + gate results) |
-| `/learn-tune` | `gates \| routing \| budget` | Tune adaptive thresholds |
-
-### Workflow
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/workflow` | `list \| status \| cancel \| resume` | Workflow management |
-| `/express` | `<prompt>` | Run express pipeline: implement → gate → commit |
-| `/full` | `<prompt>` | Run full pipeline: strategy → implement → gate → multi-review → commit |
-| `/review-this` | — | Run review pipeline on current uncommitted changes |
-| `/pipeline` | `<name>` | Run a named workflow pipeline |
-
-### Help
-
-| Command | Arguments | Description |
-|---|---|---|
-| `/help` | — | List all available commands |
-
----
-
-## Integration Examples
-
-### Example 1: Minimal session with a single prompt
-
-This is the minimum required for any editor plugin.
-
-```
-→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}
-← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,...},"agentInfo":{"name":"roko","version":"0.4.0","title":"Roko"}}}
-
-→ {"jsonrpc":"2.0","id":2,"method":"session/new","params":{"sessionName":"my-project","mcpServers":[]}}
-← {"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess_abc123","modes":{...},"configOptions":[...]}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"available_commands_update","availableCommands":[...]}}}
-
-→ {"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess_abc123","prompt":[{"type":"text","text":"What does the main function do?"}],"includeContext":false}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The main function "}}}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"initializes the runtime..."}}}}
-← {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}
-```
-
-### Example 2: Prompt with file context
-
-```
-→ {"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{
-    "sessionId":"sess_abc123",
-    "prompt":[
-      {"type":"text","text":"Add error handling to this function:"},
-      {"type":"resource","resource":{"type":"file","uri":"file:///path/to/project/src/auth.rs"}}
-    ],
-    "includeContext":false
-  }}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"tool_call","toolCallId":"knowledge","title":"Prior knowledge - 2 results","kind":"other","status":"completed","content":[{"type":"text","text":"**Knowledge:**\n  - [P] 0.88 - Always handle auth errors explicitly..."}]}}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I'll add error handling..."}}}}
-← {"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}
-```
-
-### Example 3: Express workflow pipeline
-
-```
-→ {"jsonrpc":"2.0","id":5,"method":"session/config/update","params":{"sessionId":"sess_abc123","optionId":"workflow","newValue":"express"}}
-← {"jsonrpc":"2.0","id":5,"result":{"configOptions":[...]}}
-
-→ {"jsonrpc":"2.0","id":6,"method":"session/prompt","params":{"sessionId":"sess_abc123","prompt":[{"type":"text","text":"Fix the off-by-one error in src/parser.rs line 42"}],"includeContext":false}}
-
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"tool_call","toolCallId":"agent-impl-abc","title":"Agent: implementer","kind":"other","status":"pending","content":[]}}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"[Phase: Pending -> Implementing]\n"}}}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Fixing the off-by-one..."}}}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"tool_call_update","toolCallId":"agent-impl-abc","status":"completed","content":[{"type":"text","text":"Changed `i < n` to `i <= n`"}]}}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"tool_call","toolCallId":"gate-compile","title":"Gate: compile","kind":"other","status":"in_progress","content":[]}}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"tool_call_update","toolCallId":"gate-compile","status":"completed","content":[{"type":"text","text":"compile passed"}]}}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"tool_call","toolCallId":"gate-test","title":"Gate: test","kind":"other","status":"in_progress","content":[]}}}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"tool_call_update","toolCallId":"gate-test","status":"completed","content":[{"type":"text","text":"test passed"}]}}}
-← {"jsonrpc":"2.0","id":6,"result":{"stopReason":"end_turn"}}
-```
-
-### Example 4: Cancellation
-
-```
-→ {"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"sess_abc123","prompt":[{"type":"text","text":"Refactor the entire auth system"}],"includeContext":false}}
-
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Starting refactor..."}}}}
-
-→ {"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess_abc123"}}
-
-← {"jsonrpc":"2.0","id":7,"result":{"stopReason":"cancelled"}}
-```
-
-### Example 5: Resume a persisted session
-
-```
-→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}
-← {"jsonrpc":"2.0","id":1,"result":{...}}
-
-→ {"jsonrpc":"2.0","id":2,"method":"session/list","params":{}}
-← {"jsonrpc":"2.0","id":2,"result":{"sessions":[{"sessionId":"sess_abc123","sessionName":"my-project","createdAt":"2026-04-29T10:30:00Z"}]}}
-
-→ {"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"sess_abc123"}}
-← {"jsonrpc":"2.0","id":3,"result":{"sessionId":"sess_abc123","modes":{...},"configOptions":[...]}}
-
-→ {"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"sess_abc123","prompt":[{"type":"text","text":"Continue where we left off"}],"includeContext":false}}
-```
-
-### Example 6: Using a slash command
-
-```
-→ {"jsonrpc":"2.0","id":8,"method":"session/prompt","params":{
-    "sessionId":"sess_abc123",
-    "prompt":[{"type":"text","text":"/status"}],
-    "includeContext":false
-  }}
-← {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Signals: 142\nAgents: 0 running\nKnowledge: 38 entries\nEpisodes: 71\n"}}}}
-← {"jsonrpc":"2.0","id":8,"result":{"stopReason":"end_turn"}}
-```
-
-### Example 7: Config update and mode switch
-
-```
-# Switch to plan mode
-→ {"jsonrpc":"2.0","id":9,"method":"session/set_mode","params":{"sessionId":"sess_abc123","modeId":"plan"}}
-← {"jsonrpc":"2.0","id":9,"result":{"configOptions":[...]}}
-
-# Update model selection
-→ {"jsonrpc":"2.0","id":10,"method":"session/config/update","params":{"sessionId":"sess_abc123","optionId":"model","newValue":"opus"}}
-← {"jsonrpc":"2.0","id":10,"result":{"configOptions":[{"id":"model","name":"Model","currentValue":"opus",...}]}}
-
-# Disable clippy gate
-→ {"jsonrpc":"2.0","id":11,"method":"session/config/update","params":{"sessionId":"sess_abc123","optionId":"clippy","newValue":"off"}}
-← {"jsonrpc":"2.0","id":11,"result":{"configOptions":[...]}}
-
-# Enable max effort
-→ {"jsonrpc":"2.0","id":12,"method":"session/config/update","params":{"sessionId":"sess_abc123","optionId":"effort","newValue":"max"}}
-← {"jsonrpc":"2.0","id":12,"result":{"configOptions":[...]}}
-```
-
-### Example 8: MCP server attachment
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "session/new",
-  "params": {
-    "sessionName": "with-mcp",
-    "mcpServers": [
-      {
-        "name": "roko-code",
-        "transport": {
-          "type": "stdio",
-          "command": "roko",
-          "args": ["mcp-code", "--workdir", "/path/to/project"]
-        }
-      },
-      {
-        "name": "github",
-        "transport": {
-          "type": "http",
-          "url": "http://localhost:9001"
-        }
-      }
-    ]
-  }
-}
+// List persisted sessions
+{"jsonrpc":"2.0","id":1,"method":"session/list"}
+
+// Load a specific one
+{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"sess_abc123"}}
+
+// Continue prompting with history restored
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{
+  "sessionId":"sess_abc123",
+  "prompt":[{"type":"text","text":"What did we just implement?"}],
+  "includeContext":false
+}}
 ```
 
 ---
 
-## Log File
+## roko.toml Configuration for ACP
 
-ACP server logs go to `.roko/acp.log` by default (override with `--log-file`).
-The log file is created at startup. All `tracing` output at `debug` level and
-above for `roko_acp` is written there.
+The ACP server loads `roko.toml` from the working directory. Relevant sections:
 
-```bash
-# Tail the log while debugging
-tail -f /path/to/project/.roko/acp.log
+```toml
+[agent]
+default_effort = "medium"    # Sets initial effort config option
+temperament = "balanced"     # Sets initial temperament config option
+
+[routing]
+mode = "auto_override"       # Sets initial routing_mode config option
+
+[gates]
+clippy_enabled = true        # Sets initial clippy option
+skip_tests = false           # skip_tests = true → tests option defaults to "off"
+
+[models.sonnet]
+provider = "anthropic"
+slug = "claude-sonnet-4-6"
+
+[models.haiku]
+provider = "anthropic"
+slug = "claude-haiku-3-5"
 ```
 
-Log entries are plain text with timestamps, levels, and structured fields.
+Model keys in `[models.*]` become the selectable values for the `model` config
+option. The server picks the first available key from this preference list at
+session creation: `glm51`, `glm4`, `kimi-k26`, `sonnet`, then alphabetical
+first key, then `"sonnet"` as the final fallback constant.
 
 ---
 
-## Episode Recording
+## Logging and Diagnostics
 
-Every `session/prompt` invocation (excluding slash commands) is recorded as an
-episode in:
+All server-side logging goes to `.roko/acp.log` (never stdout). The log level
+is controlled by the `RUST_LOG` environment variable, defaulting to
+`roko_acp=debug`. Logs are non-blocking via `tracing_appender`.
 
-```
-<workdir>/.roko/episodes.jsonl
-```
-
-Each episode captures:
-- Session ID and model used
-- Provider kind (claude_cli, openai_compat, etc.)
-- Whether a pipeline was active and which template
-- Routing mode in effect
-- Input and output content hashes (for deduplication)
-- Wall-clock duration
-- Whether the turn succeeded
-- Failure reason if unsuccessful
-
-This feed is consumed by `roko learn` for adaptive routing and gate threshold
-tuning.
+Key log events:
+- `"ACP logging initialized"` — startup with protocol_version, spec_version, log_file
+- `"loaded roko.toml configuration"` — with provider and model counts
+- `"handling ACP request"` — method name and request id
+- `"handling ACP session prompt"` — session_id, prompt chars, model_key, workdir
+- `"failed to append ACP episode"` — if episode logging fails (non-fatal)
+- `"ACP client disconnected while prompt was active"` — EOF during streaming
 
 ---
 
-## Quick Reference
+## Known Limitations
 
-### Startup sequence
+- **Single transport only.** The ACP server is single-threaded on the stdio
+  channel. Concurrent sessions are supported in memory, but concurrent
+  *transports* (e.g., multiple TCP clients) are not. The
+  `SessionManager` is not wrapped in `Arc<RwLock<_>>`.
 
-```
-1. Spawn: roko acp --workdir <project-root>
-2. Send:  initialize
-3. Recv:  initialize result
-4. Send:  session/new (or session/load for resume)
-5. Recv:  session/new result
-6. Recv:  session/update (available_commands_update)
-7. Ready for session/prompt calls
-```
+- **No image or audio input.** `promptCapabilities.image = false`,
+  `promptCapabilities.audio = false`.
 
-### Per-turn sequence
+- **WebSocket/SSE not on ACP path.** WebSocket and SSE streaming are available
+  via the HTTP control plane (`roko serve` on `:6677`), not through the ACP
+  stdio channel. ACP uses stdio only.
 
-```
-1. Send:  session/prompt
-2. Recv:  session/update (knowledge card, if results found)
-3. Recv:  session/update (agent_message_chunk, ..., tool_call, tool_call_update, plan, ...)
-4. Recv:  session/prompt result (stopReason)
-5. [Optional] session is auto-persisted to .roko/sessions/<id>.json
-```
+- **Outbound `fs/read_text_file` and `fs/write_text_file`** are implemented in
+  the transport layer (pending request registry) but the bridge does not yet
+  use them automatically; file content is resolved server-side by reading
+  the workdir directly.
 
-### Key invariants
-
-- One JSON object per line, `\n` terminated.
-- stdout is the protocol channel. Never write non-JSON to stdout.
-- `initialize` before anything else.
-- `session/cancel` is a notification (no response). The corresponding
-  `session/prompt` response still arrives after cancellation.
-- Sessions are single-threaded: one prompt at a time per session.
-- Config options come from `roko.toml`. The `model` dropdown reflects only
-  models defined in `[models.*]`.
+- **`ROKO_ACP_LEGACY`** env var selects the legacy pipeline runner instead of
+  the `WorkflowEngine`-based path. Set this only for debugging; the default
+  (workflow engine) path is the canonical one.

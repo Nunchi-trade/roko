@@ -1,34 +1,48 @@
 # Roko CLI Reference
 
-Complete reference for the `roko` command-line interface. All flags marked `[global]`
-are available on every subcommand.
+Complete reference for the `roko` command-line interface. Derived directly from the clap
+struct definitions in `crates/roko-cli/src/main.rs` and `crates/roko-cli/src/agent_serve.rs`.
 
 ---
 
-## Global Flags
+## Version string
 
-These flags apply to every command and must be placed before the subcommand.
+Running `roko --version` prints the short version. `roko --long-version` prints:
+
+```
+<semver> (<rustc-version>, <target-triple>, git <short-hash>)
+```
+
+Build-time variables are injected via `build.rs`: `ROKO_GIT_HASH`, `ROKO_RUSTC_VERSION`,
+`ROKO_TARGET`.
+
+---
+
+## Global flags
+
+These flags are `global = true` and apply to every subcommand. They must be placed before the
+subcommand name.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--config <path>` | path | `./roko.toml` | Override the config file location |
-| `--role <string>` | string | from config | Set the agent role / persona |
-| `--model <string>` | string | from config | Override the model name for this invocation |
-| `--repo <path>` | path | cwd | Set the repository / working directory root |
-| `--resume <id>` | string | — | Resume a previous session by ID |
-| `--effort low\|medium\|high\|max` | enum | from config | Reasoning effort level |
-| `--json` | flag | false | Emit JSON output instead of human-readable text |
-| `--log-format text\|json` | enum | `text` | Tracing log format |
-| `--quiet` | flag | false | Suppress non-essential output |
-| `--no-replan` | flag | false | Disable re-planning; gate failures become terminal |
-| `--headless` | flag | false | Run as a headless daemon (background service) |
-| `--color auto\|always\|never` | enum | `auto` | Control ANSI color output |
-| `--timing` | flag | false | Print elapsed time after command execution |
-| `--no-serve` | flag | false | Do not start the HTTP control plane in the background |
+| `--config <path>` | path | `./roko.toml` | Override the config file location. |
+| `--role <string>` | string | from config | Set the agent role / persona. |
+| `--model <string>` | string | from config | Override the model name for this invocation. |
+| `--repo <path>` | path | cwd | Set the repository / working directory root. |
+| `--resume <id>` | string | — | Resume a previous session by ID. |
+| `--effort low\|medium\|high\|max` | enum | from config | Reasoning effort level passed to the agent backend. |
+| `--json` | flag | false | Emit JSON output instead of human-readable text. Supported by most commands. |
+| `--log-format text\|json` | enum | `text` | Tracing log format. |
+| `--quiet` | flag | false | Suppress non-essential output. |
+| `--no-replan` | flag | false | Disable re-planning; gate failures become terminal failures. |
+| `--headless` | flag | false | Run as a headless daemon (background service). |
+| `--color auto\|always\|never` | enum | `auto` | Control ANSI color output. |
+| `--timing` | flag | false | Print elapsed time after command execution. Also enabled by `ROKO_TIMING=1`. |
+| `--no-serve` | flag | false | Do not start the HTTP control plane in the background. |
 
 ### Color resolution (auto mode)
 
-In `auto` mode, color is determined in this order (highest priority first):
+Precedence (highest first):
 
 1. `NO_COLOR` set and non-empty → off
 2. `CLICOLOR_FORCE` set and not `"0"` → on
@@ -36,53 +50,85 @@ In `auto` mode, color is determined in this order (highest priority first):
 4. stdout is a TTY → on
 5. otherwise → off
 
-### Exit codes
+### Effort levels
 
-| Code | Meaning |
+| Value | Description |
 |---|---|
-| `0` | Success |
-| `1` | Agent or gate failure (logical error in the build) |
-| `2` | System error (I/O, config, infrastructure) |
+| `low` | Minimal reasoning — fast, cheap. |
+| `medium` | Balanced reasoning (default). |
+| `high` | Thorough reasoning. |
+| `max` | Maximum reasoning — slowest, most expensive. |
 
-### Key environment variables
+---
+
+## Exit codes
+
+| Code | Constant | Meaning |
+|---|---|---|
+| `0` | `EXIT_SUCCESS` | Successful execution. |
+| `1` | `EXIT_AGENT_FAILURE` | Agent or gate failure (logical error in the build). |
+| `2` | `EXIT_SYSTEM_ERROR` | System error (I/O, config, infrastructure). |
+
+---
+
+## Environment variables
 
 | Variable | Effect |
 |---|---|
-| `RUST_LOG` / `ROKO_LOG` | Tracing log directive (e.g. `roko=debug`) |
-| `ROKO_TIMING=1` | Enable timing output (same as `--timing`) |
-| `ROKO_LOG_RAW=1` | Disable secret redaction in logs |
-| `ROKO_API_KEY` | API key for roko-serve authentication |
-| `ANTHROPIC_API_KEY` | Claude API key (for direct API agents) |
-| `GITHUB_TOKEN` | GitHub personal access token (for MCP GitHub server) |
-| `NO_COLOR` | Disable ANSI colors |
+| `ROKO_TIMING=1` | Print elapsed time after command execution (same as `--timing`). |
+| `ROKO_LOG_RAW=1` | Disable secret redaction in log output (debugging only). |
+| `RUST_LOG=<directive>` | Override the tracing filter (e.g. `roko=debug`). |
+| `NO_COLOR` | Disable ANSI colors when set and non-empty. |
+| `CLICOLOR_FORCE` | Force ANSI colors when set and not `"0"`. |
+| `CLICOLOR=0` | Disable ANSI colors. |
+| `NUNCHI_DASHBOARD_URL` | Override the dashboard URL for browser auth (`roko login`). |
+| `PERPLEXITY_API_KEY` | Required for `roko research search` and Perplexity-backed research. |
+| `GEMINI_API_KEY` | Required for Gemini-grounded research. |
+| `PORT` | Override the worker server port (used by `roko worker`). |
 
 ---
 
-## Default invocation
+## Config file locations and precedence
 
-Running `roko` without a subcommand has three modes:
+Roko uses a layered config system. Lower numbers override higher numbers:
 
-```
-# Interactive chat (stdin is a TTY, no --headless):
-roko
+1. **CLI flags** — `--model`, `--role`, `--effort`, etc. (highest priority)
+2. **Environment variables** — `ROKO_MODEL`, `ROKO_ROLE` (if supported by the config loader)
+3. **Project config** — `./roko.toml` (or path from `--config`)
+4. **Global config** — `~/.roko/config.toml`
+5. **Built-in defaults** (lowest priority)
 
-# One-shot execution (prompt as positional argument):
-roko "fix the login bug"
+The config file path resolution:
+- `--config <path>` → use exactly that path
+- Otherwise → search upward from cwd for `roko.toml`
+- If not found → fall back to `~/.roko/config.toml`
 
-# Piped input:
-echo "explain this code" | roko
-```
-
-The interactive chat opens an inline ratatui UI with streaming responses and
-slash command support (`/help`, `/model`, `/plan`, `/prd`, `/research`, etc.).
+Use `roko config path` to print the resolved paths, and `roko config show` to see the
+merged effective config with per-field source tags.
 
 ---
 
-## 1. Core Workflow
+## One-shot mode
+
+When `roko` is invoked with a positional argument and no subcommand, it runs the universal loop
+on that prompt and exits:
+
+```
+roko "Fix the login bug"
+```
+
+This is equivalent to `roko run "Fix the login bug"` with the default engine.
+
+When invoked with no arguments, no subcommand, and stdin is a TTY, roko launches the unified
+chat REPL.
+
+---
+
+## Core workflow
 
 ### `roko init`
 
-Create `.roko/` and a default `roko.toml` in the specified directory.
+Create `.roko/` and a default `roko.toml` in `path` (default: current directory).
 
 ```
 roko init [path] [--cloud] [--profile <name>] [--demo]
@@ -90,72 +136,51 @@ roko init [path] [--cloud] [--profile <name>] [--demo]
 
 | Flag | Description |
 |---|---|
-| `path` | Directory to initialize (default: current directory) |
-| `--cloud` | Generate cloud-ready defaults (`bind = "0.0.0.0"`) |
-| `--profile <name>` | Project profile: `rust`, `typescript`, `go`, `python`, `general` |
-| `--demo` | Seed realistic demo data after initialization |
+| `path` | Directory to initialize (default: current dir). |
+| `--cloud` | Generate cloud-ready defaults for deployment. |
+| `--profile <name>` | Project profile: `rust`, `typescript`, `go`, `python`, `general`. |
+| `--demo` | Seed realistic demo data after initialization. |
 
-Creates:
-- `.roko/` directory tree (state, prd, research, learn, episodes, etc.)
-- `roko.toml` with detected project profile and provider config
-- Auto-detects the `claude` CLI on PATH and writes a `[providers.claude_cli]` block
-
-The template includes a `[models.claude-sonnet-4-6]` entry and gate suggestions
-appropriate for the detected project language.
-
+**Examples:**
+```bash
+roko init                          # Initialize in the current directory
+roko init /path/to/project         # Initialize in a specific directory
+roko init --cloud                  # Initialize with cloud-ready defaults
+roko init --profile rust           # Initialize with Rust project profile
+roko init --demo                   # Initialize and seed demo data
 ```
-# Examples:
-roko init                         # Initialize in the current directory
-roko init /path/to/project        # Initialize in a specific directory
-roko init --cloud                 # Initialize with cloud-ready defaults
-roko init --profile rust          # Initialize with Rust project profile
-roko init --demo                  # Initialize and seed demo data
-```
-
-**Related:** `roko doctor`, `roko config init`
 
 ---
 
 ### `roko run`
 
-Seed a prompt and execute it through the universal loop:
-compose → agent → gate → persist.
+Seed a prompt and run the universal loop (compose → agent → gate → persist).
 
 ```
 roko run <prompt> [--workdir <path>] [--serve] [--share] [--engine v2|legacy]
 ```
 
-| Flag | Description |
-|---|---|
-| `prompt` | The user prompt text (required) |
-| `--workdir <path>` | Override the working directory |
-| `--serve` | Start the HTTP control plane alongside the run |
-| `--share` | Generate a shareable URL for this run (implies `--serve`) |
-| `--engine v2\|legacy` | Execution engine (default: `v2`) |
+| Arg/Flag | Default | Description |
+|---|---|---|
+| `<prompt>` | required | The user prompt text. |
+| `--workdir <path>` | cwd | Override the working directory. |
+| `--serve` | false | Start the HTTP control plane alongside the run. |
+| `--share` | false | Generate a shareable URL (starts serve if needed). |
+| `--engine v2\|legacy` | `v2` | Execution engine: `v2` (WorkflowEngine, event-driven) or `legacy` (run_once / PlanRunner). |
 
-**Engine variants:**
-
-- `v2` — WorkflowEngine: event-driven pipeline, composable stages, SSE observability (default)
-- `legacy` — run_once() path: PlanRunner + orchestrate.rs (the original implementation)
-
-The run produces an episode in `.roko/episodes.jsonl`, records efficiency events
-in `.roko/learn/efficiency.jsonl`, and updates the cascade router state.
-
-```
-# Examples:
+**Examples:**
+```bash
 roko run "Fix the login bug"
-roko run "Add tests for auth module" --role architect
-roko run "Refactor db layer" --engine legacy --model claude-opus-4-6
-roko run "Ship feature X" --share
+roko run "Add tests for auth"
+roko run "Refactor db layer" --role architect
+roko run "Deploy to staging" --serve
 ```
-
-**Related:** `roko plan run`, `roko status`
 
 ---
 
 ### `roko status`
 
-Print signal counts, most recent episode, and gate pass/fail rates.
+Print signal counts, most recent episode, and gate pass/fail.
 
 ```
 roko status [--workdir <path>] [--cfactor] [--surfaces]
@@ -163,28 +188,23 @@ roko status [--workdir <path>] [--cfactor] [--surfaces]
 
 | Flag | Description |
 |---|---|
-| `--workdir <path>` | Directory containing `.roko/` |
-| `--cfactor` | Compute and persist the latest C-Factor metrics snapshot |
-| `--surfaces` | Print the CLI/TUI/backend surface inventory instead of session status |
+| `--workdir <path>` | Directory containing `.roko/` (default: cwd). |
+| `--cfactor` | Compute and persist the latest C-Factor snapshot. |
+| `--surfaces` | Print the CLI/TUI/backend surface inventory instead of session status. |
 
-Outputs: engram count, episode count, last episode timestamp, gate pass/fail
-breakdown, C-Factor trend (if `--cfactor`).
-
+**Examples:**
+```bash
+roko status                        # Show workspace health summary
+roko status --json                 # Output status as JSON for scripting
+roko status --cfactor              # Compute and show C-Factor metrics
 ```
-# Examples:
-roko status
-roko status --json
-roko status --cfactor
-```
-
-**Related:** `roko doctor`, `roko learn all`
 
 ---
 
 ### `roko doctor`
 
-Diagnose the workspace bootstrap state: checks for required directories,
-config files, secret references, and server connectivity.
+Diagnose self-hosted workspace bootstrap state. Checks for `.roko/`, `roko.toml`, agent
+command availability, secrets, and optionally the HTTP control plane.
 
 ```
 roko doctor [--workdir <path>] [--serve-url <url>]
@@ -192,303 +212,207 @@ roko doctor [--workdir <path>] [--serve-url <url>]
 
 | Flag | Description |
 |---|---|
-| `--workdir <path>` | Directory containing `roko.toml` and `.roko/` |
-| `--serve-url <url>` | roko-serve base URL or health endpoint to probe |
-
-```
-# Examples:
-roko doctor
-roko doctor --serve-url http://localhost:6677/health
-```
-
-**Related:** `roko init`, `roko config validate`
+| `--workdir <path>` | Directory containing `roko.toml` and `.roko/` (default: cwd). |
+| `--serve-url <url>` | roko-serve base URL or health endpoint to probe. |
 
 ---
 
-### `roko resume`
+### `roko layer-check`
 
-Resume a plan execution from its last checkpoint.
-
-```
-roko resume [run_id] [--workdir <path>]
-```
-
-| Flag | Description |
-|---|---|
-| `run_id` | Run or plan ID to resume (defaults to most recent snapshot) |
-| `--workdir <path>` | Working directory |
-
-Equivalent to `roko plan run plans/ --resume-plan` but operates on the most
-recent executor snapshot automatically.
+Check workspace layer dependency rules (ensures crate imports follow the layered architecture).
 
 ```
-# Examples:
-roko resume
-roko resume run_4823
+roko layer-check
 ```
 
 ---
 
-## 2. Planning
+## Planning and PRDs
 
-### `roko plan list`
+### `roko plan`
 
-List all plans in the workspace with their progress.
+Manage plans: list, show, create, validate, run, generate.
+
+#### `roko plan list`
+
+List all plans discovered in the workspace.
 
 ```
 roko plan list [--workdir <path>]
 ```
 
-Output columns: `ID`, `TITLE`, `PROGRESS` (done/total), `STATUS` (pending, in-progress, done).
+Output includes task count, completion progress, and any persisted run state from
+`.roko/state/executor.json`. Supports `--json`.
 
-With `--json`: array of objects with `id`, `title`, `task_count`, `tasks_done`,
-`tasks_failed`, `completed`, `has_run_state`.
+#### `roko plan show`
 
-```
-roko plan list
-roko plan list --json
-```
-
----
-
-### `roko plan show`
-
-Show full details of a specific plan.
+Show details of a specific plan.
 
 ```
-roko plan show <plan_id> [--workdir <path>]
+roko plan show <plan-id> [--workdir <path>]
 ```
 
-Displays plan ID, base directory, title, file paths, task count, and frontmatter
-fields (`depends_on`, `parallel_with`, `priority`, `tags`, `milestone`).
+#### `roko plan create`
+
+Create a new plan skeleton.
 
 ```
-roko plan show wire-system-prompt
-roko plan show wire-system-prompt --json
+roko plan create <plan-id> --title <title> [--description <text>] [--workdir <path>]
 ```
 
----
+#### `roko plan validate`
 
-### `roko plan create`
-
-Create a new empty plan directory with `plan.md` and `tasks.toml` scaffolding.
+Lint every `tasks.toml` under a plans directory without executing.
 
 ```
-roko plan create <plan_id> --title <title> [--description <text>] [--workdir <path>]
+roko plan validate [<dir>] [--strict] [--json]
 ```
 
-| Flag | Description |
-|---|---|
-| `plan_id` | Plan identifier (used as directory name) |
-| `--title <text>` | Human-readable plan title (required) |
-| `--description <text>` | Plan description |
-| `--workdir <path>` | Working directory |
+| Arg/Flag | Default | Description |
+|---|---|---|
+| `<dir>` | `plans/` | Plans root directory. |
+| `--strict` | false | Fail on warnings, not only errors. |
+| `--json` | false | Output machine-readable JSON. |
 
-Creates `plans/<plan_id>/plan.md` and `plans/<plan_id>/tasks.toml`.
+#### `roko plan run`
 
-```
-roko plan create wire-gates --title "Wire gate pipeline into orchestrator"
-```
-
----
-
-### `roko plan validate`
-
-Lint every `tasks.toml` under a plans directory without executing anything.
+Run a plan directory through the orchestration loop. This is the primary command for
+self-hosted execution.
 
 ```
-roko plan validate [dir] [--strict] [--json]
+roko plan run <plans-dir> [--workdir <path>] [--resume-plan [<snapshot>]] [--approval]
+             [--max-retries <n>] [--dry-run] [--fresh]
 ```
 
-| Flag | Description |
-|---|---|
-| `dir` | Plans root directory (default: `plans/`) |
-| `--strict` | Fail on warnings, not only errors |
-| `--json` | Output machine-readable JSON report |
+| Arg/Flag | Default | Description |
+|---|---|---|
+| `<plans-dir>` | required | Path to the plans directory. |
+| `--workdir <path>` | cwd | Working directory (repo root). |
+| `--resume-plan [<path>]` | — | Resume from `.roko/state/executor.json`. Accepts optional path, defaults to `.roko/state/executor.json`. Alias: `--resume-state`. |
+| `--approval` | false | Launch the connected approval TUI while the plan runs. |
+| `--max-retries <n>` | from config | Maximum retry attempts per task (overrides per-task and config values). |
+| `--dry-run` | false | Parse and display the plan without executing. Shows tasks, dependencies, and estimates. |
+| `--fresh` | false | Archive old run state and start from scratch (ignores any existing `executor.json`). |
 
-**This validation also runs automatically before every `roko plan run`.** A plan
-that fails validation will not execute.
+**How plan run works:**
 
-Checks include: TOML syntax, required fields, dependency cycles, unknown role
-references, model name validity, gate rung ordering, and more.
+1. Plans are loaded from `<plans-dir>`. Each plan is a directory containing `tasks.toml`.
+2. Tasks are arranged into a DAG based on `depends_on` declarations.
+3. Independent tasks execute in parallel (up to `max_concurrent` from config).
+4. Each task runs an agent, collects output, then runs the gate pipeline (compile, test, clippy, diff).
+5. Gate failures trigger the replan loop (unless `--no-replan`). The failure context is
+   fed to a strategist agent which generates a revised tasks.toml.
+6. State is flushed to `.roko/state/executor.json` after every task completion.
+7. Efficiency events, episodes, and C-factor metrics are written to `.roko/learn/`.
 
-Exit code is `0` for clean, `1` for errors (or warnings with `--strict`).
+**State persistence:**
 
-```
-# Examples:
-roko plan validate
-roko plan validate plans/my-plan --strict
-roko plan validate --json | jq '.totals'
-```
-
----
-
-### `roko plan run`
-
-Execute a plan directory through the orchestration loop. Runs mandatory
-validation before execution in both normal and dry-run modes.
-
-```
-roko plan run <plans_dir> [--workdir <path>] [--resume-plan [path]] [--approval]
-              [--max-retries <n>] [--dry-run] [--fresh]
-```
-
-| Flag | Description |
-|---|---|
-| `plans_dir` | Path to the plans directory (required) |
-| `--workdir <path>` | Working directory (repo root) |
-| `--resume-plan [path]` | Resume from `.roko/state/executor.json` (or explicit path) |
-| `--approval` | Launch the interactive approval TUI while the plan runs |
-| `--max-retries <n>` | Maximum retry attempts per task (overrides per-task config) |
-| `--dry-run` | Parse and display the plan without executing |
-| `--fresh` | Archive old run state and start from scratch |
-
-**`--fresh` behavior:** Moves the existing `executor.json` to a timestamped backup
-(`.roko/state/executor.json.bak.<timestamp>`) and starts execution from the
-beginning. The backup is never deleted — it is preserved for inspection.
-
-**`--resume-plan` behavior:** If a path is specified, it is copied to the standard
-location (`.roko/state/executor.json`) before execution. If omitted, the flag
-uses the default snapshot location. The runner auto-resumes from `executor.json`
-when it exists unless `--fresh` is set.
-
-If the working directory has no `.git` repo, one is automatically initialized
-so that agent tooling (which requires git) works correctly.
-
-```
-# Examples:
-roko plan run plans/
-roko plan run plans/my-plan --approval
-roko plan run plans/ --dry-run
-roko plan run plans/ --fresh
+Snapshots are written to `.roko/state/executor.json`. Resume with:
+```bash
 roko plan run plans/ --resume-plan
 roko plan run plans/ --resume-plan .roko/state/executor.json
-roko plan run plans/ --max-retries 3
 ```
 
-**Related:** `roko plan validate`, `roko resume`
+**Examples:**
+```bash
+roko plan run plans/                    # Run all plans
+roko plan run plans/my-plan             # Run a specific plan directory
+roko plan run plans/ --approval         # Run with interactive TUI approval
+roko plan run plans/ --dry-run          # Preview without executing
+roko plan run plans/ --fresh            # Archive old state and start clean
+roko plan run plans/ --resume-plan      # Resume from last checkpoint
+roko plan run plans/ --max-retries 3    # Override retry limit
+```
 
----
+#### `roko plan generate`
 
-### `roko plan generate`
-
-Generate implementation plans from a prompt, file, or PRD using an agent.
+Generate implementation plans from a prompt, file, or PRD.
 
 ```
 roko plan generate <source...> [--from-file <path>]
 ```
 
-| Flag | Description |
+| Arg/Flag | Description |
 |---|---|
-| `source` | Free-text prompt, or file path (PRD, requirements doc) |
-| `--from-file <path>` | Treat source as a file path to read instead of inline text |
+| `<source...>` | Free-text prompt, or path to a file (PRD, requirements, etc). |
+| `--from-file <path>` | Treat source as a file path to read instead of inline text. |
+
+#### `roko plan regenerate`
+
+Regenerate an existing plan from its source PRD / plan extract.
 
 ```
-roko plan generate "Wire the SystemPromptBuilder into orchestrate.rs"
-roko plan generate --from-file .roko/prd/published/my-feature.md
+roko plan regenerate <plan-dir> [--dry-run]
 ```
 
 ---
 
-### `roko plan regenerate`
+### `roko prd`
 
-Regenerate an existing plan from its source PRD or plan extract.
+Manage product requirements documents: idea, draft, publish, plan.
 
-```
-roko plan regenerate <plan_dir> [--dry-run]
-```
+#### `roko prd idea`
 
-| Flag | Description |
-|---|---|
-| `plan_dir` | Path to the plan directory containing `tasks.toml` |
-| `--dry-run` | Preview changes without overwriting |
-
-```
-roko plan regenerate plans/my-plan
-roko plan regenerate plans/my-plan --dry-run
-```
-
----
-
-## 3. PRDs
-
-### `roko prd idea`
-
-Capture a quick work item idea, saved to `.roko/prd/ideas/`.
+Capture a quick work item idea. Appends to `.roko/prd/ideas.md`.
 
 ```
 roko prd idea <text...>
 ```
 
-```
+**Example:**
+```bash
 roko prd idea "Wire SystemPromptBuilder into orchestrate.rs"
-roko prd idea Add adaptive gate threshold tuning to the learning loop
 ```
 
----
+#### `roko prd list`
 
-### `roko prd list`
-
-List all PRDs: published, drafts, and ideas.
+List all PRDs (published, drafts, ideas).
 
 ```
 roko prd list
 ```
 
----
+#### `roko prd status`
 
-### `roko prd status`
-
-Show a coverage report across all PRDs and plans: which PRDs have plans,
-which are in-progress, which are fully executed.
+Show coverage report across PRDs and plans.
 
 ```
 roko prd status
 ```
 
----
+#### `roko prd draft new`
 
-### `roko prd draft new`
+Create a new draft PRD. Launches a `scribe`-role agent to fill in the PRD scaffold.
+Builds a repository context pack first (crate list, relevant file tree) and injects it
+into the agent prompt. Post-generation validation checks for a `## Repository Grounding`
+section and flags proposed crates that already exist.
 
-Create a new draft PRD with agent assistance. The agent reads the codebase
-and produces a PRD including a mandatory `## Repository Grounding` section.
+Sidecar files written alongside the draft:
+- `<slug>.context.json` — keywords and workspace members used for generation
+- `<slug>.validation.json` — grounding validation report
 
 ```
 roko prd draft new <title...>
 ```
 
-PRDs missing the Repository Grounding section emit a warning. The section is
-validated against workspace crate members — false-negative claims ("no existing
-crates") when the workspace has crates are flagged.
-
-```
-roko prd draft new "Adaptive gate threshold tuning"
-roko prd draft new Wire SystemPromptBuilder into orchestrate.rs
+**Example:**
+```bash
+roko prd draft new "Wire SystemPromptBuilder into orchestrate.rs"
 ```
 
----
+#### `roko prd draft edit`
 
-### `roko prd draft edit`
-
-Refine an existing draft with agent assistance.
+Refine an existing draft. Launches a `scribe`-role agent to improve requirements,
+acceptance criteria, citations, and mermaid diagrams.
 
 ```
 roko prd draft edit <slug>
 ```
 
-| Flag | Description |
-|---|---|
-| `slug` | Draft filename without `.md` extension |
+#### `roko prd draft promote`
 
-```
-roko prd draft edit adaptive-gate-thresholds
-```
-
----
-
-### `roko prd draft promote`
-
-Promote a draft PRD to published status.
+Promote a draft to published status. Moves the file from `.roko/prd/drafts/` to
+`.roko/prd/published/`.
 
 ```
 roko prd draft promote <slug> [--auto-execute]
@@ -496,21 +420,9 @@ roko prd draft promote <slug> [--auto-execute]
 
 | Flag | Description |
 |---|---|
-| `slug` | Draft filename without `.md` extension |
-| `--auto-execute` | Execute the generated plan immediately after promotion |
+| `--auto-execute` | Execute the generated plan immediately after promotion. |
 
-Moves the draft from `.roko/prd/drafts/` to `.roko/prd/published/`.
-If `prd.auto_plan = true` is set in `roko.toml`, publishing triggers automatic
-plan generation via the `prd_publish_subscriber`.
-
-```
-roko prd draft promote adaptive-gate-thresholds
-roko prd draft promote my-feature --auto-execute
-```
-
----
-
-### `roko prd draft list`
+#### `roko prd draft list`
 
 List all draft PRDs.
 
@@ -518,34 +430,35 @@ List all draft PRDs.
 roko prd draft list
 ```
 
----
+#### `roko prd plan`
 
-### `roko prd plan`
-
-Generate implementation tasks from a published PRD using an agent.
+Generate implementation plans from a PRD. Uses a `strategist`-role agent.
+Writes plan directories under `plans/` (one per major feature area).
 
 ```
 roko prd plan <slug> [--dry-run]
 ```
 
-| Flag | Description |
+| Arg/Flag | Description |
 |---|---|
-| `slug` | PRD filename without `.md` extension |
-| `--dry-run` | Preview generation without writing `tasks.toml` files |
+| `<slug>` | PRD slug (filename without `.md`). Searches both `published/` and `drafts/`. |
+| `--dry-run` | Preview generation without writing `tasks.toml` files. |
 
-Writes `plans/<slug>/tasks.toml`. The agent reads the PRD and the current
-codebase state to produce a grounded task list.
-
-```
-roko prd plan adaptive-gate-thresholds
-roko prd plan my-feature --dry-run
+**Example:**
+```bash
+roko prd plan system-prompt-wiring
+roko prd plan system-prompt-wiring --dry-run
 ```
 
----
+#### `roko prd consolidate`
 
-### `roko prd consolidate`
+Scan all PRDs for duplicates, gaps, and inconsistencies. Reports:
 
-Scan all PRDs for duplicates, gaps, and inconsistencies.
+1. **DUPLICATES** — PRDs covering the same thing (proposes merge)
+2. **GAPS** — Areas with no PRD coverage
+3. **INCONSISTENCIES** — Conflicting requirements
+4. **STALE** — Requirements already implemented
+5. **IDEAS TO PROMOTE** — Ideas that should become drafts
 
 ```
 roko prd consolidate
@@ -553,44 +466,42 @@ roko prd consolidate
 
 ---
 
-## 4. Agents
+## Agents
 
-### `roko agent create`
+### `roko agent`
 
-Create a new agent from a manifest.
+Manage standalone agent runtimes and chat.
 
-```
-roko agent create --name <name> [--domain <domain>] [--template <name>] [--prompt <text>]
-                  [--skills <list>] [--tier <tier>] [--reputation <n>]
-                  [--max-concurrent-jobs <n>] [--serve-url <url>] [--workdir <path>]
-```
+#### `roko agent create`
 
-| Flag | Description |
-|---|---|
-| `--name <name>` | Human-readable agent name (required) |
-| `--domain <domain>` | Agent domain: `coding`, `research`, `chain`, `general` (default: `general`) |
-| `--template <name>` | Strategy template (e.g. `fast-coding`, `deep-research`) |
-| `--prompt <text>` | Natural-language description of what the agent should do |
-| `--skills <list>` | Comma-separated skill tags (e.g. `rust,p2p,networking`) |
-| `--tier <tier>` | Agent tier: `Unverified`, `Verified`, `Trusted`, `Expert`, `Pioneer` |
-| `--reputation <n>` | Reputation score 0–100 (default: `0`) |
-| `--max-concurrent-jobs <n>` | Maximum concurrent jobs (default: `0` = unlimited) |
-| `--serve-url <url>` | Auto-register with roko-serve after creation |
-| `--workdir <path>` | Working directory |
-
-Generates `.roko/agents/<name>/manifest.toml` after validating all manifest
-fields. Domain presets wire appropriate capabilities.
+Create a new agent from a manifest. Generates an `AgentExtendedManifest` TOML at
+`.roko/agents/<name>/manifest.toml`.
 
 ```
-roko agent create --name coder --domain coding --skills "rust,wasm"
-roko agent create --name researcher --domain research --prompt "Deep research on protocol design"
+roko agent create --name <name> [--domain <domain>] [--template <template>]
+                  [--prompt <text>] [--skills <skills>] [--tier <tier>]
+                  [--reputation <n>] [--max-concurrent-jobs <n>]
+                  [--serve-url <url>] [--workdir <path>]
 ```
 
----
+| Flag | Default | Description |
+|---|---|---|
+| `--name <name>` | required | Human-readable agent name. |
+| `--domain <domain>` | `general` | Agent domain: `coding`, `research`, `chain`, `general`. |
+| `--template <template>` | — | Strategy template (e.g. `fast-coding`, `deep-research`). |
+| `--prompt <text>` | — | Natural-language description of what the agent should do. |
+| `--skills <skills>` | — | Comma-separated skill tags (e.g. `"rust,p2p,networking"`). |
+| `--tier <tier>` | — | Agent tier: `Unverified`, `Verified`, `Trusted`, `Expert`, `Pioneer`. |
+| `--reputation <n>` | `0` | Reputation score (0–100). |
+| `--max-concurrent-jobs <n>` | `0` | Maximum concurrent jobs. |
+| `--serve-url <url>` | — | Auto-register with roko-serve after creation. |
+| `--workdir <path>` | cwd | Working directory. |
 
-### `roko agent delete`
+#### `roko agent delete`
 
-Delete an agent and clean up its state with an ordered 8-step shutdown.
+Delete an agent and clean up its state. Performs an 8-step ordered shutdown:
+stop processing, flush pending, backup knowledge, deregister from mesh, release resources,
+archive signals, clean state, emit deletion marker.
 
 ```
 roko agent delete --name <name> [--force] [--workdir <path>]
@@ -598,22 +509,11 @@ roko agent delete --name <name> [--force] [--workdir <path>]
 
 | Flag | Description |
 |---|---|
-| `--name <name>` | Agent name to delete (required) |
-| `--force` | Skip ordered shutdown and remove immediately |
-| `--workdir <path>` | Working directory |
+| `--name <name>` | Agent name to delete. |
+| `--force` | Skip ordered shutdown and remove immediately. |
+| `--workdir <path>` | Working directory. |
 
-The ordered shutdown: stop processing → flush pending → backup knowledge →
-deregister from mesh → release resources → archive signals → clean state →
-emit deletion marker.
-
-```
-roko agent delete --name coder
-roko agent delete --name coder --force
-```
-
----
-
-### `roko agent list`
+#### `roko agent list`
 
 List all agents with their status.
 
@@ -621,30 +521,21 @@ List all agents with their status.
 roko agent list [--workdir <path>]
 ```
 
----
+#### `roko agent start`
 
-### `roko agent start`
-
-Start a previously created agent (launches the per-agent HTTP sidecar).
+Start a previously created agent.
 
 ```
 roko agent start --name <name> [--bind <addr>] [--workdir <path>]
 ```
 
-| Flag | Description |
-|---|---|
-| `--name <name>` | Agent name (required) |
-| `--bind <addr>` | Socket address to bind (default: `127.0.0.1:0` for auto-port) |
-| `--workdir <path>` | Working directory |
+| Flag | Default | Description |
+|---|---|---|
+| `--name <name>` | required | Agent name. |
+| `--bind <addr>` | `127.0.0.1:0` | Socket address to bind (0 = auto-port). |
+| `--workdir <path>` | cwd | Working directory. |
 
-```
-roko agent start --name coder
-roko agent start --name coder --bind 127.0.0.1:7788
-```
-
----
-
-### `roko agent stop`
+#### `roko agent stop`
 
 Stop a running agent.
 
@@ -654,13 +545,10 @@ roko agent stop --name <name> [--force] [--workdir <path>]
 
 | Flag | Description |
 |---|---|
-| `--name <name>` | Agent name (required) |
-| `--force` | Send SIGKILL instead of SIGTERM |
-| `--workdir <path>` | Working directory |
+| `--name <name>` | Agent name. |
+| `--force` | Force kill (SIGKILL instead of SIGTERM). |
 
----
-
-### `roko agent status`
+#### `roko agent status`
 
 Show detailed status for one agent.
 
@@ -668,12 +556,10 @@ Show detailed status for one agent.
 roko agent status --name <name> [--workdir <path>]
 ```
 
----
+#### `roko agent serve`
 
-### `roko agent serve`
-
-Start a per-agent HTTP runtime (the agent sidecar server). This is the low-level
-command; `roko up` or `roko agent start` are normally used instead.
+Start a per-agent HTTP sidecar (13 routes including `/message` for real LLM dispatch,
+`/stream` for WebSocket streaming, `/predictions`, `/research`, `/tasks`).
 
 ```
 roko agent serve --agent-id <id> [--bind <addr>] [--relay-url <url>]
@@ -684,23 +570,18 @@ roko agent serve --agent-id <id> [--bind <addr>] [--relay-url <url>]
 
 | Flag | Default | Description |
 |---|---|---|
-| `--agent-id <id>` | required | Unique agent identifier advertised by the runtime |
-| `--bind <addr>` | `127.0.0.1:0` | Socket address to bind |
-| `--relay-url <url>` | — | Relay bridge URL (reserved for future use) |
-| `--chain-rpc-url <url>` | — | Chain JSON-RPC URL (reserved for future use) |
-| `--identity-registry <addr>` | — | ERC-8004 identity registry contract address |
-| `--passport-id <id>` | — | ERC-8004 passport ID for `updateAgentCardUri` |
-| `--wallet-key <key>` | — | Wallet private key (reserved for future signing) |
-| `--serve-url <url>` | `http://localhost:6677` | Control plane URL for heartbeat reporting |
+| `--agent-id <id>` | required | Unique agent identifier advertised by the runtime. |
+| `--bind <addr>` | `127.0.0.1:0` | Socket address to bind (0 = auto-pick free port). |
+| `--relay-url <url>` | — | Relay base URL for future relay bridge hook. |
+| `--chain-rpc-url <url>` | — | Chain JSON-RPC URL for future chain hooks. |
+| `--identity-registry <addr>` | — | ERC-8004 identity registry contract address. |
+| `--passport-id <id>` | — | ERC-8004 passport ID for `updateAgentCardUri`. |
+| `--wallet-key <key>` | — | Wallet private key for future signing hooks. |
+| `--serve-url <url>` | `http://localhost:6677` | roko-serve control plane URL for heartbeat reporting. |
 
-The sidecar exposes 13 routes including `/message` (real LLM dispatch),
-`/stream` (WebSocket), `/predictions`, `/research`, and `/tasks`.
+#### `roko agent chat`
 
----
-
-### `roko agent chat`
-
-Open an interactive chat REPL with a specific agent via roko-serve.
+Interactive chat REPL with an agent.
 
 ```
 roko agent chat [--agent <id>] [--serve-url <url>]
@@ -708,118 +589,80 @@ roko agent chat [--agent <id>] [--serve-url <url>]
 
 | Flag | Default | Description |
 |---|---|---|
-| `--agent <id>` | `nunchi-intelligence` | Agent ID to chat with |
-| `--serve-url <url>` | `http://localhost:6677` | roko-serve base URL |
-
-```
-roko agent chat --agent coder
-roko agent chat --agent researcher --serve-url http://my-server.com
-```
+| `--agent <id>` | `nunchi-intelligence` | Agent ID to chat with. |
+| `--serve-url <url>` | `http://localhost:6677` | roko-serve base URL. |
 
 ---
 
-## 5. Research
+## Research
 
-### `roko research topic`
+### `roko research`
+
+Research topics, enhance documents, and analyze execution data.
+
+#### `roko research topic`
 
 Deep-dive research on a topic. Produces `.roko/research/<slug>.md` with citations.
+
+Provider priority:
+1. Perplexity deep research (if `--deep` and `PERPLEXITY_API_KEY` set)
+2. Gemini grounded search (if `gemini.grounding_model` configured)
+3. Perplexity standard search (if `perplexity.default_search_model` configured)
+4. Claude CLI fallback (agent with file tools)
 
 ```
 roko research topic <topic...> [--deep]
 ```
 
-| Flag | Description |
+| Arg/Flag | Description |
 |---|---|
-| `topic` | The research topic (joined with spaces if multiple words) |
-| `--deep` | Use Perplexity deep research (async polling, 1–10 min) |
+| `<topic...>` | The research topic (multiple words joined). |
+| `--deep` | Use Perplexity deep research (`sonar-deep-research`, async, 1-10 min). |
 
-Without `--deep`, uses the configured agent (Claude CLI by default) for synthesis.
-With `--deep`, uses `sonar-deep-research` model via Perplexity API and polls
-every 15 seconds until complete.
-
-```
-roko research topic "cascade routing for LLM agents"
-roko research topic adaptive gate thresholds --deep
+**Examples:**
+```bash
+roko research topic "HDC vector encoding"
+roko research topic "cascade router bandit algorithms" --deep
 ```
 
----
-
-### `roko research search`
-
-Direct web search using Perplexity's search API. Returns raw results without synthesis.
-
-```
-roko research search <query...> [--domains <list>] [--recency <period>]
-```
-
-| Flag | Description |
-|---|---|
-| `query` | Search query text |
-| `--domains <list>` | Restrict to these domains (comma-separated, e.g. `docs.rs,github.com`) |
-| `--recency <period>` | Recency filter: `day`, `week`, `month`, `year` |
-
-```
-roko research search "Rust async runtime" --domains docs.rs,github.com
-roko research search "Claude API changes" --recency week
-```
-
----
-
-### `roko research enhance-prd`
+#### `roko research enhance-prd`
 
 Enhance a PRD with academic citations, diagrams, and research-backed improvements.
+Adds `[AUTHOR-YEAR]` citations, mermaid diagrams, and flags claims contradicted by
+recent findings.
 
 ```
 roko research enhance-prd <slug>
 ```
 
-Reads `.roko/prd/published/<slug>.md`, enriches it with research context from the
-neuro store, and writes the improved version back.
+#### `roko research enhance-plan`
 
-```
-roko research enhance-prd adaptive-gate-thresholds
-```
-
----
-
-### `roko research enhance-plan`
-
-Optimize an implementation plan with research-backed task decomposition techniques.
+Optimize an implementation plan with research-backed task decomposition techniques
+(citing SWE-bench, Agentless, etc.).
 
 ```
 roko research enhance-plan <plan>
 ```
 
-| Argument | Description |
-|---|---|
-| `plan` | Plan directory name under `.roko/plans/` |
+#### `roko research enhance-tasks`
 
----
-
-### `roko research enhance-tasks`
-
-Optimize tasks for efficiency, parallelism, and cheapest viable model assignment.
+Optimize tasks for efficiency, parallelism, and cheapest viable model. Adds
+`context.read_files` line ranges and ensures acceptance criteria are runnable shell commands.
 
 ```
 roko research enhance-tasks <plan>
 ```
 
----
-
-### `roko research analyze`
+#### `roko research analyze`
 
 Analyze execution episodes for self-learning insights and bandit weight recommendations.
+Saves analysis to `.roko/research/execution-analysis.md`.
 
 ```
 roko research analyze
 ```
 
-Reads `.roko/episodes.jsonl` and `.roko/learn/efficiency.jsonl`, produces
-recommendations for router weights, prompt experiments, and gate thresholds.
-
----
-
-### `roko research list`
+#### `roko research list`
 
 List all research artifacts in `.roko/research/`.
 
@@ -827,158 +670,166 @@ List all research artifacts in `.roko/research/`.
 roko research list
 ```
 
+#### `roko research search`
+
+Direct web search using Perplexity's pure search API. Returns raw results without synthesis.
+Requires `PERPLEXITY_API_KEY`.
+
+```
+roko research search <query...> [--domains <domains>] [--recency day|week|month|year]
+```
+
+| Arg/Flag | Description |
+|---|---|
+| `<query...>` | The search query (multiple words joined). |
+| `--domains <domains>` | Restrict to these domains (comma-separated, e.g. `"docs.rs,github.com"`). |
+| `--recency <period>` | Recency filter: `day`, `week`, `month`, `year`. |
+
 ---
 
-## 6. Knowledge
+## Knowledge
 
-### `roko knowledge query`
+### `roko knowledge`
 
-Query the durable knowledge (neuro) store for a topic.
+Durable knowledge store, dream consolidation, custody chain, and cold archival.
+
+#### `roko knowledge query`
+
+Query the durable knowledge store for a topic. Returns up to 10 matches ranked by
+confidence. Supports `--json`.
 
 ```
 roko knowledge query <topic...> [--workdir <path>]
 ```
 
-Performs a semantic search over `.roko/learn/neuro.jsonl`. Returns matching engrams
-sorted by confidence score.
-
-```
-roko knowledge query "gate threshold adaptation"
-roko knowledge query cascade router model selection
+**Example:**
+```bash
+roko knowledge query "cascade routing bandit"
 ```
 
----
+Output fields per entry: index, kind, confidence (0.0–1.0), content, tags, source episodes.
 
-### `roko knowledge stats`
+#### `roko knowledge stats`
 
-Show aggregate statistics for the durable knowledge store.
+Show aggregate statistics for the knowledge store. Output includes: total entries,
+anti-knowledge count, average confidence, entries by kind, entries by tier,
+entries by source, oldest/newest entry. Supports `--json`.
 
 ```
 roko knowledge stats [--workdir <path>]
 ```
 
-Reports: total engrams, confidence distribution, age distribution, type breakdown.
+#### `roko knowledge gc`
 
----
-
-### `roko knowledge gc`
-
-Run garbage collection on the durable knowledge store.
+Run garbage collection on the knowledge store. Removes entries below the minimum
+confidence threshold (`DEFAULT_GC_MIN_CONFIDENCE`). Supports `--json`.
 
 ```
 roko knowledge gc [--workdir <path>]
 ```
 
-Removes engrams below the minimum confidence threshold
-(`DEFAULT_GC_MIN_CONFIDENCE`). Reports how many entries were removed.
+#### `roko knowledge backup`
 
----
-
-### `roko knowledge backup`
-
-Backup the knowledge store to a directory with optional genomic bottleneck.
+Backup the knowledge store to a directory, with optional genomic bottleneck (export
+only the top N entries by confidence).
 
 ```
 roko knowledge backup <destination> [--workdir <path>] [--force] [--top-n <n>]
 ```
 
-| Flag | Description |
+| Arg/Flag | Description |
 |---|---|
-| `destination` | Directory to write backup files into (required) |
-| `--workdir <path>` | Directory containing `.roko/` |
-| `--force` | Overwrite existing backup files in the destination |
-| `--top-n <n>` | Genomic bottleneck: export only the top N entries by confidence |
+| `<destination>` | Directory to write backup files into. |
+| `--force` | Overwrite existing backup files in the destination. |
+| `--top-n <n>` | Genomic bottleneck: export only the top N entries by confidence. |
 
-The `--top-n` flag implements a "genetic bottleneck" — only the highest-confidence
-knowledge survives, simulating evolutionary pressure.
+Files written:
+- `knowledge.jsonl` — knowledge entries
+- `knowledge-confirmations.jsonl` — confirmations (if present)
+- `manifest.json` — backup metadata (version, timestamp, entry count, source path)
+
+**Example:**
+```bash
+roko knowledge backup ./backups/2026-04-29 --top-n 1000
+```
+
+#### `roko knowledge restore`
+
+Restore the knowledge store from a backup. Applies confidence decay (0.85^N per generation)
+and sets all restored entries to `Transient` tier (quarantine).
 
 ```
-roko knowledge backup ~/backups/roko-knowledge
-roko knowledge backup ~/backups/roko-knowledge --top-n 500
-```
-
----
-
-### `roko knowledge restore`
-
-Restore the knowledge store from a backup with confidence decay.
-
-```
-roko knowledge restore <source> [--workdir <path>] [--force] [--types <list>]
+roko knowledge restore <source> [--workdir <path>] [--force] [--types <types>]
                        [--min-confidence <f>] [--generation <n>]
 ```
 
-| Flag | Default | Description |
+| Arg/Flag | Default | Description |
 |---|---|---|
-| `source` | required | Directory created by `roko knowledge backup` |
-| `--workdir <path>` | — | Directory containing `.roko/` |
-| `--force` | false | Overwrite existing local neuro store files |
-| `--types <list>` | — | Filter by knowledge types (comma-separated) |
-| `--min-confidence <f>` | — | Only restore entries with confidence >= threshold (0.0–1.0) |
-| `--generation <n>` | `1` | Hop count for confidence decay |
+| `<source>` | required | Directory created by `roko knowledge backup`. |
+| `--force` | false | Overwrite existing local neuro store files. |
+| `--types <types>` | — | Filter by knowledge types (comma-separated). |
+| `--min-confidence <f>` | — | Only restore entries with confidence >= this threshold (0.0–1.0). |
+| `--generation <n>` | `1` | Generation hop count for confidence decay. Decay factor: `0.85^N`. |
 
-Each generation hop applies a confidence decay factor to restored entries,
-preventing stale knowledge from polluting the active store at full confidence.
-
-```
-roko knowledge restore ~/backups/roko-knowledge
-roko knowledge restore ~/backups/roko-knowledge --min-confidence 0.6 --generation 2
+**Example:**
+```bash
+roko knowledge restore ./backups/2026-04-29 --generation 2 --min-confidence 0.5
 ```
 
----
+#### `roko knowledge sync`
 
-### `roko knowledge sync`
-
-Sync knowledge with a peer agent via the Mesh protocol.
+Sync knowledge with a peer agent via the Mesh protocol. Outbox deltas are written to
+`.roko/mesh/outbox/delta-<peer>.jsonl`. Inbox deltas are read from
+`.roko/mesh/inbox/delta-<peer>.jsonl`. Received entries get a 0.7x confidence discount
+and are set to `Transient` tier. Supports `--json`.
 
 ```
-roko knowledge sync <peer> [--workdir <path>] [--direction <dir>] [--max-send <n>]
+roko knowledge sync <peer> [--workdir <path>] [--direction send|receive|both] [--max-send <n>]
 ```
 
-| Flag | Default | Description |
+| Arg/Flag | Default | Description |
 |---|---|---|
-| `peer` | required | Peer agent identifier to sync with |
-| `--workdir <path>` | — | Working directory |
-| `--direction <dir>` | `both` | Direction: `send`, `receive`, or `both` |
-| `--max-send <n>` | `100` | Maximum engrams to send in this sync cycle |
+| `<peer>` | required | Peer agent identifier. |
+| `--direction` | `both` | Direction: `send`, `receive`, or `both`. |
+| `--max-send <n>` | `100` | Maximum engrams to send per cycle. |
 
----
+#### `roko knowledge dream run`
 
-### `roko knowledge dream run`
-
-Run a dream consolidation cycle immediately.
+Run a dream consolidation cycle immediately. Processes episodes from
+`.roko/episodes.jsonl`, clusters them, writes knowledge entries and playbooks to
+`.roko/neuro/`, and saves a report to `.roko/dreams/`. Also refreshes the C-factor
+snapshot. Supports `--json`.
 
 ```
 roko knowledge dream run [--workdir <path>]
 ```
 
-Dream consolidation processes recent episodes and engrams, extracts patterns,
-and distills durable knowledge into the neuro store. This is the offline
-learning cycle (the "hypnagogia" phase).
+Dream cycle output:
+- Processed episodes count
+- Clusters found
+- Knowledge entries written
+- Playbooks created
+- C-factor (overall score)
+- Report saved path
 
----
+#### `roko knowledge dream report`
 
-### `roko knowledge dream report`
-
-Show the latest dream report without running a new cycle.
+Show the latest dream report without running a new cycle. Supports `--json`.
 
 ```
 roko knowledge dream report [--workdir <path>]
 ```
 
----
+#### `roko knowledge dream schedule`
 
-### `roko knowledge dream schedule`
-
-Show when the next dream cycle is scheduled to fire.
+Show when the next dream should fire based on idle threshold and last run time.
+Supports `--json`.
 
 ```
 roko knowledge dream schedule [--workdir <path>]
 ```
 
----
-
-### `roko knowledge dream journal`
+#### `roko knowledge dream journal`
 
 Display recent dream journal entries.
 
@@ -988,12 +839,12 @@ roko knowledge dream journal [--limit <n>] [--workdir <path>]
 
 | Flag | Default | Description |
 |---|---|---|
-| `--limit <n>` | `10` | Number of recent entries to display |
-| `--workdir <path>` | — | Working directory |
+| `--limit <n>` | `10` | Number of recent entries to display. |
 
----
+Output per entry: timestamp, cycle ID, agent ID, hypotheses (generated/staged/promoted),
+total tokens, early termination flag.
 
-### `roko knowledge dream archive`
+#### `roko knowledge dream archive`
 
 Display recent dream archive entries.
 
@@ -1001,19 +852,21 @@ Display recent dream archive entries.
 roko knowledge dream archive [--limit <n>] [--workdir <path>]
 ```
 
----
+| Flag | Default | Description |
+|---|---|---|
+| `--limit <n>` | `10` | Number of recent entries to display. |
 
-### `roko knowledge custody list`
+Output per entry: archived_at, entry_id, kind, quality_score, summary.
 
-List recent custody audit records.
+#### `roko knowledge custody list`
+
+List recent custody records from the custody audit chain.
 
 ```
 roko knowledge custody list [--limit <n>] [--workdir <path>]
 ```
 
----
-
-### `roko knowledge custody show`
+#### `roko knowledge custody show`
 
 Show full details of a custody record by index.
 
@@ -1021,614 +874,169 @@ Show full details of a custody record by index.
 roko knowledge custody show <index> [--workdir <path>]
 ```
 
----
+#### `roko knowledge custody verify`
 
-### `roko knowledge custody verify`
-
-Verify integrity of the custody chain.
+Verify the integrity of the custody chain. Checks hash linkages.
 
 ```
 roko knowledge custody verify [--workdir <path>]
 ```
 
-Checks the hash chain is unbroken. Reports first broken link if found.
+#### `roko knowledge archive`
 
----
-
-### `roko knowledge archive`
-
-Move old engrams to cold storage (compressed monthly archives).
+Move old engrams to cold storage (compressed monthly archives) at `.roko/cold/`.
+Prompts for confirmation unless `--quiet` or non-TTY.
 
 ```
-roko knowledge archive [--older-than <duration>] [--batch-size <n>]
-                       [--workdir <path>] [--dry-run]
+roko knowledge archive [--older-than <duration>] [--batch-size <n>] [--workdir <path>] [--dry-run]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--older-than <duration>` | `30d` | Archive engrams older than this (e.g. `30d`, `7d`) |
-| `--batch-size <n>` | `500` | Maximum engrams to archive per batch |
-| `--workdir <path>` | — | Working directory |
-| `--dry-run` | false | Print what would be archived without doing it |
-
-```
-roko knowledge archive --older-than 90d
-roko knowledge archive --dry-run
-```
+| `--older-than <duration>` | `30d` | Archive engrams older than this duration. Formats: `30d`, `7d`, `24h`, `60m`, `3600s`. |
+| `--batch-size <n>` | `500` | Maximum engrams to archive per batch. |
+| `--dry-run` | false | Print what would be archived without doing it. |
 
 ---
 
-## 7. Learning
+## Learning
 
-### `roko learn all`
+### `roko learn`
 
-Show all learning state: cascade router, experiments, efficiency, episodes.
+Inspect and tune the learning subsystem.
+
+#### `roko learn all`
+
+Show all learning state: cascade router, experiments, efficiency, episodes, and knowledge.
 
 ```
 roko learn all [--workdir <path>]
 ```
 
----
+#### `roko learn route`
 
-### `roko learn route`
+Show cascade router state from `.roko/learn/cascade-router.json`. Displays total
+observations, model slugs, stage transitions (static → confidence → UCB), and the
+latest transition.
 
-Show cascade router state (model selection weights, bandit arms, recent decisions).
+Stage thresholds:
+- `static`: 0–49 observations
+- `confidence`: 50–199 observations
+- `ucb`: 200+ observations
 
 ```
 roko learn route [--workdir <path>]
 ```
 
-Reads `.roko/learn/cascade-router.json`.
+#### `roko learn experiments`
 
----
-
-### `roko learn experiments`
-
-Show prompt A/B experiment state (arm assignments, success rates, EMA estimates).
+Show experiment state: prompt experiments (`.roko/learn/experiments.json`) and model
+experiments (`.roko/learn/model-experiments.json`). Displays running and concluded counts
+per experiment, plus winner info.
 
 ```
 roko learn experiments [--workdir <path>]
 ```
 
-Reads `.roko/learn/experiments.json`.
+#### `roko learn efficiency`
 
----
-
-### `roko learn efficiency`
-
-Show per-role efficiency metrics (cost per token, latency, success rate).
+Show efficiency metrics from `.roko/learn/efficiency.jsonl`. Displays event count,
+date range, and most recent event (model, task, plan, gate pass/fail, cost).
 
 ```
 roko learn efficiency [--workdir <path>]
 ```
 
-Reads `.roko/learn/efficiency.jsonl`.
+#### `roko learn episodes`
 
----
-
-### `roko learn episodes`
-
-Show episode summary (recent agent turns, gate outcomes, C-Factor trend).
+Show episode summary from `.roko/learn/episodes.jsonl` (or `.roko/episodes.jsonl`).
+Displays episode count, date range, and most recent episode (model, task, pass/fail, cost).
 
 ```
 roko learn episodes [--workdir <path>]
 ```
 
-Reads `.roko/episodes.jsonl`.
+#### `roko learn tune`
 
----
-
-### `roko learn tune`
-
-Display and optionally adjust adaptive thresholds and model routing parameters.
+Display and optionally adjust adaptive thresholds.
 
 ```
-roko learn tune [subsystem] [--dry-run] [--workdir <path>]
+roko learn tune [<subsystem>] [--dry-run] [--workdir <path>]
 ```
 
-| Argument | Default | Description |
+| Arg | Default | Description |
 |---|---|---|
-| `subsystem` | `gates` | Subsystem to tune: `gates`, `routing`, or `budget` |
-| `--dry-run` | false | Display current values without modifying |
-| `--workdir <path>` | — | Working directory |
+| `<subsystem>` | `gates` | Subsystem to tune: `gates`, `routing`, `budget`. |
+| `--dry-run` | false | Display current values without modifying. |
 
-**Subsystems:**
-
-- `gates` — EMA-based adaptive gate thresholds (`.roko/learn/gate-thresholds.json`)
-- `routing` — Cascade router state and bandit weights
-- `budget` — Efficiency log entry count and budget headroom
-
-```
-roko learn tune gates
-roko learn tune routing --dry-run
-roko learn tune budget
-```
+Subsystem details:
+- `gates` — Reads `.roko/learn/gate-thresholds.json` (EMA-adjusted per rung)
+- `routing` — Reads `.roko/learn/cascade-router.json`
+- `budget` — Shows entry count from `.roko/learn/efficiency.jsonl`
 
 ---
 
-## 8. Configuration
+## Jobs
 
-### `roko config init`
+### `roko job`
 
-Interactive wizard: detects installed LLM CLIs, writes global config. Also available
-as `roko config wizard`.
+Manage marketplace jobs.
 
-```
-roko config init [--yes] [--agent <cmd>] [--model <name>] [--budget <n>]
-                 [--role <text>] [--enable-gates] [--path <path>]
-                 [--non-interactive]
-```
-
-| Flag | Description |
-|---|---|
-| `--yes` | Skip all confirmation prompts |
-| `--agent <cmd>` | Pre-select agent command (skip picker) |
-| `--model <name>` | Pre-set model name (ollama-only convenience) |
-| `--budget <n>` | Pre-set token budget |
-| `--role <text>` | Pre-set role string |
-| `--enable-gates` | Enable default compile + clippy gates |
-| `--path <path>` | Write to this path instead of the resolved global path |
-| `--non-interactive` | Skip all prompts, fail if any required answer is missing |
-
-In `--non-interactive` mode, `--agent` is required. Defaults: budget = 8000,
-role = "You are a Roko agent.", gates disabled.
-
-```
-roko config init
-roko config init --yes --agent claude --enable-gates
-roko config init --non-interactive --agent claude
-```
-
----
-
-### `roko config show`
-
-Print the effective merged config with per-field source tags (global, project, env).
-
-```
-roko config show [--workdir <path>]
-```
-
----
-
-### `roko config path`
-
-Print the resolved global and project config file paths.
-
-```
-roko config path [--workdir <path>]
-```
-
----
-
-### `roko config edit`
-
-Open `$EDITOR` on the chosen config file.
-
-```
-roko config edit [--global | --project] [--workdir <path>]
-```
-
-| Flag | Description |
-|---|---|
-| `--global` | Open the global config file |
-| `--project` | Open (or create) the project `roko.toml` |
-
-If neither flag is given, auto-selects based on whether a project config exists.
-
-```
-roko config edit --global
-roko config edit --project
-```
-
----
-
-### `roko config set`
-
-Set a dotted key in the chosen config layer.
-
-```
-roko config set <key> <value> [--project | --global] [--workdir <path>]
-```
-
-| Flag | Description |
-|---|---|
-| `key` | Dotted key path (e.g. `agent.command`, `executor.task_timeout_secs`) |
-| `value` | Value to write |
-| `--project` | Write to project config |
-| `--global` | Write to global config (default) |
-
-```
-roko config set agent.command ollama
-roko config set executor.task_timeout_secs 300 --project
-```
-
----
-
-### `roko config validate`
-
-Validate `roko.toml` syntax, schema, and semantic references (provider names,
-model slugs, secret references).
-
-```
-roko config validate [--workdir <path>]
-```
-
----
-
-### `roko config migrate`
-
-Migrate a legacy project `roko.toml` from the v1 `[agent]` command format into
-explicit `[providers.*]` and `[models.*]` tables.
-
-```
-roko config migrate [--workdir <path>] [--dry-run] [--yes]
-```
-
-| Flag | Description |
-|---|---|
-| `--workdir <path>` | Working directory |
-| `--dry-run` | Print the proposed migration without writing changes |
-| `--yes` / `-y` | Skip the confirmation prompt and apply immediately |
-
-```
-roko config migrate --dry-run
-roko config migrate --yes
-```
-
----
-
-### `roko config set-secret`
-
-Store a secret in `~/.roko/.env` as `NAME=VALUE`.
-
-```
-roko config set-secret <name> <value>
-```
-
-Secrets stored here are loaded automatically at startup and are redacted
-from log output.
-
-```
-roko config set-secret ANTHROPIC_API_KEY sk-ant-...
-roko config set-secret PERPLEXITY_API_KEY pplx-...
-```
-
----
-
-### `roko config check-secrets`
-
-Check `${VAR}` references in the active config and validate that referenced
-secrets are present.
-
-```
-roko config check-secrets [--workdir <path>]
-```
-
----
-
-### `roko config providers list`
-
-List configured providers and their current connection status.
-
-```
-roko config providers list [--workdir <path>]
-```
-
----
-
-### `roko config providers health`
-
-Show persisted provider circuit-breaker health and latency statistics.
-
-```
-roko config providers health [--workdir <path>]
-```
-
-Reads the circuit-breaker state from `.roko/learn/` and reports: circuit state
-(closed/open/half-open), error rate, p50/p95 latency.
-
----
-
-### `roko config providers test`
-
-Send a minimal request to verify provider connectivity.
-
-```
-roko config providers test [<provider>] [--all] [--workdir <path>]
-```
-
-| Flag | Description |
-|---|---|
-| `provider` | Provider name from `[providers.*]` |
-| `--all` | Test every configured provider and print a summary table |
-
-```
-roko config providers test claude_cli
-roko config providers test --all
-```
-
----
-
-### `roko config models list`
-
-List configured models and their capabilities.
-
-```
-roko config models list [--workdir <path>]
-```
-
----
-
-### `roko config models route`
-
-Show the current routing decision for a model key and optionally explain why it won.
-
-```
-roko config models route <model> [--explain] [--complexity <tier>] [--workdir <path>]
-```
-
-| Flag | Description |
-|---|---|
-| `model` | Model key or slug to explain |
-| `--explain` | Show the full routing trace instead of only the final decision |
-| `--complexity <tier>` | Complexity tier: `mechanical`, `focused`, `integrative`, `architectural` |
-
-```
-roko config models route claude-sonnet-4-6 --explain
-roko config models route claude-opus-4-6 --complexity architectural
-```
-
----
-
-### `roko config subscriptions list`
-
-List all event subscriptions.
-
-```
-roko config subscriptions list
-```
-
----
-
-### `roko config subscriptions add`
-
-Create a new event subscription.
-
-```
-roko config subscriptions add --template <name> --trigger <glob>
-```
-
-| Flag | Description |
-|---|---|
-| `--template <name>` | Agent template name to invoke when triggered |
-| `--trigger <glob>` | Engram trigger glob to match |
-
----
-
-### `roko config subscriptions remove`
-
-Delete a subscription by ID.
-
-```
-roko config subscriptions remove <id>
-```
-
----
-
-### `roko config subscriptions enable`
-
-Enable a previously disabled subscription.
-
-```
-roko config subscriptions enable <id>
-```
-
----
-
-### `roko config subscriptions disable`
-
-Disable a subscription without deleting it.
-
-```
-roko config subscriptions disable <id>
-```
-
----
-
-### `roko config events`
-
-Inspect configured event sources (cron jobs, file watchers).
-
-```
-roko config events [--workdir <path>]
-```
-
----
-
-### `roko config experiments`
-
-Manage model A/B experiments (subcommands inherited from the experiment module).
-
-```
-roko config experiments <subcommand>
-```
-
-See `roko config experiments --help` for available subcommands.
-
----
-
-### `roko config plugins list`
-
-List available and installed plugins.
-
-```
-roko config plugins list [--workdir <path>]
-```
-
----
-
-### `roko config plugins install`
-
-Install a plugin from a local path or registry.
-
-```
-roko config plugins install <source> [--workdir <path>]
-```
-
-| Argument | Description |
-|---|---|
-| `source` | Path to the plugin manifest (`plugin.toml`) or directory |
-
----
-
-### `roko config plugins remove`
-
-Remove an installed plugin by name.
-
-```
-roko config plugins remove <name> [--workdir <path>]
-```
-
----
-
-### `roko config plugins audit`
-
-Audit installed plugins and report capabilities and permissions.
-
-```
-roko config plugins audit [--workdir <path>]
-```
-
----
-
-### `roko config secrets set`
-
-Store a named secret in the profile-aware secrets store.
-
-```
-roko config secrets set <name> <value>
-```
-
----
-
-### `roko config secrets get`
-
-Retrieve a named secret.
-
-```
-roko config secrets get <name>
-```
-
----
-
-### `roko config secrets list`
-
-List all stored secret names (values are not shown).
-
-```
-roko config secrets list
-```
-
----
-
-### `roko config secrets rotate`
-
-Rotate a named secret (prompts for the new value).
-
-```
-roko config secrets rotate <name>
-```
-
----
-
-## 9. Jobs
-
-### `roko job list`
-
-List all marketplace jobs.
-
-```
-roko job list [--workdir <path>] [--status <status>]
-```
-
-| Flag | Description |
-|---|---|
-| `--workdir <path>` | Working directory |
-| `--status <status>` | Filter by status: `open`, `assigned`, `in_progress`, `completed`, `failed`, `cancelled` |
+#### `roko job list`
 
-Output format: status icon + job type + status + ID (first 8 chars) + title.
+List all marketplace jobs with optional status filter.
 
 ```
-roko job list
-roko job list --status in_progress
-roko job list --json
+roko job list [--status <status>] [--workdir <path>]
 ```
 
----
+Status values: `open`, `assigned`, `in_progress`, `completed`, `failed`, `cancelled`.
 
-### `roko job create`
+#### `roko job create`
 
 Create a new marketplace job.
 
 ```
-roko job create <title> [--type <type>] [--description <text>] [--priority <level>]
+roko job create <title> [--type <type>] [--description <text>] [--priority <priority>]
                 [--auto-execute] [--plan-id <id>] [--workdir <path>]
 ```
 
-| Flag | Default | Description |
+| Arg/Flag | Default | Description |
 |---|---|---|
-| `title` | required | Job title |
-| `--type <type>` | `research` | Job type: `research`, `coding_task`, `chain_monitor`, `chain_analysis` |
-| `--description <text>` | `""` | Job description |
-| `--priority <level>` | `medium` | Priority: `low`, `medium`, `high`, `critical` |
-| `--auto-execute` | false | Auto-execute when a runner picks it up |
-| `--plan-id <id>` | — | Associated plan ID |
-| `--workdir <path>` | — | Working directory |
+| `<title>` | required | Job title. |
+| `--type <type>` | `research` | Job type: `research`, `coding_task`, `chain_monitor`, `chain_analysis`. |
+| `--description <text>` | `""` | Job description. |
+| `--priority <priority>` | `medium` | Priority: `low`, `medium`, `high`, `critical`. |
+| `--auto-execute` | false | Auto-execute when the runner picks it up. |
+| `--plan-id <id>` | — | Associated plan ID. |
 
-Persists the job as `.roko/jobs/<uuid>.json`.
-
-```
-roko job create "Research cascade routing improvements" --type research
-roko job create "Fix auth module" --type coding_task --priority high --auto-execute
-```
-
----
-
-### `roko job match`
+#### `roko job match`
 
 Match a proposed job against registered agents via roko-serve.
 
 ```
 roko job match <title> [--serve-url <url>] [--description <text>] [--language <lang>]
-               [--min-tier <tier>] [--reward <amount>] [--skills <list>]
-               [--workdir <path>]
+               [--min-tier <tier>] [--reward <reward>] [--skills <skills>] [--workdir <path>]
 ```
 
-| Flag | Default | Description |
+| Arg/Flag | Default | Description |
 |---|---|---|
-| `title` | required | Job title |
-| `--serve-url <url>` | `http://localhost:6677` | roko-serve base URL |
-| `--description <text>` | `""` | Job description |
-| `--language <lang>` | — | Primary implementation language (treated as required skill) |
-| `--min-tier <tier>` | — | Minimum agent tier: `Unverified`, `Verified`, `Trusted`, `Expert`, `Pioneer` |
-| `--reward <amount>` | `""` | Reward string (e.g. `"2500 KORAI"`) |
-| `--skills <list>` | — | Required skills (comma-separated) |
-| `--workdir <path>` | — | Working directory (for auth config) |
+| `<title>` | required | Job title. |
+| `--serve-url <url>` | `http://localhost:6677` | roko-serve base URL. |
+| `--min-tier <tier>` | — | Minimum agent tier: `Unverified`, `Verified`, `Trusted`, `Expert`, `Pioneer`. |
+| `--reward <reward>` | `""` | Reward string, e.g. `"2500 KORAI"`. |
+| `--skills <skills>` | — | Required skills (comma-separated). |
+| `--language <lang>` | — | Primary implementation language. |
 
----
+#### `roko job show`
 
-### `roko job show`
-
-Show full details for a specific job.
+Show details for a specific job.
 
 ```
 roko job show <id> [--workdir <path>]
 ```
 
----
-
-### `roko job execute`
+#### `roko job execute`
 
 Execute a job locally or via roko-serve.
 
@@ -1636,14 +1044,7 @@ Execute a job locally or via roko-serve.
 roko job execute <id> [--serve-url <url>] [--workdir <path>]
 ```
 
-| Flag | Description |
-|---|---|
-| `id` | Job ID (required) |
-| `--serve-url <url>` | If set, POST to `/api/jobs/<id>/execute` on roko-serve |
-
----
-
-### `roko job cancel`
+#### `roko job cancel`
 
 Cancel a job.
 
@@ -1653,120 +1054,422 @@ roko job cancel <id> [--workdir <path>]
 
 ---
 
-## 10. Server and Deployment
+## Benchmarks
+
+### `roko bench`
+
+Run benchmark evaluations and write learning telemetry.
+
+#### `roko bench demo`
+
+Run a comparative benchmark: naive vs roko-optimized. Uses simulated data by default.
+
+```
+roko bench demo [--real] [--workdir <path>]
+```
+
+| Flag | Description |
+|---|---|
+| `--real` | Use real LLM dispatch instead of simulated results. |
+
+**Examples:**
+```bash
+roko bench demo                    # Run with simulated data
+roko bench demo --real             # Run with real LLM dispatch
+```
+
+#### `roko bench swe`
+
+Run a native SWE-bench-style proxy batch.
+
+```
+roko bench swe [--dataset <path>] [--batch-size <n>] [--offset <n>]
+               [--agent-mode gold|prediction-file|command]
+               [--predictions <path>] [--agent-command <cmd>]
+               [--report <path>] [--export-predictions <path>]
+               [--no-learning] [--keep-workdirs] [--workdir <path>]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--dataset <path>` | built-in smoke | Local JSONL dataset. If omitted, a built-in two-task smoke dataset is generated. |
+| `--batch-size <n>` | `2` | Number of instances to run. |
+| `--offset <n>` | `0` | Offset into the dataset. |
+| `--agent-mode <mode>` | `gold` | Agent adapter: `gold`, `prediction-file`, `command`. |
+| `--predictions <path>` | — | Predictions JSONL for `--agent-mode prediction-file`. |
+| `--agent-command <cmd>` | — | Command for `--agent-mode command`. Receives instance JSON on stdin, prints a unified diff. |
+| `--report <path>` | — | Scores JSONL output path. |
+| `--export-predictions <path>` | — | Write SWE-bench-style predictions JSONL. |
+| `--no-learning` | false | Disable episode, efficiency, and C-factor writes. |
+| `--keep-workdirs` | false | Keep per-instance benchmark workdirs for debugging. |
+
+**Examples:**
+```bash
+roko bench swe --batch-size 2 --agent-mode gold
+roko bench swe --dataset ./swe-smoke.jsonl --predictions ./predictions.jsonl --agent-mode prediction-file
+roko bench swe --agent-mode command --agent-command './my-agent.sh'
+```
+
+---
+
+## Configuration
+
+### `roko config`
+
+Manage global and project config, providers, models, subscriptions, plugins, and secrets.
+
+#### `roko config init` (alias: `roko config wizard`)
+
+Interactive wizard: detects installed LLM CLIs, writes global config.
+
+```
+roko config init [--yes] [--agent <cmd>] [--model <model>] [--budget <n>] [--role <role>]
+                 [--enable-gates] [--path <path>] [--non-interactive]
+```
+
+| Flag | Description |
+|---|---|
+| `--yes` | Skip all confirmation prompts. |
+| `--agent <cmd>` | Pre-select agent command (skip picker). |
+| `--model <model>` | Pre-set model name (ollama-only convenience). |
+| `--budget <n>` | Pre-set token budget. |
+| `--role <role>` | Pre-set role string. |
+| `--enable-gates` | Enable default compile+clippy gates. |
+| `--path <path>` | Write to this path instead of the resolved global path. |
+| `--non-interactive` | Skip all prompts, fail if any answer is missing. |
+
+#### `roko config show`
+
+Print the effective merged config with per-field source tags (shows which layer each
+value comes from).
+
+```
+roko config show [--workdir <path>]
+```
+
+#### `roko config path`
+
+Print the resolved global + project + env config paths.
+
+```
+roko config path [--workdir <path>]
+```
+
+#### `roko config edit`
+
+Open `$EDITOR` on the chosen config file.
+
+```
+roko config edit [--global] [--project] [--workdir <path>]
+```
+
+Flags `--global` and `--project` are mutually exclusive.
+
+#### `roko config set`
+
+Set a dotted key in the chosen config layer.
+
+```
+roko config set <key> <value> [--global] [--project] [--workdir <path>]
+```
+
+**Example:**
+```bash
+roko config set agent.command claude
+roko config set agent.model claude-opus-4-5 --project
+```
+
+#### `roko config set-secret`
+
+Store a secret in `~/.roko/.env` as `NAME=VALUE`.
+
+```
+roko config set-secret <name> <value>
+```
+
+#### `roko config check-secrets`
+
+Check `${VAR}` references in config and validate that referenced secrets exist.
+
+```
+roko config check-secrets [--workdir <path>]
+```
+
+#### `roko config validate`
+
+Validate `roko.toml` syntax, schema, and semantic references.
+
+```
+roko config validate [--workdir <path>]
+```
+
+#### `roko config migrate`
+
+Migrate a legacy `roko.toml` into explicit `[providers.*]` and `[models.*]` tables.
+
+```
+roko config migrate [--workdir <path>] [--dry-run] [-y]
+```
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Print the proposed migration without writing changes. |
+| `-y` | Skip the confirmation prompt and apply the migration immediately. |
+
+#### `roko config providers list`
+
+List configured providers and their current connection status.
+
+```
+roko config providers list [--workdir <path>]
+```
+
+#### `roko config providers health`
+
+Show persisted provider circuit-breaker health and latency.
+
+```
+roko config providers health [--workdir <path>]
+```
+
+#### `roko config providers test`
+
+Send a minimal request to verify provider connectivity.
+
+```
+roko config providers test [<provider>] [--all] [--workdir <path>]
+```
+
+| Arg/Flag | Description |
+|---|---|
+| `<provider>` | Provider name from `[providers.*]`. Omit when using `--all`. |
+| `--all` | Test every configured provider and print a summary table. |
+
+#### `roko config models list`
+
+List configured models and their capabilities.
+
+```
+roko config models list [--workdir <path>]
+```
+
+#### `roko config models route`
+
+Show the current routing decision for a model and optionally explain why it won.
+
+```
+roko config models route <model> [--explain] [--complexity <tier>] [--workdir <path>]
+```
+
+| Arg/Flag | Description |
+|---|---|
+| `<model>` | Model key or slug to explain. |
+| `--explain` | Show the full routing trace instead of only the final decision. |
+| `--complexity <tier>` | Complexity tier: `mechanical`, `focused`, `integrative`, `architectural`. |
+
+#### `roko config subscriptions list`
+
+List all event subscriptions.
+
+```
+roko config subscriptions list
+```
+
+#### `roko config subscriptions add`
+
+Create a new event subscription.
+
+```
+roko config subscriptions add --template <name> --trigger <glob>
+```
+
+#### `roko config subscriptions remove`
+
+Delete a subscription.
+
+```
+roko config subscriptions remove <id>
+```
+
+#### `roko config subscriptions enable` / `roko config subscriptions disable`
+
+Enable or disable a subscription.
+
+```
+roko config subscriptions enable <id>
+roko config subscriptions disable <id>
+```
+
+#### `roko config events`
+
+Inspect configured event sources (cron jobs, file watchers).
+
+```
+roko config events [--workdir <path>]
+```
+
+#### `roko config experiments`
+
+Manage model A/B experiments.
+
+```
+roko config experiments <subcommand>
+```
+
+#### `roko config plugins list`
+
+List available and installed plugins.
+
+```
+roko config plugins list [--workdir <path>]
+```
+
+#### `roko config plugins install`
+
+Install a plugin from a local path or registry.
+
+```
+roko config plugins install <source> [--workdir <path>]
+```
+
+#### `roko config plugins remove`
+
+Remove an installed plugin by name.
+
+```
+roko config plugins remove <name> [--workdir <path>]
+```
+
+#### `roko config plugins audit`
+
+Audit installed plugins and report capabilities.
+
+```
+roko config plugins audit [--workdir <path>]
+```
+
+#### `roko config secrets`
+
+Manage profile-aware secrets (set, get, list, rotate).
+
+```
+roko config secrets <subcommand>
+```
+
+---
+
+## Code intelligence
+
+### `roko index`
+
+Build, search, and inspect the workspace code index.
+
+#### `roko index build`
+
+Build a code index for the workspace.
+
+```
+roko index build [--path <path>]
+```
+
+#### `roko index rebuild`
+
+Drop existing index data and rebuild from source files.
+
+```
+roko index rebuild [--path <path>]
+```
+
+#### `roko index search`
+
+Search the code index.
+
+```
+roko index search <query> [--kind <kind>] [--strategy <strategy>] [--limit <n>] [--path <path>]
+```
+
+| Arg/Flag | Default | Description |
+|---|---|---|
+| `<query>` | required | Search query text. |
+| `--kind <kind>` | — | Restrict to a symbol kind: `function`, `struct`, `enum`, `trait`, `const`, `type`, `module`, `impl`. |
+| `--strategy <strategy>` | `keyword` | Search strategy: `keyword`, `structural`, `hybrid`. |
+| `--limit <n>` | `20` | Maximum number of results. |
+
+#### `roko index stats`
+
+Show index statistics.
+
+```
+roko index stats [--path <path>]
+```
+
+---
+
+## Server and deployment
 
 ### `roko up`
 
-Start roko-serve plus all configured `[[agents]]` from `roko.toml` in one command.
+Start roko serve + all configured `[[agents]]` in one command.
 
 ```
 roko up [--workdir <path>]
 ```
 
-Reads `roko.toml`, starts roko-serve in the background, then creates and starts
-each enabled `[[agents]]` entry. Prints a status line for each.
-
-If no agents are configured, only the server starts. Add `[[agents]]` blocks to
-`roko.toml` to launch agents automatically.
-
-```
-roko up
-roko up --workdir /path/to/project
-```
-
-**Related:** `roko serve`, `roko agent create`, `roko agent start`
-
----
-
 ### `roko serve`
 
-Start the HTTP API control plane.
+Start the HTTP API server on `:6677` (~85 REST routes + SSE + WebSocket).
 
 ```
-roko serve [--bind <addr>] [--port <n>] [--workdir <path>] [--tui] [--enable-terminal]
+roko serve [--bind <addr>] [--port <port>] [--workdir <path>] [--tui] [--enable-terminal]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--bind <addr>` | `127.0.0.1` | IP address to bind |
-| `--port <n>` | `6677` | Port number |
-| `--workdir <path>` | cwd | Working directory |
-| `--tui` | false | Run the interactive TUI dashboard embedded in the server process |
-| `--enable-terminal` | false | Expose the PTY terminal routes |
-
-The control plane exposes approximately 85 REST routes for dashboards and external
-callers. In `--tui` mode, all tracing output is routed to `.roko/serve-tui.log`
-to prevent it from corrupting the ratatui screen.
-
-```
-roko serve
-roko serve --port 8080 --bind 0.0.0.0
-roko serve --tui
-```
-
-**Related:** `roko up`, `roko daemon start`
-
----
+| `--bind <addr>` | `127.0.0.1` | Address to bind. |
+| `--port <port>` | `6677` | Port number. |
+| `--workdir <path>` | cwd | Working directory. |
+| `--tui` | false | Run the interactive TUI dashboard embedded in the server process (reads live state from StateHub, zero-copy, no file polling). |
+| `--enable-terminal` | false | Expose the PTY terminal routes. |
 
 ### `roko acp`
 
-Start the ACP (Agent Client Protocol) server for editor integration.
-ACP uses JSON-RPC over stdio; stdout is the protocol channel.
+Start ACP (Agent Client Protocol) server for editor integration. Uses stdio for JSON-RPC;
+logs are redirected to a file to avoid corrupting the protocol channel.
 
 ```
-roko acp [--workdir <path>] [--profile <name>] [--config <path>] [--log-file <path>]
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--workdir <path>` | `.` | Working directory |
-| `--profile <name>` | `default` | Configuration profile |
-| `--config <path>` | — | Path to `roko.toml` config file |
-| `--log-file <path>` | `.roko/acp.log` | Log file path (stdout is the protocol channel) |
-
-ACP mode bypasses the normal tracing subscriber initialization to keep stdout
-clean for JSON-RPC traffic. All log output goes to the log file.
-
----
-
-### `roko daemon start`
-
-Start the daemon.
-
-```
-roko daemon start [--foreground] [--port <n>]
+roko acp [--workdir <path>] [--profile <profile>] [--config <path>] [--log-file <path>]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--foreground` | false | Run in the foreground instead of daemonizing |
-| `--port <n>` | `6677` | Port number |
+| `--workdir <path>` | `.` | Working directory. |
+| `--profile <profile>` | `default` | Configuration profile. |
+| `--config <path>` | — | Path to `roko.toml`. |
+| `--log-file <path>` | `.roko/acp.log` | Log file path. |
 
----
+### `roko daemon`
 
-### `roko daemon stop`
+Manage daemon mode.
 
-Stop the running daemon.
+#### `roko daemon start`
+
+```
+roko daemon start [--foreground] [--port <port>]
+```
+
+#### `roko daemon stop`
 
 ```
 roko daemon stop
 ```
 
----
-
-### `roko daemon status`
-
-Show daemon status.
+#### `roko daemon status`
 
 ```
 roko daemon status
 ```
 
----
-
-### `roko daemon logs`
-
-Show daemon logs.
+#### `roko daemon logs`
 
 ```
 roko daemon logs [-f] [-n <lines>]
@@ -1774,75 +1477,58 @@ roko daemon logs [-f] [-n <lines>]
 
 | Flag | Default | Description |
 |---|---|---|
-| `-f` / `--follow` | false | Follow log output (tail -f style) |
-| `-n <lines>` | `50` | Number of lines to show |
+| `-f` / `--follow` | false | Stream new log lines as they appear. |
+| `-n` / `--lines <n>` | `50` | Number of lines to show. |
 
----
+#### `roko daemon reload`
 
-### `roko daemon reload`
-
-Reload daemon configuration without restart (SIGHUP equivalent — re-scans
-subscriptions and templates).
+SIGHUP equivalent — re-scan subscriptions and templates without restart.
 
 ```
 roko daemon reload
 ```
 
----
-
-### `roko daemon restart`
-
-Restart the daemon.
+#### `roko daemon restart`
 
 ```
-roko daemon restart [--port <n>]
+roko daemon restart [--port <port>]
 ```
 
----
+#### `roko daemon install`
 
-### `roko daemon install`
-
-Install the daemon as a system service.
+Generate and install the macOS launchd plist.
 
 ```
 roko daemon install
 ```
 
-On macOS, generates and installs a launchd plist. On Linux, generates a
-systemd unit file.
+#### `roko daemon uninstall`
 
----
-
-### `roko daemon uninstall`
-
-Remove the installed system service.
+Remove the macOS launchd plist.
 
 ```
 roko daemon uninstall
 ```
 
----
+### `roko deploy`
 
-### `roko deploy railway`
+Deploy to cloud targets.
 
-Deploy the current workspace to Railway via the public GraphQL API.
-Creates a Railway project with roko-serve as the control plane.
+#### `roko deploy railway`
+
+Deploy to Railway via the public GraphQL API. Creates a Railway project with roko-serve
+as the control plane.
 
 ```
-roko deploy railway [--workdir <path>] [--with-mirage] [--workers <list>]
+roko deploy railway [--workdir <path>] [--with-mirage] [--workers <templates>]
 ```
 
 | Flag | Description |
 |---|---|
-| `--workdir <path>` | Repository root |
-| `--with-mirage` | Also deploy the mirage chain relay service |
-| `--workers <list>` | Deploy worker services for these template names (comma-separated) |
+| `--with-mirage` | Also deploy the chain relay service. |
+| `--workers <templates>` | Deploy worker services for these template names (comma-separated). |
 
-Requires `RAILWAY_TOKEN` in environment or `~/.roko/.env`.
-
----
-
-### `roko deploy fly`
+#### `roko deploy fly`
 
 Generate `fly.toml` and deploy with Fly.io.
 
@@ -1850,9 +1536,7 @@ Generate `fly.toml` and deploy with Fly.io.
 roko deploy fly [--workdir <path>]
 ```
 
----
-
-### `roko deploy docker`
+#### `roko deploy docker`
 
 Build the local Docker image and tag it for the configured registry.
 
@@ -1860,23 +1544,17 @@ Build the local Docker image and tag it for the configured registry.
 roko deploy docker [--workdir <path>] [--registry <namespace>]
 ```
 
----
-
 ### `roko worker`
 
-Run as a deployed worker. Reads the template from environment, serves tasks.
+Run as a deployed worker (reads template from env, serves tasks on `:8080` or `$PORT`).
 
 ```
-roko worker [--port <n>]
+roko worker [--port <port>]
 ```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--port <n>` | `8080` | Port to listen on (overridden by `PORT` env variable) |
 
 ---
 
-## 11. Utilities
+## Interactive dashboard
 
 ### `roko dashboard`
 
@@ -1889,224 +1567,203 @@ roko dashboard [--page <slug>] [--list-pages] [--text] [--workdir <path>]
 
 | Flag | Description |
 |---|---|
-| `--page <slug>` | Jump directly to a specific dashboard page |
-| `--list-pages` | List all available page slugs and exit |
-| `--text` | Force text-mode output instead of the interactive TUI |
-| `--workdir <path>` | Working directory |
-| `--high-contrast` | High-contrast color scheme (WCAG 2.1 AA) |
-| `--reduced-motion` | Disable animations for reduced-motion accessibility |
+| `--page <slug>` | Specific dashboard page slug to render. |
+| `--list-pages` | List all available page slugs and exit. |
+| `--text` | Force text-mode output instead of the interactive terminal UI. |
+| `--high-contrast` | Use high-contrast color scheme (WCAG 2.1 AA). |
+| `--reduced-motion` | Disable animations for reduced-motion accessibility. |
 
-When stdout is a TTY and `--text` is not set, launches the interactive ratatui TUI
-with a 60fps event loop. Tabs: F1–F7 for different dashboard views.
+The dashboard can also be launched by running `roko serve --tui`, which embeds the TUI
+in the server process and reads live state from StateHub (zero-copy, no file polling).
 
-When stdout is not a TTY or `--text` is set, renders a text summary.
+#### TUI tab structure
 
-```
-roko dashboard
-roko dashboard --page health
-roko dashboard --list-pages
-roko dashboard --text --json
-```
+| Tab | Key | Alt key | Content |
+|---|---|---|---|
+| Dashboard | F1 | `1` | Health gauges, plan progress, cost summary, C-factor |
+| Plans | F2 | `2` | Plan tree, task progress, wave overview |
+| Agents | F3 | `3` | Agent output, diffs, token burn, parallel pool |
+| Git | F4 | `4` | Branch tree, commit graph, worktree list |
+| Logs | F5 | `5` | Scrollable log viewer with level filtering |
+| Config | F6 | `6` | Config editor / effective config view |
+| Inspect | F7 | `7` | Engram DAG inspector, episode replay |
+| Marketplace | F8 | `8` | Job browser, creation, assignment |
+| Atelier | F9 | `9` | PRD workshop, plan progress |
+| Learning | F10 | `0` | Cascade router, model routing, efficiency metrics |
 
----
+#### Global keybindings (all tabs)
 
-### `roko replay`
-
-Walk the lineage DAG rooted at a signal hash and print it.
-
-```
-roko replay <hash> [--workdir <path>] [--forensic] [--as-of <step>] [--format tree|json]
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `hash` | required | Engram hash (64 hex chars) to walk |
-| `--workdir <path>` | — | Directory containing `.roko/` |
-| `--forensic` | false | Show forensic detail: timestamps, full hashes, metadata |
-| `--as-of <step>` | — | Filter replay to events from this step forward |
-| `--format <fmt>` | `tree` | Output format: `tree` or `json` |
-
-```
-roko replay a3f5c2d1...
-roko replay a3f5c2d1... --forensic --format json
-```
-
----
-
-### `roko inject`
-
-Inject a signal into a running session.
-
-```
-roko inject <session> <payload> [--kind <type>] [--workdir <path>]
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `session` | required | Target session ID |
-| `payload` | required | Payload text |
-| `--kind <type>` | `directive` | Kind of signal: `directive`, `abort`, `context` |
-| `--workdir <path>` | — | Working directory (to locate the daemon socket) |
-
-```
-roko inject session-abc "stop current task" --kind abort
-roko inject session-abc "here is additional context: ..." --kind context
-```
-
----
-
-### `roko index build`
-
-Build a code index for the workspace.
-
-```
-roko index build [--path <dir>]
-```
-
-| Flag | Description |
+| Key | Action |
 |---|---|
-| `--path <dir>` | Directory to index (default: cwd / `--repo`) |
+| `F1`–`F10` | Switch tab |
+| `1`–`9`, `0` | Switch tab (digit aliases) |
+| `Alt+1`–`Alt+9` | Switch sub-view within current tab |
+| `q` | Quit (shows quit confirm dialog) |
+| `Ctrl+C` | Quit immediately |
+| `?` | Show help modal |
+| `Tab` | Focus next panel |
+| `Shift+Tab` | Focus previous panel |
+| `n` | Dismiss notification |
+| `Ctrl+R` | Refresh |
+| `Ctrl+A` | Approve all pending commands |
+| `Ctrl+T` | Toggle agent topology panel |
+| `Ctrl+X` | Force advance (with confirmation) |
+| `Ctrl+D` | Reset selected plan state (with confirmation) |
+| `Ctrl+E` | Toggle full-screen post-processing effects |
+| `v` | Cycle visual effects preset |
+| `Ctrl+G` | Reconcile git state (with confirmation) |
+| `u` | Show queue overview |
 
----
+#### Dashboard tab (F1) keybindings
 
-### `roko index rebuild`
-
-Drop existing index data and rebuild from source files.
-
-```
-roko index rebuild [--path <dir>]
-```
-
----
-
-### `roko index search`
-
-Search the code index.
-
-```
-roko index search <query> [--kind <symbol_kind>] [--strategy <name>] [--limit <n>]
-                  [--path <dir>]
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `query` | required | Search query text |
-| `--kind <type>` | — | Symbol kind: `function`, `struct`, `enum`, `trait`, `const`, `type`, `module`, `impl` |
-| `--strategy <name>` | `keyword` | Search strategy: `keyword`, `structural`, `hybrid` |
-| `--limit <n>` | `20` | Maximum number of results |
-| `--path <dir>` | — | Directory to index |
-
-```
-roko index search "run_agent"
-roko index search "AgentDispatcher" --kind struct --strategy structural
-```
-
----
-
-### `roko index stats`
-
-Show code index statistics.
-
-```
-roko index stats [--path <dir>]
-```
-
----
-
-### `roko new`
-
-Generate boilerplate for a Roko trait or domain profile.
-
-```
-roko new <type> <name> [--output <dir>]
-```
-
-| Argument | Description |
+| Key | Action |
 |---|---|
-| `type` | Scaffold type: `gate`, `scorer`, `router`, `policy`, `substrate`, `composer`, `domain`, `template`, `event-source` |
-| `name` | Name for the generated component (e.g. `my-custom-gate`) |
-| `--output <dir>` | Output directory (default: current directory) |
+| `↑` / `k` | Navigate up (focus-aware: plan tree or agent output) |
+| `↓` / `j` | Navigate down (focus-aware) |
+| `PgUp` / `PgDn` | Scroll page up/down |
+| `Home` / `End` | Scroll to start/end |
+| `Enter` | Show plan detail modal |
+| `Esc` | Close plan detail |
+| `←` / `h` | Drill out |
+| `→` / `l` | Drill in |
+| `Shift+←` | Previous wave |
+| `Shift+→` | Next wave |
+| `a` | Switch to Agents detail sub-tab |
+| `o` | Switch to Output sub-tab |
+| `d` | Switch to Diff sub-tab |
+| `e` | Switch to Errors sub-tab |
+| `g` | Switch to Git sub-tab |
+| `m` | Switch to MCP sub-tab |
+| `L` | Switch to Learning sub-tab |
+| `P` | Switch to Processes sub-tab |
+| `w` | Show wave overview |
+| `p` | Toggle pause |
+| `i` | Enter inject mode (type directive to send to agent) |
+| `y` | Approve pending command |
+| `` ` `` | Cycle agent role tabs |
 
-```
-roko new gate my-approval-gate
-roko new scorer latency-scorer --output crates/roko-custom/src/
-roko new domain trading
-```
+#### Plans tab (F2) keybindings
 
----
-
-### `roko explain`
-
-Explain a Roko concept with progressive disclosure (3 depth levels).
-
-```
-roko explain <topic> [--depth <n>]
-```
-
-| Argument | Default | Description |
-|---|---|---|
-| `topic` | required | Topic to explain: `gates`, `routing`, `cognitive`, `neuro`, `daimon`, `dreams`, `engram`, `cfactor`, etc. |
-| `--depth <n>` | `1` | Disclosure depth: `1` = summary, `2` = how it works, `3` = internals |
-
-```
-roko explain topics              # List all available topics
-roko explain gates
-roko explain routing --depth 3
-roko explain cfactor --depth 2
-```
-
----
-
-### `roko completions`
-
-Generate shell completion scripts.
-
-```
-roko completions <shell>
-```
-
-| Argument | Description |
+| Key | Action |
 |---|---|
-| `shell` | Shell to generate for: `bash`, `zsh`, `fish` |
+| `↑` / `k` | Navigate up |
+| `↓` / `j` | Navigate down |
+| `Enter` | Show plan detail modal |
+| `Esc` | Close plan detail |
+| `e` | Expand/collapse plan tree |
+| `w` | Show wave overview |
+| `o` | Show queue overview |
+| `t` | Open task picker |
+| `[` | Previous wave |
+| `]` | Next wave |
+| `←` / `h` | Drill out |
+| `→` / `l` | Drill in |
+| `PgUp` / `PgDn` | Scroll page up/down |
+| `Home` / `End` | Scroll to start/end |
+| `/` | Start filter mode |
+| `d` | Diagnose plan (with confirmation) |
+| `m` | Merge plan branch (with confirmation) |
+| `M` | Merge all done branches (with confirmation) |
+| `s` | Soft retry plan |
+| `z` | Diagnose plan |
+| `S` | Repair plan (preserve) |
+| `R` | Repair plan (clean) |
+| `c` | Reverify plan |
+| `F` | Force advance |
+| `V` | Reverify plan |
 
-```
-# Install completions:
-roko completions zsh > ~/.zsh/completions/_roko
-roko completions bash > ~/.bash_completion.d/roko
-roko completions fish > ~/.config/fish/completions/roko.fish
-```
+#### Logs tab (F5) keybindings
+
+| Key | Action |
+|---|---|
+| `↑` / `k` | Scroll log up |
+| `↓` / `j` | Scroll log down |
+| `End` / `G` | Scroll to end (tail) |
+| `I` | Toggle Info filter |
+| `W` | Toggle Warn filter |
+| `E` | Toggle Error filter |
+| `D` | Toggle Debug filter |
+| `A` | Show all log filter levels |
+| `/` | Start filter mode |
+
+#### Inject mode (entered via `i` in Dashboard tab)
+
+| Key | Action |
+|---|---|
+| Any char | Append to inject buffer |
+| `Backspace` | Delete last character |
+| `Enter` | Submit inject (sends directive signal to agent) |
+| `Esc` | Cancel inject |
+
+#### Filter mode (entered via `/` in Plans or Logs tab)
+
+| Key | Action |
+|---|---|
+| Any char | Append to filter buffer |
+| `Backspace` | Delete last character |
+| `Enter` | Accept filter |
+| `Esc` | Cancel filter |
+
+#### Approval modal (shown when agent requests tool approval)
+
+| Key | Action |
+|---|---|
+| `y` / `Y` / `Enter` | Approve command |
+| `n` / `N` / `Esc` | Reject command |
+| `Ctrl+A` / `A` | Approve all pending |
+
+#### Confirm dialog
+
+| Key | Action |
+|---|---|
+| `y` / `Y` / `Enter` | Confirm yes |
+| `n` / `N` / `Esc` | Confirm no |
+
+#### Plan detail / Task detail modal
+
+| Key | Action |
+|---|---|
+| `Esc` | Close modal |
+| `↑` / `k` | Scroll up |
+| `↓` / `j` | Scroll down |
+| `Tab` | Switch detail sub-tab |
+| `q` | Close (task detail only) |
+
+#### Task picker modal
+
+| Key | Action |
+|---|---|
+| `Esc` | Close picker |
+| `Enter` | Show task detail |
+| `↑` / `k` | Navigate up |
+| `↓` / `j` | Navigate down |
 
 ---
 
-## 12. Authentication
+## Authentication
 
 ### `roko login`
 
 Authenticate with a roko-serve instance.
 
 ```
-roko login [url] [--api-key] [--check] [--dashboard-url <url>]
+roko login [<url>] [--api-key] [--check] [--dashboard-url <url>]
 ```
 
-| Flag | Default | Description |
+| Arg/Flag | Default | Description |
 |---|---|---|
-| `url` | `http://localhost:6677` | URL of the roko-serve instance |
-| `--api-key` | false | Login with an API key instead of browser auth |
-| `--check` | false | Non-interactive: validate stored credential only (requires `--api-key`) |
-| `--dashboard-url <url>` | `http://localhost:5173` | Dashboard URL for browser auth |
+| `<url>` | `http://localhost:6677` | URL of the roko-serve instance. |
+| `--api-key` | false | Login with an API key instead of browser auth. |
+| `--check` | false | Non-interactive: validate stored credential only (requires `--api-key`). |
+| `--dashboard-url <url>` | `http://localhost:5173` | Dashboard URL for browser auth. Env: `NUNCHI_DASHBOARD_URL`. |
 
-Environment variable: `NUNCHI_DASHBOARD_URL` overrides `--dashboard-url`.
-
-```
+**Examples:**
+```bash
 roko login                              # Login via browser (Privy)
 roko login --api-key                    # Login with an API key (prompts)
 roko login --api-key --check            # Validate stored API key credential
 roko login https://my-server.com        # Login to a remote server
 ```
-
-Credentials are stored in `~/.roko/credentials.json`.
-
----
 
 ### `roko logout`
 
@@ -2115,8 +1772,6 @@ Remove stored credentials.
 ```
 roko logout
 ```
-
----
 
 ### `roko whoami`
 
@@ -2128,231 +1783,182 @@ roko whoami
 
 ---
 
-## 13. Benchmarks
+## Utilities
 
-### `roko bench demo`
+### `roko resume`
 
-Run a comparative benchmark: naive vs roko-optimized with simulated or real dispatch.
+Resume a plan execution from its last checkpoint.
 
 ```
-roko bench demo [--real] [--workdir <path>]
+roko resume [<run-id>] [--workdir <path>]
 ```
 
-| Flag | Description |
+| Arg/Flag | Description |
 |---|---|
-| `--real` | Use real LLM dispatch instead of simulated results |
-| `--workdir <path>` | Working directory |
+| `<run-id>` | Run or plan ID to resume (defaults to most recent snapshot). |
+| `--workdir <path>` | Working directory. |
 
-```
-roko bench demo
-roko bench demo --real
-```
-
----
-
-### `roko bench swe`
-
-Run a native SWE-bench-style proxy batch evaluation.
-
-```
-roko bench swe [--dataset <path>] [--batch-size <n>] [--offset <n>]
-               [--agent-mode <mode>] [--predictions <path>] [--agent-command <cmd>]
-               [--report <path>] [--export-predictions <path>]
-               [--no-learning] [--keep-workdirs] [--workdir <path>]
+**Examples:**
+```bash
+roko resume                        # Resume from default snapshot
+roko resume run_4823               # Resume a specific run by ID
 ```
 
-| Flag | Default | Description |
+### `roko replay`
+
+Walk the lineage DAG rooted at a signal hash and print it.
+
+```
+roko replay <hash> [--workdir <path>] [--forensic] [--as-of <step>] [--format tree|json]
+```
+
+| Arg/Flag | Default | Description |
 |---|---|---|
-| `--dataset <path>` | — | Local JSONL dataset (defaults to built-in 2-task smoke dataset) |
-| `--batch-size <n>` | `2` | Number of instances to run |
-| `--offset <n>` | `0` | Offset into the dataset |
-| `--agent-mode <mode>` | `gold` | Agent adapter: `gold`, `prediction-file`, `command` |
-| `--predictions <path>` | — | Predictions JSONL path (for `--agent-mode prediction-file`) |
-| `--agent-command <cmd>` | — | Command for `--agent-mode command` (receives instance JSON on stdin, prints unified diff) |
-| `--report <path>` | — | Scores JSONL output path |
-| `--export-predictions <path>` | — | Write SWE-bench-style predictions JSONL |
-| `--no-learning` | false | Disable learning episode, efficiency, and C-factor writes |
-| `--keep-workdirs` | false | Keep per-instance benchmark workdirs for debugging |
-| `--workdir <path>` | — | Working directory |
+| `<hash>` | required | Engram hash (64 hex chars) to walk. |
+| `--forensic` | false | Show forensic detail: timestamps, full hashes, metadata. |
+| `--as-of <step>` | — | Filter replay to events from this step forward. |
+| `--format tree\|json` | `tree` | Output format. |
 
-Note: This is fast proxy scoring, not official SWE-bench Docker scoring.
+### `roko inject`
+
+Inject a signal into a running session.
 
 ```
-roko bench swe --batch-size 2 --agent-mode gold
-roko bench swe --dataset ./swe-smoke.jsonl --predictions ./predictions.jsonl --agent-mode prediction-file
-roko bench swe --agent-mode command --agent-command './my-agent.sh'
+roko inject <session> <payload> [--kind directive|abort|context] [--workdir <path>]
+```
+
+| Arg/Flag | Default | Description |
+|---|---|---|
+| `<session>` | required | Target session ID. |
+| `<payload>` | required | Payload text. |
+| `--kind <kind>` | `directive` | Kind of signal to inject: `directive`, `abort`, `context`. |
+
+### `roko completions`
+
+Generate shell completion scripts.
+
+```
+roko completions <shell>
+```
+
+| Arg | Description |
+|---|---|
+| `<shell>` | Shell: `bash`, `zsh`, `fish`. |
+
+**Examples:**
+```bash
+roko completions bash >> ~/.bashrc
+roko completions zsh >> ~/.zshrc
+roko completions fish > ~/.config/fish/completions/roko.fish
+```
+
+### `roko new`
+
+Generate boilerplate for a Roko trait or domain profile.
+
+```
+roko new <type> <name> [--output <path>]
+```
+
+Supported types:
+- `gate` — A new Gate implementation
+- `scorer` — A new Scorer implementation
+- `router` — A new Router implementation
+- `policy` — A new Policy implementation
+- `substrate` — A new Substrate implementation
+- `composer` — A new Composer implementation
+- `domain` — A domain profile scaffold
+- `template` — An agent template
+- `event-source` — An event source plugin
+
+**Examples:**
+```bash
+roko new gate my-custom-gate
+roko new scorer priority-scorer --output ./crates/roko-custom/
+```
+
+### `roko explain`
+
+Explain a roko concept with progressive disclosure (3 depth levels).
+
+```
+roko explain <topic> [--depth 1|2|3]
+```
+
+| Arg/Flag | Default | Description |
+|---|---|---|
+| `<topic>` | required | Concept to explain. See below for valid topics. |
+| `--depth <n>` | `1` | Disclosure depth: 1 = summary, 2 = how it works, 3 = internals. |
+
+Topics: `gates`, `routing`, `cognitive`, `neuro`, `daimon`, `dreams`, `engram`, `cfactor`.
+
+**Examples:**
+```bash
+roko explain gates                 # Summary of the gate pipeline
+roko explain routing --depth 2     # How cascade router works
+roko explain dreams --depth 3      # Dream consolidation internals
 ```
 
 ---
 
-## 14. Vision Loop
+## Vision loop
 
 ### `roko vision-loop`
 
-Iterative vision-guided UI refinement loop. Screenshots a URL, scores the result
-with a vision model, edits the target file, and repeats until the target score
-is reached or the iteration limit is hit.
+Iterative vision-guided UI refinement loop. Takes screenshots, scores them with a vision
+model, and iterates code changes until the target score is reached or the budget is exhausted.
 
 ```
-roko vision-loop <target_file> --goal <text> --url <url>
+roko vision-loop <target-file> --goal <text> --url <url>
                  [--max-iter <n>] [--target-score <f>] [--consecutive-target <n>]
-                 [--regression-threshold <f>] [--model <key>]
-                 [--viewport-width <n>] [--viewport-height <n>] [--wait-ms <n>]
+                 [--regression-threshold <f>] [--model <model>]
+                 [--viewport-width <px>] [--viewport-height <px>] [--wait-ms <ms>]
 ```
 
-| Flag | Default | Description |
+| Arg/Flag | Default | Description |
 |---|---|---|
-| `target_file` | required | Source file to iterate on (e.g. `src/pages/Home.tsx`) |
-| `--goal <text>` | required | What the UI should look/feel like |
-| `--url <url>` | required | URL to screenshot (e.g. `http://localhost:5173`) |
-| `--max-iter <n>` | `10` | Maximum iterations |
-| `--target-score <f>` | `9.0` | Score threshold (1–10) for early stopping |
-| `--consecutive-target <n>` | `2` | Consecutive target hits before stopping |
-| `--regression-threshold <f>` | `3.0` | Score drop from peak that triggers rollback |
-| `--model <key>` | auto-detect | Vision model key from `roko.toml` |
-| `--viewport-width <n>` | `1280` | Viewport width in pixels |
-| `--viewport-height <n>` | `720` | Viewport height in pixels |
-| `--wait-ms <n>` | `2000` | Milliseconds to wait after writing (HMR settle time) |
-
-```
-roko vision-loop src/pages/Home.tsx --goal "Clean minimalist design" --url http://localhost:5173
-```
+| `<target-file>` | required | Source file to iterate on (e.g. `src/pages/Home.tsx`). |
+| `--goal <text>` | required | What the UI should look/feel like. |
+| `--url <url>` | required | URL to screenshot (e.g. `http://localhost:5173`). |
+| `--max-iter <n>` | `10` | Maximum iterations. |
+| `--target-score <f>` | `9.0` | Score threshold (1–10) for early stopping. |
+| `--consecutive-target <n>` | `2` | Consecutive target hits before stopping. |
+| `--regression-threshold <f>` | `3.0` | Score drop from peak that triggers rollback. |
+| `--model <model>` | auto | Vision model key from `roko.toml`. |
+| `--viewport-width <px>` | `1280` | Viewport width in pixels. |
+| `--viewport-height <px>` | `720` | Viewport height in pixels. |
+| `--wait-ms <ms>` | `2000` | Milliseconds to wait after writing (HMR settle time). |
 
 ---
 
-## 15. Demo
+## Self-hosting workflow
 
-### `roko demo setup`
-
-Build the release binary and prepare the workspace for demos.
-
-```
-roko demo setup [--workdir <path>]
-```
-
----
-
-### `roko demo warm`
-
-Pre-warm the LLM response cache with demo prompts.
-
-```
-roko demo warm [--workdir <path>]
-```
-
----
-
-## 16. Miscellaneous
-
-### `roko layer-check`
-
-Check workspace layer dependency rules (ensures crates do not violate the
-layered architecture — e.g. core crates must not depend on higher-level crates).
-
-```
-roko layer-check
-```
-
----
-
-## Appendix A: Environment Variables Reference
-
-| Variable | Description |
-|---|---|
-| `RUST_LOG` | Tracing log directive (e.g. `roko=debug,roko_agent=trace`) |
-| `ROKO_LOG` | Alias for `RUST_LOG` |
-| `ROKO_TIMING=1` | Enable elapsed-time output (same as `--timing`) |
-| `ROKO_LOG_RAW=1` | Disable secret redaction in log output |
-| `ROKO_API_KEY` | API key for roko-serve authentication |
-| `ANTHROPIC_API_KEY` | Claude API key (for direct API agents) |
-| `GITHUB_TOKEN` | GitHub personal access token (MCP GitHub server) |
-| `GITHUB_WEBHOOK_SECRET` | GitHub webhook secret for deploy registration |
-| `SLACK_BOT_TOKEN` | Slack bot token (MCP Slack server) |
-| `SLACK_SIGNING_SECRET` | Slack webhook signing secret |
-| `PORT` | Port override for `roko worker` |
-| `NUNCHI_DASHBOARD_URL` | Dashboard URL for browser auth (overrides `--dashboard-url`) |
-| `NO_COLOR` | Disable ANSI colors (https://no-color.org/) |
-| `CLICOLOR` | Set to `0` to disable colors |
-| `CLICOLOR_FORCE` | Set to non-`"0"` to force colors |
-
----
-
-## Appendix B: Data Directory Layout
-
-After `roko init`, the `.roko/` directory has this structure:
-
-```
-.roko/
-  roko.toml              # Project config (at project root, not inside .roko/)
-  engrams.jsonl          # Signal/engram log
-  episodes.jsonl         # Agent turn recording
-  serve-tui.log          # TUI mode tracing output
-
-  state/
-    executor.json        # Plan executor snapshot (for --resume-plan)
-
-  prd/
-    ideas/               # Captured ideas (roko prd idea)
-    drafts/              # Draft PRDs
-    published/           # Published PRDs
-
-  plans/                 # Auto-generated plans (roko prd plan)
-
-  research/              # Research artifacts (roko research topic)
-
-  learn/
-    cascade-router.json  # CascadeRouter model selection state
-    experiments.json     # Prompt A/B experiment state
-    efficiency.jsonl     # Per-turn efficiency events
-    gate-thresholds.json # Adaptive gate threshold EMA state
-    neuro.jsonl          # Durable knowledge store
-    cfactor.json         # C-Factor snapshot
-
-  agents/
-    <name>/
-      manifest.toml      # Agent manifest
-
-  jobs/
-    <uuid>.json          # Marketplace job records
-
-  subscriptions/         # Event subscription configs
-
-  templates/             # Agent template registry
-
-  task-outputs/          # Per-task agent output captures
-
-  acp.log                # ACP server log
-```
-
----
-
-## Appendix C: Self-Hosting Workflow
-
-The canonical workflow for roko developing itself:
+This is the canonical workflow for using roko to develop itself. Every step is a real CLI
+command that works today.
 
 ```bash
 # 1. Capture a work item
 roko prd idea "Wire SystemPromptBuilder into orchestrate.rs"
 
-# 2. Draft a PRD (agent-driven, produces ## Repository Grounding section)
+# 2. Draft a PRD from the idea (agent-driven)
 roko prd draft new "system-prompt-wiring"
 
-# 3. Research for context
+# 3. Research the topic for context
 roko research enhance-prd system-prompt-wiring
 
-# 4. Generate implementation plan
+# 4. Generate implementation plan + tasks from the PRD
 roko prd plan system-prompt-wiring
 
-# 5. Validate the plan (also runs automatically before roko plan run)
+# 5. Validate the plan before running
 roko plan validate plans/
 
-# 6. Execute the plan
+# 6. Execute the plan (agents run tasks, gates validate, state persists)
 roko plan run plans/
 
 # 7. Resume if interrupted
 roko plan run plans/ --resume-plan
 
-# 8. Monitor progress
+# 8. Watch progress in the TUI
 roko dashboard
 
 # 9. Check status
@@ -2360,4 +1966,95 @@ roko status
 
 # 10. Inspect what was learned
 roko learn all
+
+# 11. Query the knowledge that was distilled
+roko knowledge query "SystemPromptBuilder"
+
+# 12. Run a dream cycle to consolidate learning
+roko knowledge dream run
+```
+
+### Typical agent roles used in the workflow
+
+| Role | Command | Used by |
+|---|---|---|
+| `scribe` | `roko prd draft new` / `roko prd draft edit` | PRD authoring |
+| `strategist` | `roko prd plan` | Plan generation from PRD |
+| `researcher` | `roko research topic` / `roko research enhance-prd` | Research |
+| (task role from tasks.toml) | `roko plan run` | Task execution |
+
+---
+
+## Data directory layout
+
+All runtime data lives under `.roko/` in the workspace root.
+
+```
+.roko/
+├── config.toml             # Optional project-level config override
+├── episodes.jsonl          # Agent turn recording (EpisodeLogger)
+├── signals.jsonl           # Signal log (FileSubstrate hot store)
+├── prd/
+│   ├── ideas.md            # Captured ideas (roko prd idea)
+│   ├── drafts/             # Draft PRDs (<slug>.md + sidecars)
+│   └── published/          # Published PRDs
+├── plans/                  # Generated plan directories
+│   └── <plan-name>/
+│       ├── tasks.toml      # Task definitions with DAG
+│       └── plan.md         # Plan description
+├── state/
+│   └── executor.json       # Plan runner snapshot (resume state)
+├── research/               # Research artifacts (.md files)
+├── learn/
+│   ├── cascade-router.json # CascadeRouter persistence
+│   ├── experiments.json    # Prompt experiment store
+│   ├── model-experiments.json
+│   ├── efficiency.jsonl    # Per-turn efficiency events
+│   ├── episodes.jsonl      # Episode log (mirrored from root)
+│   └── gate-thresholds.json
+├── neuro/
+│   ├── knowledge.jsonl     # Durable knowledge store
+│   └── knowledge-confirmations.jsonl
+├── dreams/                 # Dream cycle reports
+├── cold/                   # Cold archived engrams
+├── mesh/
+│   ├── inbox/              # Incoming mesh sync deltas
+│   └── outbox/             # Outgoing mesh sync deltas
+├── agents/
+│   └── <name>/
+│       └── manifest.toml   # Agent manifest (roko agent create)
+├── daimon/
+│   └── affect.json         # Daimon affect state
+├── acp.log                 # ACP server log
+└── serve-tui.log           # TUI mode tracing log
+```
+
+---
+
+## Common error hints
+
+The CLI prints contextual hints for common errors:
+
+| Error pattern | Hint |
+|---|---|
+| `.roko/` or `roko.toml` not found | `run roko init to create a workspace` |
+| `agent not found` / `unknown agent` | `run roko agent list to see available agents` |
+| `plan not found` / `no plans found` | `run roko plan list or roko plan create` |
+| `connection refused` / `connect error` | `is roko-serve running? try roko serve` |
+
+---
+
+## Build requirements
+
+```
+rustup update stable    # Need 1.91+ for alloy deps
+cargo build --workspace
+```
+
+Pre-commit checks (CI will reject code that fails any of these):
+
+```bash
+cargo +nightly fmt --all                              # Format (nightly, matches CI)
+cargo clippy --workspace --no-deps -- -D warnings     # Lint (must pass clean)
+cargo test --workspace                                # Tests (must pass)
 ```
