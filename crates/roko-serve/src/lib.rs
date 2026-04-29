@@ -245,40 +245,19 @@ impl ServerBuilder {
             self.state = Some(Arc::new(build_app_state(workdir, runtime, roko_config)?));
         }
         let state = Arc::clone(self.state.as_ref().expect("state just set"));
-        let mut roko_config = state.load_roko_config().as_ref().clone();
-        if roko_config.serve.auth.enabled
-            && roko_config.serve.auth.api_key.is_empty()
-            && roko_config.serve.auth.api_keys.is_empty()
-        {
-            match ensure_serve_token() {
-                Ok(token) => {
-                    let path = serve_token_path();
-                    eprintln!("Auth token: {token}");
-                    eprintln!("  (stored at {})", path.display());
-                    roko_config.serve.auth.api_key = token.clone();
-                    self.config.roko_config.serve.auth.enabled = true;
-                    self.config.roko_config.serve.auth.api_key = token;
-                    state.store_roko_config(roko_config.clone());
-                }
-                Err(err) => {
-                    warn!("failed to generate serve token: {err:#}");
-                }
-            }
-        } else if roko_config.serve.auth.enabled && !roko_config.serve.auth.api_key.is_empty() {
-            info!("auth enabled with configured API key");
-        }
+        let roko_config = state.load_roko_config();
         validate_bind_safety(&addr, &roko_config.serve)?;
         if let Err(err) = state.restore_snapshot().await {
             warn!(error = %err, "failed to restore server state snapshot; starting fresh");
         }
-        let dispatcher_roko_config = roko_config.clone();
+        let dispatcher_roko_config = roko_config.as_ref().clone();
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
             None,
             dispatcher_roko_config,
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
-        start_builtin_event_sources(Arc::clone(&state), roko_config.clone());
+        start_builtin_event_sources(Arc::clone(&state), roko_config.as_ref().clone());
         let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
@@ -652,71 +631,6 @@ fn is_loopback_addr(addr: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
 }
 
-/// Path to the server bearer token file.
-fn serve_token_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".roko")
-        .join("serve-token")
-}
-
-/// Read the existing token or generate a new one.
-///
-/// Generates a token by concatenating two UUIDs (64 URL-safe chars).
-/// Stores the token at `~/.roko/serve-token` with restrictive permissions
-/// (0o600 on Unix). Returns the plaintext token.
-fn ensure_serve_token() -> anyhow::Result<String> {
-    let path = serve_token_path();
-
-    if path.exists() {
-        let token = std::fs::read_to_string(&path).context("read ~/.roko/serve-token")?;
-        let token = token.trim().to_string();
-        if !token.is_empty() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                    .with_context(|| format!("chmod 0600 {}", path.display()))?;
-            }
-            return Ok(token);
-        }
-    }
-
-    let token = format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    );
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create dir {}", parent.display()))?;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true).mode(0o600);
-        let mut file = opts
-            .open(&path)
-            .with_context(|| format!("create {}", path.display()))?;
-        use std::io::Write;
-        writeln!(file, "{token}").with_context(|| format!("write {}", path.display()))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(&path, format!("{token}\n"))
-            .with_context(|| format!("write {}", path.display()))?;
-    }
-
-    Ok(token)
-}
-
 /// Validate that a bind address is safe to expose.
 ///
 /// Loopback addresses are always allowed. Public addresses require either
@@ -850,9 +764,14 @@ fn build_app_state(
     if roko_config.serve.auth.privy_app_id.is_none() {
         roko_config.serve.auth.privy_app_id = Some(crate::jwks::NUNCHI_PRIVY_APP_ID.to_string());
     }
-    // Note: auth.enabled = false in roko.toml is respected.
-    // Privy credentials are still loaded for JWT validation when auth IS enabled,
-    // but we no longer auto-enable auth just because a credential file exists.
+    if !roko_config.serve.auth.enabled {
+        if let Ok(Some(cred)) = load_stored_credential() {
+            if cred.get("method").and_then(|v| v.as_str()) == Some("privy") {
+                info!("Privy credential found — enabling auth");
+                roko_config.serve.auth.enabled = true;
+            }
+        }
+    }
     let deploy_backend = create_deploy_backend(&roko_config);
     let state = AppState::new(workdir, runtime, roko_config, deploy_backend)?;
 
