@@ -7,15 +7,26 @@ export function useSSE(path: string) {
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    let reconnectTimer: ReturnType<typeof setTimeout>;
+    let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    setConnected(false);
 
     function connect() {
+      if (cancelled) return;
+
+      esRef.current?.close();
+
       const es = new EventSource(`${SERVE_URL}${path}`);
       esRef.current = es;
 
-      es.onopen = () => setConnected(true);
+      es.onopen = () => {
+        if (cancelled || esRef.current !== es) return;
+        setConnected(true);
+      };
 
       es.onmessage = (e) => {
+        if (cancelled || esRef.current !== es) return;
+
         try {
           setLastEvent(JSON.parse(e.data));
         } catch {
@@ -24,8 +35,14 @@ export function useSSE(path: string) {
       };
 
       es.onerror = () => {
+        if (cancelled || esRef.current !== es) {
+          es.close();
+          return;
+        }
+
         setConnected(false);
         es.close();
+        esRef.current = null;
         clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connect, 3_000);
       };
@@ -34,8 +51,12 @@ export function useSSE(path: string) {
     connect();
 
     return () => {
+      cancelled = true;
       clearTimeout(reconnectTimer);
-      esRef.current?.close();
+      if (esRef.current) {
+        esRef.current.close();
+        esRef.current = null;
+      }
     };
   }, [path]);
 

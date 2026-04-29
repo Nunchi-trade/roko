@@ -1,7 +1,7 @@
 .pipeline-panel {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   color: var(--text-primary);
 }
 
@@ -52,8 +52,8 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   min-height: 0;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 8px;
+  padding: 8px 10px;
   border: 1px solid var(--glass-border);
   background:
     radial-gradient(circle at 20% 10%, rgba(184, 122, 148, 0.18), transparent 42%),
@@ -376,7 +376,7 @@
 
 .pipeline-prd,
 .pipeline-example-brief {
-  padding: 8px 10px;
+  padding: 6px 8px;
 }
 
 .pipeline-example-brief blockquote {
@@ -498,7 +498,7 @@
 .pipeline-tasks,
 .pipeline-events,
 .pipeline-insights {
-  padding: 6px 8px;
+  padding: 4px 6px;
 }
 
 .pipeline-plan-list,

@@ -19,18 +19,34 @@ export function useBenchSSE({ benchId, enabled = true }: UseBenchSSEOptions = {}
   }, []);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      setConnected(false);
+      esRef.current?.close();
+      esRef.current = null;
+      return;
+    }
 
-    let reconnectTimer: ReturnType<typeof setTimeout>;
+    let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     const params = benchId ? `?bench_id=${encodeURIComponent(benchId)}` : '';
+    setConnected(false);
 
     function connect() {
+      if (cancelled) return;
+
+      esRef.current?.close();
+
       const es = new EventSource(`${SERVE_URL}/api/bench/events${params}`);
       esRef.current = es;
 
-      es.onopen = () => setConnected(true);
+      es.onopen = () => {
+        if (cancelled || esRef.current !== es) return;
+        setConnected(true);
+      };
 
       es.onmessage = (e) => {
+        if (cancelled || esRef.current !== es) return;
+
         try {
           const parsed = JSON.parse(e.data) as BenchSSEEvent;
           setLastEvent(parsed);
@@ -41,8 +57,15 @@ export function useBenchSSE({ benchId, enabled = true }: UseBenchSSEOptions = {}
       };
 
       es.onerror = () => {
+        if (cancelled || esRef.current !== es) {
+          es.close();
+          return;
+        }
+
         setConnected(false);
         es.close();
+        esRef.current = null;
+        clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connect, 3_000);
       };
     }
@@ -50,8 +73,12 @@ export function useBenchSSE({ benchId, enabled = true }: UseBenchSSEOptions = {}
     connect();
 
     return () => {
+      cancelled = true;
       clearTimeout(reconnectTimer);
-      esRef.current?.close();
+      if (esRef.current) {
+        esRef.current.close();
+        esRef.current = null;
+      }
     };
   }, [benchId, enabled]);
 
