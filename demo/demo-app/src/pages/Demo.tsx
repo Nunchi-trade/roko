@@ -385,6 +385,10 @@ export default function Demo() {
     setSpeedIdx((prev) => (prev + 1) % SPEEDS.length);
   }, []);
 
+  useEffect(() => {
+    setSpeedMultiplier(SPEEDS[speedIdx]);
+  }, [speedIdx]);
+
   const toggleMode = useCallback((mode: 'auto' | 'step') => {
     setPlaybackMode(mode);
     playback.setMode(mode);
