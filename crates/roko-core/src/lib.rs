@@ -200,7 +200,8 @@ pub use forensic::{
 pub use foundation::{
     ChatMessage as FoundationChatMessage, Effect, EffectExecutor, EffectOutcome, EventConsumer,
     FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner, GateVerdict, MessageRole,
-    ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec, TokenUsage,
+    ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec,
+    ShellGateCommand, TokenUsage,
 };
 pub use hash::ContentHash;
 pub use heartbeat::{
