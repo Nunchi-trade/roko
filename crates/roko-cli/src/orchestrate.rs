@@ -2419,6 +2419,8 @@ pub struct PlanRunner {
     knowledge_store: KnowledgeStore,
     /// Evidence-based admission controller that gates writes to the knowledge store.
     knowledge_admission: Option<KnowledgeAdmissionStore>,
+    /// Feedback service for recording knowledge usage outcomes.
+    feedback_service: roko_learn::feedback_service::FeedbackService,
     /// Process supervisor for tracking and cleaning up agent subprocesses.
     supervisor: Arc<ProcessSupervisor>,
     /// Root cancellation token for coordinated shutdown.
@@ -4017,6 +4019,9 @@ impl PlanRunner {
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
         let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
+        let feedback_service = roko_learn::feedback_service::FeedbackService::from_roko_dir(
+            &workdir.join(".roko"),
+        );
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -4152,6 +4157,7 @@ impl PlanRunner {
             playbook,
             knowledge_store,
             knowledge_admission,
+            feedback_service,
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
@@ -4233,6 +4239,9 @@ impl PlanRunner {
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
         let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
+        let feedback_service = roko_learn::feedback_service::FeedbackService::from_roko_dir(
+            &workdir.join(".roko"),
+        );
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -4362,6 +4371,7 @@ impl PlanRunner {
             playbook,
             knowledge_store,
             knowledge_admission,
+            feedback_service,
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
@@ -4440,6 +4450,9 @@ impl PlanRunner {
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
         let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
+        let feedback_service = roko_learn::feedback_service::FeedbackService::from_roko_dir(
+            &workdir.join(".roko"),
+        );
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -4569,6 +4582,7 @@ impl PlanRunner {
             playbook,
             knowledge_store,
             knowledge_admission,
+            feedback_service,
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
@@ -10142,6 +10156,36 @@ impl PlanRunner {
         );
     }
 
+    fn record_knowledge_usage_feedback(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        gate_passed: bool,
+        model_slug: &str,
+    ) {
+        let knowledge_ids = self
+            .task_trackers
+            .get(plan_id)
+            .map(|tracker| tracker.last_context_knowledge_ids.clone())
+            .unwrap_or_default();
+
+        if let Err(err) = self.feedback_service.record_knowledge_usage(
+            &format!("{plan_id}/{task_id}"),
+            knowledge_ids,
+            gate_passed,
+            model_slug,
+        ) {
+            tracing::warn!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                model_slug = %model_slug,
+                gate_passed,
+                error = %err,
+                "[orchestrate] failed to record knowledge usage feedback"
+            );
+        }
+    }
+
     /// Record a LinUCB observation for the implementer task route.
     fn observe_cascade_router(
         &self,
@@ -14128,6 +14172,7 @@ impl PlanRunner {
             None;
         let mut routing_log_store: Option<RoutingDecisionLogStore> = None;
         let mut routing_log_record: Option<RoutingDecisionLog> = None;
+        let mut routing_knowledge_ids: Vec<String> = Vec::new();
 
         // ── Adaptive model selection via CascadeRouter ───────────────
         let mut selected_model_experiment = None;
@@ -14282,6 +14327,11 @@ impl PlanRunner {
                         routing_ctx.task_category.label(),
                     );
                     if knowledge_advice.has_signal {
+                        routing_knowledge_ids = self.knowledge_routing_entry_ids(
+                            &healthy_models,
+                            role,
+                            routing_ctx.task_category.label(),
+                        );
                         tracing::info!(
                             hints = knowledge_advice.hints.len(),
                             "[orchestrate] applying knowledge routing advice to cascade explanation"
@@ -14716,6 +14766,11 @@ impl PlanRunner {
             tracker
                 .last_context_knowledge_ids
                 .extend(neuro_context_knowledge_ids);
+            // Keep routing and prompt-composition knowledge in one task-local set
+            // so post-gate learning can record the full influence surface.
+            tracker
+                .last_context_knowledge_ids
+                .extend(routing_knowledge_ids);
             tracker.last_context_knowledge_ids.sort();
             tracker.last_context_knowledge_ids.dedup();
         }
@@ -17725,6 +17780,7 @@ impl PlanRunner {
                 .ok()
                 .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
             self.observe_cascade_router(plan_id, task_id, task_def, selected_model, 0.0);
+            self.record_knowledge_usage_feedback(plan_id, task_id, false, selected_model);
             let error = anyhow!(
                 "verify failed for {failed_task_id}: {command} — {msg}; stderr/stdout:\n{error_output}"
             );
@@ -17738,8 +17794,15 @@ impl PlanRunner {
         }
 
         let domain = self.current_task_domain(plan_id);
-        self.verify_declared_write_files(plan_id, &td.id, &td.files, exec_dir, domain.as_ref())
-            .await?;
+        if let Err(err) = self
+            .verify_declared_write_files(plan_id, &td.id, &td.files, exec_dir, domain.as_ref())
+            .await
+        {
+            self.record_knowledge_usage_feedback(plan_id, task_id, false, selected_model);
+            return Err(err);
+        }
+
+        self.record_knowledge_usage_feedback(plan_id, task_id, true, selected_model);
 
         let uses_git = !domain.as_ref().is_some_and(|d| !domain_uses_git(d));
         let mut task_files = Vec::new();
@@ -17791,6 +17854,49 @@ impl PlanRunner {
 }
 
 impl PlanRunner {
+    fn knowledge_routing_entry_ids(
+        &self,
+        candidate_slugs: &[String],
+        role: AgentRole,
+        task_category: &str,
+    ) -> Vec<String> {
+        if candidate_slugs.is_empty() {
+            return Vec::new();
+        }
+
+        let query = format!("{} {} routing model", role.label(), task_category);
+        let entries = match self.knowledge_store.query(&query, 10) {
+            Ok(entries) => entries,
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    "[orchestrate] failed to query knowledge store for routing ids"
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut ids = entries
+            .into_iter()
+            .filter(|entry| {
+                let content_lower = entry.content.to_lowercase();
+                candidate_slugs.iter().any(|slug| {
+                    let slug_lower = slug.to_lowercase();
+                    content_lower.contains(&slug_lower)
+                        || entry
+                            .source_model
+                            .as_deref()
+                            .is_some_and(|sm| sm.eq_ignore_ascii_case(slug))
+                        || entry.tags.iter().any(|tag| tag.eq_ignore_ascii_case(slug))
+                })
+            })
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     fn build_context_assembler_sections(
         &self,
         plan_id: &str,
