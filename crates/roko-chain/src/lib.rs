@@ -49,6 +49,8 @@ pub mod alloy_impl;
 pub mod client;
 /// Collusion ring detection via assignment graph clique analysis (P2-11).
 pub mod collusion;
+/// `alto-follower` subprocess-backed [`ChainClient`] for `mode = "light" | "follower"`.
+pub mod follower;
 pub mod futures_market;
 pub mod gate;
 pub mod heartbeat_ext;
@@ -78,6 +80,7 @@ pub mod witness;
 
 pub use agent_registry::AgentRegistry;
 pub use client::ChainClient;
+pub use follower::{FollowerChainClient, FollowerFlavor};
 pub use futures_market::{FuturesMarket, FuturesMarketConfig};
 pub use gate::{
     MempoolTx, MevAlert, MevAnalysisInput, MevDetector, MevDetectorConfig, MevGate, MevPattern,

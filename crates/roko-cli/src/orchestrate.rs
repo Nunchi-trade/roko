@@ -31,7 +31,7 @@ use roko_agent::task_runner::{
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, MultiAgentPool, SafetyLayer};
 use roko_chain::alloy_impl::{AlloyChainClient, AlloyChainWallet};
-use roko_chain::{ChainClient, ChainWallet};
+use roko_chain::{ChainClient, ChainWallet, FollowerChainClient, FollowerFlavor, MockChainClient};
 use roko_compose::enrichment::{
     ALL_ORDERED, EnrichStep, EnrichmentConfig, EnrichmentPipeline,
     LlmBackend as EnrichmentLlmBackend, LlmClient as EnrichmentLlmClient, PlanInfo, SkipReason,
@@ -53,7 +53,8 @@ use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::attestation::{self, SigningKey};
 use roko_core::config::schema::{
-    GatesConfig, LearningConfig as RuntimeLearningConfig, RokoConfig, RoleOverride,
+    ChainConfig, ChainMode, GatesConfig, LearningConfig as RuntimeLearningConfig, RokoConfig,
+    RoleOverride,
 };
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
@@ -197,6 +198,85 @@ fn domain_uses_compiled_gates(domain: &TaskDomain) -> bool {
         domain,
         TaskDomain::Code | TaskDomain::Chain | TaskDomain::Custom(_)
     )
+}
+
+/// CLI-level override for `chain.mode`, set once in `main.rs` from
+/// `--chain-mode` and consumed by [`init_chain_client`]. `None` means honor
+/// the value loaded from `roko.toml`.
+static CHAIN_MODE_OVERRIDE: std::sync::OnceLock<Option<ChainMode>> = std::sync::OnceLock::new();
+
+/// Set the CLI-level chain-mode override. Called from `main.rs` after parsing
+/// `Cli`. Only the first call wins (CLI parse runs once per process).
+pub fn set_chain_mode_override(mode: Option<ChainMode>) {
+    let _ = CHAIN_MODE_OVERRIDE.set(mode);
+}
+
+fn effective_chain_mode(config_mode: ChainMode) -> ChainMode {
+    CHAIN_MODE_OVERRIDE
+        .get()
+        .copied()
+        .flatten()
+        .unwrap_or(config_mode)
+}
+
+/// Public accessor for [`effective_chain_mode`] used by `roko doctor`.
+pub fn effective_chain_mode_for_doctor(config_mode: ChainMode) -> ChainMode {
+    effective_chain_mode(config_mode)
+}
+
+/// Build the read-side `ChainClient` for the configured `chain.mode`.
+///
+/// Returns `None` when the configured mode can't be initialized (e.g. `Rpc`
+/// with no `rpc_url`, or `AlloyChainClient::http` failing); chain tools are
+/// then disabled cleanly without aborting startup.
+///
+/// Phase A: `Light` and `Follower` modes return a stub `FollowerChainClient`
+/// that surfaces `Unsupported` for every read; Phase B wires a real
+/// `alto-follower` subprocess. See plan
+/// `~/.claude/plans/greedy-moseying-cerf.md`.
+fn init_chain_client(chain: &ChainConfig) -> Option<Arc<dyn ChainClient>> {
+    let mode = effective_chain_mode(chain.mode);
+    match mode {
+        ChainMode::Rpc => match chain.rpc_url.as_deref() {
+            Some(url) => match AlloyChainClient::http(url) {
+                Ok(c) => {
+                    tracing::info!(rpc_url = url, mode = %mode, "chain client initialized (rpc backend)");
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "chain rpc_url set but client failed; chain tools disabled"
+                    );
+                    None
+                }
+            },
+            None => {
+                tracing::warn!("chain.mode = rpc but no rpc_url configured; chain tools disabled");
+                None
+            }
+        },
+        ChainMode::Light => {
+            tracing::info!(
+                mode = %mode,
+                "chain client initialized (light-client stub; Phase B will wire alto-follower)"
+            );
+            Some(Arc::new(FollowerChainClient::stub(FollowerFlavor::Light)))
+        }
+        ChainMode::Follower => {
+            tracing::info!(
+                mode = %mode,
+                "chain client initialized (follower stub; Phase B will wire alto-follower)"
+            );
+            Some(Arc::new(FollowerChainClient::stub(
+                FollowerFlavor::Follower,
+            )))
+        }
+        ChainMode::Mock => {
+            tracing::info!(mode = %mode, "chain client initialized (mock backend)");
+            Some(Arc::new(MockChainClient::default()))
+        }
+    }
 }
 
 /// Whether this domain requires git operations (worktrees, changed-files, commits).
@@ -4680,20 +4760,7 @@ impl PlanRunner {
         let runtime_event_bus = RuntimeEventBus::new(256);
         let runtime_event_rx = runtime_event_bus.subscribe();
         let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
-        let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
-        {
-            Some(url) => match AlloyChainClient::http(url) {
-                Ok(c) => {
-                    tracing::info!(rpc_url = url, "chain client initialized");
-                    Some(Arc::new(c))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
-                    None
-                }
-            },
-            None => None,
-        };
+        let chain_client: Option<Arc<dyn ChainClient>> = init_chain_client(&roko_config.chain);
         let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
             roko_config.chain.rpc_url.as_deref(),
             roko_config.chain.wallet_key.as_deref(),
@@ -4882,20 +4949,7 @@ impl PlanRunner {
         let runtime_event_bus = RuntimeEventBus::new(256);
         let runtime_event_rx = runtime_event_bus.subscribe();
         let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
-        let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
-        {
-            Some(url) => match AlloyChainClient::http(url) {
-                Ok(c) => {
-                    tracing::info!(rpc_url = url, "chain client initialized");
-                    Some(Arc::new(c))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
-                    None
-                }
-            },
-            None => None,
-        };
+        let chain_client: Option<Arc<dyn ChainClient>> = init_chain_client(&roko_config.chain);
         let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
             roko_config.chain.rpc_url.as_deref(),
             roko_config.chain.wallet_key.as_deref(),
@@ -5086,20 +5140,7 @@ impl PlanRunner {
         let runtime_event_bus = RuntimeEventBus::new(256);
         let runtime_event_rx = runtime_event_bus.subscribe();
         let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
-        let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
-        {
-            Some(url) => match AlloyChainClient::http(url) {
-                Ok(c) => {
-                    tracing::info!(rpc_url = url, "chain client initialized");
-                    Some(Arc::new(c))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
-                    None
-                }
-            },
-            None => None,
-        };
+        let chain_client: Option<Arc<dyn ChainClient>> = init_chain_client(&roko_config.chain);
         let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
             roko_config.chain.rpc_url.as_deref(),
             roko_config.chain.wallet_key.as_deref(),
@@ -21442,5 +21483,63 @@ command = "cargo check -p roko-cli"
         assert_eq!(merged.tasks[2].id, "N3");
         assert_eq!(merged.tasks[2].depends_on, vec!["N2"]);
         assert!(merged.tasks.iter().all(|task| task.id != "N1"));
+    }
+
+    // ── chain mode dispatch ─────────────────────────────────────────
+    //
+    // We can't poke at the `OnceLock` cleanly between tests (it's set once per
+    // process). These tests therefore cover the cases that don't require an
+    // override: pure config-driven dispatch + the stub backends' name() and
+    // ChainClient impl.
+
+    #[tokio::test]
+    async fn init_chain_client_mock_returns_mock_backend() {
+        let chain = ChainConfig {
+            mode: ChainMode::Mock,
+            ..Default::default()
+        };
+        let client = init_chain_client(&chain).expect("mock backend always initializes");
+        assert_eq!(client.name(), "mock");
+        // Mock chain seeds a genesis block.
+        let block = client.block_number().await.expect("mock block_number");
+        assert_eq!(block, 0);
+    }
+
+    #[tokio::test]
+    async fn init_chain_client_light_returns_stub_unsupported() {
+        let chain = ChainConfig {
+            mode: ChainMode::Light,
+            ..Default::default()
+        };
+        let client = init_chain_client(&chain).expect("light stub initializes");
+        assert_eq!(client.name(), "light");
+        assert!(matches!(
+            client.block_number().await,
+            Err(roko_chain::ChainError::Unsupported(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn init_chain_client_follower_returns_stub_unsupported() {
+        let chain = ChainConfig {
+            mode: ChainMode::Follower,
+            ..Default::default()
+        };
+        let client = init_chain_client(&chain).expect("follower stub initializes");
+        assert_eq!(client.name(), "follower");
+        assert!(matches!(
+            client.block_number().await,
+            Err(roko_chain::ChainError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn init_chain_client_rpc_without_url_returns_none() {
+        let chain = ChainConfig {
+            mode: ChainMode::Rpc,
+            rpc_url: None,
+            ..Default::default()
+        };
+        assert!(init_chain_client(&chain).is_none());
     }
 }
