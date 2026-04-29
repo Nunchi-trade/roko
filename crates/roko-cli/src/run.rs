@@ -330,6 +330,19 @@ fn workflow_report_agent_role(report: &WorkflowRunReport) -> (Option<String>, Op
     first.unwrap_or((None, None))
 }
 
+pub fn workflow_report_outcome(
+    report: &WorkflowRunReport,
+) -> Option<roko_core::WorkflowOutcome> {
+    report
+        .events
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.payload {
+            roko_core::RuntimeEvent::WorkflowCompleted { outcome, .. } => Some(outcome.clone()),
+            _ => None,
+        })
+}
+
 /// Format a duration for human display: "3.2s", "1m 42s", "0.8s".
 fn format_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs_f64();
@@ -3433,6 +3446,41 @@ mod tests {
         assert!(workflow.has_review);
         assert_eq!(workflow.max_iterations, 3);
         assert_eq!(workflow.max_autofix_attempts, 2);
+    }
+
+    #[test]
+    fn workflow_report_outcome_reads_terminal_event() {
+        let report = WorkflowRunReport {
+            run_id: "run-1".to_string(),
+            success: false,
+            model: "test-model".to_string(),
+            provider: None,
+            prompt_summary: "prompt".to_string(),
+            output: "output".to_string(),
+            agent_turns: 0,
+            token_usage: 0,
+            cost: None,
+            duration_secs: 0.0,
+            gates: Vec::new(),
+            events: vec![roko_core::runtime_event::RuntimeEventEnvelope::new(
+                "run-1",
+                1,
+                "workflow_engine",
+                roko_core::RuntimeEvent::WorkflowCompleted {
+                    run_id: "run-1".to_string(),
+                    outcome: roko_core::WorkflowOutcome::Halted {
+                        reason: "missing API key".to_string(),
+                    },
+                },
+            )],
+            checkpoint_path: None,
+        };
+
+        assert!(matches!(
+            workflow_report_outcome(&report),
+            Some(roko_core::WorkflowOutcome::Halted { ref reason })
+                if reason == "missing API key"
+        ));
     }
 
     #[cfg(feature = "legacy-orchestrate")]

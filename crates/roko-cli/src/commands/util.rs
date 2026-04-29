@@ -297,6 +297,20 @@ pub(crate) async fn cmd_run(
                     roko_cli::run::print_workflow_run_report(&prompt, template, &report);
                 }
 
+                if !report.success {
+                    match roko_cli::run::workflow_report_outcome(&report) {
+                        Some(roko_core::WorkflowOutcome::Halted { reason }) => {
+                            eprintln!("error: workflow halted: {reason}");
+                        }
+                        Some(roko_core::WorkflowOutcome::Cancelled) => {
+                            eprintln!("error: workflow cancelled");
+                        }
+                        Some(roko_core::WorkflowOutcome::Success { .. }) | None => {
+                            eprintln!("error: workflow failed");
+                        }
+                    }
+                }
+
                 if share {
                     if let Err(err) = roko_cli::run::write_shared_workflow_run(
                         &workdir,
