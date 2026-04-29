@@ -421,9 +421,11 @@ fn check_layout_basics(workdir: &Path) -> DoctorCheck {
 fn check_chain_mode(workdir: &Path) -> DoctorCheck {
     use roko_core::config::schema::{ChainMode, RokoConfig};
 
-    // Mirror `load_roko_config` from `main.rs` (kept local to avoid a public-API churn).
+    // Mirror `load_roko_config` from `main.rs` (kept local to avoid a
+    // public-API churn). Includes the global-config fallback so a
+    // `wallet_key` / `rpc_url` set only in `~/.roko/config.toml` shows up here.
     let path = workdir.join("roko.toml");
-    let config = if path.is_file() {
+    let mut config = if path.is_file() {
         match std::fs::read_to_string(&path) {
             Ok(text) => RokoConfig::from_toml(&text).unwrap_or_default(),
             Err(_) => RokoConfig::default(),
@@ -431,6 +433,7 @@ fn check_chain_mode(workdir: &Path) -> DoctorCheck {
     } else {
         RokoConfig::default()
     };
+    crate::config::merge_global_providers(&mut config);
 
     let configured = config.chain.mode;
     let active = crate::orchestrate::effective_chain_mode_for_doctor(configured);
