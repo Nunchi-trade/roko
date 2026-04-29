@@ -548,23 +548,28 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             } else {
                 "prompt"
             };
+            let config = crate::load_roko_config(&workdir)?;
             let task_id = from_file
                 .as_ref()
                 .and_then(|path| path.file_stem())
                 .and_then(|stem| stem.to_str())
                 .map(|stem| format!("plan:generate:{stem}"))
                 .unwrap_or_else(|| "plan:generate:prompt".to_string());
-            let system = roko_cli::plan_generate::build_generation_prompt(
-                &workdir,
-                &source_text,
-                source_type,
-            );
-            let model_key = resolve_effective_model_key(
-                &workdir,
+            let model_key = resolve_effective_model_key_from_config(
+                &config,
                 cli.model.clone(),
                 Some("strategist"),
                 "plan generate",
             )?;
+            let repo_keywords = extract_keywords_from_text(&source_text);
+            let repo_context =
+                build_plan_repo_context(&workdir, &repo_keywords, "plan generate").await;
+            let system = roko_cli::plan_generate::build_generation_prompt_with_context(
+                &workdir,
+                &source_text,
+                source_type,
+                repo_context.as_ref(),
+            );
 
             let task_prompt = format!(
                 "Read the source below and generate implementation plan directories under .roko/plans/. \
@@ -608,29 +613,47 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let source_path = find_plan_source_document(&plan_dir)?;
             let source_content = std::fs::read_to_string(&source_path)
                 .with_context(|| format!("read {}", source_path.display()))?;
-            let model_key = resolve_effective_model_key(
-                &workdir,
+            let config = crate::load_roko_config(&workdir)?;
+            let model_profiles = config.effective_models();
+            let model_key = resolve_effective_model_key_from_config(
+                &config,
                 cli.model.clone(),
                 Some("strategist"),
                 "plan regenerate",
             )?;
+            let pre_validation_issues = validate_plan_grounding(
+                &tasks_path,
+                existing_tasks.as_ref(),
+                &plan_dir,
+                &workdir,
+                Some(&model_profiles),
+            );
+            let repo_keywords = existing_tasks
+                .as_ref()
+                .map(|tasks| extract_keywords_from_plan(&tasks.tasks))
+                .filter(|keywords| !keywords.is_empty())
+                .unwrap_or_else(|| extract_keywords_from_text(&source_content));
+            let repo_context =
+                build_plan_repo_context(&workdir, &repo_keywords, "plan regenerate").await;
+            let validation_context = if pre_validation_issues.is_empty() {
+                None
+            } else {
+                Some(format_validation_issues(&pre_validation_issues))
+            };
+            let system = roko_cli::plan_generate::build_generation_prompt_with_context(
+                &workdir,
+                &source_content,
+                "prd",
+                repo_context.as_ref(),
+            );
+            let task_prompt = roko_cli::plan_generate::build_regeneration_prompt_with_context(
+                &workdir,
+                &existing,
+                validation_context.as_deref(),
+                repo_context.as_ref(),
+            );
 
             if dry_run {
-                let system = roko_cli::plan_generate::build_generation_prompt(
-                    &workdir,
-                    &source_content,
-                    "prd",
-                );
-                let task_prompt = format!(
-                    "Regenerate the plan at {} from the source PRD above. \
-                     Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
-                     max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
-                     [task.context], and [[task.verify]]. Preserve the status of any task that \
-                     is already marked done in the existing file. Do not create new plan \
-                     directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
-                    tasks_path.display(),
-                    existing = existing,
-                );
                 eprintln!(
                     "\n[dry-run] Would regenerate {} from {}",
                     tasks_path.display(),
@@ -641,19 +664,6 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
 
             let gw = load_gateway_env(&workdir);
-
-            let system =
-                roko_cli::plan_generate::build_generation_prompt(&workdir, &source_content, "prd");
-            let task_prompt = format!(
-                "Regenerate the plan at {} from the source PRD above. \
-                 Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
-                 max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
-                 [task.context], and [[task.verify]]. Preserve the status of any task that \
-                 is already marked done in the existing file. Do not create new plan \
-                 directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
-                tasks_path.display(),
-                existing = existing,
-            );
             let plan_name = plan_dir
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -686,13 +696,46 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 }
             };
 
+            let regenerated_parse = roko_cli::task_parser::TasksFile::parse(&tasks_path);
+            let post_validation_issues = validate_plan_grounding(
+                &tasks_path,
+                regenerated_parse.as_ref().ok(),
+                &plan_dir,
+                &workdir,
+                Some(&model_profiles),
+            );
+            let pre_error_count = pre_validation_issues
+                .iter()
+                .filter(|issue| issue.severity == Severity::Error)
+                .count();
+            let pre_warning_count = pre_validation_issues
+                .iter()
+                .filter(|issue| issue.severity == Severity::Warning)
+                .count();
+            let post_error_count = post_validation_issues
+                .iter()
+                .filter(|issue| issue.severity == Severity::Error)
+                .count();
+            let post_warning_count = post_validation_issues
+                .iter()
+                .filter(|issue| issue.severity == Severity::Warning)
+                .count();
+            println!(
+                "Pre-regeneration: {} errors, {} warnings",
+                pre_error_count, pre_warning_count
+            );
+            println!(
+                "Post-regeneration: {} errors, {} warnings",
+                post_error_count, post_warning_count
+            );
+
             if exit_code != 0 {
                 std::fs::write(&tasks_path, &existing)
                     .with_context(|| format!("restore {}", tasks_path.display()))?;
                 anyhow::bail!("plan regeneration agent failed with exit code {exit_code}");
             }
 
-            let regenerated = match roko_cli::task_parser::TasksFile::parse(&tasks_path) {
+            let regenerated = match regenerated_parse {
                 Ok(tasks) => tasks,
                 Err(err) => {
                     std::fs::write(&tasks_path, &existing)
@@ -737,23 +780,251 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     }
 }
 
-fn resolve_effective_model_key(
-    workdir: &Path,
+fn resolve_effective_model_key_from_config(
+    config: &roko_core::config::schema::RokoConfig,
     cli_model: Option<String>,
     role: Option<&str>,
     context: &str,
 ) -> Result<String> {
-    let config = crate::load_roko_config(workdir)?;
-    let selection = roko_cli::model_selection::resolve_effective_model(
-        cli_model,
-        None,
-        role.map(str::to_string),
-        None,
-        &config,
-    )
-    .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
+    let selection =
+        roko_cli::model_selection::resolve_effective_model(cli_model, None, role, None, config)
+            .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
     selection.print_stderr();
     Ok(selection.effective_model_key)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Severity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ValidationIssue {
+    severity: Severity,
+    category: String,
+    message: String,
+    location: Option<String>,
+}
+
+fn extract_keywords_from_text(text: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut keywords = Vec::new();
+    collect_keywords_from_value(text, &mut seen, &mut keywords);
+    keywords
+}
+
+fn extract_keywords_from_plan(tasks: &[roko_cli::task_parser::TaskDef]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut keywords = Vec::new();
+
+    for task in tasks {
+        collect_keywords_from_value(&task.title, &mut seen, &mut keywords);
+        if let Some(description) = task.description.as_deref() {
+            collect_keywords_from_value(description, &mut seen, &mut keywords);
+        }
+        if keywords.len() >= 10 {
+            break;
+        }
+    }
+
+    keywords.truncate(10);
+    keywords
+}
+
+async fn build_plan_repo_context(
+    workdir: &Path,
+    keywords: &[String],
+    warning_label: &str,
+) -> Option<roko_cli::repo_context::RepoContextPack> {
+    let keyword_refs: Vec<&str> = keywords.iter().map(String::as_str).collect();
+    match roko_cli::repo_context::build_repo_context(workdir, &keyword_refs).await {
+        Ok(repo_context) => {
+            if !repo_context.context_root_verified {
+                eprintln!(
+                    "WARNING: Repository context not verified for {warning_label} keywords {:?}. Generated plan may reference nonexistent code.",
+                    keywords
+                );
+            }
+            Some(repo_context)
+        }
+        Err(err) => {
+            eprintln!(
+                "WARNING: Repository context unavailable for {warning_label} keywords {:?}: {err}",
+                keywords
+            );
+            None
+        }
+    }
+}
+
+fn validate_plan_grounding(
+    tasks_path: &Path,
+    tasks: Option<&roko_cli::task_parser::TasksFile>,
+    plan_dir: &Path,
+    workdir: &Path,
+    models: Option<&std::collections::HashMap<String, roko_core::config::schema::ModelProfile>>,
+) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+
+    if let Some(tasks) = tasks {
+        issues.extend(validation_issues_from_structure(tasks.validate_structure()));
+
+        if let Ok(modern_issues) =
+            roko_cli::task_parser::TasksFile::validate_modern_fields(tasks_path)
+        {
+            issues.extend(validation_issues_from_modern_fields(modern_issues));
+        }
+    } else if let Ok(modern_issues) =
+        roko_cli::task_parser::TasksFile::validate_modern_fields(tasks_path)
+    {
+        issues.extend(validation_issues_from_modern_fields(modern_issues));
+    }
+
+    match crate::plan_validate::validate_plans_dir_with_workdir(plan_dir, models, Some(workdir)) {
+        Ok(report) => {
+            for plan in report.plans {
+                if plan.path != tasks_path.display().to_string() {
+                    continue;
+                }
+
+                for diagnostic in plan.diagnostics {
+                    if !should_keep_plan_diagnostic(&diagnostic) {
+                        continue;
+                    }
+
+                    issues.push(validation_issue_from_diagnostic(&diagnostic));
+                }
+            }
+        }
+        Err(err) => {
+            issues.push(ValidationIssue {
+                severity: Severity::Error,
+                category: "plan_validation".to_string(),
+                message: err.to_string(),
+                location: Some(tasks_path.display().to_string()),
+            });
+        }
+    }
+
+    issues.sort();
+    issues.dedup();
+    issues
+}
+
+fn should_keep_plan_diagnostic(diagnostic: &crate::plan_validate::Diagnostic) -> bool {
+    match diagnostic.rule_id.as_str() {
+        "PLAN_003" => diagnostic.message.contains("role"),
+        "PLAN_005" | "PLAN_006" => false,
+        _ => true,
+    }
+}
+
+fn validation_issue_from_diagnostic(
+    diagnostic: &crate::plan_validate::Diagnostic,
+) -> ValidationIssue {
+    ValidationIssue {
+        severity: match diagnostic.severity {
+            crate::plan_validate::Severity::Error => Severity::Error,
+            crate::plan_validate::Severity::Warning => Severity::Warning,
+        },
+        category: diagnostic.rule_id.clone(),
+        message: diagnostic.message.clone(),
+        location: diagnostic
+            .task_id
+            .clone()
+            .or_else(|| diagnostic.plan_id.clone()),
+    }
+}
+
+fn split_validation_location(message: &str) -> (Option<String>, String) {
+    if let Some((location, rest)) = message.split_once(':') {
+        let location = location.trim();
+        if !location.is_empty() {
+            return (Some(location.to_string()), rest.trim_start().to_string());
+        }
+    }
+
+    (None, message.to_string())
+}
+
+fn format_validation_issues(issues: &[ValidationIssue]) -> String {
+    issues
+        .iter()
+        .map(|issue| {
+            let severity = match issue.severity {
+                Severity::Error => "ERROR",
+                Severity::Warning => "WARNING",
+            };
+            let location = issue
+                .location
+                .as_ref()
+                .map(|location| format!(" (in {location})"))
+                .unwrap_or_default();
+            format!(
+                "- **{severity}** [{}]: {}{}",
+                issue.category, issue.message, location
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn collect_keywords_from_value(
+    value: &str,
+    seen: &mut std::collections::HashSet<String>,
+    keywords: &mut Vec<String>,
+) {
+    for token in value.split(|c: char| c.is_whitespace() || c == '-' || c == '_') {
+        let keyword = token
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+            .to_ascii_lowercase();
+        if keyword.len() < 3 {
+            continue;
+        }
+        if seen.insert(keyword.clone()) {
+            keywords.push(keyword);
+        }
+        if keywords.len() >= 10 {
+            break;
+        }
+    }
+}
+
+fn validation_issues_from_structure(
+    issues: Vec<roko_cli::task_parser::TaskValidationIssue>,
+) -> Vec<ValidationIssue> {
+    issues
+        .into_iter()
+        .map(|issue| {
+            let message = issue.to_string();
+            let (location, message) = split_validation_location(&message);
+            ValidationIssue {
+                severity: Severity::Error,
+                category: "task_structure".to_string(),
+                message,
+                location,
+            }
+        })
+        .collect()
+}
+
+fn validation_issues_from_modern_fields(
+    issues: Vec<roko_cli::task_parser::ModernFieldIssue>,
+) -> Vec<ValidationIssue> {
+    issues
+        .into_iter()
+        .map(|issue| {
+            let message = issue.to_string();
+            let (location, message) = split_validation_location(&message);
+            ValidationIssue {
+                severity: Severity::Error,
+                category: "modern_fields".to_string(),
+                message,
+                location,
+            }
+        })
+        .collect()
 }
 
 /// Parse and display a plan directory without executing anything.
@@ -985,7 +1256,11 @@ pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> 
         None
     };
 
-    let report = plan_validate::validate_plans_dir(dir, models.as_ref())?;
+    let report = plan_validate::validate_plans_dir_with_workdir(
+        dir,
+        models.as_ref(),
+        Some(current_dir.as_path()),
+    )?;
     if json_output {
         println!("{}", plan_validate::render_json(&report)?);
     } else {
@@ -1226,6 +1501,8 @@ pub(crate) fn plan_path_exists(workdir: &std::path::Path, plan_id: &str) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::fs;
     use tempfile::tempdir;
 
     #[test]
@@ -1247,5 +1524,129 @@ mod tests {
 
         let state = read_executor_state(dir.path()).expect("state");
         assert_eq!(state, vec![("plan-a".to_string(), 1, 3)]);
+    }
+
+    #[test]
+    fn extract_keywords_from_plan_deduplicates_and_limits_keywords() {
+        let parsed: roko_cli::task_parser::TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "demo"
+
+[[task]]
+id = "T1"
+title = "Build Compose Pipeline"
+description = "Compose the pipeline for the workspace"
+role = "implementer"
+tier = "focused"
+model_hint = "claude-sonnet-4-6"
+depends_on = []
+context = { read_files = [{ path = "src/lib.rs" }] }
+verify = [{ phase = "compile", command = "cargo check -p demo" }]
+
+[[task]]
+id = "T2"
+title = "Build Separate Bridge"
+description = "Bridge the workspace core adapters"
+role = "implementer"
+tier = "focused"
+model_hint = "claude-sonnet-4-6"
+depends_on = []
+context = { read_files = [{ path = "src/lib.rs" }] }
+verify = [{ phase = "compile", command = "cargo check -p demo" }]
+"#,
+        )
+        .expect("parse tasks");
+
+        let keywords = extract_keywords_from_plan(&parsed.tasks);
+
+        assert!(keywords.len() <= 10);
+        assert!(keywords.contains(&"compose".to_string()));
+        assert!(keywords.contains(&"pipeline".to_string()));
+        assert!(keywords.contains(&"bridge".to_string()));
+    }
+
+    #[test]
+    fn format_validation_issues_renders_locations_and_severity() {
+        let rendered = format_validation_issues(&[
+            ValidationIssue {
+                severity: Severity::Error,
+                category: "PLAN_003".to_string(),
+                message: "task 'T1' is missing required field 'role'".to_string(),
+                location: Some("T1".to_string()),
+            },
+            ValidationIssue {
+                severity: Severity::Warning,
+                category: "PLAN_009".to_string(),
+                message: "task 'T2' uses model alias 'sonnet'".to_string(),
+                location: None,
+            },
+        ]);
+
+        assert!(rendered.contains("**ERROR** [PLAN_003]"));
+        assert!(rendered.contains("(in T1)"));
+        assert!(rendered.contains("**WARNING** [PLAN_009]"));
+    }
+
+    #[test]
+    fn validate_plan_grounding_collects_task_and_workspace_issues() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let plan_dir = root.join("plans").join("demo");
+        fs::create_dir_all(&plan_dir).expect("plan dir");
+        fs::create_dir_all(root.join("crates").join("roko-core")).expect("existing crate");
+        fs::create_dir_all(root.join("crates").join("roko-other")).expect("other crate");
+
+        let tasks_path = plan_dir.join("tasks.toml");
+        fs::write(
+            &tasks_path,
+            r#"
+[meta]
+plan = "demo"
+max_parallel = 1
+
+[[task]]
+id = "T1"
+title = "Create crate roko-core"
+role = ""
+status = "ready"
+tier = "focused"
+model_hint = "sonnet"
+files = ["crates/missing-crate/src/lib.rs"]
+depends_on = []
+"#,
+        )
+        .expect("write tasks");
+
+        let tasks = roko_cli::task_parser::TasksFile::parse(&tasks_path).expect("parse tasks");
+        let mut models = HashMap::new();
+        models.insert(
+            "claude-sonnet-4-6".to_string(),
+            roko_core::config::schema::ModelProfile {
+                provider: "claude_cli".to_string(),
+                slug: "claude-sonnet-4-6".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let issues =
+            validate_plan_grounding(&tasks_path, Some(&tasks), &plan_dir, root, Some(&models));
+
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.category == "task_structure")
+        );
+        assert!(issues.iter().any(|issue| issue.category == "modern_fields"));
+        assert!(issues.iter().any(|issue| issue.category == "PLAN_003"));
+        assert!(issues.iter().any(|issue| issue.category == "PLAN_009"));
+        assert!(issues.iter().any(|issue| issue.category == "PLAN_030"));
+        assert!(issues.iter().any(|issue| issue.category == "PLAN_032"));
+        assert!(issues.iter().any(|issue| issue.severity == Severity::Error));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.severity == Severity::Warning)
+        );
     }
 }
