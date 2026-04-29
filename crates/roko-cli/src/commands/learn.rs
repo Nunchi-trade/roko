@@ -128,7 +128,6 @@ pub(crate) async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i
     }
 
     if show_all {
-        print_learn_gate_thresholds(workdir);
         print_learn_knowledge(workdir).await;
     }
 
@@ -144,13 +143,12 @@ pub(crate) async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i
 
 pub(crate) fn print_learn_router(workdir: &std::path::Path) {
     let path = learn_router_path(workdir);
-    print_checked_path(&path);
     if !path.exists() {
         print_no_data(&path);
         return;
     }
     let Ok(content) = std::fs::read_to_string(&path) else {
-        println!("Cascade router: 0 entries at {}", path.display());
+        print_no_data(&path);
         return;
     };
     let snapshot = serde_json::from_str::<LearnCascadeRouterSnapshot>(&content).unwrap_or_default();
@@ -188,16 +186,12 @@ pub(crate) fn print_learn_router(workdir: &std::path::Path) {
             )
         });
 
-    if snapshot.total_observations == 0 {
-        println!("Cascade router: 0 entries at {}", path.display());
-    } else {
-        println!(
-            "Cascade router: {} observations, {} models at {}",
-            snapshot.total_observations,
-            snapshot.model_slugs.len(),
-            path.display()
-        );
-    }
+    println!(
+        "Cascade router: {} observations, {} models at {}",
+        snapshot.total_observations,
+        snapshot.model_slugs.len(),
+        path.display()
+    );
     println!("  Range: {}", format_range(first_seen, last_seen));
     println!("  Latest: {}", latest);
 }
@@ -205,7 +199,6 @@ pub(crate) fn print_learn_router(workdir: &std::path::Path) {
 pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
     // Prompt experiments
     let prompt_path = learn_root(workdir).join("experiments.json");
-    print_checked_path(&prompt_path);
     let prompt_store = ExperimentStore::load_or_new(&prompt_path);
     let running = prompt_store.running_count();
     let concluded = prompt_store.concluded_count();
@@ -214,15 +207,12 @@ pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
             "Prompt experiments: {} running, {} concluded",
             running, concluded
         );
-    } else if prompt_path.exists() {
-        println!("Prompt experiments: 0 entries at {}", prompt_path.display());
     } else {
         println!("Prompt experiments: none");
     }
 
     // Model experiments
     let model_path = learn_root(workdir).join("model-experiments.json");
-    print_checked_path(&model_path);
     let model_store = roko_learn::model_experiment::ModelExperimentStore::load_or_new(&model_path);
     let model_running = model_store.running_count();
     let model_concluded = model_store.concluded_experiments().len();
@@ -241,8 +231,6 @@ pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
                 exp.winner_id.as_deref().unwrap_or("-"),
             );
         }
-    } else if model_path.exists() {
-        println!("Model experiments: 0 entries at {}", model_path.display());
     } else {
         println!("Model experiments: none");
     }
@@ -251,14 +239,13 @@ pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
 #[allow(clippy::cast_precision_loss)]
 pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
     let path = learn_efficiency_path(workdir);
-    print_checked_path(&path);
     if !path.exists() {
         print_no_data(&path);
         return;
     }
 
     let Ok(text) = tokio::fs::read_to_string(&path).await else {
-        println!("Efficiency: 0 entries at {}", path.display());
+        print_no_data(&path);
         return;
     };
 
@@ -272,8 +259,7 @@ pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(event) =
-            serde_json::from_str::<roko_learn::efficiency::AgentEfficiencyEvent>(trimmed)
+        let Ok(event) = serde_json::from_str::<roko_learn::efficiency::AgentEfficiencyEvent>(trimmed)
         else {
             continue;
         };
@@ -304,36 +290,23 @@ pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
         ));
     }
 
-    if count == 0 {
-        println!("Efficiency: 0 entries at {}", path.display());
-    } else {
-        println!("Efficiency: {} events at {}", count, path.display());
-    }
+    println!("Efficiency: {} events at {}", count, path.display());
     println!("  Range: {}", format_range(first_seen, last_seen));
-    println!("  Latest: {}", latest.unwrap_or_else(|| "none".to_string()));
+    println!(
+        "  Latest: {}",
+        latest.unwrap_or_else(|| "none".to_string())
+    );
 }
 
 pub(crate) async fn print_learn_episodes(workdir: &std::path::Path) {
-    let exact_path = learn_episodes_path(workdir);
-    let legacy_path = learn_legacy_episodes_path(workdir);
-    print_checked_path(&exact_path);
-    if legacy_path != exact_path {
-        println!("  legacy path: {}", legacy_path.display());
-    }
-    let path = if exact_path.exists() {
-        exact_path
-    } else if legacy_path.exists() {
-        legacy_path
-    } else {
-        exact_path
-    };
+    let path = learn_episodes_path(workdir);
     if !path.exists() {
         print_no_data(&path);
         return;
     }
 
     let Ok(text) = tokio::fs::read_to_string(&path).await else {
-        println!("Episodes: 0 entries at {}", path.display());
+        print_no_data(&path);
         return;
     };
 
@@ -376,40 +349,22 @@ pub(crate) async fn print_learn_episodes(workdir: &std::path::Path) {
         ));
     }
 
-    if count == 0 {
-        println!("Episodes: 0 entries at {}", path.display());
-    } else {
-        println!("Episodes: {} entries at {}", count, path.display());
-    }
+    println!("Episodes: {} entries at {}", count, path.display());
     println!("  Range: {}", format_range(first_seen, last_seen));
-    println!("  Latest: {}", latest.unwrap_or_else(|| "none".to_string()));
-}
-
-pub(crate) fn print_learn_gate_thresholds(workdir: &std::path::Path) {
-    let path = learn_gate_thresholds_path(workdir);
-    print_checked_path(&path);
-    if !path.exists() {
-        eprintln!("Gate thresholds: No data at {}", path.display());
-        println!("Gate thresholds: 0 entries at {}", path.display());
-        return;
-    }
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        println!("Gate thresholds: 0 entries at {}", path.display());
-        return;
-    };
-    let count = count_gate_threshold_entries(&content);
-    println!("Gate thresholds: {} entries at {}", count, path.display());
+    println!(
+        "  Latest: {}",
+        latest.unwrap_or_else(|| "none".to_string())
+    );
 }
 
 pub(crate) async fn print_learn_knowledge(workdir: &std::path::Path) {
     let path = learn_knowledge_path(workdir);
-    print_checked_path(&path);
     if !path.exists() {
         print_no_data(&path);
         return;
     }
     let Ok(content) = tokio::fs::read_to_string(&path).await else {
-        println!("Knowledge: 0 entries at {}", path.display());
+        print_no_data(&path);
         return;
     };
     let count = content
@@ -417,11 +372,7 @@ pub(crate) async fn print_learn_knowledge(workdir: &std::path::Path) {
         .filter(|line| !line.trim().is_empty())
         .filter(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
         .count();
-    if count == 0 {
-        println!("Knowledge: 0 entries at {}", path.display());
-    } else {
-        println!("Knowledge: {} durable entries at {}", count, path.display());
-    }
+    println!("Knowledge: {} durable entries at {}", count, path.display());
 }
 
 fn learn_root(workdir: &std::path::Path) -> std::path::PathBuf {
@@ -441,31 +392,11 @@ fn learn_efficiency_path(workdir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn learn_episodes_path(workdir: &std::path::Path) -> std::path::PathBuf {
-    workdir.join(".roko").join("episodes.jsonl")
-}
-
-/// Legacy episode log path retained for older worktrees and fixtures.
-fn learn_legacy_episodes_path(workdir: &std::path::Path) -> std::path::PathBuf {
     learn_root(workdir).join("episodes.jsonl")
 }
 
 fn learn_knowledge_path(workdir: &std::path::Path) -> std::path::PathBuf {
     workdir.join(".roko").join("neuro").join("knowledge.jsonl")
-}
-
-fn count_gate_threshold_entries(content: &str) -> usize {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
-        return 0;
-    };
-
-    value
-        .get("rungs")
-        .and_then(serde_json::Value::as_object)
-        .map_or(0, |rungs| rungs.len())
-}
-
-fn print_checked_path(path: &std::path::Path) {
-    println!("  path: {}", path.display());
 }
 
 fn print_no_data(path: &std::path::Path) {
@@ -492,11 +423,7 @@ fn format_range(
 
 fn non_empty_or_unknown(value: &str) -> &str {
     let trimmed = value.trim();
-    if trimmed.is_empty() {
-        "unknown"
-    } else {
-        trimmed
-    }
+    if trimmed.is_empty() { "unknown" } else { trimmed }
 }
 
 fn efficiency_model_label(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> &str {
@@ -561,20 +488,5 @@ mod tests {
     #[test]
     fn display_cost_precise_shows_formatted_value() {
         assert_eq!(display_cost_precise(1.42, 7, 9), "$1.4200");
-    }
-
-    #[test]
-    fn learn_episodes_path_targets_root_log() {
-        let workdir = std::path::Path::new("/tmp/workdir");
-        assert_eq!(
-            learn_episodes_path(workdir),
-            workdir.join(".roko").join("episodes.jsonl")
-        );
-    }
-
-    #[test]
-    fn count_gate_threshold_entries_uses_rungs_map() {
-        let content = r#"{"rungs":{"1":{"ema_pass_rate":0.5},"2":{"ema_pass_rate":0.75}}}"#;
-        assert_eq!(count_gate_threshold_entries(content), 2);
     }
 }
