@@ -266,6 +266,7 @@ pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
     let mut first_seen: Option<chrono::DateTime<chrono::Utc>> = None;
     let mut last_seen: Option<chrono::DateTime<chrono::Utc>> = None;
     let mut latest: Option<String> = None;
+    let mut events = Vec::new();
 
     for line in text.lines() {
         let trimmed = line.trim();
@@ -302,6 +303,7 @@ pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
             "{timestamp} model={model} task={task_id} plan={plan_id} {status} cost={}",
             display_cost_precise(event.cost_usd, event.input_tokens, event.output_tokens)
         ));
+        events.push(event);
     }
 
     if count == 0 {
@@ -311,6 +313,9 @@ pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
     }
     println!("  Range: {}", format_range(first_seen, last_seen));
     println!("  Latest: {}", latest.unwrap_or_else(|| "none".to_string()));
+    if let Some(summary) = attempt_correlation_summary(&events) {
+        println!("{summary}");
+    }
 }
 
 pub(crate) async fn print_learn_episodes(workdir: &std::path::Path) {
@@ -508,6 +513,28 @@ fn efficiency_model_label(event: &roko_learn::efficiency::AgentEfficiencyEvent) 
     }
 }
 
+fn attempt_correlation_summary(
+    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
+) -> Option<String> {
+    let events_with_attempt_id = events
+        .iter()
+        .filter(|event| !event.attempt_id.is_empty())
+        .count();
+    if events_with_attempt_id == 0 {
+        return None;
+    }
+
+    let linked_gate_failures = events
+        .iter()
+        .filter(|event| !event.attempt_id.is_empty() && !event.gate_passed)
+        .count();
+
+    Some(format!(
+        "  Attempt correlation: {} events with attempt_id, {} gate failures linked",
+        events_with_attempt_id, linked_gate_failures
+    ))
+}
+
 fn cascade_stage_for_observations(observations: u64) -> &'static str {
     if observations >= 200 {
         "ucb"
@@ -561,6 +588,36 @@ mod tests {
     #[test]
     fn display_cost_precise_shows_formatted_value() {
         assert_eq!(display_cost_precise(1.42, 7, 9), "$1.4200");
+    }
+
+    #[test]
+    fn attempt_correlation_summary_counts_only_attempted_events() {
+        let mut success = roko_learn::efficiency::AgentEfficiencyEvent::default();
+        success.attempt_id = "attempt-1".into();
+        success.gate_passed = true;
+
+        let mut failure = roko_learn::efficiency::AgentEfficiencyEvent::default();
+        failure.attempt_id = "attempt-2".into();
+        failure.gate_passed = false;
+
+        let mut unlabeled = roko_learn::efficiency::AgentEfficiencyEvent::default();
+        unlabeled.gate_passed = false;
+
+        let events = vec![success, failure, unlabeled];
+        let summary = attempt_correlation_summary(&events);
+
+        assert_eq!(
+            summary.as_deref(),
+            Some("  Attempt correlation: 2 events with attempt_id, 1 gate failures linked")
+        );
+    }
+
+    #[test]
+    fn attempt_correlation_summary_skips_empty_attempt_ids() {
+        let mut unlabeled = roko_learn::efficiency::AgentEfficiencyEvent::default();
+        unlabeled.gate_passed = false;
+
+        assert!(attempt_correlation_summary(&[unlabeled]).is_none());
     }
 
     #[test]

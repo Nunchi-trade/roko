@@ -3195,6 +3195,17 @@ fn artifact_validation_allows_reward(
         .unwrap_or(true)
 }
 
+fn gate_failure_errors(tracker: Option<&TaskTracker>) -> Vec<String> {
+    let mut gate_errors = tracker
+        .and_then(|t| t.last_gate_failure.clone())
+        .map(|msg| vec![msg])
+        .unwrap_or_default();
+    if let Some(rung) = tracker.and_then(|t| t.last_gate_failure_rung) {
+        gate_errors.insert(0, format!("gate_rung={rung}"));
+    }
+    gate_errors
+}
+
 impl TaskTracker {
     fn new(tasks_file: TasksFile, plan_dir: PathBuf) -> Self {
         let skipped = tasks_file
@@ -13037,6 +13048,7 @@ impl PlanRunner {
             1,
         );
         self.record_and_check_learning(input, plan_id).await;
+        let gate_errors = gate_failure_errors(self.task_trackers.get(plan_id));
         self.emit_failure_efficiency_event(
             plan_id,
             task_id,
@@ -13044,7 +13056,7 @@ impl PlanRunner {
             &model,
             frequency,
             wall_ms,
-            Vec::new(),
+            gate_errors,
             "retry_same",
             1,
         )
@@ -21233,6 +21245,38 @@ acceptance = []
         };
 
         assert!(gate_result_matches_requirement(&result, &requirement));
+    }
+
+    #[test]
+    fn gate_failure_errors_include_rung_and_context() {
+        let tf: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "first"
+depends_on = []
+"#,
+        )
+        .unwrap();
+        let mut tracker = TaskTracker::new(tf, PathBuf::from("/tmp"));
+        tracker.last_gate_failure = Some("compile failed".into());
+        tracker.last_gate_failure_rung = Some(2);
+
+        let gate_errors = gate_failure_errors(Some(&tracker));
+
+        assert_eq!(
+            gate_errors,
+            vec!["gate_rung=2".to_string(), "compile failed".to_string()]
+        );
+    }
+
+    #[test]
+    fn gate_failure_errors_are_empty_without_tracker_state() {
+        assert!(gate_failure_errors(None).is_empty());
     }
 
     #[test]
