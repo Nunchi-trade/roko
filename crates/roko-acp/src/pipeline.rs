@@ -300,15 +300,14 @@ impl PipelineState {
             (PipelinePhase::Gating, PipelineEvent::GateFailed { output, .. }) => {
                 self.last_gate_failure = Some(output.clone());
                 if self.iteration < self.max_iterations {
-                    // Try autofix first.
+                    self.iteration += 1;
                     self.phase = PipelinePhase::AutoFixing;
                     PipelineAction::SpawnAutoFixer {
                         error_output: output,
                     }
                 } else {
-                    // No iterations left — halt.
                     self.phase = PipelinePhase::Halted {
-                        reason: "Gate failed, no iterations remaining".into(),
+                        reason: format!("Gate failed after {} attempt(s)", self.iteration),
                     };
                     PipelineAction::Halt {
                         reason: format!("Gate failed:\n{output}"),
@@ -460,6 +459,7 @@ mod tests {
         });
         assert!(matches!(action, PipelineAction::SpawnAutoFixer { .. }));
         assert_eq!(state.phase, PipelinePhase::AutoFixing);
+        assert_eq!(state.iteration, 2);
     }
 
     #[test]
@@ -500,6 +500,12 @@ mod tests {
             output: "error".into(),
         });
         assert!(matches!(action, PipelineAction::Halt { .. }));
+        assert_eq!(
+            state.phase,
+            PipelinePhase::Halted {
+                reason: "Gate failed after 1 attempt(s)".into()
+            }
+        );
     }
 
     #[test]
