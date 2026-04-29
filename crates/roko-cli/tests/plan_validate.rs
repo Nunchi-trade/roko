@@ -134,17 +134,17 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
         stdout.contains("3 diagnostics in 1 plan"),
         "unexpected stdout: {stdout}"
     );
-    assert!(stdout.contains("PLAN_009"), "missing PLAN_009: {stdout}");
+    assert!(stdout.contains("PLAN_012"), "missing PLAN_012: {stdout}");
     assert!(
-        stdout.contains("uses model alias 'haiku'; use full name 'claude-haiku-4-5' instead"),
+        stdout.contains("uses model alias 'haiku'; prefer the full name 'claude-haiku-4-5'"),
         "missing haiku alias warning: {stdout}"
     );
     assert!(
-        stdout.contains("uses model alias 'sonnet'; use full name 'claude-sonnet-4-6' instead"),
+        stdout.contains("uses model alias 'sonnet'; prefer the full name 'claude-sonnet-4-6'"),
         "missing sonnet alias warning: {stdout}"
     );
     assert!(
-        stdout.contains("uses model alias 'opus'; use full name 'claude-opus-4-6' instead"),
+        stdout.contains("uses model alias 'opus'; prefer the full name 'claude-opus-4-6'"),
         "missing opus alias warning: {stdout}"
     );
 }

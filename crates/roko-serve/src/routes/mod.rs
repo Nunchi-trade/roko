@@ -114,6 +114,7 @@ pub fn build_router(
         .merge(swe_bench::routes())
         .merge(workflows::routes())
         .merge(workspaces::routes())
+        .merge(shared_runs::auth_routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())
@@ -164,8 +165,9 @@ pub fn build_router(
         // Top-level liveness probe — no auth, no /api prefix.
         .route("/health", get(top_level_health))
         .merge(webhooks::routes())
-        // Shareable run pages — no auth, serves HTML at /runs/{id}
-        .merge(shared_runs::routes())
+        // Public share-receipt reader: no auth required so recipients can
+        // open share links without a roko API key.
+        .merge(shared_runs::public_routes())
         // PTY terminal sessions for web UI — gated by config and bind policy.
         .merge(terminal)
         .nest("/api", api)

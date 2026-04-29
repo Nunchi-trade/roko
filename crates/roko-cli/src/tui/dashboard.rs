@@ -5237,6 +5237,7 @@ mod tests {
             model: model.to_string(),
             plan_id: String::from("plan-a"),
             task_id: task.to_string(),
+            attempt_id: String::new(),
             input_tokens,
             output_tokens,
             cache_read_tokens: 0,

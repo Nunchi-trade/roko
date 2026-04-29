@@ -10,6 +10,8 @@ use roko_orchestrator::detect_cycle_nodes;
 use serde::Serialize;
 use toml::Value;
 
+use roko_cli::task_parser::normalize_model_alias;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -537,49 +539,36 @@ fn validate_tasks_file(
             }
         }
 
-        if let (Some(model), Some(known_models)) = (normalized_field(task.model.as_deref()), models)
-        {
-            if let Some(canonical) = normalize_model_alias(model) {
-                // Known alias: warn and point at the canonical identifier.
-                if !model_is_known(canonical, known_models) {
-                    diagnostics.push(Diagnostic {
-                        severity: Severity::Warning,
-                        rule_id: "PLAN_009".to_string(),
-                        plan_id: Some(plan_id.clone()),
-                        task_id: task.task_id.clone(),
-                        message: format!(
-                            "task '{}' uses model alias '{}' (canonical: '{}'), which is not configured in roko.toml",
-                            task.label(),
-                            model,
-                            canonical
-                        ),
-                    });
-                } else {
-                    diagnostics.push(Diagnostic {
-                        severity: Severity::Warning,
-                        rule_id: "PLAN_009".to_string(),
-                        plan_id: Some(plan_id.clone()),
-                        task_id: task.task_id.clone(),
-                        message: format!(
-                            "task '{}' uses model alias '{}'; use full name '{}' instead",
-                            task.label(),
-                            model,
-                            canonical
-                        ),
-                    });
-                }
-            } else if !model_is_known(model, known_models) {
+        if let Some(model) = normalized_field(task.model.as_deref()) {
+            let normalized = normalize_model_alias(model);
+            if normalized != model {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Warning,
-                    rule_id: "PLAN_009".to_string(),
+                    rule_id: "PLAN_012".to_string(),
                     plan_id: Some(plan_id.clone()),
                     task_id: task.task_id.clone(),
                     message: format!(
-                        "task '{}' uses model '{}' which is not configured in roko.toml",
+                        "task '{}' uses model alias '{}'; prefer the full name '{}'",
                         task.label(),
-                        model
+                        model,
+                        normalized
                     ),
                 });
+            }
+            if let Some(known_models) = models {
+                if !model_is_known(normalized, known_models) {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Warning,
+                        rule_id: "PLAN_009".to_string(),
+                        plan_id: Some(plan_id.clone()),
+                        task_id: task.task_id.clone(),
+                        message: format!(
+                            "task '{}' uses model '{}' which is not configured in roko.toml",
+                            task.label(),
+                            model
+                        ),
+                    });
+                }
             }
         }
     }
@@ -1100,20 +1089,6 @@ pub fn validate_file_references(tasks_path: &Path, workdir: &Path) -> Result<Vec
     }
 
     Ok(diagnostics)
-}
-
-/// Map a known model alias to its canonical name.
-///
-/// Returns `Some(canonical)` if the alias is known, `None` if already
-/// canonical or unknown.
-fn normalize_model_alias(alias: &str) -> Option<&'static str> {
-    let lower = alias.trim().to_ascii_lowercase();
-    match lower.as_str() {
-        "haiku" | "claude-haiku" => Some("claude-haiku-4-5"),
-        "sonnet" | "claude-sonnet" => Some("claude-sonnet-4-6"),
-        "opus" | "claude-opus" => Some("claude-opus-4-6"),
-        _ => None,
-    }
 }
 
 /// Phrases that indicate ungrounded generation in an existing workspace.

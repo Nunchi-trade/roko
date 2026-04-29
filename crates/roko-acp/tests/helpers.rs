@@ -1,13 +1,12 @@
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use roko_acp::{
     bridge_events::handle_session_prompt,
-    session::{AcpSession, SessionNewParams},
+    session::AcpSession,
     transport::StdioTransport,
-    types::{ContentBlock, JsonRpcNotification, SessionPromptParams},
+    types::{ContentBlock, JsonRpcNotification, SessionNewParams, SessionPromptParams},
 };
 use roko_core::{ContentHash, ProviderKind};
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
@@ -173,7 +172,7 @@ impl TestSession {
             .model_index_for_slug(&self.model)
             .context("mock pipeline model missing from cascade router")?;
         let context = RoutingContext::default().to_features();
-        let cost_table = CostTable::with_defaults();
+        let cost_table = CostTable::from_config(&std::collections::HashMap::new()).with_defaults();
 
         let mut assistant_text = String::new();
         let mut total_input_tokens = 0u64;
@@ -207,8 +206,8 @@ impl TestSession {
         }
 
         let agent_usage = AgentUsage {
-            input_tokens: total_input_tokens,
-            output_tokens: total_output_tokens,
+            input_tokens: total_input_tokens as u32,
+            output_tokens: total_output_tokens as u32,
             cache_read_tokens: 0,
             cache_create_tokens: 0,
             ..AgentUsage::default()

@@ -272,8 +272,8 @@ async fn append_acp_episode(
     stream_result: Option<&StreamResult>,
     task_error: Option<&str>,
     stream_error: Option<&str>,
-    /// When provided, overrides the pricing-table cost calculation with the
-    /// actual cost reported by the provider (e.g. from `WorkflowRunReport.cost`).
+    // When provided, overrides the pricing-table cost calculation with the
+    // actual cost reported by the provider (e.g. from `WorkflowRunReport.cost`).
     cost_override: Option<f64>,
 ) {
     let resolved = resolve_model(roko_config, model_key);
@@ -416,24 +416,24 @@ fn acp_routing_context(mode: &str, prompt: &str) -> RoutingContext {
         _ => AgentRole::Implementer,
     };
 
-    let mut context = RoutingContext::default();
-    context.task_category = task_category;
-    context.complexity = TaskComplexityBand::Standard;
-    context.iteration = 0;
-    context.role = role;
-    context.crate_familiarity = 0.5;
-    context.has_prior_failure = false;
-    context.conductor_load = 0.0;
-    context.active_agents = 0;
-    context.ready_queue_depth = 0;
-    context.max_queue_wait_hours = 0.0;
-    context.daimon_policy = DaimonPolicy::default();
-    context.thinking_level = None;
-    context.temperament = None;
-    context.previous_model = None;
-    context.plan_context_tokens = None;
-    context.tier_thresholds = None;
-    context
+    RoutingContext {
+        task_category,
+        complexity: TaskComplexityBand::Standard,
+        iteration: 0,
+        role,
+        crate_familiarity: 0.5,
+        has_prior_failure: false,
+        conductor_load: 0.0,
+        active_agents: 0,
+        ready_queue_depth: 0,
+        max_queue_wait_hours: 0.0,
+        daimon_policy: DaimonPolicy::default(),
+        thinking_level: None,
+        temperament: None,
+        previous_model: None,
+        plan_context_tokens: None,
+        tier_thresholds: None,
+    }
 }
 
 fn acp_dispatch_succeeded(
@@ -474,7 +474,8 @@ fn compute_acp_reward(success: bool, wall_ms: u64, output_tokens: Option<u64>) -
         _ => 0.0,
     };
 
-    (0.8 + latency_bonus + token_bonus).min(1.0)
+    let score: f64 = 0.8 + latency_bonus + token_bonus;
+    score.min(1.0)
 }
 
 fn record_cascade_observation(
@@ -486,7 +487,7 @@ fn record_cascade_observation(
     output_tokens: Option<u64>,
     model_slugs: Vec<String>,
 ) {
-    let _ = task::spawn_blocking(move || {
+    drop(task::spawn_blocking(move || {
         let _guard = CASCADE_ROUTER_IO_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -513,7 +514,7 @@ fn record_cascade_observation(
                 "failed to persist cascade router after ACP observation"
             );
         }
-    });
+    }));
 }
 
 fn truncate_assistant_history(text: &str) -> String {
@@ -899,10 +900,10 @@ where
 
             // Thread the actual cost from the report back to the main task so
             // append_acp_episode can record it instead of using the pricing-table estimate.
-            if let Some(cost) = report.cost {
-                if let Ok(mut sink) = workflow_cost_sink_task.lock() {
-                    *sink = Some(cost);
-                }
+            if let Some(cost) = report.cost
+                && let Ok(mut sink) = workflow_cost_sink_task.lock()
+            {
+                *sink = Some(cost);
             }
 
             if !report.success {
@@ -989,32 +990,31 @@ where
     )
     .await;
 
-    if !is_slash_command {
-        if let Ok(ref sr) = stream_result {
-            if let Some(usage) = sr.usage.as_ref() {
-                let resolved = resolve_model(&roko_config_for_logging, &model_key_for_logging);
-                let size = resolved
-                    .profile
-                    .as_ref()
-                    .map(|profile| profile.context_window)
-                    .unwrap_or_else(|| ModelProfile::default().context_window);
-                let update = SessionUpdate::UsageUpdate {
-                    used: usage.total_tokens,
-                    size,
-                    cost: calculate_cost_for_model_slug(
-                        &resolved.slug,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.cached_read_tokens.unwrap_or(0),
-                    )
-                    .map(|amount| CostInfo {
-                        amount,
-                        currency: "USD".to_string(),
-                    }),
-                };
-                let _ = send_session_update(transport, &session.session_id, update).await;
-            }
-        }
+    if !is_slash_command
+        && let Ok(ref sr) = stream_result
+        && let Some(usage) = sr.usage.as_ref()
+    {
+        let resolved = resolve_model(&roko_config_for_logging, &model_key_for_logging);
+        let size = resolved
+            .profile
+            .as_ref()
+            .map(|profile| profile.context_window)
+            .unwrap_or_else(|| ModelProfile::default().context_window);
+        let update = SessionUpdate::UsageUpdate {
+            used: usage.total_tokens,
+            size,
+            cost: calculate_cost_for_model_slug(
+                &resolved.slug,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cached_read_tokens.unwrap_or(0),
+            )
+            .map(|amount| CostInfo {
+                amount,
+                currency: "USD".to_string(),
+            }),
+        };
+        let _ = send_session_update(transport, &session.session_id, update).await;
     }
 
     let task_result = cognitive_task.await;

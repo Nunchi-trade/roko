@@ -372,6 +372,10 @@ fn required_scope_for(method: &Method, path: &str) -> &'static str {
     if path.starts_with("/api/plans") || path.starts_with("/api/prd") {
         return "plan:write";
     }
+    // Workspace write routes.
+    if path.starts_with("/api/workspaces") {
+        return "write";
+    }
     "read"
 }
 
@@ -1089,10 +1093,27 @@ mod tests {
     }
 
     #[test]
+    fn required_scope_for_post_workspaces_is_write() {
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/workspaces"),
+            "write"
+        );
+    }
+
+    #[test]
+    fn required_scope_for_delete_workspaces_is_write() {
+        assert_eq!(
+            required_scope_for(&Method::DELETE, "/api/workspaces/abc123"),
+            "write"
+        );
+    }
+
+    #[test]
     fn admin_scope_is_sufficient_for_everything() {
         assert!(is_scope_sufficient("admin", "admin"));
         assert!(is_scope_sufficient("admin", "agent:write"));
         assert!(is_scope_sufficient("admin", "plan:write"));
+        assert!(is_scope_sufficient("admin", "write"));
         assert!(is_scope_sufficient("admin", "read"));
     }
 

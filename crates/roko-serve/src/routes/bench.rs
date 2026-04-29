@@ -176,8 +176,8 @@ async fn execute_bench_run(
 ) {
     let total_tasks = suite.tasks.len();
     let mut results = Vec::new();
-    let mut passed_count = 0usize;
-    let mut failed_count = 0usize;
+    let mut _passed_count = 0usize;
+    let mut _failed_count = 0usize;
 
     let bench_workdir = match scaffold_bench_workdir(&suite.id, &run_id).await {
         Ok(path) => path,
@@ -312,9 +312,9 @@ async fn execute_bench_run(
         };
 
         if task_result.passed() {
-            passed_count += 1;
+            _passed_count += 1;
         } else {
-            failed_count += 1;
+            _failed_count += 1;
         }
 
         // Publish task completion.

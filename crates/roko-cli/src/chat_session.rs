@@ -485,6 +485,7 @@ impl ChatAgentSession {
     /// The actual HTTP dispatch (`POST` call + response parsing) is marked
     /// with `todo!()` so the types flow correctly through the whole path and
     /// a future implementer only needs to fill in the network call.
+    #[allow(unreachable_code)]
     pub async fn send_turn_api(
         &mut self,
         prompt: &str,
@@ -535,7 +536,7 @@ impl ChatAgentSession {
         //
         // The provider-specific request body and endpoint differ between
         // Anthropic's Messages API and OpenAI-compatible providers.
-        let (response_text, input_tokens, output_tokens) = if provider_kind
+        let (response_text, input_tokens, output_tokens): (String, u64, u64) = if provider_kind
             == ProviderKind::AnthropicApi.label()
         {
             // ── Anthropic Messages API ──────────────────────────────────────

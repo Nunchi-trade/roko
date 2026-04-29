@@ -612,6 +612,10 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 "plan regenerate",
             )?;
 
+            // Collect pre-existing validation diagnostics so the agent knows what was wrong.
+            let pre_validation_context =
+                format_pre_validation_context(&tasks_path, &plan_validate::validate_plans_dir);
+
             if dry_run {
                 let system = roko_cli::plan_generate::build_generation_prompt(
                     &workdir,
@@ -624,7 +628,8 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                      max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
                      [task.context], and [[task.verify]]. Preserve the status of any task that \
                      is already marked done in the existing file. Do not create new plan \
-                     directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
+                     directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```\
+                     {pre_validation_context}",
                     tasks_path.display(),
                     existing = existing,
                 );
@@ -647,7 +652,8 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                  max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
                  [task.context], and [[task.verify]]. Preserve the status of any task that \
                  is already marked done in the existing file. Do not create new plan \
-                 directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
+                 directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```\
+                 {pre_validation_context}",
                 tasks_path.display(),
                 existing = existing,
             );
@@ -710,15 +716,23 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             match roko_cli::task_parser::TasksFile::validate_modern_fields(&tasks_path) {
                 Ok(issues) if !issues.is_empty() => {
+                    // Collect post-regeneration diagnostics for richer error output.
+                    let post_context =
+                        format_pre_validation_context(&tasks_path, &plan_validate::validate_plans_dir);
                     std::fs::write(&tasks_path, &existing)
                         .with_context(|| format!("restore {}", tasks_path.display()))?;
                     anyhow::bail!(
-                        "regenerated tasks.toml is missing modern fields: {}",
-                        issues
+                        "regenerated tasks.toml is still missing modern fields after regeneration.\n\
+                         Missing fields: {missing}\n\
+                         Pre-regeneration issues:{pre}\n\
+                         Post-regeneration issues:{post}",
+                        missing = issues
                             .into_iter()
                             .map(|issue| format!("{}: {:?}", issue.task_id, issue.missing_fields))
                             .collect::<Vec<_>>()
-                            .join("; ")
+                            .join("; "),
+                        pre = pre_validation_context,
+                        post = post_context,
                     );
                 }
                 Ok(_) => {}
@@ -734,24 +748,74 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     }
 }
 
-fn resolve_effective_model_key(
-    workdir: &Path,
-    cli_model: Option<String>,
-    role: Option<&str>,
-    context: &str,
-) -> Result<String> {
-    let config = crate::load_roko_config(workdir)?;
-    let selection =
-        roko_cli::model_selection::resolve_effective_model(
-            cli_model,
-            None,
-            role.map(str::to_string),
-            None,
-            &config,
-        )
-            .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
-    selection.print_stderr();
-    Ok(selection.effective_model_key)
+/// Format pre-existing validation issues as a prompt context block.
+///
+/// Called before plan regeneration so the agent knows exactly what was broken
+/// in the existing tasks.toml and can fix those issues in the new version.
+/// Returns an empty string when there are no issues.
+fn format_pre_validation_context(
+    tasks_path: &Path,
+    validate_fn: &dyn Fn(
+        &Path,
+        Option<&std::collections::HashMap<String, roko_core::config::schema::ModelProfile>>,
+    ) -> anyhow::Result<plan_validate::ValidationReport>,
+) -> String {
+    let Some(plan_dir) = tasks_path.parent() else {
+        return String::new();
+    };
+    let report = match validate_fn(plan_dir, None) {
+        Ok(report) => report,
+        Err(_) => return String::new(),
+    };
+
+    if report.plans.is_empty() && report.totals.errors == 0 && report.totals.warnings == 0 {
+        return String::new();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(String::new());
+    lines.push(
+        "## Previous validation issues — fix ALL of these in the regenerated plan".to_string(),
+    );
+    lines.push(String::new());
+    lines.push(format!(
+        "Found {} error(s) and {} warning(s) across {} plan(s).",
+        report.totals.errors, report.totals.warnings, report.totals.plans_checked
+    ));
+
+    for plan in &report.plans {
+        if plan.diagnostics.is_empty() {
+            continue;
+        }
+        lines.push(String::new());
+        lines.push(format!("Plan: {}", plan.plan_id));
+        for diag in &plan.diagnostics {
+            let task_label = diag
+                .task_id
+                .as_deref()
+                .map(|id| format!(" (task {id})"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  [{sev}] {rule}{task}: {msg}",
+                sev = match diag.severity {
+                    plan_validate::Severity::Error => "error",
+                    plan_validate::Severity::Warning => "warn",
+                },
+                rule = diag.rule_id,
+                task = task_label,
+                msg = diag.message,
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(
+        "Address every listed issue in the regenerated tasks.toml. \
+         Do not reproduce these diagnostics in the output."
+            .to_string(),
+    );
+
+    format!("\n\n{}", lines.join("\n"))
 }
 
 /// Parse and display a plan directory without executing anything.

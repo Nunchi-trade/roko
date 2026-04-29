@@ -121,14 +121,41 @@ Every PRD MUST have these sections:
 
 ### 7. Repository Grounding (REQUIRED)
 
-Every PRD MUST include a `## Repository Grounding` section with these four subsections:
+Every PRD MUST include a `## Repository Grounding` section. This section is validated
+post-generation; a PRD missing it will be **rejected** (artifact_valid = false).
 
-- **Existing crates**: Which workspace crates this feature touches. Use exact crate names from the repository, such as `roko-core`, `roko-agent`, or `roko-compose`. If no existing crates are relevant, state "None — this is a new subsystem."
-- **Source files**: Key source files that will be modified or read. Use relative paths, such as `crates/roko-cli/src/prd.rs`. If no existing files are modified, state "None — all files are new."
-- **New crates**: Any new crates to create. For each, justify why existing crates are insufficient. If no new crates are needed, state "None."
-- **Non-goals**: What this PRD explicitly does NOT change. Be specific, such as "Does not modify the gate pipeline" or "Does not change the TOML schema."
+The section must contain these four subsections:
 
-If Repository Context is provided in the prompt below, use it. If not available, state "No repository context available." and use your knowledge of the workspace.
+- **Existing crates**: Which workspace crates this feature touches. Use exact crate names
+  from the repository (e.g., `roko-core`, `roko-agent`, `roko-compose`). If no existing
+  crates are relevant, state "None — this is a new subsystem."
+- **Source files**: Key source files that will be modified or read. Use relative paths
+  (e.g., `crates/roko-cli/src/prd.rs`). Each path listed must actually exist in the
+  repository.
+- **New crates**: Any new crates to create. For each, justify why existing crates are
+  insufficient. If no new crates are needed, state "None."
+- **Non-goals**: What this PRD explicitly does NOT change. Be specific (e.g., "Does not
+  modify the gate pipeline", "Does not change the TOML schema").
+
+If Repository Context is provided in the prompt below, use it. If not available, state
+"No repository context available." and use your knowledge of the workspace.
+
+Example:
+
+```markdown
+## Repository Grounding
+
+**Existing crates**: `roko-cli`, `roko-core`, `roko-agent`
+
+**Source files**:
+- `crates/roko-cli/src/prd.rs` — PRD lifecycle management, adding validation
+- `crates/roko-cli/src/prd_prompt.rs` — PRD system prompt, adding grounding section
+
+**New crates**: None.
+
+**Non-goals**: Does not modify the gate pipeline, does not change roko.toml schema,
+does not affect plan generation logic.
+```
 
 ### 5. Writing style
 

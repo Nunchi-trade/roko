@@ -4,7 +4,8 @@
 use crate::*;
 use roko_core::config::schema::RokoConfig;
 
-pub(crate) fn cmd_explain(topic: &str, depth: u8) {
+/// Returns `true` on success, `false` when the topic is not recognised.
+pub(crate) fn cmd_explain(topic: &str, depth: u8) -> bool {
     use roko_cli::explain;
     let depth = depth.clamp(1, 3);
     if topic == "topics" || topic == "list" {
@@ -13,14 +14,18 @@ pub(crate) fn cmd_explain(topic: &str, depth: u8) {
             let entry = explain::find_topic(name).unwrap();
             println!("  {:<12} {}", name, entry.title);
         }
-        return;
+        return true;
     }
     match explain::find_topic(topic) {
-        Some(entry) => print!("{}", explain::render_topic(entry, depth)),
+        Some(entry) => {
+            print!("{}", explain::render_topic(entry, depth));
+            true
+        }
         None => {
             eprintln!("unknown topic: {topic}");
             eprintln!("available topics: {}", explain::topic_names().join(", "));
             eprintln!("run `roko explain topics` to see all topics with descriptions");
+            false
         }
     }
 }
@@ -266,9 +271,9 @@ pub(crate) async fn cmd_run(
     let external_hub: Option<&roko_cli::state_hub::StateHub> = None;
 
     if engine == crate::EngineVariant::V2 {
-        // Read the workflow template from roko.toml [pipeline].default_template,
-        // falling back to "standard" when not configured.
-        let template = config.pipeline.default_template.as_str();
+        // TODO(R2_G01): Read workflow template from roko.toml once a [pipeline]
+        // config section is added to the Config struct. For now, fall back to "standard".
+        let template = "standard";
 
         // Build enabled gates list and typed shell commands from declared gate configs.
         let enabled_gates = roko_cli::run::workflow_enabled_gate_names(&config.gates);

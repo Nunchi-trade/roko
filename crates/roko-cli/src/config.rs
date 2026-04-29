@@ -1233,7 +1233,6 @@ impl ConfigLayer {
                 ServeConfig {
                     port: s.port,
                     share_ttl_days: s.share_ttl_days.unwrap_or(defaults.share_ttl_days),
-                    acknowledge_public_risk: defaults.acknowledge_public_risk,
                     terminal_enabled: match s.terminal_enabled {
                         Some(terminal_enabled) => terminal_enabled,
                         None => defaults.terminal_enabled,
@@ -3874,6 +3873,25 @@ program = "echo"
         assert!(rendered.contains("max_tools = 32"));
         assert!(rendered.contains("[prd]"));
         assert!(rendered.contains("auto_plan = false"));
+        // [gates] section must be present so `roko plan run` (RokoConfig) can read it.
+        assert!(
+            rendered.contains("[gates]"),
+            "init template must include [gates] section for RokoConfig"
+        );
+        assert!(rendered.contains("clippy_enabled = true"));
+        assert!(rendered.contains("skip_tests = false"));
+        assert!(rendered.contains("max_iterations = 3"));
+    }
+
+    #[test]
+    fn default_toml_template_is_parseable_by_roko_config() {
+        use roko_core::config::schema::RokoConfig;
+        let rendered = Config::default_toml_template(false).unwrap();
+        let cfg = RokoConfig::from_toml(&rendered)
+            .expect("init template must be parseable by RokoConfig");
+        assert!(cfg.gates.clippy_enabled, "clippy_enabled should default true");
+        assert!(!cfg.gates.skip_tests, "skip_tests should default false");
+        assert_eq!(cfg.gates.max_iterations, 3);
     }
 
     #[test]

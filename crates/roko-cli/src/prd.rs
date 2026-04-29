@@ -859,6 +859,45 @@ async fn generate_plan_from_prd_with_outcome(
         );
         let plans_root = workspace_plans_dir(workdir_ref);
         let tasks_before = dry_run_fs::snapshot_tasks_files(&plans_root);
+
+        // Build repo context to ground the planning agent in actual repository
+        // structure. Keywords come from the PRD slug and title.
+        let prd_title = prd_meta.title.as_str();
+        let mut prd_feature_keywords: Vec<String> = slug
+            .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+            .chain(prd_title.split(|c: char| c == '-' || c == '_' || c.is_whitespace()))
+            .filter(|w| w.len() >= 3)
+            .map(|w| w.to_lowercase())
+            .collect();
+        prd_feature_keywords.sort_unstable();
+        prd_feature_keywords.dedup();
+        prd_feature_keywords.truncate(10);
+        let prd_keyword_refs: Vec<&str> = prd_feature_keywords.iter().map(String::as_str).collect();
+        let repo_context_section: Option<String> =
+            match crate::repo_context::build_repo_context(workdir_ref, &prd_keyword_refs).await {
+                Ok(repo_context) => {
+                    if !repo_context.context_root_verified {
+                        eprintln!(
+                            "warning: repository context not verified for keywords {:?}; \
+                             generated plan may reference nonexistent code.",
+                            prd_feature_keywords
+                        );
+                    }
+                    Some(repo_context.to_prompt_section())
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: repository context unavailable for keywords {:?}: {err}",
+                        prd_feature_keywords
+                    );
+                    None
+                }
+            };
+        let prd_context_suffix = repo_context_section
+            .as_deref()
+            .map(|ctx| format!("\n\n---\n\n{ctx}"))
+            .unwrap_or_default();
+
         let task_prompt = format!(
             "Read the PRD at {path} and generate implementation plan directories \
              under .roko/plans/. Each REQ-XXX requirement becomes one or more tasks. \
@@ -867,10 +906,11 @@ async fn generate_plan_from_prd_with_outcome(
              Create plan.md and tasks.toml files directly, including per-task mcp_servers \
              when a task needs a specific MCP server.\n\n\
              {template_guidance}\n\
-             PRD content:\n{content}",
+             PRD content:\n{content}{prd_context_suffix}",
             path = prd_path.display(),
             template_guidance = template_guidance,
             content = content,
+            prd_context_suffix = prd_context_suffix,
         );
 
         let task_id = format!("prd:plan:{slug}");
@@ -1222,6 +1262,287 @@ fn prd_workdir(prd_path: &Path) -> Result<PathBuf> {
         })
 }
 
+// ─── PRD artifact validation ───────────────────────────────────────
+
+/// Severity of a PRD validation issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrdValidationSeverity {
+    /// Blocking: `artifact_valid` is set to `false`.
+    Error,
+    /// Non-blocking: printed as a warning, does not affect `artifact_valid`.
+    Warning,
+}
+
+/// A single validation issue found in a generated PRD.
+#[derive(Debug, Clone)]
+pub struct PrdValidationIssue {
+    pub severity: PrdValidationSeverity,
+    pub category: &'static str,
+    pub message: String,
+}
+
+/// Outcome of post-generation PRD artifact validation.
+///
+/// `artifact_valid = false` means the PRD should not be accepted as a
+/// successful generation outcome — learning gates should withhold rewards.
+#[derive(Debug, Clone)]
+pub struct PrdArtifactReport {
+    /// Slug of the PRD being validated.
+    pub slug: String,
+    /// Whether the underlying agent process succeeded (exit 0).
+    pub process_success: bool,
+    /// Whether the artifact itself passes all blocking checks.
+    ///
+    /// Set to `false` when any [`PrdValidationSeverity::Error`] issue is found.
+    pub artifact_valid: bool,
+    /// All issues found during validation (errors + warnings).
+    pub issues: Vec<PrdValidationIssue>,
+}
+
+impl PrdArtifactReport {
+    fn new(slug: &str, process_success: bool) -> Self {
+        Self {
+            slug: slug.to_string(),
+            process_success,
+            artifact_valid: true,
+            issues: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, issue: PrdValidationIssue) {
+        if issue.severity == PrdValidationSeverity::Error {
+            self.artifact_valid = false;
+        }
+        self.issues.push(issue);
+    }
+
+    /// Print all issues to stderr and a summary to stdout.
+    pub fn print_summary(&self) {
+        for issue in &self.issues {
+            let label = match issue.severity {
+                PrdValidationSeverity::Error => "ERROR",
+                PrdValidationSeverity::Warning => "WARNING",
+            };
+            eprintln!("[{}] {}: {}", label, issue.category, issue.message);
+        }
+        let errors = self
+            .issues
+            .iter()
+            .filter(|i| i.severity == PrdValidationSeverity::Error)
+            .count();
+        let warnings = self
+            .issues
+            .iter()
+            .filter(|i| i.severity == PrdValidationSeverity::Warning)
+            .count();
+        if self.artifact_valid {
+            println!("PRD artifact validation: PASSED ({warnings} warnings)");
+        } else {
+            println!(
+                "PRD artifact validation: FAILED ({errors} errors, {warnings} warnings)"
+            );
+        }
+    }
+}
+
+/// Extract a `## <heading>` markdown section body (case-insensitive).
+///
+/// Returns the lines between the matched heading and the next `##`-level
+/// heading, joined as a single string. Returns `None` when the heading is
+/// not found or the matched section is empty.
+fn extract_prd_section(content: &str, heading: &str) -> Option<String> {
+    let heading_lower = heading.to_lowercase();
+    let mut in_section = false;
+    let mut lines: Vec<&str> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let trimmed_lower = trimmed.to_lowercase();
+        if trimmed_lower.starts_with("## ") {
+            if in_section {
+                // Reached the next ## heading — stop collecting.
+                break;
+            }
+            let heading_text = trimmed_lower.trim_start_matches("## ").trim();
+            if heading_text.starts_with(heading_lower.as_str()) {
+                in_section = true;
+                continue;
+            }
+        } else if in_section {
+            lines.push(line);
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+/// Extract all relative file paths referenced in the grounding section text.
+///
+/// A path is recognised when it starts with `crates/`, `src/`, `tests/`,
+/// `plans/`, `apps/`, or `docs/` — i.e. plausible workspace-relative paths.
+fn extract_referenced_paths(grounding_text: &str) -> Vec<String> {
+    let prefixes = ["crates/", "src/", "tests/", "plans/", "apps/", "docs/"];
+    let mut paths: Vec<String> = Vec::new();
+    for line in grounding_text.lines() {
+        for word in line.split_whitespace() {
+            // Strip leading punctuation like `-`, `*`, `` ` ``, `(`.
+            let word = word
+                .trim_start_matches(['-', '*', '`', '(', '['])
+                .trim_end_matches(['`', ')', ']', ',', '.']);
+            if prefixes.iter().any(|p| word.starts_with(p)) {
+                paths.push(word.to_string());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Check that a generated PRD contains the required `## Repository Grounding`
+/// section.
+///
+/// **R4_B02**: This check is **blocking** — a missing section sets
+/// `artifact_valid = false` on the returned report, which prevents learning
+/// gates from treating the generation as successful.
+///
+/// Returns a [`PrdArtifactReport`] whose `artifact_valid` field reflects
+/// whether the section was found.
+#[must_use]
+pub fn check_grounding_section(
+    prd_content: &str,
+    slug: &str,
+    process_success: bool,
+) -> PrdArtifactReport {
+    let mut report = PrdArtifactReport::new(slug, process_success);
+    let has_section = prd_content.lines().any(|line| {
+        line.trim()
+            .to_lowercase()
+            .starts_with("## repository grounding")
+    });
+    if !has_section {
+        report.push(PrdValidationIssue {
+            severity: PrdValidationSeverity::Error,
+            category: "missing_section",
+            message: format!(
+                "PRD '{}' is missing required '## Repository Grounding' section — PRD rejected",
+                slug
+            ),
+        });
+    }
+    report
+}
+
+/// Validate the `## Repository Grounding` section of a generated PRD.
+///
+/// **R4_B02**: Missing grounding section is an `Error` (blocking).
+/// **R4_B03**: Referenced source files that don't exist on disk are `Error`
+///             (blocking). Duplicate crate proposals are also `Error`.
+///
+/// `workdir` is the workspace root (used to resolve relative source paths).
+/// `workspace_members` is the list of crate directory names under `crates/`.
+#[must_use]
+pub fn validate_prd_grounding(
+    prd_content: &str,
+    slug: &str,
+    workdir: &Path,
+    workspace_members: &[String],
+    process_success: bool,
+) -> PrdArtifactReport {
+    // Start with the blocking grounding-section check (R4_B02).
+    let mut report = check_grounding_section(prd_content, slug, process_success);
+
+    let Some(grounding_text) = extract_prd_section(prd_content, "repository grounding") else {
+        // Section missing — already recorded as Error above; nothing more to validate.
+        return report;
+    };
+
+    let text_lower = grounding_text.to_lowercase();
+
+    // R4_B03a: "no existing crates" claim is suspicious when the workspace has members.
+    if (text_lower.contains("no existing crates") || text_lower.contains("no relevant crates"))
+        && !workspace_members.is_empty()
+    {
+        report.push(PrdValidationIssue {
+            severity: PrdValidationSeverity::Warning,
+            category: "false_negative",
+            message: format!(
+                "PRD claims no existing crates but workspace has {} crate(s): {}",
+                workspace_members.len(),
+                workspace_members
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+
+    // R4_B03b: "new crate X" proposals that duplicate existing workspace members.
+    let new_crate_patterns = [
+        "new crate: ",
+        "new crate `",
+        "create crate ",
+        "add crate ",
+    ];
+    for line in grounding_text.lines() {
+        let line_lower = line.to_lowercase();
+        for pat in &new_crate_patterns {
+            if let Some(after_offset) = line_lower.find(pat) {
+                let rest = &line[after_offset + pat.len()..];
+                let proposed = rest
+                    .trim()
+                    .trim_start_matches('`')
+                    .trim_start_matches('"')
+                    .split(|c: char| {
+                        c.is_whitespace() || c == '`' || c == '"' || c == ',' || c == ')'
+                    })
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !proposed.is_empty() && proposed.starts_with("roko-") {
+                    if workspace_members
+                        .iter()
+                        .any(|m| m.to_lowercase() == proposed.to_lowercase())
+                    {
+                        report.push(PrdValidationIssue {
+                            severity: PrdValidationSeverity::Error,
+                            category: "duplicate_crate",
+                            message: format!(
+                                "PRD proposes creating crate '{}' which already exists in the workspace",
+                                proposed
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // R4_B03c: Referenced source files must exist in the workspace.
+    let referenced_paths = extract_referenced_paths(&grounding_text);
+    for rel_path in &referenced_paths {
+        let abs_path = workdir.join(rel_path);
+        if !abs_path.exists() {
+            report.push(PrdValidationIssue {
+                severity: PrdValidationSeverity::Error,
+                category: "missing_file_ref",
+                message: format!(
+                    "PRD references '{}' in Repository Grounding but that path does not exist in the workspace",
+                    rel_path
+                ),
+            });
+        }
+    }
+
+    report
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1390,5 +1711,109 @@ mod tests {
             .expect("rendered");
         assert!(rendered.starts_with("---\nid: demo\n---"));
         assert!(rendered.contains("Body only"));
+    }
+
+    // ─── R4_B02 / R4_B03 validation tests ─────────────────────────
+
+    #[test]
+    fn check_grounding_section_rejects_missing_section() {
+        let content = "---\nid: prd-demo\n---\n# Demo\n\n## Requirements\n\nSome req.\n";
+        let report = check_grounding_section(content, "demo", true);
+        assert!(!report.artifact_valid, "missing section must set artifact_valid=false");
+        assert!(
+            report.issues.iter().any(|i| i.severity == PrdValidationSeverity::Error
+                && i.category == "missing_section"),
+            "expected missing_section error"
+        );
+    }
+
+    #[test]
+    fn check_grounding_section_accepts_present_section() {
+        let content = "---\nid: prd-demo\n---\n# Demo\n\n## Repository Grounding\n\nExisting crates: roko-core.\n";
+        let report = check_grounding_section(content, "demo", true);
+        assert!(report.artifact_valid, "present section must pass");
+        assert!(report.issues.is_empty(), "no issues expected");
+    }
+
+    #[test]
+    fn check_grounding_section_case_insensitive() {
+        let content = "# Demo\n\n## REPOSITORY GROUNDING\n\nContent here.\n";
+        let report = check_grounding_section(content, "demo", true);
+        assert!(report.artifact_valid, "case-insensitive match must pass");
+    }
+
+    #[test]
+    fn validate_prd_grounding_flags_no_existing_crates_claim() {
+        let content = "# Demo\n\n## Repository Grounding\n\nNo existing crates are relevant.\n";
+        let members = vec!["roko-core".to_string(), "roko-agent".to_string()];
+        let report = validate_prd_grounding(content, "demo", Path::new("/tmp"), &members, true);
+        assert!(
+            report.issues.iter().any(|i| i.category == "false_negative"),
+            "expected false_negative warning"
+        );
+        // Warning only — still valid
+        assert!(report.artifact_valid);
+    }
+
+    #[test]
+    fn validate_prd_grounding_blocks_duplicate_crate_proposal() {
+        let content = "# Demo\n\n## Repository Grounding\n\nnew crate: roko-core\n";
+        let members = vec!["roko-core".to_string()];
+        let report = validate_prd_grounding(content, "demo", Path::new("/tmp"), &members, true);
+        assert!(!report.artifact_valid, "duplicate crate must set artifact_valid=false");
+        assert!(
+            report.issues.iter().any(|i| i.category == "duplicate_crate"
+                && i.severity == PrdValidationSeverity::Error)
+        );
+    }
+
+    #[test]
+    fn validate_prd_grounding_blocks_nonexistent_file_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "# Demo\n\n## Repository Grounding\n\n**Source files**:\n- crates/roko-cli/src/no_such_file.rs — does not exist\n";
+        let report = validate_prd_grounding(content, "demo", tmp.path(), &[], true);
+        assert!(!report.artifact_valid, "nonexistent file ref must set artifact_valid=false");
+        assert!(
+            report.issues.iter().any(|i| i.category == "missing_file_ref"
+                && i.severity == PrdValidationSeverity::Error)
+        );
+    }
+
+    #[test]
+    fn validate_prd_grounding_allows_existing_file_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create the file so it "exists"
+        let file_path = tmp.path().join("crates").join("roko-cli").join("src");
+        std::fs::create_dir_all(&file_path).unwrap();
+        std::fs::write(file_path.join("prd.rs"), "// prd").unwrap();
+        let content = "# Demo\n\n## Repository Grounding\n\n**Source files**:\n- crates/roko-cli/src/prd.rs — PRD logic\n";
+        let report = validate_prd_grounding(content, "demo", tmp.path(), &[], true);
+        assert!(report.artifact_valid, "existing file ref must pass");
+        assert!(
+            !report.issues.iter().any(|i| i.category == "missing_file_ref"),
+            "no missing_file_ref issues expected"
+        );
+    }
+
+    #[test]
+    fn extract_prd_section_returns_none_when_missing() {
+        let content = "# Title\n\n## Overview\n\nSome text.\n";
+        assert!(extract_prd_section(content, "repository grounding").is_none());
+    }
+
+    #[test]
+    fn extract_prd_section_extracts_body() {
+        let content = "# Title\n\n## Repository Grounding\n\nCrates: roko-core.\n\n## References\n\nRef 1.\n";
+        let body = extract_prd_section(content, "repository grounding").unwrap();
+        assert!(body.contains("Crates: roko-core."), "body: {body}");
+        assert!(!body.contains("## References"), "must stop at next heading");
+    }
+
+    #[test]
+    fn extract_referenced_paths_finds_crate_paths() {
+        let text = "- crates/roko-cli/src/prd.rs — PRD logic\n- crates/roko-core/src/lib.rs";
+        let paths = extract_referenced_paths(text);
+        assert!(paths.contains(&"crates/roko-cli/src/prd.rs".to_string()));
+        assert!(paths.contains(&"crates/roko-core/src/lib.rs".to_string()));
     }
 }

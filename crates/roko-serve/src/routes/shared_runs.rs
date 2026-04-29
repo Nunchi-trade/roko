@@ -847,11 +847,23 @@ fn render_html(t: &RunTranscript) -> String {
     )
 }
 
-/// Register the shared-run routes on a router.
-pub fn routes() -> axum::Router<Arc<AppState>> {
+/// Routes that **require** authentication. Wire these inside the auth layer.
+///
+/// Endpoints:
+/// * `POST /runs/{id}/share` — create a shareable token for a completed run.
+pub fn auth_routes() -> axum::Router<Arc<AppState>> {
+    axum::Router::new().route("/runs/{id}/share", axum::routing::post(create_share))
+}
+
+/// Routes that are **intentionally public**. Wire these outside the auth layer.
+///
+/// Endpoints:
+/// * `GET /api/runs/{id}` — JSON transcript.
+/// * `GET /api/shared/{token}` — retrieve a transcript by its opaque token.
+/// * `GET /runs/{id}` — self-contained HTML page.
+pub fn public_routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/api/runs/{id}", axum::routing::get(get_run_json))
-        .route("/api/runs/{id}/share", axum::routing::post(create_share))
         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
         .route("/runs/{id}", axum::routing::get(get_run_html))
 }

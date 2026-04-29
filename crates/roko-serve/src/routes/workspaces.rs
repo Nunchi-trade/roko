@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,9 +40,25 @@ pub struct CreateWorkspaceResponse {
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/workspaces", post(create_workspace))
+        .route("/workspaces", get(list_workspaces).post(create_workspace))
         .route("/workspaces/default", get(get_default_workspace))
         .route("/workspaces/{id}", delete(delete_workspace))
+}
+
+/// `GET /api/workspaces` -- list all tracked ephemeral workspaces.
+async fn list_workspaces(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let map = state.ephemeral_workspaces.read().await;
+    let workspaces: Vec<Value> = map
+        .values()
+        .map(|ws| {
+            json!({
+                "id": ws.id,
+                "path": ws.path.display().to_string(),
+                "created_at": ws.created_at,
+            })
+        })
+        .collect();
+    Json(json!({ "workspaces": workspaces }))
 }
 
 /// `POST /api/workspaces` -- create an ephemeral workspace directory.

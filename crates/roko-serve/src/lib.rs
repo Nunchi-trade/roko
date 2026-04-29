@@ -264,6 +264,7 @@ impl ServerBuilder {
         let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
         let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
         let _cold_archival = start_cold_archival_timer(Arc::clone(&state));
+        let _workspace_gc = start_workspace_gc(Arc::clone(&state));
 
         // Load persisted deployments from disk.
         routes::load_persisted_deployments(&state).await;
@@ -1462,6 +1463,72 @@ fn start_state_snapshot_saver(state: Arc<AppState>) -> JoinHandle<()> {
             if let Err(err) = state.save_snapshot().await {
                 warn!(error = %err, "periodic server state snapshot save failed");
             }
+        }
+    })
+}
+
+/// Periodic garbage collection of ephemeral workspaces.
+///
+/// Runs every 5 minutes. Each tick removes entries from
+/// `AppState.ephemeral_workspaces` whose `created_at` is older than 1 hour,
+/// deleting the corresponding filesystem directories.
+fn start_workspace_gc(state: Arc<AppState>) -> JoinHandle<()> {
+    const INTERVAL_SECS: u64 = 5 * 60;
+    const MAX_AGE_SECS: u64 = 3600;
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(INTERVAL_SECS));
+        // Skip the first immediate tick — let the server warm up.
+        interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = state.cancel.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let stale: Vec<crate::state::WorkspaceInfo> = {
+                let map = state.ephemeral_workspaces.read().await;
+                map.values()
+                    .filter(|ws| now.saturating_sub(ws.created_at) > MAX_AGE_SECS)
+                    .cloned()
+                    .collect()
+            };
+
+            if stale.is_empty() {
+                continue;
+            }
+
+            let mut removed = 0usize;
+            for ws in &stale {
+                if let Err(err) = tokio::fs::remove_dir_all(&ws.path).await {
+                    warn!(
+                        workspace_id = %ws.id,
+                        path = %ws.path.display(),
+                        error = %err,
+                        "failed to remove stale ephemeral workspace directory"
+                    );
+                }
+            }
+
+            {
+                let mut map = state.ephemeral_workspaces.write().await;
+                for ws in &stale {
+                    if map.remove(&ws.id).is_some() {
+                        removed += 1;
+                    }
+                }
+            }
+
+            info!(
+                count = removed,
+                "workspace GC: removed {removed} stale ephemeral workspace(s)"
+            );
         }
     })
 }

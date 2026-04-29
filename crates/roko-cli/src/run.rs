@@ -3111,6 +3111,8 @@ mod tests {
                     .map(|gate_name| GateVerdict {
                         gate_name,
                         passed: true,
+                        skipped: false,
+                        skip_reason: None,
                         output: "mock gate passed".to_string(),
                         duration_ms: 5,
                     })
@@ -3226,7 +3228,7 @@ mod tests {
             assembled: TokioMutex::new(Vec::new()),
         });
         let services = EffectServices {
-            model: "share-mock-model".to_string(),
+            default_model: "share-mock-model".to_string(),
             model_caller: Arc::new(ShareMockModelCaller),
             prompt_assembler: prompt_assembler.clone(),
             feedback_sink: Arc::new(ShareMockFeedbackSink {

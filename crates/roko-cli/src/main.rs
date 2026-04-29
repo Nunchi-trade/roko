@@ -2129,6 +2129,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                     roko_cli::secrets::dispatch_secrets(&secrets_cmd, &workdir)?;
                     return Ok(EXIT_SUCCESS);
                 }
+                ConfigCmd::Mcp { cmd: mcp_cmd } => {
+                    let workdir = resolve_workdir(cli);
+                    dispatch_mcp_cmd(&mcp_cmd, &workdir)?;
+                    return Ok(EXIT_SUCCESS);
+                }
                 other => {
                     commands::config_cmd::dispatch_config(cli, other).await?;
                 }
@@ -2405,8 +2410,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             }
         }
         Command::Explain { topic, depth } => {
-            commands::util::cmd_explain(&topic, depth);
-            Ok(EXIT_SUCCESS)
+            if commands::util::cmd_explain(&topic, depth) {
+                Ok(EXIT_SUCCESS)
+            } else {
+                Ok(EXIT_FAILURE)
+            }
         }
         Command::Login {
             url,
@@ -2771,6 +2779,112 @@ fn load_env_file(path: &Path) -> Result<Vec<(String, String)>> {
         .collect::<std::result::Result<Vec<_>, _>>()
         .with_context(|| format!("parse {}", path.display()))?;
     Ok(entries)
+}
+
+// -----------------------------------------------------------------------
+// MCP dispatch
+// -----------------------------------------------------------------------
+
+/// Dispatch `roko config mcp` subcommands inline (avoids the `unreachable!` in
+/// `dispatch_config` which is reserved for arms intercepted before reaching it).
+fn dispatch_mcp_cmd(cmd: &ConfigMcpCmd, workdir: &Path) -> Result<()> {
+    match cmd {
+        ConfigMcpCmd::List { workdir: wd_override } => {
+            let wd = wd_override.as_deref().unwrap_or(workdir);
+            // Resolve MCP config: .roko/mcp.json → ~/.claude/mcp-config.json → walk-up .mcp.json
+            let resolved = resolve_mcp_config_path(None, wd);
+            let path = resolved.ok_or_else(|| {
+                anyhow!("no MCP config found; set agent.mcp_config in roko.toml or create .roko/mcp.json")
+            })?;
+            let cfg = roko_agent::mcp::McpConfig::load(&path)
+                .map_err(|e| anyhow!("load MCP config from {}: {}", path.display(), e))?;
+            println!("MCP config: {}", path.display());
+            if cfg.servers.is_empty() {
+                println!("  (no servers configured)");
+            } else {
+                println!("{} server(s):", cfg.servers.len());
+                for server in &cfg.servers {
+                    println!("  [{:?}] {} ({})", server.tier, server.name, server.command);
+                }
+            }
+            Ok(())
+        }
+        ConfigMcpCmd::Test { name, workdir: wd_override } => {
+            let wd = wd_override.as_deref().unwrap_or(workdir);
+            let resolved = resolve_mcp_config_path(None, wd);
+            let path = resolved.ok_or_else(|| {
+                anyhow!("no MCP config found; set agent.mcp_config in roko.toml or create .roko/mcp.json")
+            })?;
+            if !path.is_file() {
+                return Err(anyhow!("MCP config file not found: {}", path.display()));
+            }
+            let cfg = roko_agent::mcp::McpConfig::load(&path)
+                .map_err(|e| anyhow!("parse MCP config at {}: {}", path.display(), e))?;
+            if cfg.servers.iter().any(|s| s.name == *name) {
+                println!("ok: server '{}' found in {}", name, path.display());
+            } else {
+                return Err(anyhow!("server '{}' not found in {}", name, path.display()));
+            }
+            Ok(())
+        }
+        ConfigMcpCmd::Add { name, command, args, workdir: wd_override } => {
+            let wd = wd_override.as_deref().unwrap_or(workdir);
+            let path = {
+                let roko_dir = wd.join(".roko");
+                std::fs::create_dir_all(&roko_dir)
+                    .with_context(|| format!("create {}", roko_dir.display()))?;
+                roko_dir.join("mcp.json")
+            };
+            let mut cfg = if path.is_file() {
+                roko_agent::mcp::McpConfig::load(&path)
+                    .map_err(|e| anyhow!("load existing MCP config from {}: {}", path.display(), e))?
+            } else {
+                roko_agent::mcp::McpConfig { servers: Vec::new() }
+            };
+            if cfg.servers.iter().any(|s| s.name == *name) {
+                return Err(anyhow!("server '{}' already exists in {}", name, path.display()));
+            }
+            cfg.servers.push(roko_agent::mcp::McpServerConfig {
+                name: name.clone(),
+                transport: roko_agent::mcp::McpTransportConfig::Stdio,
+                command: command.clone(),
+                args: args.clone(),
+                env: Default::default(),
+                endpoint: None,
+                auth_token: None,
+                tier: Default::default(),
+            });
+            let json = serde_json::to_string_pretty(&cfg).context("serialize MCP config")?;
+            std::fs::write(&path, json)
+                .with_context(|| format!("write {}", path.display()))?;
+            println!("added server '{}' to {}", name, path.display());
+            Ok(())
+        }
+    }
+}
+
+/// Resolve the MCP config path using the following chain:
+/// 1. Explicit path (if provided)
+/// 2. `.roko/mcp.json` relative to workdir
+/// 3. `~/.claude/mcp-config.json`
+/// 4. Walk-up `.mcp.json` discovery from workdir
+fn resolve_mcp_config_path(explicit: Option<&Path>, workdir: &Path) -> Option<PathBuf> {
+    if let Some(p) = explicit {
+        return Some(p.to_path_buf());
+    }
+    let roko_local = workdir.join(".roko").join("mcp.json");
+    if roko_local.is_file() {
+        return Some(roko_local);
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let claude_default = home.join(".claude").join("mcp-config.json");
+        if claude_default.is_file() {
+            return Some(claude_default);
+        }
+    }
+    roko_agent::mcp::find_mcp_config(workdir)
+        .and_then(|r| r.ok())
+        .map(|(p, _)| p)
 }
 
 // -----------------------------------------------------------------------

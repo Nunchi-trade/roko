@@ -188,6 +188,7 @@ use crate::heartbeat::{
     HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
     persist_heartbeat_snapshot,
 };
+use crate::model_selection::resolve_effective_model;
 use crate::knowledge_helpers::{
     apply_neuro_gate_hints, build_knowledge_routing_advice, build_strategy_fragment_context,
     build_success_knowledge_entry, knowledge_routing_boost, query_anti_knowledge_patterns,
@@ -14535,79 +14536,84 @@ impl PlanRunner {
         let frequency = task_def
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
-        let explicit_model_override = model_override.filter(|model| !model.trim().is_empty());
-        let hard_model_override = explicit_model_override.is_some();
-        let current_model = self.effective_model();
+        let explicit_model_override = model_override;
 
         // ── Build prompt: surgical (from TaskDef) or generic ────────
         // Also collect attribution keys for context feedback after the agent runs.
         let mut attribution_keys: Vec<(String, String)> = Vec::new();
-        let (task_text, mut selected_model) = if let Some(override_prompt) = prompt_override {
-            let model = explicit_model_override
-                .clone()
-                .unwrap_or_else(|| current_model.clone());
-            (override_prompt, model)
+        let task_text = if let Some(override_prompt) = prompt_override {
+            override_prompt
         } else if let Some(ref td) = task_def {
             let prompt = td.build_prompt(plan_id, &self.workdir);
-            let model = explicit_model_override.clone().unwrap_or_else(|| {
-                td.effective_model(&current_model, Some(&self.config.agent.tier_models))
-            });
             tracing::info!(
-                "[orchestrate] Task {} tier={} model={} max_loc={:?} context={} verify={}",
+                "[orchestrate] Task {} tier={} max_loc={:?} context={} verify={}",
                 td.id,
                 td.tier,
-                model,
                 td.max_loc,
                 td.context.is_some(),
                 td.verify.len(),
             );
-            (prompt, model)
+            prompt
         } else {
-            let text =
-                format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
-            let model = explicit_model_override
-                .clone()
-                .or_else(|| {
-                    self.config
-                        .agent
-                        .model
-                        .clone()
-                        .filter(|model| !model.trim().is_empty())
-                })
-                .unwrap_or_else(|| "claude-opus-4-6".into());
-            (text, model)
+            format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.")
         };
-        let roko_config = match load_roko_config(&self.workdir) {
-            Ok(config) => config,
-            Err(err) => {
-                tracing::warn!(
-                    "[orchestrate] failed to load roko.toml for provider routing metadata: {err}"
+
+        // ── Resolve initial model via canonical precedence chain ─────
+        //
+        // resolve_effective_model() enforces a well-defined 6-step chain:
+        //   CliOverride → TaskModel → RoleConfig → CascadeRouter
+        //   → ProjectDefault → BuiltInDefault
+        //
+        // The cascade routing section below then applies richer dynamic
+        // overrides (healthy-model filtering, linucb, cfactor, experiments,
+        // budget pressure) on top of this base selection.
+        let roko_config_for_selection = match load_roko_config(&self.workdir) {
+            Ok(cfg) => cfg,
+            Err(_) => RokoConfig::default(),
+        };
+        // Merge per-dispatch override with the session-level CLI model setting.
+        // Precedence: explicit per-dispatch override > session --model flag.
+        let cli_model = explicit_model_override
+            .clone()
+            .or_else(|| self.config.agent.model.clone());
+        let task_model_hint = task_def.as_ref().and_then(|td| td.model_hint.clone());
+        let base_selection = resolve_effective_model(
+            cli_model,
+            task_model_hint,
+            Some(role.label().to_string()),
+            Some(self.learning.cascade_router()),
+            &roko_config_for_selection,
+        );
+        let mut selected_model = match base_selection {
+            Ok(ref sel) => {
+                tracing::info!(
+                    "[orchestrate] base model selection: {}",
+                    sel.display_line()
                 );
-                RokoConfig::default()
+                sel.effective_model_key.clone()
+            }
+            Err(ref err) => {
+                tracing::warn!(
+                    "[orchestrate] model selection error ({err}), falling back to project default"
+                );
+                let dm = roko_config_for_selection.agent.default_model.trim().to_string();
+                if dm.is_empty() {
+                    RokoConfig::default().agent.default_model
+                } else {
+                    dm
+                }
             }
         };
+        // Reuse the config already loaded for model selection above.
+        // roko_config_for_selection is always valid (loaded or default).
+        let roko_config = roko_config_for_selection;
         let resolved_dispatch_role_label = resolved_role_label(&roko_config, role.label());
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_dispatch_role_label = Some(resolved_dispatch_role_label.clone());
         }
-        if hard_model_override {
-            let validation = crate::model_selection::resolve_effective_model(
-                Some(selected_model.clone()),
-                None,
-                Some(role.label().to_string()),
-                None,
-                &roko_config,
-            )
-            .map_err(|error| {
-                anyhow!(
-                    "resolve hard model override for {plan_id}/{task} ({selected_model}): {error}"
-                )
-            })?;
-            selected_model = validation.backend_slug;
-        }
         let model_providers = routing_model_provider_map(&roko_config);
         let pending_force_model_override =
-            if !hard_model_override && task_def.is_some() && explicit_model_override.is_none() {
+            if task_def.is_some() && explicit_model_override.is_none() {
                 self.force_model_override.take()
             } else {
                 None
@@ -14615,7 +14621,12 @@ impl PlanRunner {
 
         let requested_model = selected_model.clone();
         let mut routing_stage = "static".to_string();
-        let mut routing_reason = "configured_default".to_string();
+        // Seed routing_reason from the base selection source so it's always
+        // populated with a meaningful value even before the cascade section runs.
+        let mut routing_reason = base_selection
+            .as_ref()
+            .map(|sel| sel.source.label().replace(' ', "_"))
+            .unwrap_or_else(|_| "configured_default".to_string());
         let mut routing_explanation: Option<roko_learn::cascade_router::CascadeRouteExplanation> =
             None;
         let mut routing_log_store: Option<RoutingDecisionLogStore> = None;
@@ -14624,27 +14635,21 @@ impl PlanRunner {
 
         // ── Adaptive model selection via CascadeRouter ───────────────
         let mut selected_model_experiment = None;
-        if !hard_model_override {
-            if let Some(forced_model) = pending_force_model_override {
-                tracing::warn!(
-                    forced_model = %forced_model,
-                    "applying pending cost-anomaly model override before routing"
-                );
-                selected_model = forced_model;
-            } else if task_def.is_none() {
-                let fallback_candidates: Vec<String> =
-                    roko_config.effective_models().keys().cloned().collect();
-                if let Some((role_model, reason)) = apply_role_routing_override(
-                    &roko_config,
-                    role.label(),
-                    &model_providers,
-                    &fallback_candidates,
-                ) {
-                    selected_model = role_model;
-                    routing_reason = reason;
-                    routing_stage = "static".to_string();
-                }
-            } else if let Some(td) = task_def.as_ref() {
+        if let Some(forced_model) = pending_force_model_override {
+            tracing::warn!(
+                forced_model = %forced_model,
+                "applying pending cost-anomaly model override before routing"
+            );
+            selected_model = forced_model;
+        } else if task_def.is_none() {
+            if let Some((role_model, reason)) =
+                apply_role_routing_override(&roko_config, role.label(), &model_providers, &[])
+            {
+                selected_model = role_model;
+                routing_reason = reason;
+                routing_stage = "static".to_string();
+            }
+        } else if let Some(td) = task_def.as_ref() {
                 let cascade_router = self.learning.cascade_router();
                 let mut routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
                 let load_snapshot = self.routing_load_snapshot().await;
@@ -14881,8 +14886,6 @@ impl PlanRunner {
                     }
                 }
             }
-        }
-
         // ── Lookahead router post-filter (optional tier downgrade) ───
         //
         // When enabled and calibration data exists, check if a cheaper model
@@ -14986,18 +14989,16 @@ impl PlanRunner {
         // ── Provider health check ────────────────────────────────────
         let selected_provider =
             provider_id_for_routing_model(&roko_config, &model_providers, &selected_model);
-        let selected_model = if !hard_model_override
-            && !self
-                .learning
-                .provider_health()
-                .is_healthy(&selected_provider)
+        let selected_model = if !self
+            .learning
+            .provider_health()
+            .is_healthy(&selected_provider)
         {
             let fallback = self
                 .config
                 .agent
                 .fallback_model
                 .clone()
-                .filter(|model| !model.trim().is_empty())
                 .unwrap_or_else(|| "claude-sonnet-4-6".into());
             tracing::warn!(
                 unhealthy_model = %selected_model,
@@ -15037,10 +15038,8 @@ impl PlanRunner {
         let mut dispatch_params =
             DispatchParams::new(selected_model.clone(), frequency.turn_limit());
         dispatch_params.effort = self.config.agent.effort.clone();
-        if !hard_model_override {
-            self.daimon
-                .modulate_with_strategy(&mut dispatch_params, task_strategy);
-        }
+        self.daimon
+            .modulate_with_strategy(&mut dispatch_params, task_strategy);
         let selected_model = dispatch_params.model;
         let dispatch_turn_limit = dispatch_params.turn_limit;
         let dispatch_effort = dispatch_params.effort.clone();
@@ -19860,6 +19859,7 @@ mod tests {
                 success: true,
                 output_text: None,
                 usage: None,
+                gate_results: Vec::new(),
             })
         }
 

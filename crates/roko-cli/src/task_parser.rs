@@ -405,7 +405,7 @@ impl TaskDef {
     }
 
     /// Get the model to use for this task, falling back through:
-    /// 1. model_hint from task definition
+    /// 1. model_hint from task definition (aliases like "sonnet" are normalized)
     /// 2. tier_models from config (if provided)
     /// 3. built-in tier defaults
     /// 4. provided fallback
@@ -415,7 +415,7 @@ impl TaskDef {
         tier_models: Option<&std::collections::HashMap<String, String>>,
     ) -> String {
         if let Some(ref hint) = self.model_hint {
-            return hint.clone();
+            return normalize_model_alias(hint).to_owned();
         }
         // Check config tier_models first
         if let Some(models) = tier_models {
@@ -559,6 +559,25 @@ impl TaskDef {
         if let Some(denied) = self.role.as_deref().and_then(denied_tools_for_role) {
             self.denied_tools = Some(denied.iter().map(|tool| (*tool).to_string()).collect());
         }
+    }
+}
+
+/// Normalize a model alias to its full model identifier.
+///
+/// Short aliases like `"haiku"`, `"sonnet"`, `"opus"` are accepted in
+/// `model_hint` fields for convenience, but the executor and API require the
+/// full `claude-*` identifiers. This function maps the known short forms and
+/// passes everything else through unchanged.
+///
+/// This is called at execution time inside [`TaskDef::effective_model`] so
+/// that plans written with short aliases work correctly without needing to be
+/// regenerated.
+pub fn normalize_model_alias(hint: &str) -> &str {
+    match hint.trim() {
+        "haiku" => "claude-haiku-4-5",
+        "sonnet" => "claude-sonnet-4-6",
+        "opus" => "claude-opus-4-6",
+        other => other,
     }
 }
 

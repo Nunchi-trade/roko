@@ -151,7 +151,7 @@ mod plan_validation {
             ] {
                 assert_eq!(
                     normalize_model_alias(alias),
-                    Some(canonical),
+                    canonical,
                     "alias '{alias}' should normalize to '{canonical}'"
                 );
             }
@@ -159,8 +159,9 @@ mod plan_validation {
 
         #[test]
         fn plan_validation_unknown_model_alias_does_not_normalize() {
-            assert_eq!(normalize_model_alias("gpt2"), None);
-            assert_eq!(normalize_model_alias(" claude-unknown "), None);
+            // Unknown aliases pass through unchanged
+            assert_eq!(normalize_model_alias("gpt2"), "gpt2");
+            assert_eq!(normalize_model_alias(" claude-unknown "), "claude-unknown");
         }
 
         #[test]
