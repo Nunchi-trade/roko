@@ -6,7 +6,6 @@ pub(crate) mod router_state;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -19,7 +18,6 @@ use crate::projection_contract::{DataQuality, ProjectionQuery, RuntimeProjection
 use crate::state::AppState;
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::efficiency::AgentEfficiencyEvent;
-use roko_learn::provider_health::{HealthState, ProviderStatus};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -293,22 +291,27 @@ fn source_projection_payload(node: Value, evidence: Value) -> Value {
 
 fn cascade_router_availability(state: &AppState, router: &Value) -> Vec<Value> {
     let config = state.load_roko_config();
-    let providers_by_slug: HashMap<String, String> = config
-        .effective_models()
-        .into_values()
-        .map(|profile| (profile.slug, profile.provider))
+    // Compare against runtime wire slugs, not the config map keys.
+    let configured_slugs: std::collections::HashSet<String> = config
+        .models
+        .values()
+        .map(|profile| profile.slug.trim().to_owned())
+        .filter(|slug| !slug.is_empty())
         .collect();
     let mut models = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let confidence_stats = router.get("confidence_stats").and_then(Value::as_object);
 
     for slug in cascade_router_slugs(router) {
         if !seen.insert(slug.clone()) {
             continue;
         }
-        let available = providers_by_slug
-            .get(&slug)
-            .map(|provider| provider_status_available(&state.provider_health.get(provider)))
-            .unwrap_or(false);
+        let successes = confidence_stats
+            .and_then(|stats| stats.get(&slug))
+            .and_then(|entry| entry.get("successes"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let available = configured_slugs.contains(slug.as_str()) || successes > 0;
         models.push(json!({
             "model_slug": slug,
             "available": available,
@@ -350,14 +353,6 @@ fn cascade_router_slugs(router: &Value) -> Vec<String> {
     }
 
     slugs
-}
-
-fn provider_status_available(status: &ProviderStatus) -> bool {
-    match status.state {
-        HealthState::Healthy => true,
-        HealthState::Unhealthy { recovery_at } => Instant::now() >= recovery_at,
-        HealthState::Probing => false,
-    }
 }
 
 /// Build a structured response from the adaptive gate threshold store.
@@ -727,7 +722,8 @@ mod tests {
                 "model_slugs": ["claude-sonnet-4-5", "claude-haiku-3-5"],
                 "confidence_stats": {
                     "claude-sonnet-4-5": { "trials": 50, "successes": 30 },
-                    "claude-haiku-3-5": { "trials": 10, "successes": 8 }
+                    "claude-haiku-3-5": { "trials": 10, "successes": 8 },
+                    "claude-opus-4-6": { "trials": 4, "successes": 0 }
                 }
             })
             .to_string(),
@@ -783,12 +779,12 @@ mod tests {
             2
         );
         assert_eq!(cascade_payload["data_quality"]["has_real_data"], true);
-        assert_eq!(cascade_payload["data_quality"]["entry_count"], 2);
+        assert_eq!(cascade_payload["data_quality"]["entry_count"], 3);
         assert_eq!(cascade_payload["data_quality"]["null_cost_count"], 0);
         let models = cascade_payload["models"]
             .as_array()
             .expect("invariant: cascade response should contain a models array");
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 3);
         let sonnet = models
             .iter()
             .find(|model| model["model_slug"] == "claude-sonnet-4-5")
@@ -797,8 +793,13 @@ mod tests {
         let haiku = models
             .iter()
             .find(|model| model["model_slug"] == "claude-haiku-3-5")
-            .expect("unconfigured model should be present");
-        assert_eq!(haiku["available"], false);
+            .expect("historically successful model should be present");
+        assert_eq!(haiku["available"], true);
+        let opus = models
+            .iter()
+            .find(|model| model["model_slug"] == "claude-opus-4-6")
+            .expect("historical zero-success model should be present");
+        assert_eq!(opus["available"], false);
 
         let cost_tiers_response = app
             .clone()

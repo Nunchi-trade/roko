@@ -88,7 +88,7 @@ pub struct CascadeRouter {
     pareto_frontier: Mutex<ParetoFrontierState>,
     /// Static role -> model table for stage 1.
     role_table: Mutex<HashMap<AgentRole, String>>,
-    /// Ordered list of model slugs (arms available to the router).
+    /// Ordered list of model slugs tracked by the router.
     model_slugs: Vec<String>,
     /// Active stage and recorded stage-transition history.
     stage_tracking: Mutex<StageTracking>,
@@ -213,10 +213,37 @@ impl CascadeRouter {
         self.stage_tracking.lock().current
     }
 
-    /// Read the ordered model slug list.
+    /// Read the ordered model slug history retained by the router.
     #[must_use]
     pub fn model_slugs(&self) -> &[String] {
         &self.model_slugs
+    }
+
+    /// Return tracked slugs paired with display availability.
+    ///
+    /// A slug is considered available when its wire slug appears in
+    /// `configured_slugs` or it has at least one successful observation.
+    /// `ModelStats` does not retain timestamps, so `successes > 0` is the
+    /// best available proxy for "used successfully" without deleting history.
+    #[must_use]
+    pub fn model_slugs_with_availability(
+        &self,
+        configured_slugs: &[String],
+    ) -> Vec<(String, bool)> {
+        let configured: std::collections::HashSet<&str> =
+            configured_slugs.iter().map(String::as_str).collect();
+        let stats = self.confidence_stats.lock();
+
+        self.model_slugs
+            .iter()
+            .map(|slug| {
+                let available = configured.contains(slug.as_str())
+                    || stats
+                        .get(slug)
+                        .map_or(false, |entry| entry.successes > 0);
+                (slug.clone(), available)
+            })
+            .collect()
     }
 
     /// Total observations recorded across all stages.

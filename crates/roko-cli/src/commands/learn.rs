@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
+use std::collections::HashSet;
 
 /// Format a cost value for human display.
 /// Uses the heuristic: if cost is exactly 0.0 and both token counts are 0,
@@ -154,6 +155,24 @@ pub(crate) fn print_learn_router(workdir: &std::path::Path) {
         return;
     };
     let snapshot = serde_json::from_str::<LearnCascadeRouterSnapshot>(&content).unwrap_or_default();
+    // Compare against the runtime wire slugs, not the config map keys.
+    let configured_slugs = load_roko_config(workdir)
+        .ok()
+        .map(|config| {
+            config
+                .models
+                .values()
+                .map(|profile| profile.slug.trim().to_owned())
+                .filter(|slug| !slug.is_empty())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let model_rows = learn_router_model_rows(&snapshot, &configured_slugs);
+    let total_observations = if snapshot.total_observations > 0 {
+        snapshot.total_observations
+    } else {
+        model_rows.iter().map(|row| row.trials).sum()
+    };
 
     let mut first_seen: Option<chrono::DateTime<chrono::Utc>> = None;
     let mut last_seen: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -183,23 +202,35 @@ pub(crate) fn print_learn_router(workdir: &std::path::Path) {
         .unwrap_or_else(|| {
             format!(
                 "snapshot stage={} total_observations={}",
-                cascade_stage_for_observations(snapshot.total_observations),
-                snapshot.total_observations
+                cascade_stage_for_observations(total_observations),
+                total_observations
             )
         });
 
-    if snapshot.total_observations == 0 {
+    if total_observations == 0 && model_rows.is_empty() {
         println!("Cascade router: 0 entries at {}", path.display());
-    } else {
-        println!(
-            "Cascade router: {} observations, {} models at {}",
-            snapshot.total_observations,
-            snapshot.model_slugs.len(),
-            path.display()
-        );
+        return;
     }
+
+    println!(
+        "Cascade router: {} observations, {} models at {}",
+        total_observations,
+        model_rows.len(),
+        path.display()
+    );
     println!("  Range: {}", format_range(first_seen, last_seen));
     println!("  Latest: {}", latest);
+
+    if !model_rows.is_empty() {
+        println!("  Models:");
+        for row in model_rows {
+            let suffix = if row.available { "" } else { " (unavailable)" };
+            println!(
+                "    {}{}: {} obs, {} successes",
+                row.slug, suffix, row.trials, row.successes
+            );
+        }
+    }
 }
 
 pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
@@ -550,9 +581,65 @@ struct LearnCascadeRouterSnapshot {
     #[serde(default)]
     model_slugs: Vec<String>,
     #[serde(default)]
+    confidence_stats: std::collections::HashMap<String, LearnCascadeRouterModelStats>,
+    #[serde(default)]
     total_observations: u64,
     #[serde(default)]
     stage_transitions: Vec<roko_learn::cascade::StageTransition>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct LearnCascadeRouterModelStats {
+    #[serde(default)]
+    trials: u64,
+    #[serde(default)]
+    successes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LearnCascadeRouterModelRow {
+    slug: String,
+    trials: u64,
+    successes: u64,
+    available: bool,
+}
+
+fn learn_router_model_rows(
+    snapshot: &LearnCascadeRouterSnapshot,
+    configured_slugs: &HashSet<String>,
+) -> Vec<LearnCascadeRouterModelRow> {
+    let mut slugs = Vec::new();
+    let mut seen = HashSet::new();
+
+    for slug in &snapshot.model_slugs {
+        if seen.insert(slug.clone()) {
+            slugs.push(slug.clone());
+        }
+    }
+    for slug in snapshot.confidence_stats.keys() {
+        if seen.insert(slug.clone()) {
+            slugs.push(slug.clone());
+        }
+    }
+
+    let mut rows = slugs
+        .into_iter()
+        .map(|slug| {
+            let stats = snapshot.confidence_stats.get(&slug);
+            let trials = stats.map_or(0, |entry| entry.trials);
+            let successes = stats.map_or(0, |entry| entry.successes);
+            let available = configured_slugs.contains(slug.as_str()) || successes > 0;
+            LearnCascadeRouterModelRow {
+                slug,
+                trials,
+                successes,
+                available,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|left, right| left.slug.cmp(&right.slug));
+    rows
 }
 
 #[cfg(test)]
@@ -633,5 +720,51 @@ mod tests {
     fn count_gate_threshold_entries_uses_rungs_map() {
         let content = r#"{"rungs":{"1":{"ema_pass_rate":0.5},"2":{"ema_pass_rate":0.75}}}"#;
         assert_eq!(count_gate_threshold_entries(content), 2);
+    }
+
+    #[test]
+    fn learn_router_model_rows_mark_configured_and_successful_models_available() {
+        let snapshot = LearnCascadeRouterSnapshot {
+            model_slugs: vec!["configured".into(), "history".into()],
+            confidence_stats: std::collections::HashMap::from([
+                (
+                    "configured".into(),
+                    LearnCascadeRouterModelStats {
+                        trials: 10,
+                        successes: 0,
+                    },
+                ),
+                (
+                    "history".into(),
+                    LearnCascadeRouterModelStats {
+                        trials: 4,
+                        successes: 2,
+                    },
+                ),
+                (
+                    "legacy".into(),
+                    LearnCascadeRouterModelStats {
+                        trials: 3,
+                        successes: 0,
+                    },
+                ),
+            ]),
+            total_observations: 17,
+            stage_transitions: Vec::new(),
+        };
+        let configured = ["configured".to_string()]
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        let rows = learn_router_model_rows(&snapshot, &configured);
+        let availability = rows
+            .iter()
+            .map(|row| (row.slug.as_str(), row.available))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(rows.len(), 3);
+        assert!(availability["configured"]);
+        assert!(availability["history"]);
+        assert!(!availability["legacy"]);
     }
 }

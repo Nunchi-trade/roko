@@ -90,6 +90,29 @@ fn starts_in_static_stage() {
     assert_eq!(cascade.current_stage(), CascadeStage::Static);
 }
 
+#[test]
+fn model_slugs_with_availability_marks_configured_and_successful_models() {
+    let cascade = CascadeRouter::new(vec![
+        "claude-haiku-3-5".to_string(),
+        "claude-sonnet-4-5".to_string(),
+        "claude-opus-4".to_string(),
+    ]);
+
+    assert!(cascade.record_outcome("claude-haiku-3-5", true));
+
+    let configured = vec!["claude-sonnet-4-5".to_string()];
+    let availability = cascade.model_slugs_with_availability(&configured);
+
+    assert_eq!(
+        availability,
+        vec![
+            ("claude-haiku-3-5".to_string(), true),
+            ("claude-sonnet-4-5".to_string(), true),
+            ("claude-opus-4".to_string(), false),
+        ]
+    );
+}
+
 // ── Test 2: static stage uses role table ────────────────────────────
 
 #[test]
