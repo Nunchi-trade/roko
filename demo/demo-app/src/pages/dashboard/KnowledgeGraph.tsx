@@ -133,6 +133,7 @@ export default function KnowledgeGraph() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simRef = useRef<ReturnType<typeof buildSimulation> | null>(null);
   const rafRef = useRef<number>(0);
+  const frameRef = useRef<number>(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,40 +198,39 @@ export default function KnowledgeGraph() {
 
     // Draw nodes
     for (const node of nodes) {
-      const r = 4 + node.citations * 0.8;
+      const r = 8 + node.citations * 1.5;
       const color = domainColor(node.domain);
 
-      // Glow
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, r + 3, 0, Math.PI * 2);
-      ctx.fillStyle = color.replace(')', ',0.12)').replace('#', 'rgba(').replace(/([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i, (_, r, g, b) => `${parseInt(r, 16)},${parseInt(g, 16)},${parseInt(b, 16)}`);
-      // Simpler glow approach
+      // Glow effect
+      ctx.save();
       ctx.shadowColor = color;
-      ctx.shadowBlur = 8;
-      ctx.fillStyle = 'transparent';
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      // Node circle
+      ctx.shadowBlur = 14;
       ctx.beginPath();
       ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
       ctx.fillStyle = color;
       ctx.fill();
+      ctx.restore();
 
       // Label
-      ctx.fillStyle = 'rgba(196,180,196,0.7)';
-      ctx.font = '8px "JetBrains Mono", monospace';
+      ctx.fillStyle = 'rgba(196,180,196,0.85)';
+      ctx.font = '10px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
-      ctx.fillText(node.label, node.x, node.y + r + 12);
+      ctx.fillText(node.label, node.x, node.y + r + 14);
     }
 
-    rafRef.current = requestAnimationFrame(draw);
+    // Check energy — stop animation when settled
+    frameRef.current++;
+    const energy = nodes.reduce((sum, n) => sum + n.vx * n.vx + n.vy * n.vy, 0);
+    if (energy > 0.1 && frameRef.current < 300) {
+      rafRef.current = requestAnimationFrame(draw);
+    }
   }, [entries, edges]);
 
   useEffect(() => {
     if (entries.length > 0) {
       // Reset sim when data changes
       simRef.current = null;
+      frameRef.current = 0;
       rafRef.current = requestAnimationFrame(draw);
     }
     return () => {
@@ -257,7 +257,7 @@ export default function KnowledgeGraph() {
           {/* HUD overlays */}
           <div style={{
             position: 'absolute', top: 8, left: 12,
-            fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text-dim)',
+            fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
             letterSpacing: '.08em',
           }}>
             {entries.length} NODES / {edges.length} EDGES
@@ -269,7 +269,7 @@ export default function KnowledgeGraph() {
             {Object.entries(DOMAIN_COLORS).map(([d, c]) => (
               <span key={d} style={{
                 display: 'flex', alignItems: 'center', gap: 4,
-                fontFamily: 'var(--mono)', fontSize: 8, color: 'var(--text-dim)',
+                fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
                 letterSpacing: '.06em',
               }}>
                 <span style={{
@@ -297,7 +297,7 @@ export default function KnowledgeGraph() {
             width: '100%',
             borderCollapse: 'collapse',
             fontFamily: 'var(--mono)',
-            fontSize: 10,
+            fontSize: 11,
           }}>
             <thead>
               <tr style={{ borderBottom: '1px solid rgba(255,255,255,.06)' }}>
@@ -308,7 +308,7 @@ export default function KnowledgeGraph() {
                     fontWeight: 400,
                     letterSpacing: '.1em',
                     color: 'var(--text-dim)',
-                    fontSize: 9,
+                    fontSize: 10,
                   }}>
                     {h}
                   </th>

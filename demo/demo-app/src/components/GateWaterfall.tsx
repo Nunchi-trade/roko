@@ -44,7 +44,21 @@ function drawRoundedRect(
   r: number,
 ) {
   ctx.beginPath();
-  ctx.roundRect(x, y, w, h, r);
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, w, h, r);
+  } else {
+    // Fallback for older browsers
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x, y + h, x, y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x, y, x + r, y, r);
+    ctx.closePath();
+  }
 }
 
 /** Gate waterfall timeline using Canvas 2D. */
@@ -53,7 +67,12 @@ export default function GateWaterfall({ runs, height = 360 }: GateWaterfallProps
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas || runs.length === 0) return;
+    if (!canvas) return;
+    if (runs.length === 0) {
+      const c = canvas.getContext('2d');
+      if (c) c.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;

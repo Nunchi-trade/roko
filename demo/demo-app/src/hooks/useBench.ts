@@ -191,6 +191,7 @@ export function useBench() {
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   const startRun = useCallback(async () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     clearSSE();
     setFeed([]);
 

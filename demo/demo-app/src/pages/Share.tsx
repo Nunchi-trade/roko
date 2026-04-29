@@ -36,7 +36,13 @@ export default function SharePage() {
   }, [token, get]);
 
   if (!loaded) {
-    return null;
+    return (
+      <div style={{ padding: '120px 40px', textAlign: 'center' }}>
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-dim)' }}>
+          Loading receipt...
+        </div>
+      </div>
+    );
   }
 
   if (error || !receipt) {

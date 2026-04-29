@@ -8,6 +8,7 @@ const VIEWS = [
   { to: '/dashboard/entries', label: 'Entries', end: false },
   { to: '/dashboard/routing', label: 'Routing', end: false },
   { to: '/dashboard/chain', label: 'Chain', end: false },
+  { to: '/dashboard/dreams', label: 'Dreams', end: false },
 ];
 
 const shellStyle: CSSProperties = {
@@ -50,7 +51,7 @@ const bodyStyle: CSSProperties = {
 export default function DashboardLayout() {
   return (
     <section style={shellStyle}>
-      <nav style={navStyle}>
+      <nav style={navStyle} aria-label="Dashboard sections">
         {VIEWS.map((view) => (
           <NavLink
             key={view.to}

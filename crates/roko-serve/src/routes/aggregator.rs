@@ -14,7 +14,9 @@ use base64::Engine;
 use futures::future::join_all;
 use futures::{SinkExt, StreamExt};
 use roko_agent_server::registration::AgentCard;
-use roko_core::{AgentTopology, AgentTopologyNode};
+// AgentTopology/AgentTopologyNode no longer used — topology handler returns
+// raw JSON matching the frontend shape.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -322,29 +324,57 @@ async fn agent_trace(
 
 async fn agent_topology(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<AgentTopology>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let agents = known_agents(&state).await?;
-    let nodes = agents
+
+    // Build nodes with the fields the frontend `AgentFleet` component expects:
+    //   { agent_id, role, endpoints }
+    let nodes: Vec<Value> = agents
         .iter()
-        .map(|agent| AgentTopologyNode {
-            id: agent.agent_id.clone(),
-            address: agent
+        .map(|agent| {
+            let role = agent
+                .capabilities
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "agent".to_string());
+            let endpoint = agent
                 .endpoints
                 .rest
                 .clone()
-                .unwrap_or_else(|| agent.card_uri.clone().unwrap_or_default()),
-            insights_posted: 0,
-            confirmations_given: 0,
-            challenges_given: 0,
-            total_weight: 0.0,
+                .unwrap_or_else(|| agent.card_uri.clone().unwrap_or_default());
+            json!({
+                "agent_id": agent.agent_id,
+                "role": role,
+                "endpoints": [endpoint],
+            })
         })
         .collect();
 
-    Ok(Json(AgentTopology {
-        nodes,
-        edges: Vec::new(),
-        timestamp: now_secs(),
-    }))
+    // Compute edges: agents that share domain tags are connected.
+    let mut edges: Vec<Value> = Vec::new();
+    for (i, a) in agents.iter().enumerate() {
+        for b in agents.iter().skip(i + 1) {
+            let shared = a
+                .domain_tags
+                .iter()
+                .filter(|tag| b.domain_tags.contains(tag))
+                .count();
+            if shared > 0 || a.domain_tags.is_empty() || b.domain_tags.is_empty() {
+                // Connect agents that share domain context, or all agents if
+                // domain tags are absent (sparse graphs are boring).
+                edges.push(json!({
+                    "from": a.agent_id,
+                    "to": b.agent_id,
+                    "weight": shared.max(1),
+                }));
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "nodes": nodes,
+        "edges": edges,
+    })))
 }
 
 async fn list_prediction_sessions(

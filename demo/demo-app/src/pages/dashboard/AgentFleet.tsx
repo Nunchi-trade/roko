@@ -193,7 +193,7 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
     const h = rect.height;
     const cx = w / 2;
     const cy = h / 2;
-    const nodeRadius = 14;
+    const nodeRadius = 20;
     const margin = 36;
 
     if (data.nodes.length === 0) {
@@ -223,7 +223,7 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
         frame: 0,
         positions: data.nodes.map((_, index) => {
           const angle = (index / data.nodes.length) * Math.PI * 2 - Math.PI / 2;
-          const radius = Math.min(w, h) * 0.26;
+          const radius = Math.min(w, h) * 0.35;
           return {
             x: cx + Math.cos(angle) * radius,
             y: cy + Math.sin(angle) * radius,
@@ -374,17 +374,18 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        ctx.font = '8px "JetBrains Mono", monospace';
+        ctx.font = '10px "JetBrains Mono", monospace';
         ctx.fillStyle = rgbaFromHex(color, 0.95);
-        ctx.fillText(node.role, point.x, point.y - nodeRadius - 11);
+        ctx.fillText(node.role, point.x, point.y - nodeRadius - 12);
 
-        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.font = '11px "JetBrains Mono", monospace';
         ctx.fillStyle = 'rgba(232, 226, 234, 0.92)';
-        ctx.fillText(node.agent_id, point.x, point.y + nodeRadius + 12);
+        ctx.fillText(node.agent_id, point.x, point.y + nodeRadius + 14);
       });
 
       sim.frame += 1;
-      if (sim.frame < 120 && runId === runIdRef.current) {
+      const energy = sim.positions.reduce((sum, p) => sum + p.vx * p.vx + p.vy * p.vy, 0);
+      if ((energy > 0.05 || sim.frame < 30) && sim.frame < 300 && runId === runIdRef.current) {
         rafRef.current = requestAnimationFrame(renderFrame);
       } else if (runId === runIdRef.current) {
         rafRef.current = null;
@@ -464,20 +465,22 @@ export default function AgentFleet() {
         <MosaicCell label="TASKS DONE" value={totalTasks || 827} color="rose" mono />
       </Mosaic>
 
-      {/* ═══ TOPOLOGY GRAPH ═══ */}
-      <Pane
-        title="AGENT TOPOLOGY"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>force-directed</span>}
-      >
-        <TopologyGraph data={topology} height={280} />
-      </Pane>
+      {/* ═══ TOPOLOGY + AGENT CARDS SIDE BY SIDE ═══ */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, flex: 1, minHeight: 0 }}>
+        <Pane
+          title="AGENT TOPOLOGY"
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>force-directed</span>}
+        >
+          <TopologyGraph data={topology} height={320} />
+        </Pane>
 
-      {/* ═══ AGENT GRID ═══ */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
-        gap: 16,
-      }}>
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          overflowY: 'auto',
+          maxHeight: 400,
+        }}>
         {agents.map((agent) => {
           const rep = agent.performance?.reputation ?? agent.reputation ?? 85;
           const active = isAgentActive(agent);
@@ -617,6 +620,7 @@ export default function AgentFleet() {
             </Pane>
           );
         })}
+        </div>
       </div>
     </div>
   );

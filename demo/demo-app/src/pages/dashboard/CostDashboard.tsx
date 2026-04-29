@@ -209,14 +209,6 @@ export default function CostDashboard() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 1200 }}>
-      {/* ═══ Keyframes ═══ */}
-      <style>{`
-        @keyframes pulse-dot {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.4; }
-        }
-      `}</style>
-
       {/* ═══ TOP MOSAIC: 6 stats ═══ */}
       <Mosaic columns={6}>
         <MosaicCell
@@ -230,7 +222,7 @@ export default function CostDashboard() {
                 animation: isOnline ? 'pulse-dot 2s ease-in-out infinite' : 'none',
                 display: 'inline-block',
               }} />
-              {isOnline ? 'Online' : 'Demo'}
+              <span style={{ fontFamily: 'var(--mono)', letterSpacing: '.04em' }}>{isOnline ? 'Online' : 'Demo'}</span>
             </span>
           }
           color="success"

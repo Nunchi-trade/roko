@@ -21,7 +21,7 @@ export default function GateBar({ gates }: GateBarProps) {
     <div className="gate-bar">
       {gates.map((g) => (
         <span key={g.name} className={`gate gate-${g.status}`}>
-          <span className="gate-icon">{ICONS[g.status]}</span>
+          <span className="gate-icon" aria-label={g.status}>{ICONS[g.status]}</span>
           {g.name}
         </span>
       ))}

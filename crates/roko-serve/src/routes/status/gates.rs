@@ -30,13 +30,24 @@ pub struct GateHistoryQuery {
     gate: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Pass `format=waterfall` to get items grouped by task_id with nested
+    /// rungs — the shape expected by the demo `GateWaterfall` component.
+    #[serde(default)]
+    format: Option<String>,
 }
 
 /// `GET /api/gates/history` — recent gate verdicts across all gates.
+///
+/// When called with `?format=waterfall`, items are grouped by task_id into
+/// `GateRun` objects with nested `rungs` — the shape the demo GateWaterfall
+/// component expects.
 pub async fn gates_history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GateHistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    if query.format.as_deref() == Some("waterfall") {
+        return gates_history_waterfall(&state, query.limit).await;
+    }
     let projections = RuntimeProjectionSet::load(&state).await?;
     let query = ProjectionQuery {
         gate: query.gate,
@@ -317,4 +328,105 @@ fn build_recent_gate_history(entries: &[Value], gate_filter: Option<&str>) -> Ve
     });
 
     history
+}
+
+// ── waterfall format ─────────────────────────────────────────────────
+
+/// Map numeric rung IDs to the names the frontend expects.
+pub fn rung_id_to_name(rung: u32) -> &'static str {
+    match rung {
+        0 => "compile",
+        1 => "clippy",
+        2 => "test",
+        3 => "diff",
+        4 => "fmt",
+        5 => "custom",
+        6 => "judge",
+        _ => "unknown",
+    }
+}
+
+/// `?format=waterfall` — group gate history items by task_id into `GateRun`
+/// objects with nested `GateRung` arrays.  This is the shape the demo
+/// `GateWaterfall` component expects:
+///
+/// ```json
+/// [
+///   {
+///     "task_id": "...",
+///     "timestamp": "...",
+///     "rungs": [
+///       { "name": "compile", "rung": 0, "status": "passed", "duration_ms": 123 }
+///     ]
+///   }
+/// ]
+/// ```
+async fn gates_history_waterfall(
+    state: &AppState,
+    limit: Option<usize>,
+) -> Result<Json<Value>, ApiError> {
+    let entries = read_gate_entries(state).await?;
+    let flat = build_recent_gate_history(&entries, None);
+
+    // Group by task_id.
+    let mut by_task: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for item in &flat {
+        let task_id = item
+            .get("task_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        by_task.entry(task_id).or_default().push(item.clone());
+    }
+
+    let limit = limit.unwrap_or(20).min(MAX_JSONL_RESULTS);
+    let runs: Vec<Value> = by_task
+        .into_iter()
+        .rev()
+        .take(limit)
+        .map(|(task_id, items)| {
+            let timestamp = items
+                .first()
+                .and_then(|i| i.get("created_at_ms"))
+                .cloned()
+                .unwrap_or(Value::Null);
+
+            let rungs: Vec<Value> = items
+                .iter()
+                .map(|item| {
+                    let rung_num = item
+                        .get("rung")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32;
+                    let passed = item
+                        .get("passed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let duration_ms = item
+                        .get("duration_ms")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let name = item
+                        .get("gate")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| rung_id_to_name(rung_num));
+
+                    json!({
+                        "name": name,
+                        "rung": rung_num,
+                        "status": if passed { "passed" } else { "failed" },
+                        "duration_ms": duration_ms,
+                    })
+                })
+                .collect();
+
+            json!({
+                "task_id": task_id,
+                "timestamp": timestamp,
+                "rungs": rungs,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!(runs)))
 }

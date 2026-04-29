@@ -33,8 +33,10 @@
 }
 .builder-presets {
   display: flex;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 4px;
   margin-left: auto;
+  max-width: 60%;
 }
 .preset-btn {
   background: var(--glass-bg);

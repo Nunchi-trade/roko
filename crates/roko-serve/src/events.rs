@@ -425,33 +425,34 @@ pub enum ServerEvent {
 
     /// A bench run was started.
     BenchRunStarted {
-        run_id: String,
+        /// Renamed from `run_id` to match the frontend `BenchSSEEvent` type.
+        bench_id: String,
         suite_id: String,
         total_tasks: usize,
     },
 
     /// A bench task started executing.
     BenchTaskStarted {
-        run_id: String,
+        bench_id: String,
         task_id: String,
+        task_name: String,
         task_index: usize,
         total_tasks: usize,
     },
 
-    /// A bench task completed.
+    /// A bench task completed — includes the full `BenchTaskResult` object
+    /// that the frontend expects under the `result` key.
     BenchTaskCompleted {
-        run_id: String,
+        bench_id: String,
         task_id: String,
-        passed: bool,
-        duration_ms: u64,
-        cost_usd: f64,
+        result: serde_json::Value,
     },
 
     /// Learning artifacts created while finishing a bench task.
     #[serde(rename = "BenchLearningEvent")]
     BenchLearningEvent {
         /// Bench run identifier.
-        run_id: String,
+        bench_id: String,
         /// Bench task identifier.
         task_id: String,
         /// Playbooks created for this task.
@@ -466,20 +467,17 @@ pub enum ServerEvent {
 
     /// Overall progress of a bench run.
     BenchProgress {
-        run_id: String,
+        bench_id: String,
         completed: usize,
         total: usize,
-        passed: usize,
-        failed: usize,
+        cost_so_far: f64,
     },
 
-    /// A bench run completed.
+    /// A bench run completed — includes the full `BenchRunSummary` that
+    /// the frontend expects under the `summary` key.
     BenchRunCompleted {
-        run_id: String,
-        suite_id: String,
-        pass_rate: f64,
-        total_cost_usd: f64,
-        total_duration_ms: u64,
+        bench_id: String,
+        summary: serde_json::Value,
     },
 }
 
@@ -654,7 +652,7 @@ mod tests {
     #[test]
     fn bench_learning_event_serializes_with_counts() {
         let event = ServerEvent::BenchLearningEvent {
-            run_id: "run-1".into(),
+            bench_id: "run-1".into(),
             task_id: "task-7".into(),
             playbooks_created: 1,
             anti_patterns_created: 2,
@@ -664,7 +662,7 @@ mod tests {
 
         let json = serde_json::to_value(event).expect("serialize bench learning event");
         assert_eq!(json["type"], "BenchLearningEvent");
-        assert_eq!(json["run_id"], "run-1");
+        assert_eq!(json["bench_id"], "run-1");
         assert_eq!(json["task_id"], "task-7");
         assert_eq!(json["playbooks_created"], 1);
         assert_eq!(json["anti_patterns_created"], 2);

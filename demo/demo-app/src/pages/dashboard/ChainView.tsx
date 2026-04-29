@@ -43,6 +43,7 @@ export default function ChainView() {
   const [gateHistory, setGateHistory] = useState<GateRun[]>([]);
   const [typedHash, setTypedHash] = useState('');
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     get<HealthResponse>('/api/health').then((h) => {
@@ -53,7 +54,7 @@ export default function ChainView() {
       }
     }).catch(() => {});
 
-    get<GateRun[]>('/api/gates/history?limit=20').then((data) => {
+    get<GateRun[]>('/api/gates/history?limit=20&format=waterfall').then((data) => {
       if (Array.isArray(data)) {
         setGateHistory(data);
       }
@@ -69,7 +70,7 @@ export default function ChainView() {
       if (idx >= DEMO_HASH.length) {
         if (intervalRef.current) clearInterval(intervalRef.current);
         // Restart after a pause
-        setTimeout(() => {
+        timeoutRef.current = setTimeout(() => {
           idx = 0;
           setTypedHash('');
           intervalRef.current = setInterval(() => {
@@ -85,135 +86,55 @@ export default function ChainView() {
 
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
   }, []);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 1200 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 1200 }}>
+      <style>{`
+        @keyframes blink-cursor {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0; }
+        }
+      `}</style>
+
       {/* ═══ TOP MOSAIC ═══ */}
-      <Mosaic columns={3}>
-        <MosaicCell label="STATUS" value="Phase 2" color="bone" />
-        <MosaicCell label="EPISODES LOGGED" value={episodes.toLocaleString()} color="rose" mono />
-        <MosaicCell label="GATE RESULTS" value={gateResults.toLocaleString()} color="success" mono />
+      <Mosaic columns={4}>
+        <MosaicCell label="STATUS" value="Active" color="success" />
+        <MosaicCell label="EPISODES" value={episodes.toLocaleString()} color="rose" mono />
+        <MosaicCell label="GATE RESULTS" value={gateResults.toLocaleString()} color="bone" mono />
+        <MosaicCell label="HASH" value={
+          <code style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)', letterSpacing: '.02em' }}>
+            {typedHash.slice(0, 16)}...
+            <span style={{ display: 'inline-block', width: 1, height: '1em', background: 'var(--rose-dim)', marginLeft: 1, verticalAlign: 'text-bottom', animation: 'blink-cursor .8s step-end infinite' }} />
+          </code>
+        } color="dream" />
       </Mosaic>
 
-      {/* ═══ EXPLANATION PANE ═══ */}
-      <Pane
-        title="TAMPER-PROOF AGENT HISTORY"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>Phase 2</span>}
-      >
-        <div style={{
-          textAlign: 'center',
-          maxWidth: 560,
-          margin: '0 auto',
-          padding: '8px 0 16px',
-        }}>
-          <div style={{
-            fontSize: 32,
-            color: 'var(--text-dim)',
-            marginBottom: 16,
-            lineHeight: 1,
-          }}>
-            &#x26D3;
-          </div>
-          <h3 style={{
-            fontFamily: 'var(--display)',
-            fontSize: 20,
-            fontWeight: 300,
-            color: 'var(--text-strong)',
-            marginBottom: 10,
-          }}>
-            Cryptographic Agent Trail
-          </h3>
-          <p style={{
-            fontFamily: 'var(--display)',
-            fontSize: 14,
-            fontWeight: 300,
-            color: 'var(--text-soft)',
-            lineHeight: 1.7,
-          }}>
-            Every agent action is logged with cryptographic hashes. When the chain
-            backend is connected, actions become tamper-proof witnesses anchored on-chain.
-            The custody trail is already being recorded — chain anchoring activates in Phase 2.
-          </p>
-        </div>
-      </Pane>
-
-      {/* ═══ FEATURES LIST ═══ */}
-      <Pane title="FEATURES" flat>
-        <div>
-          {FEATURES.map((f, i) => (
-            <div
-              key={f}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                padding: '12px 16px',
-                borderBottom: i < FEATURES.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
-                fontFamily: 'var(--mono)',
-                fontSize: 11,
-                color: 'var(--text-primary)',
-              }}
-            >
-              <span style={{
-                color: 'var(--success)',
-                fontSize: 13,
-                fontWeight: 600,
-              }}>
-                &#x2713;
-              </span>
-              <span>{f}</span>
+      {/* ═══ COMBINED: explanation + features ═══ */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <Pane title="CRYPTOGRAPHIC AGENT TRAIL">
+          <div style={{ padding: '4px 0 8px' }}>
+            <p style={{ fontFamily: 'var(--display)', fontSize: 13, fontWeight: 300, color: 'var(--text-soft)', lineHeight: 1.7, margin: 0 }}>
+              Every agent action is logged with cryptographic hashes. When the chain
+              backend is connected, actions become tamper-proof witnesses anchored on-chain.
+            </p>
+            <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {FEATURES.map((f) => (
+                <div key={f} style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-primary)' }}>
+                  <span style={{ color: 'var(--success)', fontSize: 12 }}>&#x2713;</span>
+                  <span>{f}</span>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      </Pane>
+          </div>
+        </Pane>
 
-      {/* ═══ GATE WATERFALL ═══ */}
-      <Pane
-        title="GATE PIPELINE WATERFALL"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>7-rung pipeline</span>}
-      >
-        <GateWaterfall runs={gateHistory} height={340} />
-      </Pane>
-
-      {/* ═══ HASH DISPLAY ═══ */}
-      <Pane title="LATEST WITNESS HASH" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>SHA-256</span>}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '16px 0',
-        }}>
-          <code style={{
-            fontFamily: 'var(--mono)',
-            fontSize: 11,
-            color: 'var(--text-dim)',
-            letterSpacing: '.04em',
-            lineHeight: 1.6,
-            wordBreak: 'break-all',
-            textAlign: 'center',
-            minHeight: '1.6em',
-          }}>
-            {typedHash}
-            <span style={{
-              display: 'inline-block',
-              width: 1,
-              height: '1em',
-              background: 'var(--rose-dim)',
-              marginLeft: 1,
-              verticalAlign: 'text-bottom',
-              animation: 'blink-cursor .8s step-end infinite',
-            }} />
-          </code>
-        </div>
-        <style>{`
-          @keyframes blink-cursor {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0; }
-          }
-        `}</style>
-      </Pane>
+        <Pane title="GATE PIPELINE WATERFALL" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>7-rung</span>}>
+          <GateWaterfall runs={gateHistory} height={260} />
+        </Pane>
+      </div>
     </div>
   );
 }

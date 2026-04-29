@@ -11,7 +11,7 @@ import KnowledgeGraph from './pages/dashboard/KnowledgeGraph';
 import ChainView from './pages/dashboard/ChainView';
 import CascadeRouter from './pages/dashboard/CascadeRouter';
 import KnowledgeEntries from './pages/dashboard/KnowledgeEntries';
-import ShareView from './pages/dashboard/ShareView';
+import DreamsView from './pages/dashboard/DreamsView';
 import Demo from './pages/Demo';
 import Terminal from './pages/Terminal';
 import Builder from './pages/Builder';
@@ -37,7 +37,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="chain" element={<ChainView />} />
               <Route path="entries" element={<KnowledgeEntries />} />
               <Route path="routing" element={<CascadeRouter />} />
-              <Route path="share/:token" element={<ShareView />} />
+              <Route path="dreams" element={<DreamsView />} />
             </Route>
             <Route path="demo" element={<Demo />} />
             <Route path="terminal" element={<Terminal />} />

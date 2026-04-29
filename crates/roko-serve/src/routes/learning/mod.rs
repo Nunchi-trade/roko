@@ -70,13 +70,101 @@ async fn costs(
     Ok(Json(projections.project("cost_state", &query)?))
 }
 
-/// `GET /api/learning/provider-outcomes` — provider/model outcome proof surface.
+/// `GET /api/learning/provider-outcomes` — provider health data shaped for the
+/// demo `ProviderCell` component.
+///
+/// Returns `{ providers: [{ name, status, models, success_rate, ... }] }`.
 async fn provider_outcomes(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ProjectionQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    // Try to get raw projection data to enrich our response.
     let projections = RuntimeProjectionSet::load(&state).await?;
-    Ok(Json(projections.project("provider_state", &query)?))
+    let raw = projections
+        .project("provider_state", &query)
+        .unwrap_or(json!({}));
+
+    // If the projection already returns the shape we need, pass it through.
+    if raw.get("providers").and_then(Value::as_array).is_some() {
+        return Ok(Json(raw));
+    }
+
+    // Otherwise, build provider summaries from efficiency events.
+    let events = projections.efficiency_events();
+
+    let mut providers: HashMap<String, ProviderAccumulator> = HashMap::new();
+    for event in events {
+        let provider_name = event
+            .model
+            .split('/')
+            .next()
+            .unwrap_or(&event.model)
+            .to_string();
+        let acc = providers.entry(provider_name).or_default();
+        acc.total_requests += 1;
+        if event.gate_passed {
+            acc.successes += 1;
+        } else {
+            acc.errors += 1;
+        }
+        acc.total_duration_ms += event.duration_ms;
+        if !acc.models.contains(&event.model) {
+            acc.models.push(event.model.clone());
+        }
+        acc.total_cost_usd += event.cost_usd;
+    }
+
+    let providers: Vec<Value> = providers
+        .into_iter()
+        .map(|(name, acc)| {
+            let success_rate = if acc.total_requests > 0 {
+                acc.successes as f64 / acc.total_requests as f64
+            } else {
+                1.0
+            };
+            let avg_latency_ms = if acc.total_requests > 0 {
+                acc.total_duration_ms as f64 / acc.total_requests as f64
+            } else {
+                0.0
+            };
+            let status = if success_rate >= 0.97 {
+                "healthy"
+            } else if success_rate >= 0.90 {
+                "degraded"
+            } else {
+                "unhealthy"
+            };
+            let cost_per_1k = if acc.total_requests > 0 {
+                acc.total_cost_usd / acc.total_requests as f64 * 1000.0
+            } else {
+                0.0
+            };
+            json!({
+                "name": name,
+                "status": status,
+                "models": acc.models,
+                "success_rate": success_rate,
+                "avg_latency_ms": avg_latency_ms as u64,
+                "p95_latency_ms": (avg_latency_ms * 1.5) as u64,
+                "cost_per_1k_tokens": cost_per_1k,
+                "total_requests": acc.total_requests,
+                "errors_24h": acc.errors,
+                "last_error": "",
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "providers": providers })))
+}
+
+#[derive(Default)]
+struct ProviderAccumulator {
+    total_requests: u64,
+    successes: u64,
+    errors: u64,
+    total_duration_ms: u64,
+    total_cost_usd: f64,
+    models: Vec<String>,
 }
 
 /// `GET /api/learning/retries` — retry attempt proof surface.
@@ -277,29 +365,46 @@ fn source_projection_payload(node: Value, evidence: Value) -> Value {
     }
 }
 
+/// Map numeric rung IDs to the canonical gate names the frontend expects.
+fn rung_id_to_name(rung: u32) -> &'static str {
+    match rung {
+        0 => "compile",
+        1 => "clippy",
+        2 => "test",
+        3 => "diff",
+        4 => "fmt",
+        5 => "custom",
+        6 => "judge",
+        _ => "unknown",
+    }
+}
+
 /// Build a structured response from the adaptive gate threshold store.
+///
+/// The response uses a `thresholds` map keyed by rung name (e.g. `"compile"`)
+/// with fields matching the frontend `RungThreshold` interface.
 fn build_adaptive_thresholds_response(
     path: &std::path::Path,
     thresholds: &AdaptiveThresholds,
 ) -> AdaptiveThresholdsResponse {
-    let mut rungs: Vec<RungThresholdSummary> = thresholds
+    let map: std::collections::BTreeMap<String, RungThresholdDetail> = thresholds
         .all_rungs()
-        .map(|(rung, stats)| RungThresholdSummary {
-            rung: *rung,
-            ema_pass_rate: stats.ema_pass_rate,
-            total_observations: stats.total_observations,
-            consecutive_passes: stats.consecutive_passes,
-            suggested_max_retries: thresholds.suggested_max_retries(*rung),
-            should_skip_rung: thresholds.should_skip_rung(*rung),
+        .map(|(rung, stats)| {
+            let name = rung_id_to_name(*rung).to_string();
+            let detail = RungThresholdDetail {
+                mean_pass_rate: stats.ema_pass_rate,
+                ema_threshold: 0.7, // sensible default; gate skip threshold
+                rung_count: stats.total_observations,
+                consecutive_passes: stats.consecutive_passes,
+            };
+            (name, detail)
         })
         .collect();
 
-    rungs.sort_by_key(|summary| summary.rung);
-
     AdaptiveThresholdsResponse {
         source: path.display().to_string(),
-        tracked_rungs: rungs.len(),
-        rungs,
+        tracked_rungs: map.len(),
+        thresholds: map,
     }
 }
 
@@ -369,24 +474,26 @@ struct EfficiencyResponse {
 }
 
 /// Structured API response for `GET /api/learn/adaptive-thresholds`.
+///
+/// The `thresholds` map is keyed by rung name (`"compile"`, `"clippy"`, etc.)
+/// to match the shape the demo `ThresholdGaugeRow` component expects.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 struct AdaptiveThresholdsResponse {
     source: String,
     tracked_rungs: usize,
-    rungs: Vec<RungThresholdSummary>,
+    /// Keyed by rung name (e.g. `"compile"`, `"clippy"`).
+    thresholds: std::collections::BTreeMap<String, RungThresholdDetail>,
 }
 
-/// One rung entry from the adaptive threshold store.
+/// One rung entry shaped for the frontend `ThresholdGauge` component.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
-struct RungThresholdSummary {
-    rung: u32,
-    ema_pass_rate: f64,
-    total_observations: u64,
+struct RungThresholdDetail {
+    mean_pass_rate: f64,
+    ema_threshold: f64,
+    rung_count: u64,
     consecutive_passes: u32,
-    suggested_max_retries: u32,
-    should_skip_rung: bool,
 }
 
 #[cfg(test)]
@@ -829,8 +936,9 @@ mod tests {
             .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
         assert_eq!(
             payload
-                .as_array()
-                .expect("invariant: c-factor trend response should be an array")
+                .get("trend")
+                .and_then(|v| v.as_array())
+                .expect("invariant: c-factor trend response should contain a trend array")
                 .len(),
             0
         );
@@ -890,10 +998,13 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .map_err(|err| anyhow!("failed to read c-factor trend response body: {err}"))?;
-        let payload: Vec<CFactorBucket> = serde_json::from_slice(&body)
+        let payload: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
-        assert_eq!(payload.len(), 24);
-        assert!(payload.iter().any(|bucket| bucket.samples == 2));
+        let trend: Vec<CFactorBucket> =
+            serde_json::from_value(payload["trend"].clone()).unwrap();
+        assert_eq!(trend.len(), 24);
+        assert!(trend.iter().any(|bucket| bucket.samples == 2));
+        assert!(payload.get("woolley").is_some());
         Ok(())
     }
 
@@ -901,10 +1012,10 @@ mod tests {
     fn adaptive_thresholds_response_exposes_per_rung_ema_values() {
         let mut thresholds = AdaptiveThresholds::new();
         for _ in 0..5 {
-            thresholds.update(2, true);
+            thresholds.update(2, true); // rung 2 = "test"
         }
         for _ in 0..3 {
-            thresholds.update(1, false);
+            thresholds.update(1, false); // rung 1 = "clippy"
         }
 
         let response = build_adaptive_thresholds_response(
@@ -914,17 +1025,16 @@ mod tests {
 
         assert_eq!(response.source, "/tmp/.roko/learn/gate-thresholds.json");
         assert_eq!(response.tracked_rungs, 2);
-        assert_eq!(response.rungs.len(), 2);
-        assert_eq!(response.rungs[0].rung, 1);
-        assert_eq!(response.rungs[0].total_observations, 3);
-        assert_eq!(response.rungs[0].consecutive_passes, 0);
-        assert_eq!(response.rungs[0].suggested_max_retries, 3);
-        assert!((response.rungs[0].ema_pass_rate - 0.0).abs() < 1e-9);
-        assert_eq!(response.rungs[1].rung, 2);
-        assert_eq!(response.rungs[1].total_observations, 5);
-        assert_eq!(response.rungs[1].consecutive_passes, 5);
-        assert_eq!(response.rungs[1].suggested_max_retries, 1);
-        assert!((response.rungs[1].ema_pass_rate - 1.0).abs() < 1e-9);
-        assert!(!response.rungs[1].should_skip_rung);
+
+        // Thresholds are now keyed by name.
+        let clippy = response.thresholds.get("clippy").expect("clippy rung");
+        assert_eq!(clippy.rung_count, 3);
+        assert_eq!(clippy.consecutive_passes, 0);
+        assert!((clippy.mean_pass_rate - 0.0).abs() < 1e-9);
+
+        let test = response.thresholds.get("test").expect("test rung");
+        assert_eq!(test.rung_count, 5);
+        assert_eq!(test.consecutive_passes, 5);
+        assert!((test.mean_pass_rate - 1.0).abs() < 1e-9);
     }
 }

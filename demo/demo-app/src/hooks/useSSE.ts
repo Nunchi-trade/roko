@@ -26,6 +26,7 @@ export function useSSE(path: string) {
       es.onerror = () => {
         setConnected(false);
         es.close();
+        clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connect, 3_000);
       };
     }

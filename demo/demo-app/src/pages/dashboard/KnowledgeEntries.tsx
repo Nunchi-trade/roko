@@ -1,6 +1,6 @@
 import { type CSSProperties, useEffect, useMemo, useState } from 'react';
 import StatCard from '../../components/StatCard';
-import { useApi } from '../../hooks/useApi';
+import { useApiWithFallback } from '../../hooks/useApiWithFallback';
 
 interface KnowledgeEntry {
   id: string;
@@ -89,7 +89,7 @@ function percent(value?: number) {
 }
 
 export default function KnowledgeEntries() {
-  const { get } = useApi();
+  const { get } = useApiWithFallback();
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

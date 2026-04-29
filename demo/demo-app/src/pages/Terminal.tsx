@@ -3,7 +3,7 @@ import { useTerminal } from '../hooks/useTerminal';
 import './Terminal.css';
 
 /** Individual terminal pane using useTerminal hook internally. */
-function TerminalPaneReal({ sessionId, label }: { sessionId: string; label: string }) {
+function TerminalPaneReal({ sessionId, label, onClose }: { sessionId: string; label: string; onClose?: () => void }) {
   const { attach, status } = useTerminal(sessionId);
 
   return (
@@ -12,6 +12,9 @@ function TerminalPaneReal({ sessionId, label }: { sessionId: string; label: stri
         <span className={`term-conn-dot ${status}`} />
         <span className="term-pane-label">{label}</span>
         <span className="term-pane-status">{status}</span>
+        {onClose && (
+          <button className="term-close-btn" onClick={onClose} aria-label={`Close ${label}`}>&times;</button>
+        )}
       </div>
       <div className="term-pane-body" ref={attach} />
     </div>
@@ -34,6 +37,10 @@ export default function Terminal() {
     setTerminals(prev => [...prev, { id: `t-${Date.now()}-${n}`, label: `shell ${n}` }]);
   }, [terminals.length]);
 
+  const removeTerminal = useCallback((id: string) => {
+    setTerminals(prev => prev.filter(t => t.id !== id));
+  }, []);
+
   const clearAll = useCallback(() => {
     setTerminals([]);
   }, []);
@@ -51,6 +58,7 @@ export default function Terminal() {
               key={c}
               className={`term-btn${columns === c ? ' active' : ''}`}
               onClick={() => setColumns(c)}
+              aria-label={`${c} column${c > 1 ? 's' : ''}`}
             >
               {c}
             </button>
@@ -64,7 +72,7 @@ export default function Terminal() {
           <div className={`term-grid cols-${columns}`}>
             {terminals.map(t => (
               <div key={t.id} className="term-cell">
-                <TerminalPaneReal sessionId={t.id} label={t.label} />
+                <TerminalPaneReal sessionId={t.id} label={t.label} onClose={() => removeTerminal(t.id)} />
               </div>
             ))}
           </div>

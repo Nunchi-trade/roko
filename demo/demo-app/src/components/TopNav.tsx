@@ -51,7 +51,7 @@ export default function TopNav() {
   return (
     <nav className="topnav">
       <Link to="/" className="brand" style={{ textDecoration: 'none' }}>
-        <span className="mark" />
+        <span className="mark" aria-hidden="true" />
         <b>ROKO</b>
       </Link>
       <div className="links">

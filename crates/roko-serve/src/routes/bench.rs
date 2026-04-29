@@ -12,7 +12,7 @@ use anyhow::Context;
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::{self, Stream};
 use serde::Deserialize;
@@ -31,10 +31,16 @@ use roko_neuro::KnowledgeStore;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/bench/run", post(start_bench_run))
-        .route("/bench/run/{id}", get(get_bench_run))
+        .route("/bench/run/{id}", get(get_bench_run).delete(delete_bench_run))
         .route("/bench/run/{id}/status", get(bench_run_status))
-        .route("/bench/run/{id}", delete(delete_bench_run))
-        .route("/bench/runs", get(list_bench_runs))
+        // Frontend uses /bench/runs (plural) for both listing and starting.
+        .route("/bench/runs", get(list_bench_runs).post(start_bench_run))
+        // Frontend polls /bench/runs/:id for run status.
+        .route("/bench/runs/{id}", get(get_bench_run))
+        // Frontend subscribes to /bench/runs/:id/events for SSE.
+        .route("/bench/runs/{id}/events", get(bench_events_sse))
+        // Frontend cancels via /bench/runs/:id/cancel.
+        .route("/bench/runs/{id}/cancel", post(delete_bench_run))
         .route("/bench/runs/compare", get(compare_bench_runs))
         .route("/bench/suites", get(list_suites))
         .route("/bench/suites/{id}", get(get_suite))
@@ -54,7 +60,8 @@ struct StartBenchRequest {
     suite_id: String,
     #[serde(default)]
     label: Option<String>,
-    #[serde(default)]
+    /// Accept both `overrides` (backend canonical) and `config` (frontend sends).
+    #[serde(default, alias = "config")]
     overrides: BenchConfigOverrides,
 }
 
@@ -136,7 +143,7 @@ async fn start_bench_run(
 
     // Publish start event.
     state.event_bus.publish(ServerEvent::BenchRunStarted {
-        run_id: run_id.clone(),
+        bench_id: run_id.clone(),
         suite_id: suite.id.clone(),
         total_tasks: suite.tasks.len(),
     });
@@ -176,8 +183,6 @@ async fn execute_bench_run(
 ) {
     let total_tasks = suite.tasks.len();
     let mut results = Vec::new();
-    let mut passed_count = 0usize;
-    let mut failed_count = 0usize;
 
     let bench_workdir = match scaffold_bench_workdir(&suite.id, &run_id).await {
         Ok(path) => path,
@@ -234,8 +239,9 @@ async fn execute_bench_run(
     for (idx, task) in suite.tasks.iter().enumerate() {
         // Publish task start.
         state.event_bus.publish(ServerEvent::BenchTaskStarted {
-            run_id: run_id.clone(),
+            bench_id: run_id.clone(),
             task_id: task.id.clone(),
+            task_name: task.name.clone(),
             task_index: idx,
             total_tasks,
         });
@@ -306,30 +312,25 @@ async fn execute_bench_run(
             },
         };
 
-        if task_result.passed {
-            passed_count += 1;
-        } else {
-            failed_count += 1;
-        }
-
-        // Publish task completion.
+        // Publish task completion with the full result object.
+        let result_value = serde_json::to_value(&task_result).unwrap_or_default();
         state.event_bus.publish(ServerEvent::BenchTaskCompleted {
-            run_id: run_id.clone(),
+            bench_id: run_id.clone(),
             task_id: task_result.task_id.clone(),
-            passed: task_result.passed,
-            duration_ms: task_result.duration_ms,
-            cost_usd: task_result.cost_usd,
+            result: result_value,
         });
 
         results.push(task_result);
 
+        // Compute cumulative cost so far.
+        let cost_so_far: f64 = results.iter().map(|r| r.cost_usd).sum();
+
         // Publish progress.
         state.event_bus.publish(ServerEvent::BenchProgress {
-            run_id: run_id.clone(),
+            bench_id: run_id.clone(),
             completed: results.len(),
             total: total_tasks,
-            passed: passed_count,
-            failed: failed_count,
+            cost_so_far,
         });
 
         if let Some((playbook_store, knowledge_store)) = learning_stores.as_ref() {
@@ -352,7 +353,7 @@ async fn execute_bench_run(
                     .unwrap_or(0);
 
                 state.event_bus.publish(ServerEvent::BenchLearningEvent {
-                    run_id: run_id.clone(),
+                    bench_id: run_id.clone(),
                     task_id: task.id.clone(),
                     playbooks_created,
                     anti_patterns_created,
@@ -398,13 +399,11 @@ async fn execute_bench_run(
     };
     let _ = bench::update_index_entry(&state.workdir, &index_entry).await;
 
-    // Publish completion event.
+    // Publish completion event with the full summary object.
+    let summary_value = serde_json::to_value(&summary).unwrap_or_default();
     state.event_bus.publish(ServerEvent::BenchRunCompleted {
-        run_id: run_id.clone(),
-        suite_id: suite.id,
-        pass_rate: summary.pass_rate,
-        total_cost_usd: summary.total_cost_usd,
-        total_duration_ms: summary.total_duration_ms,
+        bench_id: run_id.clone(),
+        summary: summary_value,
     });
 
     // Clean up handle.
@@ -573,11 +572,89 @@ async fn upload_suite(
     ))
 }
 
-/// `GET /api/bench/models` -- list available models from config.
+/// `GET /api/bench/models` -- list available models with full pricing info.
+///
+/// Returns `BenchModel[]` matching the frontend type:
+/// `{ id, name, provider, cost_per_1k_input, cost_per_1k_output, max_tokens, context_window }`
 async fn list_models(State(state): State<Arc<AppState>>) -> Json<Value> {
     let config = state.load_roko_config();
-    let models = bench::list_models_from_config(&config);
-    Json(json!({ "models": models }))
+    let slugs = bench::list_models_from_config(&config);
+
+    let models: Vec<Value> = slugs
+        .into_iter()
+        .map(|slug| {
+            let (cost_in, cost_out) = model_pricing(&slug);
+            let provider = infer_provider(&slug);
+            let context_window = infer_context_window(&slug);
+            json!({
+                "id": slug,
+                "name": slug,
+                "provider": provider,
+                "cost_per_1k_input": cost_in,
+                "cost_per_1k_output": cost_out,
+                "max_tokens": 8192,
+                "context_window": context_window,
+            })
+        })
+        .collect();
+
+    Json(json!(models))
+}
+
+/// Return (input_cost_per_1k, output_cost_per_1k) for a model slug.
+fn model_pricing(slug: &str) -> (f64, f64) {
+    let s = slug.to_lowercase();
+    if s.contains("haiku") {
+        (0.00025, 0.00125)
+    } else if s.contains("opus") {
+        (0.015, 0.075)
+    } else if s.contains("sonnet") {
+        (0.003, 0.015)
+    } else if s.contains("gpt-4o-mini") {
+        (0.00015, 0.0006)
+    } else if s.contains("gpt-4o") || s.contains("gpt-4") {
+        (0.005, 0.015)
+    } else if s.contains("o3-mini") || s.contains("o1-mini") {
+        (0.0011, 0.0044)
+    } else if s.contains("gemini") {
+        (0.00125, 0.01)
+    } else if s.contains("llama") || s.contains("cerebras") {
+        (0.0001, 0.0001)
+    } else {
+        (0.003, 0.015)
+    }
+}
+
+fn infer_provider(slug: &str) -> &'static str {
+    let s = slug.to_lowercase();
+    if s.contains("claude") || s.contains("haiku") || s.contains("sonnet") || s.contains("opus") {
+        "Anthropic"
+    } else if s.contains("gpt") || s.contains("o3") || s.contains("o1") {
+        "OpenAI"
+    } else if s.contains("gemini") {
+        "Google"
+    } else if s.contains("llama") || s.contains("cerebras") {
+        "Cerebras"
+    } else if s.contains("codex") {
+        "OpenAI"
+    } else {
+        "Unknown"
+    }
+}
+
+fn infer_context_window(slug: &str) -> u64 {
+    let s = slug.to_lowercase();
+    if s.contains("haiku") || s.contains("sonnet") || s.contains("opus") {
+        200_000
+    } else if s.contains("gpt-4o") {
+        128_000
+    } else if s.contains("gemini") {
+        1_000_000
+    } else if s.contains("llama") {
+        128_000
+    } else {
+        128_000
+    }
 }
 
 /// `GET /api/bench/pareto` -- compute pareto frontier.

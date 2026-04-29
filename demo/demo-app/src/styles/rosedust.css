@@ -51,6 +51,16 @@
   --mono: "JetBrains Mono", ui-monospace, monospace;
   --display: "Fraunces", "Times New Roman", serif;
 
+  /* ── aliases (match inline usage) ── */
+  --font-serif: var(--serif);
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+  --glass-2-border: var(--glass-border);
+  --raised: var(--bg-raised);
+  --text: var(--text-primary);
+  --fail: var(--rose-bright);
+  --danger: #cc5555;
+
   /* ── motion ── */
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 
@@ -96,6 +106,12 @@ a { color: var(--rose-glow); text-decoration: none; transition: color .2s }
 a:hover { color: var(--bone-bright) }
 
 b, strong { font-weight: 400; color: var(--text-strong) }
+
+/* ── shared keyframes ── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
 
 em { font-style: italic; color: var(--rose-glow) }
 

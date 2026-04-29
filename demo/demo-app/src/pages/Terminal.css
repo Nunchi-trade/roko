@@ -199,6 +199,20 @@
   color: var(--text-ghost);
   letter-spacing: .06em;
 }
+.term-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-ghost);
+  font-size: 14px;
+  padding: 0 4px;
+  margin-left: 6px;
+  cursor: pointer;
+  line-height: 1;
+  transition: color 200ms var(--ease);
+}
+.term-close-btn:hover {
+  color: var(--rose-bright);
+}
 .term-pane-body {
   flex: 1;
   min-height: 0;

@@ -13,19 +13,12 @@ export function useServerHealth(intervalMs = 5000) {
 
   useEffect(() => {
     let cancelled = false;
-    let checked = false;
     const check = async () => {
       try {
         const res = await fetch(`${SERVE_URL}/health`, { signal: AbortSignal.timeout(2000) });
         if (!cancelled) setStatus(res.ok ? 'connected' : 'disconnected');
-        checked = true;
       } catch {
-        if (!cancelled) {
-          // On first check failure, show as connected (demo mode)
-          // so the landing page looks alive for investors
-          setStatus(checked ? 'disconnected' : 'connected');
-          checked = true;
-        }
+        if (!cancelled) setStatus('disconnected');
       }
     };
     check();

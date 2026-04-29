@@ -96,7 +96,7 @@ export default function Builder() {
     setFiles([]);
     setGates(g => g.map(gate => ({ ...gate, status: 'pending' as const })));
 
-    const cmd = `${getRoko()} run "${text.trim()}"`;
+    const cmd = `${getRoko()} run "${text.trim()}" --model ${selectedModel}`;
 
     await showCmd(h, cmd, {
       timeout: 120000,
