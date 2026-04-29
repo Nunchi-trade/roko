@@ -160,6 +160,127 @@ export const DEMO_ROUTER_MODELS = {
 // Gates summary
 export const DEMO_GATES_SUMMARY = { pass_rate: 0.931 };
 
+// Gate history (waterfall data - sample task gate runs)
+export const DEMO_GATE_HISTORY = [
+  {
+    task_id: 'wire-gate-pipeline',
+    timestamp: '2026-04-28T14:02:44Z',
+    rungs: [
+      { name: 'compile', rung: 0, status: 'passed', duration_ms: 1200 },
+      { name: 'clippy', rung: 1, status: 'passed', duration_ms: 800 },
+      { name: 'test', rung: 2, status: 'passed', duration_ms: 3200 },
+      { name: 'diff', rung: 3, status: 'passed', duration_ms: 200 },
+      { name: 'fmt', rung: 4, status: 'passed', duration_ms: 150 },
+      { name: 'custom', rung: 5, status: 'skipped', duration_ms: 0 },
+      { name: 'judge', rung: 6, status: 'skipped', duration_ms: 0 },
+    ],
+  },
+  {
+    task_id: 'deploy-witness-contract',
+    timestamp: '2026-04-28T14:10:33Z',
+    rungs: [
+      { name: 'compile', rung: 0, status: 'passed', duration_ms: 1800 },
+      { name: 'clippy', rung: 1, status: 'passed', duration_ms: 950 },
+      { name: 'test', rung: 2, status: 'passed', duration_ms: 4100 },
+      { name: 'diff', rung: 3, status: 'passed', duration_ms: 350 },
+      { name: 'fmt', rung: 4, status: 'passed', duration_ms: 180 },
+      { name: 'custom', rung: 5, status: 'skipped', duration_ms: 0 },
+      { name: 'judge', rung: 6, status: 'skipped', duration_ms: 0 },
+    ],
+  },
+  {
+    task_id: 'build-dashboard-ui',
+    timestamp: '2026-04-28T14:31:55Z',
+    rungs: [
+      { name: 'compile', rung: 0, status: 'passed', duration_ms: 900 },
+      { name: 'clippy', rung: 1, status: 'passed', duration_ms: 600 },
+      { name: 'test', rung: 2, status: 'passed', duration_ms: 2800 },
+      { name: 'diff', rung: 3, status: 'passed', duration_ms: 280 },
+      { name: 'fmt', rung: 4, status: 'passed', duration_ms: 120 },
+      { name: 'custom', rung: 5, status: 'skipped', duration_ms: 0 },
+      { name: 'judge', rung: 6, status: 'skipped', duration_ms: 0 },
+    ],
+  },
+  {
+    task_id: 'wire-chain-witness',
+    timestamp: '2026-04-28T15:05:18Z',
+    rungs: [
+      { name: 'compile', rung: 0, status: 'failed', duration_ms: 2100 },
+      { name: 'clippy', rung: 1, status: 'skipped', duration_ms: 0 },
+      { name: 'test', rung: 2, status: 'skipped', duration_ms: 0 },
+      { name: 'diff', rung: 3, status: 'skipped', duration_ms: 0 },
+      { name: 'fmt', rung: 4, status: 'skipped', duration_ms: 0 },
+      { name: 'custom', rung: 5, status: 'skipped', duration_ms: 0 },
+      { name: 'judge', rung: 6, status: 'skipped', duration_ms: 0 },
+    ],
+  },
+  {
+    task_id: 'wire-episode-logger',
+    timestamp: '2026-04-28T15:12:09Z',
+    rungs: [
+      { name: 'compile', rung: 0, status: 'passed', duration_ms: 1100 },
+      { name: 'clippy', rung: 1, status: 'passed', duration_ms: 750 },
+      { name: 'test', rung: 2, status: 'passed', duration_ms: 2900 },
+      { name: 'diff', rung: 3, status: 'passed', duration_ms: 220 },
+      { name: 'fmt', rung: 4, status: 'failed', duration_ms: 180 },
+      { name: 'custom', rung: 5, status: 'skipped', duration_ms: 0 },
+      { name: 'judge', rung: 6, status: 'skipped', duration_ms: 0 },
+    ],
+  },
+  {
+    task_id: 'review-safety-layer',
+    timestamp: '2026-04-28T15:35:42Z',
+    rungs: [
+      { name: 'compile', rung: 0, status: 'passed', duration_ms: 1400 },
+      { name: 'clippy', rung: 1, status: 'passed', duration_ms: 820 },
+      { name: 'test', rung: 2, status: 'passed', duration_ms: 3500 },
+      { name: 'diff', rung: 3, status: 'passed', duration_ms: 300 },
+      { name: 'fmt', rung: 4, status: 'passed', duration_ms: 160 },
+      { name: 'custom', rung: 5, status: 'passed', duration_ms: 1200 },
+      { name: 'judge', rung: 6, status: 'passed', duration_ms: 2800 },
+    ],
+  },
+  {
+    task_id: 'audit-mcp-config',
+    timestamp: '2026-04-28T16:02:15Z',
+    rungs: [
+      { name: 'compile', rung: 0, status: 'passed', duration_ms: 1300 },
+      { name: 'clippy', rung: 1, status: 'failed', duration_ms: 900 },
+      { name: 'test', rung: 2, status: 'skipped', duration_ms: 0 },
+      { name: 'diff', rung: 3, status: 'skipped', duration_ms: 0 },
+      { name: 'fmt', rung: 4, status: 'skipped', duration_ms: 0 },
+      { name: 'custom', rung: 5, status: 'skipped', duration_ms: 0 },
+      { name: 'judge', rung: 6, status: 'skipped', duration_ms: 0 },
+    ],
+  },
+  {
+    task_id: 'wire-tui-dashboard',
+    timestamp: '2026-04-28T16:22:50Z',
+    rungs: [
+      { name: 'compile', rung: 0, status: 'passed', duration_ms: 1050 },
+      { name: 'clippy', rung: 1, status: 'passed', duration_ms: 680 },
+      { name: 'test', rung: 2, status: 'passed', duration_ms: 3100 },
+      { name: 'diff', rung: 3, status: 'passed', duration_ms: 240 },
+      { name: 'fmt', rung: 4, status: 'passed', duration_ms: 140 },
+      { name: 'custom', rung: 5, status: 'skipped', duration_ms: 0 },
+      { name: 'judge', rung: 6, status: 'skipped', duration_ms: 0 },
+    ],
+  },
+];
+
+// Adaptive gate thresholds
+export const DEMO_ADAPTIVE_THRESHOLDS = {
+  thresholds: {
+    compile: { mean_pass_rate: 0.96, ema_threshold: 0.92, rung_count: 847, consecutive_passes: 23 },
+    clippy: { mean_pass_rate: 0.91, ema_threshold: 0.88, rung_count: 812, consecutive_passes: 8 },
+    test: { mean_pass_rate: 0.89, ema_threshold: 0.85, rung_count: 798, consecutive_passes: 5 },
+    diff: { mean_pass_rate: 0.98, ema_threshold: 0.95, rung_count: 756, consecutive_passes: 42 },
+    fmt: { mean_pass_rate: 0.94, ema_threshold: 0.90, rung_count: 801, consecutive_passes: 14 },
+    custom: { mean_pass_rate: 0.87, ema_threshold: 0.82, rung_count: 134, consecutive_passes: 3 },
+    judge: { mean_pass_rate: 0.85, ema_threshold: 0.80, rung_count: 98, consecutive_passes: 2 },
+  },
+};
+
 // Status
 export const DEMO_STATUS = {
   signals: 1247,
