@@ -5836,6 +5836,7 @@ dependencies = [
  "reqwest 0.12.28",
  "roko-agent",
  "roko-core",
+ "roko-dreams",
  "roko-gate",
  "roko-learn",
  "roko-neuro",
