@@ -54,6 +54,120 @@ pub struct PlaybookStep {
     pub expected_signals: Vec<String>,
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod extraction_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn extract_from_tool_calls_produces_valid_playbook() {
+        let tool_calls = vec![
+            ("shell".to_string(), "cargo init".to_string()),
+            (
+                "write_file".to_string(),
+                "Write src/lib.rs with function stub".to_string(),
+            ),
+            ("shell".to_string(), "cargo test".to_string()),
+        ];
+
+        let playbook = extract_playbook_from_episode(
+            "task-1",
+            "Implement add function",
+            &tool_calls,
+        )
+        .expect("playbook should be extracted");
+
+        assert_eq!(playbook.steps.len(), 3);
+        assert_eq!(playbook.steps[0].index, 0);
+        assert_eq!(playbook.steps[0].action_kind, "shell");
+        assert_eq!(playbook.steps[1].index, 1);
+        assert_eq!(playbook.steps[1].action_kind, "write_file");
+        assert_eq!(playbook.steps[2].index, 2);
+        assert_eq!(playbook.steps[2].action_kind, "shell");
+        assert_eq!(playbook.success_count, 1);
+        assert_eq!(playbook.failure_count, 0);
+        assert!(playbook.id.starts_with("ep-task-1-"));
+        assert_eq!(playbook.goal, "Implement add function");
+        assert_eq!(playbook.name, "Learned: Implement add function");
+    }
+
+    #[test]
+    fn extract_empty_tool_calls_returns_none() {
+        assert!(extract_playbook_from_episode("task-2", "Empty task", &[]).is_none());
+    }
+
+    #[test]
+    fn extract_truncates_long_prompt_in_goal() {
+        let long_prompt = "x".repeat(500);
+        let tool_calls = vec![("shell".to_string(), "echo hello".to_string())];
+
+        let playbook = extract_playbook_from_episode("task-3", &long_prompt, &tool_calls)
+            .expect("playbook should be extracted");
+
+        assert_eq!(playbook.goal, format!("{}...", "x".repeat(200)));
+        assert!(playbook.goal.len() <= 203);
+    }
+
+    #[tokio::test]
+    async fn save_or_merge_creates_new_entry_for_extracted_playbook() {
+        let dir = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(dir.path());
+        let tool_calls = vec![("shell".to_string(), "cargo test".to_string())];
+
+        let playbook = extract_playbook_from_episode("t1", "Run tests", &tool_calls)
+            .expect("playbook should be extracted");
+        store.save_or_merge(&playbook).await.expect("save_or_merge");
+
+        let loaded = store
+            .load(&playbook.id)
+            .await
+            .expect("load")
+            .expect("playbook");
+        assert_eq!(loaded.success_count, 1);
+        assert_eq!(loaded.failure_count, 0);
+        assert_eq!(loaded.steps.len(), 1);
+        assert_eq!(loaded.steps[0].action_kind, "shell");
+
+        let listed = store.list().await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, playbook.id);
+    }
+
+    #[tokio::test]
+    async fn save_or_merge_merges_similar_extracted_playbooks() {
+        let dir = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(dir.path());
+        let tool_calls = vec![
+            ("shell".to_string(), "cargo test".to_string()),
+            ("shell".to_string(), "cargo fmt --check".to_string()),
+        ];
+
+        let first = extract_playbook_from_episode("t1", "Run tests", &tool_calls)
+            .expect("first playbook");
+        store.save_or_merge(&first).await.expect("save first");
+
+        let mut second = extract_playbook_from_episode("t1", "Run tests", &tool_calls)
+            .expect("second playbook");
+        second.id = format!("{}-retry", second.id);
+        store.save_or_merge(&second).await.expect("merge second");
+
+        let merged = store
+            .load(&first.id)
+            .await
+            .expect("load merged")
+            .expect("merged playbook");
+        assert_eq!(merged.success_count, 2);
+        assert_eq!(merged.failure_count, 0);
+        assert_eq!(merged.steps.len(), 2);
+        assert!(store.load(&second.id).await.expect("load second").is_none());
+
+        let listed = store.list().await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, first.id);
+    }
+}
+
 impl PlaybookStep {
     /// Construct a new playbook step.
     pub fn new(
