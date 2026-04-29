@@ -27,6 +27,7 @@
     clippy::manual_midpoint,
     clippy::map_unwrap_or,
     clippy::missing_const_for_fn,
+    clippy::needless_raw_string_hashes,
     clippy::needless_continue,
     clippy::needless_lifetimes,
     clippy::needless_pass_by_ref_mut,
@@ -113,6 +114,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as AnyhowContext, Result};
 use axum::response::IntoResponse;
+use roko_core_crate::config::ServeConfig;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -243,17 +245,19 @@ impl ServerBuilder {
             self.state = Some(Arc::new(build_app_state(workdir, runtime, roko_config)?));
         }
         let state = Arc::clone(self.state.as_ref().expect("state just set"));
+        let roko_config = state.load_roko_config();
+        validate_bind_safety(&addr, &roko_config.serve)?;
         if let Err(err) = state.restore_snapshot().await {
             warn!(error = %err, "failed to restore server state snapshot; starting fresh");
         }
-        let dispatcher_roko_config = state.load_roko_config().as_ref().clone();
+        let dispatcher_roko_config = roko_config.as_ref().clone();
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
             None,
             dispatcher_roko_config,
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
-        start_builtin_event_sources(Arc::clone(&state), self.config.roko_config.clone());
+        start_builtin_event_sources(Arc::clone(&state), roko_config.as_ref().clone());
         let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
@@ -266,7 +270,7 @@ impl ServerBuilder {
         routes::load_persisted_deployments(&state).await;
 
         // Eagerly prime the JWKS cache if Privy auth is configured.
-        if state.load_roko_config().serve.auth.privy_app_id.is_some() {
+        if roko_config.serve.auth.privy_app_id.is_some() {
             let jwks = Arc::clone(&state.jwks_cache);
             tokio::spawn(async move {
                 jwks.prime().await;
@@ -284,8 +288,8 @@ impl ServerBuilder {
 
         let router = build_server_router(
             Arc::clone(&state),
-            &self.config.roko_config.server.cors_origins,
-            self.config.roko_config.serve.auth.clone(),
+            &roko_config.server.cors_origins,
+            roko_config.serve.auth.clone(),
         );
 
         let listener = TcpListener::bind(&addr)
@@ -603,6 +607,55 @@ fn now_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// Returns `true` when the host portion of `addr` resolves to a loopback address.
+///
+/// Handles both `127.0.0.1`, `::1`, and hostnames like `localhost`.
+/// Returns `false` on parse errors (conservative: unknown = non-loopback).
+fn is_loopback_addr(addr: &str) -> bool {
+    let host = if let Some(rest) = addr.strip_prefix('[') {
+        if let Some(bracket_end) = rest.find(']') {
+            &rest[..bracket_end]
+        } else {
+            addr
+        }
+    } else if let Some(colon) = addr.rfind(':') {
+        &addr[..colon]
+    } else {
+        addr
+    };
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+
+    host.eq_ignore_ascii_case("localhost")
+}
+
+/// Validate that a bind address is safe to expose.
+///
+/// Loopback addresses are always allowed. Public addresses require either
+/// authentication or an explicit acknowledgement of the risk.
+pub fn validate_bind_safety(addr: &str, serve: &ServeConfig) -> Result<()> {
+    if is_loopback_addr(addr) || serve.auth.enabled {
+        return Ok(());
+    }
+
+    if serve.acknowledge_public_risk {
+        warn!(
+            addr = %addr,
+            "binding to a public address without authentication; all routes will be network-accessible"
+        );
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Public bind requires `serve.auth.enabled = true` or `serve.acknowledge_public_risk = true`.\n\
+         Attempted to bind to: {addr}\n\
+         Set `[serve] auth.enabled = true` for authenticated public access, or\n\
+         set `[serve] acknowledge_public_risk = true` to proceed anyway."
+    );
+}
+
 /// Run the HTTP server against an already constructed [`AppState`].
 ///
 /// # Errors
@@ -610,10 +663,13 @@ fn now_millis() -> u64 {
 /// Returns an error if the listener cannot bind to `bind:port` or if the
 /// Axum server exits with an error.
 pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
+    let addr = format!("{bind}:{port}");
+    let roko_config = state.load_roko_config();
+    validate_bind_safety(&addr, &roko_config.serve)?;
     if let Err(err) = state.restore_snapshot().await {
         warn!(error = %err, "failed to restore server state snapshot; starting fresh");
     }
-    let roko_config = state.load_roko_config().as_ref().clone();
+    let roko_config = roko_config.as_ref().clone();
     let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
     let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
     let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
@@ -626,7 +682,6 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
         &roko_config.server.cors_origins,
         roko_config.serve.auth.clone(),
     );
-    let addr = format!("{bind}:{port}");
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind to {addr}"))?;
@@ -647,7 +702,7 @@ fn build_server_router(
     state: Arc<AppState>,
     cors_origins: &[String],
     api_auth: roko_core::config::ServeAuthConfig,
-) -> axum::Router<()> {
+) -> axum::Router {
     // `routes::build_router` currently installs only the top-level SPA fallback.
     // Reset it here so the final fallback can distinguish API/WS typos from browser routes.
     let api_router =
