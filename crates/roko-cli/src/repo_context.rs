@@ -31,6 +31,9 @@ pub struct RepoContextPack {
     pub related_plans: Vec<PathBuf>,
     /// Names that already exist and must not be re-created (workspace members + known crates).
     pub do_not_create: Vec<String>,
+    /// Original feature keywords used to ground this repository context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
     /// True when feature keywords match workspace members AND real source exists.
     pub context_root_verified: bool,
 }
@@ -85,6 +88,78 @@ impl ProjectKind {
     }
 }
 
+/// Verify that feature keywords are grounded in the actual workspace.
+///
+/// Returns `true` when keywords match workspace members and at least one real
+/// source file exists for the match.
+#[must_use]
+pub fn verify_context_root(
+    root: &Path,
+    keywords: &[&str],
+    workspace_members: &[String],
+    key_files: &[PathBuf],
+) -> bool {
+    let normalized_keywords: Vec<String> = keywords
+        .iter()
+        .map(|keyword| keyword.trim().to_lowercase())
+        .filter(|keyword| !keyword.is_empty())
+        .collect();
+
+    if normalized_keywords.is_empty() || workspace_members.is_empty() {
+        return false;
+    }
+
+    let keyword_matches_member = normalized_keywords.iter().any(|keyword| {
+        workspace_members.iter().any(|member| {
+            let member = member.trim().to_lowercase();
+            !member.is_empty() && (member.contains(keyword) || keyword.contains(&member))
+        })
+    });
+
+    if !keyword_matches_member {
+        return false;
+    }
+
+    key_files.iter().any(|file| {
+        let full_path = root.join(file);
+        full_path.exists() && full_path.is_file() && is_verification_source_file(&full_path)
+    })
+}
+
+fn context_verification_warning(keywords: &[&str], workspace_members: &[String]) -> String {
+    let keywords: Vec<&str> = keywords
+        .iter()
+        .map(|keyword| keyword.trim())
+        .filter(|keyword| !keyword.is_empty())
+        .collect();
+    let kw_list = keywords.join(", ");
+    let members_preview: Vec<&str> = workspace_members
+        .iter()
+        .take(10)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .collect();
+    let members_list = members_preview.join(", ");
+    let suffix = if workspace_members.len() > 10 {
+        format!(" (and {} more)", workspace_members.len() - 10)
+    } else {
+        String::new()
+    };
+
+    format!(
+        "> **WARNING: Repository context not verified.**\n\
+         > The feature keywords [{}] do not match any workspace members [{}{}].\n\
+         > Generated artifacts may reference nonexistent code. Review carefully before accepting.\n",
+        kw_list, members_list, suffix
+    )
+}
+
+fn is_verification_source_file(path: &Path) -> bool {
+    const VERIFICATION_SOURCE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "go", "py"];
+    has_allowed_extension(path, VERIFICATION_SOURCE_EXTENSIONS)
+}
+
 impl fmt::Display for ProjectKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -105,6 +180,15 @@ impl RepoContextPack {
     #[must_use]
     pub fn to_prompt_section(&self) -> String {
         let mut out = String::with_capacity(4_096);
+
+        if !self.context_root_verified {
+            let keyword_refs: Vec<&str> = self.keywords.iter().map(String::as_str).collect();
+            let _ = write!(
+                out,
+                "{}",
+                context_verification_warning(&keyword_refs, &self.workspace_members)
+            );
+        }
 
         let _ = writeln!(out, "## Repository Context");
         let _ = writeln!(
@@ -788,6 +872,111 @@ use ./module-c
     }
 
     #[test]
+    fn verify_context_root_returns_true_for_matching_member_with_source() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        write_file(temp.path().join("crates/roko-compose/src/lib.rs"), "pub fn build() {}\n");
+
+        let keywords = ["compose"];
+        let workspace_members = vec![String::from("roko-compose")];
+        let key_files = vec![PathBuf::from("crates/roko-compose/src/lib.rs")];
+
+        assert!(verify_context_root(
+            temp.path(),
+            &keywords,
+            &workspace_members,
+            &key_files
+        ));
+    }
+
+    #[test]
+    fn verify_context_root_returns_false_for_empty_keywords() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        write_file(temp.path().join("crates/roko-compose/src/lib.rs"), "pub fn build() {}\n");
+
+        let workspace_members = vec![String::from("roko-compose")];
+        let key_files = vec![PathBuf::from("crates/roko-compose/src/lib.rs")];
+
+        assert!(!verify_context_root(
+            temp.path(),
+            &[],
+            &workspace_members,
+            &key_files
+        ));
+    }
+
+    #[test]
+    fn verify_context_root_returns_false_for_empty_workspace_members() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        write_file(temp.path().join("crates/roko-compose/src/lib.rs"), "pub fn build() {}\n");
+
+        let keywords = ["compose"];
+        let key_files = vec![PathBuf::from("crates/roko-compose/src/lib.rs")];
+
+        assert!(!verify_context_root(
+            temp.path(),
+            &keywords,
+            &[],
+            &key_files
+        ));
+    }
+
+    #[test]
+    fn verify_context_root_returns_false_when_keywords_do_not_match_member() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        write_file(temp.path().join("crates/roko-compose/src/lib.rs"), "pub fn build() {}\n");
+
+        let keywords = ["agent"];
+        let workspace_members = vec![String::from("roko-compose")];
+        let key_files = vec![PathBuf::from("crates/roko-compose/src/lib.rs")];
+
+        assert!(!verify_context_root(
+            temp.path(),
+            &keywords,
+            &workspace_members,
+            &key_files
+        ));
+    }
+
+    #[test]
+    fn verify_context_root_returns_false_when_source_file_is_missing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+
+        let keywords = ["compose"];
+        let workspace_members = vec![String::from("roko-compose")];
+        let key_files = vec![PathBuf::from("crates/roko-compose/src/lib.rs")];
+
+        assert!(!verify_context_root(
+            temp.path(),
+            &keywords,
+            &workspace_members,
+            &key_files
+        ));
+    }
+
+    #[test]
+    fn repo_context_prompt_section_warns_when_unverified() {
+        let pack = RepoContextPack {
+            root: PathBuf::from("/tmp/nowhere"),
+            project_kind: ProjectKind::Rust,
+            workspace_members: (0..12).map(|idx| format!("member-{idx}")).collect(),
+            key_files: Vec::new(),
+            matching_symbols: Vec::new(),
+            related_prds: Vec::new(),
+            related_plans: Vec::new(),
+            do_not_create: Vec::new(),
+            keywords: vec![String::from("roko-compose"), String::from("prompt assembly")],
+            context_root_verified: false,
+        };
+
+        let section = pack.to_prompt_section();
+        assert!(section.starts_with("> **WARNING: Repository context not verified.**"));
+        assert!(section.contains("feature keywords [roko-compose, prompt assembly]"));
+        assert!(section.contains("member-0, member-1"));
+        assert!(section.contains("(and 2 more)"));
+        assert!(section.contains("## Repository Context"));
+    }
+
+    #[test]
     fn find_related_prds_returns_empty_when_dir_missing() {
         let tmp = tempfile::tempdir().expect("temp dir");
 
@@ -1061,10 +1250,8 @@ where
                 continue;
             }
             walk_source_dir(root, &abs, deadline, cb);
-        } else if file_type.is_file() {
-            if let Ok(rel) = abs.strip_prefix(root) {
-                cb(rel);
-            }
+        } else if file_type.is_file() && let Ok(rel) = abs.strip_prefix(root) {
+            cb(rel);
         }
     }
 }
