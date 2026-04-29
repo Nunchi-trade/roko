@@ -47,7 +47,7 @@ impl RokoCliRuntime {
 #[async_trait]
 impl CliRuntime for RokoCliRuntime {
     async fn run_once(&self, workdir: &Path, prompt: &str) -> anyhow::Result<RunResult> {
-        let report = run_once(workdir, &self.config, prompt, None).await?;
+        let report = run_once(workdir, &self.config, prompt, None, None).await?;
         Ok(RunResult {
             success: report.overall_success(),
             output_text: report.output_text,
@@ -66,7 +66,7 @@ impl CliRuntime for RokoCliRuntime {
         if let Some(ref model) = overrides.model {
             config.agent.model = Some(model.clone());
         }
-        let report = run_once(workdir, &config, prompt, None).await?;
+        let report = run_once(workdir, &config, prompt, Some(overrides.strategy), None).await?;
         Ok(RunResult {
             success: report.overall_success(),
             output_text: report.output_text,

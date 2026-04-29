@@ -133,7 +133,7 @@ pub async fn cmd_demo_warm(workdir: &Path) -> Result<()> {
         // Run each prompt through the universal loop
         // This populates both the in-memory and file caches
         let config = crate::config::Config::default();
-        match crate::run::run_once(workdir, &config, prompt, None).await {
+        match crate::run::run_once(workdir, &config, prompt, None, None).await {
             Ok(report) => {
                 let icon = if report.overall_success() {
                     symbols::PASS

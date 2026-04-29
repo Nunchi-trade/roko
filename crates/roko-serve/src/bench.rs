@@ -64,6 +64,25 @@ fn default_difficulty() -> u8 {
 // Run configuration
 // ---------------------------------------------------------------------------
 
+/// Bench execution strategy requested by the UI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchStrategy {
+    /// Smallest, least-enriched execution path.
+    #[default]
+    Minimal,
+    /// Add repo context before dispatch.
+    ContextEnriched,
+    /// Add neuro-derived context before dispatch.
+    NeuroAugmented,
+    /// Apply the full cascade of enrichments before dispatch.
+    FullCascade,
+}
+
+fn is_default_bench_strategy(strategy: &BenchStrategy) -> bool {
+    matches!(strategy, BenchStrategy::Minimal)
+}
+
 /// Configuration overrides applied to each task in a bench run.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BenchConfigOverrides {
@@ -75,10 +94,13 @@ pub struct BenchConfigOverrides {
     pub backend: Option<String>,
     /// Maximum tokens for the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u64>,
+    pub max_tokens: Option<u32>,
     /// Temperature override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Execution strategy requested for this bench run.
+    #[serde(default, skip_serializing_if = "is_default_bench_strategy")]
+    pub strategy: BenchStrategy,
 }
 
 /// How a bench run was triggered.

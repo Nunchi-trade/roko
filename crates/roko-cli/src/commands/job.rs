@@ -348,7 +348,7 @@ pub(crate) async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
                 };
 
                 let config = resolve_config_for_workdir(cli, &wd)?;
-                let result = run_once(&wd, &config, &prompt, None).await;
+                let result = run_once(&wd, &config, &prompt, None, None).await;
                 match result {
                     Ok(report) => {
                         job.status = "completed".to_string();

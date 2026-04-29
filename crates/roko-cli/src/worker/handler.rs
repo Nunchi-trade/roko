@@ -151,7 +151,7 @@ async fn run_task(
         config.prompt.role = state.template.role.clone();
 
         // Run the universal loop
-        let result = match crate::run::run_once(&workdir, &config, &prompt, None).await {
+        let result = match crate::run::run_once(&workdir, &config, &prompt, None, None).await {
             Ok(report) => TaskResult {
                 success: report.overall_success(),
                 episode_id: Some(report.episode_id),
