@@ -3,6 +3,27 @@
 
 use crate::*;
 
+/// Format a cost value for human display.
+/// Uses the heuristic: if cost is exactly 0.0 and both token counts are 0,
+/// treat the value as unknown.
+fn display_cost(cost_usd: f64, input_tokens: u64, output_tokens: u64) -> String {
+    if cost_usd == 0.0 && input_tokens == 0 && output_tokens == 0 {
+        "unknown".to_string()
+    } else {
+        format!("${cost_usd:.2}")
+    }
+}
+
+/// Format a cost value for recent-entry display with four decimal places.
+fn display_cost_precise(cost_usd: f64, input_tokens: u64, output_tokens: u64) -> String {
+    let display = display_cost(cost_usd, input_tokens, output_tokens);
+    if display == "unknown" {
+        display
+    } else {
+        format!("${cost_usd:.4}")
+    }
+}
+
 pub(crate) async fn dispatch_learn(cli: &Cli, cmd: LearnCmd) -> Result<i32> {
     match cmd {
         LearnCmd::All { workdir } => {
@@ -264,8 +285,8 @@ pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
         let plan_id = non_empty_or_unknown(&event.plan_id);
         let status = if event.gate_passed { "pass" } else { "fail" };
         latest = Some(format!(
-            "{timestamp} model={model} task={task_id} plan={plan_id} {status} cost=${:.4}",
-            event.cost_usd
+            "{timestamp} model={model} task={task_id} plan={plan_id} {status} cost={}",
+            display_cost_precise(event.cost_usd, event.input_tokens, event.output_tokens)
         ));
     }
 
@@ -318,9 +339,13 @@ pub(crate) async fn print_learn_episodes(workdir: &std::path::Path) {
         let model = non_empty_or_unknown(&episode.model);
         let task_id = non_empty_or_unknown(&episode.task_id);
         latest = Some(format!(
-            "{} model={model} task={task_id} {status} cost=${:.4}",
+            "{} model={model} task={task_id} {status} cost={}",
             episode.timestamp.to_rfc3339(),
-            episode.usage.cost_usd
+            display_cost_precise(
+                episode.usage.cost_usd,
+                episode.usage.input_tokens,
+                episode.usage.output_tokens
+            )
         ));
     }
 
@@ -428,4 +453,40 @@ struct LearnCascadeRouterSnapshot {
     total_observations: u64,
     #[serde(default)]
     stage_transitions: Vec<roko_learn::cascade::StageTransition>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_cost_uses_unknown_for_zero_usage() {
+        assert_eq!(display_cost(0.0, 0, 0), "unknown");
+    }
+
+    #[test]
+    fn display_cost_shows_zero_for_reported_free_usage() {
+        assert_eq!(display_cost(0.0, 1, 0), "$0.00");
+        assert_eq!(display_cost(0.0, 0, 1), "$0.00");
+    }
+
+    #[test]
+    fn display_cost_shows_formatted_value() {
+        assert_eq!(display_cost(1.42, 0, 0), "$1.42");
+    }
+
+    #[test]
+    fn display_cost_precise_uses_unknown_for_zero_usage() {
+        assert_eq!(display_cost_precise(0.0, 0, 0), "unknown");
+    }
+
+    #[test]
+    fn display_cost_precise_shows_zero_for_reported_free_usage() {
+        assert_eq!(display_cost_precise(0.0, 2, 3), "$0.0000");
+    }
+
+    #[test]
+    fn display_cost_precise_shows_formatted_value() {
+        assert_eq!(display_cost_precise(1.42, 7, 9), "$1.4200");
+    }
 }
