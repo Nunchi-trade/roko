@@ -11,10 +11,16 @@ use crate::agent_config::{
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
+use crate::knowledge_helpers::{build_strategy_fragment_context, query_anti_knowledge_patterns};
+use crate::learning_helpers::{
+    load_or_create_playbook_store, load_or_create_skill_library, playbook_query_context,
+    render_prior_experience,
+};
 use crate::episode::EpisodePolicy;
 use crate::output_format;
 #[cfg(feature = "legacy-orchestrate")]
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
+use crate::task_helpers::extract_task_symbols;
 use crate::state_hub::{StateHub, StateHubSender};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
@@ -32,12 +38,15 @@ use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
 use roko_core::{
-    AgentRole, Body, Budget, Compose, Context, Engram, Kind, Provenance, Store, Verdict, Verify,
+    AgentRole, Body, Budget, Compose, Context, Engram, Kind, Provenance, Store, TaskCategory,
+    Verdict, Verify,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage as EpisodeUsage};
+use roko_learn::playbook::Playbook;
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
+use roko_learn::skill_library::{Skill, SkillQuery};
 use roko_orchestrator::{ServiceConfig, ServiceFactory};
 use roko_runtime::effect_driver::EffectServices;
 use roko_runtime::pipeline_state::WorkflowConfig;
@@ -910,7 +919,6 @@ pub async fn run_once(
 ) -> Result<RunReport> {
     // Future `--engine v2` dispatch should call `run_with_workflow_engine`
     // before entering this existing orchestration path.
-    let _ = strategy;
     let substrate_dir = workdir.join(".roko");
     let substrate = FileSubstrate::open(substrate_dir)
         .await
@@ -975,7 +983,7 @@ pub async fn run_once(
 
     // Run the configured agent path for this provider/backend mix.
     let (agent_result, external_actions) =
-        dispatch_agent(workdir, config, &prompt, prompt_text, &ctx).await?;
+        dispatch_agent(workdir, config, &prompt, prompt_text, &ctx, strategy).await?;
 
     // Optionally post-process the agent output to strip ANSI escapes and
     // reasoning-model thinking traces. The raw body is preserved as an
@@ -1212,6 +1220,193 @@ fn build_system_prompt(config: &Config, prompt_text: &str, tools_csv: &str) -> S
 }
 
 #[cfg(feature = "legacy-orchestrate")]
+async fn augment_system_prompt_for_strategy(
+    base_system_prompt: String,
+    workdir: &Path,
+    role: &str,
+    prompt_text: &str,
+    current_model: &str,
+    strategy: Option<BenchStrategy>,
+) -> String {
+    let overlay = match strategy.unwrap_or(BenchStrategy::Minimal) {
+        BenchStrategy::Minimal => String::new(),
+        BenchStrategy::ContextEnriched => {
+            build_context_enrichment_overlay(workdir, role, prompt_text).await
+        }
+        BenchStrategy::NeuroAugmented | BenchStrategy::FullCascade => {
+            let mut overlay = build_context_enrichment_overlay(workdir, role, prompt_text).await;
+            let neuro_overlay =
+                build_neuro_augmented_overlay(workdir, role, prompt_text, current_model).await;
+            if !neuro_overlay.is_empty() {
+                if !overlay.is_empty() {
+                    overlay.push_str("\n\n");
+                }
+                overlay.push_str(&neuro_overlay);
+            }
+            overlay
+        }
+    };
+
+    if overlay.trim().is_empty() {
+        base_system_prompt
+    } else {
+        let mut prompt = base_system_prompt;
+        prompt.push_str("\n\n");
+        prompt.push_str(&overlay);
+        prompt
+    }
+}
+
+#[cfg(feature = "legacy-orchestrate")]
+async fn build_context_enrichment_overlay(workdir: &Path, role: &str, prompt_text: &str) -> String {
+    let (playbooks, skills) = tokio::join!(
+        build_relevant_playbooks_section(workdir, role, prompt_text),
+        build_relevant_skills_section(workdir, prompt_text),
+    );
+
+    let mut sections = Vec::new();
+    if !playbooks.is_empty() {
+        sections.push(playbooks);
+    }
+    if !skills.is_empty() {
+        sections.push(skills);
+    }
+
+    sections.join("\n\n")
+}
+
+#[cfg(feature = "legacy-orchestrate")]
+async fn build_relevant_playbooks_section(workdir: &Path, role: &str, prompt_text: &str) -> String {
+    let parsed_role = parse_agent_role(role).unwrap_or(AgentRole::Implementer);
+    let store = match load_or_create_playbook_store(&workdir.join(".roko").join("learn").join("playbooks")).await {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load playbook store for strategy enrichment");
+            return String::new();
+        }
+    };
+
+    let query = playbook_query_context(parsed_role, "cli-run", prompt_text, None);
+    let playbooks = match store.query(&query).await {
+        Ok(playbooks) => playbooks,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to query playbooks for strategy enrichment");
+            return String::new();
+        }
+    };
+
+    if playbooks.is_empty() {
+        String::new()
+    } else {
+        render_relevant_playbooks(&playbooks)
+    }
+}
+
+#[cfg(feature = "legacy-orchestrate")]
+async fn build_relevant_skills_section(workdir: &Path, prompt_text: &str) -> String {
+    let store = match load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json")).await {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load skill library for strategy enrichment");
+            return String::new();
+        }
+    };
+
+    let mut tags = extract_task_symbols(prompt_text);
+    tags.sort();
+    tags.dedup();
+    let query = SkillQuery {
+        tags,
+        category: Some(TaskCategory::Implementation.label().to_string()),
+        files_hint: Vec::new(),
+    };
+
+    let skills = store
+        .select(&query, 5)
+        .into_iter()
+        .filter(|skill| skill.score >= 0.5)
+        .filter(|skill| !skill.tags.iter().any(|tag| tag == "outcome:failure"))
+        .collect::<Vec<Skill>>();
+
+    if skills.is_empty() {
+        String::new()
+    } else {
+        render_prior_experience(&skills)
+    }
+}
+
+#[cfg(feature = "legacy-orchestrate")]
+async fn build_neuro_augmented_overlay(
+    workdir: &Path,
+    role: &str,
+    prompt_text: &str,
+    current_model: &str,
+) -> String {
+    let parsed_role = parse_agent_role(role).unwrap_or(AgentRole::Implementer);
+    let knowledge_store = roko_neuro::KnowledgeStore::for_workdir(workdir);
+    let mut sections = Vec::new();
+
+    if let Some(strategy_fragments) = build_strategy_fragment_context(
+        &knowledge_store,
+        parsed_role,
+        None,
+        prompt_text,
+        current_model,
+    ) {
+        sections.push(strategy_fragments);
+    }
+
+    let anti_patterns = query_anti_knowledge_patterns(&knowledge_store, prompt_text, 5);
+    if !anti_patterns.is_empty() {
+        sections.push(render_common_mistakes_section(&anti_patterns));
+    }
+
+    sections.join("\n\n")
+}
+
+#[cfg(feature = "legacy-orchestrate")]
+fn render_relevant_playbooks(playbooks: &[Playbook]) -> String {
+    use std::fmt::Write as _;
+
+    let mut body = String::from("## Playbook Techniques\n\nReusable proven procedures:\n");
+    for playbook in playbooks {
+        let _ = writeln!(
+            body,
+            "- {}: {} (successes {}, failures {})",
+            playbook.id, playbook.goal, playbook.success_count, playbook.failure_count
+        );
+        for step in playbook.steps.iter().take(5) {
+            let expected = if step.expected_signals.is_empty() {
+                "task-local verification".to_string()
+            } else {
+                step.expected_signals.join(", ")
+            };
+            let _ = writeln!(
+                body,
+                "  - {} via {}; expect {}",
+                step.description, step.action_kind, expected
+            );
+        }
+    }
+    body
+}
+
+#[cfg(feature = "legacy-orchestrate")]
+fn render_common_mistakes_section(patterns: &[String]) -> String {
+    use std::fmt::Write as _;
+
+    let mut body = String::from("## Common Mistakes to Avoid\n\nKnown anti-patterns and failure modes:\n");
+    for pattern in patterns {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        let _ = writeln!(body, "- {pattern}");
+    }
+    body
+}
+
+#[cfg(feature = "legacy-orchestrate")]
 fn gate_policy_context(config: &Config) -> String {
     if config.gates.is_empty() {
         return "Verification gates: none configured. Still perform the smallest relevant local check before finishing.".to_string();
@@ -1317,6 +1512,7 @@ async fn dispatch_agent(
     prompt: &Engram,
     prompt_text: &str,
     ctx: &Context,
+    strategy: Option<BenchStrategy>,
 ) -> Result<(AgentResult, Vec<ExternalAction>)> {
     // TODO(gateway): migrate to ModelCallService.
     let mut routing_config = roko_core::config::load_config(workdir)
@@ -1328,12 +1524,20 @@ async fn dispatch_agent(
 
     if use_provider_routing {
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
-        let system_prompt = build_system_prompt(config, prompt_text, &tools_csv);
         let model = config
             .agent
             .model
             .clone()
             .unwrap_or_else(|| routing_config.agent.default_model.clone());
+        let system_prompt = augment_system_prompt_for_strategy(
+            build_system_prompt(config, prompt_text, &tools_csv),
+            workdir,
+            &config.prompt.role,
+            prompt_text,
+            &model,
+            strategy,
+        )
+        .await;
         let resolved = resolve_model(&routing_config, &model);
         let agent = spawn_agent_scoped(
             &routing_config,
@@ -1361,11 +1565,10 @@ async fn dispatch_agent(
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else if config.agent.command == "claude" && has_anthropic_api_key(config) {
         // Anthropic API tool loop — direct HTTP calls with full tool visibility.
-        return run_anthropic_api_tool_loop(workdir, config, prompt_text).await;
+        return run_anthropic_api_tool_loop(workdir, config, prompt_text, strategy).await;
     } else if config.agent.command == "claude" {
         // Claude CLI keeps its own prompt/tool/settings wiring internally.
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
-        let system_prompt = build_system_prompt(config, prompt_text, &tools_csv);
         let (extra_args, resume_from_args) = split_resume_arg(&config.agent.args);
         let optional_resume = optional_resume_session_id(config, resume_from_args);
         let model = config.agent.model.clone().unwrap_or_else(|| {
@@ -1377,6 +1580,15 @@ async fn dispatch_agent(
                 "claude-sonnet-4-6".to_string()
             }
         });
+        let system_prompt = augment_system_prompt_for_strategy(
+            build_system_prompt(config, prompt_text, &tools_csv),
+            workdir,
+            &config.prompt.role,
+            prompt_text,
+            &model,
+            strategy,
+        )
+        .await;
         let synthesized_config = synthesize_claude_cli_config(&config.agent.command, &model);
 
         let mut synthetic_extra_args = extra_args;
@@ -1414,7 +1626,7 @@ async fn dispatch_agent(
         )?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else if config.agent.command == "ollama" {
-        Ok(run_ollama_agentic_single(workdir, config, prompt_text).await)
+        Ok(run_ollama_agentic_single(workdir, config, prompt_text, strategy).await)
     } else if is_known_protocol_command(&config.agent.command) {
         let model = config
             .agent
@@ -1489,6 +1701,7 @@ async fn run_ollama_agentic_single(
     workdir: &Path,
     config: &Config,
     prompt_text: &str,
+    strategy: Option<BenchStrategy>,
 ) -> (AgentResult, Vec<ExternalAction>) {
     use parking_lot::RwLock;
     use roko_agent::dispatcher::ToolDispatcher;
@@ -1530,7 +1743,15 @@ async fn run_ollama_agentic_single(
     );
     let tool_loop = ToolLoop::new(translator, dispatcher, backend);
 
-    let system_prompt = build_system_prompt(config, prompt_text, "");
+    let system_prompt = augment_system_prompt_for_strategy(
+        build_system_prompt(config, prompt_text, ""),
+        workdir,
+        &config.prompt.role,
+        prompt_text,
+        &model,
+        strategy,
+    )
+    .await;
     let external_actions = Arc::new(RwLock::new(Vec::new()));
     let tool_ctx =
         ToolContext::testing(workdir).with_external_actions(Arc::clone(&external_actions));
@@ -1618,6 +1839,7 @@ async fn run_anthropic_api_tool_loop(
     workdir: &Path,
     config: &Config,
     prompt_text: &str,
+    strategy: Option<BenchStrategy>,
 ) -> Result<(AgentResult, Vec<ExternalAction>)> {
     use parking_lot::RwLock;
     use roko_agent::dispatcher::ToolDispatcher;
@@ -1687,7 +1909,15 @@ async fn run_anthropic_api_tool_loop(
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend).with_on_turn(on_turn);
 
-    let system_prompt = build_system_prompt(config, prompt_text, "");
+    let system_prompt = augment_system_prompt_for_strategy(
+        build_system_prompt(config, prompt_text, ""),
+        workdir,
+        &config.prompt.role,
+        prompt_text,
+        &model,
+        strategy,
+    )
+    .await;
     let external_actions = Arc::new(RwLock::new(Vec::new()));
     let tool_ctx =
         ToolContext::testing(workdir).with_external_actions(Arc::clone(&external_actions));
@@ -2669,6 +2899,7 @@ mod tests {
             &prompt,
             "plain-exec-ok",
             &Context::now(),
+            None,
         )
         .await
         .expect("dispatch succeeds");
