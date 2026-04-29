@@ -66,6 +66,7 @@ pub mod doctor;
 pub mod episode;
 pub mod event_sources;
 pub mod explain;
+pub mod model_selection;
 pub(crate) mod gate_runner;
 mod heartbeat;
 pub mod index;
