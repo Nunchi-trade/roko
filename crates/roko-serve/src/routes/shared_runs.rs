@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use chrono::{DateTime, Duration, Utc};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -72,15 +73,21 @@ pub struct CreateShareRequest {
     /// Request a public base URL instead of the default local-only path.
     #[serde(default)]
     public: bool,
+    /// Create a permanent share that never expires.
+    #[serde(default, alias = "no-expire")]
+    no_expire: bool,
 }
 
 /// Metadata stored alongside a shared transcript.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShareMetadata {
     /// Whether the transcript was scrubbed before persistence.
     pub scrubbed: bool,
     /// Whether the share should resolve through the configured public URL.
     pub public: bool,
+    /// Expiration timestamp; `None` means the share is permanent.
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// On-disk representation for newly shared transcripts.
@@ -104,11 +111,19 @@ struct LoadedTranscript {
     transcript: RunTranscript,
 }
 
+#[derive(Debug, Clone)]
+enum TranscriptLookup {
+    Missing,
+    Expired { expires_at: DateTime<Utc> },
+    Found(LoadedTranscript),
+}
+
 /// `GET /api/runs/{id}` — JSON transcript.
 pub async fn get_run_json(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match load_transcript(&state, &id) {
-        Some(loaded) => Json(json!(loaded.transcript)).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+        TranscriptLookup::Found(loaded) => Json(json!(loaded.transcript)).into_response(),
+        TranscriptLookup::Expired { expires_at } => expired_share_response(expires_at),
+        TranscriptLookup::Missing => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -118,8 +133,9 @@ pub async fn get_shared_run(
     Path(token): Path<String>,
 ) -> Response {
     match load_transcript(&state, &token) {
-        Some(loaded) => Json(json!(loaded.transcript)).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+        TranscriptLookup::Found(loaded) => Json(json!(loaded.transcript)).into_response(),
+        TranscriptLookup::Expired { expires_at } => expired_share_response(expires_at),
+        TranscriptLookup::Missing => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -131,6 +147,10 @@ pub async fn create_share(
 ) -> Response {
     let token = format!("{}-{:04x}", id, std::process::id() as u16);
     let requested_public = payload.as_ref().map(|Json(request)| request.public).unwrap_or(false);
+    let no_expire = payload
+        .as_ref()
+        .map(|Json(request)| request.no_expire)
+        .unwrap_or(false);
     let workspace_config = state.load_roko_config();
     let shared_dir = state.workdir.join(".roko").join("shared");
     if let Err(e) = std::fs::create_dir_all(&shared_dir) {
@@ -140,11 +160,18 @@ pub async fn create_share(
         )
             .into_response();
     }
-    let loaded = load_transcript(&state, &token);
+    let now = Utc::now();
+    let loaded = load_transcript_record(&state, &token).filter(|loaded| {
+        share_expired_at(&loaded.metadata, &now).is_none()
+    });
+    let had_existing_transcript = loaded.is_some();
     let existing_public = loaded
         .as_ref()
         .map(|loaded| loaded.metadata.public)
         .unwrap_or(false);
+    let existing_expires_at = loaded
+        .as_ref()
+        .and_then(|loaded| loaded.metadata.expires_at.clone());
     let transcript = match loaded {
         Some(loaded) => loaded.transcript,
         None => match transcript_from_runtime_events(&state, &id, &token) {
@@ -164,9 +191,17 @@ pub async fn create_share(
         },
     };
     let public = requested_public || existing_public;
+    let expires_at = if no_expire {
+        None
+    } else if had_existing_transcript {
+        existing_expires_at
+    } else {
+        Some(default_share_expires_at(workspace_config.serve.share_ttl_days))
+    };
     let metadata = ShareMetadata {
         scrubbed: true,
         public,
+        expires_at,
     };
     let transcript = match scrub_run_transcript(transcript, state.scrubber.as_ref()) {
         Some(transcript) => transcript,
@@ -227,15 +262,16 @@ pub async fn create_share(
 /// `GET /runs/{id}` — Self-contained HTML page.
 pub async fn get_run_html(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match load_transcript(&state, &id) {
-        Some(loaded) => {
+        TranscriptLookup::Found(loaded) => {
             let html = render_html(&loaded.transcript);
             Html(html).into_response()
         }
-        None => StatusCode::NOT_FOUND.into_response(),
+        TranscriptLookup::Expired { expires_at } => expired_share_response(expires_at),
+        TranscriptLookup::Missing => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-fn load_transcript(state: &AppState, id: &str) -> Option<LoadedTranscript> {
+fn load_transcript_record(state: &AppState, id: &str) -> Option<LoadedTranscript> {
     let path = state
         .workdir
         .join(".roko")
@@ -248,6 +284,7 @@ fn load_transcript(state: &AppState, id: &str) -> Option<LoadedTranscript> {
             ShareMetadata {
                 scrubbed: true,
                 public: record.metadata.public,
+                expires_at: record.metadata.expires_at,
             },
             record.transcript,
         ),
@@ -255,6 +292,7 @@ fn load_transcript(state: &AppState, id: &str) -> Option<LoadedTranscript> {
             ShareMetadata {
                 scrubbed: true,
                 public: false,
+                expires_at: None,
             },
             transcript,
         ),
@@ -265,6 +303,16 @@ fn load_transcript(state: &AppState, id: &str) -> Option<LoadedTranscript> {
         metadata,
         transcript,
     })
+}
+
+fn load_transcript(state: &AppState, id: &str) -> TranscriptLookup {
+    match load_transcript_record(state, id) {
+        Some(loaded) => match share_expired_at(&loaded.metadata, &Utc::now()) {
+            Some(expires_at) => TranscriptLookup::Expired { expires_at },
+            None => TranscriptLookup::Found(loaded),
+        },
+        None => TranscriptLookup::Missing,
+    }
 }
 
 fn transcript_from_runtime_events(
@@ -466,6 +514,32 @@ fn scrub_json_value(value: &mut Value, scrubber: &LogScrubber) {
         }
         _ => {}
     }
+}
+
+fn share_expired_at(metadata: &ShareMetadata, now: &DateTime<Utc>) -> Option<DateTime<Utc>> {
+    metadata.expires_at.as_ref().and_then(|expires_at| {
+        if now >= expires_at {
+            Some(expires_at.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn default_share_expires_at(ttl_days: u64) -> DateTime<Utc> {
+    let ttl_days = ttl_days.min(i64::MAX as u64) as i64;
+    Utc::now() + Duration::days(ttl_days)
+}
+
+fn expired_share_response(expires_at: DateTime<Utc>) -> Response {
+    (
+        StatusCode::GONE,
+        Json(json!({
+            "error": "share expired",
+            "expires_at": expires_at,
+        })),
+    )
+        .into_response()
 }
 
 fn scrub_share_text(text: &str, scrubber: &LogScrubber) -> String {
@@ -909,10 +983,14 @@ mod tests {
     #[test]
     fn stored_transcript_supports_wrapped_and_bare_formats() {
         let transcript = sample_share_transcript();
+        let expires_at = chrono::DateTime::parse_from_rfc3339("2026-05-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let wrapped_json = serde_json::to_string(&SharedTranscriptRecord {
             metadata: ShareMetadata {
                 scrubbed: true,
                 public: true,
+                expires_at: Some(expires_at.clone()),
             },
             transcript: transcript.clone(),
         })
@@ -921,6 +999,7 @@ mod tests {
             StoredTranscript::Wrapped(record) => {
                 assert!(record.metadata.scrubbed);
                 assert!(record.metadata.public);
+                assert_eq!(record.metadata.expires_at, Some(expires_at.clone()));
                 assert_eq!(record.transcript.id, transcript.id);
             }
             StoredTranscript::Bare(_) => panic!("wrapped share should deserialize as wrapped"),
@@ -931,6 +1010,39 @@ mod tests {
             serde_json::from_str::<StoredTranscript>(&bare_json).unwrap(),
             StoredTranscript::Bare(_)
         ));
+    }
+
+    #[test]
+    fn share_expired_at_distinguishes_permanent_and_expired_shares() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-06T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expired = ShareMetadata {
+            scrubbed: true,
+            public: false,
+            expires_at: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-05-05T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+        };
+        let permanent = ShareMetadata {
+            scrubbed: true,
+            public: false,
+            expires_at: None,
+        };
+
+        assert!(share_expired_at(&expired, &now).is_some());
+        assert!(share_expired_at(&permanent, &now).is_none());
+    }
+
+    #[test]
+    fn expired_share_response_uses_gone_status() {
+        let expires_at = chrono::DateTime::parse_from_rfc3339("2026-05-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let response = expired_share_response(expires_at);
+        assert_eq!(response.status(), StatusCode::GONE);
     }
 
     #[test]
