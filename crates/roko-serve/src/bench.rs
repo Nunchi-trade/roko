@@ -461,6 +461,15 @@ pub async fn load_suites(workdir: &Path) -> Vec<BenchSuite> {
         }
     }
 
+    // Keep the inlined learnable suite visible even before its TOML file has
+    // been materialized on disk.
+    if !suites
+        .iter()
+        .any(|suite| suite.id.as_str() == "learnable-rust")
+    {
+        suites.push(builtin_learnable_rust_suite());
+    }
+
     // Sort by id for stable ordering.
     suites.sort_by(|a, b| a.id.cmp(&b.id));
     suites
@@ -556,6 +565,91 @@ pub fn estimate_cost_usd(model: Option<&str>, input_tokens: u64, output_tokens: 
 }
 
 use tokio::io::AsyncWriteExt;
+
+// ---------------------------------------------------------------------------
+// Built-in suite definitions
+// ---------------------------------------------------------------------------
+
+pub fn builtin_learnable_rust_suite() -> BenchSuite {
+    BenchSuite {
+        id: "learnable-rust".to_string(),
+        name: "Learnable Rust".to_string(),
+        description: "Five short Rust tasks tuned for the Llama 3.1 8B boundary. Each task rewards a reusable playbook: search the scaffold, make a minimal edit, and finish with cargo test/check.".to_string(),
+        tasks: vec![
+            BenchTask {
+                id: "grep-fix-todo".to_string(),
+                name: "Grep and Fix TODO".to_string(),
+                prompt: r#"Work in the pre-initialized Cargo project at the bench workdir. Use `grep` to find the first `TODO:` in `src/lib.rs`, inspect the surrounding code with `read_file`, and replace only that first TODO with a real implementation using `edit_file`. If you need to confirm the project layout, use `glob` and `grep` first. Keep the edit minimal and do not rewrite unrelated code. Finish by running `cargo test` from the project root with `bash`; keep iterating until the final output contains `test result: ok`."#.to_string(),
+                expected_output: Some("test result: ok".to_string()),
+                timeout_secs: None,
+                tags: vec![
+                    "learnable".to_string(),
+                    "rust".to_string(),
+                    "grep".to_string(),
+                    "tests".to_string(),
+                ],
+                difficulty: 1,
+            },
+            BenchTask {
+                id: "extract-helper-function".to_string(),
+                name: "Extract Helper Function".to_string(),
+                prompt: r#"Use `glob` to inspect the project layout and `grep` to find duplicated logic in `src/lib.rs`. The scaffold intentionally repeats one small block twice. Extract that repeated logic into a private helper function in `src/lib.rs`, update both call sites with `edit_file`, and keep the public behavior unchanged. Read the edited file back with `read_file` if needed before saving. Finish with `bash` running `cargo check`; do not stop until the output contains `Finished`."#.to_string(),
+                expected_output: Some("Finished".to_string()),
+                timeout_secs: None,
+                tags: vec![
+                    "learnable".to_string(),
+                    "rust".to_string(),
+                    "refactor".to_string(),
+                    "check".to_string(),
+                ],
+                difficulty: 2,
+            },
+            BenchTask {
+                id: "fix-broken-import".to_string(),
+                name: "Fix Broken Import".to_string(),
+                prompt: r#"Use `grep` on `src/lib.rs` to find the broken `use` import that prevents compilation. Then use `glob` and `grep` to locate where the referenced type is actually defined elsewhere in the repo, confirm the definition with `read_file`, and fix only the import path in `src/lib.rs` with `edit_file`. Do not move or rename the type definition. Verify the minimal fix with `bash` and `cargo check`; the final output should contain `Finished`."#.to_string(),
+                expected_output: Some("Finished".to_string()),
+                timeout_secs: None,
+                tags: vec![
+                    "learnable".to_string(),
+                    "rust".to_string(),
+                    "imports".to_string(),
+                    "check".to_string(),
+                ],
+                difficulty: 2,
+            },
+            BenchTask {
+                id: "generic-wrap-result".to_string(),
+                name: "Implement Generic Wrapper with Tests".to_string(),
+                prompt: r#"In the scaffolded `src/lib.rs`, implement the generic `wrap_result<T>` stub and add tests that cover success and error handling. Use `read_file` to inspect the stub, `grep` to find the existing test module, and `write_file` only if you need a new test file; otherwise `edit_file` is enough. Keep the helper generic and do not special-case a single concrete type. Finish by running `cargo test` with `bash` until it passes; the last command must produce output containing `test result: ok`."#.to_string(),
+                expected_output: Some("test result: ok".to_string()),
+                timeout_secs: None,
+                tags: vec![
+                    "learnable".to_string(),
+                    "rust".to_string(),
+                    "generics".to_string(),
+                    "tests".to_string(),
+                ],
+                difficulty: 3,
+            },
+            BenchTask {
+                id: "countup-iterator".to_string(),
+                name: "Implement Custom Iterator".to_string(),
+                prompt: r#"In `src/lib.rs`, implement `Iterator` for the existing `CountUp` struct. Use `read_file` and `grep` to inspect the scaffold and any tests, then use `edit_file` to add the `next()` logic and `write_file` if you need to add or expand unit tests. The iterator should count upward by one per call, stop cleanly according to the scaffolded end condition, and match the behavior already implied by the tests. Finish with `bash` running `cargo test` until the output contains `test result: ok`."#.to_string(),
+                expected_output: Some("test result: ok".to_string()),
+                timeout_secs: None,
+                tags: vec![
+                    "learnable".to_string(),
+                    "rust".to_string(),
+                    "iterators".to_string(),
+                    "tests".to_string(),
+                ],
+                difficulty: 3,
+            },
+        ],
+        default_timeout_secs: 300,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Built-in suite TOML content (embedded)
@@ -728,5 +822,10 @@ pub async fn ensure_builtin_suites(workdir: &Path) {
         if !path.exists() {
             let _ = tokio::fs::write(&path, content).await;
         }
+    }
+
+    let learnable_path = dir.join("learnable-rust.toml");
+    if !learnable_path.exists() {
+        let _ = save_suite(workdir, &builtin_learnable_rust_suite()).await;
     }
 }
