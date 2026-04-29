@@ -1,41 +1,201 @@
 # Roko Integration Guide
 
-A complete reference for configuring, integrating, and operating Roko. Covers
-every section of `roko.toml`, the `.roko/` directory layout, provider recipes,
-MCP configuration, the self-hosting workflow, error recovery, event
-subscriptions, learning configuration, and deployment.
+Roko is a self-developing agent toolkit: you describe work in plain English, and Roko generates
+an implementation plan, dispatches Claude agents to execute it, validates the result with a gate
+pipeline, and learns from each run to do better next time. The entire system is configured from a
+single `roko.toml` file in your workspace root.
+
+This guide is written for someone reading it for the first time. It starts with the minimum
+you need to get running and progressively introduces each subsystem, with collapsible reference
+sections for every configuration option.
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#1-architecture-overview)
-2. [Self-Hosting Workflow (End-to-End)](#2-self-hosting-workflow-end-to-end)
-3. [roko.toml Schema Reference](#3-rokotoml-schema-reference)
-4. [.roko/ Directory Layout](#4-roko-directory-layout)
-5. [Provider Configuration](#5-provider-configuration)
-6. [Model Registry](#6-model-registry)
-7. [MCP Server Configuration](#7-mcp-server-configuration)
-8. [Agent Manifests and Safety Contracts](#8-agent-manifests-and-safety-contracts)
-9. [Gate Pipeline Configuration](#9-gate-pipeline-configuration)
-10. [Learning Configuration](#10-learning-configuration)
-11. [Event System and Subscriptions](#11-event-system-and-subscriptions)
-12. [HTTP Control Plane](#12-http-control-plane)
-13. [Error Recovery](#13-error-recovery)
-14. [Deployment Configuration](#14-deployment-configuration)
-15. [Environment Variables Reference](#15-environment-variables-reference)
-16. [WorkflowEngine Integration (Programmatic)](#16-workflowengine-integration-programmatic)
-17. [Key File Locations](#17-key-file-locations)
-18. [Known Gaps](#18-known-gaps)
+1. [Quick Start — Minimal roko.toml](#1-quick-start--minimal-rokotoml)
+2. [Core Concepts](#2-core-concepts)
+3. [Self-Hosting Workflow (End-to-End)](#3-self-hosting-workflow-end-to-end)
+4. [Essential Config — What You Must Configure](#4-essential-config--what-you-must-configure)
+   - [project](#41-project)
+   - [agent](#42-agent)
+   - [providers](#43-providers)
+   - [models](#44-models)
+5. [Operational Config — What You Should Configure](#5-operational-config--what-you-should-configure)
+   - [gates](#51-gates)
+   - [routing](#52-routing)
+   - [learning](#53-learning)
+   - [conductor](#54-conductor)
+   - [budget](#55-budget)
+   - [pipeline](#56-pipeline)
+6. [Advanced Config — Power User Sections](#6-advanced-config--power-user-sections)
+7. [Provider Configuration Recipes](#7-provider-configuration-recipes)
+8. [Model Registry](#8-model-registry)
+9. [MCP Server Configuration](#9-mcp-server-configuration)
+10. [Agent Manifests and Safety Contracts](#10-agent-manifests-and-safety-contracts)
+11. [Gate Pipeline Configuration](#11-gate-pipeline-configuration)
+12. [Learning Configuration](#12-learning-configuration)
+13. [Event System and Subscriptions](#13-event-system-and-subscriptions)
+14. [HTTP Control Plane](#14-http-control-plane)
+15. [Error Recovery](#15-error-recovery)
+16. [Deployment Guide](#16-deployment-guide)
+17. [Environment Variables Reference](#17-environment-variables-reference)
+18. [WorkflowEngine Integration (Programmatic)](#18-workflowengine-integration-programmatic)
+19. [Key File Locations](#19-key-file-locations)
+20. [Known Gaps](#20-known-gaps)
 
 ---
 
-## 1. Architecture Overview
+## 1. Quick Start — Minimal roko.toml
 
-### The Layer Stack
+The absolute minimum configuration to run Roko is a project name and an API key. If you have
+`ANTHROPIC_API_KEY` set in your environment, Roko auto-detects the provider and you only need:
 
-Roko is structured as a strict service hierarchy. Every entry point — CLI,
-HTTP server, and ACP — shares the same runtime core.
+```toml
+# roko.toml — minimal config
+
+[project]
+name = "my-project"
+
+[agent]
+default_model = "claude-sonnet-4-6"
+```
+
+Then initialize the workspace and run the self-hosting loop:
+
+```bash
+# Rust 1.91+ required (alloy deps)
+rustup update stable
+
+# Build the CLI
+cargo build -p roko-cli --release
+
+# Initialize .roko/ directory and write a starter roko.toml
+roko init
+
+# Capture work → draft a plan → execute it
+roko prd idea "Add input validation to the API handler"
+roko prd draft new "api-validation"
+roko prd plan api-validation
+roko plan run plans/api-validation/
+
+# Watch progress in real time
+roko dashboard
+```
+
+That is the complete self-hosting loop. The sections below explain every knob available.
+
+---
+
+## 2. Core Concepts
+
+### What roko.toml controls
+
+`roko.toml` is the single source of truth for how the entire system behaves:
+
+- **Which AI providers to use** and how to reach them (`[providers.*]`, `[models.*]`)
+- **Which model gets used for which kind of task** (`[routing]`, `[agent.roles.*]`)
+- **What verification gates run after each task** (`[gates]`, `[pipeline]`)
+- **How much money can be spent** (`[budget]`, `[energy]`)
+- **How the system learns from experience** (`[learning]`, `[demurrage]`)
+- **What HTTP API to expose** (`[serve]`, `[server]`)
+- **What triggers fire automatically** (`[subscriptions]`, `[scheduler]`, `[webhooks]`)
+- **How to deploy to production** (`[deploy]`, `[relay]`)
+
+The schema lives in `crates/roko-core/src/config/schema.rs`. Every field has a serde default, so
+you only need to write sections that differ from the defaults.
+
+### Config layering
+
+```
+Environment variables         ROKO_MODEL=claude-opus-4-6 overrides everything
+        |
+        v
+   roko.toml                  Your workspace config file
+        |
+        v
+  RokoConfig::default()       Compiled-in defaults (always present)
+```
+
+Two secret-resolution passes run after parsing:
+
+1. `${VAR}` interpolation — expands `${ENV_VAR}` references anywhere in the config.
+2. `*_file` resolution — keys ending in `_file` in `extra_headers` read their value from
+   the file at the specified path. Useful for Docker secrets.
+
+### What .roko/ stores
+
+All runtime state lives in `.roko/`. You never need to edit these files by hand; they exist
+so the system can resume after a crash, accumulate learning across runs, and give you visibility
+into what happened.
+
+```
+.roko/
+  roko.toml is NOT here — it lives in your workspace root
+
+  memory/               What agents learned
+    episodes.jsonl      Per-turn records: model, cost, gate verdict, HDC fingerprint
+    playbook.toml       Accumulated successful techniques, injected into future prompts
+    skills/             Learned skill files
+
+  learn/                How the system improves
+    cascade-router.json Model routing bandit state (which model wins for which task type)
+    experiments.json    A/B prompt experiment store
+    gate-thresholds.json Adaptive gate skip thresholds (EMA per rung)
+    efficiency.jsonl    Per-turn efficiency events
+    knowledge-scores.json Knowledge admission scores
+    section-effects.json Prompt section effectiveness scores
+
+  state/                Crash recovery
+    executor.json       Pipeline checkpoint — resume any interrupted plan run
+    events.json         Event log snapshot
+
+  prd/                  Product Requirements Documents
+    ideas/              Raw one-line ideas
+    drafts/             PRDs being written
+    published/          Promoted PRDs (trigger plan generation)
+    plans/              Generated implementation plans
+
+  learn/                (see above)
+  research/             Perplexity research artifacts
+  cache/                Cargo target dir, context pack cache
+  custody.jsonl         Append-only audit chain
+  witness.jsonl         Witness DAG log
+  VERSION               Layout format version (currently 1)
+```
+
+<details>
+<summary>Full .roko/ path accessor reference</summary>
+
+| Path | Method on RokoLayout | Purpose |
+|---|---|---|
+| `.roko/` | `root()` | Data directory root |
+| `.roko/memory/episodes.jsonl` | `episodes_path()` | Episode log |
+| `.roko/memory/playbook.toml` | `playbook_path()` | Active playbook |
+| `.roko/state/executor.json` | `executor_snapshot()` | Executor checkpoint |
+| `.roko/learn/cascade-router.json` | `cascade_router_path()` | Router state |
+| `.roko/learn/experiments.json` | `experiments_path()` | Experiment store |
+| `.roko/learn/efficiency.jsonl` | `efficiency_path()` | Efficiency events |
+| `.roko/custody.jsonl` | `custody_log()` | Custody audit chain |
+| `.roko/witness.jsonl` | `witness_log()` | Witness DAG |
+| `.roko/runtime/roko.pid` | `pid_file()` | PID file |
+
+Source: `crates/roko-fs/src/layout.rs` (`RokoLayout` struct).
+
+</details>
+
+### Hot-reload vs. restart
+
+When `roko serve` is running, most config changes take effect immediately:
+
+| Section | Behavior |
+|---|---|
+| `budget`, `gates`, `routing`, `learning` | Hot-reload |
+| `demurrage`, `scheduler`, `watcher` | Hot-reload |
+| `subscriptions`, `conductor`, `attention`, `goals` | Hot-reload |
+| `agent`, `project`, `serve`, `providers`, `models`, `server` | Requires restart |
+
+### Architecture in one diagram
 
 ```
 Entry points
@@ -59,7 +219,12 @@ Entry points
  (roko-agent) (roko-compose)      (roko-gate)   (roko-learn)
 ```
 
-Foundation traits live in `crates/roko-core/src/foundation.rs`:
+`PipelineStateV2` is a pure Rust struct — no async, no I/O. It serializes to JSON for
+checkpoint/resume. `EffectDriver` owns the services and translates state-machine outputs into
+real work.
+
+<details>
+<summary>Foundation trait table</summary>
 
 | Trait | Implementor | Purpose |
 |---|---|---|
@@ -71,71 +236,22 @@ Foundation traits live in `crates/roko-core/src/foundation.rs`:
 | `AffectPolicy` | `DaimonPolicy` (roko-daimon) | Behavioral dispatch modulation |
 | `EffectExecutor` | `EffectDriver` (roko-runtime) | Translates state-machine actions to I/O |
 
-### State Machine + Effect Driver Pattern
+Source: `crates/roko-core/src/foundation.rs`.
 
-The core design keeps decisions separate from side-effects:
-
-```
-PipelineStateV2::step(PipelineInput) -> PipelineOutput
-                                              │
-                              EffectDriver executes the output
-                                              │
-                              returns PipelineInput back to loop
-```
-
-`PipelineStateV2` is a pure Rust struct with no `async` methods and no I/O.
-It serializes to JSON for checkpoint/resume without any special handling.
-`EffectDriver` owns the `Arc<dyn ModelCaller>`, `Arc<dyn GateRunner>`, etc.
-and translates `PipelineOutput` variants into real work.
-
-### Provider Dispatch
-
-The provider layer (`crates/roko-agent/src/`) supports seven protocol families:
-
-| `ProviderKind` | TOML value | What it talks to |
-|---|---|---|
-| `AnthropicApi` | `"anthropic_api"` | Anthropic Messages API over HTTP |
-| `ClaudeCli` | `"claude_cli"` | `claude` CLI subprocess (stream-JSON) |
-| `OpenAiCompat` | `"openai_compat"` | Any OpenAI-compatible HTTP endpoint |
-| `CursorAcp` | `"cursor_acp"` | Cursor Agent Client Protocol |
-| `PerplexityApi` | `"perplexity_api"` | Perplexity Sonar HTTP API |
-| `GeminiApi` | `"gemini_api"` | Google Gemini API (native) |
-| `CerebrasApi` | `"cerebras_api"` | Cerebras inference API |
-
-### Event-Driven Observability
-
-Every significant action emits a `RuntimeEvent` to a process-global broadcast
-bus (`EventBus<RuntimeEvent>`). Consumers register at startup and receive
-non-blocking fire-and-forget notifications.
-
-```
-WorkflowEngine / EffectDriver
-     │
-     │  emit_runtime_event(RuntimeEvent::AgentSpawned { ... })
-     ▼
-EventBus<RuntimeEvent>
-     ├── JsonlLogger   → .roko/state/events.json
-     ├── SseAdapter    → HTTP GET /v1/events stream
-     └── AcpAdapter    → per-run ACP protocol messages
-```
-
-Event kinds:
-
-- Lifecycle: `WorkflowStarted`, `PhaseTransition`, `WorkflowCompleted`
-- Agent: `AgentSpawned`, `AgentOutput`, `AgentCompleted`, `AgentFailed`
-- Gates: `GateStarted`, `GatePassed`, `GateFailed`
-- Feedback: `FeedbackRecorded`
-- Persistence: `StateCheckpointed`
-
-Every event carries a `run_id` so consumers can correlate across concurrent
-runs.
+</details>
 
 ---
 
-## 2. Self-Hosting Workflow (End-to-End)
+## 3. Self-Hosting Workflow (End-to-End)
 
-This section walks through the complete loop that roko uses to develop itself.
-Every command exists in the CLI today.
+This is how Roko develops itself: a ten-step loop from capturing an idea to a validated,
+committed implementation. Every command listed here exists in the CLI today.
+
+```
+idea → PRD → research → plan → execute → gate → learn → repeat
+  │                               │
+  └── roko prd idea/draft/plan    └── roko plan run
+```
 
 ### Prerequisites
 
@@ -158,9 +274,8 @@ alias roko='cargo run -p roko-cli --'
 roko init
 ```
 
-Creates `.roko/` with the standard directory layout and a starter `roko.toml`
-in the workspace root. Edit `roko.toml` to configure providers before
-proceeding (see [Section 3: roko.toml Schema Reference](#3-rokotoml-schema-reference)).
+Creates `.roko/` with the standard directory layout and a starter `roko.toml` in the workspace
+root. Edit `roko.toml` to configure your providers (see Section 4) before proceeding.
 
 ### Step 2: Capture a work item
 
@@ -168,8 +283,8 @@ proceeding (see [Section 3: roko.toml Schema Reference](#3-rokotoml-schema-refer
 roko prd idea "Wire knowledge store into CascadeRouter for model selection"
 ```
 
-Creates a dated idea file in `.roko/prd/ideas/`. Ideas are lightweight —
-just a title and timestamp.
+Creates a dated idea file in `.roko/prd/ideas/`. Ideas are lightweight — just a title and
+timestamp. Think of this as a post-it note you don't want to lose.
 
 ```bash
 roko prd list   # view all ideas and PRDs
@@ -181,13 +296,12 @@ roko prd list   # view all ideas and PRDs
 roko prd draft new "knowledge-informed-routing"
 ```
 
-Launches a Claude agent that reads the idea, reads the current codebase via
-the code-intelligence MCP, and writes a structured PRD into
-`.roko/prd/drafts/knowledge-informed-routing.md`.
+Launches a Claude agent that reads the idea, reads the current codebase via the code-intelligence
+MCP, and writes a structured PRD into `.roko/prd/drafts/knowledge-informed-routing.md`.
 
-The PRD includes a mandatory **Repository Grounding** section that lists the
-specific files and types the implementation will touch. This grounding is
-injected as context when generating the plan in step 5.
+The PRD includes a mandatory **Repository Grounding** section listing the specific files and
+types the implementation will touch. This grounding is injected as context when generating the
+plan in step 5, which dramatically reduces hallucinated references to nonexistent functions.
 
 ### Step 4: Enrich with research (optional)
 
@@ -195,10 +309,9 @@ injected as context when generating the plan in step 5.
 roko research enhance-prd knowledge-informed-routing
 ```
 
-Launches a Perplexity research agent that queries for relevant prior art,
-papers, and API documentation, then appends a **Research** section to the
-draft PRD. Optional but significantly improves plan quality for novel
-subsystems.
+Launches a Perplexity research agent that queries for relevant prior art, papers, and API
+documentation, then appends a **Research** section to the draft PRD. Optional but significantly
+improves plan quality for novel subsystems.
 
 ### Step 5: Review and promote the PRD
 
@@ -213,9 +326,9 @@ roko prd draft edit knowledge-informed-routing
 roko prd draft promote knowledge-informed-routing
 ```
 
-Promoting moves the file to `.roko/prd/published/`. If `prd.auto_plan = true`
-in `roko.toml`, plan generation (step 6) triggers automatically via the
-`prd_publish_subscriber` background task in `roko-serve`.
+Promoting moves the file to `.roko/prd/published/`. If `prd.auto_plan = true` in `roko.toml`,
+plan generation (step 6) triggers automatically via the `prd_publish_subscriber` background task
+in `roko serve`.
 
 ### Step 6: Generate an implementation plan
 
@@ -223,13 +336,11 @@ in `roko.toml`, plan generation (step 6) triggers automatically via the
 roko prd plan knowledge-informed-routing
 ```
 
-A Claude agent reads the published PRD (including the Repository Grounding
-section), reads the relevant source files, and produces a
-`plans/knowledge-informed-routing/tasks.toml` with a DAG of implementation
-tasks.
+A Claude agent reads the published PRD (including the Repository Grounding section), reads the
+relevant source files, and produces a `plans/knowledge-informed-routing/tasks.toml` with a DAG
+of implementation tasks.
 
 Each task in the TOML has:
-
 - `id` — stable identifier for resumption
 - `title` — human-readable description
 - `depends_on` — list of task ids that must complete first
@@ -247,8 +358,7 @@ roko plan validate plans/knowledge-informed-routing/
 roko plan run plans/knowledge-informed-routing/
 ```
 
-This starts the main orchestration loop (`crates/roko-cli/src/orchestrate.rs`).
-For each task:
+This starts the main orchestration loop (`crates/roko-cli/src/orchestrate.rs`). For each task:
 
 1. Build the 9-layer system prompt via `PromptAssemblyService`
 2. Route to a model via `CascadeRouter`
@@ -267,9 +377,8 @@ roko plan run plans/knowledge-informed-routing/ \
   --resume .roko/state/executor.json
 ```
 
-The `PipelineStateV2` checkpoint is written atomically after each phase
-transition. Resumption restores the exact pipeline state so work is never
-duplicated.
+The `PipelineStateV2` checkpoint is written atomically after each phase transition. Resumption
+restores the exact pipeline state so work is never duplicated.
 
 ### Step 9: Watch progress
 
@@ -289,8 +398,8 @@ Opens the interactive ratatui TUI. F1–F7 cycle through tabs:
 | F6 | Cost and token usage |
 | F7 | System health |
 
-The TUI uses a file watcher (`notify::RecommendedWatcher`) to pick up changes
-to `.roko/` without polling. Updates appear in under 250 ms.
+The TUI uses a file watcher (`notify::RecommendedWatcher`) to pick up changes to `.roko/`
+without polling. Updates appear in under 250 ms.
 
 ### Step 10: Inspect learning state
 
@@ -302,51 +411,22 @@ roko learn efficiency   # per-turn efficiency events
 roko learn episodes     # episode history
 ```
 
-After a few successful runs the cascade router accumulates enough observations
-to graduate from the static routing table (stage 1, < 50 observations) into
-the confidence-based stage (stage 2, 50–200 observations) and eventually the
-LinUCB bandit stage (stage 3, > 200 observations).
+After a few successful runs the cascade router accumulates enough observations to graduate from
+the static routing table (stage 1, < 50 observations) into the confidence-based stage (stage 2,
+50–200 observations) and eventually the LinUCB bandit stage (stage 3, > 200 observations). At
+that point, Roko picks the right model for each task type automatically.
 
 ---
 
-## 3. roko.toml Schema Reference
+## 4. Essential Config — What You Must Configure
 
-The schema is defined in `crates/roko-core/src/config/schema.rs` (top-level
-`RokoConfig` struct). All fields carry serde defaults; you only need to write
-sections that differ from the defaults. The file is loaded from
-`<workdir>/roko.toml` and falls back to `RokoConfig::default()` if missing.
+These are the sections you need to set correctly before anything works. Get these right first.
 
-Two secret-resolution passes run automatically after parsing:
+### 4.1 [project]
 
-1. `${VAR}` interpolation — expands `${ENV_VAR}` references in provider
-   config strings.
-2. `*_file` resolution — reads secrets from file paths in `extra_headers`
-   whose keys end with `_file`.
-
-### Top-level version fields
-
-```toml
-config_version = 2    # layout version for migration tooling (current: 2)
-schema_version = 2    # schema version for compatibility checks (current: 2)
-```
-
-If you have an old `config_version = 1` file, run `roko config migrate` to
-upgrade.
-
-### Hot-reload vs. restart
-
-Most sections support hot-reload when `roko serve` is running:
-
-| Section | Requires restart? |
-|---|---|
-| `budget`, `gates`, `routing`, `learning` | Hot-reload |
-| `demurrage`, `scheduler`, `watcher` | Hot-reload |
-| `subscriptions`, `conductor`, `attention`, `goals` | Hot-reload |
-| `agent`, `project`, `serve`, `providers`, `models`, `server` | Restart required |
-
-### [project]
-
-Project-level metadata.
+**Why this matters**: The project name appears in logs, episode records, and PRD metadata. The
+`root` and `fresh_base_branch` fields tell the orchestrator where your code lives and which git
+branch to use as a baseline when creating fresh worktrees for isolated task execution.
 
 ```toml
 [project]
@@ -356,24 +436,41 @@ fresh_base_branch = "main"   # git branch for fresh worktree creation, default: 
 # default_domain = "coding"  # default task domain (optional)
 ```
 
-**`default_domain`** accepts: `"coding"`, `"research"`, `"chain"`, `"docs"`,
-or `"ops"`. When set, tasks without an explicit domain inherit this.
+<details>
+<summary>Field details</summary>
 
-### [prd]
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | string | `"roko-project"` | Project identifier used in logs and metadata |
+| `root` | string | `"."` | Relative or absolute project root |
+| `fresh_base_branch` | string | `"main"` | Git branch for fresh worktree creation |
+| `default_domain` | string | none | Default task domain: `"coding"`, `"research"`, `"chain"`, `"docs"`, `"ops"`. Tasks without an explicit domain inherit this. |
 
-PRD lifecycle settings.
+</details>
+
+<details>
+<summary>[prd] — PRD lifecycle settings</summary>
+
+**Why this matters**: Setting `auto_plan = true` with `roko serve` running means you never have
+to manually run `roko prd plan` — promoting a PRD automatically queues the plan generation.
 
 ```toml
 [prd]
 auto_plan = false   # bool: auto-generate plan when a PRD is promoted, default: false
 ```
 
-When `auto_plan = true`, `roko serve` listens for PRD publish events and
-triggers `roko prd plan <slug>` automatically.
+When `auto_plan = true`, `roko serve` listens for PRD publish events and triggers
+`roko prd plan <slug>` automatically via the `prd_publish_subscriber` background task.
 
-### [agent]
+</details>
 
-Agent / model configuration, including per-role overrides.
+### 4.2 [agent]
+
+**Why this matters**: This section defines the default model and backend used for all agents.
+If you skip this entirely and have `ANTHROPIC_API_KEY` set, Roko auto-detects an
+`anthropic_api` provider and uses `claude-sonnet-4-6` as the default. You only need to
+customize this when you want to change the defaults or add per-role overrides (e.g., use
+Opus for complex architectural tasks).
 
 ```toml
 [agent]
@@ -386,37 +483,25 @@ bare_mode = true                      # pass --bare to skip built-in system prom
 fallback_model = "claude-haiku-4-5"  # retry model on spawn failure (optional)
 mode = "ephemeral"                    # agent lifecycle: "ephemeral"/"persistent"/"reactive"
 domain = "coding"                     # domain profile name (optional)
-
-# legacy CLI path (used when [providers] is empty):
-# command = "claude"
-# args = ["--dangerously-skip-permissions"]
-# timeout_ms = 120000
-# env = [["ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}"]]
-
-# CaMeL dual-LLM isolation (SAFE-07):
-[agent.data_llm]
-model = "claude-haiku-3-5"   # smaller model for untrusted content isolation
-max_tokens = 4096
-temperature = 0.0
-strip_tool_calls = true      # Data LLM cannot produce tool calls
-sanitize_input = true        # strip known injection patterns before sending
-# output_schema = { ... }    # optional JSON Schema for Data LLM output validation
 ```
 
-**`default_backend`** auto-detection: if `ANTHROPIC_API_KEY` is set in the
-environment, defaults to `"anthropic_api"`; otherwise defaults to `"claude"`
-(the Claude CLI subprocess path).
+**`default_backend`** auto-detection: if `ANTHROPIC_API_KEY` is set, defaults to
+`"anthropic_api"`; otherwise defaults to `"claude"` (the Claude CLI subprocess).
 
 **`mode`** values:
 - `"ephemeral"` — agent runs a task then exits (default, used by `plan run`)
 - `"persistent"` — agent runs continuously until explicitly stopped (`roko agent start`)
 - `"reactive"` — agent sleeps until a trigger fires (webhook, cron, event)
 
-**`temperament`** values: `"conservative"`, `"balanced"`, `"exploratory"`.
-Higher exploration rates cause the AffectPolicy to set `Bypass` cache policy
-on model calls to avoid stale responses.
+**`temperament`** values: `"conservative"`, `"balanced"`, `"exploratory"`. Higher exploration
+rates cause the AffectPolicy to set `Bypass` cache policy on model calls to avoid stale
+responses.
 
-#### Per-role overrides
+<details>
+<summary>Per-role overrides — use different models for different job types</summary>
+
+Per-role overrides let you pin the implementer role to Opus (for correctness) while using
+Haiku for the autofix role (for speed and cost). Any missing field inherits from `[agent]`.
 
 ```toml
 [agent.roles.implementer]
@@ -440,27 +525,52 @@ force_backend = "claude"       # pin to a specific provider family
 force_tier = "focused"         # pin to a complexity tier
 ```
 
-Every field in `RoleOverride` is optional. Missing fields inherit the
-`[agent]` defaults.
+</details>
 
-#### Policy manifests
+<details>
+<summary>CaMeL dual-LLM isolation (SAFE-07)</summary>
+
+The `data_llm` section enables CaMeL-style dual-LLM isolation: untrusted content (e.g., web
+search results, user-provided data) is processed by a smaller isolated model before being
+passed to the main agent. This prevents prompt injection from untrusted sources.
+
+```toml
+[agent.data_llm]
+model = "claude-haiku-3-5"   # smaller model for untrusted content isolation
+max_tokens = 4096
+temperature = 0.0
+strip_tool_calls = true      # Data LLM cannot produce tool calls
+sanitize_input = true        # strip known injection patterns before sending
+# output_schema = { ... }    # optional JSON Schema for Data LLM output validation
+```
+
+</details>
+
+<details>
+<summary>Policy manifests</summary>
 
 ```toml
 [agent]
 policy_manifests = [".roko/roles/manifest.toml"]
 ```
 
-Policy manifests contain per-role YAML safety contracts and tool allowlists.
-Loaded before each agent dispatch.
+Policy manifests contain per-role YAML safety contracts and tool allowlists. Loaded before
+each agent dispatch. See [Section 10](#10-agent-manifests-and-safety-contracts) for details.
 
-### [providers.*]
+</details>
 
-Provider registry. Each key is a provider name; the value describes how to
-reach the provider.
+### 4.3 [providers.*]
+
+**Why this matters**: Providers are how Roko talks to LLMs. Without at least one provider
+configured (or `ANTHROPIC_API_KEY` set for auto-detection), no agents can run. Each key under
+`[providers]` is a name you invent; `[models.*]` entries then reference providers by that name.
+
+You can have multiple providers configured simultaneously — useful for failover or mixing
+providers (Anthropic for coding, Perplexity for research).
 
 ```toml
 [providers.my-provider]
-kind = "anthropic_api"     # ProviderKind value (see table above)
+kind = "anthropic_api"     # ProviderKind value (see table below)
 base_url = "https://..."   # HTTP base URL (for HTTP providers)
 api_key_env = "MY_API_KEY" # env var holding the API key
 command = "claude"         # CLI command (for ClaudeCli)
@@ -477,16 +587,33 @@ max_concurrent = 4         # max concurrent requests (optional)
 "Authorization_file" = "/run/secrets/my-token"
 ```
 
-See [Section 5: Provider Configuration](#5-provider-configuration) for
-ready-to-use provider recipes.
+<details>
+<summary>Supported provider kinds</summary>
 
-### [models.*]
+| `ProviderKind` | TOML value | What it talks to |
+|---|---|---|
+| `AnthropicApi` | `"anthropic_api"` | Anthropic Messages API over HTTP |
+| `ClaudeCli` | `"claude_cli"` | `claude` CLI subprocess (stream-JSON) |
+| `OpenAiCompat` | `"openai_compat"` | Any OpenAI-compatible HTTP endpoint |
+| `CursorAcp` | `"cursor_acp"` | Cursor Agent Client Protocol |
+| `PerplexityApi` | `"perplexity_api"` | Perplexity Sonar HTTP API |
+| `GeminiApi` | `"gemini_api"` | Google Gemini API (native) |
+| `CerebrasApi` | `"cerebras_api"` | Cerebras inference API |
 
-Model registry. Each key is a logical model name; the value binds it to a
-provider and specifies capabilities.
+</details>
+
+See [Section 7: Provider Configuration Recipes](#7-provider-configuration-recipes) for
+ready-to-copy configs for each provider.
+
+### 4.4 [models.*]
+
+**Why this matters**: The model registry decouples logical names from provider-specific API
+slugs. The `[routing]` section and role overrides refer to models by their registry key (e.g.,
+`"standard"`), not by the raw API slug. This means you can swap from Anthropic to OpenAI for
+the standard model by changing one line in `[models]` without touching `[routing]`.
 
 ```toml
-[models.sonnet]
+[models.standard]
 provider = "anthropic"         # key into [providers.*]
 slug = "claude-sonnet-4-6"     # model ID sent on the wire
 context_window = 200000        # context window in tokens (default: 128000)
@@ -504,11 +631,26 @@ cost_cache_read_per_m = 0.3    # $ per million cache-read tokens (optional)
 cost_cache_write_per_m = 3.75  # $ per million cache-write tokens (optional)
 ```
 
-See [Section 6: Model Registry](#6-model-registry) for examples.
+See [Section 8: Model Registry](#8-model-registry) for a minimum three-model setup and a
+full-featured example.
 
-### [gates]
+---
 
-Verification gate settings.
+## 5. Operational Config — What You Should Configure
+
+Once you have providers and models wired up, these sections control how well the system performs.
+You can leave them at defaults initially, but tuning them makes a large difference in quality and
+cost.
+
+### 5.1 [gates]
+
+**Why this matters**: Gates are the verification pipeline that runs after every agent task. By
+default, Roko runs `cargo build` (rung 0), `cargo clippy` (rung 1), `cargo test` (rung 2), and
+a `git diff` sanity check (rung 3). If any gate fails, the orchestrator retries up to
+`max_iterations` times before giving up. Gates are what prevent agents from shipping broken code.
+
+For non-Rust projects, you can replace the default gates with custom shell commands via
+`[gates.domain_gates]`.
 
 ```toml
 [gates]
@@ -522,12 +664,18 @@ research = ["shell:true"]    # research tasks skip compile/test
 docs = ["shell:true"]        # docs tasks skip compile/test
 ```
 
-See [Section 9: Gate Pipeline Configuration](#9-gate-pipeline-configuration)
-for the full rung table.
+See [Section 11: Gate Pipeline Configuration](#11-gate-pipeline-configuration) for the full
+7-rung table and adaptive threshold details.
 
-### [routing]
+### 5.2 [routing]
 
-Model routing configuration for the CascadeRouter.
+**Why this matters**: The routing section controls how Roko picks which AI model to use for
+each task. By default it uses a static mapping (fast tasks → Haiku, standard → Sonnet, complex
+→ Opus), but with `mode = "auto_override"` and enough observations, it graduates to a LinUCB
+contextual bandit that learns which models actually pass gates reliably for each task type.
+
+The three model keys (`fast_task_model`, `standard_task_model`, `complex_task_model`) reference
+entries in `[models.*]`.
 
 ```toml
 [routing]
@@ -538,8 +686,24 @@ fast_task_model = "claude-haiku-4-5"      # model for mechanical/fast tasks
 standard_task_model = "claude-sonnet-4-6" # model for standard tasks
 complex_task_model = "claude-opus-4-6"    # model for architectural tasks
 context_strategy = "mcp_first"    # "mcp_first", "hybrid", "inline_heavy"
+```
 
-# Reward scalarization weights (must sum to ~1.0):
+<details>
+<summary>Routing stages and reward weights</summary>
+
+The CascadeRouter progresses through three stages automatically:
+
+| Stage | Observations | Strategy |
+|---|---|---|
+| 1: Static | < 50 | Hardcoded role → model table from TOML |
+| 2: Confidence | 50–200 | Empirical pass-rate + confidence interval |
+| 3: UCB/LinUCB | > 200 | Full contextual bandit |
+
+State persists to `.roko/learn/cascade-router.json`.
+
+Reward scalarization weights (must sum to ~1.0):
+
+```toml
 [routing.weights]
 quality = 0.5    # default: 0.5
 cost = 0.3       # default: 0.3
@@ -557,67 +721,47 @@ cost = 0.2
 latency = 0.1
 ```
 
-The CascadeRouter progresses through three stages automatically:
+</details>
 
-| Stage | Observations | Strategy |
-|---|---|---|
-| 1: Static | < 50 | Hardcoded role → model table from TOML |
-| 2: Confidence | 50–200 | Empirical pass-rate + confidence interval |
-| 3: UCB/LinUCB | > 200 | Full contextual bandit |
+### 5.3 [learning]
 
-State persists to `.roko/learn/cascade-router.json`.
+**Why this matters**: The learning section controls how Roko improves between runs. The most
+impactful setting is `replan_on_gate_failure = true`, which makes the system automatically
+revise the implementation plan when an agent keeps failing the same gate — instead of just
+retrying the same approach.
 
-### [pipeline]
-
-Complexity-to-pipeline mapping. Each band configures whether a strategist
-agent runs before implementation and whether reviewer agents run after.
+`auto_playbook_refresh = true` means successful techniques are captured and injected into future
+agent prompts automatically, compounding over time.
 
 ```toml
-[pipeline.mechanical]
-strategist = false
-reviewers = false
-reviewer_mode = "quick"   # "quick" or "full"
-max_iterations = 1
-
-[pipeline.focused]
-strategist = false
-reviewers = false
-reviewer_mode = "quick"
-max_iterations = 2
-
-[pipeline.integrative]
-strategist = true
-reviewers = true
-reviewer_mode = "quick"
-max_iterations = 2
-
-[pipeline.architectural]
-strategist = true
-reviewers = true
-reviewer_mode = "full"    # full: architect + auditor + scribe reviewers
-max_iterations = 3
+[learning]
+auto_playbook_refresh = true       # refresh playbook after successful tasks, default: true
+knowledge_file_intel = true        # inject file difficulty profiles, default: true
+knowledge_warnings = true          # inject knowledge warnings, default: true
+knowledge_wave_context = true      # cross-task wave context propagation, default: true
+knowledge_error_patterns = true    # error signature pattern matching, default: true
+learning_min_occurrences = 2       # min occurrences before promoting rules, default: 2
+file_intel_max_entries = 15        # max file-intel entries per task, default: 15
+warning_max_entries = 5            # max warning entries per task, default: 5
+replan_on_gate_failure = true      # trigger plan revision on repeated gate failure
+replan_max_per_plan = 2            # max gate-failure replans per plan, default: 2
+replan_gate_attempts = 3           # consecutive failures before replan, default: 3
+use_lookahead_router = false       # enable lookahead cost-saving tier downgrades
+lookahead_threshold = 0.7          # success probability floor for downgrade, default: 0.7
 ```
 
-**`reviewer_mode`** values:
-- `"quick"` — single quick-pass reviewer
-- `"full"` — full review suite (architect, auditor, scribe)
+See [Section 12: Learning Configuration](#12-learning-configuration) for details on episodes,
+playbooks, and the cascade router.
 
-### [budget]
+### 5.4 [conductor]
 
-Spend and token budget settings. Violations result in
-`GatewayError::BudgetExceeded` which halts the workflow cleanly.
+**Why this matters**: The conductor is the meta-orchestrator that controls parallelism, autofix
+behavior, and which reviewer roles run. The most important setting here is `max_auto_fix_attempts`:
+when a gate fails, Roko spawns a fast model to try to fix the problem automatically. Setting this
+too low means you give up too soon; too high wastes money on hopeless autofix loops.
 
-```toml
-[budget]
-max_plan_usd = 25.0         # max dollars per plan run, default: 25.0
-max_turn_usd = 3.0          # max dollars per agent turn, default: 3.0
-prompt_token_budget = 10000 # token budget for prompt composition, default: 10000
-```
-
-### [conductor]
-
-Conductor (meta-orchestrator) settings controlling parallelism, auto-fix
-behavior, and role toggles.
+`parallel_enabled = true` lets Roko execute independent tasks concurrently — much faster for
+plans with many parallel-safe tasks.
 
 ```toml
 [conductor]
@@ -632,15 +776,29 @@ max_auto_fix_attempts = 3       # gate failure autofix attempts, default: 3
 auto_fix_model = "claude-haiku-4-5"  # model for autofix turns
 conductor_model = "claude-sonnet-4-6"  # model for conductor reasoning (optional)
 warm_implementers_per_plan = 1  # keep N implementers warm, default: 1
+```
 
+<details>
+<summary>Reviewer role toggles</summary>
+
+```toml
 # Toggle which reviewer roles are active:
 [conductor.enabled_roles]
 architect = true
 auditor = true
 scribe = true
 critic = true
+```
 
-# Per-watcher threshold overrides for anomaly detection:
+</details>
+
+<details>
+<summary>Per-watcher threshold overrides for anomaly detection</summary>
+
+The conductor runs 10 watchers that monitor for anomalous agent behavior. Each watcher has
+configurable thresholds. The defaults are reasonable starting points.
+
+```toml
 [conductor.watchers.compile_fail_repeat]
 max_repeats = 3     # halt after N consecutive compile failures
 
@@ -675,34 +833,73 @@ min_failure_increase = 1    # flag if test failures increase by N or more
 alert_ratio = 0.80          # alert when 80% of time budget is consumed
 ```
 
-### [learning]
+</details>
 
-Learning subsystem configuration.
+### 5.5 [budget]
+
+**Why this matters**: Budget settings are hard guardrails on spending. When a budget is
+exceeded, Roko raises `GatewayError::BudgetExceeded` and halts cleanly. Without these set,
+a runaway agent or a plan with an unexpectedly large number of tasks could spend much more
+than intended.
 
 ```toml
-[learning]
-auto_playbook_refresh = true       # refresh playbook after successful tasks, default: true
-knowledge_file_intel = true        # inject file difficulty profiles, default: true
-knowledge_warnings = true          # inject knowledge warnings, default: true
-knowledge_wave_context = true      # cross-task wave context propagation, default: true
-knowledge_error_patterns = true    # error signature pattern matching, default: true
-learning_min_occurrences = 2       # min occurrences before promoting rules, default: 2
-file_intel_max_entries = 15        # max file-intel entries per task, default: 15
-warning_max_entries = 5            # max warning entries per task, default: 5
-replan_on_gate_failure = true      # trigger plan revision on repeated gate failure
-replan_max_per_plan = 2            # max gate-failure replans per plan, default: 2
-replan_gate_attempts = 3           # consecutive failures before replan, default: 3
-use_lookahead_router = false       # enable lookahead cost-saving tier downgrades
-lookahead_threshold = 0.7          # success probability floor for downgrade, default: 0.7
+[budget]
+max_plan_usd = 25.0         # max dollars per plan run, default: 25.0
+max_turn_usd = 3.0          # max dollars per agent turn, default: 3.0
+prompt_token_budget = 10000 # token budget for prompt composition, default: 10000
 ```
 
-See [Section 10: Learning Configuration](#10-learning-configuration) for
-details on episodes, playbooks, and the cascade router.
+### 5.6 [pipeline]
 
-### [demurrage]
+**Why this matters**: The pipeline section maps task complexity to agent orchestration
+behavior. Mechanical tasks (rename a variable) get a single implementation agent with no
+reviewers. Architectural tasks (redesign a subsystem) get a strategist agent before
+implementation, then a full review suite (architect + auditor + scribe) after. This controls
+how much process overhead Roko applies to each task.
 
-Knowledge demurrage — Gesellian decay applied to playbook entries and
-knowledge store items so stale heuristics naturally fade.
+```toml
+[pipeline.mechanical]
+strategist = false
+reviewers = false
+reviewer_mode = "quick"   # "quick" or "full"
+max_iterations = 1
+
+[pipeline.focused]
+strategist = false
+reviewers = false
+reviewer_mode = "quick"
+max_iterations = 2
+
+[pipeline.integrative]
+strategist = true
+reviewers = true
+reviewer_mode = "quick"
+max_iterations = 2
+
+[pipeline.architectural]
+strategist = true
+reviewers = true
+reviewer_mode = "full"    # full: architect + auditor + scribe reviewers
+max_iterations = 3
+```
+
+**`reviewer_mode`** values:
+- `"quick"` — single quick-pass reviewer
+- `"full"` — full review suite (architect, auditor, scribe)
+
+---
+
+## 6. Advanced Config — Power User Sections
+
+These sections are optional and only relevant once you're past the basics. Collapse each one
+to explore.
+
+<details>
+<summary>[demurrage] — Knowledge decay</summary>
+
+**Why this matters**: Without demurrage, the playbook accumulates entries indefinitely. Old
+heuristics from months ago might be actively wrong about refactored code. Demurrage applies
+Gesellian exponential decay so stale knowledge naturally fades and fresh knowledge dominates.
 
 ```toml
 [demurrage]
@@ -721,9 +918,15 @@ warning = 2.0
 insight = 0.5
 ```
 
-### [attention]
+</details>
 
-Attention token budget allocation for prompt layers.
+<details>
+<summary>[attention] — Prompt token budget allocation</summary>
+
+**Why this matters**: The 9-layer system prompt can exceed context window limits for large
+projects. The attention section controls how tokens are allocated across layers and what
+utilization target to aim for. The auction (`auction_enabled = true`) lets layers compete
+for tokens based on their effectiveness scores.
 
 ```toml
 [attention]
@@ -733,9 +936,10 @@ auction_enabled = false        # enable attention auction between layers, defaul
 task_reserve_tokens = 512      # tokens reserved for task context, default: 512
 ```
 
-### [immune]
+</details>
 
-Anomaly detection and quarantine settings.
+<details>
+<summary>[immune] — Anomaly detection and quarantine</summary>
 
 ```toml
 [immune]
@@ -745,9 +949,10 @@ auto_reject = false          # auto-reject quarantined outputs (vs. hold for rev
 taint_levels = ["low", "medium", "high"]   # taint classification levels
 ```
 
-### [temporal]
+</details>
 
-Time horizon preferences for the task planner.
+<details>
+<summary>[temporal] — Time horizon preferences</summary>
 
 ```toml
 [temporal]
@@ -756,9 +961,10 @@ epoch_secs = 3600                # epoch duration for temporal batching, default
 enforce_allen_relations = true   # enforce Allen temporal relations between tasks
 ```
 
-### [goals]
+</details>
 
-Goal hierarchy configuration.
+<details>
+<summary>[goals] — Goal hierarchy</summary>
 
 ```toml
 [goals]
@@ -768,9 +974,14 @@ completion_threshold = 0.95  # min completion ratio for "done", default: 0.95
 prune_threshold = 0.1        # prune goals with priority below this, default: 0.1
 ```
 
-### [energy]
+</details>
 
-Compute budget pool with per-tier caps.
+<details>
+<summary>[energy] — Compute budget pool</summary>
+
+**Why this matters**: The energy pool is a higher-level budget abstraction than `[budget]`.
+While `[budget]` sets hard per-turn and per-plan USD limits, `[energy]` controls a pool that
+replenishes at a `metabolism_rate`, allowing bursty work within a rolling budget.
 
 ```toml
 [energy]
@@ -785,18 +996,25 @@ standard = 1.0
 premium = 3.0
 ```
 
-### [tui]
+</details>
 
-Terminal UI preferences.
+<details>
+<summary>[tui] — Terminal UI preferences</summary>
 
 ```toml
 [tui]
 refresh_rate_ms = 250   # TUI refresh interval in milliseconds, default: 250
 ```
 
-### [serve]
+</details>
 
-HTTP API serving options.
+<details>
+<summary>[serve] — HTTP API options</summary>
+
+**Why this matters**: `roko serve` exposes ~85 REST routes plus SSE streaming on port 6677.
+This section controls authentication, terminal access, and auto-orchestration behavior. The
+`terminal_enabled` flag is off by default because it exposes a PTY shell — only enable it in
+trusted environments.
 
 ```toml
 [serve]
@@ -832,9 +1050,10 @@ owner = "my-org"
 repo = "my-repo"
 ```
 
-### [server]
+</details>
 
-HTTP server / gateway settings.
+<details>
+<summary>[server] — HTTP server / gateway settings</summary>
 
 ```toml
 [server]
@@ -844,23 +1063,16 @@ cors_origins = []    # allowed CORS origins (empty = permissive), default: []
 auth_token = ""      # optional bearer token for authentication
 ```
 
-### [deploy]
+Empty `cors_origins` is permissive (allows all origins). Set it when deploying to production.
 
-Cloud deployment configuration.
+</details>
 
-```toml
-[deploy]
-backend = "manual"                           # "railway-api", "railway-cli", "manual"
-railway_api_token = "..."                    # Railway API token (optional)
-project_id = "..."                           # Railway project ID (optional)
-environment_id = "..."                       # Railway environment ID (optional)
-worker_image = "ghcr.io/nunchi-trade/roko-worker:latest"  # Docker image for workers
-default_region = "us-west1"                  # default deployment region (optional)
-```
+<details>
+<summary>[scheduler] — Cron jobs</summary>
 
-### [scheduler]
-
-Cron scheduler configuration.
+**Why this matters**: The scheduler emits signals on a cron schedule. Combined with
+`[[subscriptions]]`, this lets you wire up recurring tasks — weekly knowledge digests,
+nightly builds, hourly health checks — without external cron infrastructure.
 
 ```toml
 [scheduler]
@@ -871,18 +1083,28 @@ signal_kind = "scheduler:cron:weekly-digest"  # engram kind emitted when fires
 # metadata = { key = "value" }          # extra structured metadata (optional)
 ```
 
-### [webhooks]
+</details>
 
-Webhook ingress configuration.
+<details>
+<summary>[webhooks] — Webhook ingress</summary>
 
 ```toml
 [webhooks.github]
 secret = "my-webhook-secret"   # shared secret for X-Hub-Signature-256 verification
 ```
 
-### [subscriptions]
+The webhook endpoint is `POST /v1/webhooks/github`. Roko verifies the
+`X-Hub-Signature-256` header automatically.
 
-Event subscriptions — each subscription fires when a matching signal arrives.
+</details>
+
+<details>
+<summary>[subscriptions] — Event-triggered agents</summary>
+
+**Why this matters**: Subscriptions are the glue between external events and agent execution.
+A subscription says "when this signal arrives, run this agent template." This is how you
+wire up automatic PR review, auto-formatting on file save, or agent triggers from GitHub
+webhooks.
 
 ```toml
 [[subscriptions]]
@@ -901,28 +1123,28 @@ path = ["src/**/*.rs"]           # match changed file paths
 label = ["bug", "enhancement"]   # match issue/PR labels
 author = ["bot-*"]               # match author logins
 
-# Typed trigger (overrides plain trigger for firing mechanism):
+# Typed trigger — cron:
 [subscriptions.trigger_config]
 type = "cron"
 schedule = "*/30 * * * *"
 
-# OR:
+# OR — file watch:
 [subscriptions.trigger_config]
 type = "file_watch"
 paths = ["src/", "crates/"]
 extensions = ["rs", "toml"]
 recursive = true
 
-# OR:
+# OR — webhook:
 [subscriptions.trigger_config]
 type = "webhook"
 event = "push"
 ```
 
-### [watcher]
+</details>
 
-File-system watcher configuration. The watcher emits signals when watched
-paths change.
+<details>
+<summary>[watcher] — File-system watcher</summary>
 
 ```toml
 [watcher]
@@ -932,9 +1154,16 @@ include = ["*.rs", "*.toml"]   # accepts string or list of strings
 exclude = ["target/"]
 ```
 
-### [tools]
+The watcher emits signals when watched paths change, which can trigger subscriptions.
 
-Global tool allowlist/denylist and domain profiles.
+</details>
+
+<details>
+<summary>[tools] — Global tool allowlist/denylist</summary>
+
+**Why this matters**: The tools section controls which tools are available to agents globally
+and per domain. Use this to prevent agents from writing files in research mode, or to ensure
+certain tools are always available regardless of role.
 
 ```toml
 [tools]
@@ -953,9 +1182,10 @@ excluded_tools = ["write_file", "edit_file"]
 The effective tool set for a domain is:
 `(base_tools + extra_tools + global_allow) - excluded_tools - global_deny`
 
-### [chain]
+</details>
 
-On-chain integration settings (Phase 2+).
+<details>
+<summary>[chain] — On-chain integration (Phase 2+)</summary>
 
 ```toml
 [chain]
@@ -970,9 +1200,17 @@ bounty_market = "0x..."               # BountyMarket address
 deployer = "0x..."                    # deployer/funder address
 ```
 
-### [relay]
+This section is Phase 2+ — requires a blockchain backend for witness anchoring. Not needed
+for self-hosting.
 
-Relay registration for workspace auto-discovery.
+</details>
+
+<details>
+<summary>[relay] — Workspace auto-discovery</summary>
+
+**Why this matters**: The relay makes your running Roko instance discoverable by the demo
+app and other tools. When deployed on Railway or Fly.io, the public URL is auto-detected
+from `RAILWAY_PUBLIC_DOMAIN` or `FLY_APP_NAME`.
 
 ```toml
 [relay]
@@ -982,9 +1220,10 @@ public_url = "https://..."           # public URL of this roko instance
 heartbeat_interval_secs = 30         # presence heartbeat interval, default: 30
 ```
 
-### [gemini]
+</details>
 
-Gemini-specific model settings.
+<details>
+<summary>[gemini] — Gemini-specific model settings</summary>
 
 ```toml
 [gemini]
@@ -996,15 +1235,15 @@ use_free_tier = false
 thinking_level = "medium"          # "minimal", "low", "medium", "high"
 enable_context_caching = false
 
-# Per-category safety settings:
 [[gemini.safety_settings]]
 category = "HARM_CATEGORY_HATE_SPEECH"
 threshold = "BLOCK_NONE"
 ```
 
-### [perplexity]
+</details>
 
-Perplexity-specific search settings.
+<details>
+<summary>[perplexity] — Perplexity search settings</summary>
 
 ```toml
 [perplexity]
@@ -1019,9 +1258,13 @@ return_images = false
 return_related_questions = true
 ```
 
-### [[agents]]
+</details>
 
-Multi-agent startup definitions for `roko up`.
+<details>
+<summary>[[agents]] — Multi-agent startup definitions</summary>
+
+For multi-agent deployments, declare agents directly in `roko.toml`. Start all enabled agents
+with `roko up`.
 
 ```toml
 [[agents]]
@@ -1033,9 +1276,25 @@ chain_rpc = "https://..."      # optional chain RPC override
 enabled = true
 ```
 
-### [oneirography]
+</details>
 
-Dream art generation pipeline (experimental).
+<details>
+<summary>[deploy] — Cloud deployment</summary>
+
+```toml
+[deploy]
+backend = "manual"                           # "railway-api", "railway-cli", "manual"
+railway_api_token = "..."                    # Railway API token (optional)
+project_id = "..."                           # Railway project ID (optional)
+environment_id = "..."                       # Railway environment ID (optional)
+worker_image = "ghcr.io/nunchi-trade/roko-worker:latest"  # Docker image for workers
+default_region = "us-west1"                  # default deployment region (optional)
+```
+
+</details>
+
+<details>
+<summary>[oneirography] — Dream art generation (experimental)</summary>
 
 ```toml
 [oneirography]
@@ -1046,95 +1305,32 @@ base_reserve = 0.01     # base reserve price for affect-reactive auctions
 base_duration_seconds = 3600
 ```
 
----
+</details>
 
-## 4. .roko/ Directory Layout
+<details>
+<summary>Top-level version fields</summary>
 
-The `.roko/` directory stores all runtime state. Its structure is defined in
-`crates/roko-fs/src/layout.rs` (`RokoLayout` struct). The version is tracked
-in `.roko/VERSION` (currently `1`).
-
-```
-.roko/
-  VERSION               # layout format version (integer)
-  engrams.jsonl         # main engram/signal log (append-only)
-  signals.jsonl         # legacy name for engrams.jsonl (pre-rename)
-  custody.jsonl         # append-only custody audit chain
-  witness.jsonl         # append-only witness DAG log
-
-  runtime/              # process lifecycle
-    roko.pid            # PID of the running roko process
-    roko.lock           # advisory lock file
-
-  memory/               # learned knowledge
-    episodes.jsonl      # per-turn episode records
-    playbook.toml       # active learned playbook (techniques)
-    skills/             # learned skill files
-
-  plans/                # plan-level enrichment artifacts
-    {plan_id}/          # one directory per plan
-
-  runs/                 # per-run data
-    {run_id}/           # one directory per run
-      metrics.jsonl     # metrics log for this run
-      traces/           # trace files for this run
-
-  state/                # orchestrator state
-    executor.json       # executor checkpoint for crash recovery
-    events.json         # event log snapshot
-    sessions/           # per-session state
-      {session_id}/     # one directory per session
-
-  config/               # local config overrides
-    config.toml         # local config file
-
-  cache/                # cached artifacts
-    cargo-target/       # shared cargo target directory
-    context-pack-cache/ # cached context packs
-
-  learn/                # learning subsystem data
-    efficiency.jsonl    # per-turn efficiency events
-    cascade-router.json # model routing bandit state
-    experiments.json    # prompt experiment store (A/B tests)
-    gate-thresholds.json  # adaptive gate threshold state
-    knowledge-scores.json # knowledge entry admission scores
-    section-effects.json  # prompt section effectiveness scores
-
-  repos/                # per-repo layout (for multi-repo setups)
-    {repo_name}/        # mirrors the root layout for a specific repo
-
-  prd/                  # PRD storage (created by roko init)
-    ideas/              # raw ideas
-    drafts/             # PRDs in progress
-    published/          # promoted PRDs
-    plans/              # generated implementation plans
-
-  research/             # research artifacts
-    {topic}/            # research output per topic
+```toml
+config_version = 2    # layout version for migration tooling (current: 2)
+schema_version = 2    # schema version for compatibility checks (current: 2)
 ```
 
-Key path accessors from `RokoLayout`:
+If you have an old `config_version = 1` file, run `roko config migrate` to upgrade.
 
-| Path | Method | Purpose |
-|---|---|---|
-| `.roko/` | `root()` | Data directory root |
-| `.roko/memory/episodes.jsonl` | `episodes_path()` | Episode log |
-| `.roko/memory/playbook.toml` | `playbook_path()` | Active playbook |
-| `.roko/state/executor.json` | `executor_snapshot()` | Executor checkpoint |
-| `.roko/learn/cascade-router.json` | `cascade_router_path()` | Router state |
-| `.roko/learn/experiments.json` | `experiments_path()` | Experiment store |
-| `.roko/learn/efficiency.jsonl` | `efficiency_path()` | Efficiency events |
-| `.roko/custody.jsonl` | `custody_log()` | Custody audit chain |
-| `.roko/witness.jsonl` | `witness_log()` | Witness DAG |
-| `.roko/runtime/roko.pid` | `pid_file()` | PID file |
+</details>
 
 ---
 
-## 5. Provider Configuration
+## 7. Provider Configuration Recipes
 
-### Anthropic Claude CLI (recommended for local development)
+Copy-paste ready configurations for every supported provider.
 
-Uses the `claude` CLI subprocess. Requires Claude Code CLI to be installed.
+<details>
+<summary>Anthropic Claude CLI (recommended for local development)</summary>
+
+Uses the `claude` CLI subprocess. Requires Claude Code CLI to be installed. This is the
+easiest way to get started locally — no API key required if you're already authenticated
+with the Claude CLI.
 
 ```toml
 [providers.anthropic]
@@ -1144,10 +1340,13 @@ command = "claude"
 # timeout_ms = 300000   # longer timeout for complex tasks
 ```
 
-### Anthropic API (direct HTTP)
+</details>
 
-Uses the Anthropic Messages API over HTTP. Set `ANTHROPIC_API_KEY` in the
-environment.
+<details>
+<summary>Anthropic API (direct HTTP)</summary>
+
+Uses the Anthropic Messages API over HTTP. Set `ANTHROPIC_API_KEY` in the environment.
+This is the recommended path for production and CI use.
 
 ```toml
 [providers.anthropic]
@@ -1160,10 +1359,13 @@ connect_timeout_ms = 5000
 max_concurrent = 4
 ```
 
-If `ANTHROPIC_API_KEY` is set and no `[providers]` section exists, roko
-synthesizes an `anthropic_api` provider automatically.
+If `ANTHROPIC_API_KEY` is set and no `[providers]` section exists, Roko synthesizes an
+`anthropic_api` provider automatically.
 
-### OpenAI
+</details>
+
+<details>
+<summary>OpenAI</summary>
 
 ```toml
 [providers.openai]
@@ -1188,7 +1390,13 @@ cost_input_per_m = 0.4
 cost_output_per_m = 1.6
 ```
 
-### Cerebras (ultra-fast inference)
+</details>
+
+<details>
+<summary>Cerebras (ultra-fast inference)</summary>
+
+Cerebras is useful for the `fast_task_model` in `[routing]` because latency is significantly
+lower than API-based providers — often 10–20x faster for smaller models.
 
 ```toml
 [providers.cerebras]
@@ -1205,12 +1413,12 @@ cost_input_per_m = 0.59
 cost_output_per_m = 0.99
 ```
 
-Cerebras is useful for the `fast_task_model` in `[routing]` because latency
-is significantly lower than API-based providers.
+</details>
 
-### Google Gemini
+<details>
+<summary>Google Gemini</summary>
 
-Using the OpenAI-compatible endpoint (recommended):
+OpenAI-compatible endpoint (recommended — simpler, supports tool calls):
 
 ```toml
 [providers.gemini]
@@ -1226,7 +1434,7 @@ supports_tools = true
 supports_thinking = true
 ```
 
-Using the native Gemini API (for grounding and code execution):
+Native Gemini API (for grounding and code execution features):
 
 ```toml
 [providers.gemini-native]
@@ -1240,7 +1448,12 @@ thinking_level = "medium"
 enable_context_caching = true
 ```
 
-### Local Ollama
+</details>
+
+<details>
+<summary>Local Ollama</summary>
+
+No API key needed. Use for offline development or cost-free experimentation.
 
 ```toml
 [providers.ollama]
@@ -1255,7 +1468,13 @@ context_window = 128000
 supports_tools = false
 ```
 
-### Perplexity (research tasks only)
+</details>
+
+<details>
+<summary>Perplexity (research tasks only)</summary>
+
+Perplexity is used exclusively for the `roko research` commands. Do not route coding tasks
+here — it has no tool-call support and is optimized for web-grounded search answers.
 
 ```toml
 [providers.perplexity]
@@ -1281,12 +1500,16 @@ search_recency_filter = "month"
 return_related_questions = true
 ```
 
-### Using extra headers (custom auth)
+</details>
+
+<details>
+<summary>Custom gateway / proxy with extra headers</summary>
 
 ```toml
 [providers.my-gateway]
 kind = "openai_compat"
 base_url = "https://my-gateway.internal/v1"
+
 # Read secret from environment variable reference:
 [providers.my-gateway.extra_headers]
 "Authorization" = "Bearer ${MY_GATEWAY_TOKEN}"
@@ -1296,12 +1519,14 @@ base_url = "https://my-gateway.internal/v1"
 "Authorization_file" = "/run/secrets/gateway-token"
 ```
 
+</details>
+
 ---
 
-## 6. Model Registry
+## 8. Model Registry
 
-The model registry decouples logical model names from provider-specific slugs.
-The CascadeRouter refers to models by alias; changing the underlying provider
+The model registry decouples logical model names from provider-specific slugs. The
+CascadeRouter and role overrides refer to models by alias; changing the underlying provider
 slug requires no change to routing configuration.
 
 ### Minimum model registry
@@ -1329,7 +1554,8 @@ standard_task_model = "standard"
 complex_task_model = "powerful"
 ```
 
-### Full-featured model entry
+<details>
+<summary>Full-featured model entry (all fields)</summary>
 
 ```toml
 [models.sonnet]
@@ -1353,7 +1579,10 @@ tokenizer_ratio = 1.0              # ratio vs. o200k_base tokenizer
 max_tools = 64                     # tools before behavior degrades
 ```
 
-### OpenRouter routing overrides
+</details>
+
+<details>
+<summary>OpenRouter routing overrides</summary>
 
 ```toml
 [models.sonnet-openrouter]
@@ -1367,13 +1596,19 @@ allow_fallbacks = true
 max_price = 0.05             # max cost per token
 ```
 
+</details>
+
 ---
 
-## 7. MCP Server Configuration
+## 9. MCP Server Configuration
 
-MCP (Model Context Protocol) servers extend the tools available to agents.
-Roko passes MCP configuration to providers that support it (the Claude CLI
-and Anthropic API backends).
+**Why this matters**: MCP (Model Context Protocol) servers extend the tools available to
+agents. The built-in `roko-mcp-code` server gives agents code-intelligence tools — they can
+search the codebase, read files, and extract symbols without burning context window on large
+file reads. Without MCP, agents must inline all context into the prompt.
+
+Roko passes MCP configuration to providers that support it (Claude CLI and Anthropic API
+backends).
 
 ### Creating an MCP config file
 
@@ -1406,8 +1641,7 @@ The MCP config follows the Claude Desktop format:
 }
 ```
 
-The code-intelligence MCP server (`roko-mcp-code`) provides these tools to
-agents:
+The code-intelligence MCP server (`roko-mcp-code`) provides these tools to agents:
 
 - `list_files` — list files in a directory
 - `read_file` — read file contents
@@ -1416,18 +1650,8 @@ agents:
 
 ### Referencing the MCP config
 
-Pass the config file path to `roko plan run` or set it in the dispatcher
-config in `orchestrate.rs`. For the legacy `[agent]` section:
-
-```toml
-[agent]
-command = "claude"
-# MCP is passed via --mcp-config flag in the agent dispatcher
-```
-
 In practice, MCP config is assembled programmatically in
-`crates/roko-cli/src/orchestrate.rs` using `McpConfig` and
-`McpServerConfig` structs from `roko-agent`:
+`crates/roko-cli/src/orchestrate.rs` using `McpConfig` and `McpServerConfig` structs:
 
 ```rust
 let mcp_config = McpConfig {
@@ -1444,8 +1668,6 @@ let mcp_config = McpConfig {
 
 ### roko-mcp-code (built-in code intelligence)
 
-The built-in MCP server:
-
 ```bash
 # Start it directly
 cargo run -p roko-mcp-code --
@@ -1454,7 +1676,8 @@ cargo run -p roko-mcp-code --
 claude --mcp-config mcp-config.json "analyze this codebase"
 ```
 
-### Third-party MCP servers
+<details>
+<summary>Third-party MCP servers</summary>
 
 Any MCP server can be added. Common ones:
 
@@ -1477,9 +1700,17 @@ Any MCP server can be added. Common ones:
 }
 ```
 
+</details>
+
 ---
 
-## 8. Agent Manifests and Safety Contracts
+## 10. Agent Manifests and Safety Contracts
+
+**Why this matters**: Safety contracts constrain what tools each agent role is allowed to
+use. The researcher role should never be able to write files; the implementer role should
+never be able to run arbitrary web requests. Without contracts, a single compromised prompt
+could cause any agent to do anything. These constraints are enforced at the tool-dispatch
+layer before any tool runs.
 
 ### Agent definitions in roko.toml
 
@@ -1509,8 +1740,7 @@ roko up
 
 ### Per-role safety contracts
 
-Safety contracts are YAML manifests referenced via `agent.policy_manifests`.
-They constrain what actions a role is allowed to take:
+Safety contracts are YAML manifests referenced via `agent.policy_manifests`:
 
 ```toml
 [agent]
@@ -1534,13 +1764,12 @@ denied_tools = ["edit_file", "write_file", "bash"]
 max_turns = 10
 ```
 
-When a YAML manifest is missing for a role, the agent falls back to
-permissive defaults.
+When a YAML manifest is missing for a role, the agent falls back to permissive defaults
+(see Known Gaps).
 
-### Tool role allowlists
+### Tool role allowlists in roko.toml
 
-In addition to manifests, per-role tool lists can be set directly in
-`roko.toml`:
+Per-role tool lists can also be set directly in `roko.toml` without a manifest file:
 
 ```toml
 [agent.roles.implementer]
@@ -1555,12 +1784,17 @@ tools = ["web_search", "web_fetch", "read_file"]
 
 ---
 
-## 9. Gate Pipeline Configuration
+## 11. Gate Pipeline Configuration
+
+**Why this matters**: The gate pipeline is Roko's quality control system. After every agent
+task completes, the gates verify the result before committing. A failing compile gate means
+the agent produced code that doesn't build. A failing test gate means tests broke. Gates
+make Roko's output trustworthy even when individual agent turns are imperfect.
+
+Rung 0 (compile) is never skipped regardless of adaptive threshold state. All other rungs can
+be skipped by adaptive thresholds when they've passed consistently.
 
 ### 7-rung gate pipeline
-
-Gates run in rung order, stopping at the first failure. Rung 0 (compile) is
-never skipped regardless of adaptive threshold state.
 
 | Rung | Name | Gate | What it checks |
 |---|---|---|---|
@@ -1583,12 +1817,16 @@ max_iterations = 3      # max retry iterations on gate failure
 
 ### Custom shell gates
 
-Custom gates wrap any shell command:
+Custom gates wrap any shell command. This is how you adapt the gate pipeline for non-Rust
+projects or add security checks:
 
 ```toml
 [gates.domain_gates]
 # Domain "security" runs cargo audit instead of clippy:
 security = ["shell:cargo audit --deny warnings"]
+
+# Domain "research" skips compile/test entirely:
+research = ["shell:true"]
 ```
 
 In `WorkflowRunConfig` (programmatic API):
@@ -1610,9 +1848,10 @@ WorkflowRunConfig {
 
 ### Adaptive thresholds
 
-`AdaptiveThresholds` tracks per-rung pass streaks with an EMA. When a rung
-has passed consistently, it is skipped until a failure is observed. State
-persists to `.roko/learn/gate-thresholds.json`.
+`AdaptiveThresholds` tracks per-rung pass streaks with an EMA. When a rung has passed
+consistently, it is temporarily skipped until a failure is observed. This saves time on
+projects where certain gates almost always pass. State persists to
+`.roko/learn/gate-thresholds.json`.
 
 Tune with:
 
@@ -1620,7 +1859,7 @@ Tune with:
 roko learn tune gates
 ```
 
-Override per-role floor:
+Override per-role floor (prevents skipping rungs unless historical pass rate meets threshold):
 
 ```toml
 [agent.roles.implementer.thresholds]
@@ -1630,7 +1869,8 @@ gate_pass_rate_floor = 0.65   # never skip rungs unless pass rate exceeds this
 ### Gate failure replanning
 
 When gate failures exhaust the autofix budget and the iteration limit,
-`learning.replan_on_gate_failure` triggers a plan revision:
+`learning.replan_on_gate_failure` triggers a plan revision — the system generates a new
+implementation plan with the gate failure context injected as additional requirements:
 
 ```toml
 [learning]
@@ -1639,14 +1879,15 @@ replan_max_per_plan = 2      # max plan revisions per plan
 replan_gate_attempts = 3     # consecutive failures before revision triggers
 ```
 
-The replan emits `RokoEvent::PlanRevision` on the global event bus, which
-triggers a new planning agent pass with the gate failure context injected.
+The replan emits `RokoEvent::PlanRevision` on the global event bus, which triggers a new
+planning agent pass.
 
 ---
 
-## 10. Learning Configuration
+## 12. Learning Configuration
 
-All learning state lives in `.roko/learn/`.
+All learning state lives in `.roko/learn/`. Everything here is automatic — you don't need
+to manage it manually.
 
 ### Episode logging
 
@@ -1666,9 +1907,9 @@ Every agent turn produces an `Episode` record in `.roko/memory/episodes.jsonl`:
 }
 ```
 
-HDC (Hyperdimensional Computing) fingerprints identify semantically similar
-episodes for replay and retrieval. The `FeedbackService` computes them from
-the combined task + output content.
+HDC (Hyperdimensional Computing) fingerprints identify semantically similar episodes for
+replay and retrieval. The `FeedbackService` computes them from the combined task + output
+content.
 
 ```bash
 roko learn episodes --limit 20
@@ -1676,9 +1917,10 @@ roko learn episodes --limit 20
 
 ### Playbook extraction
 
-`PlaybookStore` accumulates techniques from successful runs and stores them
-in `.roko/memory/playbook.toml`. Playbooks are queried at dispatch time and
-injected into layer 6 of the system prompt.
+`PlaybookStore` accumulates techniques from successful runs and stores them in
+`.roko/memory/playbook.toml`. Playbooks are queried at dispatch time and injected into
+layer 6 of the 9-layer system prompt. After dozens of successful runs, the playbook
+becomes a highly relevant catalog of what works for your specific codebase.
 
 ```bash
 roko learn all   # view current playbook state
@@ -1687,8 +1929,8 @@ roko learn all   # view current playbook state
 ### CascadeRouter bandit state
 
 After each workflow completion, `FeedbackService` calls
-`CascadeRouter::observe_outcome(role, model, success, cost, latency)`. The
-router updates its LinUCB arm weights.
+`CascadeRouter::observe_outcome(role, model, success, cost, latency)`. The router updates
+its LinUCB arm weights and gradually learns which model performs best for each task type.
 
 ```bash
 roko learn router   # inspect bandit state per role
@@ -1696,10 +1938,32 @@ roko learn router   # inspect bandit state per role
 
 State file: `.roko/learn/cascade-router.json`
 
-### Prompt experiment tracking (A/B)
+### 9-layer system prompt
 
-`ModelExperimentStore` assigns variants to runs and records outcomes for
-statistically grounded comparisons between prompt strategies.
+`PromptAssemblyService` builds system prompts in nine ordered layers:
+
+| Layer | Content | Source |
+|---|---|---|
+| 0 | Role identity | `role_prompts::role_identity_for(role)` |
+| 1 | Task specification | `PromptSpec.task` |
+| 2 | Project conventions | Detected from `workdir` |
+| 3 | Domain context | Static text, knowledge store entries |
+| 4 | Episode history | Recent successful episodes |
+| 5 | Tool instructions | Tool usage guidance |
+| 6 | Playbook techniques | Relevant playbook entries |
+| 7 | Gate feedback | Prior gate failure output |
+| 8 | Anti-patterns | Extracted failure anti-patterns |
+
+Each layer has an effectiveness score (`.roko/learn/section-effects.json`). Sections with
+consistently low scores are trimmed first when the prompt approaches the token budget.
+
+<details>
+<summary>Other learning subsystems</summary>
+
+**Prompt experiment tracking (A/B)**
+
+`ModelExperimentStore` assigns variants to runs and records outcomes for statistically
+grounded comparisons between prompt strategies.
 
 ```bash
 roko config experiments    # list active experiments
@@ -1708,31 +1972,23 @@ roko learn tune routing    # tune routing weights
 
 State file: `.roko/learn/experiments.json`
 
-### Knowledge admission (A-MAC)
+**Knowledge admission (A-MAC)**
 
-Knowledge entries earn scores based on how often they correlate with
-successful outcomes. Entries below a minimum score threshold are excluded
-from future prompts.
+Knowledge entries earn scores based on how often they correlate with successful outcomes.
+Entries below a minimum score threshold are excluded from future prompts.
 
 State file: `.roko/learn/knowledge-scores.json`
 
-### Prompt section effectiveness
+**Efficiency events**
 
-After each run, `FeedbackService` correlates prompt section IDs with run
-outcomes. Sections with consistently low scores are trimmed first when the
-prompt approaches the token budget.
-
-State file: `.roko/learn/section-effects.json`
-
-### Efficiency events
-
-Per-turn efficiency events are logged to `.roko/learn/efficiency.jsonl`:
+Per-turn efficiency events (tokens/second, cost/token, time-to-first-token) are logged
+to `.roko/learn/efficiency.jsonl`.
 
 ```bash
 roko learn efficiency   # view efficiency events
 ```
 
-### Manual tuning commands
+**Manual tuning commands**
 
 ```bash
 roko learn tune gates     # adjust adaptive gate thresholds
@@ -1740,15 +1996,21 @@ roko learn tune routing   # adjust routing reward weights
 roko learn tune budget    # adjust budget parameters
 ```
 
+</details>
+
 ---
 
-## 11. Event System and Subscriptions
+## 13. Event System and Subscriptions
+
+**Why this matters**: The event bus is how you observe what Roko is doing in real time and
+how you wire up external triggers. The SSE stream at `/v1/events` is what the TUI, demo app,
+and any external dashboard consume. Subscriptions let you make Roko react to GitHub webhooks,
+file changes, cron schedules, or any custom signal.
 
 ### Event bus
 
-The global `EventBus<RuntimeEvent>` is the backbone for all async
-communication between the orchestrator, HTTP server, TUI, and external
-consumers.
+The global `EventBus<RuntimeEvent>` is the backbone for all async communication between the
+orchestrator, HTTP server, TUI, and external consumers.
 
 Every `RuntimeEvent` carries:
 - `run_id` — stable identifier for the workflow run
@@ -1757,6 +2019,24 @@ Every `RuntimeEvent` carries:
 - `schema_version` — for forward compatibility
 - `source` — emitting component
 - `payload` — typed event data
+
+Event kinds:
+- Lifecycle: `WorkflowStarted`, `PhaseTransition`, `WorkflowCompleted`
+- Agent: `AgentSpawned`, `AgentOutput`, `AgentCompleted`, `AgentFailed`
+- Gates: `GateStarted`, `GatePassed`, `GateFailed`
+- Feedback: `FeedbackRecorded`
+- Persistence: `StateCheckpointed`
+
+```
+WorkflowEngine / EffectDriver
+     │
+     │  emit_runtime_event(RuntimeEvent::AgentSpawned { ... })
+     ▼
+EventBus<RuntimeEvent>
+     ├── JsonlLogger   → .roko/state/events.json
+     ├── SseAdapter    → HTTP GET /v1/events stream
+     └── AcpAdapter    → per-run ACP protocol messages
+```
 
 ### SSE streaming
 
@@ -1788,8 +2068,6 @@ Sample `RuntimeEventEnvelope`:
 
 ### Cron subscriptions
 
-Fire on a schedule:
-
 ```toml
 [[subscriptions]]
 template = "weekly-summarizer"
@@ -1808,8 +2086,6 @@ signal_kind = "scheduler:cron:weekly-digest"
 
 ### File-watch subscriptions
 
-Fire when watched files change:
-
 ```toml
 [[subscriptions]]
 template = "auto-format"
@@ -1825,8 +2101,6 @@ recursive = true
 ```
 
 ### Webhook subscriptions
-
-Fire on incoming GitHub events:
 
 ```toml
 [webhooks.github]
@@ -1854,8 +2128,8 @@ The webhook endpoint is `POST /v1/webhooks/github`. Roko verifies the
 
 ### PRD auto-plan subscription
 
-If `prd.auto_plan = true` and `roko serve` is running, a built-in subscriber
-fires on every PRD publish event:
+If `prd.auto_plan = true` and `roko serve` is running, a built-in subscriber fires on
+every PRD publish event — no manual subscription entry needed:
 
 ```toml
 [prd]
@@ -1867,7 +2141,7 @@ auto_orchestrate = true
 
 ---
 
-## 12. HTTP Control Plane
+## 14. HTTP Control Plane
 
 Start the server:
 
@@ -1876,7 +2150,8 @@ roko serve
 # Listening on http://127.0.0.1:6677
 ```
 
-The server exposes approximately 85 REST routes plus SSE streaming.
+The server exposes approximately 85 REST routes plus SSE streaming. All routes under `/v1/`
+can be protected with `serve.auth`.
 
 ### Key endpoint groups
 
@@ -1897,19 +2172,21 @@ The server exposes approximately 85 REST routes plus SSE streaming.
 
 ### Authentication
 
+Single shared key:
+
 ```toml
 [serve.auth]
 enabled = true
-api_key = "my-secret-key"   # single shared key
+api_key = "my-secret-key"
 ```
 
-With a named key:
+Named keys with scopes:
 
 ```toml
 [[serve.auth.api_keys]]
 name = "ci-pipeline"
-key_hash = "abc123..."   # SHA-256 hex
-scope = "agent:write"
+key_hash = "abc123..."   # SHA-256 hex of the plaintext key
+scope = "agent:write"    # "admin", "agent:write", "read"
 created_at = "2026-04-29T00:00:00Z"
 ```
 
@@ -1930,8 +2207,7 @@ Empty `cors_origins` is permissive (allows all origins).
 
 ### Per-agent sidecar
 
-Each running agent exposes its own HTTP sidecar on a dynamically assigned
-port:
+Each running agent can expose its own HTTP sidecar on a dynamically assigned port:
 
 ```bash
 roko agent serve --name my-agent --port 7001
@@ -1949,20 +2225,20 @@ The sidecar (`roko-agent-server`) exposes 13 routes including:
 
 ---
 
-## 13. Error Recovery
+## 15. Error Recovery
 
 ### Resuming after interruption
 
-The executor checkpoint is written atomically after every phase transition.
-Resume any interrupted plan with:
+The executor checkpoint is written atomically after every phase transition. If a plan run
+is interrupted (Ctrl-C, process crash, network failure), resume with:
 
 ```bash
 roko plan run plans/my-plan/ \
   --resume .roko/state/executor.json
 ```
 
-The checkpoint restores the exact pipeline state — phase, iteration count,
-accumulated review findings — so no work is duplicated.
+The checkpoint restores the exact pipeline state — phase, iteration count, accumulated review
+findings — so no work is duplicated.
 
 ### Manual checkpoint inspection
 
@@ -1978,17 +2254,15 @@ cat .roko/state/events.json | jq
 
 When gates fail the orchestrator tries three recovery strategies in order:
 
-1. **Autofix** — spawn a fast model (`conductor.auto_fix_model`) with the
-   gate failure output injected as context. Attempts up to
-   `conductor.max_auto_fix_attempts` times.
+1. **Autofix** — spawn a fast model (`conductor.auto_fix_model`) with the gate failure output
+   injected as context. Attempts up to `conductor.max_auto_fix_attempts` times.
 
-2. **Replan** — when autofix budget is exhausted and
-   `learning.replan_on_gate_failure = true`, a new planning agent pass runs
-   with the gate failure context. Happens at most
+2. **Replan** — when autofix budget is exhausted and `learning.replan_on_gate_failure = true`,
+   a new planning agent pass runs with the gate failure context. Happens at most
    `learning.replan_max_per_plan` times per plan.
 
-3. **Halt** — if replan budget is also exhausted, the task is marked failed
-   and the plan is halted. Inspect with `roko plan show <plan-id>`.
+3. **Halt** — if replan budget is also exhausted, the task is marked failed and the plan is
+   halted. Inspect with `roko plan show <plan-id>`.
 
 ```bash
 roko plan show my-plan    # view task status and failure details
@@ -2025,17 +2299,12 @@ rm .roko/state/executor.json
 roko plan run plans/my-plan/
 ```
 
-To skip already-completed tasks:
-
-```bash
-# The executor tracks completed task IDs; if the checkpoint is gone,
-# mark tasks complete manually with roko plan show and roko plan edit.
-roko plan show my-plan
-```
+To skip already-completed tasks, use `roko plan show` to inspect which task IDs completed,
+then mark tasks complete manually with `roko plan edit`.
 
 ---
 
-## 14. Deployment Configuration
+## 16. Deployment Guide
 
 ### Railway deployment
 
@@ -2043,9 +2312,9 @@ roko plan show my-plan
 roko deploy railway
 ```
 
-This reads `[serve.deploy]` from `roko.toml`, creates or updates a Railway
-service using the worker image, sets the required environment variables, and
-configures the start command as `roko serve`.
+This reads `[serve.deploy]` from `roko.toml`, creates or updates a Railway service using
+the worker image, sets the required environment variables, and configures the start command
+as `roko serve`.
 
 ```toml
 [deploy]
@@ -2066,8 +2335,7 @@ environment = [
 ]
 ```
 
-Enable relay registration so the demo app auto-discovers your deployed
-instance:
+Enable relay registration so the demo app auto-discovers your deployed instance:
 
 ```toml
 [relay]
@@ -2095,9 +2363,9 @@ default_region = "sjc"   # Fly region
 roko deploy docker
 ```
 
-Builds and tags a Docker image from the Dockerfile in the workspace root.
-The image uses a multi-stage build, copies only the `roko-cli` binary, exposes
-port 6677, and defaults to `roko serve` as the entrypoint.
+Builds and tags a Docker image from the Dockerfile in the workspace root. The image uses
+a multi-stage build, copies only the `roko-cli` binary, exposes port 6677, and defaults
+to `roko serve` as the entrypoint.
 
 ```bash
 docker run -p 6677:6677 \
@@ -2109,7 +2377,7 @@ docker run -p 6677:6677 \
 
 ### System daemon (launchd / systemd)
 
-Install roko as a system service that starts on boot:
+Install Roko as a system service that starts on boot:
 
 ```bash
 roko daemon install   # installs launchd (macOS) or systemd (Linux) service
@@ -2143,11 +2411,12 @@ worker_image = "ghcr.io/nunchi-trade/roko-worker:latest"
 
 ---
 
-## 15. Environment Variables Reference
+## 17. Environment Variables Reference
 
 ### Direct config overrides
 
-These environment variables override values in `roko.toml` at startup:
+These environment variables override values in `roko.toml` at startup. They take precedence
+over everything in the file:
 
 | Variable | Config equivalent | Notes |
 |---|---|---|
@@ -2177,15 +2446,15 @@ Referenced by name in `[providers.*].api_key_env`:
 | `CEREBRAS_API_KEY` | Cerebras |
 | `OPENROUTER_API_KEY` | OpenRouter |
 
-If `ANTHROPIC_API_KEY` is present and no `[providers]` section is configured,
-roko auto-synthesizes an `anthropic_api` provider.
+If `ANTHROPIC_API_KEY` is present and no `[providers]` section is configured, Roko
+auto-synthesizes an `anthropic_api` provider.
 
-If `ANTHROPIC_API_KEY` is not present but the `claude` CLI is available,
-roko auto-synthesizes a `claude_cli` provider.
+If `ANTHROPIC_API_KEY` is not present but the `claude` CLI is available, Roko
+auto-synthesizes a `claude_cli` provider.
 
 ### Deployment detection
 
-These are read automatically when deploying to cloud platforms:
+Read automatically when deploying to cloud platforms:
 
 | Variable | Used for |
 |---|---|
@@ -2205,8 +2474,8 @@ api_key_env = "MY_API_KEY"
 
 ### Secret files
 
-In `[providers.*.extra_headers]`, keys ending in `_file` have their values
-treated as file paths. The file content is read and used as the header value:
+In `[providers.*.extra_headers]`, keys ending in `_file` have their values treated as file
+paths. The file content is read and used as the header value:
 
 ```toml
 [providers.my-provider.extra_headers]
@@ -2216,10 +2485,11 @@ Authorization_file = "/run/secrets/api-token"
 
 ---
 
-## 16. WorkflowEngine Integration (Programmatic)
+## 18. WorkflowEngine Integration (Programmatic)
 
-This section shows how to wire up a `WorkflowEngine` programmatically, which
-is what the CLI, HTTP server, and ACP adapter all do.
+This section shows how to wire up a `WorkflowEngine` programmatically, which is what the CLI,
+HTTP server, and ACP adapter all do internally. Use this if you're building a custom integration
+or want to embed Roko in another application.
 
 ### Instantiate the services
 
@@ -2356,46 +2626,27 @@ let restored = PipelineStateV2::from_checkpoint(&json)?;
 let output = restored.step(PipelineInput::Start);
 ```
 
-### 9-layer system prompt
-
-`PromptAssemblyService` builds system prompts in nine ordered layers:
-
-| Layer | Content | Source |
-|---|---|---|
-| 0 | Role identity | `role_prompts::role_identity_for(role)` |
-| 1 | Task specification | `PromptSpec.task` |
-| 2 | Project conventions | Detected from `workdir` |
-| 3 | Domain context | Static text, knowledge store entries |
-| 4 | Episode history | Recent successful episodes |
-| 5 | Tool instructions | Tool usage guidance |
-| 6 | Playbook techniques | Relevant playbook entries |
-| 7 | Gate feedback | Prior gate failure output |
-| 8 | Anti-patterns | Extracted failure anti-patterns |
-
-Each layer has an effectiveness score. Sections with consistently low scores
-are trimmed first when the prompt approaches the token budget.
-
 ---
 
-## 17. Key File Locations
+## 19. Key File Locations
 
-| What | Absolute path |
+| What | Path |
 |---|---|
-| Workspace config | `/path/to/project/roko.toml` |
-| Data directory | `/path/to/project/.roko/` |
-| Layout version | `/path/to/project/.roko/VERSION` |
-| Executor checkpoint | `/path/to/project/.roko/state/executor.json` |
-| Episode log | `/path/to/project/.roko/memory/episodes.jsonl` |
-| Playbook | `/path/to/project/.roko/memory/playbook.toml` |
-| Cascade router state | `/path/to/project/.roko/learn/cascade-router.json` |
-| Gate thresholds | `/path/to/project/.roko/learn/gate-thresholds.json` |
-| Prompt experiments | `/path/to/project/.roko/learn/experiments.json` |
-| Knowledge scores | `/path/to/project/.roko/learn/knowledge-scores.json` |
-| Section effectiveness | `/path/to/project/.roko/learn/section-effects.json` |
-| Efficiency events | `/path/to/project/.roko/learn/efficiency.jsonl` |
-| Custody audit chain | `/path/to/project/.roko/custody.jsonl` |
-| Witness DAG log | `/path/to/project/.roko/witness.jsonl` |
-| Gap tracker | `/path/to/project/.roko/GAPS.md` |
+| Workspace config | `<project>/roko.toml` |
+| Data directory | `<project>/.roko/` |
+| Layout version | `<project>/.roko/VERSION` |
+| Executor checkpoint | `<project>/.roko/state/executor.json` |
+| Episode log | `<project>/.roko/memory/episodes.jsonl` |
+| Playbook | `<project>/.roko/memory/playbook.toml` |
+| Cascade router state | `<project>/.roko/learn/cascade-router.json` |
+| Gate thresholds | `<project>/.roko/learn/gate-thresholds.json` |
+| Prompt experiments | `<project>/.roko/learn/experiments.json` |
+| Knowledge scores | `<project>/.roko/learn/knowledge-scores.json` |
+| Section effectiveness | `<project>/.roko/learn/section-effects.json` |
+| Efficiency events | `<project>/.roko/learn/efficiency.jsonl` |
+| Custody audit chain | `<project>/.roko/custody.jsonl` |
+| Witness DAG log | `<project>/.roko/witness.jsonl` |
+| Gap tracker | `<project>/.roko/GAPS.md` |
 | Config schema | `crates/roko-core/src/config/schema.rs` |
 | Agent config | `crates/roko-core/src/config/agent.rs` |
 | Provider config | `crates/roko-core/src/config/provider.rs` |
@@ -2415,10 +2666,10 @@ are trimmed first when the prompt approaches the token budget.
 
 ---
 
-## 18. Known Gaps
+## 20. Known Gaps
 
-The following items are built but not fully wired at runtime. Track current
-gaps in `.roko/GAPS.md`.
+The following items are built but not fully wired at runtime. The canonical gap tracker is
+`.roko/GAPS.md`.
 
 | Gap | Status |
 |---|---|

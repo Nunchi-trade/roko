@@ -1,64 +1,128 @@
 # Roko HTTP API Reference
 
-The roko control plane (`roko-serve`) exposes REST routes, SSE streams, and a WebSocket endpoint on port **6677** by default. All API routes live under `/api/`. The embedded React demo app is served as an SPA fallback from `/`. A bare liveness probe sits at `/health` (no `/api/` prefix).
+## What is this API?
 
-## Table of Contents
+Roko runs a local HTTP control plane — `roko serve` — that exposes everything the system is doing. Dashboards, external tools, CI scripts, and other agents can all talk to it.
 
-1. [Starting the Server](#starting-the-server)
-2. [Authentication](#authentication)
-3. [Middleware](#middleware)
-4. [Error Response Format](#error-response-format)
-5. [SSE Streaming — `/api/events`](#sse-streaming)
-6. [WebSocket — `/ws`](#websocket)
-7. [StateHub Push Pattern](#statehub-push-pattern)
-8. [Health and Status](#health-and-status)
-9. [Plans](#plans)
-10. [One-Shot Runs](#one-shot-runs)
-11. [Dashboard Runs](#dashboard-runs)
-12. [PRDs](#prds)
-13. [Agents — Control Plane](#agents-control-plane)
-14. [Agent Fleet Aggregation](#agent-fleet-aggregation)
-15. [Gates](#gates)
-16. [Episodes and Signals](#episodes-and-signals)
-17. [Metrics](#metrics)
-18. [Learning and Adaptation](#learning-and-adaptation)
-19. [Benchmarks](#benchmarks)
-20. [Dreams](#dreams)
-21. [Knowledge (Neuro)](#knowledge-neuro)
-22. [Research](#research)
-23. [Jobs](#jobs)
-24. [Deployments](#deployments)
-25. [Inference Gateway](#inference-gateway)
-26. [Providers and Models](#providers-and-models)
-27. [Config](#config)
-28. [Subscriptions and Workflows](#subscriptions-and-workflows)
-29. [Heartbeats](#heartbeats)
-30. [Secrets](#secrets)
-31. [Chain](#chain)
-32. [Webhooks](#webhooks)
-33. [Terminal](#terminal)
-34. [OpenAPI](#openapi)
-35. [Per-Agent Sidecar API (roko-agent-server)](#per-agent-sidecar-api)
+**The mental model:** Roko reads product requirement documents (PRDs), generates implementation plans, dispatches Claude agents to execute tasks, and validates results through a gate pipeline (compile, test, clippy, etc.). All of that activity is observable and controllable through this API. You can watch plans execute in real time via SSE or WebSocket, query what agents are doing, inspect what the system has learned, trigger new work, and manage configuration.
+
+```
++------------------+         +-----------------------------+
+|  Your client     |  HTTP   |  roko-serve  (port 6677)    |
+|  (dashboard,     | ------> |  REST + SSE + WebSocket     |
+|   CI, scripts)   |  SSE    |                             |
+|                  | <------ |  AuthMiddleware             |
++------------------+  WS     |  SecretScrubber             |
+                             |  TraceLayer                 |
+                             +--------------+--------------+
+                                            |
+                             +--------------v--------------+
+                             |  StateHub                   |
+                             |  (ring buffer + broadcast)  |
+                             +--------------+--------------+
+                                            |
+                    +---------------+-------+-------+----------------+
+                    |               |               |                |
+             +------v------+ +------v------+ +------v------+ +-------v------+
+             |  SSE stream | |  WebSocket  | | HTTP routes | |  Orchestrator|
+             |  /api/events| |  /ws        | |  /api/...   | |  (plans,     |
+             +-------------+ +-------------+ +-------------+ |   agents,    |
+                                                             |   gates)     |
+                                                             +--------------+
+```
+
+**Base URL:** `http://127.0.0.1:6677` (default)
+
+**All API routes live under `/api/`.** Exceptions: `/health` (liveness probe), `/webhook/*` (inbound webhooks), and `/runs/{id}` (shareable run pages) are outside `/api/` and always public.
 
 ---
 
-## Starting the Server
+## Table of Contents
+
+1. [Quick Start](#quick-start)
+2. [Authentication](#authentication)
+3. [Middleware and Error Handling](#middleware-and-error-handling)
+4. [Real-Time Streams — SSE and WebSocket](#real-time-streams)
+5. [StateHub Push Pattern](#statehub-push-pattern)
+6. [Health and Status](#health-and-status)
+7. [Plans](#plans)
+8. [One-Shot Runs](#one-shot-runs)
+9. [Dashboard Runs](#dashboard-runs)
+10. [PRDs](#prds)
+11. [Agents — Control Plane](#agents-control-plane)
+12. [Agent Fleet Aggregation](#agent-fleet-aggregation)
+13. [Gates](#gates)
+14. [Episodes and Signals](#episodes-and-signals)
+15. [Metrics](#metrics)
+16. [Learning and Adaptation](#learning-and-adaptation)
+17. [Benchmarks](#benchmarks)
+18. [Dreams](#dreams)
+19. [Knowledge (Neuro)](#knowledge-neuro)
+20. [Research](#research)
+21. [Jobs](#jobs)
+22. [Deployments](#deployments)
+23. [Inference Gateway](#inference-gateway)
+24. [Providers and Models](#providers-and-models)
+25. [Config](#config)
+26. [Subscriptions and Workflows](#subscriptions-and-workflows)
+27. [Heartbeats](#heartbeats)
+28. [Secrets](#secrets)
+29. [Chain](#chain)
+30. [Webhooks](#webhooks)
+31. [Terminal](#terminal)
+32. [OpenAPI](#openapi)
+33. [Per-Agent Sidecar API](#per-agent-sidecar-api)
+
+---
+
+## Quick Start
+
+### 1. Start the server
 
 ```bash
-# Default: 127.0.0.1:6677, reads roko.toml from current directory
+# Default: binds to 127.0.0.1:6677, reads roko.toml from current directory
 roko serve
 
 # Custom bind and port
 roko serve --bind 0.0.0.0 --port 8080
 
-# Enable API key auth
+# Enable API key authentication
 roko serve --api-key sk-my-secret-key
 
-# Enable PTY terminal (disabled by default)
+# Enable PTY terminal (disabled by default for security)
 roko serve --enable-terminal
 ```
 
-Relevant `roko.toml` keys:
+### 2. Verify it's running
+
+```bash
+curl http://127.0.0.1:6677/health
+# {"status":"ok"}
+
+curl http://127.0.0.1:6677/api/health
+# {"status":"ok","version":"0.1.0","uptime_secs":3,"active_plans":0,...}
+```
+
+### 3. Watch the event stream
+
+Open a second terminal and subscribe to real-time events before you trigger any work:
+
+```bash
+curl -N http://127.0.0.1:6677/api/events
+```
+
+### 4. Trigger a one-shot run
+
+```bash
+curl -X POST http://127.0.0.1:6677/api/run \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Add a unit test for the parser module"}'
+# {"id":"run-uuid"}
+```
+
+Watch the SSE stream — you'll see `task_started`, `agent_spawned`, `gate_result`, and `task_completed` events flow through as the agent works.
+
+### 5. Relevant `roko.toml` keys
 
 ```toml
 [server]
@@ -85,7 +149,12 @@ expires_at = "2027-01-01T00:00:00Z"  # optional
 
 ## Authentication
 
-Authentication is **opt-in** and controlled by `serve.auth.enabled`. When enabled, all `/api/*` routes require a credential. The `/health` (top-level), `/webhook/*`, and `/runs/{id}` (shareable page) routes are always public.
+Authentication is **opt-in**. When `serve.auth.enabled = false` (the default), all routes are open. Enable it when you expose the server beyond localhost.
+
+When enabled, all `/api/*` routes require a credential. The `/health` (top-level), `/webhook/*`, and `/runs/{id}` routes are always public.
+
+<details>
+<summary>Credential sources and scope enforcement</summary>
 
 ### Credential sources (checked in order)
 
@@ -112,26 +181,30 @@ For mutating requests (POST/PUT/PATCH/DELETE), the caller's scope is checked aga
 
 Scope hierarchy: `admin` > `agent:write` > `plan:write` > `read`.
 
-### Error responses for auth
+### Error responses
 
 ```json
 { "code": "unauthorized", "message": "missing X-Api-Key header or Authorization bearer token", "status": 401 }
 { "code": "insufficient_scope", "message": "scope 'read' is not sufficient for 'admin' on POST /api/secrets", "status": 403 }
 ```
 
----
-
-## Middleware
-
-All `/api/*` responses pass through a **secret-scrubbing middleware** (`scrub_secrets`) that redacts API key patterns (Anthropic, GitHub PATs, etc.) from JSON/text response bodies. Binary content types (`image/*`, `application/octet-stream`) are passed through unchanged. The scrubber operates on responses up to 16 MiB.
-
-CORS is configured via `serve.cors_origins`. If empty, `CorsLayer::permissive()` is used. All routes include request tracing via `TraceLayer`.
+</details>
 
 ---
 
-## Error Response Format
+## Middleware and Error Handling
 
-All handlers return errors as JSON with the following shape:
+### Secret scrubbing
+
+All `/api/*` responses pass through a **secret-scrubbing middleware** (`scrub_secrets`) that automatically redacts API key patterns (Anthropic keys, GitHub PATs, etc.) from JSON and text response bodies. Binary content types (`image/*`, `application/octet-stream`) pass through unchanged. The scrubber operates on responses up to 16 MiB.
+
+### CORS
+
+Configured via `serve.cors_origins`. If empty, `CorsLayer::permissive()` is used. All routes include request tracing via `TraceLayer`.
+
+### Error format
+
+All handlers return errors as JSON:
 
 ```json
 {
@@ -146,47 +219,59 @@ Common error codes: `not_found` (404), `bad_request` (400), `unauthorized` (401)
 
 ---
 
-## SSE Streaming
+## Real-Time Streams
 
-### `GET /api/events` and `GET /api/sse`
+Roko has two complementary push mechanisms. Use **SSE** for simple read-only dashboards and **WebSocket** when you need filtering, backpressure control, or bidirectional communication.
 
-Handler: `sse::sse_handler`
+### Server-Sent Events (SSE)
 
-Real-time SSE stream of `DashboardEvent` payloads. On connect, the server replays retained events from the ring buffer starting at the sequence number in `Last-Event-ID` (defaults to 0), then streams live events.
+SSE is the simplest way to watch Roko in real time. Open a connection and events arrive as newline-delimited JSON frames. On reconnect, send `Last-Event-ID` to replay from where you left off.
 
-**Request headers:**
-- `Last-Event-ID: <seq>` — resume from this sequence number (0 if absent)
+**`GET /api/events`** and **`GET /api/sse`** — Main dashboard event stream.
 
-**Event format:**
+On connect, the server replays retained events from the ring buffer starting at the sequence number in `Last-Event-ID` (defaults to 0), then streams live events.
+
 ```
 id: <monotonic-seq>
 data: {"type":"task_started","plan_id":"...","task_id":"...","description":"..."}
 ```
 
-Each `data:` frame is a JSON-serialized `DashboardEvent` (see [StateHub Push Pattern](#statehub-push-pattern) for all event types). The SSE connection uses keep-alive pings.
+Each `data:` frame is a JSON-serialized `DashboardEvent`. The connection is kept alive with periodic pings.
 
-### `GET /api/workflow/events`
-
-Handler: `workflow_sse_handler`
-
-`RuntimeEvent`-typed SSE stream for the workflow engine. Payload is a `SseEvent` with fields `kind: String` and embedded event data. Formatted as:
+**`GET /api/workflow/events`** — `RuntimeEvent`-typed SSE stream for the workflow engine.
 
 ```
 event: <kind>
 data: {"kind":"...","...event fields..."}
 ```
 
----
+<details>
+<summary>Example: watching events from curl</summary>
 
-## WebSocket
+```bash
+# Connect and watch all events (Ctrl-C to stop)
+curl -N http://127.0.0.1:6677/api/events
 
-### `GET /ws` and `GET /roko-ws`
+# Resume from sequence 42 after a disconnect
+curl -N -H "Last-Event-ID: 42" http://127.0.0.1:6677/api/events
 
-Handler: `ws::ws_upgrade`
+# In JavaScript (browser or Node)
+const es = new EventSource('http://127.0.0.1:6677/api/events');
+es.onmessage = (e) => {
+  const event = JSON.parse(e.data);
+  console.log(event.type, event);
+};
+```
 
-WebSocket connection for real-time event streaming. On connect, the server replays the full event backlog from the in-memory ring buffer, then streams live `ServerEvent` payloads as JSON text frames.
+</details>
 
-**Client control message** (optional, send after connect):
+### WebSocket
+
+The WebSocket endpoint supports filtering and backpressure control. The server replays the full event backlog from the ring buffer on connect, then streams live `ServerEvent` payloads as JSON text frames.
+
+**`GET /ws`** and **`GET /roko-ws`**
+
+After connecting, optionally send a JSON control message to narrow what you receive:
 
 ```json
 {
@@ -196,25 +281,57 @@ WebSocket connection for real-time event streaming. On connect, the server repla
 }
 ```
 
+<details>
+<summary>Control message fields and filter syntax</summary>
+
 | Field | Type | Description |
 |---|---|---|
 | `subscribe` | `string[]` | Filter strings. Empty = accept all. Supports plain type substrings (`"agent"`), channel prefixes (`"projection:<name>"`, `"topic:<pattern>"`, `"engram-stream:<name>"`), and glob wildcard suffix (`"agent.*"`). |
-| `cursor` | `u64` | Sequence number to replay from (catchup on reconnect). |
+| `cursor` | `u64` | Sequence number to replay from (for catchup on reconnect). |
 | `back_pressure` | `"at_most_once"` \| `"coalesce"` \| `"resume_required"` | Delivery semantics (default: `at_most_once`). |
 
-**Outgoing frames:** JSON-serialized `ServerEvent` objects. See [events.rs](#server-events) for the full tagged union.
+**Filter examples:**
+- `"agent"` — all events whose type contains "agent"
+- `"topic:plan.*"` — all events published to topics matching `plan.*`
+- `"projection:gate_pipeline"` — events from the gate_pipeline projection channel
+- `"BenchRunStarted"` — exact-match on the PascalCase event type
 
 **Lag behavior:** If the server-side broadcast buffer overflows, lagged events are silently dropped. A warning is logged server-side at most every 5 seconds.
+
+</details>
+
+**Outgoing frames:** JSON-serialized `ServerEvent` objects. See the [StateHub Push Pattern](#statehub-push-pattern) section for the full event catalog.
+
+**`GET /api/ws`** (aggregator variant) — Aggregates live event streams from all discovered agent sidecars, not just the control plane. Reconnects automatically when agents join or leave (refresh interval: 10s, reconnect delay: 2s).
 
 ---
 
 ## StateHub Push Pattern
 
-The StateHub is the central push-based state distribution hub. Orchestrator code calls `state.state_hub.publish(DashboardEvent)` or `publish_batch(...)`. The hub maintains a bounded ring buffer of recent events (default: 512) and fans out to all SSE/WS subscribers via a `tokio::sync::broadcast` channel.
+The StateHub is the central nervous system for real-time state distribution. All orchestrator activity flows through it: plans start, tasks execute, agents produce output, gates pass or fail — every significant transition is a `DashboardEvent` published to the StateHub.
 
-### DashboardEvent variants
+The StateHub maintains a bounded ring buffer (default: 512 events) and fans out to all SSE and WebSocket subscribers via a `tokio::sync::broadcast` channel. New subscribers get a replay of retained events on connect, so they can reconstruct the current state without polling.
 
-All `type` tags use `snake_case` unless noted. Events flow from the orchestrator → `StateHub` → SSE/WS clients.
+```
+Orchestrator
+    |
+    | publish(DashboardEvent)
+    v
+  StateHub
+    | ring buffer (512 events)
+    | broadcast channel
+    |
+    +---> SSE clients (/api/events)
+    +---> WS clients (/ws)
+    +---> HTTP snapshot (/api/statehub/snapshot)
+```
+
+### DashboardEvent catalog
+
+All `type` tags use `snake_case` unless noted. Events flow from the orchestrator through the StateHub to SSE/WS clients.
+
+<details>
+<summary>Orchestrator events (plans, tasks, agents, gates)</summary>
 
 | `type` | Key fields | Source |
 |---|---|---|
@@ -232,6 +349,14 @@ All `type` tags use `snake_case` unless noted. Events flow from the orchestrator
 | `episode_recorded` | `agent_id`, `role`, `episode_id`, `passed` | Orchestrator |
 | `task_output_appended` | `task_id`, `lines` (str[]) | run.rs |
 | `event_log_entry` | `timestamp_ms`, `event_type`, `plan_id`, `task_id`, `message` | run.rs |
+
+</details>
+
+<details>
+<summary>Learning and subsystem events</summary>
+
+| `type` | Key fields | Source |
+|---|---|---|
 | `cascade_router_updated` | router snapshot fields | Learning subsystem |
 | `gate_thresholds_updated` | threshold map | Learning subsystem |
 | `experiment_winners_updated` | experiment data | Learning subsystem |
@@ -244,9 +369,14 @@ All `type` tags use `snake_case` unless noted. Events flow from the orchestrator
 | `diagnosis` | diagnostic fields | Conductor |
 | `error` | `message` | Various |
 
-### ServerEvent (event bus / WebSocket)
+</details>
 
-The WebSocket and legacy `ServerEvent` bus carry a superset of dashboard events. Additional types:
+### ServerEvent catalog (WebSocket / event bus)
+
+The WebSocket and event bus carry a superset of dashboard events. Additional types include inference lifecycle, deployments, jobs, chain, and system events.
+
+<details>
+<summary>Full ServerEvent type catalog</summary>
 
 | `type` | Key fields |
 |---|---|
@@ -295,29 +425,48 @@ The WebSocket and legacy `ServerEvent` bus carry a superset of dashboard events.
 | `server_shutdown` | — |
 | `error` | `message` |
 
-**Note:** `BenchLearningEvent` is serialized with its exact PascalCase type tag; all other events use `snake_case`.
+**Note:** `BenchRunStarted`, `BenchTaskStarted`, `BenchTaskCompleted`, `BenchLearningEvent`, `BenchProgress`, and `BenchRunCompleted` are serialized with their exact PascalCase type tags. All other events use `snake_case`.
+
+</details>
 
 ---
 
 ## Health and Status
 
-### `GET /health`
+These routes tell you whether the server is alive, what's currently running, and how the overall system is faring. Start here when debugging.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Bare liveness probe — always public, no `/api/` prefix |
+| GET | `/api/health` | Rich health check with telemetry |
+| GET | `/api/status` | Session overview and supervised processes |
+| GET | `/api/dashboard` | Dashboard scaffold from the runtime |
+| GET | `/api/operations/{id}` | Look up a background operation by ID |
+| GET | `/api/relay/health` | Relay connection diagnostics |
+| GET | `/api/parity` | TUI / HTTP API / CLI feature coverage matrix |
+| GET | `/api/retention` | Retention policies and violations for `.roko/` data |
+| GET | `/api/statehub/snapshot` | Current StateHub projection snapshot |
+| GET | `/api/statehub/events` | Bounded replay from the ring buffer |
+| GET | `/api/truth_map` | Entity-to-canonical-source registry |
+
+<details>
+<summary>GET /health — liveness probe</summary>
 
 Handler: `top_level_health` (no `/api/` prefix, always public)
 
-Bare liveness probe for load balancers. Returns `200 OK` unconditionally.
+Returns `200 OK` unconditionally. Use this for load balancer health checks.
 
 ```json
 { "status": "ok" }
 ```
 
-### `GET /api/health`
+</details>
+
+<details>
+<summary>GET /api/health — rich health check</summary>
 
 Handler: `health::health`
 
-Rich health check with live telemetry.
-
-**Response:**
 ```json
 {
   "status": "ok",
@@ -348,15 +497,15 @@ Rich health check with live telemetry.
 }
 ```
 
-Status is `"ok"` / `"degraded"` (some providers unhealthy) / `"down"` (all providers failed).
+`status` is `"ok"` / `"degraded"` (some providers unhealthy) / `"down"` (all providers failed).
 
-### `GET /api/status`
+</details>
+
+<details>
+<summary>GET /api/status — session overview</summary>
 
 Handler: `dashboard::session_status`
 
-Session overview including supervised processes and the process session ledger.
-
-**Response:**
 ```json
 {
   "session_id": "sess-abc123",
@@ -371,60 +520,32 @@ Session overview including supervised processes and the process session ledger.
 }
 ```
 
-### `GET /api/dashboard`
+</details>
 
-Handler: `dashboard::dashboard`
-
-Dashboard scaffold rendered by the runtime. Returns `{ "rendered": "..." }`.
-
-### `GET /api/operations/{id}`
+<details>
+<summary>GET /api/operations/{id} — background operation status</summary>
 
 Handler: `dashboard::operation_status`
 
-Look up a background operation by ID.
+Background operations (dream runs, plan generation, PRD drafting, etc.) are tracked by an operation UUID. Use this to poll their status.
 
-**Path parameter:** `id` — operation UUID
-
-**Response:**
 ```json
 { "id": "op-uuid", "kind": "dream_run", "status": "Running" }
 ```
 
-**Errors:** 404 if not found.
+Returns `404` if the operation ID is not found.
 
-### `GET /api/relay/health`
+</details>
 
-Handler: `health::relay_health`
-
-Relay connection diagnostics as JSON. Shape depends on the relay health tracker.
-
-### `GET /api/parity`
-
-Handler: `health::parity_handler`
-
-Cross-surface parity matrix comparing TUI, HTTP API, and CLI feature coverage.
-
-### `GET /api/retention`
-
-Handler: `health::retention_handler`
-
-Retention policies and any current violations for `.roko/` data files.
-
-### `GET /api/statehub/snapshot`
-
-Handler: `health::statehub_snapshot`
-
-Current StateHub dashboard projection. Returns the canonical `DashboardProjection` state frame.
-
-**Response shape:** `{ "state": {...}, "evidence": {...} }` (projection frame).
-
-### `GET /api/statehub/events`
+<details>
+<summary>GET /api/statehub/events — ring buffer replay</summary>
 
 Handler: `health::statehub_events`
 
-Bounded replay of retained dashboard events from the StateHub ring buffer.
+Query the ring buffer directly (without establishing an SSE connection). Useful for one-shot polling or catching up after a gap.
 
 **Query parameters:**
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `after_seq` | `u64` | `0` | Return events with seq > this value |
@@ -434,7 +555,6 @@ Bounded replay of retained dashboard events from the StateHub ring buffer.
 | `task_id` | `string` | — | Filter by task ID |
 | `type` (alias: `event_type`) | `string` | — | Filter by event type tag |
 
-**Response:**
 ```json
 {
   "after_seq": 42,
@@ -451,23 +571,37 @@ Bounded replay of retained dashboard events from the StateHub ring buffer.
 }
 ```
 
-### `GET /api/truth_map`
-
-Handler: `dashboard::truth_map_handler`
-
-Entity truth-source registry — maps each data entity to its canonical source of truth.
+</details>
 
 ---
 
 ## Plans
 
-Handler module: `routes/plans.rs`
+Plans are the primary unit of work in Roko. A plan is a collection of tasks, each of which is executed by an agent and validated through the gate pipeline. Plans live in `.roko/plans/` as `tasks.toml` files and can be generated automatically from PRDs.
 
-### `GET /api/plans`
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/plans` | List all plans |
+| POST | `/api/plans` | Create a new plan |
+| GET | `/api/plans/{id}` | Get full plan details |
+| GET | `/api/plans/{id}/tasks` | List tasks for a plan |
+| POST | `/api/plans/{id}/execute` | Execute a plan in the background |
+| GET | `/api/plans/{id}/status` | Get execution status |
+| POST | `/api/plans/{id}/pause` | Pause execution |
+| POST | `/api/plans/{id}/resume` | Resume execution |
+| GET | `/api/plans/{id}/gates` | Get gate results grouped by task |
+| GET | `/api/plans/{id}/reviews` | List human reviews |
+| POST | `/api/plans/{id}/tasks/{task_id}/review` | Submit a human review |
+| GET | `/api/plans/{id}/tasks/{task_id}/diff` | Get code diff from a task agent |
+| POST | `/api/plans/{id}/chat` | Send a chat message in plan context |
+| POST | `/api/plans/{id}/estimate` | Estimate cost and duration |
+| POST | `/api/plans/generate` | Generate a plan from a prompt |
 
-List plans from `.roko/plans/`.
+<details>
+<summary>Route details and request/response shapes</summary>
 
-**Response:**
+#### `GET /api/plans`
+
 ```json
 {
   "plans": [
@@ -476,115 +610,86 @@ List plans from `.roko/plans/`.
 }
 ```
 
-### `POST /api/plans`
+#### `POST /api/plans`
 
-Create a new plan.
-
-**Request body:**
 ```json
 { "title": "My Plan", "description": "...", "tasks": [] }
 ```
 
-**Response:** `201 Created` with `{ "id": "plan-uuid" }`.
+Response: `201 Created` with `{ "id": "plan-uuid" }`.
 
-### `GET /api/plans/{id}`
+#### `POST /api/plans/{id}/execute`
 
-Get full plan details.
+Executes the plan in a background task. Response: `202 Accepted` with `{ "operation_id": "op-uuid" }`.
 
-**Path parameter:** `id` — plan slug or UUID
+#### `GET /api/plans/{id}/status`
 
-**Response:** Full plan object including tasks and metadata.
+```json
+{ "id": "...", "status": "running|paused|completed|failed", "progress": {...} }
+```
 
-### `GET /api/plans/{id}/tasks`
+#### `POST /api/plans/{id}/tasks/{task_id}/review`
 
-List tasks for a plan.
-
-**Response:** `{ "tasks": [...] }`
-
-### `POST /api/plans/{id}/execute`
-
-Execute a plan in the background.
-
-**Response:** `202 Accepted` with `{ "operation_id": "op-uuid" }`.
-
-### `GET /api/plans/{id}/status`
-
-Get plan execution status.
-
-**Response:** `{ "id": "...", "status": "running|paused|completed|failed", "progress": {...} }`
-
-### `POST /api/plans/{id}/pause`
-
-Pause a running plan execution.
-
-**Response:** `200 OK`.
-
-### `POST /api/plans/{id}/resume`
-
-Resume a paused plan execution.
-
-**Response:** `200 OK`.
-
-### `GET /api/plans/{id}/gates`
-
-Get gate results for a plan.
-
-**Response:** Gate verdicts grouped by task.
-
-### `GET /api/plans/{id}/reviews`
-
-List human reviews submitted for a plan.
-
-### `POST /api/plans/{id}/tasks/{task_id}/review`
-
-Submit a human review for a task.
-
-**Request body:**
 ```json
 { "approved": true, "comment": "Looks good" }
 ```
 
-### `GET /api/plans/{id}/tasks/{task_id}/diff`
+#### `POST /api/plans/{id}/estimate`
 
-Get the code diff produced by a task agent.
-
-### `POST /api/plans/{id}/chat`
-
-Send a chat message in the context of a plan.
-
-**Request body:**
 ```json
-{ "message": "What's the current status?" }
+{ "estimated_cost_usd": 2.50, "estimated_duration_mins": 15, "task_count": 8 }
 ```
 
-### `POST /api/plans/{id}/estimate`
+#### `POST /api/plans/generate`
 
-Estimate cost and duration for a plan before execution.
+Generate a plan from a natural language prompt using an agent.
 
-**Response:** `{ "estimated_cost_usd": 2.50, "estimated_duration_mins": 15, "task_count": 8 }`
-
-### `POST /api/plans/generate`
-
-Generate a plan from a prompt using an agent.
-
-**Request body:**
 ```json
 { "prompt": "Implement rate limiting for the API", "context": "..." }
 ```
 
-**Response:** `202 Accepted` with `{ "operation_id": "op-uuid" }`.
+Response: `202 Accepted` with `{ "operation_id": "op-uuid" }`.
+
+</details>
+
+<details>
+<summary>Example: create and execute a plan</summary>
+
+```bash
+# Create a plan
+curl -X POST http://127.0.0.1:6677/api/plans \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Add rate limiting","description":"Rate limit the HTTP API","tasks":[]}'
+
+# Execute it
+curl -X POST http://127.0.0.1:6677/api/plans/plan-uuid/execute
+
+# Poll status
+curl http://127.0.0.1:6677/api/plans/plan-uuid/status
+
+# Or watch SSE stream (already open) for real-time updates
+```
+
+</details>
 
 ---
 
 ## One-Shot Runs
 
-Handler module: `routes/run.rs`
+A one-shot run is the simplest way to get Roko to do something: pass a prompt, and Roko executes one full cycle — compose system prompt → dispatch agent → run gate pipeline → persist episode. This corresponds to `roko run "<prompt>"` on the CLI.
 
-### `POST /api/run`
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/run` | Spawn a background run |
+| GET | `/api/run/{id}/status` | Poll run status |
 
-Spawn a background `run_once()` invocation. Executes one prompt through the universal compose→agent→gate→persist loop. Emits `RunStarted`, `DashboardEvent::TaskStarted`, `DashboardEvent::AgentSpawned`, and `RunCompleted` events to the StateHub.
+<details>
+<summary>Route details and request/response shapes</summary>
 
-**Request body:**
+#### `POST /api/run`
+
+Executes one prompt through the universal compose → agent → gate → persist loop. Emits `RunStarted`, `TaskStarted`, `AgentSpawned`, and `RunCompleted` events to the StateHub.
+
 ```json
 {
   "prompt": "Add a unit test for the parser",
@@ -592,20 +697,15 @@ Spawn a background `run_once()` invocation. Executes one prompt through the univ
 }
 ```
 
-**Validation:** `prompt` must be non-blank.
+`prompt` must be non-blank.
 
-**Response:** `202 Accepted`
+Response: `202 Accepted`
 ```json
 { "id": "run-uuid" }
 ```
 
-### `GET /api/run/{id}/status`
+#### `GET /api/run/{id}/status`
 
-Poll the status of a background run.
-
-**Path parameter:** `id` — run UUID returned by `POST /api/run`
-
-**Response:**
 ```json
 {
   "id": "run-uuid",
@@ -618,7 +718,32 @@ Poll the status of a background run.
 }
 ```
 
-**Errors:** 404 if the run ID is not in the active runs map.
+Returns `404` if the run ID is not in the active runs map.
+
+</details>
+
+<details>
+<summary>Example: fire-and-forget with status polling</summary>
+
+```bash
+# Start the run
+RUN_ID=$(curl -s -X POST http://127.0.0.1:6677/api/run \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Write a summary of the codebase architecture"}' | jq -r .id)
+
+# Poll until done
+while true; do
+  STATUS=$(curl -s http://127.0.0.1:6677/api/run/$RUN_ID/status)
+  FINISHED=$(echo $STATUS | jq -r .finished)
+  if [ "$FINISHED" = "true" ]; then
+    echo $STATUS | jq .
+    break
+  fi
+  sleep 2
+done
+```
+
+</details>
 
 ---
 
@@ -626,11 +751,11 @@ Poll the status of a background run.
 
 Handler module: `routes/runs.rs`
 
-### `GET /api/dashboard/runs`
+`GET /api/dashboard/runs` summarizes runs from the runtime event log (`.roko/runtime-events.jsonl`). This is what the TUI's run history view reads.
 
-Summarize runs from the runtime event log (`.roko/runtime-events.jsonl`).
+<details>
+<summary>Response shape</summary>
 
-**Response:**
 ```json
 {
   "runs": [
@@ -650,65 +775,100 @@ Summarize runs from the runtime event log (`.roko/runtime-events.jsonl`).
 }
 ```
 
+</details>
+
 ---
 
 ## PRDs
 
-Handler module: `routes/prds.rs`
+PRDs (Product Requirement Documents) are the top of Roko's self-hosting funnel. You capture an idea, Roko drafts a PRD using an agent, generates an implementation plan, and executes it. These routes expose the full lifecycle.
 
-### `GET /api/prds`
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/prds` | List all PRDs |
+| GET | `/api/prds/status` | Coverage report by lifecycle stage |
+| POST | `/api/prds/ideas` | Capture a new work-item idea |
+| GET | `/api/prds/{slug}` | Get a PRD by slug |
+| POST | `/api/prds/{slug}/draft` | Agent-driven PRD drafting |
+| POST | `/api/prds/{slug}/promote` | Promote to planned/approved status |
+| POST | `/api/prds/{slug}/plan` | Generate implementation plan from PRD |
+| POST | `/api/prd/consolidate` | Scan for duplicates and gaps |
+| POST | `/api/prds/consolidate` | (alias) |
 
-List all PRDs from `.roko/prd/`.
+<details>
+<summary>Route details and request/response shapes</summary>
 
-**Response:** Array of PRD summary objects with `slug`, `title`, `status`, `created_at`.
+#### `GET /api/prds`
 
-### `GET /api/prds/status`
+```json
+[
+  { "slug": "rate-limiting", "title": "Add Rate Limiting", "status": "draft", "created_at": "..." }
+]
+```
 
-Coverage report: counts by lifecycle stage (idea, draft, planned, implemented).
+#### `GET /api/prds/status`
 
-### `POST /api/prds/ideas`
+Coverage report: counts by lifecycle stage (`idea`, `draft`, `planned`, `implemented`).
 
-Capture a new work-item idea.
+#### `POST /api/prds/ideas`
 
-**Request body:**
 ```json
 { "title": "Add retry logic to the HTTP client", "description": "..." }
 ```
 
-**Response:** `201 Created` with the new PRD slug.
+Response: `201 Created` with the new PRD slug.
 
-### `GET /api/prds/{slug}`
+#### `GET /api/prds/{slug}`
 
-Get a PRD by slug. Reads the markdown file from `.roko/prd/{slug}.md`.
+Reads the markdown file from `.roko/prd/{slug}.md`.
 
-**Response:** `{ "slug": "...", "title": "...", "content": "...", "status": "..." }`
+```json
+{ "slug": "rate-limiting", "title": "...", "content": "...", "status": "draft" }
+```
 
-### `POST /api/prds/{slug}/draft`
+#### `POST /api/prds/{slug}/draft`
 
-Agent-driven PRD drafting. Spawns a background agent that enriches the idea into a full PRD with requirements, acceptance criteria, and technical design.
+Spawns a background agent that enriches the idea into a full PRD with requirements, acceptance criteria, and technical design.
 
-**Response:** `202 Accepted` with `{ "operation_id": "op-uuid" }`.
+Response: `202 Accepted` with `{ "operation_id": "op-uuid" }`.
 
-### `POST /api/prds/{slug}/promote`
+#### `POST /api/prds/{slug}/promote`
 
-Promote a draft PRD to `planned` or `approved` status. Triggers `AtelierPrdsUpdated` StateHub event.
+Triggers `AtelierPrdsUpdated` StateHub event.
 
-**Request body:**
 ```json
 { "status": "approved" }
 ```
 
-### `POST /api/prds/{slug}/plan`
+#### `POST /api/prds/{slug}/plan`
 
-Generate an implementation plan (`tasks.toml`) from the PRD. Spawns a background agent. Publishes `AtelierPrdsUpdated`. If `prd.auto_plan` is enabled in `roko.toml`, this is triggered automatically on PRD publish.
+Generates a `tasks.toml` from the PRD using a background agent. If `prd.auto_plan` is enabled in `roko.toml`, this is triggered automatically on PRD publish.
 
-**Response:** `202 Accepted` with `{ "operation_id": "op-uuid" }`.
+Response: `202 Accepted` with `{ "operation_id": "op-uuid" }`.
 
-### `POST /api/prd/consolidate` and `POST /api/prds/consolidate`
+</details>
 
-Scan all PRDs for duplicates and gaps. Spawns a background agent.
+<details>
+<summary>Example: full PRD lifecycle via API</summary>
 
-**Response:** `202 Accepted` with `{ "operation_id": "op-uuid" }`.
+```bash
+# 1. Capture an idea
+curl -X POST http://127.0.0.1:6677/api/prds/ideas \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Add request deduplication","description":"Deduplicate concurrent identical requests"}'
+# returns slug: "add-request-deduplication"
+
+# 2. Draft the PRD (agent-driven)
+curl -X POST http://127.0.0.1:6677/api/prds/add-request-deduplication/draft
+
+# 3. Generate implementation plan
+curl -X POST http://127.0.0.1:6677/api/prds/add-request-deduplication/plan
+
+# 4. Check status
+curl http://127.0.0.1:6677/api/prds/status
+```
+
+</details>
 
 ---
 
@@ -716,11 +876,31 @@ Scan all PRDs for duplicates and gaps. Spawns a background agent.
 
 Handler module: `routes/agents.rs`
 
-### `GET /api/managed-agents`
+These routes manage the lifecycle of agent processes: creating them, starting and stopping them, sending them messages, and inspecting their state. The control plane maintains a registry of "discovered agents" — both locally supervised processes and self-registered remote sidecars.
 
-List all managed agent processes and discovered agents. Used by the dashboard fleet roster. Merges locally supervised processes with self-registered remote sidecars.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/managed-agents` | List all managed agent processes |
+| POST | `/api/agents/register` | Register a remote sidecar with the control plane |
+| POST | `/api/agents/create` | Create and spawn a new agent from manifest |
+| GET | `/api/agents/{id}` | Get agent details |
+| GET | `/api/agents/{id}/profile` | Get the model profile assigned to this agent |
+| POST | `/api/agents/{id}/stop` | Stop a running agent |
+| GET | `/api/agents/{id}/episodes` | Get episodes attributed to this agent |
+| GET | `/api/agents/{id}/logs` | Proxy logs from the agent sidecar |
+| POST | `/api/agents/{id}/message` | Send a prompt to an agent inline |
+| POST | `/api/agents/{id}/start` | Start or restart a stopped agent |
+| POST | `/api/agents/{id}/restart` | Restart an agent |
+| GET | `/api/agents/{id}/token` | Get token status |
+| POST | `/api/agents/{id}/token` | Issue or rotate an agent bearer token |
 
-**Response:** Array of agent dashboard payloads:
+<details>
+<summary>Route details and request/response shapes</summary>
+
+#### `GET /api/managed-agents`
+
+Merges locally supervised processes with self-registered remote sidecars. Used by the dashboard fleet roster.
+
 ```json
 [
   {
@@ -738,11 +918,8 @@ List all managed agent processes and discovered agents. Used by the dashboard fl
 ]
 ```
 
-### `POST /api/agents/register`
+#### `POST /api/agents/register`
 
-Register a remote agent sidecar with the control plane.
-
-**Request body:**
 ```json
 {
   "agent_id": "agent-uuid",
@@ -754,13 +931,10 @@ Register a remote agent sidecar with the control plane.
 }
 ```
 
-**Response:** `200 OK` with registration record.
+Response: `200 OK` with registration record.
 
-### `POST /api/agents/create`
+#### `POST /api/agents/create`
 
-Create and spawn a new agent process from manifest config.
-
-**Request body:**
 ```json
 {
   "name": "implementer-2",
@@ -770,61 +944,31 @@ Create and spawn a new agent process from manifest config.
 }
 ```
 
-**Response:** `202 Accepted`.
+Response: `202 Accepted`.
 
-### `GET /api/agents/{id}`
+#### `POST /api/agents/{id}/message`
 
-Get agent details by ID (looks up in discovered agents registry).
+Sends a prompt to an agent's sidecar and returns the response inline. 30-second timeout.
 
-### `GET /api/agents/{id}/profile`
-
-Get the model profile assigned to an agent.
-
-### `POST /api/agents/{id}/stop`
-
-Stop a running agent process.
-
-### `GET /api/agents/{id}/episodes`
-
-Get episodes attributed to a specific agent.
-
-**Query parameters:** `limit: usize` (optional)
-
-### `GET /api/agents/{id}/logs`
-
-Proxy logs from the agent sidecar's `/logs` endpoint.
-
-### `POST /api/agents/{id}/message`
-
-Send a prompt to an agent's sidecar and return the response inline (30-second timeout).
-
-**Request body:**
 ```json
 { "prompt": "Explain what you're working on", "context": {} }
 ```
 
-**Response:** Agent response object (mirrors sidecar `/message` response).
+Response: agent response object (mirrors sidecar `/message` response).
 
-### `POST /api/agents/{id}/start`
+#### `GET /api/agents/{id}/episodes`
 
-Start (or restart) a stopped agent.
+**Query parameters:** `limit: usize` (optional)
 
-### `POST /api/agents/{id}/restart`
+#### `POST /api/agents/{id}/token`
 
-Restart an agent.
+Issues (or rotates) a bearer token for an agent. The token hash is stored in `DiscoveredAgent.token_hash`. Tokens expire after 24 hours by default.
 
-### `GET /api/agents/{id}/token`
-
-Get the current token status for an agent (expiry, hash presence).
-
-### `POST /api/agents/{id}/token`
-
-Issue (or rotate) a bearer token for an agent. The token hash is stored in `DiscoveredAgent.token_hash`. Tokens expire after 24 hours by default.
-
-**Response:**
 ```json
 { "token": "roko-agent-<uuid>", "expires_at": "2026-04-30T00:00:00Z" }
 ```
+
+</details>
 
 ---
 
@@ -832,76 +976,42 @@ Issue (or rotate) a bearer token for an agent. The token hash is stored in `Disc
 
 Handler module: `routes/aggregator.rs`
 
-These routes aggregate data from all discovered agent sidecars in parallel.
+These routes aggregate data from all discovered agent sidecars in parallel. Where the control plane routes above manage the lifecycle of agents, these routes pull live operational data — stats, skills, tasks, knowledge — from all agents at once and present a unified view.
 
-### `GET /api/agents`
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/agents` | List all discovered agents with live stats (TTL-cached 30s) |
+| GET | `/api/agents/topology` | Agent topology as a graph |
+| GET | `/api/agents/{id}/stats` | Live stats from a specific agent's sidecar (TTL-cached 5s) |
+| GET | `/api/agents/{id}/skills` | Skill manifest from sidecar |
+| GET | `/api/agents/{id}/heartbeat` | Latest heartbeat |
+| GET | `/api/agents/{id}/trace` | Proxy agent trace logs |
+| GET | `/api/predictions/sessions` | Prediction sessions across all agents (TTL-cached 10s) |
+| GET | `/api/predictions/sessions/{id}` | Specific prediction session |
+| GET | `/api/predictions/claims` | Prediction claims across all agents |
+| GET | `/api/predictions/calibration/{agent_id}` | Prediction calibration for an agent |
+| GET | `/api/knowledge/entries` | Knowledge entries from neuro store (TTL-cached 30s) |
+| GET | `/api/knowledge/edges` | Knowledge graph edges |
+| GET | `/api/knowledge/search` | Search knowledge (`?q=<query>`) |
+| GET | `/api/knowledge/kinds` | Known knowledge kinds |
+| GET | `/api/tasks` | Tasks from all sidecars (TTL-cached 30s) |
+| GET | `/api/tasks/stats` | Aggregate task statistics |
+| GET | `/api/tasks/{id}` | Specific task by ID |
 
-List all discovered agents with live stats (TTL-cached, 30s).
+<details>
+<summary>Route details and query parameters</summary>
 
-**Query parameters:**
-- `owner: string` — filter by owner label
+#### `GET /api/agents`
+
+**Query parameters:** `owner: string` — filter by owner label
 
 **Response:** Paginated response: `{ items, total, offset, limit, has_more }` where each item is an `AgentCard` extended with live stats.
 
-### `GET /api/agents/topology`
+#### `GET /api/agents/{id}/trace`
 
-Return agent topology as a graph. Shape matches the frontend `AgentTopology` component.
+**Query parameters:** `limit: usize` (default: 50), `offset: usize` (default: 0)
 
-### `GET /api/agents/{id}/stats`
-
-Fetch live stats from agent `{id}`'s sidecar `/stats` endpoint (TTL-cached, 5s).
-
-### `GET /api/agents/{id}/skills`
-
-Fetch skill manifest from agent `{id}`'s sidecar `/capabilities` endpoint.
-
-### `GET /api/agents/{id}/heartbeat`
-
-Get the latest heartbeat from agent `{id}`.
-
-### `GET /api/agents/{id}/trace`
-
-Proxy agent trace logs.
-
-**Query parameters:**
-- `limit: usize` (default: 50)
-- `offset: usize` (default: 0)
-
-### `GET /api/predictions/sessions`
-
-List prediction sessions across all agents (TTL-cached, 10s).
-
-### `GET /api/predictions/sessions/{id}`
-
-Get a specific prediction session.
-
-### `GET /api/predictions/claims`
-
-List prediction claims across all agents.
-
-### `GET /api/predictions/calibration/{agent_id}`
-
-Get prediction calibration data for an agent.
-
-### `GET /api/knowledge/entries`
-
-List knowledge entries from the neuro store (TTL-cached, 30s).
-
-### `GET /api/knowledge/edges`
-
-List knowledge graph edges.
-
-### `GET /api/knowledge/search`
-
-**Query parameters:** `q: string` — search query
-
-### `GET /api/knowledge/kinds`
-
-List known knowledge kinds.
-
-### `GET /api/tasks`
-
-List tasks from all agent sidecars (TTL-cached, 30s).
+#### `GET /api/tasks`
 
 **Query parameters:**
 - `state: string` — filter by task state
@@ -912,17 +1022,7 @@ List tasks from all agent sidecars (TTL-cached, 30s).
 
 **Response:** `{ items, total, offset, limit, has_more }`
 
-### `GET /api/tasks/stats`
-
-Aggregate task statistics across all agents.
-
-### `GET /api/tasks/{id}`
-
-Get a specific task by ID.
-
-### `GET /api/ws` (aggregator)
-
-WebSocket that aggregates live event streams from all discovered agent sidecars. Reconnects automatically when agents join or leave (refresh interval: 10s, reconnect delay: 2s).
+</details>
 
 ---
 
@@ -930,11 +1030,21 @@ WebSocket that aggregates live event streams from all discovered agent sidecars.
 
 Handler module: `routes/status/gates.rs`
 
-### `GET /api/gates/summary`
+Roko validates every agent's output through a 7-rung gate pipeline before accepting it. The gates run sequentially: compile → clippy → test → diff → fmt → custom → judge. These routes let you inspect pass rates, trends, and the history of every gate check.
 
-Aggregate gate verdicts from canonical projections (`RuntimeProjectionSet`). Returns pass rate, average duration, and last run per gate, plus a rung breakdown.
+Rung numbers: `0=compile`, `1=clippy`, `2=test`, `3=diff`, `4=fmt`, `5=custom`, `6=judge`.
 
-**Response:**
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/gates/summary` | Aggregate pass rates and durations per gate, plus rung breakdown |
+| GET | `/api/gates/history` | Recent gate verdicts (flat or waterfall format) |
+| GET | `/api/gates/{gate_name}/history` | Time series for one specific gate |
+
+<details>
+<summary>GET /api/gates/summary — response shape</summary>
+
+Aggregates gate verdicts from canonical projections (`RuntimeProjectionSet`).
+
 ```json
 {
   "compile": {
@@ -951,20 +1061,20 @@ Aggregate gate verdicts from canonical projections (`RuntimeProjectionSet`). Ret
 }
 ```
 
-Rung names: `0=compile`, `1=clippy`, `2=test`, `3=diff`, `4=fmt`, `5=custom`, `6=judge`.
+</details>
 
-### `GET /api/gates/history`
-
-Recent gate verdicts across all gates.
+<details>
+<summary>GET /api/gates/history — flat and waterfall formats</summary>
 
 **Query parameters:**
+
 | Parameter | Type | Description |
 |---|---|---|
 | `gate` | `string` | Filter to one gate name |
 | `limit` | `usize` | Max results |
 | `format` | `"waterfall"` | Return waterfall shape (grouped by `task_id`) |
 
-**Default response:**
+**Default (flat) response:**
 ```json
 {
   "sources": ["/path/.roko/engrams.jsonl", "/path/.roko/events.jsonl"],
@@ -985,7 +1095,8 @@ Recent gate verdicts across all gates.
 }
 ```
 
-**Waterfall response** (`?format=waterfall`):
+**Waterfall response** (`?format=waterfall`) — groups rungs by task, useful for timeline visualizations:
+
 ```json
 [
   {
@@ -999,13 +1110,7 @@ Recent gate verdicts across all gates.
 ]
 ```
 
-### `GET /api/gates/{gate_name}/history`
-
-Time series of pass/fail results for one specific gate.
-
-**Path parameter:** `gate_name` — gate name (e.g. `compile`, `test`)
-
-**Response:** Same shape as `GET /api/gates/history`. Returns 404 if no records exist for the gate.
+</details>
 
 ---
 
@@ -1013,26 +1118,29 @@ Time series of pass/fail results for one specific gate.
 
 Handler module: `routes/status/episodes.rs`
 
-### `GET /api/episodes`
+Episodes are the fundamental record of agent work. Each time an agent completes a task and the gate pipeline runs, an episode is recorded to `.roko/episodes.jsonl` with the agent's output, the gate results, cost, tokens, and a HDC fingerprint. Signals (`Engram` objects) are the raw event log from which episodes are derived.
 
-Normalized episode proof rows from canonical projections.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/episodes` | Normalized episode proof rows |
+| GET | `/api/signals` | Raw signals JSONL as JSON array (most recent first) |
 
-**Query parameters:** `ProjectionQuery` fields:
-- `limit: usize`
-- `plan_id: string`
-- `task_id: string`
-- `gate: string`
+<details>
+<summary>Route details and query parameters</summary>
 
-**Response:** JSON array of episode objects from `.roko/episodes.jsonl`.
+#### `GET /api/episodes`
 
-### `GET /api/signals`
+**Query parameters:** `limit: usize`, `plan_id: string`, `task_id: string`, `gate: string`
 
-Read the signals JSONL as a JSON array (most recent first).
+Returns JSON array of episode objects from `.roko/episodes.jsonl`.
 
-**Query parameters:**
-- `limit: usize` — max results (default: 500, max: 500)
+#### `GET /api/signals`
 
-**Response:** JSON array of Engram signal objects from `.roko/engrams.jsonl`.
+**Query parameters:** `limit: usize` — max results (default: 500, max: 500)
+
+Returns JSON array of Engram signal objects from `.roko/engrams.jsonl`.
+
+</details>
 
 ---
 
@@ -1040,20 +1148,28 @@ Read the signals JSONL as a JSON array (most recent first).
 
 Handler module: `routes/status/metrics.rs`
 
-### `GET /api/metrics`
+These routes provide aggregated views over the data Roko has collected. Use them for dashboards, alerting, or inspecting system health over time.
 
-Raw metric snapshots from the in-memory metrics registry.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/metrics` | Raw metric snapshots from the in-memory registry |
+| GET | `/api/metrics/summary` | Aggregate execution and learning metrics |
+| GET | `/api/metrics/success_rate` | Per-template success rate by trigger kind |
+| GET | `/api/metrics/engagement` | Feedback acknowledgement ratio per template |
+| GET | `/api/metrics/c_factor` | C-Factor, sub-metrics, per-agent contributions |
+| GET | `/api/metrics/model_efficiency` | Cost per successful episode per model |
+| GET | `/api/metrics/gate_rate` | Gate pass/total with trend delta |
+| GET | `/api/metrics/experiments` | Best vs worst variant gap per experiment |
+| GET | `/api/metrics/feedback_latency` | Median hours from action to gate feedback |
+| GET | `/api/metrics/velocity` | Self-improvement velocity (Δ%/day) |
+| GET | `/api/metrics/coverage` | Event bus subscription coverage |
+| GET | `/api/metrics/prometheus` | Prometheus text exposition format |
 
-**Response:** Array of metric snapshot objects.
+<details>
+<summary>GET /api/metrics/summary — dashboard overview</summary>
 
-### `GET /api/metrics/summary`
+**Query parameters:** `period: string` — `"last_7_days"` (default), `"last_30_days"`, `"last_90_days"`, or `"last_N_days"`
 
-Aggregate recent execution and learning metrics for the dashboard.
-
-**Query parameters:**
-- `period: string` — `"last_7_days"` (default), `"last_30_days"`, `"last_90_days"`, or `"last_N_days"`
-
-**Response:**
 ```json
 {
   "period": "last_7_days",
@@ -1077,52 +1193,13 @@ Aggregate recent execution and learning metrics for the dashboard.
 }
 ```
 
-### `GET /api/metrics/success_rate`
+</details>
 
-Per-template success rate split by trigger kind.
+<details>
+<summary>GET /api/metrics/c_factor — composite C-Factor</summary>
 
-**Response:**
-```json
-{
-  "templates": [
-    {
-      "template": "implementer",
-      "triggers": [
-        {
-          "trigger_kind": "plan_dispatch",
-          "successful_episodes": 38,
-          "total_episodes": 42,
-          "success_rate": 0.905
-        }
-      ]
-    }
-  ]
-}
-```
+The C-Factor is Roko's composite self-improvement score — a weighted combination of gate pass rate, cost efficiency, speed, knowledge growth, and social/coordination metrics. Higher is better.
 
-### `GET /api/metrics/engagement`
-
-Feedback acknowledgement ratio per template.
-
-**Response:**
-```json
-{
-  "templates": [
-    {
-      "template": "reviewer",
-      "acknowledged_actions": 30,
-      "total_actions": 35,
-      "engagement_rate": 0.857
-    }
-  ]
-}
-```
-
-### `GET /api/metrics/c_factor`
-
-Composite C-Factor, component sub-metrics, per-agent contributions, and per-fleet stats.
-
-**Response:**
 ```json
 {
   "source": {
@@ -1163,11 +1240,11 @@ Composite C-Factor, component sub-metrics, per-agent contributions, and per-flee
 }
 ```
 
-### `GET /api/metrics/model_efficiency`
+</details>
 
-Cost per successful episode for each routed model.
+<details>
+<summary>GET /api/metrics/model_efficiency — cost per successful episode</summary>
 
-**Response:**
 ```json
 {
   "source": "/path/.roko/learn/cascade-router.json",
@@ -1186,11 +1263,70 @@ Cost per successful episode for each routed model.
 }
 ```
 
-### `GET /api/metrics/gate_rate`
+</details>
 
-Gate pass/total per gate with a trend delta (improving/flat/declining).
+<details>
+<summary>GET /api/metrics/prometheus — Prometheus scrape endpoint</summary>
 
-**Response:**
+Content-Type: `text/plain; version=0.0.4; charset=utf-8`
+
+| Metric | Type | Description |
+|---|---|---|
+| `roko_uptime_seconds` | gauge | Seconds since roko-serve started |
+| `roko_agents_active` | gauge | Currently active agents |
+| `roko_plans_active` | gauge | Currently executing plans |
+| `roko_plans_completed_total` | counter | Plans completed successfully |
+| `roko_plans_failed_total` | counter | Plans that failed |
+| `roko_tasks_completed_total` | counter | Tasks completed |
+| `roko_tasks_failed_total` | counter | Tasks that failed |
+| `roko_tasks_active` | gauge | Currently executing tasks |
+| `roko_gate_pass_total` | counter | Gate checks that passed |
+| `roko_gate_fail_total` | counter | Gate checks that failed |
+| `roko_errors_total` | counter | Error events recorded |
+| `roko_episodes_total` | counter | Episodes recorded |
+
+</details>
+
+<details>
+<summary>Other metrics routes — shapes</summary>
+
+#### `GET /api/metrics/success_rate`
+
+```json
+{
+  "templates": [
+    {
+      "template": "implementer",
+      "triggers": [
+        {
+          "trigger_kind": "plan_dispatch",
+          "successful_episodes": 38,
+          "total_episodes": 42,
+          "success_rate": 0.905
+        }
+      ]
+    }
+  ]
+}
+```
+
+#### `GET /api/metrics/engagement`
+
+```json
+{
+  "templates": [
+    {
+      "template": "reviewer",
+      "acknowledged_actions": 30,
+      "total_actions": 35,
+      "engagement_rate": 0.857
+    }
+  ]
+}
+```
+
+#### `GET /api/metrics/gate_rate`
+
 ```json
 {
   "summary": { "compile": { ... }, "test": { ... } },
@@ -1199,11 +1335,8 @@ Gate pass/total per gate with a trend delta (improving/flat/declining).
 }
 ```
 
-### `GET /api/metrics/experiments`
+#### `GET /api/metrics/experiments`
 
-Best vs worst variant success-rate gap per experiment.
-
-**Response:**
 ```json
 {
   "source": "/path/.roko/learn/experiments.json",
@@ -1220,20 +1353,14 @@ Best vs worst variant success-rate gap per experiment.
 }
 ```
 
-### `GET /api/metrics/feedback_latency`
+#### `GET /api/metrics/feedback_latency`
 
-Median hours from agent action to first gate feedback signal.
-
-**Response:**
 ```json
 { "sample_count": 42, "median_hours": 0.003 }
 ```
 
-### `GET /api/metrics/velocity`
+#### `GET /api/metrics/velocity`
 
-Rate of change of success rate over time (self-improvement velocity in Δ%/day).
-
-**Response:**
 ```json
 {
   "velocity": 0.042,
@@ -1242,11 +1369,8 @@ Rate of change of success rate over time (self-improvement velocity in Δ%/day).
 }
 ```
 
-### `GET /api/metrics/coverage`
+#### `GET /api/metrics/coverage`
 
-Percentage of events in the bus backlog that matched a known subscription term.
-
-**Response:**
 ```json
 {
   "matched_events": 118,
@@ -1256,25 +1380,7 @@ Percentage of events in the bus backlog that matched a known subscription term.
 }
 ```
 
-### `GET /api/metrics/prometheus`
-
-Prometheus text exposition format (Content-Type: `text/plain; version=0.0.4; charset=utf-8`).
-
-**Exposed metrics:**
-| Metric | Type | Description |
-|---|---|---|
-| `roko_uptime_seconds` | gauge | Seconds since roko-serve started |
-| `roko_agents_active` | gauge | Currently active agents |
-| `roko_plans_active` | gauge | Currently executing plans |
-| `roko_plans_completed_total` | counter | Plans completed successfully |
-| `roko_plans_failed_total` | counter | Plans that failed |
-| `roko_tasks_completed_total` | counter | Tasks completed |
-| `roko_tasks_failed_total` | counter | Tasks that failed |
-| `roko_tasks_active` | gauge | Currently executing tasks |
-| `roko_gate_pass_total` | counter | Gate checks that passed |
-| `roko_gate_fail_total` | counter | Gate checks that failed |
-| `roko_errors_total` | counter | Error events recorded |
-| `roko_episodes_total` | counter | Episodes recorded |
+</details>
 
 ---
 
@@ -1282,13 +1388,31 @@ Prometheus text exposition format (Content-Type: `text/plain; version=0.0.4; cha
 
 Handler module: `routes/learning/mod.rs`, `learning/router_state.rs`, `learning/experiments.rs`
 
-All `learning/` routes have `/learn/` aliases (both prefix forms are mounted).
+The Learning routes let you inspect how Roko adapts over time — which models it's learned to prefer, what patterns it has discovered from episodes, how gate thresholds have shifted, and which prompt experiments are running. All data originates from the `.roko/learn/` directory.
 
-### `GET /api/learning/efficiency` and `GET /api/learn/efficiency`
+All routes have both `/learning/` and `/learn/` prefix forms (both are mounted).
 
-Aggregate `.roko/learn/efficiency.jsonl` into task-level cost and timing metrics.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/learning/efficiency` | Task-level cost and timing metrics |
+| GET | `/api/learning/costs` | Canonical runtime cost projection |
+| GET | `/api/learning/provider-outcomes` | Provider health shaped for dashboards |
+| GET | `/api/learning/retries` | Retry attempt proof surface |
+| GET | `/api/learning/runtime-feedback` | Joined feedback store overview |
+| GET | `/api/learning/cascade-router` | Raw cascade router state |
+| GET | `/api/learning/cascade` | Summarized model weights and routing stats |
+| GET | `/api/learning/cost-tiers` | T0/T1/T2 routing distribution |
+| GET | `/api/learning/experiments` | Full experiment store |
+| GET | `/api/learning/adaptive-thresholds` | EMA-based adaptive gate thresholds |
+| GET | `/api/learning/gate-thresholds` | Raw gate threshold data |
+| GET | `/api/c-factor/trend` | C-Factor trend series |
+| GET | `/api/executor/state` | Executor snapshot |
 
-**Response:**
+<details>
+<summary>GET /api/learning/efficiency — cost and timing per task</summary>
+
+Aggregates `.roko/learn/efficiency.jsonl`.
+
 ```json
 {
   "total_cost": 24.50,
@@ -1305,55 +1429,15 @@ Aggregate `.roko/learn/efficiency.jsonl` into task-level cost and timing metrics
 }
 ```
 
-### `GET /api/learning/costs` and `GET /api/learn/costs`
+</details>
 
-Canonical runtime cost projection from `RuntimeProjectionSet`.
+<details>
+<summary>GET /api/learning/cascade — model routing intelligence</summary>
 
-**Query parameters:** `ProjectionQuery` fields.
+Roko uses a CascadeRouter to learn which models work best. It starts with static weights, moves to confidence intervals, then UCB (Upper Confidence Bound) selection as it accumulates observations.
 
-### `GET /api/learning/provider-outcomes` and `GET /api/learn/provider-outcomes`
+Cascade stages: `static` (<20 observations), `confidence` (<200), `ucb` (≥200).
 
-Provider health data shaped for the `ProviderCell` component.
-
-**Response:**
-```json
-{
-  "providers": [
-    {
-      "name": "Anthropic",
-      "status": "healthy",
-      "models": ["claude-sonnet-4-6", "claude-haiku-4-5"],
-      "success_rate": 0.98,
-      "avg_latency_ms": 3200,
-      "p95_latency_ms": 4800,
-      "cost_per_1k_tokens": 0.42,
-      "total_requests": 127,
-      "errors_24h": 2,
-      "last_error": ""
-    }
-  ]
-}
-```
-
-Status: `"healthy"` (≥97%), `"degraded"` (≥90%), `"unhealthy"` (<90%).
-
-### `GET /api/learning/retries` and `GET /api/learn/retries`
-
-Retry attempt proof surface (canonical `retry_state` projection).
-
-### `GET /api/learning/runtime-feedback` and `GET /api/learn/runtime-feedback`
-
-Joined feedback store overview (`runtime_feedback` projection).
-
-### `GET /api/learning/cascade-router` and `GET /api/learn/cascade-router` and `GET /api/learn/router`
-
-Read `.roko/learn/cascade-router.json` via `learning_policy_state` projection. Returns raw JSON plus `projection_state`, `source`, and `evidence`.
-
-### `GET /api/learning/cascade` and `GET /api/learn/cascade`
-
-Summarize `.roko/learn/cascade-router.json` into model weights, routing stats, and per-category recommendations.
-
-**Response:**
 ```json
 {
   "source": "/path/.roko/learn/cascade-router.json",
@@ -1381,13 +1465,13 @@ Summarize `.roko/learn/cascade-router.json` into model weights, routing stats, a
 }
 ```
 
-Cascade stages: `static` (<20 observations), `confidence` (<200), `ucb` (≥200).
+</details>
 
-### `GET /api/learning/cost-tiers` and `GET /api/learn/cost-tiers`
+<details>
+<summary>GET /api/learning/cost-tiers — T0/T1/T2 distribution</summary>
 
-T0/T1/T2 routing distribution by model tier.
+T0=fast/haiku, T1=standard/sonnet, T2=premium/opus.
 
-**Response:**
 ```json
 {
   "T0": 10, "T1": 50, "T2": 20,
@@ -1396,13 +1480,13 @@ T0/T1/T2 routing distribution by model tier.
 }
 ```
 
-T0=fast/haiku, T1=standard/sonnet, T2=premium/opus.
+</details>
 
-### `GET /api/learning/experiments` and `GET /api/learn/experiments`
+<details>
+<summary>GET /api/learning/experiments — A/B prompt experiments</summary>
 
-Full experiment store from `.roko/learn/experiments.json`.
+Roko runs A/B experiments on system prompt sections to learn which variants produce better outcomes.
 
-**Response:**
 ```json
 {
   "running_experiments": 1,
@@ -1423,11 +1507,13 @@ Full experiment store from `.roko/learn/experiments.json`.
 }
 ```
 
-### `GET /api/learning/adaptive-thresholds` and `GET /api/learn/adaptive-thresholds`
+</details>
 
-EMA-based adaptive gate threshold summary.
+<details>
+<summary>GET /api/learning/adaptive-thresholds — EMA gate thresholds</summary>
 
-**Response:**
+Gate thresholds adapt over time using Exponential Moving Average (EMA) of historical pass rates. This prevents thresholds from being too strict early on (when the system is learning) or too lenient later.
+
 ```json
 {
   "source": "/path/.roko/learn/gate-thresholds.json",
@@ -1439,18 +1525,39 @@ EMA-based adaptive gate threshold summary.
 }
 ```
 
-### `GET /api/learning/gate-thresholds` and `GET /api/learn/gate-thresholds`
+</details>
 
-Raw gate threshold data from `learning_policy_state` projection with source evidence.
+<details>
+<summary>GET /api/learning/provider-outcomes — provider health</summary>
 
-### `GET /api/c-factor/trend`
+```json
+{
+  "providers": [
+    {
+      "name": "Anthropic",
+      "status": "healthy",
+      "models": ["claude-sonnet-4-6", "claude-haiku-4-5"],
+      "success_rate": 0.98,
+      "avg_latency_ms": 3200,
+      "p95_latency_ms": 4800,
+      "cost_per_1k_tokens": 0.42,
+      "total_requests": 127,
+      "errors_24h": 2,
+      "last_error": ""
+    }
+  ]
+}
+```
 
-C-Factor trend series from `.roko/learn/c-factor.jsonl`.
+Status: `"healthy"` (≥97% success rate), `"degraded"` (≥90%), `"unhealthy"` (<90%).
 
-**Query parameters:**
-- `window: string` — `"24h"` (default, 24 hourly buckets) or `"7d"` (168 hourly buckets)
+</details>
 
-**Response:**
+<details>
+<summary>GET /api/c-factor/trend — C-Factor over time</summary>
+
+**Query parameters:** `window: string` — `"24h"` (default, 24 hourly buckets) or `"7d"` (168 hourly buckets)
+
 ```json
 {
   "trend": [
@@ -1466,9 +1573,7 @@ C-Factor trend series from `.roko/learn/c-factor.jsonl`.
 }
 ```
 
-### `GET /api/executor/state`
-
-Return the executor snapshot from `executor_state` projection (`.roko/state/executor.json`).
+</details>
 
 ---
 
@@ -1476,11 +1581,31 @@ Return the executor snapshot from `executor_state` projection (`.roko/state/exec
 
 Handler module: `routes/bench.rs`
 
-### `POST /api/bench/run` and `POST /api/bench/runs`
+Benchmarks let you measure Roko's performance on defined task suites. Run the same suite across different model configurations, compare results side by side, and find the Pareto frontier between cost and performance. All events during a bench run are also streamed via SSE.
 
-Start a new benchmark run.
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/bench/run` | Start a new benchmark run |
+| POST | `/api/bench/runs` | (alias) |
+| GET | `/api/bench/runs` | List bench runs |
+| GET | `/api/bench/run/{id}` | Full bench run with all task results |
+| GET | `/api/bench/runs/{id}` | (alias) |
+| GET | `/api/bench/run/{id}/status` | Lightweight status poll |
+| DELETE | `/api/bench/run/{id}` | Cancel or delete a run |
+| POST | `/api/bench/runs/{id}/cancel` | Cancel a running run |
+| GET | `/api/bench/runs/compare` | Compare multiple runs (`?ids=a,b`) |
+| GET | `/api/bench/suites` | List available suites |
+| GET | `/api/bench/suites/{id}` | Get full suite with tasks |
+| POST | `/api/bench/suites` | Upload a custom suite |
+| GET | `/api/bench/models` | Available models with pricing |
+| GET | `/api/bench/pareto` | Pareto frontier (pass rate vs cost) |
+| GET | `/api/bench/export/{id}` | Export a run as JSON |
+| GET | `/api/bench/events` | SSE stream of bench events only |
+| GET | `/api/bench/runs/{id}/events` | SSE stream for a specific run |
 
-**Request body:**
+<details>
+<summary>POST /api/bench/run — start a benchmark</summary>
+
 ```json
 {
   "suite_id": "learnable-rust",
@@ -1494,24 +1619,20 @@ Start a new benchmark run.
 
 `overrides.strategy`: `"full"` (with learning stores, default) or `"minimal"` (skip learning). Also accepts `"config"` as alias for `"overrides"`.
 
-**Response:** `202 Accepted`
+Response: `202 Accepted`
 ```json
 { "id": "bench-run-uuid" }
 ```
 
 Publishes `BenchRunStarted`, `BenchTaskStarted`, `BenchTaskCompleted`, `BenchLearningEvent`, `BenchProgress`, and `BenchRunCompleted` events to the event bus.
 
-### `GET /api/bench/runs`
+</details>
 
-List bench runs (from index file).
+<details>
+<summary>GET /api/bench/runs — list runs</summary>
 
-**Query parameters:**
-- `suite_id: string` — filter by suite
-- `status: string` — filter by status (`running`, `completed`, `failed`, `cancelled`)
-- `limit: usize` (default: 50)
-- `offset: usize` (default: 0)
+**Query parameters:** `suite_id: string`, `status: string` (`running`, `completed`, `failed`, `cancelled`), `limit: usize` (default: 50), `offset: usize` (default: 0)
 
-**Response:**
 ```json
 {
   "total": 10,
@@ -1523,11 +1644,11 @@ List bench runs (from index file).
 }
 ```
 
-### `GET /api/bench/run/{id}` and `GET /api/bench/runs/{id}`
+</details>
 
-Get full bench run details including all task results.
+<details>
+<summary>GET /api/bench/run/{id} — full run details</summary>
 
-**Response:** Full `BenchRun` object:
 ```json
 {
   "id": "bench-run-uuid",
@@ -1563,9 +1684,11 @@ Get full bench run details including all task results.
 }
 ```
 
-### `GET /api/bench/run/{id}/status` — lightweight status poll
+</details>
 
-**Response:**
+<details>
+<summary>GET /api/bench/run/{id}/status — lightweight poll</summary>
+
 ```json
 {
   "id": "bench-run-uuid",
@@ -1578,81 +1701,21 @@ Get full bench run details including all task results.
 }
 ```
 
-### `DELETE /api/bench/run/{id}` and `POST /api/bench/runs/{id}/cancel`
+</details>
 
-Cancel a running bench run or delete a completed one. Returns `204 No Content`.
+<details>
+<summary>Bench SSE stream format</summary>
 
-### `GET /api/bench/runs/compare?ids=a,b`
+The `/api/bench/events` and `/api/bench/runs/{id}/events` endpoints stream bench events only:
 
-Compare multiple runs side by side.
-
-**Query parameters:** `ids: string` — comma-separated run IDs
-
-**Response:** `{ "runs": [...] }`
-
-### `GET /api/bench/suites`
-
-List available benchmark suites. Ensures built-in suites exist on disk.
-
-**Response:**
-```json
-{
-  "suites": [
-    { "id": "learnable-rust", "name": "Learnable Rust", "description": "...", "task_count": 5 }
-  ]
-}
-```
-
-### `GET /api/bench/suites/{id}`
-
-Get full suite with tasks.
-
-### `POST /api/bench/suites`
-
-Upload a custom benchmark suite.
-
-**Request body:** Full `BenchSuite` object with `id` and `tasks`.
-
-**Response:** `201 Created` with `{ "id": "<suite-id>" }`.
-
-### `GET /api/bench/models`
-
-List available models with pricing info.
-
-**Response:** Array of model objects:
-```json
-[
-  {
-    "id": "claude-sonnet-4-6",
-    "name": "claude-sonnet-4-6",
-    "provider": "Anthropic",
-    "cost_per_1k_input": 0.003,
-    "cost_per_1k_output": 0.015,
-    "max_tokens": 8192,
-    "context_window": 200000
-  }
-]
-```
-
-### `GET /api/bench/pareto`
-
-Compute the Pareto frontier (pass rate vs cost) across all completed runs.
-
-**Response:** `{ "frontier": [...] }`
-
-### `GET /api/bench/export/{id}`
-
-Export a bench run as JSON (same as full run details).
-
-### `GET /api/bench/events` and `GET /api/bench/runs/{id}/events`
-
-SSE stream filtered to bench events only (`BenchRunStarted`, `BenchTaskStarted`, `BenchTaskCompleted`, `BenchLearningEvent`, `BenchProgress`, `BenchRunCompleted`).
-
-**Event format:**
 ```
 id: <seq>
 data: {"type":"BenchTaskCompleted","bench_id":"...","task_id":"...","result":{...}}
 ```
+
+Event types: `BenchRunStarted`, `BenchTaskStarted`, `BenchTaskCompleted`, `BenchLearningEvent`, `BenchProgress`, `BenchRunCompleted`.
+
+</details>
 
 ---
 
@@ -1660,27 +1723,36 @@ data: {"type":"BenchTaskCompleted","bench_id":"...","task_id":"...","result":{..
 
 Handler module: `routes/dream.rs`
 
-### `POST /api/dream/run`
+Dreams are Roko's offline consolidation cycles. During a dream run, the system processes recent episodes in phases (Hypnagogia → NREM → REM → Integration), clusters related experiences, extracts knowledge, creates playbooks, and prunes anti-patterns. Think of it as the system processing what it learned while it was "awake."
 
-Trigger a dream consolidation cycle in the background. Runs `roko-dreams::DreamRunner::consolidate_now()`. Publishes `OperationStarted` and `OperationCompleted` events.
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/dream/run` | Trigger a dream consolidation cycle |
+| GET | `/api/dream/journal` | Dream journal for visualization |
 
-**Request body:**
+<details>
+<summary>POST /api/dream/run — trigger a dream cycle</summary>
+
+Runs `roko-dreams::DreamRunner::consolidate_now()` in the background. Publishes `OperationStarted` and `OperationCompleted` events.
+
 ```json
 { "mode": "full" }
 ```
 
 `mode`: `"full"` (medium effort, default) or `"quick"` (low effort, bare mode).
 
-**Response:** `202 Accepted`
+Response: `202 Accepted`
 ```json
 { "id": "op-uuid" }
 ```
 
-### `GET /api/dream/journal`
+</details>
 
-Return the dream journal shaped for the `DreamPhaseViz` component.
+<details>
+<summary>GET /api/dream/journal — phase visualization data</summary>
 
-**Response:**
+Journal entries are read from `.roko/dreams/journal.jsonl`.
+
 ```json
 {
   "last_cycle": "2026-04-07T03:00:00Z",
@@ -1703,7 +1775,7 @@ Return the dream journal shaped for the `DreamPhaseViz` component.
 }
 ```
 
-Journal entries are read from `.roko/dreams/journal.jsonl`.
+</details>
 
 ---
 
@@ -1711,11 +1783,16 @@ Journal entries are read from `.roko/dreams/journal.jsonl`.
 
 Handler module: `routes/neuro.rs`
 
-### `POST /api/neuro/query`
+The neuro store is Roko's durable, searchable knowledge base. Episodes and dream cycles write to it; agents query it before executing tasks. Knowledge entries are stored with tier designations (Hot/Warm/Cold) and HDC (Hyperdimensional Computing) fingerprints for similarity search.
 
-Query the neuro knowledge store via HDC similarity search.
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/neuro/query` | Query via HDC similarity search |
+| GET | `/api/knowledge` | Alias using query parameters (`?q=<topic>&limit=N`) |
 
-**Request body:**
+<details>
+<summary>POST /api/neuro/query — knowledge search</summary>
+
 ```json
 {
   "query": "error handling patterns in async Rust",
@@ -1724,9 +1801,8 @@ Query the neuro knowledge store via HDC similarity search.
 }
 ```
 
-**Validation:** `query` must be non-blank.
+`query` must be non-blank.
 
-**Response:**
 ```json
 {
   "results": [
@@ -1743,15 +1819,7 @@ Query the neuro knowledge store via HDC similarity search.
 }
 ```
 
-### `GET /api/knowledge?q=<topic>&limit=N`
-
-Alias for `POST /api/neuro/query` using query parameters.
-
-**Query parameters:**
-- `q: string` — search query (returns empty result if blank)
-- `limit: usize` (default: 10)
-
-**Response:** Same shape as `/api/neuro/query`.
+</details>
 
 ---
 
@@ -1759,17 +1827,22 @@ Alias for `POST /api/neuro/query` using query parameters.
 
 Handler module: `routes/research.rs`
 
-### `GET /api/research`
+Research routes let you trigger agent-driven research, enhance existing PRDs and plans with findings, and analyze execution data for insights.
 
-List research artifacts from `.roko/research/`.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/research` | List research artifacts |
+| POST | `/api/research/topic` | Conduct deep research on a topic |
+| POST | `/api/research/enhance-prd/{slug}` | Enhance a PRD with research findings |
+| POST | `/api/research/enhance-plan/{plan}` | Enhance a plan with research findings |
+| POST | `/api/research/enhance-tasks/{plan}` | Enhance plan tasks with research |
+| POST | `/api/research/analyze` | Analyze execution data and generate insights |
 
-**Response:** Array of `{ "name": "...", "size": 4096, "is_file": true }`.
+<details>
+<summary>POST /api/research/topic — deep research</summary>
 
-### `POST /api/research/topic`
+All research operations are background operations (agent-driven).
 
-Conduct deep research on a topic (agent-driven, background).
-
-**Request body:**
 ```json
 {
   "topic": "Rust async runtime design patterns",
@@ -1778,33 +1851,11 @@ Conduct deep research on a topic (agent-driven, background).
 }
 ```
 
-`intent`: `"position"`, `"evaluate"`, `"monitor"`, `"explore"`, `"audit"`.
+`intent` values: `"position"`, `"evaluate"`, `"monitor"`, `"explore"`, `"audit"`.
 
-**Response:** `202 Accepted` with `{ "operation_id": "op-uuid" }`.
+Response: `202 Accepted` with `{ "operation_id": "op-uuid" }`.
 
-### `POST /api/research/enhance-prd/{slug}`
-
-Enhance a PRD with research findings.
-
-**Response:** `202 Accepted`.
-
-### `POST /api/research/enhance-plan/{plan}`
-
-Enhance a plan with research findings.
-
-**Response:** `202 Accepted`.
-
-### `POST /api/research/enhance-tasks/{plan}`
-
-Enhance tasks in a plan with research findings.
-
-**Response:** `202 Accepted`.
-
-### `POST /api/research/analyze`
-
-Analyze execution data and generate insights.
-
-**Response:** `202 Accepted` with `{ "operation_id": "op-uuid" }`.
+</details>
 
 ---
 
@@ -1812,29 +1863,35 @@ Analyze execution data and generate insights.
 
 Handler module: `routes/jobs.rs`
 
+Jobs are discrete units of work that can be created, assigned to agents, executed, submitted, and evaluated. They implement a marketplace model where agents bid on and complete work items.
+
 Jobs are backed by `.roko/jobs/*.json`.
 
-Valid statuses: `open`, `assigned`, `in_progress`, `submitted`, `completed`, `failed`, `cancelled`.
+**State machine:** `open → assigned/in_progress/cancelled`, `assigned → in_progress/open/cancelled`, `in_progress → submitted/failed/cancelled`, `submitted → completed/failed`. Terminal states: `completed`, `failed`, `cancelled`.
 
-State machine: `open → assigned/in_progress/cancelled`, `assigned → in_progress/open/cancelled`, `in_progress → submitted/failed/cancelled`, `submitted → completed/failed`, terminal: `completed`, `failed`, `cancelled`.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/jobs` | List jobs (filter by `status`, `job_type`) |
+| POST | `/api/jobs` | Create a new job |
+| GET | `/api/jobs/stats` | Aggregate counts by status |
+| POST | `/api/jobs/match` | Match available jobs to an agent's capabilities |
+| GET | `/api/jobs/{id}` | Get a job |
+| PATCH | `/api/jobs/{id}` | Update job fields |
+| DELETE | `/api/jobs/{id}` | Cancel a job |
+| POST | `/api/jobs/{id}/cancel` | (alias) |
+| POST | `/api/jobs/{id}/assign` | Assign to an agent |
+| POST | `/api/jobs/{id}/start` | Transition to `in_progress` |
+| POST | `/api/jobs/{id}/submit` | Submit completed work |
+| POST | `/api/jobs/{id}/evaluate` | Evaluate submitted work |
+| POST | `/api/jobs/{id}/execute` | Execute using a local agent |
 
-### `GET /api/jobs`
+<details>
+<summary>Route details and request/response shapes</summary>
 
-List jobs.
+#### `POST /api/jobs`
 
-**Query parameters:**
-- `status: string` — filter by status
-- `job_type: string` — filter by job type
-- `limit: usize` (default: 50)
-- `offset: usize` (default: 0)
+`title` and `description` must be non-blank.
 
-**Response:** `{ "jobs": [...], "total": N, "offset": 0, "limit": 50 }`
-
-### `POST /api/jobs`
-
-Create a new job. Publishes `JobCreated` event.
-
-**Request body:**
 ```json
 {
   "title": "Implement rate limiting",
@@ -1846,66 +1903,49 @@ Create a new job. Publishes `JobCreated` event.
 }
 ```
 
-**Validation:** `title` and `description` must be non-blank.
+Response: `201 Created` with the full job object. Publishes `JobCreated` event.
 
-**Response:** `201 Created` with the full job object.
+#### `GET /api/jobs`
 
-### `GET /api/jobs/stats`
+**Query parameters:** `status: string`, `job_type: string`, `limit: usize` (default: 50), `offset: usize` (default: 0)
 
-Aggregate job counts by status.
+Response: `{ "jobs": [...], "total": N, "offset": 0, "limit": 50 }`
 
-**Response:** `{ "open": 5, "assigned": 2, "completed": 42, ... }`
+#### `POST /api/jobs/match`
 
-### `POST /api/jobs/match`
-
-Match available jobs to an agent's capabilities.
-
-**Request body:**
 ```json
 { "agent_id": "...", "capabilities": ["rust", "testing"] }
 ```
 
-**Response:** Array of matching jobs.
+#### `POST /api/jobs/{id}/assign`
 
-### `GET /api/jobs/{id}`
+```json
+{ "agent_id": "..." }
+```
 
-Get a job by ID.
+Publishes `JobTransitioned` and `JobPostedToCandidate` events.
 
-### `PATCH /api/jobs/{id}`
+#### `POST /api/jobs/{id}/submit`
 
-Update job fields. Publishes `JobUpdated` event.
+```json
+{ "output": "...", "artifacts": [...] }
+```
 
-### `DELETE /api/jobs/{id}` (alias: `POST /api/jobs/{id}/cancel`)
+#### `POST /api/jobs/{id}/evaluate`
 
-Cancel a job. Publishes `JobTransitioned` event.
+```json
+{ "accepted": true, "feedback": "Looks good" }
+```
 
-### `POST /api/jobs/{id}/assign`
+Publishes `JobEvaluated` event.
 
-Assign a job to an agent. Publishes `JobTransitioned` and `JobPostedToCandidate` events.
+#### `POST /api/jobs/{id}/execute`
 
-**Request body:** `{ "agent_id": "..." }`
+Executes using a local agent in the background. Publishes `JobExecutionStarted`, `JobProgress`, `JobAgentOutput`, `ChainTriageResult` events.
 
-### `POST /api/jobs/{id}/start`
+Response: `202 Accepted`.
 
-Transition a job to `in_progress`.
-
-### `POST /api/jobs/{id}/submit`
-
-Submit completed work for a job.
-
-**Request body:** `{ "output": "...", "artifacts": [...] }`
-
-### `POST /api/jobs/{id}/evaluate`
-
-Evaluate submitted work. Publishes `JobEvaluated` event.
-
-**Request body:** `{ "accepted": true, "feedback": "Looks good" }`
-
-### `POST /api/jobs/{id}/execute`
-
-Execute a job using a local agent (background task). Publishes `JobExecutionStarted`, `JobProgress`, `JobAgentOutput`, `ChainTriageResult` events.
-
-**Response:** `202 Accepted`.
+</details>
 
 ---
 
@@ -1913,11 +1953,21 @@ Execute a job using a local agent (background task). Publishes `JobExecutionStar
 
 Handler module: `routes/deployments.rs`
 
-### `POST /api/deployments`
+Deployments let you spin up cloud workers (Railway, Fly, etc.) and route tasks to them.
 
-Create a cloud deployment from a template. Publishes `DeploymentCreated` event.
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/deployments` | Create a cloud deployment |
+| GET | `/api/deployments` | List all deployments |
+| GET | `/api/deployments/{id}` | Get deployment details |
+| DELETE | `/api/deployments/{id}` | Tear down a deployment |
+| GET | `/api/deployments/{id}/logs` | Fetch deployment logs |
+| POST | `/api/deployments/{id}/task` | Proxy a task to a deployed worker |
+| POST | `/api/deployments/{id}/callback` | Receive callback from a worker |
 
-**Request body:**
+<details>
+<summary>POST /api/deployments — create a deployment</summary>
+
 ```json
 {
   "template": "railway-worker",
@@ -1927,35 +1977,9 @@ Create a cloud deployment from a template. Publishes `DeploymentCreated` event.
 }
 ```
 
-**Response:** `201 Created` with deployment object.
+Response: `201 Created` with deployment object. Publishes `DeploymentCreated` event.
 
-### `GET /api/deployments`
-
-List all deployments.
-
-**Query parameters:**
-- `status: string` — filter by status
-- `template: string` — filter by template name
-
-### `GET /api/deployments/{id}`
-
-Get deployment details.
-
-### `DELETE /api/deployments/{id}`
-
-Tear down a deployment. Publishes `DeploymentTornDown` event.
-
-### `GET /api/deployments/{id}/logs`
-
-Fetch deployment logs.
-
-### `POST /api/deployments/{id}/task`
-
-Proxy a task to a deployed worker.
-
-### `POST /api/deployments/{id}/callback`
-
-Receive a callback from a deployed worker. Publishes `WorkerTaskCompleted`.
+</details>
 
 ---
 
@@ -1963,13 +1987,19 @@ Receive a callback from a deployed worker. Publishes `WorkerTaskCompleted`.
 
 Handler module: `routes/gateway.rs`
 
-The gateway provides centralized inference dispatch so agents never hold API keys directly. All requests flow through model selection (CascadeRouter), provider health tracking, cost accounting, and event publishing.
+The inference gateway is a centralized dispatch layer for all LLM requests. Instead of agents holding API keys directly, they route through the gateway, which handles model selection (via CascadeRouter), provider health tracking, cost accounting, and event publishing.
 
-### `POST /api/inference/complete`
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/inference/complete` | Submit a completion request |
+| GET | `/api/gateway/stats` | Gateway request statistics |
+| GET | `/api/gateway/models` | Models available through gateway with routing weights |
+| POST | `/api/inference/batch/submit` | Submit a batch of requests |
+| GET | `/api/inference/batch/{id}` | Get batch status and results |
 
-Submit a completion request to the inference gateway.
+<details>
+<summary>POST /api/inference/complete — submit a completion</summary>
 
-**Request body:**
 ```json
 {
   "messages": [
@@ -1987,7 +2017,6 @@ Submit a completion request to the inference gateway.
 
 If `auto_route: true` and no `model` is specified, the CascadeRouter selects the model. Publishes `InferenceStarted` and `InferenceCompleted` / `InferenceFailed` events.
 
-**Response:**
 ```json
 {
   "content": "fn parse(input: &str) -> Result<...",
@@ -2001,21 +2030,7 @@ If `auto_route: true` and no `model` is specified, the CascadeRouter selects the
 }
 ```
 
-### `GET /api/gateway/stats`
-
-Gateway request statistics (totals, success rates, cost, active requests).
-
-### `GET /api/gateway/models`
-
-List models available through the gateway with their routing weights.
-
-### `POST /api/inference/batch/submit`
-
-Submit a batch of inference requests.
-
-### `GET /api/inference/batch/{id}`
-
-Get batch status and results.
+</details>
 
 ---
 
@@ -2023,11 +2038,21 @@ Get batch status and results.
 
 Handler module: `routes/providers.rs`
 
-### `GET /api/providers`
+These routes expose the configured LLM providers and models, along with health diagnostics and routing explanations.
 
-List configured providers with health and model counts.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/providers` | List providers with health and model counts |
+| GET | `/api/providers/{id}/health` | Health details for a specific provider |
+| POST | `/api/providers/{id}/test` | Test a provider with a live completion |
+| GET | `/api/models` | List all models with tier and pricing |
+| GET | `/api/routing/explain` | Explain routing decision for a hypothetical request |
 
-**Response:**
+<details>
+<summary>Route details and response shapes</summary>
+
+#### `GET /api/providers`
+
 ```json
 {
   "providers": [
@@ -2045,28 +2070,19 @@ List configured providers with health and model counts.
 }
 ```
 
-### `GET /api/providers/{id}/health`
+#### `POST /api/providers/{id}/test`
 
-Health details for a specific provider.
+Sends `"Say hello."` to the provider and returns the response. Useful for diagnosing connectivity issues.
 
-### `POST /api/providers/{id}/test`
+#### `GET /api/routing/explain`
 
-Send a test completion (`"Say hello."`) to a provider and return the response.
+**Query parameters:** `role: string`, `task_category: string`, `complexity: string` (`"fast"`, `"standard"`, `"complex"`)
 
-### `GET /api/models`
+```json
+{ "selected_model": "...", "stage": "ucb", "reason": "...", "alternatives": [...] }
+```
 
-List all configured models with tier and pricing info.
-
-### `GET /api/routing/explain`
-
-Explain the routing decision for a hypothetical request.
-
-**Query parameters:**
-- `role: string` — agent role
-- `task_category: string` — e.g. `"implementation"`
-- `complexity: string` — `"fast"`, `"standard"`, `"complex"`
-
-**Response:** `{ "selected_model": "...", "stage": "ucb", "reason": "...", "alternatives": [...] }`
+</details>
 
 ---
 
@@ -2074,23 +2090,25 @@ Explain the routing decision for a hypothetical request.
 
 Handler module: `routes/config.rs`
 
-### `GET /api/config`
+These routes let you inspect and update Roko's runtime configuration without restarting the server.
 
-Return the current `RokoConfig` as JSON. Secret fields (API keys, tokens) are masked to `"***"`.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/config` | Current config (secrets masked to `"***"`) |
+| PUT | `/api/config` | Deep-merge a partial config update |
+| POST | `/api/config/reload` | Reload from disk and hot-apply compatible sections |
 
-### `PUT /api/config`
+<details>
+<summary>Route details</summary>
 
-Deep-merge a partial JSON config update into the current config and write to `roko.toml`. Publishes `ConfigReloaded` event.
+#### `PUT /api/config`
 
-**Request body:** Partial `RokoConfig` JSON (any subset of fields).
+Accepts a partial `RokoConfig` JSON (any subset of fields) and deep-merges it into the current config, then writes to `roko.toml`. Publishes `ConfigReloaded` event.
 
-**Response:** Updated config as JSON.
+#### `POST /api/config/reload`
 
-### `POST /api/config/reload`
+Hot-applies compatible sections (logging, providers, subscriptions). Sections requiring a restart are noted in the response.
 
-Reload `roko.toml` from disk and hot-apply compatible sections (logging, providers, subscriptions). Sections requiring a restart are noted. Publishes `ConfigReloaded` event.
-
-**Response:**
 ```json
 {
   "success": true,
@@ -2099,13 +2117,15 @@ Reload `roko.toml` from disk and hot-apply compatible sections (logging, provide
 }
 ```
 
+</details>
+
 ---
 
 ## Subscriptions and Workflows
 
 Handler module: `routes/subscriptions.rs`, `routes/workflows.rs`
 
-### Subscription routes
+Subscriptions let you register event listeners that trigger actions when specific events occur. Workflows are sequences of steps that can be triggered manually or by subscriptions.
 
 | Method | Path | Description |
 |---|---|---|
@@ -2113,11 +2133,6 @@ Handler module: `routes/subscriptions.rs`, `routes/workflows.rs`
 | POST | `/api/subscriptions` | Create a subscription |
 | GET | `/api/subscriptions/{id}` | Get subscription |
 | DELETE | `/api/subscriptions/{id}` | Delete subscription |
-
-### Workflow routes
-
-| Method | Path | Description |
-|---|---|---|
 | GET | `/api/workflows` | List workflows |
 | POST | `/api/workflows` | Create workflow |
 | GET | `/api/workflows/{id}` | Get workflow |
@@ -2131,9 +2146,11 @@ Handler module: `routes/subscriptions.rs`, `routes/workflows.rs`
 
 Handler module: `routes/heartbeats.rs`
 
+Agents and sidecars use this endpoint to report liveness. The control plane uses heartbeat data to determine which agents are healthy.
+
 ### `POST /api/heartbeats`
 
-Receive a heartbeat from a client or agent sidecar. Used by `roko-agent-server`'s background heartbeat loop. Publishes `HeartbeatReceived` event.
+Used by `roko-agent-server`'s background heartbeat loop. Publishes `HeartbeatReceived` event.
 
 **Request body** (`HeartbeatPayload`):
 ```json
@@ -2149,7 +2166,7 @@ Receive a heartbeat from a client or agent sidecar. Used by `roko-agent-server`'
 }
 ```
 
-**Response:** `200 OK`.
+Response: `200 OK`.
 
 ---
 
@@ -2157,7 +2174,7 @@ Receive a heartbeat from a client or agent sidecar. Used by `roko-agent-server`'
 
 Handler module: `routes/secrets.rs`
 
-Requires `admin` scope for all mutations.
+All mutations require `admin` scope.
 
 | Method | Path | Description |
 |---|---|---|
@@ -2175,7 +2192,7 @@ Requires `admin` scope for all mutations.
 
 Handler module: `routes/chain.rs`
 
-Blockchain witness and chain client routes (Phase 2+).
+Blockchain witness and chain client routes. These are Phase 2+ features — the API surface is defined but chain integration requires a backend.
 
 | Method | Path | Description |
 |---|---|---|
@@ -2187,25 +2204,31 @@ Blockchain witness and chain client routes (Phase 2+).
 
 ## Webhooks
 
-Handler module: `routes/webhooks.rs` (no `/api/` prefix, always public)
+Handler module: `routes/webhooks.rs`
+
+Webhooks are always public (no `/api/` prefix, no auth required). They allow external services to push events into Roko's event bus.
 
 ### `POST /webhook/{source}`
 
-Receive an inbound webhook. Validates the source, constructs an `Engram` signal, and publishes it to the event bus. Publishes `WebhookReceived` event.
+Validates the source, constructs an `Engram` signal, and publishes it to the event bus. Publishes a `WebhookReceived` event.
 
 **Path parameter:** `source` — webhook source name (e.g. `github`, `slack`)
 
 **Request body:** Arbitrary JSON payload.
 
-**Response:** `200 OK` with `{ "accepted": true, "signal_id": "..." }`.
+```json
+{ "accepted": true, "signal_id": "..." }
+```
 
 ---
 
 ## Terminal
 
-Terminal routes are gated by `serve.terminal_enabled = true` in `roko.toml` (or `--enable-terminal` CLI flag). When disabled, all terminal routes return `403 Forbidden` with `{ "error": "Terminal disabled", "hint": "Set serve.terminal_enabled=true or use --enable-terminal" }`.
+Terminal routes provide a PTY (pseudo-terminal) interface to the server's shell. They are **disabled by default** for security.
 
-When enabled on a non-loopback bind address, terminal routes require API key auth (same as `/api/*`).
+Enable with `serve.terminal_enabled = true` in `roko.toml` or `--enable-terminal` on the CLI. When disabled, all terminal routes return `403 Forbidden` with `{ "error": "Terminal disabled", "hint": "Set serve.terminal_enabled=true or use --enable-terminal" }`.
+
+When enabled on a non-loopback bind address, terminal routes require API key auth.
 
 | Method | Path | Description |
 |---|---|---|
@@ -2227,9 +2250,11 @@ Returns the OpenAPI 3.0 spec for the control plane API as JSON. Generated from r
 
 ## Per-Agent Sidecar API
 
-`roko-agent-server` (`crates/roko-agent-server/`) runs a per-agent HTTP server on a dynamic port (default: `0.0.0.0:0`, assigned by OS). It's built via `AgentServer::builder()` with feature flags controlling which route groups are mounted.
+`roko-agent-server` (`crates/roko-agent-server/`) runs a per-agent HTTP server on a dynamic port (default: `0.0.0.0:0`, assigned by the OS). Unlike the control plane which manages the whole system, each sidecar serves a single agent — you talk to it to send that specific agent a message, get its stats, or query its local knowledge.
 
 Sidecars register themselves with the control plane via `POST /api/agents/register` and send periodic heartbeats to `POST /api/heartbeats`. The control plane discovers them via `DiscoveredAgent` entries.
+
+The sidecar is built via `AgentServer::builder()` with feature flags controlling which route groups are mounted.
 
 ### Authentication
 
@@ -2241,7 +2266,10 @@ Authorization: Bearer <token>
 
 Public routes (`/health`, `/capabilities`) are always accessible without auth.
 
-### Public routes (always available)
+### Public routes
+
+<details>
+<summary>GET /health and GET /capabilities</summary>
 
 #### `GET /health`
 
@@ -2251,7 +2279,7 @@ Public routes (`/health`, `/capabilities`) are always accessible without auth.
 
 #### `GET /capabilities`
 
-Capabilities manifest including feature flags, live routes, and skill configs.
+Capabilities manifest including feature flags, live routes, and skill configs. Feature capabilities (`messaging`, `predictions`, `research`, `tasks`) are only advertised if the corresponding feature is enabled via the builder.
 
 ```json
 {
@@ -2265,13 +2293,14 @@ Capabilities manifest including feature flags, live routes, and skill configs.
 }
 ```
 
-**Important:** Feature capabilities (`messaging`, `predictions`, `research`, `tasks`) are only advertised if the corresponding feature is enabled via the builder (`AgentServerBuilder::messaging()`, etc.).
+</details>
 
-### Protected routes (require auth when enabled)
+### Protected routes (always available when auth passes)
+
+<details>
+<summary>GET /stats and GET /logs</summary>
 
 #### `GET /stats`
-
-Runtime stats snapshot.
 
 ```json
 {
@@ -2286,15 +2315,19 @@ Runtime stats snapshot.
 
 #### `GET /logs`
 
-Stream the agent sidecar log file. Returns `text/plain`.
+Streams the agent sidecar log file. Returns `text/plain`.
+
+</details>
 
 ### Messaging feature (`builder.messaging()`)
 
+<details>
+<summary>POST /message and GET /stream (WebSocket)</summary>
+
 #### `POST /message`
 
-Dispatch a prompt to the agent's LLM backend and return the full response.
+Dispatches a prompt to the agent's LLM backend and returns the full response.
 
-**Request body:**
 ```json
 {
   "prompt": "Explain what you're working on",
@@ -2302,7 +2335,6 @@ Dispatch a prompt to the agent's LLM backend and return the full response.
 }
 ```
 
-**Response:**
 ```json
 {
   "response": "I'm currently implementing...",
@@ -2325,9 +2357,8 @@ Dispatch a prompt to the agent's LLM backend and return the full response.
 
 #### `GET /stream` (WebSocket)
 
-Streaming dispatch via WebSocket. Send a plain text prompt frame; receive streaming chunks:
+Streaming dispatch. Send a plain text prompt frame; receive streaming chunks:
 
-**Chunk frames:**
 ```json
 { "chunk": "I'm cur", "done": false }
 { "chunk": "rently...", "done": false }
@@ -2351,19 +2382,19 @@ Streaming dispatch via WebSocket. Send a plain text prompt frame; receive stream
 { "error": "dispatch failed: ...", "done": true }
 ```
 
+</details>
+
 ### Predictions feature (`builder.predictions()`)
+
+<details>
+<summary>Predictions routes</summary>
 
 #### `GET /predictions`
 
-List all predictions.
-
-**Response:** Array of `AgentPrediction` objects.
+List all predictions. Returns array of `AgentPrediction` objects.
 
 #### `POST /predictions`
 
-Create a new prediction.
-
-**Request body** (`PredictionCreateRequest`):
 ```json
 {
   "market": "ETH-USD",
@@ -2374,59 +2405,50 @@ Create a new prediction.
 }
 ```
 
-**Response:** `200 OK` with the created `AgentPrediction`.
+Response: `200 OK` with the created `AgentPrediction`.
 
 #### `GET /predictions/{id}`
 
-Get a prediction by ID. Returns `404` if not found.
+Returns `404` if not found.
 
 #### `GET /predictions/residuals`
 
-Get prediction residuals (predicted vs actual outcomes).
+Predicted vs actual outcomes.
+
+</details>
 
 ### Research feature (`builder.research()`)
 
-#### `POST /research`
+<details>
+<summary>POST /research — knowledge query</summary>
 
-Submit a research query to the agent's knowledge store.
-
-**Request body** (`ResearchRequest`):
 ```json
-{
-  "query": "Rust async patterns",
-  "limit": 10
-}
+{ "query": "Rust async patterns", "limit": 10 }
 ```
 
-**Response** (`ResearchResponse`):
 ```json
-{
-  "entries": [...],
-  "total": 5
-}
+{ "entries": [...], "total": 5 }
 ```
+
+</details>
 
 ### Tasks feature (`builder.tasks()`)
 
+<details>
+<summary>Tasks queue routes</summary>
+
 #### `GET /tasks`
 
-List tasks in the agent's task queue.
-
-**Response:** Array of `TaskEntry` objects.
+List tasks in the agent's task queue. Returns array of `TaskEntry` objects.
 
 #### `POST /tasks/{id}/accept`
 
-Accept a task from the queue.
-
 **Path parameter:** `id` — task ID (u64)
 
-**Response:** `200 OK` with accepted `TaskEntry`, or `404`.
+Response: `200 OK` with accepted `TaskEntry`, or `404`.
 
 #### `POST /tasks/{id}/complete`
 
-Mark a task as completed.
-
-**Request body** (`TaskCompletionRequest`):
 ```json
 {
   "output": "...",
@@ -2435,13 +2457,17 @@ Mark a task as completed.
 }
 ```
 
-**Response:** `200 OK` with updated `TaskEntry`, or `404`.
+Response: `200 OK` with updated `TaskEntry`, or `404`.
+
+</details>
 
 ### Registration and Heartbeat
 
 `AgentServer` can be configured with an `AgentRegistration` that publishes an `AgentCard` to the control plane on startup. It also runs a background heartbeat loop posting to `POST /api/heartbeats` at a configurable interval (default: 30 seconds).
 
-**AgentCard** (advertised to control plane):
+<details>
+<summary>AgentCard shape (advertised to control plane)</summary>
+
 ```json
 {
   "agent_id": "agent-uuid",
@@ -2456,17 +2482,15 @@ Mark a task as completed.
 }
 ```
 
----
-
-## Shared Run Pages
-
-### `GET /runs/{id}`
-
-Shareable HTML page for a specific run. No auth required. Served by `shared_runs::routes()` outside the `/api/` namespace.
+</details>
 
 ---
 
 ## Miscellaneous Routes
+
+### Shareable run pages
+
+`GET /runs/{id}` — shareable HTML page for a specific run. No auth required. Served outside the `/api/` namespace.
 
 ### Additional control plane routes
 

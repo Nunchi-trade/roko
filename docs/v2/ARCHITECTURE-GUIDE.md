@@ -1,20 +1,18 @@
 # Roko v2 Architecture Guide
 
-This is the definitive architecture reference for the Roko v2 runtime. It covers
-the conceptual model, crate layer diagram, all protocol traits with exact
-signatures, the workflow engine internals, the EffectDriver pattern, the
-universal loop, learning architecture, gate pipeline, knowledge store, dream
-consolidation, affect engine, and system prompt assembly. Read it before
-touching any cross-cutting subsystem.
+**Who this is for**: Engineers reading the codebase for the first time. If you
+already know the system well, jump to the section you need using the table of
+contents. If this is your first time here, read the first three sections before
+anything else.
 
 ---
 
 ## Table of Contents
 
-1. [Philosophy: 1 Noun + 9 Verb Traits](#1-philosophy-1-noun--9-verb-traits)
-2. [The Universal Datum: Engram](#2-the-universal-datum-engram)
+1. [What is Roko?](#1-what-is-roko)
+2. [Core Mental Model: 1 Noun + 9 Operations](#2-core-mental-model-1-noun--9-operations)
 3. [The Universal Loop](#3-the-universal-loop)
-4. [Crate Dependency Graph](#4-crate-dependency-graph)
+4. [Crate Map](#4-crate-map)
 5. [Protocol Traits (Core Six)](#5-protocol-traits-core-six)
 6. [Foundation Service Traits](#6-foundation-service-traits)
 7. [Supporting Protocol Traits](#7-supporting-protocol-traits)
@@ -35,12 +33,35 @@ touching any cross-cutting subsystem.
 22. [Safety Architecture](#22-safety-architecture)
 23. [Extension System](#23-extension-system)
 24. [Data Flow: Signal Through the System](#24-data-flow-signal-through-the-system)
+25. [Appendix: Key File Index](#appendix-key-file-index)
 
 ---
 
-## 1. Philosophy: 1 Noun + 9 Verb Traits
+## 1. What is Roko?
 
-The entire Roko design corpus reduces to one data type and nine operations:
+Roko is a Rust toolkit for building agents that build themselves.
+
+The core idea: the same system that executes software tasks can also read
+requirements, generate implementation plans, run agents to carry them out,
+validate the results, learn from failures, and iterate — autonomously, in a
+loop. The goal is a system sophisticated enough to develop itself.
+
+Roko is not a chat wrapper or a thin LLM client. It is a full orchestration
+runtime: 18 crates, a typed event bus, a multi-stage gate pipeline, a
+self-improving model router, a durable knowledge store, and an affect engine
+that adjusts agent behavior based on recent history. Every component exists
+because the self-hosting loop needed it.
+
+If you want to understand Roko, start with the question: "what does it take
+for a system to reliably execute a software task, validate the result, and
+improve over time?" Every architectural decision in this document is an answer
+to that question.
+
+---
+
+## 2. Core Mental Model: 1 Noun + 9 Operations
+
+The entire design reduces to one data type and nine operations:
 
 ```
 Engram            -- the universal datum: addressable, decaying, scored, traced
@@ -56,21 +77,27 @@ Engram            -- the universal datum: addressable, decaying, scored, traced
   Observe/Connect/Trigger  -- peripheral protocol traits (Cell-based extensions)
 ```
 
-Every capability in the system — agent spawning, gate verification, prompt
-assembly, model routing, memory retrieval, affect modulation, chain participation
-— is an implementation of one of these traits applied to Engrams.
+### What is an Engram?
 
-**Key rule**: When adding a feature, identify which verb it belongs to. If it
-does not map cleanly to one of the traits, reconsider the design.
+Think of an `Engram` like a Git commit for a piece of knowledge or an agent
+output: it is content-addressed (its identity is a BLAKE3 hash of what it
+contains), immutable once created, and it carries metadata about where it came
+from and when.
 
----
+Unlike a Git commit, an Engram also has:
+- A **decay** curve (knowledge has a half-life; a `Warning` decays in hours, an
+  `Insight` in weeks)
+- A **score** (multi-dimensional: confidence, novelty, utility, reputation)
+- An **emotional tag** (the affect state when it was created)
+- **Lineage** (parent content hashes, forming an auditable DAG)
+- An **HDC fingerprint** (a 10,240-bit vector for semantic similarity lookup)
 
-## 2. The Universal Datum: Engram
+Everything in Roko — every agent output, every gate verdict, every piece of
+knowledge, every task definition — is an Engram. This uniformity is what makes
+the universal loop possible.
 
-Source: `crates/roko-core/src/engram.rs`
-
-An `Engram` is every event, every piece of data, every agent output, every gate
-verdict, every knowledge entry in the Roko system.
+<details>
+<summary>Full Engram struct (roko-core/src/engram.rs)</summary>
 
 ```rust
 pub struct Engram {
@@ -101,7 +128,7 @@ pub struct Engram {
 }
 ```
 
-### Identity and Hashing
+**Identity and Hashing**
 
 Content hash covers: `kind + body + author + taint + lineage + tags`. It does
 NOT cover score, decay, timestamp, attestation, or emotional metadata — those
@@ -114,7 +141,7 @@ pub fn content_hash(&self) -> ContentHash {
 }
 ```
 
-### Effective Weight
+**Effective Weight**
 
 ```rust
 pub fn weight_at(&self, now_ms: i64) -> f32 {
@@ -123,7 +150,7 @@ pub fn weight_at(&self, now_ms: i64) -> f32 {
 }
 ```
 
-### Construction
+**Construction**
 
 ```rust
 let engram = Engram::builder(Kind::Task)
@@ -133,7 +160,7 @@ let engram = Engram::builder(Kind::Task)
     .build();
 ```
 
-### HDC Operations
+**HDC Operations**
 
 Engrams support hyperdimensional computing operations when fingerprints are set:
 
@@ -143,16 +170,30 @@ pub fn bundle(engrams: &[Engram]) -> Option<HdcVector>         // majority bundl
 pub fn at_position(&self, position: usize) -> Option<HdcVector> // positional permutation
 ```
 
+</details>
+
 ### Pulse vs. Engram
 
-`Pulse` is the ephemeral counterpart — published on the `Bus` for immediate
-reactions. Pulses that are worth persisting get promoted to `Engram`s via
-`Store::put`. The bridge:
+Not everything needs to be persisted. `Pulse` is the ephemeral counterpart —
+published on the `Bus` for immediate reactions. Pulses that are worth keeping
+get promoted to `Engram`s via `Store::put`. Think of Pulses as in-flight
+events and Engrams as the durable record.
 
 ```rust
 pub fn from_pulse_synthetic(p: &Pulse) -> Self  // single pulse -> Engram
 pub fn from_pulses(pulses: &[Pulse]) -> Self     // batch of pulses -> summary Engram
 ```
+
+### Why this design?
+
+Every capability in the system — agent spawning, gate verification, prompt
+assembly, model routing, memory retrieval, affect modulation, chain participation
+— is an implementation of one of the nine traits applied to Engrams.
+
+This uniformity has a practical payoff: when you understand these nine
+operations, you understand the whole system. When adding a feature, identify
+which verb it belongs to. If it does not map cleanly to one of the traits,
+reconsider the design.
 
 ---
 
@@ -160,12 +201,34 @@ pub fn from_pulses(pulses: &[Pulse]) -> Self     // batch of pulses -> summary E
 
 Source: `crates/roko-core/src/loop_tick.rs`
 
-Every operation in Roko follows the same shape. The `loop_tick` function
-composes all six protocol traits into a single executable unit:
+Every operation in Roko follows the same shape. Here is the loop in plain
+English:
+
+1. **Query** the store for candidate Engrams (what do we know that's relevant?)
+2. **Score** the candidates (which are the most valuable right now?)
+3. **Route** to a selection (pick the best one)
+4. **Compose** it into an output Engram (assemble, under budget)
+5. **Verify** the result (did it pass the gate?)
+6. **Write back** if it passed, then **React** (policy fires side effects)
 
 ```
-query substrate → score → route/compose → gate verdict → write back → policy fires
+candidates = substrate.query(q, ctx)
+    ↓
+selection = router.select(candidates, ctx)
+    ↓
+composed  = composer.compose([selection], budget, scorer, ctx)
+    ↓
+verdict   = gate.verify(composed, ctx)
+    ↓
+if passed: substrate.put(composed) + policy.decide(stream, ctx)
 ```
+
+The loop is parameterized entirely by trait implementations. The same
+`loop_tick` call trains the scaffold optimizer, picks a model, runs a gate,
+assembles a prompt, or claims a bounty — only the concrete impls change.
+
+<details>
+<summary>TickConfig and TickOutcome structs</summary>
 
 ```rust
 pub struct TickConfig {
@@ -184,27 +247,40 @@ pub struct TickOutcome {
 }
 ```
 
-The concrete loop:
+</details>
 
-```
-candidates = substrate.query(q, ctx)
-    ↓
-selection = router.select(candidates, ctx)
-    ↓
-composed  = composer.compose([selection], budget, scorer, ctx)
-    ↓
-verdict   = gate.verify(composed, ctx)
-    ↓
-if passed: substrate.put(composed) + policy.decide(stream, ctx)
-```
+### Walking through a real execution
 
-This loop is parameterized entirely by trait impls. The same `loop_tick` call
-trains the scaffold optimizer, picks a model, runs a gate, assembles a prompt,
-or claims a bounty — only the impls change.
+To make this concrete, here is what happens when `roko plan run` executes a
+single task:
+
+1. `PlanRunner` (orchestrate.rs) picks a pending task from the DAG.
+2. `CascadeRouter.select()` chooses a model based on the task's role and
+   complexity — this is the **Route** step applied to model selection.
+3. `SystemPromptBuilder.build()` assembles a 9-layer system prompt by
+   **composing** role identity, conventions, domain context, task details,
+   relevant playbooks, and current affect state into a single Engram.
+4. `ContextAssembler` queries `KnowledgeStore` and injects relevant knowledge
+   entries — past insights, anti-patterns, strategy fragments.
+5. `DaimonState.pre_dispatch()` computes a `DispatchModulation` that adjusts
+   model temperature and turn budget based on recent success/failure history.
+6. The agent runs (`dispatch_agent()`), makes tool calls, and produces output.
+7. `GatePipeline.run_rung()` **verifies** the output: compile, lint, test,
+   symbol check — whatever rungs are appropriate for this task's complexity.
+8. If gates pass, the episode is **written back** to `episodes.jsonl`.
+9. **React**: `CascadeRouter.feedback()` updates the model arm reward,
+   `DaimonState.on_outcome()` updates the affect state, `KnowledgeAdmissionStore`
+   considers admitting a new knowledge entry.
+
+Every step is an instance of one of the nine operations. That is the loop.
 
 ---
 
-## 4. Crate Dependency Graph
+## 4. Crate Map
+
+Here is the full system in one diagram. The arrows show dependency direction
+(bottom depends on top). Crates at the bottom are the entry points; crates at
+the top are foundations.
 
 ```
                          ┌─────────────────────────┐
@@ -234,7 +310,7 @@ or claims a bounty — only the impls change.
                                    │                    │
        ┌───────────────────────────┼────────────────────┤
        │                           │                    │
-┌──────▼──────┐  ┌──────────────── ▼──────┐  ┌────────▼───────┐
+┌──────▼──────┐  ┌─────────────────▼──────┐  ┌────────▼───────┐
 │ roko-agent  │  │   roko-gate            │  │  roko-neuro    │
 │ 5 backends  │  │  7-rung pipeline,      │  │  KnowledgeStore│
 │ ToolDisp.,  │  │  AdaptiveThresholds,   │  │  ContextAssemb.│
@@ -275,9 +351,12 @@ or claims a bounty — only the impls change.
           │  orchestrate.rs (PlanRunner), dashboard TUI,       │
           │  all subcommands (prd, plan, agent, research, ...) │
           └───────────────────────────────────────────────────┘
+```
 
-Additional crates (parallel, not in main stack):
-  roko-serve          HTTP control plane (~85 routes)
+Additional crates (parallel, not in the main execution stack):
+
+```
+  roko-serve          HTTP control plane (~85 routes on :6677)
   roko-agent-server   Per-agent HTTP sidecar (13 routes)
   roko-std            19 builtin tools, StaticToolRegistry, SumScorer
   roko-chain          Chain witness primitives (Phase 2+)
@@ -286,6 +365,21 @@ Additional crates (parallel, not in main stack):
   roko-lang-{rust,typescript,go}  Language analyzers
 ```
 
+### Reading the map
+
+- `roko-core` is the vocabulary: types and trait definitions. Nothing in it
+  does any I/O. It has no runtime dependencies.
+- `roko-primitives` is pre-core math: HDC vectors, PAD affect, tier routing.
+- The middle tier (`roko-fs`, `roko-runtime`, `roko-learn`) implements the
+  infrastructure: file storage, the workflow state machine, the learning
+  subsystems.
+- `roko-agent`, `roko-gate`, `roko-neuro`, `roko-compose` are the operational
+  core: LLM dispatch, verification, knowledge, prompt assembly.
+- `roko-conductor`, `roko-daimon`, `roko-dreams` layer on reactive oversight,
+  affect modulation, and offline consolidation.
+- `roko-orchestrator` and `roko-cli` are the entry points that wire everything
+  together.
+
 ---
 
 ## 5. Protocol Traits (Core Six)
@@ -293,9 +387,18 @@ Additional crates (parallel, not in main stack):
 Source: `crates/roko-core/src/traits.rs`
 
 These six traits define the complete operational surface of Roko. Every
-capability is an implementation of one of these traits.
+capability is an implementation of one of these traits. If you add a feature
+and it does not fit into one of these six verbs, reconsider the design.
 
 ### 5.1 Store — Persist and Retrieve
+
+**What it does in plain English**: A Store is an addressable database of
+Engrams. You put things in (by content hash), get them back, and query by
+filter or semantic similarity. Implementations range from an in-memory hash
+map (for tests) to a JSONL file on disk to an HDC-indexed semantic store.
+
+<details>
+<summary>Store trait signature</summary>
 
 ```rust
 #[async_trait]
@@ -328,11 +431,24 @@ pub trait Store: Send + Sync {
 }
 ```
 
+</details>
+
 **Implementations**: `MemorySubstrate` (testing), `FileSubstrate` (JSONL on
 `.roko/`), `HdcSubstrate` (semantic search), `ChainSubstrate` (on-chain shared
 state, Phase 2+).
 
+---
+
 ### 5.2 Score — Rate Along Dimensions
+
+**What it does in plain English**: A Scorer takes an Engram and returns a
+numeric rating. Scores are multi-dimensional (confidence, novelty, utility,
+reputation) and context-dependent. Different scorers weight things differently:
+`RecencyScorer` favors newer engrams, `ReputationScorer` favors high-trust
+sources. The composite `SumScorer` blends multiple scorers.
+
+<details>
+<summary>Score trait signature</summary>
 
 ```rust
 pub trait Score: Send + Sync {
@@ -346,6 +462,8 @@ pub trait Score: Send + Sync {
 }
 ```
 
+</details>
+
 The `ScoreValue` struct carries four dimensions: `confidence`, `novelty`,
 `utility`, and `reputation`. `Score::effective()` returns a single f32
 combining them.
@@ -353,7 +471,17 @@ combining them.
 **Implementations**: `RelevanceScorer`, `RecencyScorer`, `ReputationScorer`,
 `CatalyticScorer`, `SumScorer` (roko-std), `CompositeScorer`.
 
+---
+
 ### 5.3 Verify — Check Against Ground Truth
+
+**What it does in plain English**: A Verifier takes an Engram and returns a
+Verdict — pass or fail, with output. This is how the gate pipeline works: each
+gate is a `Verify` implementation that runs `cargo compile`, `cargo test`, a
+diff check, or an LLM judge, and returns whether the output is acceptable.
+
+<details>
+<summary>Verify trait signature</summary>
 
 ```rust
 #[async_trait]
@@ -369,9 +497,21 @@ pub trait Verify: Send + Sync {
 }
 ```
 
-**Implementations**: See Section 12 (Gate Pipeline).
+</details>
+
+**Implementations**: See Section 12 (Gate Pipeline) for the full list.
+
+---
 
 ### 5.4 Route — Select One Candidate
+
+**What it does in plain English**: A Router takes a list of candidates and
+picks one. At the model routing level, the candidates are models and the
+Router implements the learning loop that decides which model to use. At the
+knowledge level, the Router picks which knowledge entry to surface.
+
+<details>
+<summary>Route trait signature</summary>
 
 ```rust
 pub trait Route: Send + Sync {
@@ -388,11 +528,24 @@ pub trait Route: Send + Sync {
 }
 ```
 
+</details>
+
 **Implementations**: `StaticRouter` (config-driven), `LinUCBRouter` (contextual
 bandit), `CascadeRouter` (3-stage: Static→Confidence→UCB), `WeightedRouter`
 (softmax over scorers).
 
+---
+
 ### 5.5 Compose — Combine Under Budget
+
+**What it does in plain English**: A Composer takes multiple input Engrams and
+assembles them into a single output Engram, respecting a token budget. This is
+how prompt assembly works: `PromptComposer` takes role identity, conventions,
+task context, knowledge entries, and gate feedback, and assembles them into a
+single system prompt that fits within the model's context window.
+
+<details>
+<summary>Compose trait signature</summary>
 
 ```rust
 pub trait Compose: Send + Sync {
@@ -418,10 +571,23 @@ pub trait Compose: Send + Sync {
 }
 ```
 
+</details>
+
 **Implementations**: `PromptComposer` (prompt assembly), `ContextAssembler`
 (knowledge context packs), task plan combiners.
 
+---
+
 ### 5.6 React — Watch Streams and Emit Interventions
+
+**What it does in plain English**: A Policy watches the stream of recent
+Engrams and decides whether to intervene. The `Conductor` is the primary
+implementation: it runs 10 watchers over the stream and emits `ConductorDecision`
+events when something is wrong (agent stuck, budget exceeded, quality degrading).
+This is the reactive oversight layer.
+
+<details>
+<summary>React trait signature</summary>
 
 ```rust
 pub trait React: Send + Sync {
@@ -440,6 +606,8 @@ pub trait React: Send + Sync {
 }
 ```
 
+</details>
+
 `PolicyOutputs` contains both `engrams: Vec<Engram>` (to persist) and
 `pulses: Vec<Pulse>` (to publish on the Bus).
 
@@ -454,9 +622,18 @@ Source: `crates/roko-core/src/foundation.rs`
 
 These are the service contracts between the WorkflowEngine and its
 infrastructure providers. Every impl is injected at runtime — the engine is
-pure.
+pure. This is what makes the WorkflowEngine testable: swap in mock
+implementations of these traits and you can drive the full pipeline without
+touching a real LLM or filesystem.
 
 ### 6.1 ModelCaller
+
+**What it does**: The contract between the engine and LLM backends. Takes a
+structured request (model, messages, budget, routing hints) and returns a
+response (content, usage, stop reason). All five LLM backends implement this.
+
+<details>
+<summary>ModelCaller structs and trait</summary>
 
 ```rust
 pub struct ModelCallRequest {
@@ -490,10 +667,21 @@ pub trait ModelCaller: Send + Sync {
 }
 ```
 
+</details>
+
 Implemented by: `roko-agent` backends (Claude CLI, Claude API, Gemini, Codex,
 Ollama, Perplexity, OpenAI-compat).
 
+---
+
 ### 6.2 PromptAssembler
+
+**What it does**: Assembles a system prompt from a role spec. The 9-layer
+`SystemPromptBuilder` in `roko-compose` implements this. See Section 18 for
+the assembly details.
+
+<details>
+<summary>PromptAssembler structs and trait</summary>
 
 ```rust
 pub struct PromptSpec {
@@ -512,10 +700,19 @@ pub trait PromptAssembler: Send + Sync {
 }
 ```
 
-Implemented by: `SystemPromptBuilder` in `roko-compose`. See Section 18 for
-the 9-layer assembly.
+</details>
+
+---
 
 ### 6.3 FeedbackSink
+
+**What it does**: The funnel through which every model call, gate result, and
+completed workflow feeds into the learning subsystems. The `FeedbackService`
+in `roko-learn` implements this and fans events to `CascadeRouter`,
+`EpisodeLogger`, `AdaptiveThresholds`, and more.
+
+<details>
+<summary>FeedbackSink event types and trait</summary>
 
 ```rust
 pub enum FeedbackEvent {
@@ -556,10 +753,18 @@ pub trait FeedbackSink: Send + Sync {
 }
 ```
 
-Implemented by: `roko-learn`'s `FeedbackService`, which fans events into the
-learning subsystems (CascadeRouter, EpisodeLogger, AdaptiveThresholds, etc.).
+</details>
+
+---
 
 ### 6.4 GateRunner
+
+**What it does**: The contract the WorkflowEngine uses to run gates without
+knowing about the gate pipeline's internals. `GatePipeline` in `roko-gate`
+implements this. See Section 12.
+
+<details>
+<summary>GateRunner structs and trait</summary>
 
 ```rust
 pub struct GateConfig {
@@ -589,9 +794,15 @@ pub trait GateRunner: Send + Sync {
 }
 ```
 
-Implemented by: `GatePipeline` in `roko-gate`. See Section 12.
+</details>
+
+---
 
 ### 6.5 EventConsumer
+
+**What it does**: A one-way sink for `RuntimeEvent` values emitted by the
+workflow engine. Adapters include: the TUI bridge (renders events to the
+dashboard), the SSE broadcaster (pushes to HTTP clients), and the JSONL logger.
 
 ```rust
 pub trait EventConsumer: Send + Sync {
@@ -600,9 +811,16 @@ pub trait EventConsumer: Send + Sync {
 }
 ```
 
-Adapters include: TUI bridge, SSE broadcaster, JSONL logger.
+---
 
 ### 6.6 EffectExecutor (Low-level Effect)
+
+**What it does**: The low-level effect abstraction used by the `EffectDriver`.
+Translates `Effect` enum variants (SpawnAgent, RunGates, Commit, Checkpoint)
+into real I/O, and returns `EffectOutcome`.
+
+<details>
+<summary>Effect, EffectOutcome, and EffectExecutor</summary>
 
 ```rust
 pub enum Effect {
@@ -630,7 +848,21 @@ pub trait EffectExecutor: Send + Sync {
 }
 ```
 
+</details>
+
+---
+
 ### 6.7 AffectPolicy
+
+**What it does**: DaimonPolicy is like an emotional thermostat. It reads the
+system's recent success/failure history, maintains a multi-timescale emotional
+state (fast emotion, medium mood, slow temperament), and adjusts the behavior
+of every agent dispatch based on that state. If agents have been failing
+repeatedly, the thermostat notices and dials down exploration. If things are
+going smoothly, it stays lean.
+
+<details>
+<summary>AffectPolicy structs and trait</summary>
 
 ```rust
 pub struct AffectContext {
@@ -658,6 +890,8 @@ pub trait AffectPolicy: Send + Sync {
 }
 ```
 
+</details>
+
 Canonical implementation: `DaimonPolicy` (roko-daimon). No-op: `NoOpAffectPolicy`.
 
 ---
@@ -668,6 +902,14 @@ Source: `crates/roko-core/src/traits.rs`
 
 ### 7.1 Bus — Publish/Subscribe for Ephemeral Pulses
 
+**What it does**: The Bus is a broadcast channel for `Pulse` values — things
+that need immediate reactive handling but may not need to be persisted.
+Subscribers filter by topic. The sequence number enables gap detection and
+ordered replay.
+
+<details>
+<summary>Bus trait</summary>
+
 ```rust
 pub trait Bus: Send + Sync {
     type Receiver: Send;
@@ -676,10 +918,21 @@ pub trait Bus: Send + Sync {
 }
 ```
 
+</details>
+
 **Implementation**: `PulseBus` wraps `EventBus<Pulse>` with topic filtering.
-Sequence numbers support gap detection and ordered replay.
+
+---
 
 ### 7.2 ColdStore — Archival for Aged-Out Engrams
+
+**What it does**: When an Engram's effective weight falls below a threshold
+(because it is old and low-scored), it moves from the hot `Store` to a
+`ColdStore`. Cold storage is compressed, rarely-accessed, and does not
+participate in live queries. Engrams can be thawed back on demand.
+
+<details>
+<summary>ColdStore trait and migration flow</summary>
 
 ```rust
 #[async_trait]
@@ -695,15 +948,26 @@ pub trait ColdStore: Send + Sync {
 }
 ```
 
-**Migration flow**:
+Migration flow:
 ```
 Store (hot) ──age_out()──► ColdStore (cold/archive)
               ◄──thaw()──
 ```
 
+</details>
+
 **Implementation**: `ArchiveColdSubstrate` in roko-fs (compressed JSONL archives).
 
+---
+
 ### 7.3 Observe, Connect, Trigger (Cell-Based Extensions)
+
+These three traits extend the `Cell` supertrait for peripheral integrations:
+external data sources (`Observe`), network connections (`Connect`), and
+scheduled triggers (`Trigger`).
+
+<details>
+<summary>Observe, Connect, Trigger trait signatures</summary>
 
 ```rust
 pub trait Observe: Cell {
@@ -722,14 +986,21 @@ pub trait Trigger: Cell {
 }
 ```
 
+</details>
+
 ---
 
 ## 8. The Cell Supertrait
 
-Source: `crates/roko-core/src/cell.rs`
+Source: `crates/roko-cell.rs`
 
 Every protocol implementation must be a `Cell`. This gives the execution engine
-identity, cost estimation, and protocol introspection.
+identity, cost estimation, and protocol introspection. Think of it as the
+common interface that lets the system ask any component "who are you, how
+expensive are you, and what can you do?"
+
+<details>
+<summary>Cell trait signature</summary>
 
 ```rust
 pub trait Cell: Send + Sync + 'static {
@@ -742,6 +1013,8 @@ pub trait Cell: Send + Sync + 'static {
 }
 ```
 
+</details>
+
 ---
 
 ## 9. WorkflowEngine and PipelineStateV2
@@ -750,9 +1023,21 @@ Sources:
 - `crates/roko-runtime/src/pipeline_state.rs`
 - `crates/roko-runtime/src/workflow_engine.rs`
 
-### 9.1 Design Principle
+### The core idea
 
-The pipeline uses a strict separation:
+The WorkflowEngine is the execution engine for a single task. Given a task
+prompt and a set of services, it runs the agent, validates the output, handles
+failures, and commits the result. It coordinates the `PipelineStateV2` state
+machine with the `EffectDriver` that executes real I/O.
+
+> **Why pure state machine + effect driver?** Because it makes the engine
+> testable — you can feed events to `PipelineStateV2` and verify the outputs
+> without ever spawning a real agent. The state machine has zero side effects.
+> Every decision it makes is expressed as a `PipelineOutput` action that the
+> `EffectDriver` then executes. Swap the driver for a mock and the entire
+> workflow logic is unit-testable.
+
+The separation looks like this:
 
 ```
 PipelineStateV2       -- PURE state machine, zero side effects
@@ -760,11 +1045,9 @@ EffectDriver          -- executes the actions returned by the state machine
 WorkflowEngine        -- ties them together in a run loop
 ```
 
-The state machine takes `PipelineInput` events and returns `PipelineOutput`
-actions. It never does I/O. Every test can drive the machine synchronously with
-no mocks.
+### Workflow Templates
 
-### 9.2 Workflow Templates
+Three built-in configurations cover the common cases:
 
 ```rust
 pub struct WorkflowConfig {
@@ -781,9 +1064,13 @@ impl WorkflowConfig {
 }
 ```
 
-### 9.3 Phase State Machine
+### Phase State Machine
 
-States:
+The state machine moves a task through phases. Here is the complete transition
+diagram:
+
+<details>
+<summary>Full state machine transition diagram</summary>
 
 ```
 Pending
@@ -818,7 +1105,10 @@ Reviewing ───────────────────────�
 (ResourceExhausted → Halted from any phase)
 ```
 
-### 9.4 PipelineInput Events
+</details>
+
+<details>
+<summary>PipelineInput events (what drives the state machine)</summary>
 
 ```rust
 pub enum PipelineInput {
@@ -840,7 +1130,10 @@ pub enum PipelineInput {
 }
 ```
 
-### 9.5 PipelineOutput Actions
+</details>
+
+<details>
+<summary>PipelineOutput actions (what the state machine returns)</summary>
 
 ```rust
 pub enum PipelineOutput {
@@ -855,7 +1148,9 @@ pub enum PipelineOutput {
 }
 ```
 
-### 9.6 Checkpointing
+</details>
+
+### Checkpointing
 
 The state machine serializes to JSON for resumption:
 
@@ -864,9 +1159,14 @@ let json = sm.checkpoint()?;             // → JSON string
 let sm = PipelineStateV2::from_checkpoint(&json)?; // restore exact state
 ```
 
-This enables `roko plan run --resume .roko/state/executor.json`.
+This is how `roko plan run --resume .roko/state/executor.json` works. The
+executor snapshots state after every task completion, so if the process crashes
+mid-plan, you can resume from the last checkpoint.
 
-### 9.7 WorkflowEngine
+### WorkflowEngine
+
+<details>
+<summary>WorkflowEngine struct and run loop</summary>
 
 ```rust
 pub struct WorkflowEngine {
@@ -891,6 +1191,8 @@ The run loop:
 4. Each iteration checks `CancelToken` for cooperative cancellation.
 5. Returns `WorkflowRunReport` with gate outcomes, timing, tokens, cost.
 
+</details>
+
 ---
 
 ## 10. EffectDriver Pattern
@@ -898,6 +1200,14 @@ The run loop:
 Source: `crates/roko-runtime/src/effect_driver.rs`
 
 The `EffectDriver` bridges the pure state machine to real infrastructure.
+
+When the state machine emits `PipelineOutput::SpawnImplementer`, the
+EffectDriver executes it by: assembling the system prompt, applying affect
+modulation, calling the model, recording feedback, and returning
+`PipelineInput::AgentCompleted` or `::AgentFailed`.
+
+<details>
+<summary>EffectServices and EffectDriver structs</summary>
 
 ```rust
 pub struct EffectServices {
@@ -917,8 +1227,10 @@ pub struct EffectDriver {
 }
 ```
 
-Key method: `spawn_agent` — translates `PipelineOutput::SpawnImplementer` into
-a real model call, applying affect modulation:
+</details>
+
+The `spawn_agent` method sequence (called for `SpawnImplementer`,
+`SpawnStrategist`, `SpawnAutoFixer`, `SpawnReviewer`):
 
 ```
 1. Compute DispatchModulation from AffectPolicy.pre_dispatch()
@@ -942,9 +1254,10 @@ phase the workflow is in.
 
 Source: `crates/roko-agent/src/dispatcher/mod.rs`
 
-### 11.1 ToolDispatcher Pipeline
+### The ToolDispatcher Pipeline
 
-For every tool call dispatched during an agent turn:
+When an agent makes a tool call during its turn, every call passes through a
+fixed 8-stage pipeline. Think of it like a middleware stack:
 
 ```
 1. validate    -- JSON schema check against registry def
@@ -958,7 +1271,10 @@ For every tool call dispatched during an agent turn:
 8. result_cache -- optionally cache deterministic tool results
 ```
 
-### 11.2 Batch Dispatch
+<details>
+<summary>Batch dispatch and HandlerResolver</summary>
+
+**Batch Dispatch**
 
 ```rust
 pub async fn dispatch_batch(
@@ -972,7 +1288,7 @@ Calls are partitioned by `ToolConcurrency`: `Parallel` tools run via
 `join_all`; `Serial` tools run sequentially to preserve shell-state ordering
 and avoid write-write races.
 
-### 11.3 HandlerResolver (Pluggable)
+**HandlerResolver (Pluggable)**
 
 ```rust
 pub trait HandlerResolver: Send + Sync {
@@ -984,14 +1300,9 @@ The builtin resolver is `roko_std::tool::handlers::handler_for`. Custom MCP
 backends provide their own. This keeps `roko-agent` free of `roko-std`
 dependency.
 
-### 11.4 Safety Layer
+**ToolDispatcher struct**
 
 ```rust
-pub struct SafetyLayer {
-    // pre-execution: role auth, contract checks, scrub policy
-    // post-execution: output scrubbing, audit logging
-}
-
 pub struct ToolDispatcher {
     registry: Arc<dyn ToolRegistry>,
     resolver: Arc<dyn HandlerResolver>,
@@ -1003,7 +1314,9 @@ pub struct ToolDispatcher {
 }
 ```
 
-### 11.5 Agent Backends
+</details>
+
+### Agent Backends
 
 Five LLM backends share a common `Agent` trait interface:
 
@@ -1021,10 +1334,17 @@ Five LLM backends share a common `Agent` trait interface:
 
 Source: `crates/roko-gate/src/lib.rs`, `rung_selector.rs`, `adaptive_threshold.rs`
 
-### 12.1 7-Rung Pipeline
+The gate pipeline is like a CI/CD pipeline for AI output. An agent produces
+changes; the gate pipeline runs them through a sequence of checks and either
+approves or rejects. Unlike a static CI pipeline, this one adapts: it skips
+rungs that are consistently passing, adjusts retry budgets based on historical
+pass rates, and detects statistical shifts in quality.
+
+### 7-Rung Pipeline
 
 The canonical pipeline is selected based on plan complexity
-(`PlanComplexity`: Trivial, Simple, Moderate, Complex, Critical):
+(`PlanComplexity`: Trivial, Simple, Moderate, Complex, Critical). Harder tasks
+run more rungs:
 
 | Rung | Index | Gates | Trigger |
 |------|-------|-------|---------|
@@ -1036,7 +1356,7 @@ The canonical pipeline is selected based on plan complexity
 | PropertyTest | 5 | `PropertyTestGate` + `FactCheckGate` | Complex+ |
 | Integration | 6 | `LlmJudgeGate` + `IntegrationGate` | Critical |
 
-### 12.2 Standalone Gates (6 Gates)
+### Standalone Gates (6 Gates)
 
 Invoked outside the rung pipeline for specific scenarios:
 
@@ -1047,7 +1367,7 @@ Invoked outside the rung pipeline for specific scenarios:
 - `FormatCheckGate` — code formatting (rustfmt, prettier)
 - `SecurityScanGate` — security scanning
 
-### 12.3 Gate Combinators
+### Gate Combinators
 
 ```rust
 pub struct ParallelGate<G>(Vec<G>);   // run gates in parallel, collect all verdicts
@@ -1055,11 +1375,14 @@ pub struct VotingGate<G>(Vec<G>);     // majority-vote across inner gates
 pub struct FallbackGate<G>(Vec<G>);   // try in order, first non-error wins
 ```
 
-### 12.4 Adaptive Thresholds
+### Adaptive Thresholds
 
-Source: `crates/roko-gate/src/adaptive_threshold.rs`
+Each rung tracks its own statistical history using EMA and CUSUM. The system
+uses this history to make smarter decisions: if a rung has passed 20 times in
+a row, skip it. If the pass rate suddenly drops, alert the Conductor.
 
-Per-rung statistics tracked with EMA (alpha=0.1) and CUSUM detection:
+<details>
+<summary>RungStats and AdaptiveThresholds structs</summary>
 
 ```rust
 pub struct RungStats {
@@ -1078,15 +1401,23 @@ pub struct AdaptiveThresholds {
 }
 ```
 
+EMA update formula (alpha = 0.1):
+```
+ema_pass_rate = 0.9 * ema_pass_rate + 0.1 * (1.0 if passed else 0.0)
+```
+
+</details>
+
 Key decisions driven by adaptive thresholds:
 
 - **Retry budget**: `suggested_retries(rung)` → 1..5 based on EMA pass rate
 - **Skip decision**: when `consecutive_passes >= 20`, suggest skipping the rung
 - **CUSUM alerts**: trigger replan or conductor intervention on detected shifts
 
-### 12.5 SPC Detectors
+### SPC Detectors
 
-Source: `crates/roko-gate/src/spc.rs`
+<details>
+<summary>Statistical Process Control detector details</summary>
 
 ```
 CUSUM      -- Cumulative Sum, detects sustained mean shift
@@ -1096,7 +1427,12 @@ BOCPD      -- Bayesian Online Change Point Detection (for structural shifts)
 
 All three fire `SpcAlert` events that feed into the `Conductor` watcher pipeline.
 
-### 12.6 Gate Failure Classification
+</details>
+
+### Gate Failure Classification
+
+<details>
+<summary>FailureClass and GateFailureAction enums</summary>
 
 ```rust
 pub enum FailureClass {
@@ -1115,14 +1451,19 @@ pub enum GateFailureAction {
 }
 ```
 
+</details>
+
 ---
 
 ## 13. CascadeRouter: 3-Stage Model Selection
 
 Source: `crates/roko-learn/src/cascade_router.rs`
 
-The cascade combines three routing strategies, transitioning as the observation
-count grows:
+CascadeRouter is like an A/B testing framework that learns. It starts simple
+(use the configured model for each role), accumulates observations, builds
+confidence, and eventually graduates to a full contextual bandit that learns
+which model produces the best outcomes for which kinds of tasks. The three
+stages correspond to how much data you have:
 
 | Stage | Name | Observations | Strategy |
 |-------|------|--------------|----------|
@@ -1130,7 +1471,8 @@ count grows:
 | 2 | Confidence | 50–200 | Empirical pass rates + confidence interval |
 | 3 | UCB | > 200 | Full `LinUCB` contextual bandit |
 
-### 13.1 Structure
+<details>
+<summary>CascadeRouter struct</summary>
 
 ```rust
 pub struct CascadeRouter {
@@ -1144,13 +1486,18 @@ pub struct CascadeRouter {
 }
 ```
 
-### 13.2 Stage 1 — Static Routing
+</details>
+
+### Stage 1 — Static Routing
 
 Uses a hardcoded `role → model_slug` table. The table is configurable from
 `roko.toml` under `[cascade_router]`. Transitions to Stage 2 once 50
 observations accumulate.
 
-### 13.3 Stage 2 — Confidence-Based
+### Stage 2 — Confidence-Based
+
+<details>
+<summary>Stage 2 selection logic</summary>
 
 Tracks `ModelStats` per model:
 - Pass rate (EMA)
@@ -1161,7 +1508,12 @@ Selects the model whose lower confidence interval bound is highest. Falls back
 to static when confidence intervals are too wide. Transitions to Stage 3 after
 200 observations.
 
-### 13.4 Stage 3 — LinUCB Contextual Bandit
+</details>
+
+### Stage 3 — LinUCB Contextual Bandit
+
+<details>
+<summary>LinUCB feature vector and reward computation</summary>
 
 `LinUCBRouter` uses a `CONTEXT_DIM`-dimensional feature vector built from:
 - Task category and complexity
@@ -1174,7 +1526,9 @@ to static when confidence intervals are too wide. Transitions to Stage 3 after
 `compute_routing_reward_v2` aggregates: pass rate, cost, latency, C-factor,
 budget pressure, and Pareto adjustments into a scalar reward.
 
-### 13.5 Supporting Systems
+</details>
+
+### Supporting Systems
 
 **Pareto frontier**: Periodically recomputed from `ModelObservation` records.
 Down-weights dominated models during UCB exploration.
@@ -1187,7 +1541,8 @@ Down-weights dominated models during UCB exploration.
 **Temperature adjustment**: `exploration_rate` from `AffectPolicy` modulates
 model call temperature in `EffectDriver`.
 
-**Persistence**: State serializes to `.roko/learn/cascade-router.json`.
+**Persistence**: State serializes to `.roko/learn/cascade-router.json`. The
+router does not lose its learning between runs.
 
 ---
 
@@ -1199,7 +1554,16 @@ The learning system is a collection of independent subsystems that consume the
 signal stream from the orchestrator and agents, persist durable records, and
 surface reusable knowledge back to the composer/router feedback loop.
 
+Every task completion fans out through `FeedbackSink.record()` into all the
+subsystems below. Nothing is thrown away.
+
 ### 14.1 Episode Logger
+
+An episode is a complete record of one agent task execution: what task it ran,
+what model it used, what gates it passed or failed, how much it cost.
+
+<details>
+<summary>Episode struct</summary>
 
 ```rust
 pub struct Episode {
@@ -1218,12 +1582,19 @@ pub struct Episode {
 }
 ```
 
+</details>
+
 Persisted to `.roko/episodes.jsonl`. The `hdc_fingerprint` per episode enables
-semantic clustering during dream consolidation.
+semantic clustering during dream consolidation (Section 16).
 
 ### 14.2 CFactor (Catalyst Factor)
 
-C-factor measures how many downstream engrams an engram enabled:
+C-factor measures how many downstream engrams an engram enabled. It answers
+the question: "did this particular task unlock a lot of subsequent work, or
+was it a dead end?"
+
+<details>
+<summary>C-factor formula and uses</summary>
 
 ```
 C-factor = (downstream_count - baseline) / baseline_stddev
@@ -1234,6 +1605,8 @@ High C-factor → this engram was unusually catalytic. Used to:
 - Trigger replan on detected C-factor regressions
 - Influence Daimon behavioral state classification
 
+</details>
+
 ### 14.3 Anomaly Detection
 
 Three detectors running continuously:
@@ -1242,7 +1615,7 @@ Three detectors running continuously:
 - `CostSpikeDetector` — detects sudden cost increases
 - `QualityDegradationDetector` — detects declining gate pass rates
 
-Each emits `Anomaly` events that are consumed by the `Conductor`.
+Each emits `Anomaly` events consumed by the `Conductor`.
 
 ### 14.4 Budget Guardrails
 
@@ -1256,7 +1629,11 @@ pub struct BudgetGuardrail {
 ### 14.5 Playbook Store
 
 Reusable task patterns extracted from successful episodes. Queried at dispatch
-time and injected into Layer 6 of the system prompt:
+time and injected into Layer 6 of the system prompt. When an agent faces a
+task similar to one it has done before, its playbook is in the prompt.
+
+<details>
+<summary>Playbook struct</summary>
 
 ```rust
 pub struct Playbook {
@@ -1269,7 +1646,12 @@ pub struct Playbook {
 }
 ```
 
+</details>
+
 ### 14.6 Model Experiment Store
+
+<details>
+<summary>A/B experiment structure</summary>
 
 A/B experiments over prompt sections and models:
 
@@ -1283,7 +1665,12 @@ pub struct ModelExperimentStore {
 
 Results feed back into `CascadeRouter` arm selection.
 
+</details>
+
 ### 14.7 Skill Library
+
+<details>
+<summary>Skill struct</summary>
 
 Structured skills that agents can invoke and improve:
 
@@ -1298,10 +1685,16 @@ pub struct Skill {
 }
 ```
 
+</details>
+
 ### 14.8 Error Pattern Store
 
-Persistent storage of gate failure patterns, enabling learned
-retry strategies:
+Persistent storage of gate failure patterns, enabling learned retry strategies.
+When the system sees a failure it has seen before, it knows whether recovering
+was successful and how many tokens it took.
+
+<details>
+<summary>GateFailureObservation struct</summary>
 
 ```rust
 pub struct GateFailureObservation {
@@ -1313,7 +1706,12 @@ pub struct GateFailureObservation {
 }
 ```
 
+</details>
+
 ### 14.9 Routing Decision Log
+
+<details>
+<summary>RoutingDecisionLog struct</summary>
 
 Every routing decision is logged for later analysis and bandit training:
 
@@ -1328,17 +1726,25 @@ pub struct RoutingDecisionLog {
 }
 ```
 
+</details>
+
 ---
 
 ## 15. Knowledge Store Architecture
 
 Source: `crates/roko-neuro/src/lib.rs`
 
-The durable knowledge store (`KnowledgeStore`/`NeuroStore`) provides
-long-term memory for agents. It is separate from the Engram substrate —
-knowledge entries are distilled observations, not raw signals.
+The durable knowledge store (`KnowledgeStore`/`NeuroStore`) is long-term
+memory. It is separate from the Engram substrate: knowledge entries are
+distilled, validated observations extracted from multiple episodes, not raw
+signals. An Engram might record "this task failed with E0308"; a knowledge
+entry records "type mismatches in trait impls often come from lifetime
+parameter omissions."
 
-### 15.1 KnowledgeKind Taxonomy
+### KnowledgeKind Taxonomy
+
+<details>
+<summary>KnowledgeKind enum</summary>
 
 ```rust
 pub enum KnowledgeKind {
@@ -1351,7 +1757,17 @@ pub enum KnowledgeKind {
 }
 ```
 
-### 15.2 Decay Half-Lives
+</details>
+
+### Decay Half-Lives
+
+Different knowledge kinds have different durability. A `Warning` is urgent and
+specific; it decays in hours. An `Insight` is durable wisdom; it decays in
+weeks. On-chain storage has shorter effective lifetimes because of block-based
+accounting.
+
+<details>
+<summary>Decay half-life table</summary>
 
 | Kind | Off-chain half-life | On-chain half-life |
 |------|--------------------|--------------------|
@@ -1364,7 +1780,15 @@ pub enum KnowledgeKind {
 
 Block rate: 1 block per 2 seconds (`BLOCKS_PER_DAY = 43,200`).
 
-### 15.3 KnowledgeTier
+</details>
+
+### KnowledgeTier
+
+Entries advance through tiers as they accumulate validation. Higher tier =
+slower decay and higher priority in retrieval.
+
+<details>
+<summary>KnowledgeTier enum and progression</summary>
 
 ```rust
 pub enum KnowledgeTier {
@@ -1378,7 +1802,10 @@ pub enum KnowledgeTier {
 Tier progression is driven by `TierProgression` which promotes entries based
 on validation count, cross-episode consistency, and C-factor contribution.
 
-### 15.4 KnowledgeEntry Structure
+</details>
+
+<details>
+<summary>KnowledgeEntry struct</summary>
 
 ```rust
 pub struct KnowledgeEntry {
@@ -1395,10 +1822,15 @@ pub struct KnowledgeEntry {
 }
 ```
 
-### 15.5 Admission Control
+</details>
 
-New candidates are evaluated by `KnowledgeAdmissionStore` before entering the
-durable store:
+### Admission Control
+
+New candidates are evaluated before entering the durable store. The store does
+not accept everything — it filters, deduplicates, and resolves conflicts.
+
+<details>
+<summary>Admission pipeline</summary>
 
 ```
 1. Duplicate detection (content hash + semantic similarity threshold)
@@ -1409,9 +1841,17 @@ durable store:
 
 Outcomes: `Admitted`, `Rejected(reason)`, `Merged(existing_id)`.
 
-### 15.6 Four-Factor Retrieval (Daimon Integration)
+</details>
 
-Knowledge retrieval uses a learnable four-factor scoring model:
+### Four-Factor Retrieval (Daimon Integration)
+
+Knowledge retrieval uses a learnable four-factor scoring model. The emotional
+factor means that knowledge discovered in a high-stress context gets weighted
+differently when retrieved in a different affect state — the system accounts
+for context.
+
+<details>
+<summary>Four-factor retrieval formula and default weights</summary>
 
 ```
 score = w_recency    * recency_factor(Ebbinghaus)
@@ -1424,7 +1864,12 @@ Default weights: recency=0.20, importance=0.25, relevance=0.35,
 emotional=0.20. Weights are online-learnable via gradient descent on retrieval
 quality.
 
-### 15.7 Emotional Provenance
+</details>
+
+### Emotional Provenance
+
+<details>
+<summary>EmotionalProvenance struct</summary>
 
 ```rust
 pub struct EmotionalProvenance {
@@ -1438,17 +1883,24 @@ pub struct EmotionalProvenance {
 Knowledge validated under diverse emotional conditions gets a diversity bonus
 in retrieval scoring.
 
+</details>
+
 ---
 
 ## 16. Dream Consolidation Cycle
 
 Source: `crates/roko-dreams/src/`
 
-The dream cycle runs offline (no active agents) to distill completed episodes
-into durable knowledge and playbooks. It is the primary mechanism by which the
-system improves over time.
+Dream consolidation is like sleeping on a problem. While agents are active,
+they accumulate episodes. Offline, the dream cycle processes those episodes
+to extract durable knowledge, identify recurring patterns, simulate
+counterfactual scenarios, and generate routing advice.
 
-### 16.1 Four Phases
+The dream cycle is the primary mechanism by which the system improves over
+time. Without it, episodes accumulate but are never distilled into reusable
+knowledge.
+
+### Four Phases
 
 ```
 Phase 1: Hypnagogia
@@ -1475,7 +1927,8 @@ Phase 4: Rehearsal and Routing Advice
   └── save_dream_routing_advice() — persist to .roko/learn/dream-routing.json
 ```
 
-### 16.2 DreamCycleReport
+<details>
+<summary>DreamCycleReport struct</summary>
 
 ```rust
 pub struct DreamCycleReport {
@@ -1493,7 +1946,9 @@ pub struct DreamCycleReport {
 }
 ```
 
-### 16.3 StagingBuffer and Confidence Stages
+</details>
+
+### StagingBuffer and Confidence Stages
 
 Episodes enter a `StagingBuffer` before full consolidation. They progress
 through confidence stages based on validation count and cross-episode
@@ -1508,7 +1963,10 @@ pub enum ConfidenceStage {
 }
 ```
 
-### 16.4 DreamRunner Configuration
+### DreamRunner Configuration
+
+<details>
+<summary>DreamLoopConfig and DreamAgentConfig</summary>
 
 ```rust
 pub struct DreamLoopConfig {
@@ -1524,6 +1982,8 @@ pub struct DreamAgentConfig {
 }
 ```
 
+</details>
+
 ---
 
 ## 17. DaimonPolicy Affect Engine
@@ -1532,12 +1992,24 @@ Sources:
 - `crates/roko-daimon/src/lib.rs`
 - `crates/roko-core/src/affect.rs`
 
-The Daimon is the affect engine that modulates agent behavior based on
-the system's emotional state. It implements `AffectPolicy` (Section 6.7).
+DaimonPolicy is the affect engine that modulates agent behavior based on
+the system's emotional state. Think of it as an emotional thermostat: it reads
+recent success/failure history, maintains a multi-timescale internal state,
+and adjusts every subsequent agent dispatch based on what it sees.
 
-### 17.1 PAD Vector
+If agents have been failing repeatedly (high arousal, low pleasure), the
+thermostat notices the `Struggling` state and dials down exploration, prefers
+cheaper models, and reduces turn budgets. If things are going smoothly
+(`Coasting`), it stays lean. If it is in a productive groove (`Focused`), it
+may prefer more capable models to capitalize on momentum.
 
-The Pleasure-Arousal-Dominance (PAD) model represents emotional state:
+### PAD Vector
+
+The Pleasure-Arousal-Dominance (PAD) model represents emotional state as a
+point in 3D space:
+
+<details>
+<summary>PadVector struct</summary>
 
 ```rust
 pub struct PadVector {
@@ -1547,10 +2019,17 @@ pub struct PadVector {
 }
 ```
 
-### 17.2 Three-Layer ALMA Model (Gebhard 2005)
+</details>
 
-The Daimon maintains three temporal layers, each with a different time
-constant:
+### Three-Layer ALMA Model (Gebhard 2005)
+
+The Daimon maintains three temporal layers. Each layer has a different time
+constant: emotion reacts immediately to stimuli, mood is a rolling average of
+emotion, and temperament is a slow-moving baseline. This is the same
+multi-timescale model used in human affect research.
+
+<details>
+<summary>AlmaLayers struct and update equations</summary>
 
 ```rust
 pub struct AlmaLayers {
@@ -1573,7 +2052,12 @@ mood    = (1 - tau_m) * mood    + tau_m * emotion     # at mood_interval ticks
 temp    = (1 - tau_t) * temp    + tau_t * mood        # at temperament_interval ticks
 ```
 
-### 17.3 BehavioralState Classification
+</details>
+
+### BehavioralState Classification
+
+<details>
+<summary>BehavioralState classification rules</summary>
 
 ```rust
 pub enum BehavioralState {
@@ -1598,7 +2082,12 @@ dominance < 0.10 and pleasure > -0.20       →  Exploring
 otherwise                                   →  Engaged
 ```
 
-### 17.4 Somatic Markers
+</details>
+
+### Somatic Markers
+
+<details>
+<summary>Somatic marker lookup via k-d tree</summary>
 
 Somatic markers encode situation→response associations learned from past
 outcomes. The `KdTree` allows fast nearest-neighbor lookup in 8-dimensional
@@ -1616,7 +2105,12 @@ When dispatching a task, the somatic system looks up the nearest stored
 situation and applies the associated emotional bias to retrieval weights and
 dispatch modulation.
 
-### 17.5 Four-Factor Retrieval Weights
+</details>
+
+### Four-Factor Retrieval Weights
+
+<details>
+<summary>RetrievalWeights and update rule</summary>
 
 ```rust
 pub struct RetrievalWeights {
@@ -1630,7 +2124,9 @@ pub struct RetrievalWeights {
 // Online update via gradient descent on retrieval quality outcomes
 ```
 
-### 17.6 DispatchModulation
+</details>
+
+### DispatchModulation
 
 The Daimon fills `DispatchModulation` before every task dispatch. The
 `EffectDriver` applies it:
@@ -1642,7 +2138,10 @@ turn_limit_factor     →  multiply default turn budget
 exploration_rate      →  increases temperature, may bypass cache
 ```
 
-### 17.7 AffectEvent Pipeline
+### AffectEvent Pipeline
+
+<details>
+<summary>AffectEvent enum</summary>
 
 ```rust
 pub enum AffectEvent {
@@ -1657,6 +2156,8 @@ pub enum AffectEvent {
 Each event is appraised into a PAD stimulus, which updates the ALMA emotion
 layer via EMA.
 
+</details>
+
 ---
 
 ## 18. SystemPromptBuilder 9-Layer Assembly
@@ -1664,10 +2165,13 @@ layer via EMA.
 Source: `crates/roko-compose/src/system_prompt_builder.rs`
 
 The `SystemPromptBuilder` constructs cache-aligned, role-specific system
-prompts from composable fragments. Each layer targets a different stability
-tier, enabling prefix-cache reuse across calls.
+prompts from composable fragments. Think of it as a layered document assembler:
+each layer adds different content targeting a different cache tier. Stable
+content (role identity, conventions) goes in the prefix that can be cached
+across many calls; volatile content (current task, gate feedback) goes at the
+end.
 
-### 18.1 The 9 Layers
+### The 9 Layers
 
 | Layer | Content | Cache Tier |
 |-------|---------|------------|
@@ -1683,7 +2187,8 @@ tier, enabling prefix-cache reuse across calls.
 | 7 | Anti-patterns: what NOT to do | Task (volatile) |
 | 8 | Affect guidance: emotional tone and focus | Dynamic |
 
-### 18.2 Builder Fields
+<details>
+<summary>SystemPromptBuilder struct fields</summary>
 
 ```rust
 pub struct SystemPromptBuilder {
@@ -1708,7 +2213,9 @@ pub struct SystemPromptBuilder {
 }
 ```
 
-### 18.3 Builder API
+</details>
+
+### Builder API
 
 ```rust
 SystemPromptBuilder::new("You are an implementer...")
@@ -1725,9 +2232,10 @@ SystemPromptBuilder::new("You are an implementer...")
     .build();
 ```
 
-### 18.4 Section Effectiveness Registry
+### Section Effectiveness Registry
 
-Learned section-effectiveness data adjusts per-layer priorities:
+<details>
+<summary>How section effectiveness is learned</summary>
 
 ```rust
 pub struct SectionEffectivenessRegistry {
@@ -1739,11 +2247,16 @@ pub struct SectionEffectivenessRegistry {
 A section's priority is boosted if its presence correlates with gate passes
 and task success, and reduced if it correlates with token waste.
 
-### 18.5 Cache Alignment
+</details>
+
+### Cache Alignment
 
 Layers 1+2+5 form the prefix-cacheable "system" tier. A cache alignment
 marker is inserted at each tier boundary so the provider's prompt cache
 can reuse the stable prefix across calls with different task contexts.
+
+<details>
+<summary>Cache boundary layout</summary>
 
 ```
 [CACHE_BOUNDARY: system]
@@ -1761,16 +2274,25 @@ Layer 4b: gate feedback
 Layer 8: affect
 ```
 
+</details>
+
 ---
 
 ## 19. Conductor: Reactive Intelligence Layer
 
 Source: `crates/roko-conductor/src/lib.rs`
 
-The conductor watches signal streams and decides when to intervene: restart
-an agent, change model, or abort a plan.
+The Conductor watches signal streams and decides when to intervene: restart
+an agent, change model, or abort a plan. It is a `React` implementation
+composed of 10 independent watchers that each inspect the Engram stream for
+different problems.
 
-### 19.1 Architecture
+> **Why 10 pure watchers?** Because each watcher is testable in isolation.
+> A watcher is a function from `&[Engram]` to `Vec<Engram>`. You can feed it
+> a known sequence of events and verify that it fires at the right moment.
+> No mocking, no side effects.
+
+### Architecture
 
 ```
 Engram stream
@@ -1798,7 +2320,10 @@ Engram stream
        └── Escalate { severity, context }
 ```
 
-### 19.2 Circuit Breaker
+### Circuit Breaker
+
+<details>
+<summary>CircuitBreaker struct and proactive trip signal</summary>
 
 ```rust
 pub struct CircuitBreaker {
@@ -1811,7 +2336,12 @@ pub struct CircuitBreaker {
 `ProactiveTripSignal` fires when the Holt forecaster predicts imminent failure
 budget exhaustion — trips the circuit before the budget is actually hit.
 
-### 19.3 StuckDetector
+</details>
+
+### StuckDetector
+
+<details>
+<summary>StuckDetector and MetaCognitionHook</summary>
 
 ```rust
 pub struct StuckDetector {
@@ -1825,10 +2355,12 @@ pub struct MetaCognitionHook {
 }
 ```
 
-### 19.4 DiagnosisEngine
+</details>
 
-Classifies conductor interventions into error categories and produces
-suggested interventions:
+### DiagnosisEngine
+
+<details>
+<summary>DiagnosisEngine enums</summary>
 
 ```rust
 pub enum ErrorCategory {
@@ -1849,7 +2381,12 @@ pub struct DiagnosisResult {
 }
 ```
 
-### 19.5 Federation Hierarchy
+</details>
+
+### Federation Hierarchy
+
+The Conductor is hierarchical. Each layer escalates to the next when local
+policy cannot resolve the problem:
 
 ```
 L1: Per-turn watcher (StuckDetector, AnomalyDetector)
@@ -1858,9 +2395,10 @@ L3: Per-plan coordinator (PlanRevision, recovery policies)
 L4: Fleet conductor (cross-plan resource allocation)
 ```
 
-Each layer escalates to the next when local policy cannot resolve.
+### Yerkes-Dodson Pressure-Performance
 
-### 19.6 Yerkes-Dodson Pressure-Performance
+<details>
+<summary>YerkesDodson watcher</summary>
 
 ```rust
 pub struct YerkesDodson {
@@ -1874,14 +2412,20 @@ pub struct YerkesDodson {
 Used to calibrate when to inject challenge (increase arousal) vs. when to
 de-escalate (reduce pressure).
 
+</details>
+
 ---
 
 ## 20. RuntimeEvent System
 
 Source: `crates/roko-core/src/runtime_event.rs`, `crates/roko-runtime/src/event_bus.rs`
 
-`RuntimeEvent` is the typed event stream emitted by the workflow engine and
-consumed by TUI, SSE endpoints, JSONL logger, and `EventConsumer` adapters.
+`RuntimeEvent` is the typed event stream emitted by the workflow engine. It
+is consumed by three separate sinks simultaneously: the TUI (renders to the
+dashboard), SSE endpoints (pushes to HTTP clients), and the JSONL logger.
+
+<details>
+<summary>RuntimeEvent enum variants</summary>
 
 ```rust
 pub enum RuntimeEvent {
@@ -1899,6 +2443,8 @@ pub enum RuntimeEvent {
 }
 ```
 
+</details>
+
 The `RuntimeEventBus` is a `tokio::broadcast` channel. The TUI subscribes via
 `StateHub` (push-based dashboard). SSE subscribers receive events as
 newline-delimited JSON.
@@ -1910,7 +2456,18 @@ newline-delimited JSON.
 Source: `crates/roko-primitives/src/hdc.rs`
 
 Roko uses 10,240-bit hyperdimensional computing (HDC) vectors for semantic
-similarity, episode clustering, and anti-noise fingerprinting.
+similarity, episode clustering, and anti-noise fingerprinting. HDC is a form
+of computation where meaning is encoded in high-dimensional binary vectors,
+and operations like XOR (binding) and majority vote (bundling) preserve
+semantic relationships.
+
+The key property: two HDC vectors computed from similar inputs have high
+Hamming similarity. Two vectors from unrelated inputs are nearly orthogonal.
+This is what enables episode clustering during dream consolidation: episodes
+with similar task shapes produce similar fingerprints.
+
+<details>
+<summary>HDC vector constants, operations, and codebook</summary>
 
 ```rust
 pub const HDC_BITS: usize = 10_240;
@@ -1942,13 +2499,15 @@ detection.
 pub enum InferenceTier { T0, T1, T2 }
 ```
 
+</details>
+
 ---
 
 ## 22. Safety Architecture
 
 Source: `crates/roko-agent/src/safety/`
 
-### 22.1 SafetyLayer
+### SafetyLayer
 
 Attached to `ToolDispatcher`. Runs before and after every tool invocation:
 
@@ -1964,7 +2523,10 @@ Post-execution:
   3. Taint propagation
 ```
 
-### 22.2 AgentContract
+<details>
+<summary>AgentContract, CustodyLogger, and ScrubPolicy</summary>
+
+**AgentContract**
 
 ```yaml
 # contracts/<agent-role>.yaml
@@ -1977,7 +2539,7 @@ max_file_size_bytes: 10485760
 
 Falls back to permissive default when YAML is missing.
 
-### 22.3 Custody Chain
+**Custody Chain**
 
 Every tool invocation is logged to the Custody audit chain:
 
@@ -1988,7 +2550,7 @@ pub struct CustodyLogger {
 }
 ```
 
-### 22.4 ScrubPolicy
+**ScrubPolicy**
 
 ```rust
 pub struct ScrubPolicy {
@@ -1998,13 +2560,20 @@ pub struct ScrubPolicy {
 }
 ```
 
+</details>
+
 ---
 
 ## 23. Extension System
 
 Source: `crates/roko-core/src/extension.rs`
 
-`ExtensionChain` allows plugging in custom behavior at named hook points:
+`ExtensionChain` allows plugging in custom behavior at named hook points.
+Extensions are called synchronously at task lifecycle events and can modify
+context, record metrics, or trigger external notifications.
+
+<details>
+<summary>ExtensionChain and Extension trait</summary>
 
 ```rust
 pub struct ExtensionChain {
@@ -2022,9 +2591,13 @@ pub trait Extension: Send + Sync {
 Hook points: `TaskStart`, `GateResult`, `TaskComplete`, `PlanRevision`,
 `ModelSelected`, `KnowledgeAdmitted`.
 
+</details>
+
 ---
 
 ## 24. Data Flow: Signal Through the System
+
+This section follows a request end-to-end to show how all the pieces connect.
 
 ### 24.1 Plan Execution Flow
 
@@ -2121,7 +2694,7 @@ Before dispatching agent for task T:
   └── All injected into Layer 6 (techniques) of system prompt
 ```
 
-### 24.5 ASCII: Cross-Crate Signal Flow
+### 24.5 Cross-Crate Signal Flow
 
 ```
                     ┌──────────────┐
