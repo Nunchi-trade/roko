@@ -14,8 +14,12 @@ use tracing::info;
 
 use crate::auth_detect::{AuthMethod, detect_auth, print_setup_instructions};
 use crate::chat_inline;
+use crate::chat_session::ChatAgentSession;
 use crate::config::RepoRegistry;
+use crate::model_selection::resolve_effective_model;
 use crate::serve_runtime::RokoCliRuntime;
+use roko_core::agent::ProviderKind;
+use roko_core::config::schema::RokoConfig;
 
 /// Main unified entry point: auto-detect auth, launch chat.
 ///
@@ -81,6 +85,9 @@ pub async fn cmd_unified_chat(
 /// One-shot inline mode: dispatch a bare prompt, print result, exit.
 ///
 /// Called for `roko "fix the bug"` (positional prompt, no subcommand).
+///
+/// Uses `ChatAgentSession` for full system prompt, tools, MCP, and safety
+/// settings. Falls back to raw dispatch if session initialization fails.
 pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
     let auth = detect_auth();
     if matches!(auth, AuthMethod::NeedsSetup) {
@@ -92,14 +99,46 @@ pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
         eprintln!("roko — auth: {}", auth.label());
     }
 
-    // Prefer ModelCallService for cost tracking and feedback recording.
-    let result = match crate::dispatch_v2::dispatch_via_model_call_service(prompt).await {
-        Ok(r) => r,
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = load_config_or_defaults(None, &workdir)?;
+
+    // Build a ChatAgentSession for full tool/system-prompt/MCP support.
+    let mut session = match build_oneshot_session(&config, &auth, workdir.clone()) {
+        Ok(session) => session,
         Err(e) => {
+            tracing::warn!("ChatAgentSession init failed ({e:#}), falling back to dispatch_direct");
+            // Fallback: raw dispatch (no system prompt, no tools, no MCP)
             #[cfg(feature = "legacy-orchestrate")]
             {
-                tracing::debug!("ModelCallService failed ({e:#}), falling back to raw dispatch");
-                crate::dispatch_direct::dispatch_prompt(&auth, prompt).await?
+                let result = {
+                    #[allow(deprecated)]
+                    {
+                        match crate::dispatch_v2::dispatch_via_model_call_service(prompt).await {
+                            Ok(r) => r,
+                            Err(e2) => {
+                                tracing::debug!(
+                                    "ModelCallService also failed ({e2:#}), using raw dispatch"
+                                );
+                                crate::dispatch_direct::dispatch_prompt(&auth, prompt).await?
+                            }
+                        }
+                    }
+                };
+                for tool_output in &result.tool_outputs {
+                    let label = tool_output.tool_name.as_deref().unwrap_or("tool");
+                    eprintln!(
+                        "[{label}] {}",
+                        tool_output.content.lines().next().unwrap_or("")
+                    );
+                }
+                println!("{}", result.text);
+                if !quiet {
+                    eprintln!(
+                        "\n[{} | {} in / {} out tokens]",
+                        result.model, result.input_tokens, result.output_tokens,
+                    );
+                }
+                return Ok(0);
             }
             #[cfg(not(feature = "legacy-orchestrate"))]
             {
@@ -108,21 +147,36 @@ pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
         }
     };
 
-    // Show tool outputs before the response text
-    for tool_output in &result.tool_outputs {
-        let label = tool_output.tool_name.as_deref().unwrap_or("tool");
-        eprintln!(
-            "[{label}] {}",
-            tool_output.content.lines().next().unwrap_or("")
-        );
+    // Single-turn dispatch via ChatAgentSession.
+    let result = match session.send_turn_oneshot(prompt).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return Ok(1);
+        }
+    };
+
+    if result.cancelled {
+        eprintln!("error: turn cancelled");
+        return Ok(1);
     }
 
+    // Show tool summaries on stderr before response text.
+    for tc in &result.tool_calls {
+        let status = if tc.success { "done" } else { "failed" };
+        eprintln!("[{}] {}", tc.name, status);
+    }
+
+    // Response text to stdout (pipe-friendly).
     println!("{}", result.text);
 
     if !quiet {
         eprintln!(
-            "\n[{} | {} in / {} out tokens]",
-            result.model, result.input_tokens, result.output_tokens,
+            "\n[{} | {} in / {} out tokens | {:.1}s]",
+            result.model,
+            result.input_tokens,
+            result.output_tokens,
+            result.duration.as_secs_f64(),
         );
     }
 
@@ -180,6 +234,43 @@ fn load_config_or_defaults(
         Ok(resolved) => Ok(resolved.config),
         Err(_) => Ok(crate::config::Config::default()),
     }
+}
+
+fn build_oneshot_session(
+    config: &crate::config::Config,
+    auth: &AuthMethod,
+    workdir: PathBuf,
+) -> Result<ChatAgentSession> {
+    // One-shot chat currently has a Claude CLI implementation only.
+    if !matches!(auth, &AuthMethod::ClaudeCli) {
+        return Err(anyhow::anyhow!(
+            "ChatAgentSession oneshot currently supports Claude CLI auth, got {}",
+            auth.label()
+        ));
+    }
+
+    let mut model_config = RokoConfig::default();
+    model_config.providers.extend(config.providers.clone());
+    model_config.models.extend(config.models.clone());
+    model_config.agent.default_effort = config.agent.effort.clone();
+    model_config.agent.bare_mode = config.agent.bare_mode;
+    model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
+    model_config.agent.fallback_model = config.agent.fallback_model.clone();
+    model_config.agent.tier_models = config.agent.tier_models.clone();
+    model_config.agent.env = Some(config.agent.env.clone());
+    if let Some(model) = config.agent.model.clone() {
+        model_config.agent.default_model = model;
+    }
+
+    let selection = resolve_effective_model(None, None, None, None, &model_config)
+        .context("resolve oneshot model selection")?;
+    if selection.provider_kind != ProviderKind::ClaudeCli.label() {
+        return Err(anyhow::anyhow!(
+            "ChatAgentSession oneshot currently supports Claude CLI provider, got {}",
+            selection.provider_kind
+        ));
+    }
+    ChatAgentSession::new(config, workdir, selection)
 }
 
 #[cfg(test)]
