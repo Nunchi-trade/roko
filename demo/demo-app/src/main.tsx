@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route } from 'react-router';
+import ErrorBoundary from './components/ErrorBoundary';
 import AppShell from './components/AppShell';
 import Landing from './pages/Landing';
 import DashboardLayout from './pages/dashboard/Layout';
@@ -26,30 +27,32 @@ import './styles/rosedust.css';
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
-      <Routes>
-        <Route element={<AppShell />}>
-          <Route index element={<Landing />} />
-          <Route path="dashboard" element={<DashboardLayout />}>
-            <Route index element={<CostDashboard />} />
-            <Route path="fleet" element={<AgentFleet />} />
-            <Route path="knowledge" element={<KnowledgeGraph />} />
-            <Route path="chain" element={<ChainView />} />
-            <Route path="entries" element={<KnowledgeEntries />} />
-            <Route path="routing" element={<CascadeRouter />} />
-            <Route path="share/:token" element={<ShareView />} />
+      <ErrorBoundary>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<Landing />} />
+            <Route path="dashboard" element={<DashboardLayout />}>
+              <Route index element={<CostDashboard />} />
+              <Route path="fleet" element={<AgentFleet />} />
+              <Route path="knowledge" element={<KnowledgeGraph />} />
+              <Route path="chain" element={<ChainView />} />
+              <Route path="entries" element={<KnowledgeEntries />} />
+              <Route path="routing" element={<CascadeRouter />} />
+              <Route path="share/:token" element={<ShareView />} />
+            </Route>
+            <Route path="demo" element={<Demo />} />
+            <Route path="terminal" element={<Terminal />} />
+            <Route path="builder" element={<Builder />} />
+            <Route path="explorer" element={<Explorer />} />
+            <Route path="bench" element={<Bench />} />
+            <Route path="bench/run/:id" element={<BenchRunDetail />} />
+            <Route path="bench/compare" element={<BenchCompare />} />
+            <Route path="bench/showroom" element={<BenchShowroom />} />
+            <Route path="share/:token" element={<SharePage />} />
+            <Route path="job-market" element={<JobMarket />} />
           </Route>
-          <Route path="demo" element={<Demo />} />
-          <Route path="terminal" element={<Terminal />} />
-          <Route path="builder" element={<Builder />} />
-          <Route path="explorer" element={<Explorer />} />
-          <Route path="bench" element={<Bench />} />
-          <Route path="bench/run/:id" element={<BenchRunDetail />} />
-          <Route path="bench/compare" element={<BenchCompare />} />
-          <Route path="bench/showroom" element={<BenchShowroom />} />
-          <Route path="job-market" element={<JobMarket />} />
-          <Route path="share/:token" element={<SharePage />} />
-        </Route>
-      </Routes>
+        </Routes>
+      </ErrorBoundary>
     </BrowserRouter>
   </StrictMode>,
 );

@@ -9,19 +9,22 @@
 import type { TerminalHandle } from './useTerminal';
 import { lookupCmdDesc } from '../lib/cmd-descriptions';
 
-// ── Global speed ─────────────────────────────────────────────
+// ── Speed multiplier ─────────────────────────────────────────
 
-let globalSpeed = 1;
+let speedMultiplier = 1;
 
-/** Set the global typing speed multiplier (used by showCmd when no explicit speed is passed). */
-export function setGlobalSpeed(speed: number) {
-  globalSpeed = speed;
+export function setSpeedMultiplier(m: number) {
+  speedMultiplier = m;
 }
 
 // ── Helpers ──────────────────────────────────────────────────
 
 function rawSleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+function adjustedSleep(ms: number): Promise<void> {
+  return rawSleep(ms / speedMultiplier);
 }
 
 // ── Roko binary resolution ───────────────────────────────────
@@ -116,21 +119,26 @@ export interface GateResult {
   status: 'pass' | 'fail';
 }
 
+let showCmdSeq = 0;
+
 async function typeVisibleCommandAndWait(
   handle: TerminalHandle,
   cmd: string,
   timeout: number,
-  speed = 1,
 ): Promise<boolean> {
-  if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
-  const charDelay = Math.max(3, (10 + Math.random() * 5) / speed);
+  if (!handle?.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
+
+  const marker = `__RK_SHOW_${(++showCmdSeq).toString(36)}_${Date.now().toString(36)}__`;
   for (const ch of cmd) {
+    if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
     handle.ws.send(ch);
-    await rawSleep(charDelay);
+    await adjustedSleep(10 + Math.random() * 5);
   }
-  await rawSleep(Math.max(10, 40 / speed));
+  await adjustedSleep(40);
+  if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
   handle.ws.send('\r');
-  return handle.waitForPrompt(timeout);
+  handle.sendRaw(`printf '\\n${marker}\\n'\r`);
+  return handle.waitForMarker(marker, timeout);
 }
 
 /**
@@ -166,7 +174,7 @@ export async function showCmd(
 
   // Type and execute. Waiting on an explicit marker is more reliable than
   // trying to parse arbitrary themed shell prompts.
-  const ok = await typeVisibleCommandAndWait(handle, cmd, timeout, opts?.speed ?? globalSpeed);
+  const ok = await typeVisibleCommandAndWait(handle, cmd, timeout);
 
   const elapsed = (Date.now() - startTime) / 1000;
 

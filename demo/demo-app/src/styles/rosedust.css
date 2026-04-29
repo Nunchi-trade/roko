@@ -702,6 +702,22 @@ section + section::before {
   to { opacity: 1; }
 }
 
+/* Component keyframes (Skeleton, LiveIndicator, ConnectScreen) */
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes livepulse {
+  0%, 100% { opacity: .7; }
+  50% { opacity: 1; }
+}
+
+@keyframes connectPulse {
+  0%, 100% { transform: scale(1); opacity: .6; }
+  50% { transform: scale(1.4); opacity: 1; }
+}
+
 /* ═══════════════════════════════════════════════════════════
    GLASS CARD HOVER
    ═══════════════════════════════════════════════════════════ */

@@ -113,8 +113,6 @@ export default function ParetoChart({ data, height = 320 }: ParetoChartProps) {
       // Glow
       ctx.beginPath();
       ctx.arc(x, y, 8, 0, Math.PI * 2);
-      ctx.fillStyle = color.replace(')', ',0.15)').replace('rgb', 'rgba').replace('#', '');
-      // For hex colors, convert
       ctx.fillStyle = `${color}26`;
       ctx.fill();
 
