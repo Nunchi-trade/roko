@@ -138,6 +138,12 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             max_retries,
             dry_run,
         } => {
+            // ── Mandatory validation: reject malformed plans before execution ──
+            // Runs in both normal and `--dry-run` mode.
+            if let Some(exit_code) = validate_before_run(&plans_dir) {
+                return Ok(exit_code);
+            }
+
             // ── Dry-run mode: parse plans + show summary without executing ──
             if dry_run {
                 return cmd_plan_dry_run(&plans_dir, cli).await;
@@ -806,6 +812,47 @@ pub(crate) async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32>
     }
 
     Ok(EXIT_SUCCESS)
+}
+
+/// Run plan validation before `plan run` starts any agents.
+///
+/// Returns `Some(exit_code)` when validation fails, or `None` when the plan
+/// set is valid enough to continue.
+fn validate_before_run(plans_dir: &Path) -> Option<i32> {
+    let current_dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("error: cannot resolve cwd for validation: {error}");
+            return Some(1);
+        }
+    };
+
+    let config_path = current_dir.join("roko.toml");
+    let models = if config_path.is_file() {
+        std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|text| toml::from_str::<roko_core::config::schema::RokoConfig>(&text).ok())
+            .map(|config| crate::commands::config_cmd::configured_models(&config))
+    } else {
+        None
+    };
+
+    let report = match plan_validate::validate_plans_dir(plans_dir, models.as_ref()) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("error: plan validation failed: {error:#}");
+            return Some(1);
+        }
+    };
+
+    let code = report.exit_code(false);
+    if code != 0 {
+        eprintln!("{}", plan_validate::render_text(&report));
+        eprintln!("error: plan validation failed — fix the errors above before running");
+        Some(1)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> Result<i32> {
