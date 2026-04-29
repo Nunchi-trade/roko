@@ -397,35 +397,56 @@ where
         "handling ACP session prompt"
     );
 
-    // Build file context if include_context is set.
-    let file_context = if params.include_context {
-        let uris = extract_resource_uris(&params.prompt);
-        if uris.is_empty() {
-            String::new()
+    // Capture workflow config before we decide whether context resolution is needed.
+    let workflow_config = session.config_state.workflow.clone();
+
+    // Check if a workflow pipeline should handle this prompt.
+    let pipeline_template = if workflow_config == "auto" {
+        Some(crate::pipeline::WorkflowTemplate::auto_select(&prompt_text))
+    } else {
+        crate::pipeline::WorkflowTemplate::from_config(&workflow_config)
+    };
+    let should_resolve_context = !is_slash_command && pipeline_template.is_none();
+
+    // Resolve context only for the single-agent path.
+    // Resource blocks always resolve; @-mentions are only resolved when
+    // prompt-time context is enabled.
+    let file_context = if should_resolve_context {
+        if params.include_context {
+            resolve_context_items(&params.prompt, workdir).await
         } else {
-            read_file_context(&uris, workdir)
+            let uris = extract_resource_uris(&params.prompt);
+            if uris.is_empty() {
+                String::new()
+            } else {
+                read_file_context(&uris, workdir)
+            }
         }
     } else {
         String::new()
     };
 
-    // Get system prompt and history context (skip for slash commands).
-    let system_prompt = session.system_prompt_for_mode().to_owned();
-    let history_context = if is_slash_command {
+    // Get system prompt and history context for the single-agent path.
+    let system_prompt = if should_resolve_context {
+        session.system_prompt_for_mode().to_owned()
+    } else {
         String::new()
-    } else {
-        session.build_history_context_for_cli()
     };
-    let messages = if is_slash_command {
-        Vec::new()
+    let history_context = if should_resolve_context {
+        session.build_history_context_for_cli()
     } else {
-        // Build combined system prompt with file context.
+        String::new()
+    };
+    let messages = if should_resolve_context {
+        // Build combined system prompt with resolved context.
         let full_system = if file_context.is_empty() {
             system_prompt.clone()
         } else {
             format!("{system_prompt}\n\n{file_context}")
         };
         session.build_messages_array(&full_system, &prompt_text)
+    } else {
+        Vec::new()
     };
 
     // Push user turn before dispatch (skip slash commands).
@@ -439,8 +460,6 @@ where
     let workdir = workdir.to_path_buf();
     let roko_config = roko_config.clone();
 
-    // Capture workflow config for the pipeline.
-    let workflow_config = session.config_state.workflow.clone();
     let clippy_enabled = session.config_state.clippy_enabled;
     let tests_enabled = session.config_state.tests_enabled;
     let max_iterations = session.config_state.max_iterations;
@@ -461,12 +480,6 @@ where
             .await;
         }
 
-        // Check if a workflow pipeline should handle this prompt.
-        let pipeline_template = if workflow_config == "auto" {
-            Some(crate::pipeline::WorkflowTemplate::auto_select(&prompt_text))
-        } else {
-            crate::pipeline::WorkflowTemplate::from_config(&workflow_config)
-        };
         if let Some(template) = pipeline_template {
             if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
                 return Ok(crate::runner::run_workflow_pipeline(
@@ -1607,11 +1620,7 @@ fn read_file_context(uris: &[String], workdir: &Path) -> String {
         match std::fs::read_to_string(&canonical) {
             Ok(contents) => {
                 // Cap individual file at 32KB to avoid blowing up context.
-                let truncated = if contents.len() > 32_768 {
-                    format!("{}... [truncated at 32KB]", &contents[..32_768])
-                } else {
-                    contents
-                };
+                let truncated = truncate_with_limit(&contents, 32_768, "... [truncated at 32KB]");
                 let rel_path = canonical
                     .strip_prefix(&workdir_canonical)
                     .unwrap_or(&canonical);
@@ -1628,6 +1637,198 @@ fn read_file_context(uris: &[String], workdir: &Path) -> String {
     }
 
     context
+}
+
+/// Resolves context annotations in prompt blocks into a single context string.
+///
+/// Explicit file attachments are resolved as XML-tagged file content. Text
+/// blocks are scanned for `@` mentions and each supported mention is resolved
+/// to either git context or file content.
+pub(crate) async fn resolve_context_items(prompt: &[ContentBlock], workdir: &Path) -> String {
+    use crate::types::ResourceRef;
+
+    let mut parts = Vec::new();
+
+    for block in prompt {
+        match block {
+            ContentBlock::Resource {
+                resource: ResourceRef::File { uri },
+            } => match resolve_file_uri(uri, workdir).await {
+                Ok(content) => parts.push(content),
+                Err(error) => {
+                    warn!(uri = %uri, error = %error, "failed to resolve file resource URI");
+                }
+            },
+            ContentBlock::Text { text } => {
+                for label in extract_at_mentions(text) {
+                    match resolve_at_mention(&label, workdir).await {
+                        Ok(content) => parts.push(content),
+                        Err(error) => {
+                            warn!(label = %label, error = %error, "failed to resolve @-mention");
+                        }
+                    }
+                }
+            }
+            ContentBlock::Diff { .. } => {}
+        }
+    }
+
+    parts.join("\n\n")
+}
+
+async fn resolve_file_uri(uri: &str, workdir: &Path) -> anyhow::Result<String> {
+    let path_str = uri.strip_prefix("file://").unwrap_or(uri);
+    let (rel_path, contents) = resolve_local_file_contents(Path::new(path_str), workdir).await?;
+    Ok(format!(
+        "<file path=\"{}\">\n{}\n</file>",
+        rel_path.display(),
+        contents
+    ))
+}
+
+async fn resolve_at_mention(label: &str, workdir: &Path) -> anyhow::Result<String> {
+    match label {
+        "branch-diff" | "diff" => {
+            let output = tokio::process::Command::new("git")
+                .args(["diff"])
+                .current_dir(workdir)
+                .output()
+                .await?;
+            ensure_git_output_success(&output, "git diff")?;
+            let diff = String::from_utf8_lossy(&output.stdout);
+            let truncated = truncate_with_limit(&diff, 10_240, "...\n[truncated]");
+            Ok(format!("--- branch diff ---\n{truncated}"))
+        }
+        "recent-commits" | "git-log" | "log" => {
+            let output = tokio::process::Command::new("git")
+                .args(["log", "--oneline", "-20"])
+                .current_dir(workdir)
+                .output()
+                .await?;
+            ensure_git_output_success(&output, "git log")?;
+            let log = String::from_utf8_lossy(&output.stdout);
+            let truncated = truncate_with_limit(&log, 10_240, "...\n[truncated]");
+            Ok(format!("--- recent commits ---\n{truncated}"))
+        }
+        "status" | "git-status" => {
+            let output = tokio::process::Command::new("git")
+                .args(["status", "--short"])
+                .current_dir(workdir)
+                .output()
+                .await?;
+            ensure_git_output_success(&output, "git status")?;
+            let status = String::from_utf8_lossy(&output.stdout);
+            let truncated = truncate_with_limit(&status, 10_240, "...\n[truncated]");
+            Ok(format!("--- git status ---\n{truncated}"))
+        }
+        _ => {
+            let (rel_path, contents) = resolve_local_file_contents(Path::new(label), workdir).await?;
+            Ok(format!("--- {} ---\n{contents}", rel_path.display()))
+        }
+    }
+}
+
+async fn resolve_local_file_contents(
+    path: &Path,
+    workdir: &Path,
+) -> anyhow::Result<(PathBuf, String)> {
+    let full_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workdir.join(path)
+    };
+
+    let workdir_canonical = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    let canonical = full_path.canonicalize().map_err(|error| {
+        anyhow::anyhow!("cannot canonicalize {}: {error}", full_path.display())
+    })?;
+    if !canonical.starts_with(&workdir_canonical) {
+        return Err(anyhow::anyhow!(
+            "path {} is outside workdir",
+            canonical.display()
+        ));
+    }
+
+    let contents = tokio::fs::read_to_string(&canonical).await?;
+    let rel_path = canonical
+        .strip_prefix(&workdir_canonical)
+        .unwrap_or(&canonical)
+        .to_path_buf();
+    let truncated = truncate_with_limit(&contents, 32_768, "... [truncated at 32KB]");
+
+    Ok((rel_path, truncated))
+}
+
+fn extract_at_mentions(text: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    let mut search_start = 0;
+
+    while let Some(relative_at) = text[search_start..].find('@') {
+        let at_index = search_start + relative_at;
+        let prev = text[..at_index].chars().next_back();
+        if matches!(prev, Some(c) if c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            search_start = at_index + 1;
+            continue;
+        }
+
+        let mut end = at_index + 1;
+        while end < text.len() {
+            let ch = text[end..].chars().next().expect("valid char boundary");
+            if ch.is_whitespace()
+                || ch == '@'
+                || matches!(ch, ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '<' | '>')
+            {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+
+        let label = text[at_index + 1..end]
+            .trim_matches(|ch: char| matches!(ch, ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '<' | '>' | '\'' | '"'));
+        if !label.is_empty() && !label.starts_with('@') {
+            mentions.push(label.to_owned());
+        }
+
+        search_start = end;
+    }
+
+    mentions
+}
+
+fn truncate_with_limit(text: &str, limit: usize, suffix: &str) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut truncated = String::with_capacity(end + suffix.len());
+    truncated.push_str(&text[..end]);
+    truncated.push_str(suffix);
+    truncated
+}
+
+fn ensure_git_output_success(
+    output: &std::process::Output,
+    command: &str,
+) -> anyhow::Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        Err(anyhow::anyhow!("{command} failed"))
+    } else {
+        Err(anyhow::anyhow!("{command} failed: {stderr}"))
+    }
 }
 
 fn workflow_template_name(template: &crate::pipeline::WorkflowTemplate) -> &'static str {
@@ -1785,5 +1986,47 @@ mod tests {
         assert_eq!(tool_name_to_kind("Write"), ToolCallKind::Create);
         assert_eq!(tool_name_to_kind("Bash"), ToolCallKind::Terminal);
         assert_eq!(tool_name_to_kind("Read"), ToolCallKind::Other);
+    }
+
+    #[test]
+    fn extract_at_mentions_supports_embedded_mentions() {
+        let mentions = extract_at_mentions("fix @src/main.rs and @branch-diff, not foo@bar.com");
+        assert_eq!(mentions, vec!["src/main.rs", "branch-diff"]);
+    }
+
+    #[tokio::test]
+    async fn resolve_context_items_resolves_resource_and_path_mentions() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path();
+        let file_path = workdir.join("src/main.rs");
+        std::fs::create_dir_all(file_path.parent().expect("parent directory")).expect("create dirs");
+        std::fs::write(&file_path, "fn main() {}\n").expect("write file");
+
+        let prompt = vec![
+            ContentBlock::Resource {
+                resource: crate::types::ResourceRef::File {
+                    uri: format!("file://{}", file_path.display()),
+                },
+            },
+            ContentBlock::Text {
+                text: "check @src/main.rs".to_owned(),
+            },
+        ];
+
+        let context = resolve_context_items(&prompt, workdir).await;
+        assert!(context.contains("<file path=\"src/main.rs\">"));
+        assert!(context.contains("--- src/main.rs ---"));
+        assert!(context.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn truncate_with_limit_is_char_safe() {
+        let text = "é".repeat(20_000);
+        let truncated = truncate_with_limit(&text, 32_768, "... [truncated]");
+        let prefix_len = truncated.len() - "... [truncated]".len();
+
+        assert!(truncated.ends_with("... [truncated]"));
+        assert!(truncated.len() < text.len());
+        assert!(truncated[..prefix_len].chars().all(|c| c == 'é'));
     }
 }
