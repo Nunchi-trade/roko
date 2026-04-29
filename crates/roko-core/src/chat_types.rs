@@ -234,11 +234,11 @@ impl ChatResponse {
     /// Convert the canonical chat response back into an `AgentOutput` engram.
     #[must_use]
     pub fn to_signal(&self) -> Engram {
-        Engram::builder(Kind::AgentOutput)
+            Engram::builder(Kind::AgentOutput)
             .body(Body::text(&self.content))
             .tag(
                 "model",
-                self.metadata.model_used.as_deref().unwrap_or("unknown"),
+                self.metadata.model_used.as_deref().unwrap_or(""),
             )
             .tag("finish_reason", format!("{:?}", self.finish_reason))
             .build()

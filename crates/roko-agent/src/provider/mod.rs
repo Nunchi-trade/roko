@@ -1073,7 +1073,7 @@ mod tests {
 
         let agent = create_agent_for_model(
             &config,
-            "unknown-model",
+            "mystery-model",
             AgentOptions {
                 timeout_ms: Some(250),
                 name: "fallback-agent".to_string(),
@@ -1096,7 +1096,7 @@ mod tests {
 
         let agent = create_agent_for_model(
             &config,
-            "unknown-model",
+            "mystery-model",
             AgentOptions {
                 timeout_ms: Some(250),
                 name: "fallback-agent".to_string(),
@@ -1128,7 +1128,7 @@ mod tests {
         let agent = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
             create_agent_for_model(
                 &config,
-                "unknown-model",
+                "mystery-model",
                 AgentOptions {
                     timeout_ms: Some(250),
                     name: "fallback-agent".to_string(),

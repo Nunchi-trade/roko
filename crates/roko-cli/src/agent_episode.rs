@@ -10,7 +10,7 @@ fn resolved_capture_model(agent_command: &str, model: Option<&str>) -> String {
     if agent_command.eq_ignore_ascii_case("claude") {
         "claude-opus-4-6".to_string()
     } else {
-        "unknown-model".to_string()
+        String::new()
     }
 }
 

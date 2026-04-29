@@ -704,7 +704,7 @@ fn same_episode(lhs: &Episode, rhs: &Episode) -> bool {
 }
 
 fn episode_model_label(episode: &Episode) -> String {
-    normalized_template(&episode.model).unwrap_or_else(|| "unknown-model".to_string())
+    normalized_template(&episode.model).unwrap_or_default()
 }
 
 fn episode_template_label(episode: &Episode) -> String {

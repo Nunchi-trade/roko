@@ -2866,7 +2866,7 @@ fn derive_cost_record(episode: &Episode, provider_override: Option<&str>) -> Opt
 
     Some(CostRecord {
         timestamp: episode.timestamp.to_rfc3339(),
-        model: extra_string(episode, "model").unwrap_or_else(|| "unknown-model".to_string()),
+        model: episode_model(episode),
         provider,
         role: extra_string(episode, "role").unwrap_or_else(|| "unknown-role".to_string()),
         plan_id: extra_string(episode, "plan_id").unwrap_or_default(),

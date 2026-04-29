@@ -48,7 +48,7 @@ async fn create_agent_for_model_exec_fallback_keeps_default_safety() {
 
     let agent = create_agent_for_model(
         &config,
-        "unknown-model",
+        "mystery-model",
         AgentOptions {
             timeout_ms: Some(250),
             name: "fallback-agent".to_string(),

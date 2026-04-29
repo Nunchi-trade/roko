@@ -892,7 +892,7 @@ fn load_last_session_summary() -> Option<(String, u32, f64, String)> {
     let saved_at = snap.saved_at;
     let topic = snap
         .first_user_message
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_default();
     Some((saved_at, snap.turn_count, snap.total_cost, topic))
 }
 
@@ -913,9 +913,9 @@ fn active_model_name(session: &ChatSession) -> String {
             }
             AuthMethod::ClaudeCli => "claude CLI".to_string(),
             AuthMethod::OpenAiCompat { model, .. } => {
-                model.as_deref().unwrap_or("unknown").to_string()
+                model.as_deref().unwrap_or_default().to_string()
             }
-            AuthMethod::NeedsSetup => "none".to_string(),
+            AuthMethod::NeedsSetup => String::new(),
         },
         DispatchMode::Http { .. } => "HTTP backend".to_string(),
         DispatchMode::Session => "session".to_string(),
@@ -1117,7 +1117,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
     let mut session = ChatSession {
         phase: Phase::Input,
         input,
-        streaming: StreamingState::new("unknown"),
+        streaming: StreamingState::new(""),
         cost: CostMeter::new(),
         cost_table,
         agent_id: agent_id.to_string(),
@@ -1514,7 +1514,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
     let mut session = ChatSession {
         phase: Phase::Input,
         input,
-        streaming: StreamingState::new("unknown"),
+        streaming: StreamingState::new(""),
         cost: CostMeter::new(),
         cost_table,
         agent_id: "roko".to_string(),
@@ -3662,7 +3662,7 @@ fn handle_slash_command(
         _ => {
             term.push_lines(&[styled::continuation(
                 theme,
-                "unknown",
+                "command",
                 &format!("command: {cmd}"),
                 Some("try /help"),
             )])?;

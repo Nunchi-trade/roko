@@ -127,7 +127,7 @@ impl CalibrationPolicy {
                 for (_task_id, pending) in entries {
                     let residual = pending.predicted_success_prob - actual;
                     let category = if pending.category.is_empty() {
-                        "unknown"
+                        ""
                     } else {
                         &pending.category
                     };
@@ -217,7 +217,7 @@ mod tests {
             policy.process_event(&turn_started(&task_id, "model-a"));
             policy.process_event(&turn_completed(false));
         }
-        assert!(policy.tracker().sample_count("model-a", "unknown") >= 5);
+        assert!(policy.tracker().sample_count("model-a", "") >= 5);
     }
 
     #[test]

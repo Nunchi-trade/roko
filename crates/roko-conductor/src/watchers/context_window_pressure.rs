@@ -217,7 +217,7 @@ mod tests {
             Engram::builder(Kind::TokenUsage)
                 .body(Body::text("usage"))
                 .tag(TOKENS_USED_TAG, "0")
-                .tag(MODEL_TAG, "unknown-model")
+                .tag(MODEL_TAG, "mystery-model")
                 .build(),
         ];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());

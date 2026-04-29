@@ -794,7 +794,7 @@ fn episode_model_key(episode: &Episode) -> String {
     if !episode.model.trim().is_empty() {
         episode.model.trim().to_string()
     } else {
-        "unknown-model".to_string()
+        String::new()
     }
 }
 

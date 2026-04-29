@@ -2730,7 +2730,8 @@ fn resolved_model(config: &Config) -> String {
     if let Some(model) = &config.agent.model {
         return model.clone();
     }
-    // Check routing config for configured default model before falling back to the command label.
+    // Check routing config for configured default model before returning an empty model for
+    // non-Claude commands.
     if let Ok(mut rc) = roko_core::config::load_config(std::path::Path::new(".")) {
         rc.apply_process_env();
         crate::config::merge_global_providers(&mut rc);
@@ -2738,21 +2739,21 @@ fn resolved_model(config: &Config) -> String {
             return rc.agent.default_model;
         }
     }
-    config.agent.command.trim().to_string()
+    if config.agent.command.trim().eq_ignore_ascii_case("claude") {
+        "claude-sonnet-4-6".to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn dashboard_agent_model(config: &Config) -> String {
     let model = resolved_model(config);
-    if !model.trim().is_empty() {
+    if !model.is_empty() {
         return model;
     }
 
     let command = config.agent.command.trim();
-    if command.is_empty() {
-        "unconfigured".to_string()
-    } else {
-        command.to_string()
-    }
+    command.to_string()
 }
 
 fn infer_provider(config: &Config) -> String {

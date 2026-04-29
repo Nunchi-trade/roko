@@ -371,7 +371,7 @@ fn episode_model(episode: &Episode) -> String {
     if !episode.model.trim().is_empty() {
         episode.model.trim().to_string()
     } else {
-        extra_string(episode, "model").unwrap_or_else(|| "unknown-model".to_string())
+        extra_string(episode, "model").unwrap_or_default()
     }
 }
 

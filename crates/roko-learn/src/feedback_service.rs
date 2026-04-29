@@ -1137,7 +1137,7 @@ mod tests {
             request_id: None,
             prompt_section_ids: Vec::new(),
             knowledge_ids: Vec::new(),
-            model: Some("unknown-model".into()),
+            model: Some("mystery-model".into()),
             provider: None,
             token_usage: None,
             cost: None,

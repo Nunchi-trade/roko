@@ -2022,7 +2022,7 @@ mod tests {
         let router = LinUCBRouter::new(test_slugs());
         let ctx = default_ctx();
 
-        router.update(&ctx, "unknown-model-42", 1.0);
+        router.update(&ctx, "mystery-model-42", 1.0);
         assert_eq!(router.total_observations(), 0);
     }
 

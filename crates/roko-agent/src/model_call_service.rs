@@ -1861,7 +1861,7 @@ mod tests {
     fn cost_predict_returns_zero_for_unknown_model() {
         let svc = ModelCallService::new("default".into());
         let req = ModelCallRequest {
-            model: "unknown-model".into(),
+            model: "mystery-model".into(),
             system: None,
             messages: vec![ChatMessage {
                 role: MessageRole::User,
@@ -1882,7 +1882,7 @@ mod tests {
 
         let estimate = svc.cost_predict(&req);
 
-        assert_eq!(estimate.model, "unknown-model");
+        assert_eq!(estimate.model, "mystery-model");
         assert_eq!(estimate.predicted_cost_usd, 0.0);
     }
 

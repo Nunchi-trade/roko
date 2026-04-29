@@ -1573,9 +1573,9 @@ fn feedback_with_unknown_model_is_noop() {
     let cascade = CascadeRouter::new(test_slugs());
 
     // Should not panic, just silently skip.
-    cascade.feedback("unknown-model-xyz", 0.5, true, -0.5);
+    cascade.feedback("mystery-model-xyz", 0.5, true, -0.5);
 
     // No observations should have been recorded in confidence stats.
     let stats = cascade.confidence_snapshot();
-    assert!(!stats.contains_key("unknown-model-xyz"));
+    assert!(!stats.contains_key("mystery-model-xyz"));
 }

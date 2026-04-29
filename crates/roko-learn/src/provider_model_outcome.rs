@@ -167,7 +167,7 @@ impl ProviderModelOutcomeRecord {
             Some(episode.trigger_kind.clone()),
             Some(episode.kind.clone()),
         ])
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_default();
         let role_id = first_non_empty_owned([
             extra_string_ref(episode, "role_id"),
             extra_string_ref(episode, "role"),
@@ -219,7 +219,7 @@ impl ProviderModelOutcomeRecord {
         let provider =
             first_non_empty([Some(event.backend.as_str())]).unwrap_or("unknown-provider");
         let task_type = if event.outcome.trim().is_empty() {
-            "unknown".to_string()
+            String::new()
         } else {
             event.outcome.clone()
         };
@@ -661,7 +661,7 @@ mod tests {
 
         assert_eq!(record.provider, "anthropic");
         assert_eq!(record.role_id, None);
-        assert_eq!(record.task_type, "unknown");
+        assert_eq!(record.task_type, "");
         assert!(record.gate_outcomes.is_empty());
         assert_eq!(record.retry_count, 0);
         assert_eq!(record.usage.cost_usd, None);

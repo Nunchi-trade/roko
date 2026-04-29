@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn for_call_model_aware_handles_unknown_slug_gracefully() {
         let reg = sixteen_tool_registry();
-        // unknown-model-xyz → unknown_default() profile: cap = 3
+        // mystery-model-xyz → unknown_default() profile: cap = 3
         let results = for_call_model_aware(&reg, "do a task", "nonexistent-model-xyz", None);
         // unknown_default cap is 3, so we must get ≤ 3
         assert!(

@@ -155,10 +155,10 @@ fn plan_validate_preserves_unknown_model_warning() {
     write_model_registry(temp.path());
     write_plan(
         temp.path(),
-        "unknown-model",
+        "mystery-model",
         r#"
 [meta]
-plan = "unknown-model"
+plan = "mystery-model"
 
 [[task]]
 id = "T1"
@@ -179,7 +179,7 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
     assert!(stdout.contains("PLAN_009"), "missing PLAN_009: {stdout}");
     assert!(
         stdout.contains("uses model 'definitely-not-a-model' which is not configured in roko.toml"),
-        "missing original unknown-model warning: {stdout}"
+        "missing original mystery-model warning: {stdout}"
     );
 }
 

@@ -304,7 +304,7 @@ async fn dispatch_openai_compat(
         .unwrap_or("")
         .to_string();
 
-    let model = data.model.unwrap_or_else(|| "unknown".to_string());
+    let model = data.model.unwrap_or_default();
     let input_tokens = data.usage.as_ref().map_or(0, |u| u.prompt_tokens);
     let output_tokens = data.usage.as_ref().map_or(0, |u| u.completion_tokens);
 

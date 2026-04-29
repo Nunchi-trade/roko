@@ -177,7 +177,7 @@ fn describe_threat(failures: &[&Episode]) -> String {
     let model = failures
         .first()
         .map(|episode| episode.model.as_str())
-        .unwrap_or("unknown-model");
+        .unwrap_or("");
     let gates = failing_gates(failures);
     let reason = failures
         .first()

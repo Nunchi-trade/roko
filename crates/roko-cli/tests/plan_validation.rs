@@ -200,9 +200,9 @@ mod plan_validation {
             let models = known_models();
             let report = validate_plan_report(
                 temp.path(),
-                "unknown-model",
+                "mystery-model",
                 &task_toml(
-                    "unknown-model",
+                    "mystery-model",
                     "Unknown model",
                     Some("implementer"),
                     "model_hint = \"gpt2\"\n",

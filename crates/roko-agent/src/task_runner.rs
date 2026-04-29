@@ -517,8 +517,8 @@ impl TaskRunner {
                 error_pattern: classify_error_pattern(&result.output),
                 elapsed_ms: total_usage.wall_ms,
                 cost_so_far_usd: total_cost_usd,
-                model_tier: ctx.attr("model_tier").unwrap_or("unknown").to_string(),
-                task_complexity: ctx.attr("task_complexity").unwrap_or("unknown").to_string(),
+                model_tier: ctx.attr("model_tier").unwrap_or_default().to_string(),
+                task_complexity: ctx.attr("task_complexity").unwrap_or_default().to_string(),
             };
             let action = self.conductor.select_action(&conductor_state);
             conductor_actions.push(action);
