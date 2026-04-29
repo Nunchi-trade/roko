@@ -47,6 +47,7 @@ pub mod bench_demo;
 pub mod chain_handler;
 pub mod chain_registry;
 pub mod chat;
+pub mod chat_session;
 pub mod chat_inline;
 pub mod clean;
 pub mod config;
