@@ -4,19 +4,19 @@
 //! CLI adapter or to API-backed provider adapters.
 
 use std::fs;
-use std::io::Read as _;
+use std::io::{self, Read as _, Write as StdWrite};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use roko_agent::AgentRuntimeEvent;
 use roko_agent::agent::{Agent, AgentResult};
 use roko_agent::claude_cli_agent::ClaudeCliAgent;
 use roko_agent::safety::contract::AgentContract;
-use roko_agent::AgentRuntimeEvent;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
-use roko_compose::{detect_conventions, ProjectConventions, TokenCounter};
+use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
 use roko_core::foundation::ChatMessage;
 use roko_core::{Body, Context, Engram, Kind};
 use tokio::signal;
@@ -115,6 +115,61 @@ pub fn accumulate_tool_event(
         }
         _ => {}
     }
+}
+
+fn write_stdout_bytes(bytes: &[u8]) {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    let _ = handle.write_all(bytes);
+    let _ = handle.flush();
+}
+
+fn write_stderr_line(line: &str) {
+    let stderr = io::stderr();
+    let mut handle = stderr.lock();
+    let _ = handle.write_all(line.as_bytes());
+    let _ = handle.write_all(b"\n");
+    let _ = handle.flush();
+}
+
+/// Render an `AgentRuntimeEvent` to stdout/stderr for plain terminal display.
+///
+/// This is the non-TUI rendering path used for plain terminal output.
+pub fn render_stream_event(event: &AgentRuntimeEvent) {
+    match event {
+        AgentRuntimeEvent::MessageDelta { text } => {
+            write_stdout_bytes(text.as_bytes());
+        }
+        AgentRuntimeEvent::ToolCall { name, .. } => {
+            write_stderr_line(&format!("[{name}] running..."));
+        }
+        AgentRuntimeEvent::ToolOutput { id, .. } => {
+            write_stderr_line(&format!("[tool:{id}] done"));
+        }
+        AgentRuntimeEvent::TurnCompleted { is_error, .. } => {
+            if *is_error {
+                write_stderr_line("[error] turn completed with error flag");
+            }
+        }
+        AgentRuntimeEvent::Error { message } => {
+            write_stderr_line(&format!("[error] {message}"));
+        }
+        _ => {}
+    }
+}
+
+/// Print a final newline after streaming completes.
+pub fn render_stream_end() {
+    write_stdout_bytes(b"\n");
+}
+
+/// Render collected text in one shot for the `--no-stream` fallback.
+pub fn render_collected(text: &str) {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    let _ = handle.write_all(text.as_bytes());
+    let _ = handle.write_all(b"\n");
+    let _ = handle.flush();
 }
 
 /// Result of a single agent turn.
@@ -454,6 +509,20 @@ impl ChatAgentSession {
         result
     }
 
+    /// Send a streaming turn and forward runtime events into `tx`.
+    pub async fn send_turn_streaming(
+        &mut self,
+        prompt: &str,
+        tx: tokio::sync::mpsc::Sender<AgentRuntimeEvent>,
+    ) -> Result<TurnResult> {
+        crate::chat_session::send_turn_streaming(self, prompt, tx).await
+    }
+
+    /// Send a streaming turn and render its events directly to the terminal.
+    pub async fn send_turn_streaming_inline(&mut self, prompt: &str) -> Result<TurnResult> {
+        crate::chat_session::send_turn_streaming_inline(self, prompt).await
+    }
+
     #[cfg(test)]
     /// Clone the session for test assertions.
     fn clone_for_test(&self) -> Self {
@@ -472,6 +541,64 @@ impl ChatAgentSession {
             timeout: self.timeout,
         }
     }
+}
+
+/// Send a streaming turn and forward runtime events into `tx`.
+///
+/// The current session adapter only exposes a completed `TurnResult`, so this
+/// projects the final text into the runtime event stream consumed by the
+/// plain-terminal renderer.
+pub async fn send_turn_streaming(
+    session: &mut ChatAgentSession,
+    prompt: &str,
+    tx: tokio::sync::mpsc::Sender<AgentRuntimeEvent>,
+) -> Result<TurnResult> {
+    let result = session.send_turn(prompt).await;
+
+    match &result {
+        Ok(turn) => {
+            if !turn.cancelled && !turn.text.is_empty() {
+                let _ = tx
+                    .send(AgentRuntimeEvent::MessageDelta {
+                        text: turn.text.clone(),
+                    })
+                    .await;
+            }
+        }
+        Err(error) => {
+            let _ = tx
+                .send(AgentRuntimeEvent::Error {
+                    message: error.to_string(),
+                })
+                .await;
+        }
+    }
+
+    drop(tx);
+    result
+}
+
+/// Send a streaming turn, rendering events to stdout/stderr directly.
+///
+/// This is the plain terminal path. It consumes the same event stream as the
+/// TUI-free renderer and prints a final newline after the turn finishes.
+pub async fn send_turn_streaming_inline(
+    session: &mut ChatAgentSession,
+    prompt: &str,
+) -> Result<TurnResult> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentRuntimeEvent>(256);
+
+    let render_handle = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            render_stream_event(&event);
+        }
+    });
+
+    let result = send_turn_streaming(session, prompt, tx).await;
+    let _ = render_handle.await;
+    render_stream_end();
+
+    result
 }
 
 /// Build a system prompt for interactive and one-shot chat using the shared
