@@ -10,14 +10,14 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{bail, Context as _, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
+    Frame,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -34,7 +34,9 @@ use crate::inline::symbols;
 use crate::inline::terminal::InlineTerminal;
 use crate::tui::Theme;
 
+use crate::chat_session::{ChatAgentSession, SlashResult};
 use chrono;
+use roko_core::agent::ProviderKind;
 use roko_learn::cost_table::CostTable;
 
 // ---------------------------------------------------------------------------
@@ -714,6 +716,8 @@ enum DispatchMode {
     },
     /// Direct in-process dispatch via [`AuthMethod`].
     Direct { auth: AuthMethod },
+    /// Full agent session with system prompt, tools, MCP, safety.
+    Session,
 }
 
 /// A recorded conversation message.
@@ -764,6 +768,8 @@ struct ChatSession {
     system_message: Option<String>,
     /// Compact output mode.
     compact: bool,
+    /// Full agent session (present when dispatch == `DispatchMode::Session`).
+    agent_session: Option<ChatAgentSession>,
 }
 
 // ---------------------------------------------------------------------------
@@ -851,10 +857,10 @@ fn save_session(session: &ChatSession) {
         total_cost: session.cost.total_cost,
         input_tokens: session.cost.input_tokens,
         output_tokens: session.cost.output_tokens,
-        model: current_model_name_static(session),
+        model: active_model_name(session),
         agent_id: session.agent_id.clone(),
         messages: session.conversation.clone(),
-        system_message: session.system_message.clone(),
+        system_message: active_system_prompt(session),
         saved_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         first_user_message: first_user,
     };
@@ -879,6 +885,14 @@ fn load_last_session_summary() -> Option<(String, u32, f64, String)> {
 
 /// Get model name without needing mutable access.
 fn current_model_name_static(session: &ChatSession) -> String {
+    active_model_name(session)
+}
+
+fn active_model_name(session: &ChatSession) -> String {
+    if let Some(agent_session) = session.agent_session.as_ref() {
+        return agent_session.model.clone();
+    }
+
     match &session.dispatch {
         DispatchMode::Direct { auth } => match auth {
             AuthMethod::AnthropicApi { model, .. } => {
@@ -891,6 +905,61 @@ fn current_model_name_static(session: &ChatSession) -> String {
             AuthMethod::NeedsSetup => "none".to_string(),
         },
         DispatchMode::Http { .. } => "HTTP backend".to_string(),
+        DispatchMode::Session => "session".to_string(),
+    }
+}
+
+fn active_system_prompt(session: &ChatSession) -> Option<String> {
+    session
+        .agent_session
+        .as_ref()
+        .map(|agent_session| agent_session.system_prompt.clone())
+        .or_else(|| session.system_message.clone())
+}
+
+fn clone_chat_agent_session(session: &ChatAgentSession) -> ChatAgentSession {
+    ChatAgentSession {
+        workdir: session.workdir.clone(),
+        model: session.model.clone(),
+        model_selection: session.model_selection.clone(),
+        effort: session.effort.clone(),
+        system_prompt: session.system_prompt.clone(),
+        allowed_tools_csv: session.allowed_tools_csv.clone(),
+        mcp_config: session.mcp_config.clone(),
+        session_id: session.session_id.clone(),
+        api_history: session.api_history.clone(),
+        http_client: session.http_client.clone(),
+        settings_json: session.settings_json.clone(),
+        timeout: session.timeout,
+    }
+}
+
+fn turn_result_to_dispatch_result(
+    turn: crate::chat_session::TurnResult,
+    model: String,
+) -> DispatchResult {
+    DispatchResult {
+        text: turn.text,
+        model,
+        input_tokens: turn.input_tokens,
+        output_tokens: turn.output_tokens,
+        tool_outputs: turn
+            .tool_calls
+            .into_iter()
+            .map(|tool_call| ToolOutput {
+                tool_name: Some(tool_call.name),
+                content: if tool_call.input_abbrev.is_empty() {
+                    if tool_call.success {
+                        "done".to_string()
+                    } else {
+                        "failed".to_string()
+                    }
+                } else {
+                    tool_call.input_abbrev
+                },
+            })
+            .collect(),
+        session_id: turn.session_id,
     }
 }
 
@@ -1042,6 +1111,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
         last_prompt: None,
         system_message: None,
         compact: false,
+        agent_session: None,
     };
 
     // Main event loop
@@ -1130,6 +1200,13 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                         &result.model,
                         naive,
                     );
+                    if matches!(&session.dispatch, DispatchMode::Session) {
+                        if let Some(agent_session) = session.agent_session.as_mut() {
+                            if let Some(session_id) = result.session_id.clone() {
+                                agent_session.session_id = Some(session_id);
+                            }
+                        }
+                    }
                     session.turn_count += 1;
                     session.thinking_started = None;
                     if latency > 10.0 {
@@ -1144,11 +1221,17 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                     term.push_blank()?;
                 }
                 Ok(Err(err)) => {
-                    push_error_with_suggestions(&mut term, &theme, &err)?;
-                    let prompt = session.last_prompt.clone().unwrap_or_default();
-                    session.thinking_started = None;
-                    session.phase = Phase::Error { prompt, error: err };
-                    session.response_rx = None;
+                    if err == "__cancelled__" {
+                        session.thinking_started = None;
+                        session.phase = Phase::Input;
+                        session.response_rx = None;
+                    } else {
+                        push_error_with_suggestions(&mut term, &theme, &err)?;
+                        let prompt = session.last_prompt.clone().unwrap_or_default();
+                        session.thinking_started = None;
+                        session.phase = Phase::Error { prompt, error: err };
+                        session.response_rx = None;
+                    }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     // Still waiting — spinner continues
@@ -1206,7 +1289,8 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run the unified inline chat with direct dispatch (no HTTP intermediary).
+/// Run the unified inline chat, preferring `ChatAgentSession` and falling
+/// back to direct dispatch when session setup fails.
 ///
 /// This is the primary entry point for `roko` with no subcommand.
 /// Uses [`AuthMethod`] to dispatch prompts directly via Claude CLI or API.
@@ -1280,6 +1364,76 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
     let mut input = InputState::new();
     input.history = load_history();
 
+    let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let (dispatch, agent_session, system_message) = match crate::config::load_layered(&workdir) {
+        Ok(resolved) => {
+            let config = resolved.config;
+            let mut model_config = roko_core::config::schema::RokoConfig::default();
+            model_config.providers.extend(config.providers.clone());
+            model_config.models.extend(config.models.clone());
+            if let Some(model) = config.agent.model.clone() {
+                model_config.agent.default_model = model;
+            }
+            model_config.agent.default_effort = config.agent.effort.clone();
+            model_config.agent.bare_mode = config.agent.bare_mode;
+            model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
+            model_config.agent.fallback_model = config.agent.fallback_model.clone();
+            model_config.agent.tier_models = config.agent.tier_models.clone();
+            model_config.agent.env = Some(config.agent.env.clone());
+
+            let role = {
+                let role = config.prompt.role.trim();
+                (!role.is_empty()).then(|| role.to_string())
+            };
+
+            match crate::model_selection::resolve_effective_model(
+                None,
+                None,
+                role,
+                None,
+                &model_config,
+            ) {
+                Ok(selection) if selection.provider_kind == ProviderKind::ClaudeCli.label() => {
+                    match ChatAgentSession::new(&config, workdir.clone(), selection) {
+                        Ok(agent_session) => {
+                            let system_message = Some(agent_session.system_prompt.clone());
+                            (DispatchMode::Session, Some(agent_session), system_message)
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "ChatAgentSession init failed; using direct dispatch"
+                            );
+                            (DispatchMode::Direct { auth: auth.clone() }, None, None)
+                        }
+                    }
+                }
+                Ok(selection) => {
+                    tracing::warn!(
+                        provider = %selection.provider_kind,
+                        model = %selection.effective_model_key,
+                        "interactive chat resolved to unsupported provider; using direct dispatch"
+                    );
+                    (DispatchMode::Direct { auth: auth.clone() }, None, None)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to resolve interactive chat model; using direct dispatch"
+                    );
+                    (DispatchMode::Direct { auth: auth.clone() }, None, None)
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to load interactive chat config; using direct dispatch"
+            );
+            (DispatchMode::Direct { auth: auth.clone() }, None, None)
+        }
+    };
+
     let mut session = ChatSession {
         phase: Phase::Input,
         input,
@@ -1289,14 +1443,15 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
         agent_id: "roko".to_string(),
         tick: 0,
         started_at: Instant::now(),
-        dispatch: DispatchMode::Direct { auth: auth.clone() },
+        dispatch,
         response_rx: None,
         turn_count: 0,
         thinking_started: None,
         conversation: Vec::new(),
         last_prompt: None,
-        system_message: None,
+        system_message,
         compact: false,
+        agent_session,
     };
 
     // Main event loop (identical structure to run_chat_inline)
@@ -1377,6 +1532,13 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                         &result.model,
                         naive,
                     );
+                    if matches!(&session.dispatch, DispatchMode::Session) {
+                        if let Some(agent_session) = session.agent_session.as_mut() {
+                            if let Some(session_id) = result.session_id.clone() {
+                                agent_session.session_id = Some(session_id);
+                            }
+                        }
+                    }
                     session.turn_count += 1;
                     session.thinking_started = None;
                     if latency > 10.0 {
@@ -1391,11 +1553,17 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                     term.push_blank()?;
                 }
                 Ok(Err(err)) => {
-                    push_error_with_suggestions(&mut term, &theme, &err)?;
-                    let prompt = session.last_prompt.clone().unwrap_or_default();
-                    session.thinking_started = None;
-                    session.phase = Phase::Error { prompt, error: err };
-                    session.response_rx = None;
+                    if err == "__cancelled__" {
+                        session.thinking_started = None;
+                        session.phase = Phase::Input;
+                        session.response_rx = None;
+                    } else {
+                        push_error_with_suggestions(&mut term, &theme, &err)?;
+                        let prompt = session.last_prompt.clone().unwrap_or_default();
+                        session.thinking_started = None;
+                        session.phase = Phase::Error { prompt, error: err };
+                        session.response_rx = None;
+                    }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -1491,6 +1659,31 @@ fn dispatch_prompt(session: &mut ChatSession, prompt: &str) {
                 #[cfg(not(feature = "legacy-orchestrate"))]
                 let result = crate::dispatch_v2::dispatch_via_model_call_service(&text).await;
                 let _ = tx.send(result.map_err(|e| e.to_string())).await;
+            });
+        }
+        DispatchMode::Session => {
+            let Some(agent_session) = session.agent_session.as_ref() else {
+                let _ = tx.try_send(Err("agent session unavailable".to_string()));
+                return;
+            };
+
+            let mut agent_session = clone_chat_agent_session(agent_session);
+            let model = agent_session.model.clone();
+            tokio::spawn(async move {
+                let (event_tx, mut event_rx) =
+                    tokio::sync::mpsc::channel::<roko_agent::AgentRuntimeEvent>(256);
+                let drain_handle =
+                    tokio::spawn(async move { while let Some(_event) = event_rx.recv().await {} });
+
+                let result = agent_session.send_turn_streaming(&text, event_tx).await;
+                let _ = drain_handle.await;
+
+                let mapped = match result {
+                    Ok(turn) if turn.cancelled => Err("__cancelled__".to_string()),
+                    Ok(turn) => Ok(turn_result_to_dispatch_result(turn, model)),
+                    Err(error) => Err(error.to_string()),
+                };
+                let _ = tx.send(mapped).await;
             });
         }
     }
@@ -1622,6 +1815,11 @@ async fn handle_input_key(
 
             // Persist to history file
             save_history_entry(&text);
+
+            if let Some(handled) = handle_agent_session_slash_command(&text, session, term, theme)?
+            {
+                return Ok(handled);
+            }
 
             // Handle / commands
             if text.starts_with('/') {
@@ -1874,6 +2072,51 @@ fn read_roko_toml() -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// Let `ChatAgentSession` handle slash commands that mutate its own state.
+fn handle_agent_session_slash_command(
+    text: &str,
+    session: &mut ChatSession,
+    term: &mut InlineTerminal,
+    theme: &Theme,
+) -> Result<Option<bool>> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('/') {
+        return Ok(None);
+    }
+
+    let result = {
+        session
+            .agent_session
+            .as_mut()
+            .map(|agent_session| agent_session.handle_slash_command(trimmed))
+    };
+
+    let Some(result) = result else {
+        return Ok(None);
+    };
+
+    match result {
+        SlashResult::Updated(msg) => {
+            if trimmed.starts_with("/system") || trimmed.starts_with("/reset") {
+                session.system_message = active_system_prompt(session);
+            }
+            if trimmed.starts_with("/reset") {
+                session.conversation.clear();
+                session.turn_count = 0;
+                session.cost = CostMeter::new();
+                session.last_prompt = None;
+            }
+            term.push_lines(&[styled::continuation(theme, "config", &msg, None)])?;
+            Ok(Some(false))
+        }
+        SlashResult::Error(msg) => {
+            term.push_lines(&[styled::continuation(theme, "error", &msg, None)])?;
+            Ok(Some(false))
+        }
+        SlashResult::Unknown(_) | SlashResult::NotACommand => Ok(None),
+    }
+}
+
 /// Handle `/` commands. Returns true if the session should exit.
 fn handle_slash_command(
     text: &str,
@@ -1882,6 +2125,9 @@ fn handle_slash_command(
     theme: &Theme,
 ) -> Result<bool> {
     let cmd = text.trim();
+    if let Some(exit) = handle_agent_session_slash_command(cmd, session, term, theme)? {
+        return Ok(exit);
+    }
     match cmd {
         // =================================================================
         // Session & display
@@ -2127,8 +2373,8 @@ fn handle_slash_command(
         _ if cmd.starts_with("/system") => {
             let msg = cmd.strip_prefix("/system").unwrap().trim();
             if msg.is_empty() {
-                if let Some(ref sys) = session.system_message {
-                    term.push_lines(&[styled::continuation(theme, "system", sys, None)])?;
+                if let Some(sys) = active_system_prompt(session) {
+                    term.push_lines(&[styled::continuation(theme, "system", &sys, None)])?;
                 } else {
                     term.push_lines(&[styled::continuation(
                         theme,
@@ -2139,6 +2385,9 @@ fn handle_slash_command(
                 }
             } else {
                 session.system_message = Some(msg.to_string());
+                if let Some(agent_session) = session.agent_session.as_mut() {
+                    agent_session.system_prompt = msg.to_string();
+                }
                 term.push_lines(&[styled::continuation(theme, "system", "set", Some(msg))])?;
             }
         }
@@ -2147,7 +2396,11 @@ fn handle_slash_command(
             session.turn_count = 0;
             session.cost = CostMeter::new();
             session.last_prompt = None;
-            session.system_message = None;
+            session.system_message = if session.agent_session.is_some() {
+                active_system_prompt(session)
+            } else {
+                None
+            };
             term.push_lines(&[styled::continuation(
                 theme,
                 "reset",
@@ -2192,6 +2445,17 @@ fn handle_slash_command(
                         if *is_sidecar { "sidecar" } else { "serve" }
                     )
                 }
+                DispatchMode::Session => session
+                    .agent_session
+                    .as_ref()
+                    .map(|agent_session| {
+                        format!(
+                            "{} ({})",
+                            agent_session.model_selection.provider_key,
+                            agent_session.model_selection.provider_kind
+                        )
+                    })
+                    .unwrap_or_else(|| "ChatAgentSession".to_string()),
             };
             term.push_lines(&[styled::continuation(theme, "provider", &info, None)])?;
         }
@@ -2214,6 +2478,7 @@ fn handle_slash_command(
                         AuthMethod::NeedsSetup => "none".to_string(),
                     },
                     DispatchMode::Http { .. } => "HTTP backend (model set server-side)".to_string(),
+                    DispatchMode::Session => active_model_name(session),
                 };
                 term.push_lines(&[styled::continuation(theme, "model", &current, None)])?;
             } else {
@@ -2246,21 +2511,47 @@ fn handle_slash_command(
                             None,
                         )])?;
                     }
+                    DispatchMode::Session => {
+                        if let Some(agent_session) = session.agent_session.as_mut() {
+                            agent_session.model = arg.to_string();
+                            term.push_lines(&[styled::continuation(
+                                theme,
+                                "model",
+                                &format!("switched to {arg}"),
+                                None,
+                            )])?;
+                        } else {
+                            term.push_lines(&[styled::continuation(
+                                theme,
+                                "model",
+                                "ChatAgentSession unavailable",
+                                None,
+                            )])?;
+                        }
+                    }
                 }
             }
         }
         _ if cmd.starts_with("/effort") => {
             let arg = cmd.strip_prefix("/effort").unwrap().trim();
             if arg.is_empty() {
+                let current = session
+                    .agent_session
+                    .as_ref()
+                    .map(|agent_session| agent_session.effort.as_str())
+                    .unwrap_or("medium");
                 term.push_lines(&[styled::continuation(
                     theme,
                     "effort",
-                    "current: medium",
+                    &format!("current: {current}"),
                     Some("use: low, medium, high, max"),
                 )])?;
             } else {
                 match arg {
                     "low" | "medium" | "med" | "high" | "max" => {
+                        if let Some(agent_session) = session.agent_session.as_mut() {
+                            agent_session.effort = arg.to_string();
+                        }
                         term.push_lines(&[styled::continuation(
                             theme,
                             "effort",
@@ -3047,19 +3338,7 @@ fn handle_slash_command(
 
 /// Get the current model name for display.
 fn current_model_name(session: &ChatSession) -> String {
-    match &session.dispatch {
-        DispatchMode::Direct { auth } => match auth {
-            AuthMethod::AnthropicApi { model, .. } => {
-                model.as_deref().unwrap_or("claude-sonnet-4-6").to_string()
-            }
-            AuthMethod::ClaudeCli => "claude CLI".to_string(),
-            AuthMethod::OpenAiCompat { model, .. } => {
-                model.as_deref().unwrap_or("unknown").to_string()
-            }
-            AuthMethod::NeedsSetup => "none".to_string(),
-        },
-        DispatchMode::Http { .. } => "HTTP backend".to_string(),
-    }
+    active_model_name(session)
 }
 
 // ---------------------------------------------------------------------------
@@ -3959,6 +4238,31 @@ mod tests {
         assert_eq!(text, "test");
         assert!(input.is_empty());
         assert_eq!(input.history.len(), 1);
+    }
+
+    #[test]
+    fn turn_result_to_dispatch_result_keeps_model_and_tool_preview() {
+        let turn = crate::chat_session::TurnResult {
+            text: "hello".to_string(),
+            model: "stale-backend".to_string(),
+            input_tokens: 12,
+            output_tokens: 34,
+            tool_calls: vec![crate::chat_session::ToolCallSummary {
+                name: "Read".to_string(),
+                input_abbrev: "file contents here".to_string(),
+                success: true,
+            }],
+            session_id: Some("sess-123".to_string()),
+            duration: Duration::from_millis(42),
+            cancelled: false,
+        };
+
+        let result = turn_result_to_dispatch_result(turn, "claude-sonnet-4-6".to_string());
+        assert_eq!(result.model, "claude-sonnet-4-6");
+        assert_eq!(result.session_id.as_deref(), Some("sess-123"));
+        assert_eq!(result.tool_outputs.len(), 1);
+        assert_eq!(result.tool_outputs[0].tool_name.as_deref(), Some("Read"));
+        assert_eq!(result.tool_outputs[0].content, "file contents here");
     }
 
     #[test]
