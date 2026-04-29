@@ -168,6 +168,20 @@ export function useTerminal(sessionId?: string) {
 
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Register terminal I/O handlers once — they read from the handle's
+    // current `ws` so they survive reconnects without stacking.
+    term.onData((data) => {
+      if (handle.ws && handle.ws.readyState === WebSocket.OPEN) {
+        handle.ws.send(data);
+      }
+    });
+
+    term.onResize(({ cols, rows }) => {
+      if (handle.ws && handle.ws.readyState === WebSocket.OPEN) {
+        handle.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      }
+    });
+
     function connectWs() {
       const ws = new WebSocket(`${WS_BASE}/ws/terminal/${id}`);
       ws.binaryType = 'arraybuffer';
@@ -203,23 +217,9 @@ export function useTerminal(sessionId?: string) {
       };
 
       ws.onerror = () => {
-        if (!handle.ws) {
-          handle.status = 'connected';
-          setStatus('connected');
-        }
+        handle.status = 'disconnected';
+        setStatus('disconnected');
       };
-
-      term.onData((data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(data);
-        }
-      });
-
-      term.onResize(({ cols, rows }) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-        }
-      });
     }
 
     connectWs();

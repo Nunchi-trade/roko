@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, Fragment } from 'react';
 import type { BenchTaskResult } from '../lib/bench-types';
 
 interface TaskTableProps {
@@ -48,9 +48,8 @@ export default function TaskTable({ results }: TaskTableProps) {
         </thead>
         <tbody>
           {sorted.map((r) => (
-            <>
+            <Fragment key={r.task_id}>
               <tr
-                key={r.task_id}
                 className={`task-row task-row-${r.status}`}
                 onClick={() => setExpandedId(expandedId === r.task_id ? null : r.task_id)}
                 style={{ cursor: 'pointer' }}
@@ -108,7 +107,7 @@ export default function TaskTable({ results }: TaskTableProps) {
                   </td>
                 </tr>
               )}
-            </>
+            </Fragment>
           ))}
         </tbody>
       </table>

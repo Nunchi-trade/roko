@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { SCENARIOS, type ScenarioContext } from '../lib/scenarios';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../lib/playback-controller';
 import { useTerminal, type TerminalHandle } from '../hooks/useTerminal';
+import { setSpeedMultiplier } from '../hooks/useTerminalSession';
 import { useServerHealth } from '../hooks/useServerHealth';
 import { lookupCmdDesc } from '../lib/cmd-descriptions';
 import Pane from '../components/Pane';
@@ -341,6 +342,15 @@ export default function Demo() {
     ]);
 
     const ctx = buildContext();
+    if (ctx.entries.length < scenario.panes) {
+      console.error(
+        `Waiting for terminals: need ${scenario.panes} but only ${ctx.entries.length} connected`,
+      );
+      runningRef.current = false;
+      setIsRunning(false);
+      setProgressText('waiting for terminals to connect...');
+      return;
+    }
     try {
       await scenario.run(ctx);
     } catch (err) {
@@ -670,7 +680,7 @@ function TerminalPaneWithHandle({
     if (handleRef && 'current' in handleRef) {
       (handleRef as React.MutableRefObject<TerminalHandle | null>).current = handle.current;
     }
-  });
+  }, [handleRef, handle, status]);
 
   return (
     <div className="demo-term-pane">
