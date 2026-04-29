@@ -516,23 +516,10 @@ pub(crate) async fn cmd_status(
             }
         }
 
-        // Active plans from executor snapshot.
-        let executor_path_json = workdir.join(".roko").join("state").join("executor.json");
-        let active_plans_json: usize = if executor_path_json.is_file() {
-            tokio::fs::read_to_string(&executor_path_json)
-                .await
-                .ok()
-                .and_then(|contents| {
-                    serde_json::from_str::<serde_json::Value>(&contents)
-                        .ok()?
-                        .get("plans")?
-                        .as_array()
-                        .map(|arr| arr.len())
-                })
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let executor_state = crate::commands::plan::read_executor_state(&workdir);
+        let state_entries = executor_state.clone().unwrap_or_default();
+        let active_plans_json: usize = state_entries.len();
+        let run_state_found = executor_state.is_some();
 
         // Most recent episode.
         let mut episodes_json = substrate
@@ -567,10 +554,18 @@ pub(crate) async fn cmd_status(
         let base = status.display_json();
         // Splice additional fields before the closing brace.
         let enriched = format!(
-            "{},\"gates\":{{\"pass\":{gate_pass},\"fail\":{gate_fail}}},\"workspace\":{{\"agents\":{running_agents_json},\"plans\":{active_plans_json}}},\"signal_counts\":{counts_json},\"cost_by_model\":{cost_by_model_json},\"cost_by_plan\":{cost_by_plan_json},\"health\":\"ready\"}}",
+            "{},\"gates\":{{\"pass\":{gate_pass},\"fail\":{gate_fail}}},\"workspace\":{{\"agents\":{running_agents_json},\"plans\":{active_plans_json},\"run_state_found\":{run_state_found}}},\"signal_counts\":{counts_json},\"cost_by_model\":{cost_by_model_json},\"cost_by_plan\":{cost_by_plan_json},\"health\":\"ready\"}}",
             &base[..base.len() - 1],
         );
         println!("{enriched}");
+
+        for (plan_id, _, _) in &state_entries {
+            if !crate::commands::plan::plan_path_exists(&workdir, plan_id) {
+                eprintln!(
+                    "warning: state references missing plan: {plan_id} (not found in plans/ or .roko/plans/)"
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -601,30 +596,32 @@ pub(crate) async fn cmd_status(
         }
     }
 
-    // Active plans from executor snapshot.
-    let executor_path = workdir.join(".roko").join("state").join("executor.json");
-    let active_plans: usize = if executor_path.is_file() {
-        // Parse minimally: count plans with active=true.
-        match tokio::fs::read_to_string(&executor_path).await {
-            Ok(contents) => {
-                // Quick JSON parse: count occurrences of "active":true or
-                // plan entries. For a lightweight check, use serde_json::Value.
-                serde_json::from_str::<serde_json::Value>(&contents)
-                    .ok()
-                    .and_then(|val| val.get("plans")?.as_array().map(|arr| arr.len()))
-                    .unwrap_or(0)
-            }
-            Err(_) => 0,
-        }
-    } else {
-        0
-    };
+    let executor_state = crate::commands::plan::read_executor_state(&workdir);
+    let state_entries = executor_state.clone().unwrap_or_default();
+    let active_plans: usize = state_entries.len();
 
     println!();
-    println!(
-        "workspace: {} agent pid(s), {} plan(s) in executor snapshot",
-        running_agents, active_plans
-    );
+    if executor_state.is_some() {
+        println!(
+            "workspace: {} agent pid(s), {} plan(s) in executor snapshot",
+            running_agents, active_plans
+        );
+        for (plan_id, tasks_done, tasks_total) in &state_entries {
+            println!("  plan {plan_id}: {tasks_done}/{tasks_total} tasks completed");
+        }
+        for (plan_id, _, _) in &state_entries {
+            if !crate::commands::plan::plan_path_exists(&workdir, plan_id) {
+                println!(
+                    "  warning: state references missing plan: {plan_id} (not found in plans/ or .roko/plans/)"
+                );
+            }
+        }
+    } else {
+        println!(
+            "workspace: {} agent pid(s), no run state found",
+            running_agents
+        );
+    }
 
     let mut episodes = substrate
         .query(&Query::of_kind(Kind::Episode), &ctx)

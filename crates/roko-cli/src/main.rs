@@ -2011,7 +2011,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             cfactor,
             surfaces,
         } => {
-            commands::util::cmd_status(cli, workdir, cfactor, surfaces).await?;
+            commands::status::cmd_status(cli, workdir, cfactor, surfaces).await?;
             Ok(EXIT_SUCCESS)
         }
         Command::Doctor { workdir, serve_url } => {

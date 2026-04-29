@@ -81,7 +81,9 @@ fn detect_init_profile() -> Option<String> {
 
     while let Some(arg) = args.next() {
         if arg.as_os_str() == OsStr::new("--profile") {
-            return args.next().map(|value| value.to_string_lossy().into_owned());
+            return args
+                .next()
+                .map(|value| value.to_string_lossy().into_owned());
         }
 
         let arg = arg.to_string_lossy();
@@ -116,7 +118,9 @@ fn append_verification_gates(out: &mut String, profile: Option<&str>) {
             );
             out.push_str("# Supported profiles: rust, typescript.\n");
             out.push_str("# Add [[gate]] entries manually to run your own validation commands.\n");
-            out.push_str("# Or rerun `roko init --profile rust` / `roko init --profile typescript`.\n");
+            out.push_str(
+                "# Or rerun `roko init --profile rust` / `roko init --profile typescript`.\n",
+            );
         }
     }
 }
