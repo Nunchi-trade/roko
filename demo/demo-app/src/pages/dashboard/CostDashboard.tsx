@@ -66,6 +66,31 @@ interface RouterResponse {
   total_observations?: number;
 }
 
+type ProviderStatus = 'healthy' | 'degraded' | 'unhealthy';
+
+interface Provider {
+  name: string;
+  status: ProviderStatus;
+  models: string[];
+  success_rate: number;
+  avg_latency_ms: number;
+  p95_latency_ms: number;
+  cost_per_1k_tokens: number;
+  total_requests: number;
+  errors_24h: number;
+  last_error: string;
+}
+
+interface ProviderHealthResponse {
+  providers: Provider[];
+}
+
+const STATUS_DOT_STYLES: Record<ProviderStatus, { bg: string; glow: string; anim: string }> = {
+  healthy: { bg: 'var(--success)', glow: '0 0 6px rgba(122,138,120,.6)', anim: 'pulse-dot 2s ease-in-out infinite' },
+  degraded: { bg: 'var(--warning)', glow: '0 0 6px rgba(216,168,120,.6)', anim: 'pulse-dot 1.5s ease-in-out infinite' },
+  unhealthy: { bg: 'var(--rose-bright)', glow: '0 0 6px rgba(204,144,168,.6)', anim: 'none' },
+};
+
 /* ── Helpers ─────────────────────────────────────────────── */
 
 function fmtUptime(secs: number): string {
@@ -93,21 +118,24 @@ export default function CostDashboard() {
   const [efficiency, setEfficiency] = useState<EfficiencyResponse | null>(null);
   const [cfactor, setCfactor] = useState<CFactorResponse | null>(null);
   const [router, setRouter] = useState<RouterResponse | null>(null);
+  const [providerHealth, setProviderHealth] = useState<ProviderHealthResponse | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const [h, e, c, r] = await Promise.all([
+      const [h, e, c, r, ph] = await Promise.all([
         get<HealthResponse>('/api/health'),
         get<EfficiencyResponse>('/api/learn/efficiency'),
         get<CFactorResponse>('/api/metrics/c_factor'),
         get<RouterResponse>('/api/learn/cascade-router'),
+        get<ProviderHealthResponse>('/api/learn/provider-outcomes'),
       ]);
       if (cancelled) return;
       setHealth(h);
       setEfficiency(e);
       setCfactor(c);
       setRouter(r);
+      setProviderHealth(ph);
     };
     poll();
     const id = setInterval(poll, 10_000);
@@ -132,6 +160,8 @@ export default function CostDashboard() {
     label: `T${i + 1}`,
     value: t.cost_usd,
   }));
+  const providers = providerHealth?.providers ?? [];
+  const healthyProviders = providers.filter((p) => p.status === 'healthy').length;
 
   /* Router bar data: derive model distribution from role_table */
   const routerBars = (() => {
@@ -343,6 +373,26 @@ export default function CostDashboard() {
           </Pane>
         </div>
       </div>
+
+      {/* ═══ PROVIDER HEALTH ═══ */}
+      <Pane
+        title="PROVIDER HEALTH"
+        badge={
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>
+            {providerHealth ? `${healthyProviders}/${providers.length} healthy` : 'loading'}
+          </span>
+        }
+      >
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+          gap: 12,
+        }}>
+          {providers.map((p) => (
+            <ProviderCell key={p.name} provider={p} />
+          ))}
+        </div>
+      </Pane>
     </div>
   );
 }
@@ -379,6 +429,121 @@ function ActivityBlock({ label, value, color }: { label: string; value: string; 
       }}>
         {value}
       </span>
+    </div>
+  );
+}
+
+/* ── Provider health helpers ─────────────────────────────── */
+
+function ProviderStat({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <span style={{
+        fontFamily: 'var(--mono)',
+        fontSize: '0.5rem',
+        letterSpacing: '.1em',
+        textTransform: 'uppercase',
+        color: 'var(--text-dim)',
+      }}>
+        {label}
+      </span>
+      <span style={{
+        fontFamily: 'var(--mono)',
+        fontSize: '0.72rem',
+        fontWeight: 500,
+        color,
+      }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function ProviderCell({ provider }: { provider: Provider }) {
+  const dot = STATUS_DOT_STYLES[provider.status] ?? STATUS_DOT_STYLES.unhealthy;
+  const successColor = provider.success_rate >= 0.97
+    ? 'var(--success)'
+    : provider.success_rate >= 0.93
+      ? 'var(--warning)'
+      : 'var(--rose-bright)';
+  const latencyColor = provider.avg_latency_ms < 1500
+    ? 'var(--success)'
+    : provider.avg_latency_ms < 3000
+      ? 'var(--warning)'
+      : 'var(--rose-bright)';
+  const errorsColor = provider.errors_24h < 10
+    ? 'var(--text-dim)'
+    : provider.errors_24h < 30
+      ? 'var(--warning)'
+      : 'var(--rose-bright)';
+
+  return (
+    <div style={{
+      background: 'rgba(255,255,255,.04)',
+      border: '1px solid rgba(255,255,255,.07)',
+      borderRadius: 10,
+      padding: '14px 16px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <span style={{
+          fontFamily: 'var(--display)',
+          fontSize: 13,
+          fontWeight: 500,
+          color: 'var(--text-strong)',
+          letterSpacing: '.01em',
+        }}>
+          {provider.name}
+        </span>
+        <span style={{
+          width: 7,
+          height: 7,
+          borderRadius: '50%',
+          background: dot.bg,
+          boxShadow: dot.glow,
+          animation: dot.anim,
+          display: 'inline-block',
+          flexShrink: 0,
+        }} />
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {provider.models.map((m) => (
+          <span key={m} style={{
+            fontFamily: 'var(--mono)',
+            fontSize: 8,
+            letterSpacing: '.04em',
+            padding: '2px 6px',
+            borderRadius: 3,
+            background: 'var(--glass-bg)',
+            border: '1px solid var(--glass-border)',
+            color: 'var(--text-soft)',
+          }}>
+            {m}
+          </span>
+        ))}
+      </div>
+
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        gap: '6px 12px',
+        borderTop: '1px solid rgba(255,255,255,.04)',
+        paddingTop: 8,
+      }}>
+        <ProviderStat label="Success" value={`${(provider.success_rate * 100).toFixed(1)}%`} color={successColor} />
+        <ProviderStat label="Avg Latency" value={`${provider.avg_latency_ms}ms`} color={latencyColor} />
+        <ProviderStat
+          label="Cost/1K"
+          value={provider.cost_per_1k_tokens > 0 ? `$${provider.cost_per_1k_tokens.toFixed(4)}` : 'free'}
+          color="var(--bone-bright)"
+        />
+        <ProviderStat label="Errors (24h)" value={String(provider.errors_24h)} color={errorsColor} />
+        <ProviderStat label="Requests" value={provider.total_requests.toLocaleString()} color="var(--text-soft)" />
+        <ProviderStat label="p95 Latency" value={`${provider.p95_latency_ms}ms`} color="var(--text-dim)" />
+      </div>
     </div>
   );
 }
