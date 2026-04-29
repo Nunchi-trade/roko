@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use roko_agent::agent::Agent;
+use roko_agent::agent::{Agent, AgentResult};
 use roko_agent::claude_cli_agent::ClaudeCliAgent;
 use roko_agent::AgentRuntimeEvent;
 use roko_agent::safety::contract::AgentContract;
@@ -19,6 +19,7 @@ use roko_compose::system_prompt_builder::SystemPromptBuilder;
 use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
 use roko_core::foundation::ChatMessage;
 use roko_core::{Body, Context, Engram, Kind};
+use tokio::signal;
 
 use crate::config::Config;
 use crate::model_selection::EffectiveModelSelection;
@@ -136,6 +137,26 @@ pub struct TurnResult {
     pub duration: Duration,
     /// Whether the turn was cancelled by the user.
     pub cancelled: bool,
+}
+
+impl TurnResult {
+    /// Create a cancelled result with no text content.
+    ///
+    /// Used when a turn is interrupted by Ctrl-C or timeout.
+    /// The session loop should display a "[cancelled]" indicator and
+    /// continue accepting input.
+    pub fn cancelled(duration: Duration) -> Self {
+        Self {
+            text: String::new(),
+            model: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            tool_calls: Vec::new(),
+            session_id: None,
+            duration,
+            cancelled: true,
+        }
+    }
 }
 
 /// Unified agent session for interactive and one-shot CLI modes.
@@ -327,14 +348,11 @@ impl ChatAgentSession {
             .build()
     }
 
-    /// Send a single turn through the configured Claude CLI agent.
-    pub async fn send_turn(&mut self, prompt: &str) -> Result<TurnResult> {
-        let started = Instant::now();
-        let agent = self.build_agent()?;
-        let input = self.build_engram(prompt);
-        let ctx = Context::default();
-        let result = agent.run(&input, &ctx).await;
-
+    /// Convert an `AgentResult` into a `TurnResult`.
+    ///
+    /// Extracts text from the output `Engram` and token counts from `Usage`.
+    /// `session_id` is always `None` for the non-streaming path.
+    fn process_result(&self, result: AgentResult, start: Instant) -> TurnResult {
         let text = result
             .output
             .body
@@ -343,34 +361,75 @@ impl ChatAgentSession {
             .map(str::to_string)
             .unwrap_or_default();
 
-        // Session_id is NOT available from the non-streaming path.
-        //
-        // ClaudeCliAgent::run buffers all stdout internally and only returns
-        // an AgentResult with output: Engram (tagged "agent" and "model" only),
-        // trace: Vec<Engram>, usage: Usage, and success: bool.
-        //
-        // The session_id is emitted by Claude CLI in two places:
-        //   1. {"type":"system","session_id":"..."} - the init handshake
-        //   2. {"type":"result","session_id":"..."} - the terminal event
-        //
-        // Both are only accessible through the raw stdout stream (R3_C01-C03).
-        // For the non-streaming path, TurnResult.session_id is always None.
-        let new_session_id: Option<String> = None;
+        // ClaudeCliAgent only sets wall_ms; input/output tokens are 0.
+        // The streaming path populates tokens from the result event.
+        let input_tokens = u64::from(result.usage.input_tokens);
+        let output_tokens = u64::from(result.usage.output_tokens);
 
-        Ok(TurnResult {
+        TurnResult {
             text,
             model: self.model.clone(),
-            input_tokens: u64::from(result.usage.input_tokens),
-            output_tokens: u64::from(result.usage.output_tokens),
-            // Tool call data is not available from the non-streaming path.
-            // ClaudeCliAgent::run returns only the final text in AgentResult.output.
-            // The trace Vec<Engram> contains raw stderr lines, not structured tool records.
-            // Use send_turn_streaming (R3_C03) to capture tool_calls.
+            input_tokens,
+            output_tokens,
             tool_calls: Vec::new(),
-            session_id: new_session_id,
-            duration: started.elapsed(),
+            session_id: None,
+            duration: start.elapsed(),
             cancelled: false,
-        })
+        }
+    }
+
+    /// Send a single turn through the configured Claude CLI agent.
+    pub async fn send_turn(&mut self, prompt: &str) -> Result<TurnResult> {
+        let started = Instant::now();
+        let agent = self.build_agent()?;
+        let input = self.build_engram(prompt);
+        let ctx = Context::default();
+        let timeout_duration = self.timeout.unwrap_or(Duration::from_secs(300));
+
+        let agent_result = tokio::select! {
+            // Branch 1: Normal completion.
+            result = agent.run(&input, &ctx) => result,
+
+            // Branch 2: Session-level timeout fires before the agent's internal timeout.
+            // ClaudeCliAgent has its own 120s internal timeout; this is the session's
+            // configurable outer bound (default 300s).
+            _ = tokio::time::sleep(timeout_duration) => {
+                tracing::warn!(
+                    timeout_secs = timeout_duration.as_secs(),
+                    "turn timed out at session level"
+                );
+                return Ok(TurnResult::cancelled(started.elapsed()));
+            }
+
+            // Branch 3: Ctrl-C pressed by user.
+            // The subprocess is killed via kill_on_drop when the agent future is dropped.
+            _ = signal::ctrl_c() => {
+                tracing::info!("turn cancelled by Ctrl-C");
+                return Ok(TurnResult::cancelled(started.elapsed()));
+            }
+        };
+
+        if !agent_result.success {
+            let error_text = agent_result
+                .output
+                .body
+                .as_text()
+                .ok()
+                .map(str::to_string)
+                .unwrap_or_else(|| "agent failed".to_string());
+            return Ok(TurnResult {
+                text: error_text,
+                model: self.model.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+                tool_calls: Vec::new(),
+                session_id: None,
+                duration: started.elapsed(),
+                cancelled: false,
+            });
+        }
+
+        Ok(self.process_result(agent_result, started))
     }
 
     /// Send a single turn in one-shot mode.
@@ -821,6 +880,21 @@ mod tests {
             SlashResult::Updated(msg) => assert!(msg.contains("test prompt")),
             other => panic!("expected Updated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cancelled_turn_result_has_empty_payload() {
+        let duration = Duration::from_secs(7);
+        let result = TurnResult::cancelled(duration);
+
+        assert!(result.cancelled);
+        assert_eq!(result.duration, duration);
+        assert!(result.text.is_empty());
+        assert!(result.model.is_empty());
+        assert_eq!(result.input_tokens, 0);
+        assert_eq!(result.output_tokens, 0);
+        assert!(result.tool_calls.is_empty());
+        assert!(result.session_id.is_none());
     }
 
     #[test]
