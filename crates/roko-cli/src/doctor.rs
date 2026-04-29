@@ -440,20 +440,34 @@ fn check_chain_mode(workdir: &Path) -> DoctorCheck {
     let overridden = active != configured;
 
     let (status, message, detail) = match active {
-        ChainMode::Light | ChainMode::Follower => (
-            DoctorStatus::Warn,
-            format!("chain.mode = {active} (Phase A stub: alto-follower not yet imported)"),
-            Some(format!(
-                "Reads via this backend currently return Unsupported until Phase B \
-                 (embeds alto-follower as a library). See \
-                 ~/.claude/plans/greedy-moseying-cerf.md.{}",
-                if overridden {
-                    format!(" Override active: --chain-mode={active} (config = {configured}).")
-                } else {
-                    String::new()
-                }
-            )),
-        ),
+        ChainMode::Light | ChainMode::Follower => match config.chain.rpc_url.as_deref() {
+            Some(url) => (
+                DoctorStatus::Ok,
+                format!("chain.mode = {active} → {url} (rpc + kora_nodeStatus liveness)"),
+                Some(format!(
+                    "light and follower share the same backend today — \
+                     threshold-cert verification (light vs trusted-rpc) and local block cache \
+                     (follower vs light) are not yet wired.{}",
+                    if overridden {
+                        format!(" Override active: --chain-mode={active} (config = {configured}).")
+                    } else {
+                        String::new()
+                    }
+                )),
+            ),
+            None => (
+                DoctorStatus::Warn,
+                format!("chain.mode = {active} but no rpc_url configured"),
+                Some(format!(
+                    "set [chain].rpc_url in roko.toml (or ~/.roko/config.toml) to point at a Daeji node, or pass --chain-mode mock for tests.{}",
+                    if overridden {
+                        format!(" Override active: --chain-mode={active} (config = {configured}).")
+                    } else {
+                        String::new()
+                    }
+                )),
+            ),
+        },
         ChainMode::Rpc => match config.chain.rpc_url.as_deref() {
             Some(url) => (
                 DoctorStatus::Ok,

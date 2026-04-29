@@ -118,10 +118,13 @@ pub enum LogFormat {
 /// into `roko-core`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CliChainMode {
-    /// Embedded light client (default): subscribes to threshold-signed view
-    /// certificates and verifies state reads locally. No historical state.
+    /// Light client (default): JSON-RPC state reads against a Daeji node
+    /// plus `kora_nodeStatus` liveness. No historical state retained
+    /// locally; threshold-cert verification is a follow-up.
     Light,
-    /// `alto-follower` subprocess with full history.
+    /// Follower mode: same JSON-RPC + `kora_nodeStatus` backend as Light;
+    /// future revisions add a local block cache once Daeji's secondary-peer
+    /// protocol streams blocks.
     Follower,
     /// HTTP JSON-RPC client. Trusts the remote node — no on-agent verification.
     Rpc,
@@ -290,9 +293,9 @@ struct Cli {
     /// Override the chain read-side mode (`rpc`, `light`, `follower`, `mock`).
     ///
     /// Takes precedence over `[chain].mode` in `roko.toml`. `light` (default)
-    /// runs an embedded light client; `follower` runs an `alto-follower`
-    /// subprocess with full history; `rpc` uses the JSON-RPC endpoint; `mock`
-    /// uses an in-memory backend for tests.
+    /// and `follower` both speak Ethereum JSON-RPC + `kora_nodeStatus` against
+    /// a Daeji node; `rpc` uses plain JSON-RPC without the liveness layer;
+    /// `mock` uses an in-memory backend for tests.
     #[arg(long, global = true, value_enum)]
     chain_mode: Option<CliChainMode>,
 
