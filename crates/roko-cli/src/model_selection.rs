@@ -82,7 +82,9 @@ pub enum Error {
         provider_key: String,
     },
     /// The selected model could not be backed by any configured provider.
-    #[error("{source} selected unknown model '{model}', and no configured provider matches kind '{provider_kind}'")]
+    #[error(
+        "{source} selected unknown model '{model}', and no configured provider matches kind '{provider_kind}'"
+    )]
     UnknownModel {
         /// Which precedence step selected the model.
         source: SelectionSource,
@@ -112,7 +114,8 @@ pub fn resolve_effective_model(
     let requested_model = candidate.model;
     let resolved = resolve_model(config, &requested_model);
     let providers = config.effective_providers();
-    let (provider_key, provider) = select_provider(source, &requested_model, &resolved, &providers)?;
+    let (provider_key, provider) =
+        select_provider(source, &requested_model, &resolved, &providers)?;
 
     let effective_model_key = resolved.model_key;
     let backend_slug = resolved.slug;
@@ -205,10 +208,7 @@ fn select_candidate(
     })
 }
 
-fn required_model(
-    input: Option<String>,
-    source: SelectionSource,
-) -> Result<Option<String>, Error> {
+fn required_model(input: Option<String>, source: SelectionSource) -> Result<Option<String>, Error> {
     match input {
         Some(model) => {
             let model = model.trim();
@@ -250,11 +250,13 @@ fn select_provider<'a>(
             });
         }
 
-        let provider = providers.get(provider_key).ok_or_else(|| Error::MissingProvider {
-            source,
-            model: model.to_string(),
-            provider_key: provider_key.to_string(),
-        })?;
+        let provider = providers
+            .get(provider_key)
+            .ok_or_else(|| Error::MissingProvider {
+                source,
+                model: model.to_string(),
+                provider_key: provider_key.to_string(),
+            })?;
 
         return Ok((provider_key.to_string(), provider));
     }
@@ -287,7 +289,9 @@ fn provider_for_kind<'a>(
         .filter_map(|(key, provider)| (provider.kind == kind).then_some((key.as_str(), provider)))
         .collect::<Vec<_>>();
     matches.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    matches.first().map(|&(key, provider)| (key.to_string(), provider))
+    matches
+        .first()
+        .map(|&(key, provider)| (key.to_string(), provider))
 }
 
 fn build_reason(
@@ -307,7 +311,7 @@ fn build_reason(
 mod tests {
     use super::*;
 
-    use roko_core::config::schema::{ModelProfile, RoleOverride, RokoConfig};
+    use roko_core::config::schema::{ModelProfile, RokoConfig, RoleOverride};
     use roko_learn::cascade_router::CascadeRouter;
 
     fn role_model(model: &str) -> RoleOverride {
@@ -333,7 +337,10 @@ mod tests {
     fn cli_override_wins_over_everything() {
         let mut config = RokoConfig::default();
         config.agent.default_model = "claude-opus-4-6".to_string();
-        config.agent.roles.insert("implementer".to_string(), role_model("claude-haiku-4-5"));
+        config
+            .agent
+            .roles
+            .insert("implementer".to_string(), role_model("claude-haiku-4-5"));
         let router = cascade_router("claude-sonnet-4-6");
 
         let selection = resolve_effective_model(
@@ -346,7 +353,10 @@ mod tests {
         .expect("selection");
 
         assert_eq!(selection.source, SelectionSource::CliOverride);
-        assert_eq!(selection.requested_model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(
+            selection.requested_model.as_deref(),
+            Some("claude-haiku-4-5")
+        );
         assert_eq!(selection.effective_model_key, "claude-haiku-4-5");
         assert_eq!(selection.backend_slug, "claude-haiku-4-5");
         assert_eq!(selection.provider_key, "claude_cli");
@@ -357,7 +367,10 @@ mod tests {
     #[test]
     fn task_hint_wins_when_no_cli_override() {
         let mut config = RokoConfig::default();
-        config.agent.roles.insert("implementer".to_string(), role_model("claude-opus-4-6"));
+        config
+            .agent
+            .roles
+            .insert("implementer".to_string(), role_model("claude-opus-4-6"));
         let router = cascade_router("claude-sonnet-4-6");
 
         let selection = resolve_effective_model(
@@ -370,7 +383,10 @@ mod tests {
         .expect("selection");
 
         assert_eq!(selection.source, SelectionSource::TaskModel);
-        assert_eq!(selection.requested_model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(
+            selection.requested_model.as_deref(),
+            Some("claude-haiku-4-5")
+        );
         assert_eq!(selection.effective_model_key, "claude-haiku-4-5");
         assert_eq!(selection.provider_key, "claude_cli");
         assert!(selection.reason.contains("task model"));
@@ -379,19 +395,20 @@ mod tests {
     #[test]
     fn role_default_used_as_fallback() {
         let mut config = RokoConfig::default();
-        config.agent.roles.insert("architect".to_string(), role_model("claude-opus-4-6"));
+        config
+            .agent
+            .roles
+            .insert("architect".to_string(), role_model("claude-opus-4-6"));
 
-        let selection = resolve_effective_model(
-            None,
-            None,
-            Some("architect".to_string()),
-            None,
-            &config,
-        )
-        .expect("selection");
+        let selection =
+            resolve_effective_model(None, None, Some("architect".to_string()), None, &config)
+                .expect("selection");
 
         assert_eq!(selection.source, SelectionSource::RoleConfig);
-        assert_eq!(selection.requested_model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(
+            selection.requested_model.as_deref(),
+            Some("claude-opus-4-6")
+        );
         assert_eq!(selection.effective_model_key, "claude-opus-4-6");
         assert_eq!(selection.provider_key, "claude_cli");
         assert!(selection.reason.contains("role config"));
@@ -402,11 +419,14 @@ mod tests {
         let config = RokoConfig::default();
         let router = cascade_router("claude-haiku-4-5");
 
-        let selection = resolve_effective_model(None, None, None, Some(&router), &config)
-            .expect("selection");
+        let selection =
+            resolve_effective_model(None, None, None, Some(&router), &config).expect("selection");
 
         assert_eq!(selection.source, SelectionSource::CascadeRouter);
-        assert_eq!(selection.requested_model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(
+            selection.requested_model.as_deref(),
+            Some("claude-haiku-4-5")
+        );
         assert_eq!(selection.effective_model_key, "claude-haiku-4-5");
         assert_eq!(selection.provider_key, "claude_cli");
         assert!(selection.reason.contains("cascade router"));
@@ -417,10 +437,14 @@ mod tests {
         let mut config = RokoConfig::default();
         config.agent.default_model = "claude-opus-4-6".to_string();
 
-        let selection = resolve_effective_model(None, None, None, None, &config).expect("selection");
+        let selection =
+            resolve_effective_model(None, None, None, None, &config).expect("selection");
 
         assert_eq!(selection.source, SelectionSource::ProjectDefault);
-        assert_eq!(selection.requested_model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(
+            selection.requested_model.as_deref(),
+            Some("claude-opus-4-6")
+        );
         assert_eq!(selection.effective_model_key, "claude-opus-4-6");
         assert_eq!(selection.provider_key, "claude_cli");
         assert!(selection.reason.contains("project default"));
@@ -432,10 +456,14 @@ mod tests {
         config.agent.default_model.clear();
         let builtin_default = RokoConfig::default().agent.default_model;
 
-        let selection = resolve_effective_model(None, None, None, None, &config).expect("selection");
+        let selection =
+            resolve_effective_model(None, None, None, None, &config).expect("selection");
 
         assert_eq!(selection.source, SelectionSource::BuiltInDefault);
-        assert_eq!(selection.requested_model.as_deref(), Some(builtin_default.as_str()));
+        assert_eq!(
+            selection.requested_model.as_deref(),
+            Some(builtin_default.as_str())
+        );
         assert_eq!(selection.effective_model_key, builtin_default);
         assert_eq!(selection.provider_key, "claude_cli");
         assert!(selection.reason.contains("built-in default"));
@@ -467,6 +495,9 @@ mod tests {
         )
         .expect_err("selection should fail");
 
-        assert!(err.to_string().contains("no configured provider matches kind"));
+        assert!(
+            err.to_string()
+                .contains("no configured provider matches kind")
+        );
     }
 }

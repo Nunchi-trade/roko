@@ -284,6 +284,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 workdir: wd.clone(),
                 plan_dir: plans_dir.clone(),
                 model: roko_config.agent.default_model.clone(),
+                cli_model_override: cli.model.clone(),
                 timeout_secs: task_timeout_secs,
                 max_retries: max_retries.unwrap_or(2),
                 approval,
@@ -627,14 +628,9 @@ fn resolve_effective_model_key(
     context: &str,
 ) -> Result<String> {
     let config = crate::load_roko_config(workdir)?;
-    let selection = roko_cli::model_selection::resolve_effective_model(
-        cli_model,
-        None,
-        role,
-        None,
-        &config,
-    )
-    .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
+    let selection =
+        roko_cli::model_selection::resolve_effective_model(cli_model, None, role, None, &config)
+            .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
     eprintln!("[{context}] effective selection: {}", selection.reason);
     Ok(selection.effective_model_key)
 }

@@ -1816,7 +1816,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 role: role.to_string(),
                 workdir: ctx.config.workdir.clone(),
                 model_hint: Some(ctx.config.model.clone()),
-                force_backend: None,
+                force_backend: ctx.config.cli_model_override.clone(),
                 budget_remaining_usd: if ctx.config.max_plan_usd > 0.0 {
                     (ctx.config.max_plan_usd - ctx.state.plan_cost(plan_id)).max(0.0)
                 } else {

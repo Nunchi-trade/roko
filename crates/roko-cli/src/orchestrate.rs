@@ -52,11 +52,11 @@ use roko_core::DaimonPolicy;
 use roko_core::React;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::attestation::{self, SigningKey};
-use roko_core::foundation::ShellGateCommand as CoreShellGateCommand;
 use roko_core::config::schema::{
     GatesConfig, LearningConfig as RuntimeLearningConfig, RokoConfig, RoleOverride,
 };
 use roko_core::extension::ExtensionChain;
+use roko_core::foundation::ShellGateCommand as CoreShellGateCommand;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
@@ -4139,9 +4139,8 @@ impl PlanRunner {
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
         let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
-        let feedback_service = roko_learn::feedback_service::FeedbackService::from_roko_dir(
-            &workdir.join(".roko"),
-        );
+        let feedback_service =
+            roko_learn::feedback_service::FeedbackService::from_roko_dir(&workdir.join(".roko"));
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -4360,9 +4359,8 @@ impl PlanRunner {
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
         let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
-        let feedback_service = roko_learn::feedback_service::FeedbackService::from_roko_dir(
-            &workdir.join(".roko"),
-        );
+        let feedback_service =
+            roko_learn::feedback_service::FeedbackService::from_roko_dir(&workdir.join(".roko"));
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -4572,9 +4570,8 @@ impl PlanRunner {
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
         let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
-        let feedback_service = roko_learn::feedback_service::FeedbackService::from_roko_dir(
-            &workdir.join(".roko"),
-        );
+        let feedback_service =
+            roko_learn::feedback_service::FeedbackService::from_roko_dir(&workdir.join(".roko"));
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -8063,14 +8060,10 @@ impl PlanRunner {
                             .and_then(|tracker| tracker.last_impl_output_hash)
                             .map(|hash| hash.to_string())
                             .unwrap_or_else(|| plan_id.clone());
-                        ep.extra.insert(
-                            "gates_passed".to_string(),
-                            serde_json::json!(counts.passed),
-                        );
-                        ep.extra.insert(
-                            "gates_failed".to_string(),
-                            serde_json::json!(counts.failed),
-                        );
+                        ep.extra
+                            .insert("gates_passed".to_string(), serde_json::json!(counts.passed));
+                        ep.extra
+                            .insert("gates_failed".to_string(), serde_json::json!(counts.failed));
                         ep.extra.insert(
                             "gates_skipped".to_string(),
                             serde_json::json!(counts.skipped),
@@ -14308,18 +14301,16 @@ impl PlanRunner {
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
         let explicit_model_override = model_override;
+        let hard_model_override = explicit_model_override.is_some();
 
         // ── Build prompt: surgical (from TaskDef) or generic ────────
         // Also collect attribution keys for context feedback after the agent runs.
         let mut attribution_keys: Vec<(String, String)> = Vec::new();
         let (task_text, mut selected_model) = if let Some(override_prompt) = prompt_override {
-            let model = explicit_model_override.clone().unwrap_or_else(|| {
-                self.config
-                    .agent
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| "claude-sonnet-4-6".into())
-            });
+            let model = explicit_model_override
+                .clone()
+                .or_else(|| self.config.agent.model.clone())
+                .unwrap_or_else(|| "claude-sonnet-4-6".into());
             (override_prompt, model)
         } else if let Some(ref td) = task_def {
             let prompt = td.build_prompt(plan_id, &self.workdir);
@@ -14346,11 +14337,9 @@ impl PlanRunner {
         } else {
             let text =
                 format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
-            let model = self
-                .config
-                .agent
-                .model
+            let model = explicit_model_override
                 .clone()
+                .or_else(|| self.config.agent.model.clone())
                 .unwrap_or_else(|| "claude-opus-4-6".into());
             (text, model)
         };
@@ -14367,9 +14356,24 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_dispatch_role_label = Some(resolved_dispatch_role_label.clone());
         }
+        if hard_model_override {
+            let validation = crate::model_selection::resolve_effective_model(
+                Some(selected_model.clone()),
+                None,
+                Some(role.label().to_string()),
+                None,
+                &roko_config,
+            )
+            .map_err(|error| {
+                anyhow!(
+                    "resolve hard model override for {plan_id}/{task} ({selected_model}): {error}"
+                )
+            })?;
+            selected_model = validation.backend_slug;
+        }
         let model_providers = routing_model_provider_map(&roko_config);
         let pending_force_model_override =
-            if task_def.is_some() && explicit_model_override.is_none() {
+            if !hard_model_override && task_def.is_some() && explicit_model_override.is_none() {
                 self.force_model_override.take()
             } else {
                 None
@@ -14386,243 +14390,250 @@ impl PlanRunner {
 
         // ── Adaptive model selection via CascadeRouter ───────────────
         let mut selected_model_experiment = None;
-        if let Some(forced_model) = pending_force_model_override {
-            tracing::warn!(
-                forced_model = %forced_model,
-                "applying pending cost-anomaly model override before routing"
-            );
-            selected_model = forced_model;
-        } else if task_def.is_none() {
-            let fallback_candidates: Vec<String> =
-                roko_config.effective_models().keys().cloned().collect();
-            if let Some((role_model, reason)) = apply_role_routing_override(
-                &roko_config,
-                role.label(),
-                &model_providers,
-                &fallback_candidates,
-            ) {
-                selected_model = role_model;
-                routing_reason = reason;
-                routing_stage = "static".to_string();
-            }
-        } else if let Some(td) = task_def.as_ref() {
-            let cascade_router = self.learning.cascade_router();
-            let mut routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
-            let load_snapshot = self.routing_load_snapshot().await;
-            routing_ctx.conductor_load = load_snapshot.pressure;
-            routing_ctx.active_agents = load_snapshot.active_agents;
-            routing_ctx.ready_queue_depth = load_snapshot.ready_queue_depth;
-            routing_ctx.max_queue_wait_hours = load_snapshot.max_queue_wait_hours;
-            routing_ctx.conductor_load = routing_ctx.conductor_load.max(budget_pressure);
-            let routing_bias = {
-                let mut signals = self.conductor_signals.clone();
-                if let Ok(efficiency_signals) = load_efficiency_signals_sync(
-                    &self.learning.paths().efficiency_jsonl,
-                    self.executor.config().budget_usd,
+        if !hard_model_override {
+            if let Some(forced_model) = pending_force_model_override {
+                tracing::warn!(
+                    forced_model = %forced_model,
+                    "applying pending cost-anomaly model override before routing"
+                );
+                selected_model = forced_model;
+            } else if task_def.is_none() {
+                let fallback_candidates: Vec<String> =
+                    roko_config.effective_models().keys().cloned().collect();
+                if let Some((role_model, reason)) = apply_role_routing_override(
+                    &roko_config,
+                    role.label(),
+                    &model_providers,
+                    &fallback_candidates,
                 ) {
-                    signals.extend(efficiency_signals);
+                    selected_model = role_model;
+                    routing_reason = reason;
+                    routing_stage = "static".to_string();
                 }
-                let _ = self.conductor.decide(&signals, &Context::now());
-                self.conductor.routing_bias()
-            };
-            if routing_bias.prefer_cheaper {
-                routing_ctx.conductor_load = routing_ctx.conductor_load.max(0.85);
-            }
-            let cost_spike = CostsLog::at(self.learning.paths().costs_jsonl.clone())
-                .is_cost_spike(0.50)
-                .await
-                .unwrap_or(false);
-            let agent_id = format!("{role:?}");
-            let effective_models = roko_config.effective_models();
-            // Merge configured models with observed models so candidates
-            // always include every model the user explicitly set up, even
-            // when no LinUCB observations exist yet.
-            let all_model_slugs = {
-                let mut slugs: Vec<String> = cascade_router
-                    .linucb()
-                    .arm_stats()
-                    .into_iter()
-                    .map(|arm| arm.slug)
-                    .collect();
-                for key in effective_models.keys() {
-                    if !slugs.iter().any(|s| s == key) {
-                        slugs.push(key.clone());
+            } else if let Some(td) = task_def.as_ref() {
+                let cascade_router = self.learning.cascade_router();
+                let mut routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
+                let load_snapshot = self.routing_load_snapshot().await;
+                routing_ctx.conductor_load = load_snapshot.pressure;
+                routing_ctx.active_agents = load_snapshot.active_agents;
+                routing_ctx.ready_queue_depth = load_snapshot.ready_queue_depth;
+                routing_ctx.max_queue_wait_hours = load_snapshot.max_queue_wait_hours;
+                routing_ctx.conductor_load = routing_ctx.conductor_load.max(budget_pressure);
+                let routing_bias = {
+                    let mut signals = self.conductor_signals.clone();
+                    if let Ok(efficiency_signals) = load_efficiency_signals_sync(
+                        &self.learning.paths().efficiency_jsonl,
+                        self.executor.config().budget_usd,
+                    ) {
+                        signals.extend(efficiency_signals);
                     }
+                    let _ = self.conductor.decide(&signals, &Context::now());
+                    self.conductor.routing_bias()
+                };
+                if routing_bias.prefer_cheaper {
+                    routing_ctx.conductor_load = routing_ctx.conductor_load.max(0.85);
                 }
-                slugs
-            };
-            let healthy_models =
-                self.learning
-                    .healthy_model_slugs(&all_model_slugs, |model_slug| {
-                        provider_id_for_routing_model(&roko_config, &model_providers, model_slug)
-                    });
-            let task_requirements = task_requirements_for_routing(
-                Some(td),
-                role,
-                &task_text,
-                &td.allowed_tools.clone().unwrap_or_default().join(","),
-                effective_context_window_tokens(&self.config) as u64,
-            );
-            let healthy_models = {
-                let fallback_models = healthy_models.clone();
-                let knowledge_category = routing_ctx.task_category.label();
-                let mut ranked = healthy_models
-                    .iter()
-                    .filter_map(|slug| {
-                        let reward = self.learning.local_reward_score("router", slug);
-                        let kb_boost = knowledge_routing_boost(
-                            &self.knowledge_store,
-                            slug,
-                            role,
-                            knowledge_category,
-                        );
-                        match effective_models.get(slug) {
-                            Some(profile) => score_model_for_task(profile, &task_requirements).map(
-                                |capability_score| {
-                                    (slug.clone(), capability_score + reward * 0.5 + kb_boost)
-                                },
-                            ),
-                            None => Some((slug.clone(), reward + kb_boost)),
+                let cost_spike = CostsLog::at(self.learning.paths().costs_jsonl.clone())
+                    .is_cost_spike(0.50)
+                    .await
+                    .unwrap_or(false);
+                let agent_id = format!("{role:?}");
+                let effective_models = roko_config.effective_models();
+                // Merge configured models with observed models so candidates
+                // always include every model the user explicitly set up, even
+                // when no LinUCB observations exist yet.
+                let all_model_slugs = {
+                    let mut slugs: Vec<String> = cascade_router
+                        .linucb()
+                        .arm_stats()
+                        .into_iter()
+                        .map(|arm| arm.slug)
+                        .collect();
+                    for key in effective_models.keys() {
+                        if !slugs.iter().any(|s| s == key) {
+                            slugs.push(key.clone());
                         }
-                    })
-                    .collect::<Vec<_>>();
-                if ranked.is_empty() {
-                    healthy_models
-                } else {
-                    let cascade_bias = cascade_routing_bias_from_conductor(&routing_bias);
-                    cascade_router.apply_bias(&mut ranked, &cascade_bias);
-                    cascade_router.apply_cost_pressure(&mut ranked, cost_spike);
-                    let candidate_count = ranked.len();
-                    ranked.retain(|(slug, score)| {
-                        *score > 0.0
-                            && (!cost_spike || !is_premium_model(slug))
-                            && (!routing_bias
-                                .deprioritize
-                                .iter()
-                                .any(|blocked| slug_matches(slug, blocked))
-                                || candidate_count == 1)
-                    });
-                    if ranked.is_empty() {
-                        fallback_models
-                    } else {
-                        ranked.sort_by(|a, b| {
-                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        ranked.into_iter().map(|(slug, _)| slug).collect()
                     }
-                }
-            };
+                    slugs
+                };
+                let healthy_models =
+                    self.learning
+                        .healthy_model_slugs(&all_model_slugs, |model_slug| {
+                            provider_id_for_routing_model(
+                                &roko_config,
+                                &model_providers,
+                                model_slug,
+                            )
+                        });
+                let task_requirements = task_requirements_for_routing(
+                    Some(td),
+                    role,
+                    &task_text,
+                    &td.allowed_tools.clone().unwrap_or_default().join(","),
+                    effective_context_window_tokens(&self.config) as u64,
+                );
+                let healthy_models = {
+                    let fallback_models = healthy_models.clone();
+                    let knowledge_category = routing_ctx.task_category.label();
+                    let mut ranked = healthy_models
+                        .iter()
+                        .filter_map(|slug| {
+                            let reward = self.learning.local_reward_score("router", slug);
+                            let kb_boost = knowledge_routing_boost(
+                                &self.knowledge_store,
+                                slug,
+                                role,
+                                knowledge_category,
+                            );
+                            match effective_models.get(slug) {
+                                Some(profile) => score_model_for_task(profile, &task_requirements)
+                                    .map(|capability_score| {
+                                        (slug.clone(), capability_score + reward * 0.5 + kb_boost)
+                                    }),
+                                None => Some((slug.clone(), reward + kb_boost)),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    if ranked.is_empty() {
+                        healthy_models
+                    } else {
+                        let cascade_bias = cascade_routing_bias_from_conductor(&routing_bias);
+                        cascade_router.apply_bias(&mut ranked, &cascade_bias);
+                        cascade_router.apply_cost_pressure(&mut ranked, cost_spike);
+                        let candidate_count = ranked.len();
+                        ranked.retain(|(slug, score)| {
+                            *score > 0.0
+                                && (!cost_spike || !is_premium_model(slug))
+                                && (!routing_bias
+                                    .deprioritize
+                                    .iter()
+                                    .any(|blocked| slug_matches(slug, blocked))
+                                    || candidate_count == 1)
+                        });
+                        if ranked.is_empty() {
+                            fallback_models
+                        } else {
+                            ranked.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            ranked.into_iter().map(|(slug, _)| slug).collect()
+                        }
+                    }
+                };
 
-            if let Some((role_model, reason)) = apply_role_routing_override(
-                &roko_config,
-                role.label(),
-                &model_providers,
-                &healthy_models,
-            ) {
-                selected_model = role_model;
-                routing_reason = reason;
-                routing_stage = "static".to_string();
-            } else {
-                routing_explanation =
-                    Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
+                if let Some((role_model, reason)) = apply_role_routing_override(
+                    &roko_config,
+                    role.label(),
+                    &model_providers,
+                    &healthy_models,
+                ) {
+                    selected_model = role_model;
+                    routing_reason = reason;
+                    routing_stage = "static".to_string();
+                } else {
+                    routing_explanation =
+                        Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
 
-                // Apply knowledge-informed routing advice to the explanation.
-                // This adjusts candidate scores based on past model/task
-                // performance stored in the neuro knowledge store.
-                if let Some(ref mut explanation) = routing_explanation {
-                    let knowledge_advice = build_knowledge_routing_advice(
-                        &self.knowledge_store,
-                        &healthy_models,
-                        role,
-                        routing_ctx.task_category.label(),
-                    );
-                    if knowledge_advice.has_signal {
-                        routing_knowledge_ids = self.knowledge_routing_entry_ids(
+                    // Apply knowledge-informed routing advice to the explanation.
+                    // This adjusts candidate scores based on past model/task
+                    // performance stored in the neuro knowledge store.
+                    if let Some(ref mut explanation) = routing_explanation {
+                        let knowledge_advice = build_knowledge_routing_advice(
+                            &self.knowledge_store,
                             &healthy_models,
                             role,
                             routing_ctx.task_category.label(),
                         );
-                        tracing::info!(
-                            hints = knowledge_advice.hints.len(),
-                            "[orchestrate] applying knowledge routing advice to cascade explanation"
-                        );
+                        if knowledge_advice.has_signal {
+                            routing_knowledge_ids = self.knowledge_routing_entry_ids(
+                                &healthy_models,
+                                role,
+                                routing_ctx.task_category.label(),
+                            );
+                            tracing::info!(
+                                hints = knowledge_advice.hints.len(),
+                                "[orchestrate] applying knowledge routing advice to cascade explanation"
+                            );
+                        }
+                        cascade_router.apply_knowledge_advice(explanation, knowledge_advice);
                     }
-                    cascade_router.apply_knowledge_advice(explanation, knowledge_advice);
-                }
 
-                if let Some(explanation) = routing_explanation.as_ref() {
-                    routing_stage = explanation.stage.label().to_string();
-                    routing_reason = if cost_spike {
-                        "cost_spike"
-                    } else if budget_pressure > 0.0 {
-                        "budget_pressure"
-                    } else if !routing_bias.deprioritize.is_empty() {
-                        "conductor_deprioritize"
-                    } else if routing_bias.prefer_cheaper {
-                        "conductor_prefer_cheaper"
-                    } else {
-                        match explanation.stage {
-                            roko_learn::cascade_router::CascadeStage::Static => "role_default",
-                            roko_learn::cascade_router::CascadeStage::Confidence => {
-                                "highest_confidence_score"
+                    if let Some(explanation) = routing_explanation.as_ref() {
+                        routing_stage = explanation.stage.label().to_string();
+                        routing_reason = if cost_spike {
+                            "cost_spike"
+                        } else if budget_pressure > 0.0 {
+                            "budget_pressure"
+                        } else if !routing_bias.deprioritize.is_empty() {
+                            "conductor_deprioritize"
+                        } else if routing_bias.prefer_cheaper {
+                            "conductor_prefer_cheaper"
+                        } else {
+                            match explanation.stage {
+                                roko_learn::cascade_router::CascadeStage::Static => "role_default",
+                                roko_learn::cascade_router::CascadeStage::Confidence => {
+                                    "highest_confidence_score"
+                                }
+                                roko_learn::cascade_router::CascadeStage::Ucb => {
+                                    "highest_ucb_score"
+                                }
                             }
-                            roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
                         }
+                        .to_string();
                     }
-                    .to_string();
-                }
-                let cfactor_snapshot = match self.learning.latest_cfactor().await {
-                    Ok(snapshot) => snapshot,
-                    Err(err) => {
-                        tracing::debug!("[orchestrate] failed to read latest C-Factor: {err}");
-                        None
-                    }
-                };
+                    let cfactor_snapshot = match self.learning.latest_cfactor().await {
+                        Ok(snapshot) => snapshot,
+                        Err(err) => {
+                            tracing::debug!("[orchestrate] failed to read latest C-Factor: {err}");
+                            None
+                        }
+                    };
 
-                let experiment_store =
-                    ModelExperimentStore::load_or_new(&model_experiments_path(&self.workdir));
-                if let Some((experiment_id, variant)) = experiment_store
-                    .assign_model_with_experiment(
-                        routing_ctx.role.label(),
-                        routing_ctx.task_category.label(),
-                    )
-                {
-                    tracing::info!(
-                        experiment_id = %experiment_id,
-                        variant_id = %variant.id,
-                        model = %variant.slug,
-                        "[orchestrate] model experiment override selected variant"
-                    );
-                    selected_model_experiment = Some(SelectedModelExperiment {
-                        experiment_id,
-                        variant_id: variant.id.clone(),
-                        model_slug: variant.slug.clone(),
-                    });
-                    selected_model = variant.slug;
-                    routing_reason = "experiment_override".to_string();
-                } else {
-                    match cascade_router.select_for_frequency_among(
-                        frequency,
-                        Some(&routing_ctx),
-                        cfactor_snapshot.as_ref(),
-                        Some(agent_id.as_str()),
-                        &healthy_models,
-                    ) {
-                        Some(model) => {
-                            tracing::info!(
-                                "[orchestrate] frequency={} model={} healthy_candidates={} (selected via cascade)",
-                                frequency_label(frequency),
-                                model.slug,
-                                healthy_models.len()
-                            );
-                            selected_model = model.slug;
-                        }
-                        None => {
-                            tracing::info!(
-                                "[orchestrate] frequency={} (reactive; bypassing model selection)",
-                                frequency_label(frequency)
-                            );
-                            routing_reason = "reactive_bypass".to_string();
+                    let experiment_store =
+                        ModelExperimentStore::load_or_new(&model_experiments_path(&self.workdir));
+                    if let Some((experiment_id, variant)) = experiment_store
+                        .assign_model_with_experiment(
+                            routing_ctx.role.label(),
+                            routing_ctx.task_category.label(),
+                        )
+                    {
+                        tracing::info!(
+                            experiment_id = %experiment_id,
+                            variant_id = %variant.id,
+                            model = %variant.slug,
+                            "[orchestrate] model experiment override selected variant"
+                        );
+                        selected_model_experiment = Some(SelectedModelExperiment {
+                            experiment_id,
+                            variant_id: variant.id.clone(),
+                            model_slug: variant.slug.clone(),
+                        });
+                        selected_model = variant.slug;
+                        routing_reason = "experiment_override".to_string();
+                    } else {
+                        match cascade_router.select_for_frequency_among(
+                            frequency,
+                            Some(&routing_ctx),
+                            cfactor_snapshot.as_ref(),
+                            Some(agent_id.as_str()),
+                            &healthy_models,
+                        ) {
+                            Some(model) => {
+                                tracing::info!(
+                                    "[orchestrate] frequency={} model={} healthy_candidates={} (selected via cascade)",
+                                    frequency_label(frequency),
+                                    model.slug,
+                                    healthy_models.len()
+                                );
+                                selected_model = model.slug;
+                            }
+                            None => {
+                                tracing::info!(
+                                    "[orchestrate] frequency={} (reactive; bypassing model selection)",
+                                    frequency_label(frequency)
+                                );
+                                routing_reason = "reactive_bypass".to_string();
+                            }
                         }
                     }
                 }
@@ -14732,10 +14743,11 @@ impl PlanRunner {
         // ── Provider health check ────────────────────────────────────
         let selected_provider =
             provider_id_for_routing_model(&roko_config, &model_providers, &selected_model);
-        let selected_model = if !self
-            .learning
-            .provider_health()
-            .is_healthy(&selected_provider)
+        let selected_model = if !hard_model_override
+            && !self
+                .learning
+                .provider_health()
+                .is_healthy(&selected_provider)
         {
             let fallback = self
                 .config
@@ -14781,8 +14793,10 @@ impl PlanRunner {
         let mut dispatch_params =
             DispatchParams::new(selected_model.clone(), frequency.turn_limit());
         dispatch_params.effort = self.config.agent.effort.clone();
-        self.daimon
-            .modulate_with_strategy(&mut dispatch_params, task_strategy);
+        if !hard_model_override {
+            self.daimon
+                .modulate_with_strategy(&mut dispatch_params, task_strategy);
+        }
         let selected_model = dispatch_params.model;
         let dispatch_turn_limit = dispatch_params.turn_limit;
         let dispatch_effort = dispatch_params.effort.clone();
@@ -18693,14 +18707,8 @@ fn execution_event_summary(
             format!("Phase changed: {old_phase} -> {new_phase}"),
         ),
         ExecutionEvent::GateResult {
-            task_id,
-            message,
-            ..
-        } => (
-            "gate_result".to_string(),
-            task_id.clone(),
-            message.clone(),
-        ),
+            task_id, message, ..
+        } => ("gate_result".to_string(), task_id.clone(), message.clone()),
         _ => ("execution".to_string(), String::new(), String::new()),
     }
 }
@@ -20241,7 +20249,10 @@ acceptance = []
             fleet_cfactor: None,
         };
         assert!(report.all_succeeded());
-        assert_eq!(report.plans[0].gate_summary, "1 passed, 0 failed, 0 skipped");
+        assert_eq!(
+            report.plans[0].gate_summary,
+            "1 passed, 0 failed, 0 skipped"
+        );
         assert_eq!(report.plans[0].gates_skipped, 0);
     }
 
@@ -20279,8 +20290,14 @@ acceptance = []
             fleet_cfactor: None,
         };
         assert!(!report.all_succeeded());
-        assert_eq!(report.plans[0].gate_summary, "0 passed, 0 failed, 0 skipped");
-        assert_eq!(report.plans[1].gate_summary, "0 passed, 0 failed, 0 skipped");
+        assert_eq!(
+            report.plans[0].gate_summary,
+            "0 passed, 0 failed, 0 skipped"
+        );
+        assert_eq!(
+            report.plans[1].gate_summary,
+            "0 passed, 0 failed, 0 skipped"
+        );
     }
 
     #[test]
@@ -20469,12 +20486,15 @@ depends_on = []
         let deploy_backend = Arc::from(
             roko_serve::deploy::create_backend("manual", None, None, None).expect("manual backend"),
         );
-        let state = Arc::new(roko_serve::state::AppState::new(
-            tmp.path().to_path_buf(),
-            Arc::new(TestServeRuntime),
-            roko_core::config::schema::RokoConfig::default(),
-            deploy_backend,
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            roko_serve::state::AppState::new(
+                tmp.path().to_path_buf(),
+                Arc::new(TestServeRuntime),
+                roko_core::config::schema::RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
         // state.state_hub is roko_serve::StateHub (via #[path] include), but
         // set_state_hub expects roko_cli::state_hub::StateHubSender. Both are the
         // same source file but distinct types. Create a local hub for the test.

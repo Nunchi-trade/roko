@@ -11,12 +11,12 @@ use anyhow::Context;
 use async_trait::async_trait;
 use roko_core::config::schema::RokoConfig;
 use roko_learn::playbook::PlaybookStore;
+use roko_neuro::KnowledgeStore;
 use roko_serve::bench::{BenchConfigOverrides, BenchStrategy};
 use roko_serve::runtime::{
-    CliRuntime, DashboardInfo, PlanExecutionResult, PlanGenerationResult, RepoInfo,
-    RunResult, RunResultUsage, RuntimeGateResult, SessionStatusInfo,
+    CliRuntime, DashboardInfo, PlanExecutionResult, PlanGenerationResult, RepoInfo, RunResult,
+    RunResultUsage, RuntimeGateResult, SessionStatusInfo,
 };
-use roko_neuro::KnowledgeStore;
 
 use crate::config::{Config, RepoRegistry};
 use crate::prd;
@@ -118,7 +118,8 @@ impl CliRuntime for RokoCliRuntime {
         }
 
         if success && !matches!(overrides.strategy, BenchStrategy::Minimal) {
-            match crate::run::extract_bench_playbook(workdir, prompt, output_text.as_deref()).await {
+            match crate::run::extract_bench_playbook(workdir, prompt, output_text.as_deref()).await
+            {
                 Ok(Some(playbook)) => {
                     let playbook_store = self.playbook_store(workdir);
                     if let Err(err) = playbook_store.save_or_merge(&playbook).await {
@@ -535,6 +536,7 @@ fn build_runner_config(
         workdir: workdir.to_path_buf(),
         plan_dir: plan_dir.to_path_buf(),
         model,
+        cli_model_override: None,
         timeout_secs: cli_config.executor.task_timeout_secs,
         max_retries: cli_config.executor.max_auto_fix_iterations,
         approval: false,

@@ -1229,6 +1229,8 @@ pub struct RunConfig {
     pub plan_dir: PathBuf,
     /// Default model to use when task has no model_hint.
     pub model: String,
+    /// Hard CLI model override. Beats task model hints when present.
+    pub cli_model_override: Option<String>,
     /// Per-task timeout in seconds.
     pub timeout_secs: u64,
     /// Maximum auto-fix retries per task.
@@ -1328,6 +1330,7 @@ impl RunConfig {
             workdir,
             plan_dir,
             model,
+            cli_model_override: None,
             timeout_secs: roko_config.agent.timeout_ms.unwrap_or(600_000) / 1000,
             max_retries: 2,
             approval: false,
@@ -1372,6 +1375,7 @@ impl Default for RunConfig {
             workdir: PathBuf::from("."),
             plan_dir: PathBuf::from("plans"),
             model: "claude-sonnet-4-6".to_string(),
+            cli_model_override: None,
             timeout_secs: 600,
             max_retries: 5,
             approval: false,
@@ -1402,6 +1406,10 @@ impl std::fmt::Debug for RunConfig {
             .field("workdir", &self.workdir)
             .field("plan_dir", &self.plan_dir)
             .field("model", &self.model)
+            .field(
+                "cli_model_override",
+                &self.cli_model_override.as_ref().map(|_| ".."),
+            )
             .field("timeout_secs", &self.timeout_secs)
             .field("max_retries", &self.max_retries)
             .field("max_gate_rung", &self.max_gate_rung)
