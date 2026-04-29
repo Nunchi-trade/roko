@@ -321,7 +321,7 @@ pub async fn cmd_validate(workdir: &Path) -> Result<()> {
     }
     print_phase_status("Phase 1: TOML syntax", true);
 
-    let config = match RokoConfig::from_toml(&text) {
+    let config = match toml::from_str::<RokoConfig>(&text) {
         Ok(config) => config,
         Err(err) => {
             print_phase_status("Phase 2: Schema validation", false);
@@ -338,24 +338,25 @@ pub async fn cmd_validate(workdir: &Path) -> Result<()> {
         .timeout(Duration::from_secs(VALIDATION_REACHABILITY_TIMEOUT_SECS))
         .build()
         .context("build validation HTTP client")?;
-    let report = semantic_validate_config(&config, &client).await;
-
-    println!("Phase 3: Semantic validation:");
-    print_semantic_result(
-        "All model providers exist in [providers.*]",
-        &report.provider_reference_errors,
-    );
-    print_semantic_result(
-        "Fallback chain models exist",
-        &report.fallback_reference_errors,
-    );
-    print_semantic_result("Tier model keys exist", &report.tier_model_errors);
-    print_semantic_result("API key env vars are set", &report.api_key_errors);
-    for warning in &report.warnings {
-        println!("  ⚠ {warning}");
+    let mut report = semantic_validate_config(&config, &client).await;
+    if let Some(warning) = legacy_layout_warning(&config) {
+        report.schema_warnings.push(warning);
     }
 
+    println!("Phase 3: Semantic validation:");
+    print_warning_section("Schema warnings", &report.schema_warnings);
+    print_warning_section("Field warnings", &report.field_warnings);
+    print_warning_section("Migration warnings", &report.migration_warnings);
+    print_semantic_result("API key env vars are set", &report.api_key_errors);
+
     println!();
+    println!(
+        "Summary: schema {} warnings, field {} warnings, migration {} warnings, {} errors",
+        report.schema_warning_count(),
+        report.field_warning_count(),
+        report.migration_warning_count(),
+        report.error_count()
+    );
     println!(
         "Result: {} warnings, {} errors",
         report.warning_count(),
@@ -953,23 +954,31 @@ fn render_prefixed_toml_block(block: String) -> Vec<String> {
 
 #[derive(Debug, Default)]
 struct SemanticValidationReport {
-    provider_reference_errors: Vec<String>,
-    fallback_reference_errors: Vec<String>,
-    tier_model_errors: Vec<String>,
+    schema_warnings: Vec<String>,
+    field_warnings: Vec<String>,
+    migration_warnings: Vec<String>,
     api_key_errors: Vec<String>,
-    warnings: Vec<String>,
 }
 
 impl SemanticValidationReport {
     fn error_count(&self) -> usize {
-        self.provider_reference_errors.len()
-            + self.fallback_reference_errors.len()
-            + self.tier_model_errors.len()
-            + self.api_key_errors.len()
+        self.api_key_errors.len()
+    }
+
+    fn schema_warning_count(&self) -> usize {
+        self.schema_warnings.len()
+    }
+
+    fn field_warning_count(&self) -> usize {
+        self.field_warnings.len()
+    }
+
+    fn migration_warning_count(&self) -> usize {
+        self.migration_warnings.len()
     }
 
     fn warning_count(&self) -> usize {
-        self.warnings.len()
+        self.schema_warnings.len() + self.field_warnings.len() + self.migration_warnings.len()
     }
 }
 
@@ -991,6 +1000,17 @@ fn print_phase_status(label: &str, ok: bool) {
     println!("{label:.<32} {symbol}");
 }
 
+fn print_warning_section(label: &str, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+
+    println!("  {label}:");
+    for warning in warnings {
+        println!("    ⚠ {warning}");
+    }
+}
+
 fn print_semantic_result(label: &str, errors: &[String]) {
     if errors.is_empty() {
         println!("  ✓ {label}");
@@ -1000,6 +1020,30 @@ fn print_semantic_result(label: &str, errors: &[String]) {
     for error in errors {
         println!("  ✗ {error}");
     }
+}
+
+fn legacy_layout_warning(config: &RokoConfig) -> Option<String> {
+    if config.config_version == 1 {
+        if !config.providers.is_empty() {
+            return Some(
+                "roko.toml uses config version 1; run `roko config migrate` to upgrade"
+                    .to_string(),
+            );
+        }
+        return Some(
+            "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+                .to_string(),
+        );
+    }
+
+    if config.providers.is_empty() {
+        return Some(
+            "roko.toml has no [providers] section; run `roko config migrate` to upgrade"
+                .to_string(),
+        );
+    }
+
+    None
 }
 
 async fn semantic_validate_config(
@@ -1015,13 +1059,13 @@ async fn semantic_validate_config(
     for (model_key, profile) in model_entries {
         let provider_name = profile.provider.trim();
         if provider_name.is_empty() {
-            report.provider_reference_errors.push(format!(
+            report.schema_warnings.push(format!(
                 "Model '{model_key}' has an empty provider reference"
             ));
             continue;
         }
         if !providers.contains_key(provider_name) {
-            report.provider_reference_errors.push(format!(
+            report.schema_warnings.push(format!(
                 "Model '{model_key}' references missing provider '{provider_name}'"
             ));
         }
@@ -1031,10 +1075,10 @@ async fn semantic_validate_config(
         let fallback_model = fallback_model.trim();
         if fallback_model.is_empty() {
             report
-                .fallback_reference_errors
+                .schema_warnings
                 .push("agent.fallback_model must not be empty".to_string());
         } else if !models.contains_key(fallback_model) {
-            report.fallback_reference_errors.push(format!(
+            report.schema_warnings.push(format!(
                 "agent.fallback_model references missing model '{fallback_model}'"
             ));
         }
@@ -1045,12 +1089,12 @@ async fn semantic_validate_config(
     for (tier, model) in tier_models {
         if tier.trim().is_empty() {
             report
-                .tier_model_errors
+                .schema_warnings
                 .push("agent.tier_models contains an empty tier name".to_string());
         }
         if model.trim().is_empty() {
             report
-                .tier_model_errors
+                .schema_warnings
                 .push(format!("agent.tier_models.{tier} must not be empty"));
         }
     }
@@ -1088,7 +1132,7 @@ async fn semantic_validate_config(
             && let Some(warning) = probe_validation_base_url(client, provider_name, base_url).await
         {
             unreachable_providers.insert(provider_name.to_string());
-            report.warnings.push(warning);
+            report.field_warnings.push(warning);
         }
     }
 
@@ -1097,7 +1141,7 @@ async fn semantic_validate_config(
         model_entries.sort_by(|a, b| a.0.cmp(b.0));
         for (model_key, profile) in model_entries {
             if unreachable_providers.contains(profile.provider.trim()) {
-                report.warnings.push(format!(
+                report.field_warnings.push(format!(
                     "Model '{model_key}' references provider '{}' which is unreachable",
                     profile.provider.trim()
                 ));
@@ -1686,10 +1730,12 @@ command = "claude"
         );
 
         let report = semantic_validate_config(&config, &client).await;
-        assert_eq!(report.error_count(), 1);
-        assert_eq!(report.warning_count(), 0);
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(report.warning_count(), 1);
+        assert_eq!(report.schema_warning_count(), 1);
+        assert_eq!(report.field_warning_count(), 0);
         assert_eq!(
-            report.provider_reference_errors,
+            report.schema_warnings,
             vec!["Model 'kimi-k2-5' references missing provider 'moonshot'".to_string()]
         );
     }
@@ -1736,10 +1782,12 @@ command = "claude"
 
         let report = semantic_validate_config(&config, &client).await;
 
-        assert_eq!(report.error_count(), 1);
-        assert_eq!(report.warning_count(), 0);
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(report.warning_count(), 1);
+        assert_eq!(report.schema_warning_count(), 1);
+        assert_eq!(report.field_warning_count(), 0);
         assert_eq!(
-            report.fallback_reference_errors,
+            report.schema_warnings,
             vec!["agent.fallback_model references missing model 'missing-model'".to_string()]
         );
     }
@@ -1757,7 +1805,7 @@ command = "claude"
 
         let report = semantic_validate_config(&config, &client).await;
 
-        assert!(report.fallback_reference_errors.is_empty());
+        assert!(report.schema_warnings.is_empty());
     }
 
     #[tokio::test]
@@ -1811,15 +1859,33 @@ command = "claude"
 
         assert_eq!(report.error_count(), 0);
         assert_eq!(report.warning_count(), 2);
+        assert_eq!(report.schema_warning_count(), 0);
+        assert_eq!(report.field_warning_count(), 2);
         assert!(
             report
-                .warnings
+                .field_warnings
                 .iter()
                 .any(|warning| warning.contains("Provider 'moonshot' base_url unreachable"))
         );
         assert_eq!(
-            report.warnings[1],
+            report.field_warnings[1],
             "Model 'kimi-k2-5' references provider 'moonshot' which is unreachable"
+        );
+    }
+
+    #[test]
+    fn legacy_layout_warning_reports_version_one_or_missing_providers() {
+        let mut legacy = RokoConfig::default();
+        legacy.config_version = 1;
+        assert_eq!(
+            legacy_layout_warning(&legacy).as_deref(),
+            Some("roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade")
+        );
+
+        let current = RokoConfig::default();
+        assert_eq!(
+            legacy_layout_warning(&current).as_deref(),
+            Some("roko.toml has no [providers] section; run `roko config migrate` to upgrade")
         );
     }
 }
