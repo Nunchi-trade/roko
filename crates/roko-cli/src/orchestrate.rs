@@ -9704,16 +9704,10 @@ impl PlanRunner {
                 .map(|task| task.status.clone())
                 .unwrap_or_else(|| "unknown".into());
 
+            let current_model = self.effective_model();
             let (prompt_text, model) = if let Some(ref td) = task_def {
                 let p = td.build_prompt(plan_id, &self.workdir);
-                let m = td.effective_model(
-                    self.config
-                        .agent
-                        .model
-                        .as_deref()
-                        .unwrap_or("claude-sonnet-4-6"),
-                    Some(&self.config.agent.tier_models),
-                );
+                let m = td.effective_model(&current_model, Some(&self.config.agent.tier_models));
                 (p, m)
             } else {
                 let p =
@@ -9723,6 +9717,7 @@ impl PlanRunner {
                     .agent
                     .model
                     .clone()
+                    .filter(|model| !model.trim().is_empty())
                     .unwrap_or_else(|| "claude-opus-4-6".into());
                 (p, m)
             };
@@ -10124,7 +10119,9 @@ impl PlanRunner {
         self.config
             .agent
             .model
-            .clone()
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .map(str::to_owned)
             .unwrap_or_else(|| "claude-sonnet-4-6".into())
     }
 
@@ -10158,6 +10155,7 @@ impl PlanRunner {
     }
 
     fn task_retry_model(&self, plan_id: &str, task_id: &str) -> String {
+        let current_model = self.effective_model();
         self.task_trackers
             .get(plan_id)
             .and_then(|tracker| {
@@ -10168,16 +10166,9 @@ impl PlanRunner {
                     .find(|task| task.id == task_id)
             })
             .map(|task| {
-                task.effective_model(
-                    self.config
-                        .agent
-                        .model
-                        .as_deref()
-                        .unwrap_or("claude-sonnet-4-6"),
-                    Some(&self.config.agent.tier_models),
-                )
+                task.effective_model(&current_model, Some(&self.config.agent.tier_models))
             })
-            .unwrap_or_else(|| self.effective_model())
+            .unwrap_or_else(|| current_model.clone())
     }
 
     fn retry_model_tier_label(model_slug: &str) -> String {
@@ -12956,6 +12947,7 @@ impl PlanRunner {
         let frequency = task_def
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
+        let selected_model = selected_model.filter(|model| !model.trim().is_empty());
         if let Some(model) = selected_model {
             self.observe_cascade_router(plan_id, task_id, task_def.as_ref(), model, 0.0);
         }
@@ -13167,15 +13159,9 @@ impl PlanRunner {
             task_def.denied_tools.as_deref(),
             self.tool_registry.as_deref(),
         );
+        let current_model = self.effective_model();
         let model = selected_model.map(str::to_owned).unwrap_or_else(|| {
-            task_def.effective_model(
-                self.config
-                    .agent
-                    .model
-                    .as_deref()
-                    .unwrap_or("claude-sonnet-4-6"),
-                Some(&self.config.agent.tier_models),
-            )
+            task_def.effective_model(&current_model, Some(&self.config.agent.tier_models))
         });
         let prompt_hash = roko_core::ContentHash::of(
             build_system_prompt(
@@ -13996,12 +13982,7 @@ impl PlanRunner {
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let current = self
-                    .config
-                    .agent
-                    .model
-                    .as_deref()
-                    .unwrap_or("claude-sonnet-4-6");
+                let current = self.effective_model();
                 let current_idx = escalation_models
                     .iter()
                     .position(|m| *m == current)
@@ -14405,8 +14386,9 @@ impl PlanRunner {
         let frequency = task_def
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
-        let explicit_model_override = model_override;
+        let explicit_model_override = model_override.filter(|model| !model.trim().is_empty());
         let hard_model_override = explicit_model_override.is_some();
+        let current_model = self.effective_model();
 
         // ── Build prompt: surgical (from TaskDef) or generic ────────
         // Also collect attribution keys for context feedback after the agent runs.
@@ -14414,20 +14396,12 @@ impl PlanRunner {
         let (task_text, mut selected_model) = if let Some(override_prompt) = prompt_override {
             let model = explicit_model_override
                 .clone()
-                .or_else(|| self.config.agent.model.clone())
-                .unwrap_or_else(|| "claude-sonnet-4-6".into());
+                .unwrap_or_else(|| current_model.clone());
             (override_prompt, model)
         } else if let Some(ref td) = task_def {
             let prompt = td.build_prompt(plan_id, &self.workdir);
             let model = explicit_model_override.clone().unwrap_or_else(|| {
-                td.effective_model(
-                    self.config
-                        .agent
-                        .model
-                        .as_deref()
-                        .unwrap_or("claude-sonnet-4-6"),
-                    Some(&self.config.agent.tier_models),
-                )
+                td.effective_model(&current_model, Some(&self.config.agent.tier_models))
             });
             tracing::info!(
                 "[orchestrate] Task {} tier={} model={} max_loc={:?} context={} verify={}",
@@ -14444,7 +14418,13 @@ impl PlanRunner {
                 format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
             let model = explicit_model_override
                 .clone()
-                .or_else(|| self.config.agent.model.clone())
+                .or_else(|| {
+                    self.config
+                        .agent
+                        .model
+                        .clone()
+                        .filter(|model| !model.trim().is_empty())
+                })
                 .unwrap_or_else(|| "claude-opus-4-6".into());
             (text, model)
         };
@@ -14859,6 +14839,7 @@ impl PlanRunner {
                 .agent
                 .fallback_model
                 .clone()
+                .filter(|model| !model.trim().is_empty())
                 .unwrap_or_else(|| "claude-sonnet-4-6".into());
             tracing::warn!(
                 unhealthy_model = %selected_model,
