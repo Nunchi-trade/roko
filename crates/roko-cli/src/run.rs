@@ -17,6 +17,7 @@ use crate::learning_helpers::{
     render_prior_experience,
 };
 use crate::episode::EpisodePolicy;
+use crate::model_selection::{EffectiveModelSelection, resolve_effective_model};
 use crate::output_format;
 #[cfg(feature = "legacy-orchestrate")]
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
@@ -30,6 +31,7 @@ use roko_agent::{AgentResult, OllamaLlmBackend};
 #[cfg(feature = "legacy-orchestrate")]
 use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
+use roko_core::config::schema::RokoConfig;
 use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_core::foundation::{
     EventConsumer as WorkflowEventConsumer, ShellGateCommand as CoreShellGateCommand,
@@ -309,10 +311,82 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<EffectServices> {
-    let config = crate::config::load_layered(workdir)
+// `cmd_run` only passes the resolved workspace config into the v2 path, so we
+// re-read the process args/env here to preserve the caller's `--model`/`--role`
+// inputs without introducing a second selection chain.
+fn workflow_cli_overrides() -> (Option<String>, Option<String>) {
+    let mut model = None;
+    let mut role = None;
+    let mut parsing_flags = true;
+    let mut args = std::env::args_os().skip(1).peekable();
+
+    while let Some(arg) = args.next() {
+        let arg = arg.to_string_lossy();
+        if parsing_flags && arg == "--" {
+            parsing_flags = false;
+            continue;
+        }
+        if !parsing_flags {
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--model=") {
+            model = Some(value.to_string());
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--role=") {
+            role = Some(value.to_string());
+            continue;
+        }
+        if arg == "--model" {
+            if let Some(value) = args.peek() {
+                let value = value.to_string_lossy().into_owned();
+                if !value.starts_with('-') {
+                    model = Some(value);
+                    let _ = args.next();
+                }
+            }
+            continue;
+        }
+        if arg == "--role" {
+            if let Some(value) = args.peek() {
+                let value = value.to_string_lossy().into_owned();
+                if !value.starts_with('-') {
+                    role = Some(value);
+                    let _ = args.next();
+                }
+            }
+            continue;
+        }
+    }
+
+    if model.is_none() {
+        model = std::env::var("ROKO_MODEL")
+            .ok()
+            .filter(|value| !value.is_empty());
+    }
+    if role.is_none() {
+        role = std::env::var("ROKO_ROLE")
+            .ok()
+            .filter(|value| !value.is_empty());
+    }
+
+    (model, role)
+}
+
+fn resolve_workflow_model_selection(
+    workdir: &std::path::Path,
+) -> anyhow::Result<(Config, RokoConfig, EffectiveModelSelection)> {
+    let mut config = crate::config::load_layered(workdir)
         .map(|resolved| resolved.config)
         .unwrap_or_default();
+    let (cli_model_override, cli_role_override) = workflow_cli_overrides();
+    if let Some(model) = cli_model_override.clone() {
+        config.agent.model = Some(model);
+    }
+    if let Some(role) = cli_role_override.clone() {
+        config.prompt.role = role;
+    }
+
     let mut model_config = roko_core::config::load_config(workdir).unwrap_or_default();
     model_config.apply_process_env();
     crate::config::merge_global_providers(&mut model_config);
@@ -330,11 +404,26 @@ fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<E
         model_config.agent.default_model = model;
     }
 
+    let role = non_empty(&config.prompt.role).map(str::to_owned);
+    let selection = resolve_effective_model(cli_model_override, None, role, None, &model_config)
+        .map_err(|error| anyhow!("resolve workflow model selection: {error}"))?;
+
+    Ok((config, model_config, selection))
+}
+
+fn build_workflow_effect_services(
+    workdir: &std::path::Path,
+    config: &Config,
+    mut model_config: RokoConfig,
+    selection: &EffectiveModelSelection,
+) -> anyhow::Result<EffectServices> {
+    model_config.agent.default_model = selection.effective_model_key.clone();
+
     let services = ServiceFactory::build(ServiceConfig {
         workdir: workdir.to_path_buf(),
         roko_dir: workdir.join(".roko"),
         workspace_config: model_config,
-        model_key: config.agent.model.clone(),
+        model_key: Some(selection.effective_model_key.clone()),
         mcp_config: config.agent.mcp_config.clone(),
         feedback_enabled: true,
         affect_enabled: true,
@@ -452,7 +541,12 @@ pub async fn run_workflow_engine_report_with_hub(
         }
     }
 
-    let services = build_workflow_effect_services(workdir)?;
+    let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
+    eprintln!(
+        "model: {} via {} (source: {})",
+        selection.effective_model_key, selection.provider_key, selection.source
+    );
+    let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
 
     let config = WorkflowRunConfig {
         prompt: prompt.to_string(),
@@ -477,10 +571,12 @@ pub async fn run_workflow_engine_report_with_hub(
         engine.add_consumer(bridge);
     }
 
-    let result = engine
+    let mut result = engine
         .run(config)
         .await
         .map_err(|error| anyhow!("workflow engine failed: {error}"))?;
+
+    result.provider = Some(selection.provider_key.clone());
 
     Ok(result)
 }
