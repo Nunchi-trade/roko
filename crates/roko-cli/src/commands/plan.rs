@@ -977,7 +977,11 @@ pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> 
         None
     };
 
-    let report = plan_validate::validate_plans_dir(dir, models.as_ref())?;
+    let report = plan_validate::validate_plans_dir_with_workdir(
+        dir,
+        models.as_ref(),
+        Some(current_dir.as_path()),
+    )?;
     if json_output {
         println!("{}", plan_validate::render_json(&report)?);
     } else {
