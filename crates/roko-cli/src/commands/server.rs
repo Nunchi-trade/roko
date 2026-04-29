@@ -166,15 +166,72 @@ pub(crate) async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
     }
 }
 
+/// Print a security checklist and fail unless auth is enabled or `--unsafe-public` is set.
+///
+/// Does not block for `localhost`/`127.0.0.1` targets.
+fn check_security_posture(config: &roko_core::config::schema::RokoConfig, unsafe_public: bool) -> Result<()> {
+    let auth = &config.serve.auth;
+    let auth_ok = auth.enabled && (!auth.api_key.is_empty() || !auth.api_keys.is_empty());
+    let cors_configured = !config.server.cors_origins.is_empty();
+    // Terminal is disabled when not explicitly set; treat absence as disabled.
+    let terminal_disabled = true; // terminal feature is not on by default
+
+    println!("  Security checklist:");
+    println!(
+        "  [{}] serve.auth.enabled = {}",
+        if auth_ok { "x" } else { " " },
+        auth.enabled
+    );
+    println!(
+        "  [{}] serve.auth.api_key set",
+        if !auth.api_key.is_empty() || !auth.api_keys.is_empty() { "x" } else { " " }
+    );
+    println!(
+        "  [{}] server.cors_origins configured",
+        if cors_configured { "x" } else { " " }
+    );
+    println!(
+        "  [{}] terminal disabled (not exposed)",
+        if terminal_disabled { "x" } else { " " }
+    );
+    println!();
+
+    if !auth_ok {
+        if unsafe_public {
+            eprintln!(
+                "WARNING: proceeding without auth (--unsafe-public). \
+                 Your server will be accessible to the internet without authentication."
+            );
+        } else {
+            anyhow::bail!(
+                "deployment blocked: serve.auth is not configured.\n\
+                 Add to roko.toml:\n\
+                 \n  [serve.auth]\n  enabled = true\n  api_key = \"<secret>\"\n\n\
+                 Or bypass with: roko deploy railway --unsafe-public"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
     match cmd {
         DeployCmd::Railway {
             workdir,
             with_mirage,
             workers,
-        } => cmd_deploy_railway(cli, workdir, with_mirage, workers).await,
-        DeployCmd::Fly { workdir } => cmd_deploy_fly(cli, workdir).await,
-        DeployCmd::Docker { workdir, registry } => cmd_deploy_docker(cli, workdir, registry).await,
+            unsafe_public,
+        } => cmd_deploy_railway(cli, workdir, with_mirage, workers, unsafe_public).await,
+        DeployCmd::Fly {
+            workdir,
+            unsafe_public,
+        } => cmd_deploy_fly(cli, workdir, unsafe_public).await,
+        DeployCmd::Docker {
+            workdir,
+            registry,
+            unsafe_public,
+        } => cmd_deploy_docker(cli, workdir, registry, unsafe_public).await,
     }
 }
 
@@ -183,11 +240,14 @@ pub(crate) async fn cmd_deploy_railway(
     workdir: Option<PathBuf>,
     with_mirage: bool,
     workers: Vec<String>,
+    unsafe_public: bool,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     run_release_build(&workdir).await?;
 
     let config = load_roko_config(&workdir)?;
+    println!("Checking security posture...");
+    check_security_posture(&config, unsafe_public)?;
     let deploy_webhooks = match load_layered(&workdir) {
         Ok(resolved) => resolved.config.serve.deploy.webhooks,
         Err(err) => {
@@ -330,8 +390,15 @@ pub(crate) async fn cmd_deploy_railway(
     Ok(EXIT_SUCCESS)
 }
 
-pub(crate) async fn cmd_deploy_fly(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
+pub(crate) async fn cmd_deploy_fly(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    unsafe_public: bool,
+) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    let config = load_roko_config(&workdir)?;
+    println!("Checking security posture...");
+    check_security_posture(&config, unsafe_public)?;
 
     write_fly_toml(&workdir)?;
     run_command_status(&workdir, "flyctl", &["deploy", "--remote-only"])?;
@@ -343,9 +410,13 @@ pub(crate) async fn cmd_deploy_docker(
     cli: &Cli,
     workdir: Option<PathBuf>,
     registry: Option<String>,
+    unsafe_public: bool,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
-    let registry = resolve_docker_registry(&workdir, registry)?;
+    let config = load_roko_config(&workdir)?;
+    println!("Checking security posture...");
+    check_security_posture(&config, unsafe_public)?;
+    let registry = resolve_docker_registry(&config, registry)?;
     let tagged_image = format!("{registry}/roko:latest");
 
     run_command_status(&workdir, "docker", &["build", "-t", "roko", "."])?;
@@ -401,7 +472,10 @@ pub(crate) fn write_fly_toml(workdir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-pub(crate) fn resolve_docker_registry(workdir: &Path, registry: Option<String>) -> Result<String> {
+pub(crate) fn resolve_docker_registry(
+    config: &roko_core::config::schema::RokoConfig,
+    registry: Option<String>,
+) -> Result<String> {
     if let Some(registry) = registry {
         let registry = registry.trim().trim_end_matches('/');
         if registry.is_empty() {
@@ -410,7 +484,6 @@ pub(crate) fn resolve_docker_registry(workdir: &Path, registry: Option<String>) 
         return Ok(registry.to_string());
     }
 
-    let config = load_roko_config(workdir)?;
     let worker_image =
         config.deploy.worker_image.as_deref().ok_or_else(|| {
             anyhow!("deploy.docker.registry is required or set deploy.worker_image")

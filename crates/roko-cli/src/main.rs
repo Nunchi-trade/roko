@@ -1424,12 +1424,18 @@ enum DeployCmd {
         /// Deploy worker services for these template names (comma-separated).
         #[arg(long, value_delimiter = ',')]
         workers: Vec<String>,
+        /// Skip the security posture check (WARNING: server will be public without auth).
+        #[arg(long)]
+        unsafe_public: bool,
     },
     /// Generate `fly.toml` and deploy the current workspace with Fly.io.
     Fly {
         /// Working directory / repository root (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Skip the security posture check (WARNING: server will be public without auth).
+        #[arg(long)]
+        unsafe_public: bool,
     },
     /// Build the local Docker image and tag it for the configured registry.
     Docker {
@@ -1439,6 +1445,9 @@ enum DeployCmd {
         /// Registry namespace to tag the image under.
         #[arg(long)]
         registry: Option<String>,
+        /// Skip the security posture check (WARNING: server will be public without auth).
+        #[arg(long)]
+        unsafe_public: bool,
     },
 }
 
@@ -3491,6 +3500,20 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_deploy_railway_unsafe_public_flag() {
+        let cli = Cli::try_parse_from(["roko", "deploy", "railway", "--unsafe-public"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Deploy {
+                cmd: DeployCmd::Railway {
+                    unsafe_public: true,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
     fn cli_parses_deploy_fly_subcommand() {
         let cli = Cli::try_parse_from(["roko", "deploy", "fly"]).unwrap();
         assert!(matches!(
@@ -3502,12 +3525,40 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_deploy_fly_unsafe_public_flag() {
+        let cli = Cli::try_parse_from(["roko", "deploy", "fly", "--unsafe-public"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Deploy {
+                cmd: DeployCmd::Fly {
+                    unsafe_public: true,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
     fn cli_parses_deploy_docker_subcommand() {
         let cli = Cli::try_parse_from(["roko", "deploy", "docker"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Deploy {
                 cmd: DeployCmd::Docker { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_deploy_docker_unsafe_public_flag() {
+        let cli = Cli::try_parse_from(["roko", "deploy", "docker", "--unsafe-public"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Deploy {
+                cmd: DeployCmd::Docker {
+                    unsafe_public: true,
+                    ..
+                }
             })
         ));
     }
