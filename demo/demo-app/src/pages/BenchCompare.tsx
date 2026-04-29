@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useApiWithFallback } from '../hooks/useApiWithFallback';
 import type { BenchRun, BenchTaskResult } from '../lib/bench-types';
-import { DEMO_BENCH_RUNS } from '../lib/bench-demo-data';
 import Pane from '../components/Pane';
 import ConfigDiff from '../components/ConfigDiff';
 import './Bench.css';
@@ -49,8 +48,8 @@ export default function BenchCompare() {
           setRuns(data);
           return;
         }
-      } catch { /* fallback */ }
-      setRuns(DEMO_BENCH_RUNS);
+      } catch { /* no fallback */ }
+      setRuns([]);
     })();
   }, [get]);
 
@@ -206,7 +205,7 @@ export default function BenchCompare() {
         {runA && runB ? (
           <>
             <Pane title="COMPARISON">
-              <ConfigDiff runA={comparisonRunA ?? runA} runB={comparisonRunB ?? runB} />
+              <ConfigDiff runs={[comparisonRunA ?? runA, comparisonRunB ?? runB]} />
             </Pane>
 
             <Pane title="TASK-BY-TASK COMPARISON">

@@ -21,7 +21,7 @@ interface CascadeState {
 const pageStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
-  gap: 16,
+  gap: 10,
   minHeight: '100%',
 };
 
@@ -138,7 +138,7 @@ function ModelConfidenceChart({ rows, height = 200 }: { rows: [string, Confidenc
 /* ── Table styles ────────────────────────────────────────── */
 
 const thStyle: CSSProperties = {
-  padding: '10px 12px',
+  padding: '6px 10px',
   color: 'var(--text-dim)',
   borderBottom: '1px solid var(--glass-2-border)',
   background: 'var(--raised)',
@@ -151,12 +151,12 @@ const thStyle: CSSProperties = {
 };
 
 const tdStyle: CSSProperties = {
-  padding: '10px 12px',
+  padding: '5px 10px',
   color: 'var(--text)',
   borderBottom: '1px solid var(--glass-border)',
   verticalAlign: 'middle',
   fontFamily: 'var(--mono)',
-  fontSize: '0.72rem',
+  fontSize: '0.7rem',
 };
 
 /* ── Component ───────────────────────────────────────────── */
@@ -231,14 +231,102 @@ export default function CascadeRouter() {
         <MosaicCell label="ROLES ASSIGNED" value={roleEntries.length || 5} color="warning" mono />
       </Mosaic>
 
-      {/* ═══ CHARTS ROW ═══ */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-        {/* Model Confidence */}
+      {/* ═══ MAIN CONTENT: 3-column layout ═══ */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1.2fr 1fr',
+        gap: 12,
+        flex: 1,
+        minHeight: 0,
+      }}>
+        {/* Model Confidence Chart */}
         <Pane
           title="MODEL CONFIDENCE"
           badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>success rate</span>}
         >
-          <ModelConfidenceChart rows={rows} height={Math.max(160, rows.length * 30 + 20)} />
+          <ModelConfidenceChart rows={rows} height={Math.max(80, rows.length * 30 + 16)} />
+        </Pane>
+
+        {/* Model Statistics Table */}
+        <Pane
+          title="MODEL STATISTICS"
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>detailed breakdown</span>}
+          flat
+        >
+          <div style={{ overflow: 'auto', flex: 1 }}>
+            {loading ? (
+              <div style={{
+                padding: 24,
+                color: 'var(--text-ghost)',
+                fontFamily: 'var(--mono)',
+                fontSize: '0.75rem',
+                textAlign: 'center',
+              }}>
+                Loading cascade router...
+              </div>
+            ) : rows.length === 0 ? (
+              <div style={{
+                padding: 24,
+                color: 'var(--text-ghost)',
+                fontFamily: 'var(--mono)',
+                fontSize: '0.75rem',
+                textAlign: 'center',
+              }}>
+                No model stats found
+              </div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={thStyle}>Model</th>
+                    <th style={thStyle}>Confidence</th>
+                    <th style={thStyle}>Successes</th>
+                    <th style={thStyle}>Trials</th>
+                    <th style={thStyle}>Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(([model, stat]) => {
+                    const conf = stat.trials > 0 ? stat.successes / stat.trials : 0;
+                    return (
+                      <tr
+                        key={model}
+                        style={{ transition: 'background .15s' }}
+                        onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,.03)'; }}
+                        onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                      >
+                        <td style={tdStyle}>{model}</td>
+                        <td style={tdStyle}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{
+                              display: 'inline-block',
+                              width: 48,
+                              height: 4,
+                              background: 'rgba(255,255,255,.04)',
+                              borderRadius: 2,
+                              overflow: 'hidden',
+                            }}>
+                              <span style={{
+                                display: 'block',
+                                height: '100%',
+                                width: `${conf * 100}%`,
+                                background: conf >= 0.9 ? 'var(--success)' : conf >= 0.7 ? 'var(--warning)' : 'var(--rose-bright)',
+                                borderRadius: 2,
+                              }} />
+                            </span>
+                            {`${(conf * 100).toFixed(1)}%`}
+                          </span>
+                        </td>
+                        <td style={tdStyle}>{stat.successes}</td>
+                        <td style={tdStyle}>{stat.trials}</td>
+                        <td style={tdStyle}>{stat.total_cost_usd != null ? `$${stat.total_cost_usd.toFixed(3)}` : '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
         </Pane>
 
         {/* Role Assignments */}
@@ -248,17 +336,17 @@ export default function CascadeRouter() {
         >
           {loading ? (
             <div style={{
-              padding: 36,
+              padding: 24,
               color: 'var(--text-ghost)',
               fontFamily: 'var(--mono)',
               fontSize: '0.75rem',
               textAlign: 'center',
             }}>
-              Loading role assignments...
+              Loading...
             </div>
           ) : roleEntries.length === 0 ? (
             <div style={{
-              padding: 36,
+              padding: 24,
               color: 'var(--text-ghost)',
               fontFamily: 'var(--mono)',
               fontSize: '0.75rem',
@@ -267,7 +355,7 @@ export default function CascadeRouter() {
               No role assignments
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0, overflow: 'auto', flex: 1 }}>
               {roleEntries.map(([role, model], i) => (
                 <div
                   key={role}
@@ -275,21 +363,22 @@ export default function CascadeRouter() {
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
-                    gap: 12,
-                    padding: '10px 0',
+                    gap: 8,
+                    padding: '5px 0',
                     borderBottom: i < roleEntries.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
                   }}
                 >
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span style={{
-                      width: 6, height: 6, borderRadius: '50%',
+                      width: 5, height: 5, borderRadius: '50%',
                       background: roleColor(role),
-                      boxShadow: `0 0 8px ${roleColor(role)}60`,
+                      boxShadow: `0 0 6px ${roleColor(role)}60`,
                       display: 'inline-block',
+                      flexShrink: 0,
                     }} />
                     <span style={{
                       fontFamily: 'var(--display)',
-                      fontSize: 12,
+                      fontSize: 11,
                       fontWeight: 500,
                       color: 'var(--text-primary)',
                       letterSpacing: '.01em',
@@ -299,13 +388,14 @@ export default function CascadeRouter() {
                   </span>
                   <span style={{
                     fontFamily: 'var(--mono)',
-                    fontSize: 10,
-                    padding: '3px 8px',
-                    borderRadius: 4,
+                    fontSize: 9,
+                    padding: '2px 6px',
+                    borderRadius: 3,
                     background: 'var(--glass-bg)',
                     border: '1px solid var(--glass-border)',
                     color: 'var(--text-soft)',
                     letterSpacing: '.04em',
+                    flexShrink: 0,
                   }}>
                     {model.replace(/^claude-/, '')}
                   </span>
@@ -315,88 +405,6 @@ export default function CascadeRouter() {
           )}
         </Pane>
       </div>
-
-      {/* ═══ DETAILED TABLE ═══ */}
-      <Pane
-        title="MODEL STATISTICS"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>detailed breakdown</span>}
-        flat
-      >
-        <div style={{ maxHeight: 360, overflow: 'auto' }}>
-          {loading ? (
-            <div style={{
-              padding: 36,
-              color: 'var(--text-ghost)',
-              fontFamily: 'var(--mono)',
-              fontSize: '0.75rem',
-              textAlign: 'center',
-            }}>
-              Loading cascade router...
-            </div>
-          ) : rows.length === 0 ? (
-            <div style={{
-              padding: 36,
-              color: 'var(--text-ghost)',
-              fontFamily: 'var(--mono)',
-              fontSize: '0.75rem',
-              textAlign: 'center',
-            }}>
-              No model stats found
-            </div>
-          ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={thStyle}>Model</th>
-                  <th style={thStyle}>Confidence</th>
-                  <th style={thStyle}>Successes</th>
-                  <th style={thStyle}>Trials</th>
-                  <th style={thStyle}>Cost</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map(([model, stat]) => {
-                  const conf = stat.trials > 0 ? stat.successes / stat.trials : 0;
-                  return (
-                    <tr
-                      key={model}
-                      style={{ transition: 'background .15s' }}
-                      onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,.03)'; }}
-                      onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'transparent'; }}
-                    >
-                      <td style={tdStyle}>{model}</td>
-                      <td style={tdStyle}>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                          <span style={{
-                            display: 'inline-block',
-                            width: 48,
-                            height: 4,
-                            background: 'rgba(255,255,255,.04)',
-                            borderRadius: 2,
-                            overflow: 'hidden',
-                          }}>
-                            <span style={{
-                              display: 'block',
-                              height: '100%',
-                              width: `${conf * 100}%`,
-                              background: conf >= 0.9 ? 'var(--success)' : conf >= 0.7 ? 'var(--warning)' : 'var(--rose-bright)',
-                              borderRadius: 2,
-                            }} />
-                          </span>
-                          {`${(conf * 100).toFixed(1)}%`}
-                        </span>
-                      </td>
-                      <td style={tdStyle}>{stat.successes}</td>
-                      <td style={tdStyle}>{stat.trials}</td>
-                      <td style={tdStyle}>{stat.total_cost_usd != null ? `$${stat.total_cost_usd.toFixed(3)}` : '—'}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </Pane>
     </div>
   );
 }

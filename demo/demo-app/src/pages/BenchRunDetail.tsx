@@ -2,12 +2,16 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router';
 import { useApiWithFallback } from '../hooks/useApiWithFallback';
 import type { BenchRun, BenchTaskResult } from '../lib/bench-types';
-import { DEMO_BENCH_RUNS } from '../lib/bench-demo-data';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
-import BarChart from '../components/Charts/BarChart';
+import TimelineChart from '../components/Charts/TimelineChart';
+import HeatmapChart from '../components/Charts/HeatmapChart';
 import TaskTable from '../components/TaskTable';
 import './Bench.css';
+
+/* ═══════════════════════════════════════════════════════════
+   Cost Breakdown Chart (inline — complex canvas component)
+   ═══════════════════════════════════════════════════════════ */
 
 type CostGroupBy = 'task' | 'model' | 'difficulty';
 
@@ -32,12 +36,6 @@ function tokenCost(model: string, tokensIn: number, tokensOut: number): [number,
   return [(Math.max(tokensIn, 0) * inRate) / 1000, (Math.max(tokensOut, 0) * outRate) / 1000];
 }
 
-function truncateLabel(text: string, maxLength: number) {
-  if (text.length <= maxLength) return text;
-  if (maxLength <= 3) return text.slice(0, maxLength);
-  return `${text.slice(0, maxLength - 3)}...`;
-}
-
 function fitLabel(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
   if (maxWidth <= 0) return '';
   if (ctx.measureText(text).width <= maxWidth) return text;
@@ -47,6 +45,12 @@ function fitLabel(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
     value = value.slice(0, -1);
   }
   return `${value}...`;
+}
+
+function truncateLabel(text: string, maxLength: number) {
+  if (text.length <= maxLength) return text;
+  if (maxLength <= 3) return text.slice(0, maxLength);
+  return `${text.slice(0, maxLength - 3)}...`;
 }
 
 function buildCostSegments(results: BenchTaskResult[], groupBy: CostGroupBy): CostSegment[] {
@@ -245,6 +249,227 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
   );
 }
 
+/* ═══════════════════════════════════════════════════════════
+   Token Flow Chart (inline horizontal stacked bars)
+   ═══════════════════════════════════════════════════════════ */
+
+function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[]; height?: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || results.length === 0) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const w = rect.width;
+    const h = rect.height;
+    const pad = { top: 8, right: 16, bottom: 24, left: 100 };
+    const plotW = w - pad.left - pad.right;
+    const plotH = h - pad.top - pad.bottom;
+    if (plotW <= 0 || plotH <= 0) return;
+
+    ctx.clearRect(0, 0, w, h);
+
+    const maxTokens = Math.max(...results.map((r) => r.tokens_in + r.tokens_out), 1);
+    const rowGap = 4;
+    const barHeight = Math.max(4, Math.min(22, plotH / results.length - rowGap));
+    const inColor = '#7A8A78'; // --success muted
+    const outColor = '#C8B890'; // --bone
+
+    // Grid lines
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    for (let i = 0; i <= 4; i++) {
+      const x = pad.left + (plotW * i) / 4;
+      ctx.beginPath();
+      ctx.moveTo(x, pad.top);
+      ctx.lineTo(x, pad.top + plotH);
+      ctx.stroke();
+    }
+
+    results.forEach((r, index) => {
+      const y = pad.top + index * (barHeight + rowGap);
+      const centerY = y + barHeight / 2;
+      const inW = (r.tokens_in / maxTokens) * plotW;
+      const outW = (r.tokens_out / maxTokens) * plotW;
+
+      // Background
+      ctx.fillStyle = 'rgba(255,255,255,0.03)';
+      ctx.fillRect(pad.left, y, plotW, barHeight);
+
+      // Input bar
+      if (inW > 0) {
+        ctx.fillStyle = inColor;
+        ctx.fillRect(pad.left, y, inW, barHeight);
+      }
+
+      // Output bar
+      if (outW > 0) {
+        ctx.fillStyle = outColor;
+        ctx.fillRect(pad.left + inW, y, outW, barHeight);
+      }
+
+      // Label
+      ctx.font = '10px "JetBrains Mono", monospace';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#8a7a88';
+      const nameText = r.task_name.length > 12 ? r.task_name.slice(0, 11) + '\u2026' : r.task_name;
+      ctx.fillText(nameText, pad.left - 8, centerY);
+
+      // Token count
+      const total = r.tokens_in + r.tokens_out;
+      ctx.font = '9px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#BDAEB8';
+      const barEnd = pad.left + inW + outW;
+      ctx.fillText(total.toLocaleString(), Math.min(barEnd + 6, pad.left + plotW - 40), centerY);
+    });
+
+    // Legend
+    const legendY = h - 8;
+    ctx.font = '10px "General Sans", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const legendItems = [
+      { color: inColor, label: 'Tokens in' },
+      { color: outColor, label: 'Tokens out' },
+    ];
+    let legendX = pad.left;
+    legendItems.forEach((item) => {
+      ctx.fillStyle = item.color;
+      ctx.fillRect(legendX, legendY - 5, 10, 10);
+      ctx.fillStyle = '#85707D';
+      ctx.fillText(item.label, legendX + 14, legendY);
+      legendX += ctx.measureText(item.label).width + 34;
+    });
+  }, [results]);
+
+  useEffect(() => {
+    draw();
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === 'undefined') return undefined;
+
+    const ro = new ResizeObserver(draw);
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [draw]);
+
+  if (results.length === 0) {
+    return (
+      <div className="chart-container" style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <p className="bench-empty-text">No token data.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="chart-container" style={{ height }}>
+      <canvas ref={canvasRef} className="chart-canvas" />
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Output Preview Panel
+   ═══════════════════════════════════════════════════════════ */
+
+function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
+  const failedWithOutput = results.filter((r) => r.status === 'fail' && (r.output_preview || r.error));
+  const passedWithOutput = results.filter((r) => r.status === 'pass' && r.output_preview);
+
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => {
+    // Auto-expand failed tasks
+    return new Set(failedWithOutput.map((r) => r.task_id));
+  });
+
+  const toggle = (id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  if (failedWithOutput.length === 0 && passedWithOutput.length === 0) {
+    return <p className="bench-empty-text">No output previews available.</p>;
+  }
+
+  const allTasks = [...failedWithOutput, ...passedWithOutput];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {allTasks.map((r) => (
+        <div key={r.task_id} style={{ borderRadius: 6, border: '1px solid var(--glass-border)', overflow: 'hidden' }}>
+          <button
+            onClick={() => toggle(r.task_id)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              width: '100%',
+              padding: '8px 12px',
+              background: 'rgba(255,255,255,0.02)',
+              border: 'none',
+              cursor: 'pointer',
+              textAlign: 'left',
+              fontFamily: 'var(--mono)',
+              fontSize: 11,
+              color: 'var(--text-primary)',
+            }}
+          >
+            <span style={{ color: 'var(--text-dim)', fontSize: 9, width: 12 }}>
+              {expandedIds.has(r.task_id) ? '\u25BC' : '\u25B6'}
+            </span>
+            <span className={`status-badge status-${r.status}`} style={{ fontSize: 8 }}>
+              {r.status.toUpperCase()}
+            </span>
+            <span style={{ flex: 1, color: 'var(--text-strong)' }}>{r.task_name}</span>
+          </button>
+          {expandedIds.has(r.task_id) && (
+            <div style={{ padding: '0 12px 12px' }}>
+              {r.error && (
+                <div className="task-error" style={{ marginTop: 8 }}>{r.error}</div>
+              )}
+              {r.output_preview && (
+                <pre className="task-output-code" style={{
+                  marginTop: 8,
+                  padding: 10,
+                  background: 'rgba(0,0,0,0.3)',
+                  borderRadius: 4,
+                  fontSize: 10,
+                  color: 'var(--text-primary)',
+                  overflow: 'auto',
+                  maxHeight: 200,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                }}>
+                  {r.output_preview}
+                </pre>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   BenchRunDetail — Main Page
+   ═══════════════════════════════════════════════════════════ */
+
 export default function BenchRunDetail() {
   const { id } = useParams<{ id: string }>();
   const { get } = useApiWithFallback();
@@ -259,12 +484,35 @@ export default function BenchRunDetail() {
           setRun(data);
           return;
         }
-      } catch { /* fallback */ }
-      // Fallback to demo data
-      const demo = DEMO_BENCH_RUNS.find((r) => r.id === id);
-      if (demo) setRun(demo);
+      } catch { /* no fallback -- show not-found */ }
     })();
   }, [id, get]);
+
+  // Timeline tasks (waterfall)
+  const timelineTasks = useMemo(() => {
+    if (!run) return [];
+    return run.results.map((r, i) => ({
+      name: r.task_name,
+      startMs: run.results.slice(0, i).reduce((s, prev) => s + prev.duration_ms, 0),
+      durationMs: r.duration_ms,
+      status: r.status as 'pass' | 'fail' | 'pending' | 'running' | 'skipped',
+      gateVerdicts: r.gate_verdicts.map((g) => ({ gate: g.gate, passed: g.passed })),
+    }));
+  }, [run]);
+
+  // Gate heatmap data
+  const { gateNames, heatRows, heatValues } = useMemo(() => {
+    if (!run) return { gateNames: [], heatRows: [], heatValues: [] };
+    const names = [...new Set(run.results.flatMap((r) => r.gate_verdicts.map((g) => g.gate)))];
+    const rows = run.results.map((r) => r.task_name);
+    const values = run.results.map((r) =>
+      names.map((gate) => {
+        const v = r.gate_verdicts.find((g) => g.gate === gate);
+        return v ? v.passed : null;
+      }),
+    );
+    return { gateNames: names, heatRows: rows, heatValues: values };
+  }, [run]);
 
   if (!run) {
     return (
@@ -280,8 +528,14 @@ export default function BenchRunDetail() {
 
   const summary = run.summary;
 
+  // Computed hero metrics
+  const totalTokens = run.results.reduce((s, r) => s + r.tokens_in + r.tokens_out, 0);
+  const passCount = run.results.filter((r) => r.status === 'pass').length;
+  const tokenEfficiency = totalTokens > 0 ? (passCount / (totalTokens / 1000)).toFixed(2) : '0';
+
   return (
     <div className="bench-page">
+      {/* ── Hero ── */}
       <div className="bench-hero">
         <div className="bench-hero-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -294,33 +548,41 @@ export default function BenchRunDetail() {
         </div>
         {summary && (
           <div className="bench-hero-stats">
-            <Mosaic columns={5}>
+            <Mosaic columns={6}>
               <MosaicCell label="PASS RATE" value={`${(summary.pass_rate * 100).toFixed(0)}%`} color="success" />
               <MosaicCell label="TOTAL COST" value={`$${summary.total_cost_usd.toFixed(3)}`} color="warning" />
               <MosaicCell label="USD/SUCCESS" value={`$${summary.cost_per_success_usd.toFixed(3)}`} color="bone" mono />
-              <MosaicCell label="TASKS" value={`${summary.passed}/${summary.total_tasks}`} color="rose" />
-              <MosaicCell label="DURATION" value={`${(summary.total_duration_ms / 1000).toFixed(1)}s`} color="dream" mono />
+              <MosaicCell label="AVG DURATION" value={`${(summary.avg_duration_ms / 1000).toFixed(1)}s`} color="dream" mono />
+              <MosaicCell label="TOTAL TOKENS" value={totalTokens.toLocaleString()} color="rose" mono />
+              <MosaicCell
+                label="TOKEN EFF"
+                value={tokenEfficiency}
+                sub="passes/1K tok"
+                color="success"
+                mono
+              />
             </Mosaic>
           </div>
         )}
       </div>
 
       <div className="bench-body">
+        {/* ── Task Timeline Waterfall ── */}
+        {timelineTasks.length > 0 && (
+          <Pane title="TASK TIMELINE">
+            <TimelineChart
+              tasks={timelineTasks}
+              height={Math.max(200, timelineTasks.length * 28 + 48)}
+            />
+          </Pane>
+        )}
+
+        {/* ── Task Results Table ── */}
         <Pane title="TASK RESULTS">
-          <TaskTable results={run.results} />
+          <TaskTable results={run.results} showDifficulty showOutputPreview />
         </Pane>
 
-        <Pane title="COST PER TASK">
-          <BarChart
-            data={run.results.map((r) => ({
-              label: r.task_name.slice(0, 20),
-              value: r.cost_usd,
-              color: r.status === 'pass' ? 'var(--success)' : 'var(--rose-dim)',
-            }))}
-            height={250}
-          />
-        </Pane>
-
+        {/* ── Cost Attribution ── */}
         <Pane title="COST ATTRIBUTION">
           <CostBreakdownChart
             results={run.results}
@@ -328,30 +590,48 @@ export default function BenchRunDetail() {
           />
         </Pane>
 
-        <Pane title="GATE WATERFALL">
-          <div className="gate-waterfall">
-            {run.results.map((r) => (
-              <div key={r.task_id} className="gate-waterfall-row">
-                <span className="gate-waterfall-task">{r.task_name}</span>
-                <div className="gate-waterfall-cells">
-                  {r.gate_verdicts.map((g) => (
-                    <div
-                      key={g.gate}
-                      className={`gate-waterfall-cell gate-${g.passed ? 'pass' : 'fail'}`}
-                      title={`${g.gate}: ${g.passed ? 'passed' : 'failed'}${g.duration_ms ? ` (${g.duration_ms}ms)` : ''}`}
-                    >
-                      {g.gate[0].toUpperCase()}
-                    </div>
-                  ))}
-                </div>
-                <span className={`gate-waterfall-status status-badge status-${r.status}`}>
-                  {r.status.toUpperCase()}
-                </span>
-              </div>
-            ))}
-          </div>
+        {/* ── Token Flow ── */}
+        <Pane title="TOKEN FLOW">
+          <TokenFlowChart
+            results={run.results}
+            height={Math.max(200, run.results.length * 26 + 40)}
+          />
         </Pane>
 
+        {/* ── Gate Heatmap ── */}
+        {gateNames.length > 0 && (
+          <Pane title="GATE HEATMAP">
+            <HeatmapChart
+              rows={heatRows}
+              columns={gateNames}
+              values={heatValues}
+              height={Math.max(200, heatRows.length * 28 + 48)}
+            />
+          </Pane>
+        )}
+
+        {/* ── Output Previews ── */}
+        <Pane title="OUTPUT PREVIEWS">
+          <OutputPreviewPanel results={run.results} />
+        </Pane>
+
+        {/* ── Compare Button ── */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16, marginBottom: 8 }}>
+          <Link
+            to={`/bench/compare?ids=${run.id}`}
+            className="btn btn-sm"
+            style={{
+              textDecoration: 'none',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            Compare with...
+          </Link>
+        </div>
+
+        {/* ── Configuration ── */}
         <Pane title="CONFIGURATION">
           <div className="config-detail-grid">
             <div><span className="detail-label">Model:</span> {run.config.model}</div>

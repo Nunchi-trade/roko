@@ -67,7 +67,7 @@ export default function DreamsView() {
   const recentEntries = entries.slice(-8).reverse();
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {/* ═══ TOP MOSAIC ═══ */}
       <Mosaic columns={6}>
         <MosaicCell label="CYCLES" value={journal?.cycle_count ?? 12} color="dream" mono sub={journal?.last_cycle ? `last: ${new Date(journal.last_cycle).toLocaleDateString()}` : 'periodic'} />
@@ -89,7 +89,7 @@ export default function DreamsView() {
       </Pane>
 
       {/* ═══ BOTTOM ROW ═══ */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
         {/* Consolidation Summary */}
         <Pane
           title="CONSOLIDATION SUMMARY"
@@ -114,7 +114,7 @@ export default function DreamsView() {
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     gap: 12,
-                    padding: '12px 0',
+                    padding: '7px 0',
                     borderBottom: i < arr.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
                   }}
                 >
@@ -203,7 +203,7 @@ export default function DreamsView() {
                       display: 'flex',
                       alignItems: 'center',
                       gap: 10,
-                      padding: '9px 0',
+                      padding: '5px 0',
                       borderBottom: i < recentEntries.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
                     }}
                   >

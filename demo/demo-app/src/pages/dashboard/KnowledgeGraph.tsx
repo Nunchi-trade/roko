@@ -251,7 +251,7 @@ export default function KnowledgeGraph() {
   const sortedDomains = Object.entries(domainCounts).sort(([, a], [, b]) => b - a);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {/* ═══ TOP MOSAIC ═══ */}
       <Mosaic columns={5}>
         <MosaicCell label="NODES" value={entries.length || 18} color="rose" mono />
@@ -262,9 +262,9 @@ export default function KnowledgeGraph() {
       </Mosaic>
 
       {/* ═══ GRAPH + DOMAIN BREAKDOWN ═══ */}
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
         <Pane title="KNOWLEDGE GRAPH" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>force-directed</span>}>
-          <div style={{ position: 'relative', height: 400 }}>
+          <div style={{ position: 'relative', height: 260 }}>
             <canvas
               ref={canvasRef}
               style={{ width: '100%', height: '100%', display: 'block' }}
@@ -321,7 +321,7 @@ export default function KnowledgeGraph() {
                     display: 'flex',
                     flexDirection: 'column',
                     gap: 6,
-                    padding: '10px 0',
+                    padding: '6px 0',
                     borderBottom: i < sortedDomains.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
                   }}
                 >
@@ -384,7 +384,7 @@ export default function KnowledgeGraph() {
 
       {/* ═══ ENTRIES TABLE ═══ */}
       <Pane title="ALL ENTRIES" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{entries.length} nodes</span>} flat>
-        <div style={{ maxHeight: 320, overflow: 'auto' }}>
+        <div style={{ maxHeight: 200, overflow: 'auto' }}>
           <table style={{
             width: '100%',
             borderCollapse: 'collapse',

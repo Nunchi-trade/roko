@@ -1,32 +1,115 @@
 import type { BenchRun } from '../lib/bench-types';
 
 interface ConfigDiffProps {
-  runA: BenchRun;
-  runB: BenchRun;
+  runs: BenchRun[];
 }
 
 interface DiffRow {
   key: string;
-  a: string;
-  b: string;
+  values: string[];
   changed: boolean;
 }
 
-export default function ConfigDiff({ runA, runB }: ConfigDiffProps) {
-  const rows: DiffRow[] = [
-    { key: 'Model', a: runA.config.model, b: runB.config.model, changed: runA.config.model !== runB.config.model },
-    { key: 'Strategy', a: runA.config.strategy, b: runB.config.strategy, changed: runA.config.strategy !== runB.config.strategy },
-    { key: 'Temperature', a: String(runA.config.temperature ?? '-'), b: String(runB.config.temperature ?? '-'), changed: runA.config.temperature !== runB.config.temperature },
-    { key: 'Max Tokens', a: String(runA.config.max_tokens ?? '-'), b: String(runB.config.max_tokens ?? '-'), changed: runA.config.max_tokens !== runB.config.max_tokens },
-    { key: 'Timeout', a: `${runA.config.timeout_secs}s`, b: `${runB.config.timeout_secs}s`, changed: runA.config.timeout_secs !== runB.config.timeout_secs },
-    { key: 'Retries', a: String(runA.config.retries), b: String(runB.config.retries), changed: runA.config.retries !== runB.config.retries },
-    { key: 'Suite', a: runA.suite_name, b: runB.suite_name, changed: runA.suite_id !== runB.suite_id },
+function majority(values: string[]): string {
+  const counts = new Map<string, number>();
+  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+  let best = values[0];
+  let max = 0;
+  for (const [v, c] of counts) {
+    if (c > max) { best = v; max = c; }
+  }
+  return best;
+}
+
+export default function ConfigDiff({ runs }: ConfigDiffProps) {
+  if (runs.length < 2) return null;
+
+  const configRows: DiffRow[] = [
+    { key: 'Model', values: runs.map((r) => r.config.model), changed: false },
+    { key: 'Strategy', values: runs.map((r) => r.config.strategy), changed: false },
+    { key: 'Temperature', values: runs.map((r) => String(r.config.temperature ?? '-')), changed: false },
+    { key: 'Max Tokens', values: runs.map((r) => String(r.config.max_tokens ?? '-')), changed: false },
+    { key: 'Timeout', values: runs.map((r) => `${r.config.timeout_secs}s`), changed: false },
+    { key: 'Retries', values: runs.map((r) => String(r.config.retries)), changed: false },
+    { key: 'Suite', values: runs.map((r) => r.suite_name), changed: false },
   ];
 
-  const passA = runA.summary?.pass_rate ?? 0;
-  const passB = runB.summary?.pass_rate ?? 0;
-  const costA = runA.summary?.total_cost_usd ?? 0;
-  const costB = runB.summary?.total_cost_usd ?? 0;
+  // Mark changed rows
+  for (const row of configRows) {
+    row.changed = new Set(row.values).size > 1;
+  }
+
+  // Metrics
+  const metricRows: { key: string; values: string[]; numValues: number[]; higherBetter: boolean }[] = [
+    {
+      key: 'Pass Rate',
+      values: runs.map((r) => r.summary ? `${(r.summary.pass_rate * 100).toFixed(1)}%` : '-'),
+      numValues: runs.map((r) => r.summary?.pass_rate ?? 0),
+      higherBetter: true,
+    },
+    {
+      key: 'Total Cost',
+      values: runs.map((r) => r.summary ? `$${r.summary.total_cost_usd.toFixed(3)}` : '-'),
+      numValues: runs.map((r) => r.summary?.total_cost_usd ?? Infinity),
+      higherBetter: false,
+    },
+    {
+      key: 'USD/Success',
+      values: runs.map((r) => r.summary ? `$${r.summary.cost_per_success_usd.toFixed(3)}` : '-'),
+      numValues: runs.map((r) => r.summary?.cost_per_success_usd ?? Infinity),
+      higherBetter: false,
+    },
+    {
+      key: 'Duration',
+      values: runs.map((r) => r.summary ? `${(r.summary.total_duration_ms / 1000).toFixed(1)}s` : '-'),
+      numValues: runs.map((r) => r.summary?.total_duration_ms ?? Infinity),
+      higherBetter: false,
+    },
+    {
+      key: 'Total Tokens',
+      values: runs.map((r) => r.summary ? r.summary.total_tokens.toLocaleString() : '-'),
+      numValues: runs.map((r) => r.summary?.total_tokens ?? 0),
+      higherBetter: false,
+    },
+    {
+      key: 'Token Efficiency',
+      values: runs.map((r) => {
+        if (!r.summary || r.summary.total_tokens === 0) return '-';
+        const eff = r.summary.passed / (r.summary.total_tokens / 1000);
+        return `${eff.toFixed(2)}/1K`;
+      }),
+      numValues: runs.map((r) => {
+        if (!r.summary || r.summary.total_tokens === 0) return 0;
+        return r.summary.passed / (r.summary.total_tokens / 1000);
+      }),
+      higherBetter: true,
+    },
+    {
+      key: 'Gate Pass Rate',
+      values: runs.map((r) => {
+        if (!r.results.length) return '-';
+        let passed = 0, total = 0;
+        for (const res of r.results) {
+          for (const g of res.gate_verdicts) {
+            total++;
+            if (g.passed) passed++;
+          }
+        }
+        return total > 0 ? `${((passed / total) * 100).toFixed(1)}%` : '-';
+      }),
+      numValues: runs.map((r) => {
+        let passed = 0, total = 0;
+        for (const res of r.results) {
+          for (const g of res.gate_verdicts) {
+            total++;
+            if (g.passed) passed++;
+          }
+        }
+        return total > 0 ? passed / total : 0;
+      }),
+      higherBetter: true,
+    },
+  ];
 
   return (
     <div className="config-diff">
@@ -34,18 +117,28 @@ export default function ConfigDiff({ runA, runB }: ConfigDiffProps) {
         <thead>
           <tr>
             <th>Config</th>
-            <th>Run A ({runA.id.slice(0, 8)})</th>
-            <th>Run B ({runB.id.slice(0, 8)})</th>
+            {runs.map((r) => (
+              <th key={r.id}>Run {r.id.slice(0, 8)}</th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
-            <tr key={r.key} className={r.changed ? 'diff-changed' : ''}>
-              <td className="detail-label">{r.key}</td>
-              <td className="mono">{r.a}</td>
-              <td className="mono">{r.b}</td>
-            </tr>
-          ))}
+          {configRows.map((row) => {
+            const maj = majority(row.values);
+            return (
+              <tr key={row.key} className={row.changed ? 'diff-changed' : ''}>
+                <td className="detail-label">{row.key}</td>
+                {row.values.map((v, i) => (
+                  <td
+                    key={i}
+                    className={`mono${row.changed && v !== maj ? ' diff-highlight' : ''}`}
+                  >
+                    {v}
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
 
@@ -54,36 +147,32 @@ export default function ConfigDiff({ runA, runB }: ConfigDiffProps) {
           <thead>
             <tr>
               <th>Metric</th>
-              <th>Run A</th>
-              <th>Run B</th>
-              <th>Delta</th>
+              {runs.map((r) => (
+                <th key={r.id}>Run {r.id.slice(0, 8)}</th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td className="detail-label">Pass Rate</td>
-              <td className="mono">{(passA * 100).toFixed(1)}%</td>
-              <td className="mono">{(passB * 100).toFixed(1)}%</td>
-              <td className={`mono ${passB > passA ? 'gate-ok' : passB < passA ? 'gate-err' : ''}`}>
-                {((passB - passA) * 100).toFixed(1)}%
-              </td>
-            </tr>
-            <tr>
-              <td className="detail-label">Cost</td>
-              <td className="mono">${costA.toFixed(3)}</td>
-              <td className="mono">${costB.toFixed(3)}</td>
-              <td className={`mono ${costB < costA ? 'gate-ok' : costB > costA ? 'gate-err' : ''}`}>
-                ${(costB - costA).toFixed(3)}
-              </td>
-            </tr>
-            <tr>
-              <td className="detail-label">Tasks</td>
-              <td className="mono">{runA.summary?.total_tasks ?? '-'}</td>
-              <td className="mono">{runB.summary?.total_tasks ?? '-'}</td>
-              <td className="mono">
-                {(runB.summary?.total_tasks ?? 0) - (runA.summary?.total_tasks ?? 0)}
-              </td>
-            </tr>
+            {metricRows.map((row) => {
+              const best = row.higherBetter
+                ? Math.max(...row.numValues)
+                : Math.min(...row.numValues);
+
+              return (
+                <tr key={row.key}>
+                  <td className="detail-label">{row.key}</td>
+                  {row.values.map((v, i) => (
+                    <td
+                      key={i}
+                      className={`mono${row.numValues[i] === best && v !== '-' ? ' gate-ok' : ''}`}
+                      style={row.numValues[i] === best && v !== '-' ? { fontWeight: 700 } : undefined}
+                    >
+                      {v}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

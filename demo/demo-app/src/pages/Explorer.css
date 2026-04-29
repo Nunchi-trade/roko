@@ -326,15 +326,15 @@
 
 .expl-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
 }
 
 .expl-card {
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   border-radius: 8px;
-  padding: 14px 16px 8px;
+  padding: 10px 12px 6px;
   cursor: pointer;
   transition: border-color 250ms var(--ease), background 250ms var(--ease), box-shadow 250ms var(--ease), transform 250ms var(--ease);
   animation: cardStagger 400ms var(--ease) backwards;
@@ -363,8 +363,8 @@
 .expl-card-top {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 6px;
+  margin-bottom: 4px;
 }
 
 .expl-card-kind {
@@ -395,15 +395,18 @@
   margin-left: auto;
 }
 
-/* Agent name (display font, larger) */
+/* Agent name (display font) */
 .expl-card-agent {
   font-family: var(--display);
   font-weight: 300;
-  font-size: 18px;
+  font-size: 14px;
   color: var(--text-strong);
   letter-spacing: -0.01em;
   line-height: 1.2;
   margin-bottom: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Task ID (mono, dim, truncated) */
@@ -497,34 +500,44 @@
 
 /* Expanded detail */
 .expl-card-detail {
-  margin-top: 10px;
-  padding-top: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--glass-border);
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   animation: fadeIn 200ms var(--ease);
+  max-height: 180px;
+  overflow-y: auto;
 }
 
 .expl-card-field {
   display: flex;
-  gap: 8px;
-  font-size: 11px;
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  min-width: 0;
 }
 
 .expl-card-field-key {
   color: var(--text-dim);
-  min-width: 90px;
+  width: 100px;
+  min-width: 100px;
   font-family: var(--mono);
   flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .expl-card-field-val {
   color: var(--text-primary);
   font-family: var(--mono);
-  word-break: break-all;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 
 /* ═══════════════════════════════════════════════════════════

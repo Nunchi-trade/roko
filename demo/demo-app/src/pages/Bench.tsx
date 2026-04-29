@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { Link } from 'react-router';
 import { useBench } from '../hooks/useBench';
 import { useRokoConfig } from '../hooks/useRokoConfig';
 import type { AgentStrategy } from '../lib/bench-types';
@@ -122,6 +121,14 @@ export default function Bench() {
               </div>
             </Pane>
 
+            <Pane title="MODEL">
+              <div className="bench-model-display">
+                <span className="bench-model-value">{defaultModel || '—'}</span>
+                <span className="bench-model-provider">{defaultBackend || '—'}</span>
+                <span className="bench-model-hint">Change via config pill (bottom-right)</span>
+              </div>
+            </Pane>
+
             <Pane title="PARAMETERS">
               <div className="config-params">
                 <label className="param-row">
@@ -208,9 +215,6 @@ export default function Bench() {
               >
                 {activeRun?.status === 'running' ? 'Running...' : 'Run Benchmark'}
               </button>
-              <Link to="/bench/showroom" className="btn bone" style={{ textDecoration: 'none' }}>
-                Showroom
-              </Link>
             </div>
           </div>
         )}

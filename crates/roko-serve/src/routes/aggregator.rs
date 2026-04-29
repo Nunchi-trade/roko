@@ -445,7 +445,30 @@ async fn list_knowledge_entries(
     if let Some(cached) = state.cached_json(cache_key).await {
         return Ok(Json(cached));
     }
-    let body = json!(PaginatedResponse::<Value>::new(Vec::new(), 0, 0, 0));
+    let store = roko_neuro::knowledge_store::KnowledgeStore::for_layout(&state.layout);
+    let all = store
+        .read_all()
+        .unwrap_or_default();
+    let items: Vec<Value> = all
+        .iter()
+        .map(|e| {
+            let domain = domain_from_entry(e);
+            let label = if e.content.len() > 80 {
+                format!("{}…", &e.content[..80])
+            } else {
+                e.content.clone()
+            };
+            json!({
+                "id": e.id,
+                "domain": domain,
+                "citations": e.source_episodes.len() + e.confirmation_count as usize,
+                "label": label,
+                "confidence": e.confidence,
+            })
+        })
+        .collect();
+    let total = items.len();
+    let body = json!(PaginatedResponse::new(items, total, 0, total));
     state
         .put_cached_json(cache_key, KNOWLEDGE_TTL, body.clone())
         .await;
@@ -457,11 +480,99 @@ async fn list_knowledge_edges(State(state): State<Arc<AppState>>) -> Result<Json
     if let Some(cached) = state.cached_json(cache_key).await {
         return Ok(Json(cached));
     }
-    let body = json!(PaginatedResponse::<Value>::new(Vec::new(), 0, 0, 0));
+    let store = roko_neuro::knowledge_store::KnowledgeStore::for_layout(&state.layout);
+    let all = store
+        .read_all()
+        .unwrap_or_default();
+    let mut edges: Vec<Value> = Vec::new();
+    // Build edges from refutation links (anti-knowledge → refuted entry).
+    for entry in &all {
+        if let Some(ref target) = entry.refuted_insight_id {
+            edges.push(json!({
+                "source": entry.id,
+                "target": target,
+                "frequency": 1,
+            }));
+        }
+    }
+    // Build edges from shared source episodes (entries that share an episode
+    // are related).
+    let mut episode_to_entries: HashMap<&str, Vec<&str>> = HashMap::new();
+    for entry in &all {
+        for ep in &entry.source_episodes {
+            episode_to_entries
+                .entry(ep.as_str())
+                .or_default()
+                .push(&entry.id);
+        }
+    }
+    let mut seen = HashSet::new();
+    for ids in episode_to_entries.values() {
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                let pair = if ids[i] < ids[j] {
+                    (ids[i], ids[j])
+                } else {
+                    (ids[j], ids[i])
+                };
+                if seen.insert(pair) {
+                    edges.push(json!({
+                        "source": pair.0,
+                        "target": pair.1,
+                        "frequency": 1,
+                    }));
+                }
+            }
+        }
+    }
+    let total = edges.len();
+    let body = json!(PaginatedResponse::new(edges, total, 0, total));
     state
         .put_cached_json(cache_key, KNOWLEDGE_TTL, body.clone())
         .await;
     Ok(Json(body))
+}
+
+/// Derive a domain label from a knowledge entry's kind, source, and tags.
+fn domain_from_entry(e: &roko_neuro::KnowledgeEntry) -> &'static str {
+    // Check source field first (most specific).
+    if let Some(ref src) = e.source {
+        if src.contains("gate") {
+            return "gate";
+        }
+        if src.contains("agent") || src.contains("dispatch") {
+            return "agent";
+        }
+        if src.contains("plan") || src.contains("task") {
+            return "plan";
+        }
+        if src.contains("config") {
+            return "config";
+        }
+    }
+    // Check tags.
+    for tag in &e.tags {
+        let t = tag.to_lowercase();
+        if t.contains("gate") {
+            return "gate";
+        }
+        if t.contains("agent") {
+            return "agent";
+        }
+        if t.contains("plan") || t.contains("task") {
+            return "plan";
+        }
+        if t.contains("config") {
+            return "config";
+        }
+    }
+    // Fall back to kind.
+    match e.kind {
+        roko_neuro::KnowledgeKind::Warning | roko_neuro::KnowledgeKind::AntiKnowledge => "gate",
+        roko_neuro::KnowledgeKind::StrategyFragment => "plan",
+        roko_neuro::KnowledgeKind::CausalLink => "agent",
+        _ => "knowledge",
+    }
 }
 
 async fn search_knowledge(

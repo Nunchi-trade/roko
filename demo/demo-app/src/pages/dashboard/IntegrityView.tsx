@@ -30,8 +30,8 @@ const DEMO_HASH = 'a3f8c2d1e4b5976801234abcdef56789012345678abcdef0123456789abcd
 const FEATURES = [
   { label: 'SHA-256 hash per episode', desc: 'Cryptographic fingerprint for every agent turn' },
   { label: 'Merkle tree for batch verification', desc: 'Tree hashing enables O(log n) proof verification' },
-  { label: 'EVM-compatible witness contract', desc: 'Ready for on-chain anchoring when chain backend connects' },
-  { label: 'Automatic custody chain', desc: 'Gate results auto-append to tamper-evident audit log' },
+  { label: 'EVM-compatible witness contract', desc: 'Ready for on-chain anchoring when witness backend connects' },
+  { label: 'Automatic custody trail', desc: 'Gate results auto-append to tamper-evident audit log' },
   { label: 'HDC fingerprint embedding', desc: 'Hyperdimensional vectors encode episode semantics' },
   { label: 'Cross-agent verification', desc: 'Multi-party witness protocol for contested outcomes' },
 ];
@@ -155,7 +155,7 @@ function HashChainViz({ episodes, height = 160 }: { episodes: number; height?: n
 
 /* ── Component ───────────────────────────────────────────── */
 
-export default function ChainView() {
+export default function IntegrityView() {
   const { get } = useApiWithFallback();
   const [episodes, setEpisodes] = useState(847);
   const [gatesPassed, setGatesPassed] = useState(791);
@@ -231,7 +231,7 @@ export default function ChainView() {
 
       {/* ═══ HASH CHAIN VIZ ═══ */}
       <Pane
-        title="HASH CHAIN"
+        title="HASH TRAIL"
         badge={
           <code style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text-dim)', letterSpacing: '.02em' }}>
             {typedHash.slice(0, 24)}...
@@ -239,7 +239,7 @@ export default function ChainView() {
           </code>
         }
       >
-        <HashChainViz episodes={episodes} height={120} />
+        <HashChainViz episodes={episodes} height={90} />
       </Pane>
 
       {/* ═══ MIDDLE ROW: Features + Gate Waterfall ═══ */}
@@ -252,10 +252,10 @@ export default function ChainView() {
               fontWeight: 300,
               color: 'var(--text-soft)',
               lineHeight: 1.7,
-              margin: '0 0 10px',
+              margin: '0 0 4px',
             }}>
-              Every agent action is logged with cryptographic hashes. When the chain
-              backend is connected, actions become tamper-proof witnesses anchored on-chain.
+              Every agent action is logged with cryptographic hashes. When a witness
+              backend is connected, actions become tamper-proof records with verifiable integrity.
             </p>
             {FEATURES.map((f) => (
               <div key={f.label} style={{
@@ -280,7 +280,7 @@ export default function ChainView() {
         </Pane>
 
         <Pane title="GATE PIPELINE WATERFALL" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>7-rung</span>}>
-          <GateWaterfall runs={gateHistory} height={280} />
+          <GateWaterfall runs={gateHistory} height={200} />
         </Pane>
       </div>
     </div>

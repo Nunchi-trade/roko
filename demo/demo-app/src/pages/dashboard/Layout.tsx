@@ -7,7 +7,7 @@ const VIEWS = [
   { to: '/dashboard/knowledge', label: 'Knowledge', end: false },
   { to: '/dashboard/entries', label: 'Entries', end: false },
   { to: '/dashboard/routing', label: 'Routing', end: false },
-  { to: '/dashboard/chain', label: 'Chain', end: false },
+  { to: '/dashboard/integrity', label: 'Integrity', end: false },
   { to: '/dashboard/dreams', label: 'Dreams', end: false },
 ];
 
@@ -21,7 +21,7 @@ const shellStyle: CSSProperties = {
 const navStyle: CSSProperties = {
   display: 'flex',
   gap: 4,
-  padding: '10px 40px',
+  padding: '6px 24px',
   borderBottom: '1px solid var(--glass-2-border)',
   background: 'rgba(8, 8, 12, 0.6)',
   backdropFilter: 'blur(8px)',
@@ -53,7 +53,7 @@ const activeLinkStyle: CSSProperties = {
 const bodyStyle: CSSProperties = {
   flex: 1,
   minHeight: 0,
-  padding: '20px 40px 60px',
+  padding: '12px 24px 20px',
 };
 
 export default function DashboardLayout() {

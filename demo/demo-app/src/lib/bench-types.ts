@@ -63,6 +63,8 @@ export interface BenchTaskResult {
   gate_verdicts: BenchGateVerdict[];
   error?: string;
   retries_used: number;
+  output_preview?: string;
+  difficulty?: number;
 }
 
 export interface BenchRunSummary {
@@ -102,6 +104,15 @@ export interface BenchModel {
 }
 
 // SSE event types
+export interface BenchRunStartedEvent {
+  type: 'BenchRunStarted';
+  bench_id: string;
+  suite_id: string;
+  suite_name: string;
+  total_tasks: number;
+  model: string;
+}
+
 export interface BenchTaskStartedEvent {
   type: 'BenchTaskStarted';
   bench_id: string;
@@ -130,8 +141,35 @@ export interface BenchRunCompletedEvent {
   summary: BenchRunSummary;
 }
 
+export interface BenchLearningEvent {
+  type: 'BenchLearning';
+  bench_id: string;
+  insight: string;
+  metric?: string;
+  before?: number;
+  after?: number;
+  confidence?: number;
+}
+
+export interface ParetoFrontierPoint {
+  run_id: string;
+  label?: string;
+  model?: string;
+  provider?: string;
+  cost_usd: number;
+  pass_rate: number;
+  duration_ms?: number;
+}
+
+export interface ParetoFrontierResponse {
+  points: ParetoFrontierPoint[];
+  generated_at?: string;
+}
+
 export type BenchSSEEvent =
+  | BenchRunStartedEvent
   | BenchTaskStartedEvent
   | BenchTaskCompletedEvent
   | BenchProgressEvent
-  | BenchRunCompletedEvent;
+  | BenchRunCompletedEvent
+  | BenchLearningEvent;

@@ -208,7 +208,7 @@ export default function CostDashboard() {
   })();
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {/* ═══ TOP MOSAIC: 6 stats ═══ */}
       <Mosaic columns={6}>
         <MosaicCell
@@ -266,7 +266,7 @@ export default function CostDashboard() {
       </Mosaic>
 
       {/* ═══ MIDDLE ROW: C-Factor + Model Routing ═══ */}
-      <div style={{ display: 'flex', gap: 16 }}>
+      <div style={{ display: 'flex', gap: 10 }}>
         {/* Left: C-Factor breakdown */}
         <div style={{ flex: 1, minWidth: 0 }}>
           <Pane
@@ -282,7 +282,7 @@ export default function CostDashboard() {
                     display: 'flex',
                     alignItems: 'center',
                     gap: 12,
-                    padding: '10px 0',
+                    padding: '6px 0',
                     borderBottom: i < METRICS.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
                   }}>
                     <span style={{
@@ -333,17 +333,17 @@ export default function CostDashboard() {
         {/* Right: Model Routing */}
         <div style={{ flex: 1, minWidth: 0 }}>
           <Pane title="MODEL ROUTING" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{currentModel}</span>}>
-            <BarChart data={routerBars} height={200} />
+            <BarChart data={routerBars} height={140} />
           </Pane>
         </div>
       </div>
 
       {/* ═══ BOTTOM ROW: Cost Over Time + Activity ═══ */}
-      <div style={{ display: 'flex', gap: 16 }}>
+      <div style={{ display: 'flex', gap: 10 }}>
         {/* Left: Cost Over Time */}
         <div style={{ flex: 1, minWidth: 0 }}>
           <Pane title="COST OVER TIME" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>${totalCost.toFixed(2)} total</span>}>
-            <CostChart data={costPoints} height={180} color="var(--bone)" />
+            <CostChart data={costPoints} height={130} color="var(--bone)" />
           </Pane>
         </div>
 
@@ -353,7 +353,7 @@ export default function CostDashboard() {
             <div style={{
               display: 'grid',
               gridTemplateColumns: '1fr 1fr',
-              gap: 12,
+              gap: 8,
             }}>
               <ActivityBlock
                 label="Active Plans"
@@ -388,7 +388,7 @@ export default function CostDashboard() {
         <CFactorSparkline
           trend={cfactorTrend?.trend ?? []}
           woolley={cfactorTrend?.woolley}
-          height={320}
+          height={180}
         />
       </Pane>
 
@@ -404,7 +404,7 @@ export default function CostDashboard() {
         <div style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-          gap: 12,
+          gap: 8,
         }}>
           {providers.map((p) => (
             <ProviderCell key={p.name} provider={p} />
@@ -431,7 +431,7 @@ function ActivityBlock({ label, value, color }: { label: string; value: string; 
       background: 'rgba(255,255,255,.04)',
       border: '1px solid rgba(255,255,255,.07)',
       borderRadius: 8,
-      padding: '16px 18px',
+      padding: '10px 12px',
       display: 'flex',
       flexDirection: 'column',
       gap: 6,
@@ -508,10 +508,10 @@ function ProviderCell({ provider }: { provider: Provider }) {
       background: 'rgba(255,255,255,.04)',
       border: '1px solid rgba(255,255,255,.07)',
       borderRadius: 10,
-      padding: '14px 16px',
+      padding: '10px 12px',
       display: 'flex',
       flexDirection: 'column',
-      gap: 10,
+      gap: 6,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <span style={{

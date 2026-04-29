@@ -8,7 +8,7 @@ import DashboardLayout from './pages/dashboard/Layout';
 import CostDashboard from './pages/dashboard/CostDashboard';
 import AgentFleet from './pages/dashboard/AgentFleet';
 import KnowledgeGraph from './pages/dashboard/KnowledgeGraph';
-import ChainView from './pages/dashboard/ChainView';
+import IntegrityView from './pages/dashboard/IntegrityView';
 import CascadeRouter from './pages/dashboard/CascadeRouter';
 import KnowledgeEntries from './pages/dashboard/KnowledgeEntries';
 import DreamsView from './pages/dashboard/DreamsView';
@@ -19,7 +19,6 @@ import Explorer from './pages/Explorer';
 import Bench from './pages/Bench';
 import BenchRunDetail from './pages/BenchRunDetail';
 import BenchCompare from './pages/BenchCompare';
-import BenchShowroom from './pages/BenchShowroom';
 import Settings from './pages/Settings';
 import SharePage from './pages/Share';
 import './styles/rosedust.css';
@@ -35,7 +34,7 @@ createRoot(document.getElementById('root')!).render(
               <Route index element={<CostDashboard />} />
               <Route path="fleet" element={<AgentFleet />} />
               <Route path="knowledge" element={<KnowledgeGraph />} />
-              <Route path="chain" element={<ChainView />} />
+              <Route path="integrity" element={<IntegrityView />} />
               <Route path="entries" element={<KnowledgeEntries />} />
               <Route path="routing" element={<CascadeRouter />} />
               <Route path="dreams" element={<DreamsView />} />
@@ -48,7 +47,6 @@ createRoot(document.getElementById('root')!).render(
             <Route path="bench" element={<Bench />} />
             <Route path="bench/run/:id" element={<BenchRunDetail />} />
             <Route path="bench/compare" element={<BenchCompare />} />
-            <Route path="bench/showroom" element={<BenchShowroom />} />
             <Route path="share/:token" element={<SharePage />} />
           </Route>
         </Routes>

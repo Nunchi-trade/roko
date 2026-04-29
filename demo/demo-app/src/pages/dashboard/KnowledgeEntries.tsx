@@ -14,7 +14,7 @@ interface KnowledgeEntry {
 const pageStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
-  gap: 16,
+  gap: 10,
   minHeight: '100%',
 };
 
@@ -233,7 +233,7 @@ function ConfidenceHistogram({ entries, height = 140 }: { entries: KnowledgeEntr
 /* ── Table styles ────────────────────────────────────────── */
 
 const thStyle: CSSProperties = {
-  padding: '10px 12px',
+  padding: '6px 10px',
   color: 'var(--text-dim)',
   borderBottom: '1px solid var(--glass-2-border)',
   background: 'var(--raised)',
@@ -246,7 +246,7 @@ const thStyle: CSSProperties = {
 };
 
 const tdStyle: CSSProperties = {
-  padding: '10px 12px',
+  padding: '5px 10px',
   color: 'var(--text)',
   borderBottom: '1px solid var(--glass-border)',
   verticalAlign: 'middle',
@@ -317,19 +317,19 @@ export default function KnowledgeEntries() {
       </Mosaic>
 
       {/* ═══ CHARTS ROW ═══ */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
         <Pane
           title="DOMAIN DISTRIBUTION"
           badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{stats.domains || 5} domains</span>}
         >
-          <DomainChart entries={entries} height={160} />
+          <DomainChart entries={entries} height={110} />
         </Pane>
 
         <Pane
           title="CONFIDENCE DISTRIBUTION"
           badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>histogram</span>}
         >
-          <ConfidenceHistogram entries={entries} height={160} />
+          <ConfidenceHistogram entries={entries} height={110} />
         </Pane>
       </div>
 
@@ -339,7 +339,7 @@ export default function KnowledgeEntries() {
         badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{entries.length} rows</span>}
         flat
       >
-        <div style={{ maxHeight: 420, overflow: 'auto' }}>
+        <div style={{ maxHeight: 280, overflow: 'auto' }}>
           {loading ? (
             <div style={{
               padding: 36,

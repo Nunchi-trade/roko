@@ -136,6 +136,33 @@
 .bench-config {
   max-width: 860px;
 }
+.bench-model-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+.bench-model-value {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--rose-bright);
+}
+.bench-model-provider {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 2px 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 3px;
+  background: var(--glass-bg);
+}
+.bench-model-hint {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-ghost);
+  letter-spacing: 0.04em;
+}
 .config-cards {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
