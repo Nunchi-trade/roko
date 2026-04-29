@@ -190,12 +190,15 @@ pub struct ServerConfig {
     /// Port number.
     #[serde(default = "default_port")]
     pub port: u16,
-    /// Allowed CORS origins. Empty = permissive.
+    /// Allowed CORS origins. Empty = local-only.
     #[serde(default)]
     pub cors_origins: Vec<String>,
     /// Optional bearer token for API authentication.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Allow all origins when `cors_origins` is empty.
+    #[serde(default)]
+    pub unsafe_public_cors: bool,
 }
 
 fn default_bind() -> String {
@@ -213,6 +216,7 @@ impl Default for ServerConfig {
             port: default_port(),
             cors_origins: Vec::new(),
             auth_token: None,
+            unsafe_public_cors: false,
         }
     }
 }

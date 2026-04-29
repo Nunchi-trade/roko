@@ -61,6 +61,7 @@ use tower_http::trace::TraceLayer;
 
 pub use self::config::reload_config_from_disk;
 pub use self::deployments::load_persisted_deployments;
+pub(crate) use self::middleware::cors_layer;
 pub(crate) use self::prds::start_prd_publish_subscriber;
 
 /// Build the complete API router with all route groups and middleware.
@@ -74,8 +75,8 @@ pub fn build_router(
         .set_state_hub_consumer(crate::dashboard_event_bridge(&state));
     state.sse_adapter.start_runtime_event_subscription();
 
-    let cors = middleware::cors_layer(cors_origins);
     let roko_config = state.load_roko_config();
+    let cors = middleware::cors_layer(cors_origins, roko_config.server.unsafe_public_cors);
     let terminal_enabled = roko_config.serve.terminal_enabled;
     let terminal_requires_auth = terminal_enabled && !bind_is_loopback(&roko_config.server.bind);
 

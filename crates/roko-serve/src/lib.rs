@@ -119,7 +119,6 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, warn};
 
@@ -289,6 +288,7 @@ impl ServerBuilder {
         let router = build_server_router(
             Arc::clone(&state),
             &roko_config.server.cors_origins,
+            roko_config.server.unsafe_public_cors,
             roko_config.serve.auth.clone(),
         );
 
@@ -680,6 +680,7 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
     let router = build_server_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,
+        roko_config.server.unsafe_public_cors,
         roko_config.serve.auth.clone(),
     );
     let listener = TcpListener::bind(&addr)
@@ -701,6 +702,7 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
 fn build_server_router(
     state: Arc<AppState>,
     cors_origins: &[String],
+    unsafe_public_cors: bool,
     api_auth: roko_core::config::ServeAuthConfig,
 ) -> axum::Router {
     // `routes::build_router` currently installs only the top-level SPA fallback.
@@ -710,25 +712,10 @@ fn build_server_router(
     let fallback_router = axum::Router::new()
         .fallback(serve_api_or_spa_fallback)
         .layer(TraceLayer::new_for_http())
-        .layer(build_cors_layer(cors_origins))
+        .layer(routes::cors_layer(cors_origins, unsafe_public_cors))
         .with_state(state);
 
     api_router.merge(fallback_router)
-}
-
-fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
-    if cors_origins.is_empty() {
-        CorsLayer::permissive()
-    } else {
-        let allowed: Vec<axum::http::HeaderValue> = cors_origins
-            .iter()
-            .filter_map(|origin| origin.parse().ok())
-            .collect();
-        CorsLayer::new()
-            .allow_origin(allowed)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    }
 }
 
 fn api_or_ws_path_requires_json_404(path: &str) -> bool {

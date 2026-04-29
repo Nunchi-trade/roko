@@ -1,6 +1,6 @@
 //! Shared API auth and scrubbing middleware for `/api/*` routes.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -13,10 +13,12 @@ use chrono::Utc;
 use roko_core::config::{ApiKeyEntry, ServeAuthConfig};
 use roko_core::obs::LogScrubber;
 use sha2::{Digest, Sha256};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+
+static UNSAFE_PUBLIC_CORS_WARNING: OnceLock<()> = OnceLock::new();
 
 /// Extract a bearer token from an `Authorization` header value.
 ///
@@ -423,17 +425,55 @@ pub async fn require_scope(req: Request<Body>, next: Next) -> Result<Response, A
 }
 
 /// Build the CORS layer from configured origins.
-pub fn cors_layer(cors_origins: &[String]) -> CorsLayer {
-    if cors_origins.is_empty() {
-        CorsLayer::permissive()
-    } else {
+pub fn cors_layer(cors_origins: &[String], unsafe_public: bool) -> CorsLayer {
+    if !cors_origins.is_empty() {
         let allowed: Vec<axum::http::HeaderValue> =
             cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
-        CorsLayer::new()
+        return CorsLayer::new()
             .allow_origin(allowed)
             .allow_methods(Any)
-            .allow_headers(Any)
+            .allow_headers(Any);
     }
+
+    if unsafe_public {
+        if UNSAFE_PUBLIC_CORS_WARNING.set(()).is_ok() {
+            tracing::warn!(
+                "CORS is unrestricted (allow *) because server.unsafe_public_cors = true and no \
+                 cors_origins are configured. Set cors_origins to limit access."
+            );
+        }
+        return CorsLayer::permissive();
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(
+            |origin: &axum::http::HeaderValue, _parts: &axum::http::request::Parts| match origin
+                .to_str()
+            {
+                Ok(origin) => is_local_origin(origin),
+                Err(_) => false,
+            },
+        ))
+        .allow_methods(Any)
+        .allow_headers(Any)
+}
+
+/// Returns `true` when `origin` is a localhost or loopback origin on any port.
+fn is_local_origin(origin: &str) -> bool {
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str() else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https") {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let host = authority.host();
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 /// Returns `true` when the response content-type indicates a text-like body
@@ -499,11 +539,11 @@ pub async fn scrub_secrets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::Router;
-    use axum::http::StatusCode;
     use axum::http::header::AUTHORIZATION;
     use axum::http::header::CONTENT_TYPE;
+    use axum::http::StatusCode;
     use axum::routing::{get, post};
+    use axum::Router;
     use roko_core::config::{RokoConfig, ServeAuthConfig};
     use serde_json::Value;
     use tempfile::tempdir;
@@ -1061,5 +1101,33 @@ mod tests {
         assert!(is_scope_sufficient("read", "read"));
         assert!(!is_scope_sufficient("read", "admin"));
         assert!(!is_scope_sufficient("read", "agent:write"));
+    }
+
+    // --- cors / local origin tests ---
+
+    #[test]
+    fn local_origin_accepts_localhost() {
+        assert!(is_local_origin("http://localhost:5173"));
+        assert!(is_local_origin("https://localhost:443"));
+        assert!(is_local_origin("http://localhost"));
+    }
+
+    #[test]
+    fn local_origin_accepts_127_0_0_1() {
+        assert!(is_local_origin("http://127.0.0.1:3000"));
+        assert!(is_local_origin("https://127.0.0.1"));
+    }
+
+    #[test]
+    fn local_origin_accepts_ipv6_loopback() {
+        assert!(is_local_origin("http://[::1]:3000"));
+    }
+
+    #[test]
+    fn local_origin_rejects_external_or_malformed() {
+        assert!(!is_local_origin("http://evil.com"));
+        assert!(!is_local_origin("https://api.example.com"));
+        assert!(!is_local_origin("localhost:3000"));
+        assert!(!is_local_origin("http://192.168.1.1:6677"));
     }
 }
