@@ -1324,12 +1324,15 @@ async fn augment_system_prompt_for_strategy(
     current_model: &str,
     strategy: Option<BenchStrategy>,
 ) -> String {
-    let overlay = match strategy.unwrap_or(BenchStrategy::Minimal) {
-        BenchStrategy::Minimal => String::new(),
-        BenchStrategy::ContextEnriched => {
+    let overlay = match strategy {
+        Some(BenchStrategy::Minimal) => String::new(),
+        Some(BenchStrategy::ContextEnriched) => {
+            // Context-enriched is the first step above minimal: add learned
+            // playbooks + skills, but skip neuro knowledge and retry guidance.
             build_context_enrichment_overlay(workdir, role, prompt_text).await
         }
-        BenchStrategy::NeuroAugmented | BenchStrategy::FullCascade => {
+        _ => {
+            // Default path keeps the full enrichment stack.
             let mut overlay = build_context_enrichment_overlay(workdir, role, prompt_text).await;
             let neuro_overlay =
                 build_neuro_augmented_overlay(workdir, role, prompt_text, current_model).await;
@@ -1356,7 +1359,7 @@ async fn augment_system_prompt_for_strategy(
 #[cfg(feature = "legacy-orchestrate")]
 async fn build_context_enrichment_overlay(workdir: &Path, role: &str, prompt_text: &str) -> String {
     let (playbooks, skills) = tokio::join!(
-        build_relevant_playbooks_section(workdir, role, prompt_text),
+        build_relevant_playbooks_section(workdir, role, "cli-run", prompt_text),
         build_relevant_skills_section(workdir, prompt_text),
     );
 
@@ -1368,13 +1371,26 @@ async fn build_context_enrichment_overlay(workdir: &Path, role: &str, prompt_tex
         sections.push(skills);
     }
 
-    sections.join("\n\n")
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("## Relevant Techniques\n\n{}", sections.join("\n\n"))
+    }
 }
 
 #[cfg(feature = "legacy-orchestrate")]
-async fn build_relevant_playbooks_section(workdir: &Path, role: &str, prompt_text: &str) -> String {
+async fn build_relevant_playbooks_section(
+    workdir: &Path,
+    role: &str,
+    task: &str,
+    task_text: &str,
+) -> String {
     let parsed_role = parse_agent_role(role).unwrap_or(AgentRole::Implementer);
-    let store = match load_or_create_playbook_store(&workdir.join(".roko").join("learn").join("playbooks")).await {
+    let store = match load_or_create_playbook_store(
+        &workdir.join(".roko").join("learn").join("playbooks"),
+    )
+    .await
+    {
         Ok(store) => store,
         Err(err) => {
             tracing::warn!(error = %err, "failed to load playbook store for strategy enrichment");
@@ -1382,7 +1398,7 @@ async fn build_relevant_playbooks_section(workdir: &Path, role: &str, prompt_tex
         }
     };
 
-    let query = playbook_query_context(parsed_role, "cli-run", prompt_text, None);
+    let query = playbook_query_context(parsed_role, task, task_text, None);
     let playbooks = match store.query(&query).await {
         Ok(playbooks) => playbooks,
         Err(err) => {
@@ -1400,7 +1416,11 @@ async fn build_relevant_playbooks_section(workdir: &Path, role: &str, prompt_tex
 
 #[cfg(feature = "legacy-orchestrate")]
 async fn build_relevant_skills_section(workdir: &Path, prompt_text: &str) -> String {
-    let store = match load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json")).await {
+    let store = match load_or_create_skill_library(
+        &workdir.join(".roko").join("learn").join("skills.json"),
+    )
+    .await
+    {
         Ok(store) => store,
         Err(err) => {
             tracing::warn!(error = %err, "failed to load skill library for strategy enrichment");
