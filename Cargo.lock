@@ -5837,6 +5837,7 @@ dependencies = [
  "roko-agent",
  "roko-core",
  "roko-gate",
+ "roko-learn",
  "roko-orchestrator",
  "roko-runtime",
  "serde",
