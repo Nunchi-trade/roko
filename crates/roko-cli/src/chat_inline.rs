@@ -2444,7 +2444,7 @@ fn handle_slash_command(
                         "roko-serve".to_string()
                     }
                 }
-                DispatchMode::Session => "agent-session".to_string(),
+                DispatchMode::Session => "session".to_string(),
             };
             let workdir = std::env::current_dir()
                 .map(|p| p.display().to_string())
@@ -3627,7 +3627,7 @@ fn handle_slash_command(
                 lines.push(styled::continuation(theme, "config", path, None));
 
                 if path.ends_with(".json") {
-                    if let Ok(raw) = fs::read_to_string(path) {
+                    if let Ok(raw) = std::fs::read_to_string(path) {
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
                             if let Some(servers) = val.get("mcpServers").and_then(|s| s.as_object())
                             {

@@ -155,7 +155,7 @@ pub(crate) fn format_acceptance_decision(task_id: &str, decision: &AcceptanceDec
 // ─── Recording gate wrapper ──────────────────────────────────────────────
 
 /// A verdict captured by [`RecordingGate`] for post-pipeline analysis.
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RecordedGateVerdict {
     pub(crate) rung: Rung,
     pub(crate) verdict: Verdict,

@@ -127,6 +127,7 @@ pub async fn run_learning_subscriber(
                 costs.insert(cost_record);
 
                 let tools_used = tool_call_count.min(u32::MAX as usize) as u32;
+                let attempt_id = format!("{}:{turn}", turn_ctx.task_id);
                 let efficiency_event = AgentEfficiencyEvent {
                     agent_id: format!("{}:{turn}", turn_ctx.task_id),
                     role: String::new(),
@@ -134,6 +135,7 @@ pub async fn run_learning_subscriber(
                     model: turn_ctx.model.clone(),
                     plan_id: String::new(),
                     task_id: turn_ctx.task_id,
+                    attempt_id,
                     input_tokens: u64::from(usage.input_tokens),
                     output_tokens: u64::from(usage.output_tokens),
                     reasoning_tokens: 0,

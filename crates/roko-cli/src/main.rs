@@ -42,6 +42,7 @@ use roko_cli::{
     PipeMode, Plan, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs, config_cmd,
     load_layered, run_init_wizard, run_once,
 };
+pub use roko_cli::{model_selection, repo_context};
 use roko_core::agent::{AgentRole, ProviderKind};
 use roko_core::config::ServeDeployWebhookConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};

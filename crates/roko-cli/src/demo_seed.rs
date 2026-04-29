@@ -1040,6 +1040,13 @@ fn build_efficiency_event(
         model: model.to_string(),
         plan_id: spec.plan_id.to_string(),
         task_id: spec.task_id.to_string(),
+        attempt_id: format!(
+            "seed-{}-{}-{}-{}",
+            spec.role.label(),
+            spec.task_id,
+            if primary { "primary" } else { "followup" },
+            event_index
+        ),
         input_tokens,
         output_tokens,
         reasoning_tokens: if primary { 96 } else { 64 },
@@ -1572,7 +1579,11 @@ fn task_metric_sections_included(spec: &DemoTaskSpec) -> u32 {
 }
 
 fn task_metric_sections_dropped(spec: &DemoTaskSpec) -> u32 {
-    if spec.success { 0 } else { 1 }
+    if spec.success {
+        0
+    } else {
+        1
+    }
 }
 
 fn tool_calls_for_task(spec: &DemoTaskSpec, primary: bool) -> Vec<ToolCallMeta> {

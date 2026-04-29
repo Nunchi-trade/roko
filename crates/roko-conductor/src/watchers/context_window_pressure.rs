@@ -138,6 +138,7 @@ mod tests {
             model: model.into(),
             plan_id: "plan-1".into(),
             task_id: "task-1".into(),
+            attempt_id: format!("{model}:{prompt_tokens}"),
             input_tokens: prompt_tokens,
             output_tokens: 10,
             reasoning_tokens: 0,

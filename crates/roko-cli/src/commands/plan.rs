@@ -734,6 +734,26 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     }
 }
 
+fn resolve_effective_model_key(
+    workdir: &Path,
+    cli_model: Option<String>,
+    role: Option<&str>,
+    context: &str,
+) -> Result<String> {
+    let config = crate::load_roko_config(workdir)?;
+    let selection =
+        roko_cli::model_selection::resolve_effective_model(
+            cli_model,
+            None,
+            role.map(str::to_string),
+            None,
+            &config,
+        )
+            .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
+    selection.print_stderr();
+    Ok(selection.effective_model_key)
+}
+
 /// Parse and display a plan directory without executing anything.
 pub(crate) async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
     let plans = roko_orchestrator::discover_plans(plans_dir)

@@ -2691,6 +2691,8 @@ struct TaskTracker {
     last_routing_reason: Option<String>,
     /// Pending skill extraction request for the most recent successful task.
     last_skill_request: Option<SkillExtractionRequest>,
+    /// Attempt ID from the most recent dispatch, for linking gate-failure events.
+    last_attempt_id: Option<String>,
     /// Number of consecutive gate failures for this plan (for re-planning, §9).
     gate_failure_count: u32,
     /// Bounded activity history used by stuck detection and meta-cognition.
@@ -3343,6 +3345,7 @@ impl TaskTracker {
             last_prompt_sections: Vec::new(),
             last_routing_reason: None,
             last_skill_request: None,
+            last_attempt_id: None,
             gate_failure_count: 0,
             activity_history: Vec::new(),
         };
@@ -11076,7 +11079,7 @@ impl PlanRunner {
         }
 
         // Emit efficiency event for this agent turn.
-        self.emit_efficiency_event(
+        let attempt_id = self.emit_efficiency_event(
             plan_id,
             task_id,
             "Implementer",
@@ -11097,6 +11100,7 @@ impl PlanRunner {
         }
 
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_attempt_id = Some(attempt_id);
             tracker.mark_completed(task_id);
             tracker.last_impl_output_hash = Some(result.output.id);
 
@@ -11703,7 +11707,7 @@ impl PlanRunner {
             .iter()
             .find(|task| task.id == task_id)
             .cloned();
-        let frequency = task_def
+        let _frequency = task_def
             .as_ref()
             .map_or(OperatingFrequency::Theta, |task| task.operating_frequency());
         let terminal_count = tracker.terminal_task_count();
@@ -11740,26 +11744,9 @@ impl PlanRunner {
                 }
             });
 
-        let gate_errors = self
-            .gate_failure_report(plan_id)
-            .split("\n\n---\n\n")
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-
-        self.emit_failure_efficiency_event(
-            plan_id,
-            &task_id,
-            "Implementer",
-            &task_model,
-            frequency,
-            0,
-            gate_errors,
-            &strategy.to_string(),
-            failure_count,
-        )
-        .await;
+        // No efficiency event here: record_task_failure already emitted one
+        // when the dispatch attempt failed. A second event would double-count
+        // the attempt in efficiency.jsonl.
 
         tracing::info!(
             plan_id = %plan_id,
@@ -13169,6 +13156,10 @@ impl PlanRunner {
         let model = selected_model
             .map(str::to_owned)
             .unwrap_or_else(|| self.effective_model());
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_attempt_id =
+                result.map(|agent_result| format!("{plan_id}:{task_id}:{}", agent_result.output.id));
+        }
         let prompt_text = task_text
             .map(str::to_owned)
             .or_else(|| {
@@ -17932,13 +17923,14 @@ impl PlanRunner {
         result: &AgentResult,
         wall_ms: u64,
         success: bool,
-    ) {
+    ) -> String {
         let prompt_sections = self
             .task_trackers
             .get(plan_id)
             .filter(|tracker| tracker.last_impl_task_id.as_deref() == Some(task_id))
             .map(|tracker| tracker.last_prompt_sections.clone())
             .unwrap_or_default();
+        let attempt_id = format!("{}:{}:{}", plan_id, task_id, result.output.id);
         let event = AgentEfficiencyEvent {
             agent_id: result.output.id.to_string(),
             role: role.to_string(),
@@ -17946,6 +17938,7 @@ impl PlanRunner {
             model: model.to_string(),
             plan_id: plan_id.to_string(),
             task_id: task_id.to_string(),
+            attempt_id: attempt_id.clone(),
             // Success events use the parsed provider usage from the agent result.
             input_tokens: u64::from(result.usage.input_tokens),
             output_tokens: u64::from(result.usage.output_tokens),
@@ -18033,6 +18026,7 @@ impl PlanRunner {
             metric: "cost_usd".to_string(),
             value: event.cost_usd,
         });
+        attempt_id
     }
 
     /// Construct and persist a failure efficiency event for a task that did not succeed.
@@ -18054,6 +18048,11 @@ impl PlanRunner {
             .filter(|tracker| tracker.last_impl_task_id.as_deref() == Some(task_id))
             .map(|tracker| tracker.last_prompt_sections.clone())
             .unwrap_or_default();
+        let attempt_id = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|tracker| tracker.last_attempt_id.clone())
+            .unwrap_or_else(|| format!("{plan_id}:{task_id}:unknown"));
         let event = AgentEfficiencyEvent {
             agent_id: format!("{plan_id}:{task_id}:failure"),
             role: role.to_string(),
@@ -18061,6 +18060,7 @@ impl PlanRunner {
             model: model.to_string(),
             plan_id: plan_id.to_string(),
             task_id: task_id.to_string(),
+            attempt_id,
             // Failure events have no agent result, so usage and cost remain unknown.
             // These zero values are intentional and mean "not available", not "free".
             input_tokens: 0,

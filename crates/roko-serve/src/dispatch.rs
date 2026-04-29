@@ -244,6 +244,7 @@ impl EfficiencyTracker {
             model: template_name.to_string(),
             plan_id: String::new(),
             task_id: String::new(),
+            attempt_id: format!("roko-serve:{template_name}:{turns}"),
             input_tokens: tokens,
             output_tokens: 0,
             reasoning_tokens: 0,

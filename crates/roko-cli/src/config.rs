@@ -1233,6 +1233,7 @@ impl ConfigLayer {
                 ServeConfig {
                     port: s.port,
                     share_ttl_days: s.share_ttl_days.unwrap_or(defaults.share_ttl_days),
+                    acknowledge_public_risk: defaults.acknowledge_public_risk,
                     terminal_enabled: match s.terminal_enabled {
                         Some(terminal_enabled) => terminal_enabled,
                         None => defaults.terminal_enabled,

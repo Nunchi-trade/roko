@@ -91,6 +91,12 @@ pub struct AgentEfficiencyEvent {
     pub plan_id: String,
     /// Task within the plan.
     pub task_id: String,
+    /// Unique identifier for this dispatch attempt.
+    ///
+    /// Shared between the dispatch cost event and any gate-failure event for
+    /// the same attempt, enabling cross-event joins.
+    #[serde(default)]
+    pub attempt_id: String,
 
     // ── Token accounting ────────────────────────────────────────────
     /// Input tokens from provider response.
@@ -210,6 +216,7 @@ impl Default for AgentEfficiencyEvent {
             model: String::new(),
             plan_id: String::new(),
             task_id: String::new(),
+            attempt_id: String::new(),
             input_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: 0,
@@ -776,16 +783,17 @@ fn make_test_event(
     warm: bool,
     passed: bool,
 ) -> AgentEfficiencyEvent {
-    AgentEfficiencyEvent {
-        agent_id: "agent-1".into(),
-        role: role.into(),
-        backend: "claude".into(),
-        model: "claude-sonnet-4-5".into(),
-        plan_id: "plan-1".into(),
-        task_id: "t1".into(),
-        input_tokens,
-        output_tokens,
-        reasoning_tokens: 0,
+        AgentEfficiencyEvent {
+            agent_id: "agent-1".into(),
+            role: role.into(),
+            backend: "claude".into(),
+            model: "claude-sonnet-4-5".into(),
+            plan_id: "plan-1".into(),
+            task_id: "t1".into(),
+            attempt_id: "test-attempt".into(),
+            input_tokens,
+            output_tokens,
+            reasoning_tokens: 0,
         cache_read_tokens: cache_read,
         cache_write_tokens: 0,
         cost_usd: cost,

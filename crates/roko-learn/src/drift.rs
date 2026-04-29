@@ -289,6 +289,7 @@ mod tests {
             model: "claude-sonnet-4-5".into(),
             plan_id: "plan-1".into(),
             task_id: "task-1".into(),
+            attempt_id: format!("{role}:{input_tokens}:{output_tokens}"),
             input_tokens,
             output_tokens,
             reasoning_tokens,

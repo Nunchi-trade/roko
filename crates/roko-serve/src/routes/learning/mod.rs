@@ -598,6 +598,7 @@ mod tests {
             model: "claude-sonnet-4-5".into(),
             plan_id: plan_id.into(),
             task_id: task_id.into(),
+            attempt_id: format!("{}:{task_id}:{timestamp}", plan_id),
             input_tokens,
             output_tokens,
             reasoning_tokens: 0,

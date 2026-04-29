@@ -429,13 +429,13 @@ pub(crate) async fn cmd_provider_test(
     let report = match provider.kind {
         ProviderKind::OpenAiCompat => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{}' requires a model profile for testing", provider_name)
+                anyhow!("provider {} requires a model profile for testing", provider_name)
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
         ProviderKind::AnthropicApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{}' requires a model profile for testing", provider_name)
+                anyhow!("provider {} requires a model profile for testing", provider_name)
             })?;
             run_anthropic_provider_test(&provider_name, provider, model, json).await?
         }
@@ -444,13 +444,13 @@ pub(crate) async fn cmd_provider_test(
         }
         ProviderKind::GeminiApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{}' requires a model profile for testing", provider_name)
+                anyhow!("provider {} requires a model profile for testing", provider_name)
             })?;
             run_gemini_provider_test(&provider_name, provider, model, json).await?
         }
         ProviderKind::PerplexityApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{}' requires a model profile for testing", provider_name)
+                anyhow!("provider {} requires a model profile for testing", provider_name)
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
@@ -459,7 +459,7 @@ pub(crate) async fn cmd_provider_test(
         }
         ProviderKind::CerebrasApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{}' requires a model profile for testing", provider_name)
+                anyhow!("provider {} requires a model profile for testing", provider_name)
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
@@ -604,8 +604,10 @@ fn format_effective_model_selection_summary(
 
 fn model_selection_recommendation(error: &roko_cli::model_selection::Error) -> String {
     match error {
-        roko_cli::model_selection::Error::EmptyModel { origin } => {
-            format!("pass a non-empty model value for {origin}")
+        crate::model_selection::Error::EmptyModel {
+            selection_source,
+        } => {
+            format!("pass a non-empty model value for {selection_source}")
         }
         roko_cli::model_selection::Error::MissingProvider {
             model,

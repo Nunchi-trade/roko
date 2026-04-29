@@ -23,6 +23,7 @@ use roko_core::agent::ProviderKind;
 use roko_core::foundation::{ChatMessage, MessageRole};
 use roko_core::{Body, Context, Engram, Kind, OperatingFrequency};
 use thiserror::Error;
+use serde_yaml_ng as serde_yaml;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::signal;
