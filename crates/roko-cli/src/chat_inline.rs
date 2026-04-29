@@ -69,6 +69,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/input-history", "show typed input history"),
     ("/copy", "copy last response to clipboard"),
     ("/compact", "toggle compact output mode"),
+    ("/quiet", "toggle per-turn usage summary"),
     ("/system", "set system message for session"),
     ("/reset", "clear conversation, fresh start"),
     ("/retry", "resend the last message"),
@@ -770,6 +771,8 @@ struct ChatSession {
     system_message: Option<String>,
     /// Compact output mode.
     compact: bool,
+    /// Suppress per-turn usage summary.
+    quiet: bool,
     /// Full agent session (present when dispatch == `DispatchMode::Session`).
     agent_session: Option<ChatAgentSession>,
 }
@@ -1125,6 +1128,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
         last_prompt: None,
         system_message: None,
         compact: false,
+        quiet: false,
         agent_session: None,
     };
 
@@ -1223,6 +1227,18 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                     }
                     session.turn_count += 1;
                     session.thinking_started = None;
+                    if !session.quiet {
+                        let model_name = current_model_name_static(&session);
+                        push_usage_line(
+                            &mut term,
+                            &theme,
+                            &model_name,
+                            result.input_tokens,
+                            result.output_tokens,
+                            cost,
+                            latency,
+                        )?;
+                    }
                     if latency > 10.0 {
                         print!("\x07");
                     }
@@ -1465,6 +1481,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
         last_prompt: None,
         system_message,
         compact: false,
+        quiet: false,
         agent_session,
     };
 
@@ -1555,6 +1572,18 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                     }
                     session.turn_count += 1;
                     session.thinking_started = None;
+                    if !session.quiet {
+                        let model_name = current_model_name_static(&session);
+                        push_usage_line(
+                            &mut term,
+                            &theme,
+                            &model_name,
+                            result.input_tokens,
+                            result.output_tokens,
+                            cost,
+                            latency,
+                        )?;
+                    }
                     if latency > 10.0 {
                         print!("\x07");
                     }
@@ -2170,6 +2199,12 @@ fn handle_slash_command(
                 styled::continuation(theme, "/input-history", "show typed input history", None),
                 styled::continuation(theme, "/copy", "copy last response to clipboard", None),
                 styled::continuation(theme, "/compact", "toggle compact output", None),
+                styled::continuation(
+                    theme,
+                    "/quiet",
+                    "toggle per-turn usage summary",
+                    None,
+                ),
                 styled::continuation(theme, "/system <text>", "set system message", None),
                 styled::continuation(theme, "/reset", "clear conversation", None),
                 styled::continuation(theme, "/retry", "resend last message", None),
@@ -2501,6 +2536,16 @@ fn handle_slash_command(
             session.compact = !session.compact;
             let state = if session.compact { "on" } else { "off" };
             term.push_lines(&[styled::continuation(theme, "compact", state, None)])?;
+        }
+        "/quiet" => {
+            session.quiet = !session.quiet;
+            let state = if session.quiet { "on" } else { "off" };
+            term.push_lines(&[styled::continuation(
+                theme,
+                "quiet",
+                &format!("usage line {state}"),
+                None,
+            )])?;
         }
         _ if cmd.starts_with("/system") => {
             let msg = cmd.strip_prefix("/system").unwrap().trim();
@@ -4206,6 +4251,34 @@ fn reading_time(text: &str) -> Option<String> {
     } else {
         Some(format!("~{} min read", minutes.ceil() as u32))
     }
+}
+
+/// Print a compact per-turn usage summary to the inline terminal scrollback.
+fn push_usage_line(
+    term: &mut InlineTerminal,
+    _theme: &Theme,
+    model_name: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: f64,
+    latency_s: f64,
+) -> std::io::Result<()> {
+    let total_tokens = input_tokens + output_tokens;
+    let usage_text = if total_tokens == 0 {
+        format!("  [{model_name} | usage: unknown | {latency_s:.1}s]")
+    } else {
+        let cost_text = if cost == 0.0 {
+            "free".to_string()
+        } else {
+            format!("${cost:.4}")
+        };
+        format!("  [{model_name} | {total_tokens} tokens | {cost_text} | {latency_s:.1}s]")
+    };
+
+    term.push_lines(&[Line::from(vec![Span::styled(
+        usage_text,
+        Style::default().fg(Theme::TEXT_GHOST),
+    )])])
 }
 
 /// Render tool execution outputs above the agent response.
