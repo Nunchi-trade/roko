@@ -20,7 +20,8 @@ use crate::test_gate::TestGate;
 /// This is the canonical way to run gates in the workflow engine. It:
 /// - Selects gates from `GateConfig`
 /// - Runs supported gates in rung order: compile, clippy, test, diff, fmt, shell, judge
-/// - Stops at the first failing gate
+/// - Records skipped gates without counting them as passes
+/// - Stops at the first real failing gate
 /// - Returns a unified `GateReport`
 pub struct GateService {
     adaptive: Option<Arc<Mutex<AdaptiveThresholds>>>,
@@ -133,6 +134,21 @@ impl GateService {
     }
 }
 
+fn skipped_gate_verdict(
+    gate_name: String,
+    output: impl Into<String>,
+    skip_reason: impl Into<String>,
+) -> GateVerdict {
+    GateVerdict {
+        gate_name,
+        passed: false,
+        skipped: true,
+        skip_reason: Some(skip_reason.into()),
+        output: output.into(),
+        duration_ms: 0,
+    }
+}
+
 /// Format-check gate adapter for the GateService rung pipeline.
 struct FormatCheckGate {
     inner: ShellGate,
@@ -172,10 +188,10 @@ impl Verify for FormatCheckGate {
     }
 }
 
-/// Stub LLM judge gate that fails with a clear message.
+/// Stub LLM judge gate that fails with a clear message if called directly.
 ///
-/// Replace with `LlmJudgeGate` once model dispatch is available in the gate
-/// service context. Fails rather than silently passing to prevent false confidence.
+/// The `GateService` runner intercepts `judge`/`llm-judge` and records a skipped
+/// verdict instead of executing this placeholder.
 struct StubJudgeGate;
 
 impl roko_core::Cell for StubJudgeGate {
@@ -228,57 +244,116 @@ impl GateRunner for GateService {
         for gate_name in Self::ordered_gate_names(&config) {
             let rung = Self::rung_for_name(&gate_name);
 
-            if let Some(r) = rung {
-                if self.should_skip_rung_adaptively(Some(r))? {
-                    verdicts.push(GateVerdict {
-                        gate_name: gate_name.clone(),
-                        passed: true,
-                        output: format!("Skipped (adaptive: high pass rate for rung {r})"),
-                        duration_ms: 0,
-                    });
-                    continue;
-                }
+            if matches!(gate_name.as_str(), "judge" | "llm-judge") {
+                verdicts.push(skipped_gate_verdict(
+                    gate_name,
+                    "Skipped: LLM judge gate not yet implemented — enable a real judge or remove from enabled_gates",
+                    "not implemented",
+                ));
+                continue;
             }
 
             let gate = match gate_name.as_str() {
                 "custom" => {
-                    return Err(RokoError::Invalid(
-                        "custom gate requires explicit command configuration".to_string(),
-                    ));
+                    let Some(command) = shell_gates.next() else {
+                        verdicts.push(skipped_gate_verdict(
+                            gate_name.clone(),
+                            "Skipped: custom gate requires explicit command configuration",
+                            "not wired",
+                        ));
+                        continue;
+                    };
+
+                    if command.program.trim().is_empty() {
+                        verdicts.push(skipped_gate_verdict(
+                            gate_name.clone(),
+                            "Skipped: custom gate requires a non-empty program",
+                            "missing program",
+                        ));
+                        continue;
+                    }
+
+                    match Self::shell_gate_for_config(command) {
+                        Ok(gate) => gate,
+                        Err(err) => {
+                            verdicts.push(skipped_gate_verdict(
+                                gate_name.clone(),
+                                format!("Skipped: {err}"),
+                                "missing program",
+                            ));
+                            continue;
+                        }
+                    }
                 }
                 "shell" | "custom:shell" => {
                     let Some(command) = shell_gates.next() else {
-                        return Err(RokoError::Invalid(format!(
-                            "{gate_name} gate requires explicit command configuration"
-                        )));
+                        verdicts.push(skipped_gate_verdict(
+                            gate_name.clone(),
+                            format!("Skipped: {gate_name} gate requires explicit command configuration"),
+                            "not wired",
+                        ));
+                        continue;
                     };
-                    Self::shell_gate_for_config(command)?
+
+                    if command.program.trim().is_empty() {
+                        verdicts.push(skipped_gate_verdict(
+                            gate_name.clone(),
+                            format!("Skipped: {gate_name} gate requires a non-empty program"),
+                            "missing program",
+                        ));
+                        continue;
+                    }
+
+                    match Self::shell_gate_for_config(command) {
+                        Ok(gate) => gate,
+                        Err(err) => {
+                            verdicts.push(skipped_gate_verdict(
+                                gate_name.clone(),
+                                format!("Skipped: {err}"),
+                                "missing program",
+                            ));
+                            continue;
+                        }
+                    }
                 }
                 _ => {
                     let Some(gate) = self.gate_for_name(&gate_name, build_system) else {
-                        verdicts.push(GateVerdict {
-                            gate_name: gate_name.clone(),
-                            passed: false,
-                            output: format!("Unknown gate: {gate_name}"),
-                            duration_ms: 0,
-                        });
-                        break;
+                        verdicts.push(skipped_gate_verdict(
+                            gate_name.clone(),
+                            format!("Skipped: Unknown gate: {gate_name}"),
+                            "not wired",
+                        ));
+                        continue;
                     };
                     gate
                 }
             };
 
+            if let Some(r) = rung
+                && self.should_skip_rung_adaptively(Some(r))?
+            {
+                verdicts.push(skipped_gate_verdict(
+                    gate_name.clone(),
+                    format!("Skipped (adaptive: high pass rate for rung {r})"),
+                    format!("adaptive: high pass rate for rung {r}"),
+                ));
+                continue;
+            }
+
             let verdict = gate.verify(&signal, &ctx).await;
             let passed = verdict.passed;
-            verdicts.push(to_gate_verdict(gate_name, verdict));
+            let gate_verdict = to_gate_verdict(gate_name, verdict);
+            let was_skipped = gate_verdict.skipped;
+            verdicts.push(gate_verdict);
 
             if let (Some(r), Some(adaptive)) = (rung, &self.adaptive)
+                && !was_skipped
                 && let Ok(mut thresholds) = adaptive.lock()
             {
                 thresholds.observe(u32::from(r), passed);
             }
 
-            if !passed {
+            if !passed && !was_skipped {
                 break;
             }
         }
@@ -297,6 +372,8 @@ fn to_gate_verdict(gate_name: String, verdict: Verdict) -> GateVerdict {
     GateVerdict {
         gate_name,
         passed: verdict.passed,
+        skipped: false,
+        skip_reason: None,
         output,
         duration_ms: verdict.duration_ms,
     }
@@ -430,6 +507,32 @@ mod tests {
         );
         assert!(svc.gate_for_name("compile", BuildSystem::Cargo).is_some());
         assert!(svc.gate_for_name("custom", BuildSystem::Cargo).is_none());
+    }
+
+    #[test]
+    fn skipped_gate_verdict_marks_skip_metadata() {
+        let verdict = skipped_gate_verdict(
+            "custom".to_string(),
+            "Skipped: custom gate requires explicit command configuration",
+            "not wired",
+        );
+
+        assert!(!verdict.passed);
+        assert!(verdict.skipped);
+        assert_eq!(verdict.skip_reason.as_deref(), Some("not wired"));
+        assert!(verdict.output.starts_with("Skipped:"));
+    }
+
+    #[test]
+    fn real_gate_verdicts_default_to_not_skipped() {
+        let verdict = Verdict::pass("compile").with_detail("ok").with_duration(7);
+        let gate_verdict = to_gate_verdict("compile".to_string(), verdict);
+
+        assert!(gate_verdict.passed);
+        assert!(!gate_verdict.skipped);
+        assert_eq!(gate_verdict.skip_reason, None);
+        assert_eq!(gate_verdict.output, "ok");
+        assert_eq!(gate_verdict.duration_ms, 7);
     }
 
     #[test]
