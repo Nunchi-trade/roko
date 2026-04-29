@@ -55,6 +55,8 @@ export interface ScenarioContext {
   updatePipelineTask: (planId: string, taskId: string, patch: Partial<PipelineTask>) => void;
   appendPipelineEvent: (event: PipelineEvent) => void;
   pipelineExample: PipelineScenarioExample;
+  /** Active model from ConfigWidget (e.g. "glm51", "sonnet") */
+  activeModel?: string;
   paused: { current: boolean };
   running: { current: boolean };
 }

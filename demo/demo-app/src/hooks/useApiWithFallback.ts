@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useApi } from './useApi';
 import { SERVE_URL } from '../lib/serve-url';
 import * as Demo from '../lib/demo-data';
-import { getDemoBenchFallback } from '../lib/bench-demo-data';
+
 
 // Map API paths to demo fallback data (used only when offline or endpoint returns nothing)
 function getFallback(path: string): unknown {
@@ -24,10 +24,6 @@ function getFallback(path: string): unknown {
   if (path.includes('/dashboard')) return Demo.DEMO_DASHBOARD;
   if (path.includes('/learn/provider-outcomes') || path.includes('/providers/health')) return Demo.DEMO_PROVIDER_HEALTH;
   if (path.includes('/cost-race') || path.includes('/bench/cost-summary')) return Demo.DEMO_COST_RACE;
-  if (path.includes('/api/bench/')) {
-    const benchFallback = getDemoBenchFallback(path);
-    if (benchFallback !== undefined) return benchFallback;
-  }
   if (path.includes('/dream/journal')) return Demo.DEMO_DREAM_JOURNAL;
   if (path.includes('/config') && !path.includes('/config/')) return Demo.DEMO_CONFIG;
   if (path.includes('/share/')) return null;
