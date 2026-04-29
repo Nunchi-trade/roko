@@ -272,6 +272,21 @@ pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
         }
     }
 
+    // 3. Prefix match on slug (e.g. "claude-opus-4" matches slug "claude-opus-4-6").
+    //    Only accept the match if the slug starts with the key and the next char
+    //    (if any) is a separator, avoiding false positives like "o3" matching "o3-mini".
+    for (key, profile) in &config.models {
+        if profile.slug.len() > model_key.len()
+            && profile.slug.starts_with(model_key)
+            && matches!(
+                profile.slug.as_bytes().get(model_key.len()),
+                Some(b'-' | b'.' | b'_')
+            )
+        {
+            return resolved_from_profile(config, key, profile);
+        }
+    }
+
     let backend = AgentBackend::from_model(model_key);
     ResolvedModel {
         model_key: model_key.to_owned(),
@@ -1403,6 +1418,51 @@ mod tests {
 
         let selected = select_model_for_task(&config, &requirements).expect("selected model");
         assert_eq!(selected, "capable");
+    }
+
+    #[test]
+    fn resolve_model_prefix_matches_slug() {
+        let mut config = RokoConfig::default();
+        config.models.insert(
+            "opus".to_owned(),
+            ModelProfile {
+                provider: "anthropic".to_owned(),
+                slug: "claude-opus-4-6".to_owned(),
+                ..Default::default()
+            },
+        );
+
+        // "claude-opus-4" is a prefix of slug "claude-opus-4-6" separated by '-'
+        let resolved = resolve_model(&config, "claude-opus-4");
+        assert_eq!(resolved.model_key, "opus");
+        assert_eq!(resolved.slug, "claude-opus-4-6");
+        assert!(resolved.profile.is_some());
+    }
+
+    #[test]
+    fn resolve_model_prefix_requires_separator() {
+        let mut config = RokoConfig::default();
+        config.models.insert(
+            "o3".to_owned(),
+            ModelProfile {
+                provider: "openai".to_owned(),
+                slug: "o3".to_owned(),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "o3-mini".to_owned(),
+            ModelProfile {
+                provider: "openai".to_owned(),
+                slug: "o3-mini".to_owned(),
+                ..Default::default()
+            },
+        );
+
+        // "o3" should match exactly, not prefix-match "o3-mini"
+        let resolved = resolve_model(&config, "o3");
+        assert_eq!(resolved.model_key, "o3");
+        assert_eq!(resolved.slug, "o3");
     }
 
     #[test]

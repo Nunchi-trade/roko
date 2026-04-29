@@ -17,7 +17,6 @@ import {
 } from '../lib/bench-demo-data';
 
 export interface BenchConfig {
-  model: string;
   strategy: AgentStrategy;
   temperature: number;
   maxTokens: number;
@@ -46,7 +45,6 @@ interface FeedItem {
 }
 
 const DEFAULT_CONFIG: BenchConfig = {
-  model: 'claude-sonnet-4-20250514',
   strategy: 'full_cascade',
   temperature: 0.1,
   maxTokens: 8192,
@@ -190,7 +188,7 @@ export function useBench() {
   // Cleanup polling on unmount
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
-  const startRun = useCallback(async () => {
+  const startRun = useCallback(async (model: string, provider: string) => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     clearSSE();
     setFeed([]);
@@ -199,13 +197,14 @@ export function useBench() {
     if (!suite) return;
 
     const ts = new Date().toLocaleTimeString();
-    setFeed([{ text: `Starting ${suite.name} with ${config.model}...`, type: 'info' as const, ts }]);
+    setFeed([{ text: `Starting ${suite.name} with ${model}...`, type: 'info' as const, ts }]);
 
     try {
       const res = await post<{ id: string }>('/api/bench/runs', {
         suite_id: suite.id,
         config: {
-          model: config.model,
+          model,
+          provider,
           temperature: config.temperature,
           max_tokens: config.maxTokens,
           timeout_secs: config.timeoutSecs,

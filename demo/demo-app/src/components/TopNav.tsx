@@ -10,6 +10,7 @@ const NAV_LINKS = [
   { to: '/explorer', label: 'EXPLORER' },
   { to: '/builder', label: 'BUILDER' },
   { to: '/terminal', label: 'TERMINAL' },
+  { to: '/settings', label: 'SETTINGS' },
 ];
 
 interface HealthResponse {

@@ -311,6 +311,7 @@ metabolism_rate = 0.1
 refresh_rate_ms = 250
 
 [serve]
+terminal_enabled = true
 auto_orchestrate = true
 
 [serve.auth]

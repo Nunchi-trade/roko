@@ -339,6 +339,12 @@ Examples:
         /// Execution engine: v2 (WorkflowEngine, default) or legacy (run_once).
         #[arg(long, value_enum, default_value_t = EngineVariant::V2)]
         engine: EngineVariant,
+        /// Override the provider for this run (e.g. anthropic, openai, ollama, moonshot).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Maximum retry attempts per task when gate failures trigger replanning.
+        #[arg(long)]
+        max_retries: Option<u32>,
     },
     /// Print signal counts, most recent episode, and gate pass/fail.
     #[command(after_help = "\
@@ -2042,7 +2048,12 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             serve,
             share,
             engine,
-        } => commands::util::cmd_run(cli, workdir, prompt, serve, share, engine).await,
+            provider,
+            max_retries,
+        } => {
+            commands::util::cmd_run(cli, workdir, prompt, serve, share, engine, provider, max_retries)
+                .await
+        }
         Command::Status {
             workdir,
             cfactor,

@@ -424,14 +424,15 @@ pub enum ServerEvent {
     },
 
     /// A bench run was started.
+    #[serde(rename = "BenchRunStarted")]
     BenchRunStarted {
-        /// Renamed from `run_id` to match the frontend `BenchSSEEvent` type.
         bench_id: String,
         suite_id: String,
         total_tasks: usize,
     },
 
     /// A bench task started executing.
+    #[serde(rename = "BenchTaskStarted")]
     BenchTaskStarted {
         bench_id: String,
         task_id: String,
@@ -442,6 +443,7 @@ pub enum ServerEvent {
 
     /// A bench task completed — includes the full `BenchTaskResult` object
     /// that the frontend expects under the `result` key.
+    #[serde(rename = "BenchTaskCompleted")]
     BenchTaskCompleted {
         bench_id: String,
         task_id: String,
@@ -466,6 +468,7 @@ pub enum ServerEvent {
     },
 
     /// Overall progress of a bench run.
+    #[serde(rename = "BenchProgress")]
     BenchProgress {
         bench_id: String,
         completed: usize,
@@ -475,6 +478,7 @@ pub enum ServerEvent {
 
     /// A bench run completed — includes the full `BenchRunSummary` that
     /// the frontend expects under the `summary` key.
+    #[serde(rename = "BenchRunCompleted")]
     BenchRunCompleted {
         bench_id: String,
         summary: serde_json::Value,

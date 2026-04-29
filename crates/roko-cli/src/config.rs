@@ -58,6 +58,9 @@ pub struct Config {
     /// Model registry keyed by model name.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub models: HashMap<String, ModelProfile>,
+    /// Learning / feedback-loop settings.
+    #[serde(default)]
+    pub learning: LearningLayer,
     /// API serving options.
     #[serde(default)]
     pub serve: ServeConfig,
@@ -88,6 +91,7 @@ impl Default for Config {
             budget: BudgetConfig::default(),
             providers: HashMap::new(),
             models: HashMap::new(),
+            learning: LearningLayer::default(),
             serve: ServeConfig::default(),
             log_format: None,
             bind: None,
@@ -956,6 +960,39 @@ pub struct ConfigLayer {
     /// Per-repository configuration blocks.
     #[serde(default, rename = "repos", skip_serializing_if = "Option::is_none")]
     pub repos: Option<Vec<RepoConfig>>,
+    /// Learning subsystem overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learning: Option<LearningLayer>,
+}
+
+/// Partial overrides for `[learning]`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct LearningLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_on_gate_failure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_max_per_plan: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_gate_attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_playbook_refresh: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_lookahead_router: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookahead_threshold: Option<f64>,
+}
+
+impl LearningLayer {
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            replan_on_gate_failure: overlay.replan_on_gate_failure.or(self.replan_on_gate_failure),
+            replan_max_per_plan: overlay.replan_max_per_plan.or(self.replan_max_per_plan),
+            replan_gate_attempts: overlay.replan_gate_attempts.or(self.replan_gate_attempts),
+            auto_playbook_refresh: overlay.auto_playbook_refresh.or(self.auto_playbook_refresh),
+            use_lookahead_router: overlay.use_lookahead_router.or(self.use_lookahead_router),
+            lookahead_threshold: overlay.lookahead_threshold.or(self.lookahead_threshold),
+        }
+    }
 }
 
 impl ConfigLayer {
@@ -1052,6 +1089,12 @@ impl ConfigLayer {
         if let Some(repos) = overlay.repos {
             self.repos = Some(repos);
         }
+        if let Some(l) = overlay.learning {
+            self.learning = Some(match self.learning {
+                Some(base) => base.merge(l),
+                None => l,
+            });
+        }
         self
     }
 
@@ -1071,6 +1114,7 @@ impl ConfigLayer {
             && self.models.is_none()
             && self.serve.is_none()
             && self.repos.is_none()
+            && self.learning.is_none()
     }
 
     /// Resolve into a concrete [`Config`], filling missing fields with defaults.
@@ -1212,6 +1256,7 @@ impl ConfigLayer {
             }
             None => ServeConfig::default(),
         };
+        let learning = self.learning.unwrap_or_default();
         Ok(Config {
             agent,
             auto_plan,
@@ -1226,6 +1271,7 @@ impl ConfigLayer {
             budget: BudgetConfig::default(),
             providers,
             models,
+            learning,
             serve,
             log_format: None,
             bind: None,
@@ -1989,6 +2035,31 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
                 serde_json::from_str(value)
                     .context("parse JSON array for serve.deploy.webhooks")?,
             );
+        }
+        // ---- learning ---------------------------------------------------
+        ["learning", "replan_on_gate_failure"] => {
+            let l = layer.learning.get_or_insert_with(Default::default);
+            l.replan_on_gate_failure = Some(value.parse::<bool>().context("parse replan_on_gate_failure as bool")?);
+        }
+        ["learning", "replan_max_per_plan"] => {
+            let l = layer.learning.get_or_insert_with(Default::default);
+            l.replan_max_per_plan = Some(value.parse().context("parse u32 for learning.replan_max_per_plan")?);
+        }
+        ["learning", "replan_gate_attempts"] => {
+            let l = layer.learning.get_or_insert_with(Default::default);
+            l.replan_gate_attempts = Some(value.parse().context("parse u32 for learning.replan_gate_attempts")?);
+        }
+        ["learning", "auto_playbook_refresh"] => {
+            let l = layer.learning.get_or_insert_with(Default::default);
+            l.auto_playbook_refresh = Some(value.parse::<bool>().context("parse auto_playbook_refresh as bool")?);
+        }
+        ["learning", "use_lookahead_router"] => {
+            let l = layer.learning.get_or_insert_with(Default::default);
+            l.use_lookahead_router = Some(value.parse::<bool>().context("parse use_lookahead_router as bool")?);
+        }
+        ["learning", "lookahead_threshold"] => {
+            let l = layer.learning.get_or_insert_with(Default::default);
+            l.lookahead_threshold = Some(value.parse().context("parse f64 for learning.lookahead_threshold")?);
         }
         _ => return Err(anyhow!("unknown key: {key}")),
     }

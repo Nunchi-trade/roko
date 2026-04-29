@@ -5,7 +5,9 @@ import HeroParticleField from './HeroParticleField';
 import Curtain from './Curtain';
 import ScrollTrack from './ScrollTrack';
 import TopNav from './TopNav';
+import ConfigWidget from './ConfigWidget';
 import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { RokoConfigProvider } from '../hooks/useRokoConfig';
 
 export default function AppShell() {
   const { dataMode } = useApiWithFallback();
@@ -27,7 +29,7 @@ export default function AppShell() {
   }, []);
 
   return (
-    <>
+    <RokoConfigProvider>
       <Grain />
       <HeroParticleField />
       <Curtain />
@@ -55,9 +57,10 @@ export default function AppShell() {
           SEED DATA
         </div>
       )}
+      <ConfigWidget />
       <div className="app-frame" style={{ paddingTop: 48, position: 'relative', zIndex: 1, minHeight: '100vh' }}>
         <Outlet />
       </div>
-    </>
+    </RokoConfigProvider>
   );
 }

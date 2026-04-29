@@ -21,6 +21,7 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/config", get(get_config).put(update_config))
+        .route("/config/toml", get(get_config_toml))
         .route("/config/reload", post(reload_config))
 }
 
@@ -39,6 +40,16 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Result<Json<Value>, A
     expose_dashboard_config_fields(&mut value, cfg.as_ref());
     mask_secret_fields(&mut value);
     Ok(Json(value))
+}
+
+/// `GET /api/config/toml` — return the raw `roko.toml` content as `text/toml`.
+///
+/// Used by Builder workspaces to copy the live config into ephemeral directories.
+async fn get_config_toml(State(state): State<Arc<AppState>>) -> Result<([(axum::http::header::HeaderName, &'static str); 1], String), ApiError> {
+    let cfg = state.load_roko_config();
+    let toml_str = toml::to_string_pretty(cfg.as_ref())
+        .map_err(|e| ApiError::internal(format!("serialize toml: {e}")))?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/toml")], toml_str))
 }
 
 /// `PUT /api/config` — merge partial config JSON into the current config,

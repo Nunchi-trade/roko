@@ -238,60 +238,152 @@ export default function KnowledgeGraph() {
     };
   }, [draw, entries]);
 
+  /* Citation stats */
+  const totalCitations = entries.reduce((s, e) => s + (e.citations ?? 0), 0);
+  const avgCitations = entries.length > 0 ? totalCitations / entries.length : 0;
+
+  /* Domain counts */
+  const domainCounts: Record<string, number> = {};
+  for (const e of entries) {
+    const d = e.domain ?? 'unknown';
+    domainCounts[d] = (domainCounts[d] ?? 0) + 1;
+  }
+  const sortedDomains = Object.entries(domainCounts).sort(([, a], [, b]) => b - a);
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 1200 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* ═══ TOP MOSAIC ═══ */}
-      <Mosaic columns={3}>
+      <Mosaic columns={5}>
         <MosaicCell label="NODES" value={entries.length || 18} color="rose" mono />
         <MosaicCell label="EDGES" value={edges.length || 28} color="bone" mono />
         <MosaicCell label="DOMAINS" value={domains.size || 5} color="dream" mono />
+        <MosaicCell label="CITATIONS" value={totalCitations || 142} color="warning" mono />
+        <MosaicCell label="AVG CITATIONS" value={(avgCitations || 7.9).toFixed(1)} color="success" mono />
       </Mosaic>
 
-      {/* ═══ GRAPH CANVAS ═══ */}
-      <Pane title="KNOWLEDGE GRAPH" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{entries.length} nodes</span>}>
-        <div style={{ position: 'relative', height: 380 }}>
-          <canvas
-            ref={canvasRef}
-            style={{ width: '100%', height: '100%', display: 'block' }}
-          />
-          {/* HUD overlays */}
-          <div style={{
-            position: 'absolute', top: 8, left: 12,
-            fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
-            letterSpacing: '.08em',
-          }}>
-            {entries.length} NODES / {edges.length} EDGES
+      {/* ═══ GRAPH + DOMAIN BREAKDOWN ═══ */}
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
+        <Pane title="KNOWLEDGE GRAPH" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>force-directed</span>}>
+          <div style={{ position: 'relative', height: 400 }}>
+            <canvas
+              ref={canvasRef}
+              style={{ width: '100%', height: '100%', display: 'block' }}
+            />
+            {/* HUD overlays */}
+            <div style={{
+              position: 'absolute', top: 8, left: 12,
+              fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
+              letterSpacing: '.08em',
+            }}>
+              {entries.length} NODES / {edges.length} EDGES
+            </div>
+            <div style={{
+              position: 'absolute', top: 8, right: 12,
+              display: 'flex', gap: 10,
+            }}>
+              {Object.entries(DOMAIN_COLORS).map(([d, c]) => (
+                <span key={d} style={{
+                  display: 'flex', alignItems: 'center', gap: 4,
+                  fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
+                  letterSpacing: '.06em',
+                }}>
+                  <span style={{
+                    width: 5, height: 5, borderRadius: '50%',
+                    background: c, display: 'inline-block',
+                    boxShadow: `0 0 4px ${c}80`,
+                  }} />
+                  {d}
+                </span>
+              ))}
+            </div>
+            <div style={{
+              position: 'absolute', bottom: 8, left: 12,
+              fontFamily: 'var(--mono)', fontSize: 8, color: 'var(--text-dim)',
+              letterSpacing: '.06em',
+            }}>
+              FORCE-DIRECTED / 2D
+            </div>
           </div>
-          <div style={{
-            position: 'absolute', top: 8, right: 12,
-            display: 'flex', gap: 10,
-          }}>
-            {Object.entries(DOMAIN_COLORS).map(([d, c]) => (
-              <span key={d} style={{
-                display: 'flex', alignItems: 'center', gap: 4,
-                fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
-                letterSpacing: '.06em',
-              }}>
-                <span style={{
-                  width: 5, height: 5, borderRadius: '50%',
-                  background: c, display: 'inline-block',
-                }} />
-                {d}
-              </span>
-            ))}
+        </Pane>
+
+        {/* Domain Breakdown */}
+        <Pane title="DOMAIN BREAKDOWN" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{sortedDomains.length} domains</span>}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+            {sortedDomains.map(([domain, count], i) => {
+              const total = entries.length || 1;
+              const pct = (count / total) * 100;
+              const color = domainColor(domain);
+
+              return (
+                <div
+                  key={domain}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                    padding: '10px 0',
+                    borderBottom: i < sortedDomains.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{
+                        width: 6, height: 6, borderRadius: '50%',
+                        background: color,
+                        boxShadow: `0 0 6px ${color}60`,
+                        display: 'inline-block',
+                      }} />
+                      <span style={{
+                        fontFamily: 'var(--display)',
+                        fontSize: 12,
+                        fontWeight: 500,
+                        color,
+                        letterSpacing: '.02em',
+                      }}>
+                        {domain}
+                      </span>
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--mono)',
+                      fontSize: '0.7rem',
+                      fontWeight: 500,
+                      color: 'var(--text-primary)',
+                    }}>
+                      {count}
+                    </span>
+                  </div>
+                  <div style={{
+                    height: 4,
+                    background: 'rgba(255,255,255,.04)',
+                    borderRadius: 2,
+                    overflow: 'hidden',
+                  }}>
+                    <div style={{
+                      height: '100%',
+                      width: `${pct}%`,
+                      background: color,
+                      borderRadius: 2,
+                      opacity: 0.7,
+                      boxShadow: `0 0 8px ${color}40`,
+                      transition: 'width .6s cubic-bezier(.22,1,.36,1)',
+                    }} />
+                  </div>
+                  <span style={{
+                    fontFamily: 'var(--mono)',
+                    fontSize: '0.55rem',
+                    color: 'var(--text-ghost)',
+                  }}>
+                    {pct.toFixed(0)}% of graph
+                  </span>
+                </div>
+              );
+            })}
           </div>
-          <div style={{
-            position: 'absolute', bottom: 8, left: 12,
-            fontFamily: 'var(--mono)', fontSize: 8, color: 'var(--text-dim)',
-            letterSpacing: '.06em',
-          }}>
-            FORCE-DIRECTED / 2D
-          </div>
-        </div>
-      </Pane>
+        </Pane>
+      </div>
 
       {/* ═══ ENTRIES TABLE ═══ */}
-      <Pane title="ENTRIES" flat>
+      <Pane title="ALL ENTRIES" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{entries.length} nodes</span>} flat>
         <div style={{ maxHeight: 320, overflow: 'auto' }}>
           <table style={{
             width: '100%',
@@ -305,10 +397,11 @@ export default function KnowledgeGraph() {
                   <th key={h} style={{
                     textAlign: 'left',
                     padding: '8px 12px',
-                    fontWeight: 400,
+                    fontWeight: 600,
                     letterSpacing: '.1em',
                     color: 'var(--text-dim)',
                     fontSize: 10,
+                    textTransform: 'uppercase',
                   }}>
                     {h}
                   </th>
@@ -327,22 +420,23 @@ export default function KnowledgeGraph() {
                   onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,.03)'; }}
                   onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'transparent'; }}
                 >
-                  <td style={{ padding: '6px 12px', color: 'var(--text-dim)' }}>{e.id}</td>
-                  <td style={{ padding: '6px 12px' }}>
+                  <td style={{ padding: '8px 12px', color: 'var(--text-dim)' }}>{e.id}</td>
+                  <td style={{ padding: '8px 12px' }}>
                     <span style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
                       color: domainColor(e.domain),
                     }}>
                       <span style={{
                         width: 5, height: 5, borderRadius: '50%',
                         background: domainColor(e.domain),
                         display: 'inline-block',
+                        boxShadow: `0 0 4px ${domainColor(e.domain)}60`,
                       }} />
                       {e.domain ?? 'unknown'}
                     </span>
                   </td>
-                  <td style={{ padding: '6px 12px', color: 'var(--text-primary)' }}>{e.label ?? '-'}</td>
-                  <td style={{ padding: '6px 12px', color: 'var(--bone-bright)' }}>{e.citations ?? 0}</td>
+                  <td style={{ padding: '8px 12px', color: 'var(--text-primary)' }}>{e.label ?? '-'}</td>
+                  <td style={{ padding: '8px 12px', color: 'var(--bone-bright)' }}>{e.citations ?? 0}</td>
                 </tr>
               ))}
             </tbody>

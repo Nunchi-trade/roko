@@ -1,7 +1,9 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useTerminal } from '../hooks/useTerminal';
 import { setupWorkspace, showCmd, getRoko } from '../hooks/useTerminalSession';
+import { useRokoConfig } from '../hooks/useRokoConfig';
 import { MODEL_CATALOG, ALL_MODELS } from '../lib/model-catalog';
+import type { ProviderGroup as CatalogGroup } from '../lib/model-catalog';
 import GateBar from '../components/GateBar';
 import Pane from '../components/Pane';
 import './Builder.css';
@@ -37,9 +39,44 @@ export default function Builder() {
     { name: 'diff', status: 'pending' },
   ]);
   const [statusText, setStatusText] = useState('idle');
-  const [selectedModel, setSelectedModel] = useState(ALL_MODELS[0].id);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
+
+  // Use live config for model list, fall back to static catalog when offline
+  const { providers: liveProviders, isLive, defaultModel } = useRokoConfig();
+
+  const { liveModelCatalog, liveAllModels } = useMemo(() => {
+    if (!isLive || liveProviders.length === 0) {
+      return { liveModelCatalog: MODEL_CATALOG, liveAllModels: ALL_MODELS };
+    }
+    const catalog: CatalogGroup[] = liveProviders.map(p => ({
+      name: p.provider,
+      models: p.models.map(m => ({
+        id: m.name,       // config key — what --model accepts
+        label: m.slug,    // API slug as human-readable label
+        provider: p.provider,
+      })),
+    }));
+    const all = catalog.flatMap(g => g.models);
+    return { liveModelCatalog: catalog, liveAllModels: all };
+  }, [isLive, liveProviders]);
+
+  const [selectedModel, setSelectedModel] = useState(() => {
+    // Initial: first model from static catalog
+    return ALL_MODELS[0]?.id ?? '';
+  });
   const [autocompleteItems, setAutocompleteItems] = useState<string[]>([]);
+
+  // Sync selected model when live config loads
+  useEffect(() => {
+    if (!selectedModel || selectedModel === ALL_MODELS[0]?.id) {
+      // Pick the config's default or the first live model
+      const initial = defaultModel
+        || liveAllModels[0]?.id
+        || ALL_MODELS[0]?.id
+        || '';
+      if (initial) setSelectedModel(initial);
+    }
+  }, [defaultModel, liveAllModels]); // eslint-disable-line react-hooks/exhaustive-deps
   const [showAutocomplete, setShowAutocomplete] = useState(false);
   const [autocompleteIdx, setAutocompleteIdx] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -164,7 +201,7 @@ export default function Builder() {
     inputRef.current?.focus();
   };
 
-  const currentModelLabel = ALL_MODELS.find(m => m.id === selectedModel)?.label ?? selectedModel;
+  const currentModelLabel = liveAllModels.find(m => m.id === selectedModel)?.label ?? selectedModel;
 
   return (
     <div className="builder-page">
@@ -182,7 +219,7 @@ export default function Builder() {
           </button>
           {showModelDropdown && (
             <div className="model-dropdown">
-              {MODEL_CATALOG.map(group => (
+              {liveModelCatalog.map(group => (
                 <div key={group.name} className="model-group">
                   <div className="model-group-label">{group.name}</div>
                   {group.models.map(m => (

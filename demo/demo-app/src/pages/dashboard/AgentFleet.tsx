@@ -455,7 +455,7 @@ export default function AgentFleet() {
   const totalTasks = agents.reduce((s, a) => s + agentTasks(a), 0);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 1200 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <style>{FLEET_STYLES}</style>
       {/* ═══ TOP MOSAIC ═══ */}
       <Mosaic columns={4}>
@@ -471,7 +471,7 @@ export default function AgentFleet() {
           title="AGENT TOPOLOGY"
           badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>force-directed</span>}
         >
-          <TopologyGraph data={topology} height={320} />
+          <TopologyGraph data={topology} height={360} />
         </Pane>
 
         <div style={{
@@ -479,7 +479,7 @@ export default function AgentFleet() {
           flexDirection: 'column',
           gap: 8,
           overflowY: 'auto',
-          maxHeight: 400,
+          maxHeight: 440,
         }}>
         {agents.map((agent) => {
           const rep = agent.performance?.reputation ?? agent.reputation ?? 85;

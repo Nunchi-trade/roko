@@ -14,6 +14,7 @@ import PrdPipelinePanel from '../components/PrdPipelinePanel';
 import KnowledgeFlowPanel, { type InsightEvent, type AgentInfo } from '../components/KnowledgeFlowPanel';
 import EfficiencyBar, { type EfficiencyMetric } from '../components/EfficiencyBar';
 import ChainIntelPanel from '../components/ChainIntelPanel';
+import RevealWhen from '../components/RevealWhen';
 import { useChainWs, type InsightEvent as ChainInsightEvent } from '../hooks/useChain';
 import type { BlockData } from '../components/ChainActivityPanel';
 import type { AgentPosition } from '../components/LivePositionsPanel';
@@ -444,17 +445,14 @@ export default function Demo() {
 
   // ── Timeline display ────────────────────────────────────────
 
-  const timelineDisplay = timelineSteps.length > 0
-    ? timelineSteps.map((s) => ({
-        label: s.label,
-        detail: s.sublabel,
-        status: s.status === 'completed' ? ('done' as const) : s.status,
-      }))
-    : scenario.steps.map((s) => ({
-        label: s.label,
-        detail: s.sublabel,
-        status: 'pending' as const,
-      }));
+  const timelineDisplay = timelineSteps.map((s) => ({
+    label: s.label,
+    detail: s.sublabel,
+    status: s.status === 'completed' ? ('done' as const) : s.status,
+  }));
+
+  const hasStats = stats.model !== '--' || stats.cost !== '--' || stats.tokens !== '--' || stats.time !== '--';
+  const hasKfMetrics = kfMetrics.some((m) => m.value > 0);
 
   // Grid class for 4-pane scenarios (2x2)
   const gridCols = scenario.panes === 4 ? 2 : scenario.panes;
@@ -543,77 +541,97 @@ export default function Demo() {
               />
             ) : scenario.id === 'knowledge-transfer' ? (
               <>
-                <Pane title="TIMELINE" flat>
-                  <Timeline steps={timelineDisplay} />
-                </Pane>
+                <RevealWhen visible={timelineDisplay.length > 0}>
+                  <Pane title="TIMELINE" flat>
+                    <Timeline steps={timelineDisplay} />
+                  </Pane>
+                </RevealWhen>
 
-                <KnowledgeFlowPanel
-                  leftAgent={kfLeftAgent}
-                  rightAgent={kfRightAgent}
-                  insights={kfInsights}
-                  mode="local"
-                />
+                <RevealWhen visible={kfInsights.length > 0}>
+                  <KnowledgeFlowPanel
+                    leftAgent={kfLeftAgent}
+                    rightAgent={kfRightAgent}
+                    insights={kfInsights}
+                    mode="local"
+                  />
+                </RevealWhen>
 
-                <EfficiencyBar metrics={kfMetrics} />
+                <RevealWhen visible={hasKfMetrics}>
+                  <EfficiencyBar metrics={kfMetrics} />
+                </RevealWhen>
 
-                {gates.length > 0 && (
+                <RevealWhen visible={gates.length > 0}>
                   <Pane title="GATES" flat>
                     <div style={{ padding: '12px 16px' }}>
                       <GateBar gates={gates} />
                     </div>
                   </Pane>
-                )}
+                </RevealWhen>
 
-                <Pane title="LOG" flat>
-                  <CommandLog entries={logEntries} maxHeight="180px" />
-                </Pane>
+                <RevealWhen visible={logEntries.length > 0}>
+                  <Pane title="LOG" flat>
+                    <CommandLog entries={logEntries} maxHeight="180px" />
+                  </Pane>
+                </RevealWhen>
               </>
             ) : scenario.id === 'chain-intelligence' ? (
               <>
-                <Pane title="TIMELINE" flat>
-                  <Timeline steps={timelineDisplay} />
-                </Pane>
+                <RevealWhen visible={timelineDisplay.length > 0}>
+                  <Pane title="TIMELINE" flat>
+                    <Timeline steps={timelineDisplay} />
+                  </Pane>
+                </RevealWhen>
 
-                <ChainIntelPanel
-                  leftAgent={ciLeftAgent}
-                  rightAgent={ciRightAgent}
-                  insights={ciInsights}
-                  blocks={ciBlocks}
-                  positions={ciPositions}
-                  metrics={ciMetrics}
-                  mirageConnected={chainWs.connected}
-                />
+                <RevealWhen visible={ciInsights.length > 0 || chainWs.connected}>
+                  <ChainIntelPanel
+                    leftAgent={ciLeftAgent}
+                    rightAgent={ciRightAgent}
+                    insights={ciInsights}
+                    blocks={ciBlocks}
+                    positions={ciPositions}
+                    metrics={ciMetrics}
+                    mirageConnected={chainWs.connected}
+                  />
+                </RevealWhen>
 
-                <Pane title="LOG" flat>
-                  <CommandLog entries={logEntries} maxHeight="140px" />
-                </Pane>
+                <RevealWhen visible={logEntries.length > 0}>
+                  <Pane title="LOG" flat>
+                    <CommandLog entries={logEntries} maxHeight="140px" />
+                  </Pane>
+                </RevealWhen>
               </>
             ) : (
               <>
-                <Pane title="TIMELINE" flat>
-                  <Timeline steps={timelineDisplay} />
-                </Pane>
+                <RevealWhen visible={timelineDisplay.length > 0}>
+                  <Pane title="TIMELINE" flat>
+                    <Timeline steps={timelineDisplay} />
+                  </Pane>
+                </RevealWhen>
 
-                <div className="demo-stats-mosaic">
-                  <Mosaic columns={2}>
-                    <MosaicCell label="MODEL" value={stats.model} mono color="rose" />
-                    <MosaicCell label="COST" value={stats.cost} mono color="bone" />
-                    <MosaicCell label="TOKENS" value={stats.tokens} mono color="dream" />
-                    <MosaicCell label="TIME" value={stats.time} mono color="warning" />
-                  </Mosaic>
-                </div>
+                <RevealWhen visible={hasStats}>
+                  <div className="demo-stats-mosaic">
+                    <Mosaic columns={2}>
+                      <MosaicCell label="MODEL" value={stats.model} mono color="rose" />
+                      <MosaicCell label="COST" value={stats.cost} mono color="bone" />
+                      <MosaicCell label="TOKENS" value={stats.tokens} mono color="dream" />
+                      <MosaicCell label="TIME" value={stats.time} mono color="warning" />
+                    </Mosaic>
+                  </div>
+                </RevealWhen>
 
-                {gates.length > 0 && (
+                <RevealWhen visible={gates.length > 0}>
                   <Pane title="GATES" flat>
                     <div style={{ padding: '12px 16px' }}>
                       <GateBar gates={gates} />
                     </div>
                   </Pane>
-                )}
+                </RevealWhen>
 
-                <Pane title="LOG" flat>
-                  <CommandLog entries={logEntries} maxHeight="240px" />
-                </Pane>
+                <RevealWhen visible={logEntries.length > 0}>
+                  <Pane title="LOG" flat>
+                    <CommandLog entries={logEntries} maxHeight="240px" />
+                  </Pane>
+                </RevealWhen>
               </>
             )}
           </div>

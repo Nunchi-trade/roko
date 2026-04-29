@@ -1,7 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useApiWithFallback } from '../hooks/useApiWithFallback';
-import Mosaic, { MosaicCell } from '../components/Mosaic';
 import './Explorer.css';
+
+/* ═══════════════════════════════════════════════════════════
+   TYPES
+   ═══════════════════════════════════════════════════════════ */
 
 interface HealthData {
   status: string;
@@ -25,6 +28,7 @@ interface Episode {
   timestamp_ms?: number;
   duration_secs?: number;
   turns?: number;
+  gate_verdicts?: Array<{ gate: string; passed: boolean }>;
   [key: string]: unknown;
 }
 
@@ -34,10 +38,51 @@ interface StateEvent {
   timestamp: string;
 }
 
+/* ═══════════════════════════════════════════════════════════
+   CONSTANTS
+   ═══════════════════════════════════════════════════════════ */
+
+const KIND_COLORS: Record<string, string> = {
+  agent_turn: '#b87a94',
+  gate_result: '#8a9c86',
+  tool_call: '#d4c89c',
+  plan_step: '#8888a8',
+};
+
+const KIND_LABELS: Record<string, string> = {
+  agent_turn: 'Agent Turn',
+  gate_result: 'Gate Result',
+  tool_call: 'Tool Call',
+  plan_step: 'Plan Step',
+};
+
+const HERO_HEIGHT = 360;
+const LANE_PAD_TOP = 48;
+const LANE_PAD_BOTTOM = 40;
+const LANE_PAD_LEFT = 120;
+const LANE_PAD_RIGHT = 28;
+const LEGEND_W = 140;
+const LEGEND_H = 100;
+const MIN_BLOCK_W = 8;
+const BLOCK_H = 22;
+const BLOCK_R = 4;
+
+/* ═══════════════════════════════════════════════════════════
+   HELPERS
+   ═══════════════════════════════════════════════════════════ */
+
 function fmtUptime(secs: number): string {
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
   return `${h}h ${m}m`;
+}
+
+function relativeTime(ms: number): string {
+  const delta = Date.now() - ms;
+  if (delta < 60000) return `${Math.floor(delta / 1000)}s ago`;
+  if (delta < 3600000) return `${Math.floor(delta / 60000)}m ago`;
+  if (delta < 86400000) return `${Math.floor(delta / 3600000)}h ago`;
+  return new Date(ms).toLocaleDateString();
 }
 
 function getProviders(health: HealthData | null): Record<string, { healthy: boolean }> {
@@ -79,14 +124,87 @@ function safePayload(payload: unknown): string {
   }
 }
 
+function kindColor(kind: string): string {
+  return KIND_COLORS[kind] ?? '#8888a8';
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SPARKLINE (tiny inline canvas)
+   ═══════════════════════════════════════════════════════════ */
+
+function drawSparkline(
+  canvas: HTMLCanvasElement,
+  data: number[],
+  color: string,
+) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx || data.length < 2) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const max = Math.max(...data, 1);
+  const step = w / (data.length - 1);
+
+  ctx.beginPath();
+  ctx.moveTo(0, h - (data[0] / max) * h * 0.85);
+  for (let i = 1; i < data.length; i++) {
+    ctx.lineTo(i * step, h - (data[i] / max) * h * 0.85);
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // fill under
+  ctx.lineTo((data.length - 1) * step, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = color.replace(')', ', 0.08)').replace('rgb', 'rgba');
+  // handle hex colors
+  if (color.startsWith('#')) {
+    const r = parseInt(color.slice(1, 3), 16);
+    const g = parseInt(color.slice(3, 5), 16);
+    const b = parseInt(color.slice(5, 7), 16);
+    ctx.fillStyle = `rgba(${r},${g},${b},0.10)`;
+  }
+  ctx.fill();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   COMPONENT
+   ═══════════════════════════════════════════════════════════ */
+
 export default function Explorer() {
+  /* ── state ── */
   const [health, setHealth] = useState<HealthData | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [events, setEvents] = useState<StateEvent[]>([]);
   const [expandedEp, setExpandedEp] = useState<string | null>(null);
-  const { get } = useApiWithFallback();
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [hoveredEp, setHoveredEp] = useState<Episode | null>(null);
 
+  /* ── refs ── */
+  const heroRef = useRef<HTMLCanvasElement>(null);
+  const mouseRef = useRef<{ x: number; y: number }>({ x: -1, y: -1 });
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const epSparkRef = useRef<HTMLCanvasElement>(null);
+  const costSparkRef = useRef<HTMLCanvasElement>(null);
+  const agentSparkRef = useRef<HTMLCanvasElement>(null);
+  const gateSparkRef = useRef<HTMLCanvasElement>(null);
+  const durSparkRef = useRef<HTMLCanvasElement>(null);
+
+  // Keep a ref for episode rects so hover detection works outside draw
+  const epRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number; ep: Episode }>>([]);
+
+  const { get } = useApiWithFallback();
+
+  /* ── data fetch ── */
   const refresh = useCallback(async () => {
     try {
       const [h, eps, evts] = await Promise.allSettled([
@@ -108,113 +226,631 @@ export default function Explorer() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [refresh]);
 
+  /* ── derived data ── */
   const providers = getProviders(health);
   const provEntries = Object.entries(providers);
 
+  const stats = useMemo(() => {
+    const totalCost = episodes.reduce((s, e) => s + (e.usage?.cost_usd ?? 0), 0);
+    const agents = new Set(episodes.map(e => e.agent_id).filter(Boolean));
+    const gateVerdicts = episodes.flatMap(e => e.gate_verdicts ?? []);
+    const gatePass = gateVerdicts.length > 0
+      ? (gateVerdicts.filter(v => v.passed).length / gateVerdicts.length) * 100
+      : 100;
+    const durations = episodes.filter(e => e.duration_secs != null).map(e => e.duration_secs!);
+    const avgDuration = durations.length > 0
+      ? durations.reduce((s, d) => s + d, 0) / durations.length
+      : 0;
+    return { totalCost, agentCount: agents.size, gatePass, avgDuration };
+  }, [episodes]);
+
+  // Sparkline data: bucket episodes into 10-min intervals
+  const sparkData = useMemo(() => {
+    if (episodes.length === 0) return { epBuckets: [], costBuckets: [], durBuckets: [], agentBuckets: [], gateBuckets: [] };
+
+    const timestamps = episodes.map(e => e.timestamp_ms ?? 0).filter(t => t > 0);
+    if (timestamps.length === 0) return { epBuckets: [], costBuckets: [], durBuckets: [], agentBuckets: [], gateBuckets: [] };
+
+    const minT = Math.min(...timestamps);
+    const maxT = Math.max(...timestamps);
+    const bucketMs = 10 * 60 * 1000; // 10 minutes
+    const numBuckets = Math.max(Math.ceil((maxT - minT) / bucketMs), 8);
+
+    const epBuckets = new Array(numBuckets).fill(0);
+    const costBuckets = new Array(numBuckets).fill(0);
+    const durBuckets = new Array(numBuckets).fill(0);
+    const agentSets: Set<string>[] = Array.from({ length: numBuckets }, () => new Set());
+    const gateBuckets = new Array(numBuckets).fill(0);
+    const gateTotal = new Array(numBuckets).fill(0);
+
+    for (const ep of episodes) {
+      const t = ep.timestamp_ms ?? 0;
+      if (t <= 0) continue;
+      const idx = Math.min(Math.floor((t - minT) / bucketMs), numBuckets - 1);
+      epBuckets[idx]++;
+      costBuckets[idx] += ep.usage?.cost_usd ?? 0;
+      durBuckets[idx] += ep.duration_secs ?? 0;
+      if (ep.agent_id) agentSets[idx].add(ep.agent_id);
+      for (const v of ep.gate_verdicts ?? []) {
+        gateTotal[idx]++;
+        if (v.passed) gateBuckets[idx]++;
+      }
+    }
+
+    // cumulative cost
+    for (let i = 1; i < costBuckets.length; i++) costBuckets[i] += costBuckets[i - 1];
+
+    return {
+      epBuckets,
+      costBuckets,
+      durBuckets,
+      agentBuckets: agentSets.map(s => s.size),
+      gateBuckets: gateBuckets.map((g, i) => gateTotal[i] > 0 ? (g / gateTotal[i]) * 100 : 100),
+    };
+  }, [episodes]);
+
+  // Heatmap: 24 hours
+  const heatmapData = useMemo(() => {
+    const hours = new Array(24).fill(0);
+    for (const ep of episodes) {
+      if (ep.timestamp_ms) {
+        const h = new Date(ep.timestamp_ms).getHours();
+        hours[h]++;
+      }
+    }
+    return hours;
+  }, [episodes]);
+
+  const maxCostInSet = useMemo(() => {
+    return Math.max(...episodes.map(e => e.usage?.cost_usd ?? 0), 0.001);
+  }, [episodes]);
+
+  /* ── hero canvas draw ── */
+  const drawTimeline = useCallback(() => {
+    const canvas = heroRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+
+    // Background
+    ctx.fillStyle = '#06060a';
+    ctx.fillRect(0, 0, w, h);
+
+    // Grid lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+    ctx.lineWidth = 1;
+    for (let y = LANE_PAD_TOP; y < h - LANE_PAD_BOTTOM; y += 40) {
+      ctx.beginPath();
+      ctx.moveTo(LANE_PAD_LEFT, y);
+      ctx.lineTo(w - LANE_PAD_RIGHT, y);
+      ctx.stroke();
+    }
+    for (let x = LANE_PAD_LEFT; x < w - LANE_PAD_RIGHT; x += 80) {
+      ctx.beginPath();
+      ctx.moveTo(x, LANE_PAD_TOP);
+      ctx.lineTo(x, h - LANE_PAD_BOTTOM);
+      ctx.stroke();
+    }
+
+    if (episodes.length === 0) {
+      ctx.font = '12px JetBrains Mono, monospace';
+      ctx.fillStyle = '#7a6a78';
+      ctx.textAlign = 'center';
+      ctx.fillText('No episodes yet', w / 2, h / 2);
+      epRectsRef.current = [];
+      return;
+    }
+
+    // Agent lanes
+    const agents = [...new Set(episodes.map(e => e.agent_id ?? 'system').filter(Boolean))];
+    const drawH = h - LANE_PAD_TOP - LANE_PAD_BOTTOM;
+    const laneH = agents.length > 0 ? Math.min(drawH / agents.length, 48) : 40;
+
+    // Time range
+    const timestamps = episodes.map(e => e.timestamp_ms ?? 0).filter(t => t > 0);
+    const minT = timestamps.length > 0 ? Math.min(...timestamps) : Date.now() - 3600000;
+    const maxT = timestamps.length > 0 ? Math.max(...timestamps) : Date.now();
+    const timeSpan = Math.max(maxT - minT, 60000); // at least 1 minute
+    const drawW = w - LANE_PAD_LEFT - LANE_PAD_RIGHT;
+
+    // Helper: time to x
+    const tx = (t: number) => LANE_PAD_LEFT + ((t - minT) / timeSpan) * drawW;
+    // Helper: agent to y
+    const ay = (agent: string) => {
+      const idx = agents.indexOf(agent);
+      return LANE_PAD_TOP + (idx >= 0 ? idx : 0) * laneH + laneH / 2;
+    };
+
+    // Draw agent labels
+    ctx.font = '10px JetBrains Mono, monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < agents.length; i++) {
+      const y = LANE_PAD_TOP + i * laneH + laneH / 2;
+      ctx.fillStyle = '#7a6a78';
+      const label = agents[i].length > 14 ? agents[i].slice(0, 13) + '\u2026' : agents[i];
+      ctx.fillText(label, LANE_PAD_LEFT - 10, y);
+
+      // Lane separator
+      ctx.strokeStyle = 'rgba(255,255,255,0.025)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(LANE_PAD_LEFT, LANE_PAD_TOP + i * laneH);
+      ctx.lineTo(w - LANE_PAD_RIGHT, LANE_PAD_TOP + i * laneH);
+      ctx.stroke();
+    }
+
+    // Time axis
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#7a6a78';
+    ctx.font = '9px JetBrains Mono, monospace';
+    const numLabels = Math.max(Math.floor(drawW / 100), 3);
+    for (let i = 0; i <= numLabels; i++) {
+      const t = minT + (i / numLabels) * timeSpan;
+      const x = tx(t);
+      const d = new Date(t);
+      ctx.fillText(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), x, h - LANE_PAD_BOTTOM + 8);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+      ctx.beginPath();
+      ctx.moveTo(x, h - LANE_PAD_BOTTOM);
+      ctx.lineTo(x, h - LANE_PAD_BOTTOM + 4);
+      ctx.stroke();
+    }
+
+    // Task connection lines (dotted)
+    const taskGroups = new Map<string, Episode[]>();
+    for (const ep of episodes) {
+      if (ep.task_id && ep.timestamp_ms) {
+        const arr = taskGroups.get(ep.task_id) ?? [];
+        arr.push(ep);
+        taskGroups.set(ep.task_id, arr);
+      }
+    }
+    ctx.setLineDash([3, 5]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    for (const [, eps] of taskGroups) {
+      if (eps.length < 2) continue;
+      const sorted = eps.sort((a, b) => (a.timestamp_ms ?? 0) - (b.timestamp_ms ?? 0));
+      ctx.beginPath();
+      for (let i = 0; i < sorted.length; i++) {
+        const ep = sorted[i];
+        const x = tx(ep.timestamp_ms!);
+        const y = ay(ep.agent_id ?? 'system');
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // Draw episode blocks
+    const maxDur = Math.max(...episodes.map(e => e.duration_secs ?? 1), 1);
+    const rects: Array<{ x: number; y: number; w: number; h: number; ep: Episode }> = [];
+
+    for (const ep of episodes) {
+      if (!ep.timestamp_ms) continue;
+      const x = tx(ep.timestamp_ms);
+      const y = ay(ep.agent_id ?? 'system') - BLOCK_H / 2;
+      const dur = ep.duration_secs ?? 1;
+      const bw = Math.max((dur / maxDur) * drawW * 0.15, MIN_BLOCK_W);
+      const color = kindColor(ep.kind);
+
+      // Glow for hovered
+      const isHovered = hoveredEp?.id === ep.id;
+      if (isHovered) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 12;
+      }
+
+      ctx.fillStyle = isHovered ? color : color + 'cc';
+      ctx.beginPath();
+      ctx.roundRect(x, y, bw, BLOCK_H, BLOCK_R);
+      ctx.fill();
+
+      // Inner shine
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.beginPath();
+      ctx.roundRect(x, y, bw, BLOCK_H / 2, [BLOCK_R, BLOCK_R, 0, 0]);
+      ctx.fill();
+
+      ctx.shadowBlur = 0;
+      rects.push({ x, y, w: bw, h: BLOCK_H, ep });
+    }
+    epRectsRef.current = rects;
+
+    // Legend (top-right)
+    const lx = w - LANE_PAD_RIGHT - LEGEND_W;
+    const ly = 10;
+    ctx.fillStyle = 'rgba(6,6,10,0.85)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(lx, ly, LEGEND_W, LEGEND_H, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = '9px JetBrains Mono, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const kinds = Object.keys(KIND_COLORS);
+    for (let i = 0; i < kinds.length; i++) {
+      const ky = ly + 16 + i * 20;
+      ctx.fillStyle = KIND_COLORS[kinds[i]];
+      ctx.beginPath();
+      ctx.arc(lx + 14, ky, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#c4b4c4';
+      ctx.fillText(KIND_LABELS[kinds[i]] ?? kinds[i], lx + 26, ky);
+    }
+
+    // Tooltip for hovered episode
+    const mouse = mouseRef.current;
+    if (hoveredEp && mouse.x >= 0) {
+      const tipW = 240;
+      const tipH = 90;
+      let tipX = mouse.x + 14;
+      let tipY = mouse.y - tipH - 8;
+      if (tipX + tipW > w) tipX = mouse.x - tipW - 14;
+      if (tipY < 0) tipY = mouse.y + 14;
+
+      ctx.fillStyle = 'rgba(6,6,10,0.92)';
+      ctx.strokeStyle = 'rgba(184,122,148,0.3)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(tipX, tipY, tipW, tipH, 6);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font = '10px JetBrains Mono, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#e0d4e0';
+      ctx.fillText(hoveredEp.agent_id ?? 'system', tipX + 12, tipY + 10);
+      ctx.fillStyle = '#7a6a78';
+      ctx.fillText(`kind: ${hoveredEp.kind}`, tipX + 12, tipY + 28);
+      ctx.fillText(`task: ${(hoveredEp.task_id ?? '-').slice(0, 22)}`, tipX + 12, tipY + 44);
+      ctx.fillStyle = '#d4c89c';
+      ctx.fillText(
+        `cost: $${(hoveredEp.usage?.cost_usd ?? 0).toFixed(4)}  dur: ${(hoveredEp.duration_secs ?? 0).toFixed(1)}s`,
+        tipX + 12,
+        tipY + 62,
+      );
+    }
+  }, [episodes, hoveredEp]);
+
+  /* ── canvas effects ── */
+  useEffect(() => {
+    drawTimeline();
+  }, [drawTimeline]);
+
+  // ResizeObserver for hero canvas
+  useEffect(() => {
+    const canvas = heroRef.current;
+    if (!canvas) return;
+
+    const ro = new ResizeObserver(() => drawTimeline());
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [drawTimeline]);
+
+  // Draw sparklines whenever data changes
+  useEffect(() => {
+    if (epSparkRef.current && sparkData.epBuckets.length >= 2) {
+      drawSparkline(epSparkRef.current, sparkData.epBuckets, '#b87a94');
+    }
+    if (costSparkRef.current && sparkData.costBuckets.length >= 2) {
+      drawSparkline(costSparkRef.current, sparkData.costBuckets, '#d4c89c');
+    }
+    if (agentSparkRef.current && sparkData.agentBuckets.length >= 2) {
+      drawSparkline(agentSparkRef.current, sparkData.agentBuckets, '#8888a8');
+    }
+    if (gateSparkRef.current && sparkData.gateBuckets.length >= 2) {
+      drawSparkline(gateSparkRef.current, sparkData.gateBuckets, '#8a9c86');
+    }
+    if (durSparkRef.current && sparkData.durBuckets.length >= 2) {
+      drawSparkline(durSparkRef.current, sparkData.durBuckets, '#d89ab2');
+    }
+  }, [sparkData]);
+
+  /* ── hero mouse tracking ── */
+  const handleHeroMouse = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = heroRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    mouseRef.current = { x, y };
+
+    // Hit test
+    let found: Episode | null = null;
+    for (const r of epRectsRef.current) {
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+        found = r.ep;
+        break;
+      }
+    }
+    setHoveredEp(found);
+  }, []);
+
+  const handleHeroLeave = useCallback(() => {
+    mouseRef.current = { x: -1, y: -1 };
+    setHoveredEp(null);
+  }, []);
+
+  /* ── heatmap helpers ── */
+  const heatmapMax = Math.max(...heatmapData, 1);
+  function heatColor(count: number): string {
+    if (count === 0) return 'var(--bg-void)';
+    const ratio = count / heatmapMax;
+    if (ratio < 0.25) return 'var(--rose-deep)';
+    if (ratio < 0.5) return 'var(--rose-dim)';
+    if (ratio < 0.75) return 'var(--rose)';
+    return 'var(--rose-bright)';
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     RENDER
+     ═══════════════════════════════════════════════════════════ */
+
   return (
     <div className="explorer-page">
-      <div className="explorer-header">
-        <span className="explorer-title">Explorer</span>
-        <span className="explorer-live-badge">live</span>
-        <button className="btn-refresh" onClick={refresh}>Refresh</button>
+
+      {/* ── 1. Floating header ── */}
+      <header className="expl-header">
+        <span className="expl-title">Explorer</span>
+        <span className="expl-live-badge">
+          <span className="expl-live-dot" />
+          LIVE
+        </span>
+
+        <div className="expl-header-pills">
+          <span className="expl-pill">
+            <span className="expl-pill-label">Status</span>
+            <span className="expl-pill-value" style={{ color: health?.status === 'ok' ? 'var(--success)' : 'var(--rose-bright)' }}>
+              {health?.status === 'ok' ? 'online' : (health?.status ?? 'ok')}
+            </span>
+          </span>
+          <span className="expl-pill">
+            <span className="expl-pill-label">Uptime</span>
+            <span className="expl-pill-value">{fmtUptime(health?.uptime_secs ?? 0)}</span>
+          </span>
+          <span className="expl-pill">
+            <span className="expl-pill-label">Version</span>
+            <span className="expl-pill-value">{health?.version ?? '0.1.0'}</span>
+          </span>
+          <span className="expl-pill">
+            <span className="expl-pill-label">Agents</span>
+            <span className="expl-pill-value">{health?.active_agents ?? 0}</span>
+          </span>
+          <span className="expl-pill">
+            <span className="expl-pill-label">Plans</span>
+            <span className="expl-pill-value">{health?.active_plans ?? 0}</span>
+          </span>
+        </div>
+
+        <button className="expl-refresh" onClick={refresh} title="Refresh data">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <path d="M1.5 7a5.5 5.5 0 0 1 9.9-3.3M12.5 7a5.5 5.5 0 0 1-9.9 3.3" />
+            <path d="M11.4 1v2.7h-2.7M2.6 13v-2.7h2.7" />
+          </svg>
+        </button>
+      </header>
+
+      {/* ── 2. Hero canvas: Swimlane Timeline ── */}
+      <div className="expl-hero-wrap">
+        <canvas
+          ref={heroRef}
+          className="expl-hero-canvas"
+          style={{ width: '100%', height: HERO_HEIGHT }}
+          onMouseMove={handleHeroMouse}
+          onMouseLeave={handleHeroLeave}
+        />
       </div>
 
-      <div className="explorer-body">
-        {/* Mosaic row */}
-        <Mosaic columns={6}>
-          <MosaicCell label="STATUS" value={health?.status === 'ok' ? 'online' : (health?.status ?? 'ok')} color="success" />
-          <MosaicCell label="UPTIME" value={fmtUptime(health?.uptime_secs ?? 14523)} color="bone" mono />
-          <MosaicCell label="VERSION" value={health?.version ?? '0.1.0'} color="rose" mono />
-          <MosaicCell label="AGENTS" value={String(health?.active_agents ?? 5)} color="dream" />
-          <MosaicCell label="PLANS" value={String(health?.active_plans ?? 2)} color="rose" />
-          <MosaicCell label="PROVIDERS" value={`${provEntries.filter(([,v]) => v.healthy).length}/${provEntries.length} ok`} color="bone" mono />
-        </Mosaic>
+      {/* ── 3. Stat strip with sparklines ── */}
+      <div className="expl-stat-strip">
+        <div className="expl-stat-pill">
+          <span className="expl-stat-label">EPISODES</span>
+          <span className="expl-stat-value" style={{ color: 'var(--rose-bright)' }}>{episodes.length}</span>
+          <canvas ref={epSparkRef} className="expl-spark" />
+        </div>
+        <div className="expl-stat-pill">
+          <span className="expl-stat-label">COST</span>
+          <span className="expl-stat-value" style={{ color: 'var(--bone)' }}>${stats.totalCost.toFixed(3)}</span>
+          <canvas ref={costSparkRef} className="expl-spark" />
+        </div>
+        <div className="expl-stat-pill">
+          <span className="expl-stat-label">AGENTS</span>
+          <span className="expl-stat-value" style={{ color: 'var(--dream-bright)' }}>{stats.agentCount}</span>
+          <canvas ref={agentSparkRef} className="expl-spark" />
+        </div>
+        <div className="expl-stat-pill">
+          <span className="expl-stat-label">GATE PASS</span>
+          <span className="expl-stat-value" style={{ color: 'var(--success)' }}>{stats.gatePass.toFixed(0)}%</span>
+          <canvas ref={gateSparkRef} className="expl-spark" />
+        </div>
+        <div className="expl-stat-pill">
+          <span className="expl-stat-label">AVG DURATION</span>
+          <span className="expl-stat-value" style={{ color: 'var(--rose-glow)' }}>{stats.avgDuration.toFixed(1)}s</span>
+          <canvas ref={durSparkRef} className="expl-spark" />
+        </div>
+      </div>
 
-        {/* Main content: episodes (dominant) */}
-        <div className="explorer-main">
-          <div className="explorer-episodes-panel">
-            <div className="panel-header">Recent Episodes</div>
-            <div className="ep-list">
-              {episodes.length === 0 ? (
-                <div className="explorer-empty">No episodes recorded yet</div>
-              ) : (
-                episodes.slice(0, 20).map((ep) => (
+      {/* ── 4. Activity heatmap ── */}
+      <div className="expl-heatmap-section">
+        <span className="expl-section-label">ACTIVITY DENSITY</span>
+        <div className="expl-heatmap">
+          {heatmapData.map((count, hour) => (
+            <div
+              key={hour}
+              className="expl-heat-cell"
+              style={{ background: heatColor(count) }}
+              title={`${hour}:00 - ${count} episode${count !== 1 ? 's' : ''}`}
+            >
+              {(hour === 0 || hour === 6 || hour === 12 || hour === 18 || hour === 23) && (
+                <span className="expl-heat-label">{hour}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── 5. Episode card grid ── */}
+      <div className="expl-cards-section">
+        {episodes.length === 0 ? (
+          <div className="expl-empty">No episodes recorded yet</div>
+        ) : (
+          <div className="expl-card-grid">
+            {episodes.slice(0, 30).map((ep, i) => (
+              <div
+                key={ep.id}
+                className={`expl-card${expandedEp === ep.id ? ' expl-card--expanded' : ''}`}
+                style={{ animationDelay: `${i * 40}ms` }}
+                role="button"
+                tabIndex={0}
+                onClick={() => setExpandedEp(expandedEp === ep.id ? null : ep.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setExpandedEp(expandedEp === ep.id ? null : ep.id);
+                  }
+                }}
+              >
+                {/* Top row: badges + time */}
+                <div className="expl-card-top">
+                  <span className="expl-card-kind" style={{ background: kindColor(ep.kind) + '22', color: kindColor(ep.kind) }}>
+                    {ep.kind}
+                  </span>
+                  {ep.model && (
+                    <span className="expl-card-model">{ep.model}</span>
+                  )}
+                  <span className="expl-card-time">
+                    {ep.timestamp_ms ? relativeTime(ep.timestamp_ms) : ''}
+                  </span>
+                </div>
+
+                {/* Agent name */}
+                <div className="expl-card-agent">{ep.agent_id ?? 'system'}</div>
+
+                {/* Task ID */}
+                {ep.task_id && (
+                  <div className="expl-card-task">{ep.task_id}</div>
+                )}
+
+                {/* Gate verdict dots */}
+                {ep.gate_verdicts && ep.gate_verdicts.length > 0 && (
+                  <div className="expl-card-gates">
+                    {ep.gate_verdicts.map((v, gi) => (
+                      <span
+                        key={gi}
+                        className={`expl-gate-dot ${v.passed ? 'pass' : 'fail'}`}
+                        title={`${v.gate}: ${v.passed ? 'passed' : 'failed'}`}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* Meta chips */}
+                <div className="expl-card-meta">
+                  {ep.usage?.cost_usd != null && (
+                    <span className="expl-chip cost">${ep.usage.cost_usd.toFixed(3)}</span>
+                  )}
+                  {ep.duration_secs != null && (
+                    <span className="expl-chip dur">{ep.duration_secs.toFixed(1)}s</span>
+                  )}
+                  {ep.turns != null && (
+                    <span className="expl-chip turns">{ep.turns}t</span>
+                  )}
+                </div>
+
+                {/* Cost bar */}
+                <div className="expl-card-bar-wrap">
                   <div
-                    key={ep.id}
-                    className={`ep-item${expandedEp === ep.id ? ' expanded' : ''}`}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setExpandedEp(expandedEp === ep.id ? null : ep.id)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedEp(expandedEp === ep.id ? null : ep.id); } }}
-                  >
-                    <div className="ep-summary">
-                      <span className={`ep-badge ep-${ep.kind}`}>{ep.kind}</span>
-                      <span className="ep-agent">{ep.agent_id ?? 'system'}</span>
-                      <span className="ep-task">{ep.task_id ?? ''}</span>
-                      {ep.usage?.cost_usd != null && (
-                        <span className="ep-cost">${ep.usage.cost_usd.toFixed(4)}</span>
-                      )}
-                      {ep.duration_secs != null && (
-                        <span className="ep-duration">{ep.duration_secs.toFixed(1)}s</span>
-                      )}
-                      <span className="ep-ts">{ep.timestamp_ms ? new Date(ep.timestamp_ms).toLocaleTimeString() : ''}</span>
-                    </div>
-                    {expandedEp === ep.id && (
-                      <div className="ep-detail">
-                        {Object.entries(ep).map(([k, v]) => (
-                          <div key={k} className="ep-field">
-                            <span className="ep-field-key">{k}</span>
-                            <span className="ep-field-val">
-                              {typeof v === 'object' ? JSON.stringify(v) : String(v ?? '')}
-                            </span>
-                          </div>
-                        ))}
+                    className="expl-card-bar"
+                    style={{ width: `${Math.max(((ep.usage?.cost_usd ?? 0) / maxCostInSet) * 100, 2)}%` }}
+                  />
+                </div>
+
+                {/* Expanded detail */}
+                {expandedEp === ep.id && (
+                  <div className="expl-card-detail">
+                    {Object.entries(ep).map(([k, v]) => (
+                      <div key={k} className="expl-card-field">
+                        <span className="expl-card-field-key">{k}</span>
+                        <span className="expl-card-field-val">
+                          {typeof v === 'object' ? JSON.stringify(v) : String(v ?? '')}
+                        </span>
                       </div>
-                    )}
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── 6. Bottom drawer (providers + events) ── */}
+      <div className={`expl-drawer${drawerOpen ? ' open' : ''}`}>
+        <button
+          className="expl-drawer-handle"
+          onClick={() => setDrawerOpen(!drawerOpen)}
+          aria-label={drawerOpen ? 'Collapse drawer' : 'Expand drawer'}
+        >
+          <span className="expl-drawer-bar" />
+          <span className="expl-drawer-hint">{drawerOpen ? 'Collapse' : 'Providers & Events'}</span>
+        </button>
+
+        <div className="expl-drawer-body">
+          {/* Left: Provider health */}
+          <div className="expl-drawer-providers">
+            <div className="expl-section-label">PROVIDER HEALTH</div>
+            {provEntries.length === 0 ? (
+              <div className="expl-empty">No providers configured</div>
+            ) : (
+              <div className="expl-provider-list">
+                {provEntries.map(([name, info]) => (
+                  <div key={name} className={`provider-card${info.healthy ? ' provider-card--healthy' : ''}`}>
+                    <span className={`provider-led ${info.healthy ? 'healthy' : 'unhealthy'}`}>
+                      {info.healthy && <span className="provider-led-pulse" />}
+                    </span>
+                    <span className="provider-name">{name}</span>
+                    <span className={`provider-badge ${info.healthy ? 'ok' : 'down'}`}>
+                      {info.healthy ? 'ok' : 'down'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Right: Event stream */}
+          <div className="expl-drawer-events">
+            <div className="expl-section-label">EVENT STREAM</div>
+            <div className="expl-event-list">
+              {events.length === 0 ? (
+                <div className="expl-empty">No events recorded yet</div>
+              ) : (
+                events.slice(0, 16).map((evt, i) => (
+                  <div key={`${evt?.type ?? 'evt'}-${i}`} className="expl-event-item">
+                    <span className="expl-event-ts">{safeTimestamp(evt?.timestamp)}</span>
+                    <span className="expl-event-badge">{evt?.type ?? 'unknown'}</span>
+                    <span className="expl-event-payload">{safePayload(evt?.payload)}</span>
                   </div>
                 ))
               )}
-            </div>
-          </div>
-
-          {/* Bottom row: providers + events side-by-side */}
-          <div className="explorer-bottom-row">
-            <div className="explorer-providers-panel">
-              <div className="panel-header">Provider Health</div>
-              {provEntries.length === 0 ? (
-                <div className="explorer-empty">No providers configured</div>
-              ) : (
-                <div className="providers">
-                  {provEntries.map(([name, info]) => (
-                    <div key={name} className={`provider-card${info.healthy ? ' provider-card--healthy' : ''}`}>
-                      <span className={`provider-led ${info.healthy ? 'healthy' : 'unhealthy'}`}>
-                        {info.healthy && <span className="provider-led-pulse" />}
-                      </span>
-                      <span className="provider-name">{name}</span>
-                      <span className={`provider-badge ${info.healthy ? 'ok' : 'down'}`}>
-                        {info.healthy ? 'ok' : 'down'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="explorer-events-panel">
-              <div className="panel-header">Recent Events</div>
-              <div className="event-list">
-                {events.length === 0 ? (
-                  <div className="explorer-empty">No events recorded yet</div>
-                ) : (
-                  events.slice(0, 12).map((evt, i) => (
-                    <div key={`${evt?.type ?? 'evt'}-${i}`} className="event-item">
-                      <span className="event-ts">{safeTimestamp(evt?.timestamp)}</span>
-                      <span className="event-badge">{evt?.type ?? 'unknown'}</span>
-                      <span className="event-payload">{safePayload(evt?.payload)}</span>
-                    </div>
-                  ))
-                )}
-              </div>
             </div>
           </div>
         </div>

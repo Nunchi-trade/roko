@@ -19,5 +19,15 @@ export function useApi() {
     return res.json() as Promise<T>;
   }, []);
 
-  return useMemo(() => ({ get, post, baseUrl: SERVE_URL }), [get, post]);
+  const put = useCallback(async <T = unknown>(path: string, body?: unknown): Promise<T> => {
+    const res = await fetch(`${SERVE_URL}${path}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.json() as Promise<T>;
+  }, []);
+
+  return useMemo(() => ({ get, post, put, baseUrl: SERVE_URL }), [get, post, put]);
 }

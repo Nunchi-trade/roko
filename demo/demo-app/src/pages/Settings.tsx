@@ -1,0 +1,260 @@
+import { useState, useEffect, useCallback } from 'react';
+import { useRokoConfig } from '../hooks/useRokoConfig';
+import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import './Settings.css';
+
+interface GatesConfig {
+  clippy_enabled?: boolean;
+  skip_tests?: boolean;
+  max_iterations?: number;
+}
+
+export default function Settings() {
+  const { defaultModel, defaultBackend, providers, isLive, updateModelConfig } =
+    useRokoConfig();
+  const { get, put } = useApiWithFallback();
+
+  // Agent defaults
+  const [model, setModel] = useState('');
+  const [backend, setBackend] = useState('');
+  const [bareMode, setBareMode] = useState(true);
+  const [effort, setEffort] = useState('medium');
+
+  // Gates
+  const [clippyEnabled, setClippyEnabled] = useState(true);
+  const [skipTests, setSkipTests] = useState(false);
+  const [gateMaxIter, setGateMaxIter] = useState(3);
+
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  // Fetch full config on mount
+  const fetchConfig = useCallback(async () => {
+    try {
+      const cfg = await get<Record<string, unknown>>('/api/config');
+      const agent = cfg?.agent as Record<string, unknown> | undefined;
+      if (agent) {
+        if (typeof agent.default_model === 'string') setModel(agent.default_model);
+        if (typeof agent.default_backend === 'string') setBackend(agent.default_backend);
+        if (typeof agent.bare_mode === 'boolean') setBareMode(agent.bare_mode);
+        if (typeof agent.default_effort === 'string') setEffort(agent.default_effort);
+      }
+      const gates = cfg?.gates as GatesConfig | undefined;
+      if (gates) {
+        if (typeof gates.clippy_enabled === 'boolean') setClippyEnabled(gates.clippy_enabled);
+        if (typeof gates.skip_tests === 'boolean') setSkipTests(gates.skip_tests);
+        if (typeof gates.max_iterations === 'number') setGateMaxIter(gates.max_iterations);
+      }
+      setLoaded(true);
+    } catch {
+      // offline — use defaults
+    }
+  }, [get]);
+
+  useEffect(() => { fetchConfig(); }, [fetchConfig]);
+
+  // Sync from context when it changes
+  useEffect(() => {
+    if (defaultModel && !loaded) setModel(defaultModel);
+    if (defaultBackend && !loaded) setBackend(defaultBackend);
+  }, [defaultModel, defaultBackend, loaded]);
+
+  const allModels = providers.flatMap(p =>
+    p.models.map(m => ({ key: m.name, slug: m.slug, provider: p.provider })),
+  );
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaved(false);
+    try {
+      // Save agent + gates sections
+      await put('/api/config', {
+        agent: {
+          default_model: model,
+          default_backend: backend,
+          bare_mode: bareMode,
+          default_effort: effort,
+        },
+        gates: {
+          clippy_enabled: clippyEnabled,
+          skip_tests: skipTests,
+          max_iterations: gateMaxIter,
+        },
+      });
+      // Also update the config context so other pages pick it up
+      await updateModelConfig(model, backend);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch {
+      // swallow
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="settings-page">
+      <div className="settings-header">
+        <span className="settings-title">Settings</span>
+        <span className="settings-subtitle">manage providers, models, and defaults</span>
+        <div className="settings-status">
+          <span className={`dot ${isLive ? '' : 'offline'}`} />
+          {isLive ? 'connected' : 'offline'}
+        </div>
+      </div>
+
+      {/* ── Providers ── */}
+      <div className="settings-section">
+        <h2>
+          Providers
+          <span className="badge">{providers.length}</span>
+        </h2>
+        {providers.length === 0 ? (
+          <div className="settings-empty">No providers configured</div>
+        ) : (
+          <table className="settings-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Kind</th>
+                <th>Models</th>
+              </tr>
+            </thead>
+            <tbody>
+              {providers.map(p => (
+                <tr key={p.provider}>
+                  <td className="mono">{p.provider}</td>
+                  <td className="mono">{p.kind}</td>
+                  <td>{p.models.length}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* ── Models ── */}
+      <div className="settings-section">
+        <h2>
+          Models
+          <span className="badge">{allModels.length}</span>
+        </h2>
+        {allModels.length === 0 ? (
+          <div className="settings-empty">No models configured</div>
+        ) : (
+          <table className="settings-table">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Slug</th>
+                <th>Provider</th>
+              </tr>
+            </thead>
+            <tbody>
+              {allModels.map(m => (
+                <tr key={m.key}>
+                  <td className="mono">{m.key}</td>
+                  <td className="mono">{m.slug}</td>
+                  <td className="mono">{m.provider}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* ── Agent Defaults ── */}
+      <div className="settings-section">
+        <h2>Agent Defaults</h2>
+        <div className="settings-field">
+          <label>Default Model</label>
+          <select
+            value={model}
+            onChange={e => setModel(e.target.value)}
+            disabled={!isLive}
+          >
+            {!allModels.length && <option value="">{model || '--'}</option>}
+            {allModels.map(m => (
+              <option key={m.key} value={m.key}>
+                {m.key} ({m.slug})
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="settings-field">
+          <label>Default Backend</label>
+          <select
+            value={backend}
+            onChange={e => setBackend(e.target.value)}
+            disabled={!isLive}
+          >
+            {!providers.length && <option value="">{backend || '--'}</option>}
+            {providers.map(p => (
+              <option key={p.provider} value={p.provider}>
+                {p.provider}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="settings-field">
+          <label>Effort</label>
+          <select value={effort} onChange={e => setEffort(e.target.value)} disabled={!isLive}>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+        </div>
+        <div className="settings-field">
+          <label>Bare Mode</label>
+          <input
+            type="checkbox"
+            checked={bareMode}
+            onChange={e => setBareMode(e.target.checked)}
+            disabled={!isLive}
+          />
+        </div>
+      </div>
+
+      {/* ── Gates ── */}
+      <div className="settings-section">
+        <h2>Gates</h2>
+        <div className="settings-field">
+          <label>Clippy</label>
+          <input
+            type="checkbox"
+            checked={clippyEnabled}
+            onChange={e => setClippyEnabled(e.target.checked)}
+            disabled={!isLive}
+          />
+        </div>
+        <div className="settings-field">
+          <label>Skip Tests</label>
+          <input
+            type="checkbox"
+            checked={skipTests}
+            onChange={e => setSkipTests(e.target.checked)}
+            disabled={!isLive}
+          />
+        </div>
+        <div className="settings-field">
+          <label>Max Iterations</label>
+          <input
+            type="text"
+            value={gateMaxIter}
+            onChange={e => setGateMaxIter(Number(e.target.value) || 1)}
+            disabled={!isLive}
+            style={{ maxWidth: 80 }}
+          />
+        </div>
+      </div>
+
+      {/* ── Save ── */}
+      <div className="settings-actions">
+        <button className="primary" onClick={handleSave} disabled={!isLive || saving}>
+          {saving ? 'Saving...' : 'Save'}
+        </button>
+        {saved && <span className="settings-saved">Saved</span>}
+      </div>
+    </div>
+  );
+}

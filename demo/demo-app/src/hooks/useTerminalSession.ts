@@ -70,8 +70,13 @@ export function getRoko(): string {
 // ── Workspace management ─────────────────────────────────────
 
 /**
- * Create an ephemeral workspace: mktemp, cd, roko init, clear terminal.
+ * Create an ephemeral workspace: mktemp, cd, roko init, fetch live config, clear terminal.
  * Returns the workspace directory path.
+ *
+ * After `roko init` creates the bare `.roko/` structure, we pull the live
+ * `roko.toml` from the serve process so the workspace inherits all configured
+ * providers and models. This prevents "Missing required config field" errors
+ * when the Builder runs `roko run --model <key>`.
  */
 export async function setupWorkspace(
   handle: TerminalHandle,
@@ -86,6 +91,17 @@ export async function setupWorkspace(
   const dir = `/tmp/${dirPrefix}-${Date.now()}`;
   await handle.execCmd(`mkdir -p ${dir} && cd ${dir}`, 5000);
   await handle.execCmd(`${resolvedRoko} init`, 30000);
+
+  // Fetch live config from serve process and write it into the workspace.
+  // This gives the ephemeral dir all providers/models from the UI-managed config.
+  const serveUrl = typeof window !== 'undefined'
+    ? `${window.location.protocol}//${window.location.host}`
+    : 'http://localhost:6677';
+  await handle.execCmd(
+    `curl -sf ${serveUrl}/api/config/toml -o roko.toml 2>/dev/null || true`,
+    10000,
+  );
+
   await rawSleep(200);
   handle.clearTerminal();
   return dir;

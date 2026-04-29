@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useApi } from './useApi';
 import { SERVE_URL } from '../lib/serve-url';
 import * as Demo from '../lib/demo-data';
-import * as BenchDemo from '../lib/bench-demo-data';
 
 // Map API paths to demo fallback data (used only when offline or endpoint returns nothing)
 function getFallback(path: string): unknown {
@@ -24,10 +23,8 @@ function getFallback(path: string): unknown {
   if (path.includes('/dashboard')) return Demo.DEMO_DASHBOARD;
   if (path.includes('/learn/provider-outcomes') || path.includes('/providers/health')) return Demo.DEMO_PROVIDER_HEALTH;
   if (path.includes('/cost-race') || path.includes('/bench/cost-summary')) return Demo.DEMO_COST_RACE;
-  if (path.includes('/bench/suites')) return BenchDemo.DEMO_BENCH_SUITES;
-  if (path.includes('/bench/models')) return BenchDemo.DEMO_BENCH_MODELS;
-  if (path.includes('/bench/runs')) return BenchDemo.DEMO_BENCH_RUNS;
   if (path.includes('/dream/journal')) return Demo.DEMO_DREAM_JOURNAL;
+  if (path.includes('/config') && !path.includes('/config/')) return Demo.DEMO_CONFIG;
   if (path.includes('/share/')) return null;
   return {};
 }
@@ -141,8 +138,17 @@ export function useApiWithFallback() {
     }
   }, [api]);
 
+  const put = useCallback(async <T = unknown>(path: string, body?: unknown): Promise<T> => {
+    if (_serverLive === false) return {} as T;
+    try {
+      return await api.put<T>(path, body);
+    } catch {
+      return {} as T;
+    }
+  }, [api]);
+
   return useMemo(
-    () => ({ get, post, baseUrl: api.baseUrl, isLive, dataMode }),
-    [get, post, api.baseUrl, isLive, dataMode],
+    () => ({ get, post, put, baseUrl: api.baseUrl, isLive, dataMode }),
+    [get, post, put, api.baseUrl, isLive, dataMode],
   );
 }

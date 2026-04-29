@@ -357,80 +357,6 @@ const prdPipeline: Scenario = {
   },
 };
 
-const selfhost: Scenario = {
-  id: 'selfhost',
-  title: 'Self-Hosting',
-  subtitle: 'Watch roko develop itself — from idea to running code.',
-  panes: 1,
-  labels: ['self-hosting'],
-  panel: true,
-  promptBar: false,
-  steps: [
-    { label: 'Capture idea', sublabel: 'prd idea' },
-    { label: 'Draft PRD', sublabel: 'prd draft new' },
-    { label: 'Generate plan', sublabel: 'prd plan' },
-    { label: 'Check status', sublabel: 'status' },
-    { label: 'Inspect learning', sublabel: 'learn all' },
-  ],
-  async run({ entries, playback, timeline, setMetric, logCommand }) {
-    const e = entries[0];
-    await setupWorkspace(e, 'roko-demo');
-    const ROKO = getRoko();
-    setMetric('model', 'haiku');
-    timeline.init(this.steps);
-
-    // Phase 1: capture idea
-    await playback.waitForStep();
-    playback.setProgress(1, 5, `${ROKO} prd idea "..."`);
-    timeline.setActive(0);
-    await showCmd(e, `${ROKO} prd idea "Wire SystemPromptBuilder into orchestrate.rs"`, {
-      timeout: 45000,
-      onLog: logCommand,
-    });
-    setMetric('cost', '$0.02');
-    setMetric('tokens', '1.2k');
-
-    // Phase 2: draft PRD
-    await playback.waitForStep();
-    playback.setProgress(2, 5, `${ROKO} prd draft new ...`);
-    timeline.setActive(1);
-    await showCmd(e, `${ROKO} prd draft new system-prompt-wiring`, {
-      timeout: 60000,
-      onLog: logCommand,
-    });
-    setMetric('cost', '$0.08');
-    setMetric('tokens', '3.8k');
-
-    // Phase 3: generate plan
-    await playback.waitForStep();
-    playback.setProgress(3, 5, `${ROKO} prd plan ...`);
-    timeline.setActive(2);
-    await showCmd(e, `${ROKO} prd plan system-prompt-wiring`, {
-      timeout: 90000,
-      onLog: logCommand,
-    });
-    setMetric('cost', '$0.14');
-    setMetric('tokens', '6.2k');
-
-    // Phase 4: check status
-    await playback.waitForStep();
-    playback.setProgress(4, 5, `${ROKO} status`);
-    timeline.setActive(3);
-    await showCmd(e, `${ROKO} status`, { timeout: 30000, onLog: logCommand });
-    setMetric('cost', '$0.15');
-    setMetric('tokens', '6.5k');
-
-    // Phase 5: inspect learning
-    await playback.waitForStep();
-    playback.setProgress(5, 5, `${ROKO} learn all`);
-    timeline.setActive(4);
-    await showCmd(e, `${ROKO} learn all`, { timeout: 30000, onLog: logCommand });
-    setMetric('cost', '$0.15');
-
-    timeline.setActive(5); // all completed
-  },
-};
-
 const prdResearchLoop: Scenario = {
   id: 'prd-research-loop',
   title: 'Research Loop',
@@ -574,27 +500,6 @@ const prdResearchLoop: Scenario = {
     setMetric('model', 'loop complete');
 
     timeline.setActive(8); // all completed
-  },
-};
-
-const builder: Scenario = {
-  id: 'builder',
-  title: 'Build',
-  subtitle: 'Type a prompt. Roko builds it, validates with gates, shows cost.',
-  panes: 1,
-  labels: ['builder'],
-  panel: true,
-  promptBar: true,
-  steps: [
-    { label: 'Submit prompt', sublabel: 'type or pick preset' },
-    { label: 'Agent builds', sublabel: 'roko run' },
-    { label: 'Gates validate', sublabel: 'compile + test + clippy' },
-  ],
-  async run({ entries, timeline }) {
-    const e = entries[0];
-    await setupWorkspace(e, 'roko-build');
-    timeline.init(this.steps);
-    // Builder is ready — actual build is triggered externally via prompt bar
   },
 };
 
@@ -1975,9 +1880,7 @@ const mirage: Scenario = {
 
 export const SCENARIOS: Scenario[] = [
   prdPipeline,
-  selfhost,
   prdResearchLoop,
-  builder,
   race,
   gateRetry,
   providers,

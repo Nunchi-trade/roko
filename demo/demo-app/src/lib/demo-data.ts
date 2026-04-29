@@ -55,24 +55,24 @@ export const DEMO_AGENT_TOPOLOGY = {
 
 // 18 knowledge entries across domains
 export const DEMO_KNOWLEDGE_ENTRIES = [
-  { id: 'k01', domain: 'gate', citations: 6, label: 'Gate Pipeline' },
-  { id: 'k02', domain: 'agent', citations: 5, label: 'Cascade Router' },
-  { id: 'k03', domain: 'knowledge', citations: 4, label: 'Episode Logger' },
-  { id: 'k04', domain: 'plan', citations: 7, label: 'DAG Executor' },
-  { id: 'k05', domain: 'agent', citations: 3, label: 'Tool Dispatcher' },
-  { id: 'k06', domain: 'config', citations: 2, label: 'System Prompt Builder' },
-  { id: 'k07', domain: 'gate', citations: 5, label: 'Adaptive Thresholds' },
-  { id: 'k08', domain: 'agent', citations: 4, label: 'Process Supervisor' },
-  { id: 'k09', domain: 'knowledge', citations: 8, label: 'Neuro Store' },
-  { id: 'k10', domain: 'plan', citations: 3, label: 'Plan Revision' },
-  { id: 'k11', domain: 'agent', citations: 6, label: 'MCP Integration' },
-  { id: 'k12', domain: 'gate', citations: 4, label: 'Compile Gate' },
-  { id: 'k13', domain: 'gate', citations: 3, label: 'Test Gate' },
-  { id: 'k14', domain: 'config', citations: 2, label: 'Role Templates' },
-  { id: 'k15', domain: 'knowledge', citations: 5, label: 'Dream Consolidation' },
-  { id: 'k16', domain: 'plan', citations: 4, label: 'PRD Lifecycle' },
-  { id: 'k17', domain: 'agent', citations: 3, label: 'Context Bidders' },
-  { id: 'k18', domain: 'config', citations: 1, label: 'Safety Contracts' },
+  { id: 'k01', domain: 'gate', citations: 6, label: 'Gate Pipeline', confidence: 0.94 },
+  { id: 'k02', domain: 'agent', citations: 5, label: 'Cascade Router', confidence: 0.91 },
+  { id: 'k03', domain: 'knowledge', citations: 4, label: 'Episode Logger', confidence: 0.88 },
+  { id: 'k04', domain: 'plan', citations: 7, label: 'DAG Executor', confidence: 0.96 },
+  { id: 'k05', domain: 'agent', citations: 3, label: 'Tool Dispatcher', confidence: 0.85 },
+  { id: 'k06', domain: 'config', citations: 2, label: 'System Prompt Builder', confidence: 0.82 },
+  { id: 'k07', domain: 'gate', citations: 5, label: 'Adaptive Thresholds', confidence: 0.90 },
+  { id: 'k08', domain: 'agent', citations: 4, label: 'Process Supervisor', confidence: 0.87 },
+  { id: 'k09', domain: 'knowledge', citations: 8, label: 'Neuro Store', confidence: 0.95 },
+  { id: 'k10', domain: 'plan', citations: 3, label: 'Plan Revision', confidence: 0.83 },
+  { id: 'k11', domain: 'agent', citations: 6, label: 'MCP Integration', confidence: 0.92 },
+  { id: 'k12', domain: 'gate', citations: 4, label: 'Compile Gate', confidence: 0.89 },
+  { id: 'k13', domain: 'gate', citations: 3, label: 'Test Gate', confidence: 0.86 },
+  { id: 'k14', domain: 'config', citations: 2, label: 'Role Templates', confidence: 0.81 },
+  { id: 'k15', domain: 'knowledge', citations: 5, label: 'Dream Consolidation', confidence: 0.88 },
+  { id: 'k16', domain: 'plan', citations: 4, label: 'PRD Lifecycle', confidence: 0.90 },
+  { id: 'k17', domain: 'agent', citations: 3, label: 'Context Bidders', confidence: 0.84 },
+  { id: 'k18', domain: 'config', citations: 1, label: 'Safety Contracts', confidence: 0.79 },
 ];
 
 // 28 edges connecting entries
@@ -451,6 +451,26 @@ export const DEMO_COST_RACE = {
     { model: 'gpt-4o', cost_usd: 0.34, tokens: 48600, tasks: 15, color: '#D8A878' },
     { model: 'gemini-2.5-pro', cost_usd: 0.21, tokens: 38400, tasks: 12, color: '#9A8AB8' },
   ],
+};
+
+// Config (matches GET /api/config shape — agent defaults + models section)
+export const DEMO_CONFIG = {
+  agent: {
+    default_model: 'claude-sonnet-4-20250514',
+    default_backend: 'claude-code',
+  },
+  models: {
+    sonnet: { provider: 'anthropic', slug: 'claude-sonnet-4-20250514' },
+    haiku: { provider: 'anthropic', slug: 'claude-haiku-3-20250414' },
+    opus: { provider: 'anthropic', slug: 'claude-opus-4-20250414' },
+    'gpt-4o': { provider: 'openai', slug: 'gpt-4o' },
+    'gemini-pro': { provider: 'google', slug: 'gemini-2.5-pro' },
+  },
+  providers: {
+    anthropic: { kind: 'anthropic' },
+    openai: { kind: 'openai_compat' },
+    google: { kind: 'openai_compat' },
+  },
 };
 
 // Dream consolidation journal

@@ -1,0 +1,218 @@
+/* Config widget — floating bottom-right pill / panel */
+
+.cw-pill {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 9500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-soft);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 20px;
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.cw-pill:hover {
+  border-color: var(--rose-dim);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.cw-pill .cw-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  flex-shrink: 0;
+}
+
+.cw-pill .cw-dot.offline {
+  background: var(--text-dim);
+  box-shadow: none;
+}
+
+/* Expanded panel */
+.cw-panel {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 9500;
+  width: 280px;
+  background: var(--bg-raised);
+  border: 1px solid var(--rose-dim);
+  border-radius: 10px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  animation: cw-slide-up 0.2s var(--ease);
+}
+
+@keyframes cw-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.cw-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cw-header-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.cw-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.cw-close:hover {
+  color: var(--text-soft);
+}
+
+.cw-body {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cw-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cw-field label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.cw-field select {
+  appearance: none;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 5px 8px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.cw-field select:hover:not(:disabled) {
+  border-color: var(--rose-dim);
+}
+
+.cw-field select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cw-backend-display {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-soft);
+  padding: 5px 8px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  opacity: 0.7;
+}
+
+.cw-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.cw-apply {
+  flex: 1;
+  background: var(--rose-deep);
+  border: 1px solid var(--rose-dim);
+  border-radius: 4px;
+  color: var(--rose-bright);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 5px 0;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.cw-apply:hover:not(:disabled) {
+  background: var(--rose-ember);
+  border-color: var(--rose);
+}
+
+.cw-apply:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.cw-badge {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.cw-badge.demo {
+  background: rgba(255, 200, 0, 0.15);
+  border: 1px solid rgba(255, 200, 0, 0.3);
+  color: rgba(255, 200, 0, 0.9);
+}
+
+.cw-saved {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--success);
+  animation: cw-flash 1.5s ease-out forwards;
+}
+
+@keyframes cw-flash {
+  0% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}

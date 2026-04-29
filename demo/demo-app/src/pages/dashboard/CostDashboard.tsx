@@ -208,7 +208,7 @@ export default function CostDashboard() {
   })();
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 1200 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* ═══ TOP MOSAIC: 6 stats ═══ */}
       <Mosaic columns={6}>
         <MosaicCell

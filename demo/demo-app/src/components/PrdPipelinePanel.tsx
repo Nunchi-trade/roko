@@ -9,7 +9,6 @@ import type {
   PipelineTaskStatus,
 } from '../lib/prd-pipeline-types';
 import type { ServerStatus } from '../hooks/useServerHealth';
-import WorkflowConstellation from './WorkflowConstellation';
 import './PrdPipelinePanel.css';
 
 const PHASES: { id: PipelinePhase; label: string }[] = [
@@ -112,20 +111,6 @@ function gateSummary(plans: PipelinePlan[]) {
     .sort((a, b) => b.count - a.count || a.phase.localeCompare(b.phase));
 }
 
-function gateOutcomeStats(plans: PipelinePlan[]): { total: number; passed: number; failed: number; pending: number } {
-  let total = 0;
-  let passed = 0;
-  let failed = 0;
-  for (const task of allTasks(plans)) {
-    for (const verify of task.verify) {
-      total += 1;
-      if (verify.status === 'passed') passed += 1;
-      if (verify.status === 'failed') failed += 1;
-    }
-  }
-  return { total, passed, failed, pending: Math.max(total - passed - failed, 0) };
-}
-
 function routeLabel(tier: PipelineRouteTier): string {
   if (tier === 'T1') return 'T1 fast';
   if (tier === 'T2') return 'T2 build';
@@ -179,7 +164,6 @@ export default function PrdPipelinePanel({
   const tasks = allTasks(state.plans);
   const routes = routeSummary(state.plans);
   const gates = gateSummary(state.plans);
-  const gateOutcomes = gateOutcomeStats(state.plans);
 
   return (
     <div className="pipeline-panel">
@@ -225,12 +209,6 @@ export default function PrdPipelinePanel({
           {state.stream && <StreamStatus stream={state.stream} />}
         </div>
         <div className="pipeline-hero-visual">
-          <WorkflowConstellation
-            phase={state.phase}
-            plans={state.plans}
-            gateTotal={gateOutcomes.total}
-            gatePassed={gateOutcomes.passed}
-          />
           <div className="pipeline-score">
             <span>{progress.done}</span>
             <b>/ {progress.total || '--'}</b>

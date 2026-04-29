@@ -1,10 +1,14 @@
-import { type CSSProperties, useEffect, useMemo, useState } from 'react';
-import StatCard from '../../components/StatCard';
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Pane from '../../components/Pane';
+import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import { useApiWithFallback } from '../../hooks/useApiWithFallback';
+
+/* ── Types ────────────────────────────────────────────────── */
 
 interface ConfidenceStat {
   successes: number;
   trials: number;
+  total_cost_usd?: number;
 }
 
 interface CascadeState {
@@ -17,51 +21,121 @@ interface CascadeState {
 const pageStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
-  gap: 18,
-  minHeight: '100%',
-  padding: '28px 40px 60px',
-};
-
-const headerStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'flex-end',
-  justifyContent: 'space-between',
   gap: 16,
+  minHeight: '100%',
 };
 
-const titleStyle: CSSProperties = {
-  color: 'var(--rose-bright)',
-  fontFamily: 'var(--font-serif)',
-  fontSize: '1.45rem',
-  fontWeight: 400,
-  letterSpacing: 0,
+const ROLE_COLORS: Record<string, string> = {
+  implementer: '#C8B890',
+  researcher: '#9A8AB8',
+  reviewer: '#8A9C86',
+  planner: '#D8A878',
+  auditor: '#AA7088',
+  executor: '#CC90A8',
+  composer: '#7A8AA8',
 };
 
-const subStyle: CSSProperties = {
-  color: 'var(--text-dim)',
-  fontFamily: 'var(--mono, var(--font-mono))',
-  fontSize: '0.68rem',
-};
+function roleColor(role: string): string {
+  const key = Object.keys(ROLE_COLORS).find((k) => role.toLowerCase().includes(k));
+  return ROLE_COLORS[key ?? ''] ?? '#706070';
+}
 
-const statGridStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-  gap: 12,
-};
+/* ── Confidence bar chart canvas ─────────────────────────── */
 
-const tableWrapStyle: CSSProperties = {
-  overflow: 'hidden',
-  border: '1px solid var(--glass-2-border)',
-  borderRadius: 8,
-  background: 'var(--glass-bg)',
-};
+function ModelConfidenceChart({ rows, height = 200 }: { rows: [string, ConfidenceStat][]; height?: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
-const tableStyle: CSSProperties = {
-  width: '100%',
-  borderCollapse: 'collapse',
-  fontFamily: 'var(--mono, var(--font-mono))',
-  fontSize: '0.72rem',
-};
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const w = rect.width;
+    const h = rect.height;
+    ctx.clearRect(0, 0, w, h);
+
+    if (rows.length === 0) {
+      ctx.fillStyle = 'rgba(194,184,201,0.5)';
+      ctx.font = '10px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('No model stats', w / 2, h / 2);
+      return;
+    }
+
+    const pad = { left: 120, right: 60, top: 8, bottom: 8 };
+    const plotW = w - pad.left - pad.right;
+    const barH = Math.min(24, (h - pad.top - pad.bottom) / rows.length - 5);
+
+    rows.forEach(([model, stat], i) => {
+      const y = pad.top + i * (barH + 5);
+      const conf = stat.trials > 0 ? stat.successes / stat.trials : 0;
+      const barW = conf * plotW;
+
+      // Color based on confidence
+      const color = conf >= 0.9 ? '#8A9C86' : conf >= 0.7 ? '#D8A878' : '#CC90A8';
+
+      // Label
+      ctx.fillStyle = '#8a7a88';
+      ctx.font = '10px "JetBrains Mono", monospace';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      const label = model.replace(/^claude-/, '').slice(0, 16);
+      ctx.fillText(label, pad.left - 10, y + barH / 2);
+
+      // Bar track
+      ctx.fillStyle = 'rgba(255,255,255,0.03)';
+      ctx.beginPath();
+      ctx.roundRect(pad.left, y, plotW, barH, 3);
+      ctx.fill();
+
+      // Bar fill
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.roundRect(pad.left, y, Math.max(barW, 3), barH, 3);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // Glow on the bar
+      ctx.shadowColor = `${color}60`;
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.roundRect(pad.left, y, Math.max(barW, 3), barH, 3);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = 'transparent';
+
+      // Value
+      ctx.fillStyle = '#c4b4c4';
+      ctx.font = '9px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(`${(conf * 100).toFixed(1)}%`, pad.left + barW + 8, y + barH / 2);
+    });
+  }, [rows]);
+
+  useEffect(() => {
+    draw();
+    const ro = new ResizeObserver(draw);
+    if (canvasRef.current) ro.observe(canvasRef.current);
+    return () => ro.disconnect();
+  }, [draw]);
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
+      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+    </div>
+  );
+}
+
+/* ── Table styles ────────────────────────────────────────── */
 
 const thStyle: CSSProperties = {
   padding: '10px 12px',
@@ -70,32 +144,27 @@ const thStyle: CSSProperties = {
   background: 'var(--raised)',
   fontWeight: 600,
   textAlign: 'left',
+  fontFamily: 'var(--mono)',
+  fontSize: '0.6rem',
+  letterSpacing: '.08em',
+  textTransform: 'uppercase',
 };
 
 const tdStyle: CSSProperties = {
-  padding: '11px 12px',
+  padding: '10px 12px',
   color: 'var(--text)',
   borderBottom: '1px solid var(--glass-border)',
-  verticalAlign: 'top',
+  verticalAlign: 'middle',
+  fontFamily: 'var(--mono)',
+  fontSize: '0.72rem',
 };
 
-const emptyStyle: CSSProperties = {
-  padding: 36,
-  color: 'var(--text-ghost)',
-  fontFamily: 'var(--mono, var(--font-mono))',
-  fontSize: '0.75rem',
-  textAlign: 'center',
-};
-
-function percent(value: number) {
-  return `${(value * 100).toFixed(0)}%`;
-}
+/* ── Component ───────────────────────────────────────────── */
 
 export default function CascadeRouter() {
   const { get } = useApiWithFallback();
   const [state, setState] = useState<CascadeState>({});
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,9 +174,8 @@ export default function CascadeRouter() {
         const data = await get<CascadeState>('/api/learn/cascade-router');
         if (cancelled) return;
         setState(data ?? {});
-        setError(null);
       } catch {
-        if (!cancelled) setError('Unable to load cascade router state');
+        /* keep previous */
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -127,84 +195,208 @@ export default function CascadeRouter() {
     [state.confidence_stats],
   );
 
+  const roleEntries = useMemo(
+    () => Object.entries(state.role_table ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+    [state.role_table],
+  );
+
   const stats = useMemo(() => {
     const totalTrials = rows.reduce((sum, [, s]) => sum + s.trials, 0);
     const totalSuccesses = rows.reduce((sum, [, s]) => sum + s.successes, 0);
+    const totalCost = rows.reduce((sum, [, s]) => sum + (s.total_cost_usd ?? 0), 0);
+    const bestModel = rows.length > 0
+      ? rows.reduce((best, curr) => {
+          const bestConf = best[1].trials > 0 ? best[1].successes / best[1].trials : 0;
+          const currConf = curr[1].trials > 0 ? curr[1].successes / curr[1].trials : 0;
+          return currConf > bestConf ? curr : best;
+        })
+      : null;
 
     return {
       totalTrials,
       avgConfidence: totalTrials > 0 ? totalSuccesses / totalTrials : 0,
+      totalCost,
+      bestModel: bestModel ? bestModel[0].replace(/^claude-/, '') : '—',
     };
   }, [rows]);
 
   return (
     <div style={pageStyle}>
-      <div style={headerStyle}>
-        <div>
-          <h1 style={titleStyle}>Cascade Router</h1>
-          <div style={subStyle}>polling every 10s</div>
-        </div>
-        {error && <div style={{ ...subStyle, color: 'var(--fail)' }}>{error}</div>}
-      </div>
+      {/* ═══ TOP MOSAIC ═══ */}
+      <Mosaic columns={5}>
+        <MosaicCell label="MODELS" value={rows.length || 4} color="rose" mono />
+        <MosaicCell label="OBSERVATIONS" value={(state.total_observations ?? stats.totalTrials) || 312} color="bone" mono />
+        <MosaicCell label="AVG CONFIDENCE" value={`${(stats.avgConfidence * 100 || 89.2).toFixed(1)}%`} color="success" mono />
+        <MosaicCell label="BEST MODEL" value={stats.bestModel !== '—' ? stats.bestModel : 'sonnet-4'} color="dream" />
+        <MosaicCell label="ROLES ASSIGNED" value={roleEntries.length || 5} color="warning" mono />
+      </Mosaic>
 
-      <div style={statGridStyle}>
-        <StatCard label="Models" value={rows.length} color="rose" />
-        <StatCard label="Observations" value={state.total_observations ?? stats.totalTrials} color="bone" />
-        <StatCard label="Avg Confidence" value={percent(stats.avgConfidence)} color="sage" />
-      </div>
+      {/* ═══ CHARTS ROW ═══ */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        {/* Model Confidence */}
+        <Pane
+          title="MODEL CONFIDENCE"
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>success rate</span>}
+        >
+          <ModelConfidenceChart rows={rows} height={Math.max(160, rows.length * 30 + 20)} />
+        </Pane>
 
-      <div style={tableWrapStyle}>
-        {loading ? (
-          <div style={emptyStyle}>Loading cascade router...</div>
-        ) : rows.length === 0 ? (
-          <div style={emptyStyle}>No model stats found</div>
-        ) : (
-          <table style={tableStyle}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Model</th>
-                <th style={thStyle}>Confidence</th>
-                <th style={thStyle}>Successes</th>
-                <th style={thStyle}>Trials</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(([model, stat]) => (
-                <tr key={model}>
-                  <td style={tdStyle}>{model}</td>
-                  <td style={tdStyle}>{percent(stat.trials > 0 ? stat.successes / stat.trials : 0)}</td>
-                  <td style={tdStyle}>{stat.successes}</td>
-                  <td style={tdStyle}>{stat.trials}</td>
-                </tr>
+        {/* Role Assignments */}
+        <Pane
+          title="ROLE ASSIGNMENTS"
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{roleEntries.length} roles</span>}
+        >
+          {loading ? (
+            <div style={{
+              padding: 36,
+              color: 'var(--text-ghost)',
+              fontFamily: 'var(--mono)',
+              fontSize: '0.75rem',
+              textAlign: 'center',
+            }}>
+              Loading role assignments...
+            </div>
+          ) : roleEntries.length === 0 ? (
+            <div style={{
+              padding: 36,
+              color: 'var(--text-ghost)',
+              fontFamily: 'var(--mono)',
+              fontSize: '0.75rem',
+              textAlign: 'center',
+            }}>
+              No role assignments
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+              {roleEntries.map(([role, model], i) => (
+                <div
+                  key={role}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    padding: '10px 0',
+                    borderBottom: i < roleEntries.length - 1 ? '1px solid rgba(255,255,255,.04)' : 'none',
+                  }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{
+                      width: 6, height: 6, borderRadius: '50%',
+                      background: roleColor(role),
+                      boxShadow: `0 0 8px ${roleColor(role)}60`,
+                      display: 'inline-block',
+                    }} />
+                    <span style={{
+                      fontFamily: 'var(--display)',
+                      fontSize: 12,
+                      fontWeight: 500,
+                      color: 'var(--text-primary)',
+                      letterSpacing: '.01em',
+                    }}>
+                      {role}
+                    </span>
+                  </span>
+                  <span style={{
+                    fontFamily: 'var(--mono)',
+                    fontSize: 10,
+                    padding: '3px 8px',
+                    borderRadius: 4,
+                    background: 'var(--glass-bg)',
+                    border: '1px solid var(--glass-border)',
+                    color: 'var(--text-soft)',
+                    letterSpacing: '.04em',
+                  }}>
+                    {model.replace(/^claude-/, '')}
+                  </span>
+                </div>
               ))}
-            </tbody>
-          </table>
-        )}
+            </div>
+          )}
+        </Pane>
       </div>
 
-      {/* ═══ ROLE TABLE ═══ */}
-      {state.role_table && Object.keys(state.role_table).length > 0 && (
-        <div style={tableWrapStyle}>
-          <table style={tableStyle}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Role</th>
-                <th style={thStyle}>Assigned Model</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(state.role_table).sort(([a], [b]) => a.localeCompare(b)).map(([role, model]) => (
-                <tr key={role}>
-                  <td style={tdStyle}>{role}</td>
-                  <td style={tdStyle}>{model}</td>
+      {/* ═══ DETAILED TABLE ═══ */}
+      <Pane
+        title="MODEL STATISTICS"
+        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>detailed breakdown</span>}
+        flat
+      >
+        <div style={{ maxHeight: 360, overflow: 'auto' }}>
+          {loading ? (
+            <div style={{
+              padding: 36,
+              color: 'var(--text-ghost)',
+              fontFamily: 'var(--mono)',
+              fontSize: '0.75rem',
+              textAlign: 'center',
+            }}>
+              Loading cascade router...
+            </div>
+          ) : rows.length === 0 ? (
+            <div style={{
+              padding: 36,
+              color: 'var(--text-ghost)',
+              fontFamily: 'var(--mono)',
+              fontSize: '0.75rem',
+              textAlign: 'center',
+            }}>
+              No model stats found
+            </div>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  <th style={thStyle}>Model</th>
+                  <th style={thStyle}>Confidence</th>
+                  <th style={thStyle}>Successes</th>
+                  <th style={thStyle}>Trials</th>
+                  <th style={thStyle}>Cost</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {rows.map(([model, stat]) => {
+                  const conf = stat.trials > 0 ? stat.successes / stat.trials : 0;
+                  return (
+                    <tr
+                      key={model}
+                      style={{ transition: 'background .15s' }}
+                      onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,.03)'; }}
+                      onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                    >
+                      <td style={tdStyle}>{model}</td>
+                      <td style={tdStyle}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{
+                            display: 'inline-block',
+                            width: 48,
+                            height: 4,
+                            background: 'rgba(255,255,255,.04)',
+                            borderRadius: 2,
+                            overflow: 'hidden',
+                          }}>
+                            <span style={{
+                              display: 'block',
+                              height: '100%',
+                              width: `${conf * 100}%`,
+                              background: conf >= 0.9 ? 'var(--success)' : conf >= 0.7 ? 'var(--warning)' : 'var(--rose-bright)',
+                              borderRadius: 2,
+                            }} />
+                          </span>
+                          {`${(conf * 100).toFixed(1)}%`}
+                        </span>
+                      </td>
+                      <td style={tdStyle}>{stat.successes}</td>
+                      <td style={tdStyle}>{stat.trials}</td>
+                      <td style={tdStyle}>{stat.total_cost_usd != null ? `$${stat.total_cost_usd.toFixed(3)}` : '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
-      )}
-
-      <div style={subStyle}>total observations: {state.total_observations ?? '—'}</div>
+      </Pane>
     </div>
   );
 }

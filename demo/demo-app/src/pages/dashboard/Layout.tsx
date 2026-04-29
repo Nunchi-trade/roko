@@ -14,27 +14,34 @@ const VIEWS = [
 const shellStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
-  minHeight: '100%',
+  minHeight: 'calc(100vh - 48px)',
+  padding: 0,
 };
 
 const navStyle: CSSProperties = {
   display: 'flex',
-  gap: 2,
-  padding: '8px 40px',
+  gap: 4,
+  padding: '10px 40px',
   borderBottom: '1px solid var(--glass-2-border)',
-  background: 'var(--raised)',
+  background: 'rgba(8, 8, 12, 0.6)',
+  backdropFilter: 'blur(8px)',
   overflowX: 'auto',
+  position: 'sticky',
+  top: 48,
+  zIndex: 100,
 };
 
 const linkStyle: CSSProperties = {
   border: '1px solid transparent',
   borderRadius: 6,
   color: 'var(--text-dim)',
-  fontFamily: 'var(--font-sans)',
-  fontSize: '0.72rem',
-  padding: '6px 14px',
+  fontFamily: 'var(--mono, var(--font-mono))',
+  fontSize: '0.68rem',
+  letterSpacing: '.04em',
+  padding: '6px 16px',
   textDecoration: 'none',
   whiteSpace: 'nowrap',
+  transition: 'all .2s ease',
 };
 
 const activeLinkStyle: CSSProperties = {
@@ -46,11 +53,12 @@ const activeLinkStyle: CSSProperties = {
 const bodyStyle: CSSProperties = {
   flex: 1,
   minHeight: 0,
+  padding: '20px 40px 60px',
 };
 
 export default function DashboardLayout() {
   return (
-    <section style={shellStyle}>
+    <div style={shellStyle}>
       <nav style={navStyle} aria-label="Dashboard sections">
         {VIEWS.map((view) => (
           <NavLink
@@ -69,6 +77,6 @@ export default function DashboardLayout() {
       <div style={bodyStyle}>
         <Outlet />
       </div>
-    </section>
+    </div>
   );
 }

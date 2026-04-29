@@ -291,12 +291,14 @@ async fn execute_bench_run(
                 BenchTaskResult {
                     task_id: task.id.clone(),
                     task_name: task.name.clone(),
-                    passed,
+                    status: if passed { "pass" } else { "fail" }.to_string(),
                     duration_ms,
-                    model_used: overrides.model.clone(),
-                    input_tokens,
-                    output_tokens,
+                    model: overrides.model.clone().unwrap_or_else(|| "unknown".to_string()),
+                    tokens_in: input_tokens,
+                    tokens_out: output_tokens,
                     cost_usd,
+                    gate_verdicts: Vec::new(),
+                    retries_used: 0,
                     output_preview,
                     error: None,
                 }
@@ -304,12 +306,14 @@ async fn execute_bench_run(
             Err(e) => BenchTaskResult {
                 task_id: task.id.clone(),
                 task_name: task.name.clone(),
-                passed: false,
+                status: "fail".to_string(),
                 duration_ms,
-                model_used: overrides.model.clone(),
-                input_tokens: 0,
-                output_tokens: 0,
+                model: overrides.model.clone().unwrap_or_else(|| "unknown".to_string()),
+                tokens_in: 0,
+                tokens_out: 0,
                 cost_usd: bench::estimate_cost_usd(overrides.model.as_deref(), 0, 0),
+                gate_verdicts: Vec::new(),
+                retries_used: 0,
                 output_preview: None,
                 error: Some(format!("{e}")),
             },
@@ -440,8 +444,8 @@ async fn bench_run_status(
         "status": run.status,
         "current_task_index": run.current_task_index,
         "total_tasks": run.total_tasks,
-        "passed": run.results.iter().filter(|r| r.passed).count(),
-        "failed": run.results.iter().filter(|r| !r.passed).count(),
+        "passed": run.results.iter().filter(|r| r.passed()).count(),
+        "failed": run.results.iter().filter(|r| !r.passed()).count(),
         "summary": run.summary,
     })))
 }
@@ -468,6 +472,10 @@ async fn delete_bench_run(
 }
 
 /// `GET /api/bench/runs` -- list bench runs.
+///
+/// Returns `BenchRun[]` (flat array) to match the frontend expectation.
+/// Falls back to index entries (promoted to lightweight BenchRun shapes)
+/// when full run files are unavailable.
 async fn list_bench_runs(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListRunsQuery>,
@@ -491,19 +499,21 @@ async fn list_bench_runs(
     // Reverse chronological.
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.started_at));
 
-    let total = entries.len();
     let page: Vec<_> = entries
         .into_iter()
         .skip(query.offset)
         .take(query.limit)
         .collect();
 
-    Json(json!({
-        "total": total,
-        "offset": query.offset,
-        "limit": query.limit,
-        "runs": page,
-    }))
+    // Load full BenchRun objects for each index entry.
+    let mut runs = Vec::with_capacity(page.len());
+    for entry in &page {
+        if let Ok(Some(run)) = bench::load_bench_run(&state.workdir, &entry.id).await {
+            runs.push(serde_json::to_value(run).unwrap_or_default());
+        }
+    }
+
+    Json(json!(runs))
 }
 
 /// `GET /api/bench/runs/compare?ids=a,b` -- compare multiple runs.
@@ -528,21 +538,12 @@ async fn compare_bench_runs(
 }
 
 /// `GET /api/bench/suites` -- list available suites.
+///
+/// Returns `BenchSuite[]` (flat array) to match the frontend expectation.
 async fn list_suites(State(state): State<Arc<AppState>>) -> Json<Value> {
     bench::ensure_builtin_suites(&state.workdir).await;
     let suites = bench::load_suites(&state.workdir).await;
-    let listing: Vec<Value> = suites
-        .iter()
-        .map(|s| {
-            json!({
-                "id": s.id,
-                "name": s.name,
-                "description": s.description,
-                "task_count": s.tasks.len(),
-            })
-        })
-        .collect();
-    Json(json!({ "suites": listing }))
+    Json(serde_json::to_value(suites).unwrap_or_default())
 }
 
 /// `GET /api/bench/suites/:id` -- get full suite with tasks.

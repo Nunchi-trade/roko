@@ -3,7 +3,7 @@ import type { BenchModel } from '../lib/bench-types';
 interface ModelPickerProps {
   models: BenchModel[];
   value: string;
-  onChange: (modelId: string) => void;
+  onChange: (modelId: string, provider: string) => void;
 }
 
 export default function ModelPicker({ models, value, onChange }: ModelPickerProps) {
@@ -19,7 +19,11 @@ export default function ModelPicker({ models, value, onChange }: ModelPickerProp
     <select
       className="config-input"
       value={value}
-      onChange={(e) => onChange(e.target.value)}
+      onChange={(e) => {
+        const id = e.target.value;
+        const model = models.find((m) => m.id === id);
+        onChange(id, model?.provider ?? '');
+      }}
       style={{ maxWidth: 420 }}
     >
       {[...grouped.entries()].map(([provider, providerModels]) => (

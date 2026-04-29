@@ -764,14 +764,9 @@ fn build_app_state(
     if roko_config.serve.auth.privy_app_id.is_none() {
         roko_config.serve.auth.privy_app_id = Some(crate::jwks::NUNCHI_PRIVY_APP_ID.to_string());
     }
-    if !roko_config.serve.auth.enabled {
-        if let Ok(Some(cred)) = load_stored_credential() {
-            if cred.get("method").and_then(|v| v.as_str()) == Some("privy") {
-                info!("Privy credential found — enabling auth");
-                roko_config.serve.auth.enabled = true;
-            }
-        }
-    }
+    // Note: auth.enabled = false in roko.toml is respected.
+    // Privy credentials are still loaded for JWT validation when auth IS enabled,
+    // but we no longer auto-enable auth just because a credential file exists.
     let deploy_backend = create_deploy_backend(&roko_config);
     let state = AppState::new(workdir, runtime, roko_config, deploy_backend)?;
 

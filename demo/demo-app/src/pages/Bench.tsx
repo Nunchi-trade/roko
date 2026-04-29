@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { useBench } from '../hooks/useBench';
+import { useRokoConfig } from '../hooks/useRokoConfig';
 import type { AgentStrategy } from '../lib/bench-types';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
@@ -8,7 +9,6 @@ import BarChart from '../components/Charts/BarChart';
 import CostChart from '../components/Charts/CostChart';
 import ParetoChart from '../components/Charts/ParetoChart';
 import type { ParetoPoint } from '../components/Charts/ParetoChart';
-import ModelPicker from '../components/ModelPicker';
 import SuiteSelector from '../components/SuiteSelector';
 import TaskTable from '../components/TaskTable';
 import './Bench.css';
@@ -36,11 +36,12 @@ export default function Bench() {
   const {
     config, setConfig,
     selectedSuiteId, setSelectedSuiteId, selectedSuite,
-    suites, models, history,
+    suites, history,
     activeRun, activeRunSummary, feed,
     startRun, cancelRun, exportRun, importRun,
     lastCompletedRun,
   } = bench;
+  const { defaultModel, defaultBackend } = useRokoConfig();
 
   // Compute hero stats from history
   const totalRuns = history.length;
@@ -119,14 +120,6 @@ export default function Bench() {
                   </button>
                 ))}
               </div>
-            </Pane>
-
-            <Pane title="MODEL">
-              <ModelPicker
-                models={models}
-                value={config.model}
-                onChange={(m) => setConfig({ ...config, model: m })}
-              />
             </Pane>
 
             <Pane title="PARAMETERS">
@@ -210,7 +203,7 @@ export default function Bench() {
             <div className="bench-run-btn" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
               <button
                 className="btn"
-                onClick={() => { startRun(); setTab('live'); }}
+                onClick={() => { startRun(defaultModel, defaultBackend); setTab('live'); }}
                 disabled={activeRun?.status === 'running'}
               >
                 {activeRun?.status === 'running' ? 'Running...' : 'Run Benchmark'}

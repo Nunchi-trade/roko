@@ -1,0 +1,204 @@
+/* ═══════════════════════════════════════════════════════════
+   SETTINGS · Config Management
+   Rosedust design system
+   ═══════════════════════════════════════════════════════════ */
+
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: 2rem;
+  gap: 1.5rem;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.settings-header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.settings-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.settings-subtitle {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.settings-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.settings-status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.settings-status .dot.offline {
+  background: var(--danger, #f44);
+}
+
+/* ── Section cards ── */
+
+.settings-section {
+  background: var(--surface-1, #1a1a2e);
+  border: 1px solid var(--border, #2a2a3e);
+  border-radius: 8px;
+  padding: 1.25rem;
+}
+
+.settings-section h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0 0 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.settings-section h2 .badge {
+  font-size: 0.65rem;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--accent-dim, #3a3a5e);
+  color: var(--text-dim);
+}
+
+/* ── Table ── */
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.settings-table th {
+  text-align: left;
+  padding: 0.4rem 0.75rem;
+  color: var(--text-dim);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border, #2a2a3e);
+}
+
+.settings-table td {
+  padding: 0.4rem 0.75rem;
+  color: var(--text);
+  border-bottom: 1px solid var(--border-dim, #1a1a2e);
+}
+
+.settings-table tr:last-child td {
+  border-bottom: none;
+}
+
+.settings-table .mono {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8rem;
+}
+
+/* ── Form fields ── */
+
+.settings-field {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.settings-field:last-child {
+  margin-bottom: 0;
+}
+
+.settings-field label {
+  min-width: 120px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.settings-field select,
+.settings-field input[type="text"] {
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  background: var(--surface-0, #12121e);
+  border: 1px solid var(--border, #2a2a3e);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+
+.settings-field select:focus,
+.settings-field input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent, #7c6f9c);
+}
+
+.settings-field input[type="checkbox"] {
+  accent-color: var(--accent, #7c6f9c);
+}
+
+/* ── Actions ── */
+
+.settings-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.settings-actions button {
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  border: 1px solid var(--border, #2a2a3e);
+  background: var(--surface-1, #1a1a2e);
+  color: var(--text);
+  transition: background 0.15s;
+}
+
+.settings-actions button:hover:not(:disabled) {
+  background: var(--accent-dim, #3a3a5e);
+}
+
+.settings-actions button.primary {
+  background: var(--accent, #7c6f9c);
+  border-color: var(--accent, #7c6f9c);
+  color: #fff;
+}
+
+.settings-actions button.primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.settings-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-saved {
+  font-size: 0.8rem;
+  color: var(--success, #4caf50);
+  align-self: center;
+}
+
+/* ── Empty state ── */
+
+.settings-empty {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  font-style: italic;
+  padding: 0.5rem 0;
+}

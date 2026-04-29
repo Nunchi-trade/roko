@@ -220,11 +220,25 @@ pub(crate) async fn cmd_run(
     serve: bool,
     share: bool,
     engine: crate::EngineVariant,
+    provider: Option<String>,
+    max_retries: Option<u32>,
 ) -> Result<i32> {
+    // Expose --provider as the ROKO_PROVIDER env var so that apply_env()
+    // picks it up during config resolution (same mechanism as the env var).
+    #[allow(unsafe_code)]
+    if let Some(ref p) = provider {
+        // SAFETY: single-threaded at this point (before tokio runtime starts).
+        unsafe { std::env::set_var("ROKO_PROVIDER", p) };
+    }
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
     let mut config = resolve_config_for_workdir(cli, &workdir)?;
     apply_resume_session_override(&mut config, cli.resume.clone());
+
+    // Apply --max-retries to the learning config.
+    if let Some(retries) = max_retries {
+        config.learning.replan_max_per_plan = Some(retries);
+    }
 
     // Optionally start the HTTP control plane for external observability.
     let server_guard: Option<(

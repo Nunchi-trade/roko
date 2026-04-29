@@ -20,6 +20,7 @@ import Bench from './pages/Bench';
 import BenchRunDetail from './pages/BenchRunDetail';
 import BenchCompare from './pages/BenchCompare';
 import BenchShowroom from './pages/BenchShowroom';
+import Settings from './pages/Settings';
 import SharePage from './pages/Share';
 import './styles/rosedust.css';
 
@@ -43,6 +44,7 @@ createRoot(document.getElementById('root')!).render(
             <Route path="terminal" element={<Terminal />} />
             <Route path="builder" element={<Builder />} />
             <Route path="explorer" element={<Explorer />} />
+            <Route path="settings" element={<Settings />} />
             <Route path="bench" element={<Bench />} />
             <Route path="bench/run/:id" element={<BenchRunDetail />} />
             <Route path="bench/compare" element={<BenchCompare />} />

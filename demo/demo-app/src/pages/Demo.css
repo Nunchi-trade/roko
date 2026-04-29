@@ -314,8 +314,8 @@
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  padding: 8px;
-  gap: 8px;
+  padding: 6px;
+  gap: 6px;
   background: var(--bg-deeper, var(--bg-void));
 }
 
@@ -329,7 +329,8 @@
   min-height: 0;
   border-left: none;
   border-bottom: 1px solid var(--glass-border);
-  padding: 12px 14px;
+  padding: 6px 10px;
+  gap: 6px;
   background:
     linear-gradient(180deg, rgba(18, 16, 25, 0.92), rgba(8, 8, 12, 0.98)),
     var(--bg-void);
@@ -337,9 +338,9 @@
 
 .demo-main-pipeline .demo-terminals {
   order: 2;
-  flex: 0 0 176px;
-  min-height: 132px;
-  max-height: 196px;
+  flex: 0 0 200px;
+  min-height: 160px;
+  max-height: 240px;
   border-top: 1px solid rgba(216, 154, 178, 0.18);
   background: rgba(6, 6, 9, 0.94);
 }
@@ -375,29 +376,45 @@
   }
 }
 
-/* Remove default pane margins inside sidebar */
+/* Compact panes inside sidebar */
 .demo-sidebar .pane {
   margin-top: 0;
   border-radius: 4px;
 }
 
+.demo-sidebar .pane .head {
+  padding: 8px 12px;
+}
+
+.demo-sidebar .pane .body {
+  padding: 12px;
+}
+
+.demo-sidebar .pane .body.flat {
+  padding: 0;
+}
+
+.demo-sidebar .pane .foot {
+  padding: 6px 12px;
+}
+
 /* Compact mosaic inside sidebar */
 .demo-stats-mosaic .mosaic .cell {
-  padding: 14px 16px;
+  padding: 10px 12px;
 }
 
 .demo-stats-mosaic .mosaic .cell .k {
-  margin-bottom: 6px;
-  font-size: 9px;
+  margin-bottom: 4px;
+  font-size: 8px;
 }
 
 .demo-stats-mosaic .mosaic .cell .v {
-  font-size: 18px;
+  font-size: 16px;
   margin-bottom: 0;
 }
 
 .demo-stats-mosaic .mosaic .cell .v.mono {
-  font-size: 16px;
+  font-size: 14px;
 }
 
 /* ── Intro overlay ── */
@@ -514,12 +531,12 @@
 .demo-playback-bar {
   display: flex;
   align-items: center;
-  padding: 10px 20px;
-  gap: 12px;
+  padding: 6px 16px;
+  gap: 10px;
   border-top: 1px solid var(--glass-border);
   background: var(--bg-raised);
   flex-shrink: 0;
-  height: 48px;
+  height: 38px;
 }
 
 .demo-pb-controls {
