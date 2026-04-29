@@ -74,6 +74,14 @@ impl RunReport {
     pub fn overall_success(&self) -> bool {
         self.agent_success && self.gate_verdicts.iter().all(|(_, ok)| *ok)
     }
+
+    /// Return the first gate that failed, if any.
+    #[must_use]
+    pub(crate) fn first_failed_gate(&self) -> Option<&str> {
+        self.gate_verdicts
+            .iter()
+            .find_map(|(gate, passed)| (!*passed).then_some(gate.as_str()))
+    }
 }
 
 /// Write a RunReport to `.roko/shared/{token}.json` and return the token.
@@ -2391,6 +2399,25 @@ mod tests {
             ..r
         };
         assert!(!r.overall_success());
+    }
+
+    #[test]
+    fn run_report_first_failed_gate_returns_first_failure() {
+        let r = RunReport {
+            episode_id: "a".into(),
+            prompt_id: "b".into(),
+            agent_output_id: "c".into(),
+            agent_success: true,
+            gate_verdicts: vec![
+                ("compile".into(), true),
+                ("clippy".into(), false),
+                ("test".into(), false),
+            ],
+            total_signals: 5,
+            output_text: Some("done".into()),
+        };
+
+        assert_eq!(r.first_failed_gate(), Some("clippy"));
     }
 
     #[cfg(feature = "legacy-orchestrate")]

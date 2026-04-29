@@ -4,17 +4,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use async_trait::async_trait;
 use roko_core::config::schema::RokoConfig;
-use roko_serve::bench::BenchConfigOverrides;
+use roko_serve::bench::{BenchConfigOverrides, BenchStrategy};
 use roko_serve::runtime::{
     CliRuntime, DashboardInfo, PlanExecutionResult, PlanGenerationResult, RepoInfo, RunResult,
     RuntimeGateResult, SessionStatusInfo,
 };
+use roko_neuro::KnowledgeStore;
 
 use crate::config::{Config, RepoRegistry};
 use crate::prd;
@@ -28,6 +29,8 @@ use crate::workspace_paths;
 pub struct RokoCliRuntime {
     config: Config,
     repo_registry: RepoRegistry,
+    // Lazily bound to the workspace used by the first bench task that needs it.
+    knowledge_store: OnceLock<KnowledgeStore>,
 }
 
 impl RokoCliRuntime {
@@ -36,6 +39,7 @@ impl RokoCliRuntime {
         Self {
             config,
             repo_registry,
+            knowledge_store: OnceLock::new(),
         }
     }
 
@@ -67,8 +71,35 @@ impl CliRuntime for RokoCliRuntime {
             config.agent.model = Some(model.clone());
         }
         let report = run_once(workdir, &config, prompt, Some(overrides.strategy), None).await?;
+        let success = report.overall_success();
+
+        if !success && !matches!(overrides.strategy, BenchStrategy::Minimal) {
+            let gate_name = report.first_failed_gate().unwrap_or("unknown");
+            let gate_error = report
+                .output_text
+                .as_deref()
+                .and_then(non_empty_string)
+                .unwrap_or_else(|| "unknown error".to_string());
+            let knowledge_store = self.knowledge_store(workdir);
+
+            if let Err(err) = knowledge_store.record_anti_pattern_from_failure(
+                &report.prompt_id,
+                prompt,
+                gate_name,
+                gate_error.as_str(),
+                report.output_text.as_deref(),
+            ) {
+                tracing::warn!(
+                    error = %err,
+                    task_id = %report.prompt_id,
+                    gate = gate_name,
+                    "failed to save anti-pattern"
+                );
+            }
+        }
+
         Ok(RunResult {
-            success: report.overall_success(),
+            success,
             output_text: report.output_text,
             usage: None,
         })
@@ -154,6 +185,15 @@ impl CliRuntime for RokoCliRuntime {
                 branch: entry.config.branch.clone(),
             })
             .collect()
+    }
+}
+
+impl RokoCliRuntime {
+    fn knowledge_store(&self, workdir: &Path) -> &KnowledgeStore {
+        // `run_once_with_config` is the only bench entry point, so this store can
+        // be initialized on demand from the workspace passed into that call.
+        self.knowledge_store
+            .get_or_init(|| KnowledgeStore::for_workdir(workdir))
     }
 }
 
