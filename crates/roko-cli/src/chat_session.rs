@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use roko_agent::agent::Agent;
 use roko_agent::claude_cli_agent::ClaudeCliAgent;
+use roko_agent::AgentRuntimeEvent;
 use roko_agent::safety::contract::AgentContract;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
 use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
@@ -72,10 +73,44 @@ pub enum SlashResult {
 pub struct ToolCallSummary {
     /// Tool name (for example `Read`, `Bash`, or `Edit`).
     pub name: String,
-    /// Abbreviated input, capped at the first 200 characters.
+    /// Abbreviated tool output, capped at the first 200 characters.
     pub input_abbrev: String,
     /// Whether the tool call succeeded.
     pub success: bool,
+}
+
+/// Update the streaming tool-call accumulator with one runtime event.
+///
+/// The streaming turn path calls this for every `AgentRuntimeEvent` so the
+/// caller can render tool usage after the turn completes. Non-streaming
+/// `send_turn` does not call this because structured tool data is not
+/// available from `ClaudeCliAgent::run`.
+pub fn accumulate_tool_event(
+    tool_calls: &mut Vec<ToolCallSummary>,
+    pending_ids: &mut Vec<(String, usize)>,
+    event: &AgentRuntimeEvent,
+) {
+    match event {
+        AgentRuntimeEvent::ToolCall { id, name } => {
+            let idx = tool_calls.len();
+            tool_calls.push(ToolCallSummary {
+                name: name.clone(),
+                input_abbrev: String::new(),
+                success: true,
+            });
+            pending_ids.push((id.clone(), idx));
+        }
+        AgentRuntimeEvent::ToolOutput { id, output } => {
+            if let Some(pos) = pending_ids.iter().position(|(tool_use_id, _)| tool_use_id == id) {
+                let (_, idx) = pending_ids.remove(pos);
+                if let Some(tool_call) = tool_calls.get_mut(idx) {
+                    tool_call.input_abbrev = preview_text(output, 200);
+                    tool_call.success = true;
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Result of a single agent turn.
@@ -327,6 +362,10 @@ impl ChatAgentSession {
             model: self.model.clone(),
             input_tokens: u64::from(result.usage.input_tokens),
             output_tokens: u64::from(result.usage.output_tokens),
+            // Tool call data is not available from the non-streaming path.
+            // ClaudeCliAgent::run returns only the final text in AgentResult.output.
+            // The trace Vec<Engram> contains raw stderr lines, not structured tool records.
+            // Use send_turn_streaming (R3_C03) to capture tool_calls.
             tool_calls: Vec::new(),
             session_id: new_session_id,
             duration: started.elapsed(),
@@ -959,5 +998,53 @@ mod tests {
             s.handle_slash_command("/banana"),
             SlashResult::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn accumulate_tool_event_links_output_by_id() {
+        let mut tool_calls = Vec::new();
+        let mut pending_ids = Vec::new();
+
+        accumulate_tool_event(
+            &mut tool_calls,
+            &mut pending_ids,
+            &AgentRuntimeEvent::ToolCall {
+                id: "tool-1".to_string(),
+                name: "Read".to_string(),
+            },
+        );
+        accumulate_tool_event(
+            &mut tool_calls,
+            &mut pending_ids,
+            &AgentRuntimeEvent::ToolOutput {
+                id: "tool-1".to_string(),
+                output: "é".repeat(201),
+            },
+        );
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "Read");
+        assert!(tool_calls[0].success);
+        assert_eq!(tool_calls[0].input_abbrev.chars().count(), 203);
+        assert!(tool_calls[0].input_abbrev.ends_with("..."));
+        assert!(pending_ids.is_empty());
+    }
+
+    #[test]
+    fn accumulate_tool_event_ignores_unmatched_output() {
+        let mut tool_calls = Vec::new();
+        let mut pending_ids = Vec::new();
+
+        accumulate_tool_event(
+            &mut tool_calls,
+            &mut pending_ids,
+            &AgentRuntimeEvent::ToolOutput {
+                id: "missing".to_string(),
+                output: "orphan".to_string(),
+            },
+        );
+
+        assert!(tool_calls.is_empty());
+        assert!(pending_ids.is_empty());
     }
 }
