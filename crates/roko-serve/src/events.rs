@@ -173,6 +173,52 @@ pub enum ServerEvent {
         value: f64,
     },
 
+    /// A gateway inference request was started.
+    InferenceStarted {
+        /// Unique request identifier.
+        request_id: String,
+        /// Model slug selected for this request.
+        model: String,
+        /// Agent that initiated the request.
+        #[serde(default)]
+        agent_id: String,
+        /// Whether the model was explicitly requested or auto-selected.
+        #[serde(default)]
+        auto_routed: bool,
+    },
+
+    /// A gateway inference request completed successfully.
+    InferenceCompleted {
+        /// Unique request identifier.
+        request_id: String,
+        /// Model that actually served the request.
+        model: String,
+        /// Agent that initiated the request.
+        #[serde(default)]
+        agent_id: String,
+        /// Input tokens consumed.
+        input_tokens: u64,
+        /// Output tokens generated.
+        output_tokens: u64,
+        /// Estimated cost in USD.
+        cost_usd: f64,
+        /// Wall-clock duration in milliseconds.
+        duration_ms: u64,
+    },
+
+    /// A gateway inference request failed.
+    InferenceFailed {
+        /// Unique request identifier.
+        request_id: String,
+        /// Model that was targeted.
+        model: String,
+        /// Agent that initiated the request.
+        #[serde(default)]
+        agent_id: String,
+        /// Error description.
+        error: String,
+    },
+
     /// A strong somatic marker fired for the current task situation.
     SomaticMarkerFired {
         plan_id: String,
@@ -533,6 +579,27 @@ mod tests {
                 iterations: 5,
                 best_score: 9.0,
                 stop_reason: "target_reached".into(),
+            },
+            ServerEvent::InferenceStarted {
+                request_id: "req-1".into(),
+                model: "sonnet".into(),
+                agent_id: "a".into(),
+                auto_routed: true,
+            },
+            ServerEvent::InferenceCompleted {
+                request_id: "req-1".into(),
+                model: "sonnet".into(),
+                agent_id: "a".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+                cost_usd: 0.001,
+                duration_ms: 1500,
+            },
+            ServerEvent::InferenceFailed {
+                request_id: "req-1".into(),
+                model: "sonnet".into(),
+                agent_id: "a".into(),
+                error: "timeout".into(),
             },
             ServerEvent::ServerShutdown,
         ];

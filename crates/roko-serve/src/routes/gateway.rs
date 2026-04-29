@@ -291,6 +291,16 @@ async fn inference_complete(
         select_model_via_router(&state, &hints).await
     };
 
+    let auto_routed = body.model.is_none();
+    let agent_label = body.agent_id.as_deref().unwrap_or("gateway").to_owned();
+
+    state.event_bus.publish(ServerEvent::InferenceStarted {
+        request_id: request_id.clone(),
+        model: model_slug.clone(),
+        agent_id: agent_label.clone(),
+        auto_routed,
+    });
+
     let req = model_call_request(
         model_slug.clone(),
         &body.messages,
@@ -299,8 +309,17 @@ async fn inference_complete(
         body.agent_id.clone(),
     );
 
+    let call_start = std::time::Instant::now();
+
     let model_response = state.model_call_service.call(req).await.map_err(|err| {
         state.provider_health.record_failure(&model_slug);
+        let _duration_ms = call_start.elapsed().as_millis() as u64;
+        state.event_bus.publish(ServerEvent::InferenceFailed {
+            request_id: request_id.clone(),
+            model: model_slug.clone(),
+            agent_id: agent_label.clone(),
+            error: err.to_string(),
+        });
         ApiError::internal(format!("inference dispatch failed: {err}"))
     })?;
 
@@ -316,7 +335,17 @@ async fn inference_complete(
     let counters = state.gateway_counters_for(&served_model).await;
     counters.record(input_tokens, output_tokens, cost_usd);
 
-    let agent_label = body.agent_id.as_deref().unwrap_or("gateway").to_owned();
+    let duration_ms = call_start.elapsed().as_millis() as u64;
+
+    state.event_bus.publish(ServerEvent::InferenceCompleted {
+        request_id: request_id.clone(),
+        model: served_model.clone(),
+        agent_id: agent_label.clone(),
+        input_tokens,
+        output_tokens,
+        cost_usd,
+        duration_ms,
+    });
 
     // Publish event for SSE/WS consumers.
     state.event_bus.publish(ServerEvent::AgentOutput {
