@@ -10,14 +10,14 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -74,6 +74,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/export", "export conversation (markdown/json)"),
     ("/cost", "session cost summary"),
     ("/tools", "list available tools"),
+    ("/mcp", "show MCP config status"),
     ("/clear", "clear scrollback"),
     ("/quit", "exit the chat"),
     ("/exit", "exit the chat"),
@@ -2145,6 +2146,7 @@ fn handle_slash_command(
                 styled::continuation(theme, "/stats", "detailed session statistics", None),
                 styled::continuation(theme, "/context", "token/context usage", None),
                 styled::continuation(theme, "/tools", "list available tools", None),
+                styled::continuation(theme, "/mcp", "MCP config status", None),
                 styled::continuation(theme, "/version", "version info", None),
                 styled::continuation(theme, "/history", "show input history", None),
                 styled::continuation(theme, "/copy", "copy last response to clipboard", None),
@@ -3322,6 +3324,56 @@ fn handle_slash_command(
                 "resolved from roko-std builtins",
             ));
             term.push_lines(&lines)?;
+        }
+
+        "/mcp" | "/mcp reload" => {
+            let reload = cmd == "/mcp reload";
+            let candidates = [".roko/mcp.json", ".roko/mcp.toml", "mcp.json"];
+            let found: Option<&str> = candidates
+                .iter()
+                .copied()
+                .find(|p| std::path::Path::new(p).exists());
+
+            if let Some(path) = found {
+                let mut lines = vec![styled::section_start(
+                    theme,
+                    "mcp",
+                    if reload { "reloaded" } else { "configured" },
+                    None,
+                )];
+                lines.push(styled::continuation(theme, "config", path, None));
+
+                if path.ends_with(".json") {
+                    if let Ok(raw) = fs::read_to_string(path) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            if let Some(servers) = val.get("mcpServers").and_then(|s| s.as_object())
+                            {
+                                for name in servers.keys() {
+                                    lines.push(styled::continuation(
+                                        theme,
+                                        "server",
+                                        name,
+                                        Some("configured"),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                lines.push(styled::section_end(
+                    theme,
+                    "tip",
+                    "use --mcp-config in roko.toml to override",
+                ));
+                term.push_lines(&lines)?;
+            } else {
+                term.push_lines(&[
+                    styled::section_start(theme, "mcp", "not configured", None),
+                    styled::continuation(theme, "hint", "set agent.mcp_config in roko.toml", None),
+                    styled::section_end(theme, "docs", "see: roko config show"),
+                ])?;
+            }
         }
 
         _ => {
