@@ -81,7 +81,7 @@ impl ChatAgentSession {
     ) -> Result<Self> {
         let system_prompt = build_chat_system_prompt(&workdir, config);
         let allowed_tools_csv = resolve_tool_policy(&workdir);
-        let mcp_config = discover_mcp_config_stub(config, &workdir);
+        let mcp_config = resolve_mcp_config(&workdir, config);
         let effort = config.agent.effort.clone();
         let timeout =
             (config.agent.timeout_ms > 0).then(|| Duration::from_millis(config.agent.timeout_ms));
@@ -403,9 +403,51 @@ fn is_skipped_dir_name(name: &str) -> bool {
     SKIP_DIR_NAMES.contains(&name)
 }
 
-fn discover_mcp_config_stub(_config: &Config, _workdir: &Path) -> Option<PathBuf> {
-    // Placeholder until R3_A04 wires MCP discovery into session creation.
+/// Discover MCP config file using the same resolution order as orchestrate.rs.
+///
+/// Priority:
+/// 1. Explicit path in `config.agent.mcp_config`
+/// 2. Workspace `.roko/mcp.json`
+/// 3. Global `~/.claude/mcp-config.json`
+///
+/// Returns `None` if no MCP config is found.
+fn resolve_mcp_config(workdir: &Path, config: &Config) -> Option<PathBuf> {
+    if let Some(ref path) = config.agent.mcp_config {
+        let resolved = if path.is_absolute() {
+            path.clone()
+        } else {
+            workdir.join(path)
+        };
+        if resolved.exists() {
+            tracing::debug!("MCP config from roko.toml: {}", resolved.display());
+            return Some(resolved);
+        }
+        tracing::debug!(
+            "MCP config in roko.toml does not exist: {}",
+            resolved.display()
+        );
+    }
+
+    let workspace_mcp = workdir.join(".roko/mcp.json");
+    if workspace_mcp.exists() {
+        tracing::debug!("MCP config from workspace: {}", workspace_mcp.display());
+        return Some(workspace_mcp);
+    }
+
+    if let Some(home) = home_dir() {
+        let global_mcp = home.join(".claude/mcp-config.json");
+        if global_mcp.exists() {
+            tracing::debug!("MCP config from global: {}", global_mcp.display());
+            return Some(global_mcp);
+        }
+    }
+
+    tracing::debug!("no MCP config found");
     None
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 fn shared_http_client() -> reqwest::Client {
