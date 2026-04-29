@@ -6,7 +6,7 @@ use roko_core::{
     ContentHash, Context, Engram, Query, Store,
     error::{Result, RokoError},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -116,6 +116,65 @@ impl FileSubstrate {
             .await?;
         *self.log_writer.lock().await = new_writer;
         Ok(())
+    }
+
+    /// Write multiple signals in a single I/O batch.
+    ///
+    /// More efficient than calling [`put`](Store::put) in a loop because it:
+    /// - Acquires the write lock once for all signals
+    /// - Serializes all non-duplicate signals before the lock is acquired
+    /// - Flushes once at the end
+    ///
+    /// Signals already in the index are deduplicated (skipped silently).
+    /// Signal order in the JSONL file matches the input order for signals
+    /// that are actually persisted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or I/O fails. On error, partial
+    /// writes may have occurred - the caller should not retry the same
+    /// signals without first checking the index.
+    pub async fn put_batch(&self, signals: Vec<Engram>) -> Result<Vec<ContentHash>> {
+        let mut ids = Vec::with_capacity(signals.len());
+        let mut lines = String::new();
+        let mut to_index: Vec<Engram> = Vec::new();
+        let mut seen_ids = HashSet::with_capacity(signals.len());
+
+        // Phase 1: deduplicate and serialize without holding the write lock.
+        {
+            let index_read = self.index.read();
+            for signal in signals {
+                let signal = attach_hdc_fingerprint(signal);
+                let id = signal.id;
+                if index_read.contains_key(&id) || !seen_ids.insert(id) {
+                    ids.push(id);
+                    continue;
+                }
+                let line = serde_json::to_string(&signal).map_err(RokoError::body_encode)?;
+                lines.push_str(&line);
+                lines.push('\n');
+                to_index.push(signal);
+                ids.push(id);
+            }
+        }
+
+        // Phase 2: single lock acquire -> write -> flush.
+        if !lines.is_empty() {
+            let mut guard = self.log_writer.lock().await;
+            guard.write_all(lines.as_bytes()).await?;
+            guard.flush().await?;
+            drop(guard);
+        }
+
+        // Phase 3: update the in-memory index after the write succeeds.
+        if !to_index.is_empty() {
+            let mut index_write = self.index.write();
+            for signal in to_index {
+                index_write.insert(signal.id, signal);
+            }
+        }
+
+        Ok(ids)
     }
 }
 
@@ -333,6 +392,39 @@ mod tests {
         let id = sub.put(s.clone()).await.unwrap();
         let got = sub.get(&id).await.unwrap();
         assert_eq!(got, Some(s));
+    }
+
+    #[tokio::test]
+    async fn put_batch_deduplicates_existing_signals_and_preserves_order() {
+        let tmp = TempDir::new().unwrap();
+        let sub = FileSubstrate::open(tmp.path()).await.unwrap();
+
+        let existing = sig(Kind::Task, "existing", 0);
+        sub.put(existing.clone()).await.unwrap();
+
+        let second = sig(Kind::Task, "second", 1);
+        let third = sig(Kind::Task, "third", 2);
+        let ids = sub
+            .put_batch(vec![
+                existing.clone(),
+                second.clone(),
+                third.clone(),
+                third.clone(),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(sub.len().await.unwrap(), 3);
+        assert_eq!(ids.len(), 4);
+        assert_eq!(ids[2], ids[3]);
+
+        let contents = fs::read_to_string(sub.log_path()).await.unwrap();
+        let stored_bodies: Vec<String> = contents
+            .lines()
+            .map(|line| serde_json::from_str::<Engram>(line).unwrap())
+            .map(|sig| sig.body.as_text().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(stored_bodies, vec!["existing", "second", "third"]);
     }
 
     #[tokio::test]

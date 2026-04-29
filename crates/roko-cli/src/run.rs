@@ -1166,13 +1166,6 @@ pub async fn run_once(
         .map_err(|e| anyhow!("build task section: {e}"))?;
     sections.push(task_sig);
 
-    for sig in &sections {
-        substrate
-            .put(sig.clone())
-            .await
-            .map_err(|e| anyhow!("persist prompt section: {e}"))?;
-    }
-
     // Compose the prompt under the configured budget.
     let composer = PromptComposer::new();
     let prompt = composer
@@ -1183,10 +1176,14 @@ pub async fn run_once(
             &ctx,
         )
         .map_err(|e| anyhow!("compose prompt: {e}"))?;
+
+    // Batch-write the prompt sections and composed prompt in one I/O pass.
+    let mut prompt_signals = sections;
+    prompt_signals.push(prompt.clone());
     substrate
-        .put(prompt.clone())
+        .put_batch(prompt_signals)
         .await
-        .map_err(|e| anyhow!("persist prompt: {e}"))?;
+        .map_err(|e| anyhow!("persist prompt signals: {e}"))?;
 
     // Run the configured agent path for this provider/backend mix.
     let DispatchOutcome {
@@ -1205,18 +1202,20 @@ pub async fn run_once(
         agent_result.output.clone()
     };
     if config.agent.clean_output {
-        // clean path already wrote both signals; skip the normal write
+        // The clean path already wrote the canonical output; batch any traces.
+        if !agent_result.trace.is_empty() {
+            substrate
+                .put_batch(agent_result.trace.clone())
+                .await
+                .map_err(|e| anyhow!("persist agent traces: {e}"))?;
+        }
     } else {
+        let mut batch = vec![agent_result.output.clone()];
+        batch.extend(agent_result.trace.iter().cloned());
         substrate
-            .put(agent_result.output.clone())
+            .put_batch(batch)
             .await
-            .map_err(|e| anyhow!("persist agent output: {e}"))?;
-    }
-    for trace in &agent_result.trace {
-        substrate
-            .put(trace.clone())
-            .await
-            .map_err(|e| anyhow!("persist agent trace: {e}"))?;
+            .map_err(|e| anyhow!("persist agent output + traces: {e}"))?;
     }
 
     // Emit DashboardEvents for the TUI: plan/task start + agent output.
@@ -1267,13 +1266,13 @@ pub async fn run_once(
             .tag("passed", verdict.passed.to_string())
             .tag("gate", &verdict.gate)
             .build();
-        substrate
-            .put(sig.clone())
-            .await
-            .map_err(|e| anyhow!("persist verdict: {e}"))?;
         verdict_summary.push((verdict.gate.clone(), verdict.passed));
         verdict_sigs.push(sig);
     }
+    substrate
+        .put_batch(verdict_sigs.clone())
+        .await
+        .map_err(|e| anyhow!("persist verdicts: {e}"))?;
 
     // Emit gate result events for the TUI.
     for (gate_name, passed) in &verdict_summary {
@@ -2889,9 +2888,9 @@ async fn maybe_clean_output(
     if cleaned == raw.trim() {
         // No-op cleaning — just persist the original and move on.
         substrate
-            .put(agent_result.output.clone())
+            .put_batch(vec![agent_result.output.clone()])
             .await
-            .map_err(|e| anyhow!("persist agent output: {e}"))?;
+            .map_err(|e| anyhow!("persist agent output batch: {e}"))?;
         return Ok(agent_result.output.clone());
     }
 
@@ -2902,10 +2901,6 @@ async fn maybe_clean_output(
         .provenance(Provenance::agent("exec:raw"))
         .tag("stream", "raw_stdout")
         .build();
-    substrate
-        .put(raw_trace)
-        .await
-        .map_err(|e| anyhow!("persist raw agent output trace: {e}"))?;
 
     // Build a fresh AgentOutput signal whose body is the cleaned text. The
     // new signal chains to the prompt (not the raw output) so lineage stays
@@ -2922,9 +2917,9 @@ async fn maybe_clean_output(
         .tag("agent", agent_result.output.tag("agent").unwrap_or("exec"))
         .build();
     substrate
-        .put(clean_sig.clone())
+        .put_batch(vec![raw_trace, clean_sig.clone()])
         .await
-        .map_err(|e| anyhow!("persist cleaned agent output: {e}"))?;
+        .map_err(|e| anyhow!("persist cleaned agent output batch: {e}"))?;
     Ok(clean_sig)
 }
 
