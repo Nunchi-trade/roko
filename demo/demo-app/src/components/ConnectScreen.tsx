@@ -13,7 +13,7 @@ export default function ConnectScreen({ onRetry }: ConnectScreenProps) {
         width: 16, height: 16, borderRadius: '50%',
         background: 'var(--rose-dim, #6b4a5e)',
         boxShadow: '0 0 30px rgba(220,165,189,.3)',
-        animation: 'connectPulse 1.8s ease-in-out infinite',
+        animation: 'pulse 1.8s ease-in-out infinite',
       }} />
       <div style={{
         marginTop: 20,
@@ -37,6 +37,7 @@ export default function ConnectScreen({ onRetry }: ConnectScreenProps) {
           Retry
         </button>
       )}
+      <style>{`@keyframes pulse { 0%,100%{transform:scale(1);opacity:.6} 50%{transform:scale(1.4);opacity:1} }`}</style>
     </div>
   );
 }

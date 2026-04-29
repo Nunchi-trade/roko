@@ -9,22 +9,19 @@
 import type { TerminalHandle } from './useTerminal';
 import { lookupCmdDesc } from '../lib/cmd-descriptions';
 
-// ── Speed multiplier ─────────────────────────────────────────
+// ── Global speed ─────────────────────────────────────────────
 
-let speedMultiplier = 1;
+let globalSpeed = 1;
 
-export function setSpeedMultiplier(m: number) {
-  speedMultiplier = m;
+/** Set the global typing speed multiplier (used by showCmd when no explicit speed is passed). */
+export function setGlobalSpeed(speed: number) {
+  globalSpeed = speed;
 }
 
 // ── Helpers ──────────────────────────────────────────────────
 
 function rawSleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
-}
-
-function adjustedSleep(ms: number): Promise<void> {
-  return rawSleep(ms / speedMultiplier);
 }
 
 // ── Roko binary resolution ───────────────────────────────────
@@ -87,7 +84,6 @@ export async function setupWorkspace(
   await handle.execCmd(`mkdir -p ${dir} && cd ${dir}`, 5000);
   await handle.execCmd(`${resolvedRoko} init`, 30000);
   await rawSleep(200);
-  handle.clearTerminal();
   return dir;
 }
 
@@ -103,7 +99,6 @@ export async function joinWorkspace(
   await handle.waitForPrompt(10000);
   await resolveRoko(handle);
   await handle.execCmd(`cd ${dir}`, 3000);
-  handle.clearTerminal();
 }
 
 // ── Command execution with logging ──────────────────────────
@@ -127,17 +122,17 @@ async function typeVisibleCommandAndWait(
   handle: TerminalHandle,
   cmd: string,
   timeout: number,
+  speed = 1,
 ): Promise<boolean> {
-  if (!handle?.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
+  if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
 
   const marker = `__RK_SHOW_${(++showCmdSeq).toString(36)}_${Date.now().toString(36)}__`;
+  const charDelay = Math.max(3, (10 + Math.random() * 5) / speed);
   for (const ch of cmd) {
-    if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
     handle.ws.send(ch);
-    await adjustedSleep(10 + Math.random() * 5);
+    await rawSleep(charDelay);
   }
-  await adjustedSleep(40);
-  if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
+  await rawSleep(Math.max(10, 40 / speed));
   handle.ws.send('\r');
   handle.sendRaw(`printf '\\n${marker}\\n'\r`);
   return handle.waitForMarker(marker, timeout);
@@ -157,6 +152,7 @@ export async function showCmd(
   opts?: {
     timeout?: number;
     customDesc?: string;
+    speed?: number;
     onLog?: (cmd: string, desc: string) => void;
     onGate?: (name: string, status: 'pass' | 'fail') => void;
     onCost?: (cost: string) => void;
@@ -175,7 +171,7 @@ export async function showCmd(
 
   // Type and execute. Waiting on an explicit marker is more reliable than
   // trying to parse arbitrary themed shell prompts.
-  const ok = await typeVisibleCommandAndWait(handle, cmd, timeout);
+  const ok = await typeVisibleCommandAndWait(handle, cmd, timeout, opts?.speed ?? globalSpeed);
 
   const elapsed = (Date.now() - startTime) / 1000;
 

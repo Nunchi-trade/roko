@@ -1,0 +1,195 @@
+.job-market-page {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 48px);
+  overflow: hidden;
+  background: var(--bg-void);
+}
+
+/* ── Header bar ── */
+
+.job-market-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--bg-raised);
+  flex-shrink: 0;
+}
+
+.job-market-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.job-market-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+  transition: background 300ms ease;
+}
+
+.job-market-status-dot.live {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+}
+
+.job-market-status-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  color: var(--text-ghost);
+  text-transform: uppercase;
+}
+
+.job-market-run-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  padding: 4px 14px;
+  border: 1px solid var(--rose-dim);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--rose);
+  cursor: pointer;
+  transition: all 200ms ease;
+  text-transform: uppercase;
+}
+
+.job-market-run-btn:hover:not(:disabled) {
+  background: var(--rose-dim);
+  color: var(--text-strong);
+}
+
+.job-market-run-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.job-market-run-btn.running {
+  border-color: var(--bone-dim);
+  color: var(--bone);
+  animation: runPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes runPulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* ── 3-column layout ── */
+
+.job-market-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Terminal columns (20% each) ── */
+
+.job-market-term {
+  flex: 0 0 20%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-void);
+  position: relative;
+  border-left: 2px solid transparent;
+  transition: border-color 200ms var(--ease);
+}
+
+.job-market-term:first-child {
+  border-left: none;
+  border-right: 1px solid var(--glass-border);
+}
+
+.job-market-term:last-child {
+  border-left: 1px solid var(--glass-border);
+  border-right: none;
+}
+
+.job-market-term.active {
+  border-left-color: var(--rose-dim);
+}
+
+.job-market-term.active:first-child {
+  border-right-color: var(--rose-dim);
+}
+
+/* Scanline overlay on terminals */
+.job-market-term::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 2px,
+    rgba(0,0,0,.04) 2px,
+    rgba(0,0,0,.04) 4px
+  );
+  pointer-events: none;
+  z-index: 2;
+}
+
+.job-market-term-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--glass-border);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+  flex-shrink: 0;
+}
+
+.job-market-term-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Center visualization (60%) ── */
+
+.job-market-viz {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-void);
+}
+
+/* ── Bottom bar ── */
+
+.job-market-bottom {
+  flex-shrink: 0;
+  border-top: 1px solid var(--glass-border);
+  background: var(--bg-raised);
+  padding: 4px 12px;
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 900px) {
+  .job-market-main {
+    flex-direction: column;
+  }
+
+  .job-market-term {
+    flex: 0 0 25%;
+    border-left: none !important;
+    border-right: none !important;
+    border-bottom: 1px solid var(--glass-border);
+  }
+
+  .job-market-viz {
+    min-height: 300px;
+  }
+}

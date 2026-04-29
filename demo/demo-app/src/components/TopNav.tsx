@@ -5,6 +5,7 @@ import './TopNav.css';
 
 const NAV_LINKS = [
   { to: '/demo', label: 'DEMO' },
+  { to: '/job-market', label: 'JOBS' },
   { to: '/dashboard', label: 'DASHBOARD' },
   { to: '/bench', label: 'BENCH' },
   { to: '/explorer', label: 'EXPLORER' },
@@ -52,7 +53,7 @@ export default function TopNav() {
     <nav className="topnav">
       <Link to="/" className="brand" style={{ textDecoration: 'none' }}>
         <span className="mark" />
-        <b>ROKO</b>
+        <b>NUNCHI</b>
       </Link>
       <div className="links">
         {NAV_LINKS.map((l) => (

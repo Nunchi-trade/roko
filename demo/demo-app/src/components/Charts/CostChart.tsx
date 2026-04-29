@@ -90,7 +90,7 @@ export default function CostChart({ data, title, color = '#C8B890', height = 200
       ctx.lineTo(lastX, pad.top + plotH);
       ctx.lineTo(pad.left, pad.top + plotH);
       ctx.closePath();
-      ctx.fillStyle = `${color}14`;
+      ctx.fillStyle = color.replace(')', ',0.08)').replace('rgb', 'rgba');
       ctx.fill();
     }
   }, [data, title, color]);

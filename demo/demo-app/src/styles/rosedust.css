@@ -58,6 +58,12 @@
   --wrap: 1240px;
   --gutter: 64px;
   --section-y: 200px;
+
+  /* ── spacing (Phase 0) ── */
+  --gap-xs: 8px;
+  --gap-sm: 12px;
+  --gap-md: 20px;
+  --gap-lg: 32px;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -101,7 +107,7 @@ em { font-style: italic; color: var(--rose-glow) }
 
 code {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--bone);
 }
 
@@ -201,8 +207,8 @@ h3 {
 
 h4, .mono-label {
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: .28em;
+  font-size: 13px;
+  letter-spacing: .18em;
   text-transform: uppercase;
   color: var(--text-dim);
   font-weight: 400;
@@ -211,7 +217,7 @@ h4, .mono-label {
 .lead {
   font-family: var(--display);
   font-weight: 300;
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1.65;
   color: var(--text-soft);
   max-width: 900px;
@@ -259,7 +265,7 @@ section + section::before {
 
 .stag .num {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: .22em;
   color: var(--rose-glow);
   font-weight: 400;
@@ -267,7 +273,7 @@ section + section::before {
 
 .stag .label {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: .28em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -301,7 +307,7 @@ section + section::before {
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: .20em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -383,7 +389,7 @@ section + section::before {
 
 .mosaic .cell .k {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 12px;
   letter-spacing: .28em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -395,7 +401,7 @@ section + section::before {
   font-family: var(--display);
   font-style: italic;
   font-weight: 300;
-  font-size: 34px;
+  font-size: 40px;
   color: var(--rose-glow);
   letter-spacing: -.01em;
   line-height: 1.1;
@@ -413,7 +419,7 @@ section + section::before {
 .mosaic .cell .sub {
   font-family: var(--sans);
   font-weight: 400;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.5;
   color: var(--text-soft);
   letter-spacing: .02em;
@@ -696,22 +702,6 @@ section + section::before {
   to { opacity: 1; }
 }
 
-/* Component keyframes (Skeleton, LiveIndicator, ConnectScreen) */
-@keyframes shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-
-@keyframes livepulse {
-  0%, 100% { opacity: .7; }
-  50% { opacity: 1; }
-}
-
-@keyframes connectPulse {
-  0%, 100% { transform: scale(1); opacity: .6; }
-  50% { transform: scale(1.4); opacity: 1; }
-}
-
 /* ═══════════════════════════════════════════════════════════
    GLASS CARD HOVER
    ═══════════════════════════════════════════════════════════ */
@@ -723,6 +713,32 @@ section + section::before {
 .glass-card:hover {
   border-color: rgba(204, 144, 168, .18);
   box-shadow: 0 0 20px rgba(204, 144, 168, .08);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   STAGED REVEAL UTILITIES (Phase 0)
+   ═══════════════════════════════════════════════════════════ */
+
+.staged-enter {
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 500ms var(--ease), transform 500ms var(--ease);
+  transition-delay: calc(var(--stagger-index, 0) * 80ms);
+}
+
+.staged-enter.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@keyframes contentPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(216, 154, 178, 0); }
+  50%  { box-shadow: 0 0 16px 2px rgba(216, 154, 178, .15); }
+  100% { box-shadow: 0 0 0 0 rgba(216, 154, 178, 0); }
+}
+
+.content-pulse {
+  animation: contentPulse 1.2s ease-out;
 }
 
 /* ═══════════════════════════════════════════════════════════

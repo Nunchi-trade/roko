@@ -18,6 +18,7 @@ export default function LiveIndicator({ active = true }: LiveIndicatorProps) {
       }}>
         {active ? 'LIVE' : 'OFFLINE'}
       </span>
+      <style>{`@keyframes livepulse { 0%,100%{opacity:.7} 50%{opacity:1} }`}</style>
     </span>
   );
 }
