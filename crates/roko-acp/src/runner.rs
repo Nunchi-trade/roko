@@ -51,6 +51,51 @@ pub struct PipelineConfig {
 const CLAUDE_CLI_BIN: &str = "claude";
 const NO_CHANGES_TO_COMMIT_MESSAGE: &str = "(no changes to commit)";
 
+/// Classification of the gate failure cause.
+#[derive(Debug)]
+enum GateErrorType {
+    CompileError {
+        file: String,
+        line: u32,
+        message: String,
+    },
+    TestFailure {
+        test_name: String,
+        expected: Option<String>,
+        actual: Option<String>,
+    },
+    ClippyWarning {
+        lint: String,
+        location: String,
+    },
+    RuntimePanic {
+        message: String,
+    },
+    Unknown,
+}
+
+impl GateErrorType {
+    fn description(&self) -> &'static str {
+        match self {
+            Self::CompileError { .. } => "compile error",
+            Self::TestFailure { .. } => "test failure",
+            Self::ClippyWarning { .. } => "clippy warning",
+            Self::RuntimePanic { .. } => "runtime panic",
+            Self::Unknown => "unknown error",
+        }
+    }
+}
+
+/// Forensic analysis of a gate failure.
+#[derive(Debug)]
+struct GateAutopsy {
+    error_type: GateErrorType,
+    root_cause: String,
+    causal_chain: Vec<String>,
+    similar_past: Option<(String, String)>,
+    confidence: f64,
+}
+
 /// Detect files changed in the most recent commit via `git diff --name-status HEAD~1 HEAD`.
 /// Returns an empty vec if git is unavailable or the repo has no prior commits.
 fn detect_file_changes(workdir: &Path) -> Vec<FileChangeNotification> {
@@ -107,6 +152,248 @@ fn detect_file_changes(workdir: &Path) -> Vec<FileChangeNotification> {
     }
 
     changes
+}
+
+fn classify_gate_error(output: &str) -> GateErrorType {
+    if let Some(line) = output.lines().find(|line| line.contains("error[E")) {
+        let location_line = output
+            .lines()
+            .find(|candidate| candidate.contains("-->") && candidate.contains(".rs:"));
+        let location = location_line
+            .and_then(|line| line.split_once("-->").map(|(_, location)| location.trim()));
+        let file = location
+            .and_then(|location| location.split_once(':').map(|(file, _)| file.to_string()))
+            .unwrap_or_default();
+        let line_no: u32 = location
+            .and_then(|location| location.split_once(':'))
+            .and_then(|(_, rest)| rest.split_once(':'))
+            .and_then(|(line, _)| line.parse().ok())
+            .unwrap_or(0);
+        let message = line
+            .split_once("error[E")
+            .and_then(|(_, segment)| segment.split_once("]: ").map(|(_, message)| message))
+            .unwrap_or(line)
+            .chars()
+            .take(120)
+            .collect();
+        return GateErrorType::CompileError {
+            file,
+            line: line_no,
+            message,
+        };
+    }
+
+    if output.contains("panicked at")
+        || output
+            .lines()
+            .any(|line| line.starts_with("thread '") && line.contains("panicked"))
+    {
+        let message = output
+            .lines()
+            .find(|line| line.contains("panicked at") || line.contains("panicked"))
+            .map(|line| line.chars().take(120).collect())
+            .unwrap_or_default();
+        return GateErrorType::RuntimePanic { message };
+    }
+
+    if output.contains("test result: FAILED")
+        || output
+            .lines()
+            .any(|line| line.contains("FAILED") && !line.contains("test result:"))
+    {
+        let test_name = output
+            .lines()
+            .find(|line| line.contains("FAILED") && !line.contains("test result:"))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("unknown")
+            .trim_end_matches("...")
+            .to_string();
+        let expected = output
+            .lines()
+            .find(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with("left =")
+                    || trimmed.starts_with("left:")
+                    || trimmed.starts_with("expected =")
+                    || trimmed.starts_with("expected:")
+            })
+            .map(|line| line.trim().chars().take(80).collect());
+        let actual = output
+            .lines()
+            .find(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with("right =")
+                    || trimmed.starts_with("right:")
+                    || trimmed.starts_with("actual =")
+                    || trimmed.starts_with("actual:")
+                    || trimmed.starts_with("got =")
+                    || trimmed.starts_with("got:")
+            })
+            .map(|line| line.trim().chars().take(80).collect());
+        return GateErrorType::TestFailure {
+            test_name,
+            expected,
+            actual,
+        };
+    }
+
+    if output.contains("warning:") && output.contains("error: could not compile") {
+        let lint = output
+            .lines()
+            .find(|line| line.trim().starts_with("warning:"))
+            .and_then(|line| line.strip_prefix("warning:"))
+            .map(|line| line.trim().chars().take(60).collect())
+            .unwrap_or_default();
+        let location = output
+            .lines()
+            .find(|line| line.contains("-->") && line.contains(".rs:"))
+            .and_then(|line| line.split_once("-->").map(|(_, location)| location.trim()))
+            .map(|location| location.chars().take(60).collect())
+            .unwrap_or_default();
+        return GateErrorType::ClippyWarning { lint, location };
+    }
+
+    GateErrorType::Unknown
+}
+
+fn extract_root_cause(output: &str) -> String {
+    output
+        .lines()
+        .find(|line| {
+            line.contains("error[E")
+                || line.contains("panicked at")
+                || (line.starts_with("thread '") && line.contains("panicked"))
+                || line.contains("FAILED")
+                || line.contains("error:")
+        })
+        .unwrap_or("could not determine root cause")
+        .trim()
+        .chars()
+        .take(200)
+        .collect()
+}
+
+async fn analyze_gate_failure(error_output: &str, workdir: &Path, _iteration: u32) -> GateAutopsy {
+    use roko_learn::episode_logger::EpisodeLogger;
+
+    let error_type = classify_gate_error(error_output);
+    let root_cause = extract_root_cause(error_output);
+    let mut causal_chain = Vec::new();
+
+    if let Ok(output) = Command::new("git")
+        .args(["diff", "--stat", "HEAD"])
+        .current_dir(workdir)
+        .output()
+        .await
+        && output.status.success()
+    {
+        let stat = String::from_utf8_lossy(&output.stdout);
+        if let Some(summary) = stat
+            .lines()
+            .last()
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+        {
+            causal_chain.push(format!("Changes: {summary}"));
+        }
+    }
+
+    match &error_type {
+        GateErrorType::CompileError { file, line, message } => {
+            if !file.is_empty() {
+                causal_chain.push(format!("Compile error at {file}:{line}"));
+            }
+            causal_chain.push(format!("Message: {message}"));
+        }
+        GateErrorType::TestFailure {
+            test_name,
+            expected,
+            actual,
+        } => {
+            causal_chain.push(format!("Test `{test_name}` failed"));
+            if let (Some(expected), Some(actual)) = (expected, actual) {
+                causal_chain.push(format!("Expected: {expected}"));
+                causal_chain.push(format!("Got: {actual}"));
+            }
+        }
+        GateErrorType::ClippyWarning { lint, location } => {
+            causal_chain.push(format!("Clippy: {lint}"));
+            if !location.is_empty() {
+                causal_chain.push(format!("In: {location}"));
+            }
+        }
+        GateErrorType::RuntimePanic { message } => {
+            causal_chain.push(format!("Panic: {message}"));
+        }
+        GateErrorType::Unknown => {
+            causal_chain.push("Error type: unclassified".to_string());
+        }
+    }
+
+    if causal_chain.is_empty() {
+        causal_chain.push("No additional causal evidence found".to_string());
+    }
+
+    let mut similar_past: Option<(String, String)> = None;
+    let episodes_path = workdir.join(".roko").join("episodes.jsonl");
+
+    if let Ok(episodes) = EpisodeLogger::read_all_lossy(&episodes_path).await {
+        let error_sig: String = root_cause.chars().take(60).collect();
+        for episode in episodes.iter().rev().take(50) {
+            if episode.success {
+                continue;
+            }
+
+            let past_text = episode
+                .reflection
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    episode
+                        .failure_reason
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                });
+
+            if let Some(text) = past_text.filter(|text| {
+                !error_sig.is_empty()
+                    && (text.contains(&error_sig) || similar_strings(text, &error_sig))
+            }) {
+                let task_id = if episode.task_id.trim().is_empty() {
+                    "unknown-task".to_string()
+                } else {
+                    episode.task_id.clone()
+                };
+                similar_past = Some((task_id, text.chars().take(120).collect()));
+                break;
+            }
+        }
+    }
+
+    let confidence = match (&error_type, &similar_past) {
+        (GateErrorType::Unknown, None) => 0.30,
+        (GateErrorType::Unknown, Some(_)) => 0.60,
+        (_, None) => 0.65,
+        (_, Some(_)) => 0.89,
+    };
+
+    GateAutopsy {
+        error_type,
+        root_cause,
+        causal_chain,
+        similar_past,
+        confidence,
+    }
+}
+
+fn similar_strings(a: &str, b: &str) -> bool {
+    use std::collections::HashSet;
+
+    let words_a: HashSet<&str> = a.split_whitespace().collect();
+    let words_b: HashSet<&str> = b.split_whitespace().collect();
+    let overlap = words_a.intersection(&words_b).count();
+    let total = words_a.len().max(words_b.len());
+    total > 3 && (overlap as f64 / total as f64) > 0.5
 }
 
 /// Execute a prompt via WorkflowEngine, bridging events to ACP protocol.
@@ -612,9 +899,64 @@ pub async fn run_workflow_pipeline(
                         let attempt = run.pipeline.iteration + 1;
                         let narrative = narrate_gate_failure(&error_str, attempt);
                         emit_narrative(&narrative, &event_sender).await;
+                        let autopsy =
+                            analyze_gate_failure(&error_str, workdir, run.pipeline.iteration)
+                                .await;
+                        let GateAutopsy {
+                            error_type,
+                            root_cause,
+                            causal_chain,
+                            similar_past,
+                            confidence,
+                        } = autopsy;
+
+                        let autopsy_id = format!("gate-autopsy-{}", run.pipeline.iteration);
+                        let _ = event_sender
+                            .send(CognitiveEvent::ToolCallStart {
+                                tool_call_id: autopsy_id.clone(),
+                                title: format!("Gate autopsy: {}", error_type.description()),
+                                kind: ToolCallKind::Other,
+                            })
+                            .await;
+
+                        let mut card_text =
+                            format!("**Root cause:** {root_cause}\n\n**Causal chain:**\n");
+                        for (index, step) in causal_chain.iter().enumerate() {
+                            card_text.push_str(&format!("  {}. {}\n", index + 1, step));
+                        }
+                        if let Some((task_id, resolution)) = &similar_past {
+                            card_text.push_str(&format!(
+                                "\n**Similar past failure:** episode `{task_id}`\n  Reflection/resolution: {resolution}\n"
+                            ));
+                        }
+                        card_text.push_str(&format!(
+                            "\n**Confidence:** {:.0}% ({})",
+                            confidence * 100.0,
+                            error_type.description()
+                        ));
+
+                        let _ = event_sender
+                            .send(CognitiveEvent::ToolCallComplete {
+                                tool_call_id: autopsy_id,
+                                status: ToolCallStatus::Completed,
+                                content: vec![ContentBlock::Text { text: card_text }],
+                            })
+                            .await;
+
+                        let enhanced_error = if let Some((task_id, resolution)) = &similar_past {
+                            format!(
+                                "Fix the following {} error.\nRoot cause: {root_cause}\nSimilar past episode: {task_id}\nSimilar past resolution: {resolution}\n\nError output:\n{error_str}",
+                                error_type.description()
+                            )
+                        } else {
+                            format!(
+                                "Fix the following {} error.\nRoot cause: {root_cause}\n\nError output:\n{error_str}",
+                                error_type.description()
+                            )
+                        };
                         run.pipeline.step(PipelineEvent::GateFailed {
                             gate: "gate".into(),
-                            output: error_str,
+                            output: enhanced_error,
                         })
                     }
                 };
