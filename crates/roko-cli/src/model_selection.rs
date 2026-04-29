@@ -118,7 +118,7 @@ pub enum Error {
     },
     /// The selected model could not be backed by any configured provider.
     #[error(
-        "{selection_source} selected unknown model '{model}', and no configured provider matches kind '{provider_kind}'"
+        "{source} selected unknown model '{model}', and no configured provider matches kind '{provider_kind}'"
     )]
     UnknownModel {
         /// Which precedence step selected the model.
@@ -310,7 +310,7 @@ fn select_provider<'a>(
         let provider = providers
             .get(provider_key)
             .ok_or_else(|| Error::MissingProvider {
-                selection_source: source,
+                source,
                 model: model.to_string(),
                 provider_key: provider_key.to_string(),
             })?;

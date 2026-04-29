@@ -1942,7 +1942,6 @@ async fn dispatch_agent(
             selected_model_override.clone(),
             prompt_text,
             strategy,
-            resolved_cli_model.clone(),
         )
         .await;
     } else if config.agent.command == "claude" {
@@ -2022,7 +2021,6 @@ async fn dispatch_agent(
             selected_model_override.clone(),
             prompt_text,
             strategy,
-            resolved_cli_model.clone(),
         )
         .await)
     } else if is_known_protocol_command(&config.agent.command) {
