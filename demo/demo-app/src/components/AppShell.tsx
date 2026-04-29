@@ -1,16 +1,15 @@
-import { Suspense, lazy, useEffect } from 'react';
+import { useEffect } from 'react';
 import { Outlet } from 'react-router';
 import Grain from './Grain';
+import HeroParticleField from './HeroParticleField';
 import Curtain from './Curtain';
 import ScrollTrack from './ScrollTrack';
 import TopNav from './TopNav';
-import ConfigWidget from './ConfigWidget';
-import { RokoConfigProvider } from '../hooks/useRokoConfig';
-import { WorkspaceProvider } from '../hooks/useWorkspace';
-
-const HeroParticleField = lazy(() => import('./HeroParticleField'));
+import { useApiWithFallback } from '../hooks/useApiWithFallback';
 
 export default function AppShell() {
+  const { dataMode } = useApiWithFallback();
+
   useEffect(() => {
     const io = new IntersectionObserver(
       (entries) => {
@@ -28,30 +27,37 @@ export default function AppShell() {
   }, []);
 
   return (
-    <RokoConfigProvider>
-      <WorkspaceProvider>
-        <Grain />
-        <Suspense fallback={null}>
-          <HeroParticleField />
-        </Suspense>
-        <Curtain />
-        <ScrollTrack />
-        <TopNav />
-        <ConfigWidget />
-        <div className="app-frame" style={{
-          paddingTop: 'var(--nav-h)',
-          position: 'relative',
-          zIndex: 1,
-          height: '100vh',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}>
-          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <Outlet />
-          </div>
+    <>
+      <Grain />
+      <HeroParticleField />
+      <Curtain />
+      <ScrollTrack />
+      <TopNav />
+      {dataMode === 'seed' && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 52,
+            right: 12,
+            zIndex: 9000,
+            background: 'rgba(255, 200, 0, 0.15)',
+            border: '1px solid rgba(255, 200, 0, 0.4)',
+            borderRadius: 4,
+            padding: '2px 8px',
+            fontSize: 11,
+            fontFamily: 'monospace',
+            color: 'rgba(255, 200, 0, 0.9)',
+            letterSpacing: '0.08em',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          SEED DATA
         </div>
-      </WorkspaceProvider>
-    </RokoConfigProvider>
+      )}
+      <div className="app-frame" style={{ paddingTop: 48, position: 'relative', zIndex: 1, minHeight: '100vh' }}>
+        <Outlet />
+      </div>
+    </>
   );
 }
