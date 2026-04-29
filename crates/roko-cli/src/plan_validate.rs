@@ -99,6 +99,27 @@ pub fn validate_plans_dir(
     dir: &Path,
     models: Option<&HashMap<String, ModelProfile>>,
 ) -> Result<ValidationReport> {
+    validate_plans_dir_impl(dir, models, None)
+}
+
+/// Validate plans in `dir` with optional file-reference checking against `workdir`.
+///
+/// When `workdir` is provided, each `tasks.toml` file is scanned for declared
+/// `files` and `write_files` entries and those paths are checked against the
+/// workspace filesystem.
+pub fn validate_plans_dir_with_workdir(
+    dir: &Path,
+    models: Option<&HashMap<String, ModelProfile>>,
+    workdir: Option<&Path>,
+) -> Result<ValidationReport> {
+    validate_plans_dir_impl(dir, models, workdir)
+}
+
+fn validate_plans_dir_impl(
+    dir: &Path,
+    models: Option<&HashMap<String, ModelProfile>>,
+    workdir: Option<&Path>,
+) -> Result<ValidationReport> {
     let tasks_files = collect_tasks_files(dir)?;
     let mut plans = Vec::with_capacity(tasks_files.len());
     let mut totals = Totals {
@@ -107,8 +128,20 @@ pub fn validate_plans_dir(
     };
 
     for tasks_path in tasks_files {
-        let plan = validate_tasks_file(&tasks_path, models)
+        let mut plan = validate_tasks_file(&tasks_path, models)
             .with_context(|| format!("validate {}", tasks_path.display()))?;
+        if let Some(workdir) = workdir
+            && let Ok(ref_diagnostics) = validate_file_references(&tasks_path, workdir)
+        {
+            plan.diagnostics.extend(ref_diagnostics);
+            plan.diagnostics.sort_by(|left, right| {
+                left.severity
+                    .cmp(&right.severity)
+                    .then_with(|| left.rule_id.cmp(&right.rule_id))
+                    .then_with(|| left.task_id.cmp(&right.task_id))
+                    .then_with(|| left.message.cmp(&right.message))
+            });
+        }
         for diagnostic in &plan.diagnostics {
             match diagnostic.severity {
                 Severity::Error => totals.errors += 1,
@@ -888,6 +921,168 @@ fn model_is_known(model: &str, known_models: &HashMap<String, ModelProfile>) -> 
     known_models.contains_key(model) || known_models.values().any(|profile| profile.slug == model)
 }
 
+/// Extract the workspace package/crate name from a task file path.
+///
+/// Returns `Some(name)` for paths like `crates/roko-foo/src/lib.rs` and
+/// `packages/app-one/package.json`. Returns `None` for paths outside those
+/// workspace roots.
+fn extract_crate_from_path(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.splitn(3, '/').collect();
+    if parts.len() >= 2 && (parts[0] == "crates" || parts[0] == "packages") {
+        Some(parts[1])
+    } else {
+        None
+    }
+}
+
+/// Collect declared task file paths from a parsed `tasks.toml`.
+///
+/// Returns `(task_id, file_path)` pairs for both `files` and `write_files`.
+fn collect_task_file_paths(parsed: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let tasks = parsed
+        .get("task")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    for task in tasks {
+        let table = match task.as_table() {
+            Some(table) => table,
+            None => continue,
+        };
+
+        let task_id = table
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+
+        for field in ["files", "write_files"] {
+            if let Some(files) = table.get(field).and_then(Value::as_array) {
+                for file in files {
+                    let Some(path) = file
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    else {
+                        continue;
+                    };
+
+                    let key = (task_id.clone(), path.to_string());
+                    if seen.insert(key.clone()) {
+                        out.push(key);
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn collect_workspace_package_names(workdir: &Path, root_dir_name: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let root = workdir.join(root_dir_name);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return names;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            names.insert(name.to_string());
+        }
+    }
+
+    names
+}
+
+/// Validate that declared file references exist in the workspace.
+///
+/// Paths under `crates/<name>/` and `packages/<name>/` are checked against the
+/// corresponding workspace directories. Other paths must exist on disk.
+pub fn validate_file_references(tasks_path: &Path, workdir: &Path) -> Result<Vec<Diagnostic>> {
+    let content = std::fs::read_to_string(tasks_path)
+        .with_context(|| format!("read {}", tasks_path.display()))?;
+    let parsed: Value =
+        toml::from_str(&content).with_context(|| format!("parse TOML {}", tasks_path.display()))?;
+    let plan_id = parsed
+        .get("meta")
+        .and_then(Value::as_table)
+        .and_then(|meta| meta.get("plan"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown-plan")
+        .to_string();
+    let existing_crates = collect_workspace_package_names(workdir, "crates");
+    let existing_packages = collect_workspace_package_names(workdir, "packages");
+    let file_refs = collect_task_file_paths(&parsed);
+    let mut diagnostics = Vec::new();
+
+    for (task_id, file_path) in &file_refs {
+        let full_path = workdir.join(file_path);
+        match file_path.split_once('/') {
+            Some(("crates", _)) => {
+                if let Some(crate_name) = extract_crate_from_path(file_path)
+                    && !existing_crates.contains(crate_name)
+                {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Warning,
+                        rule_id: "PLAN_030".to_string(),
+                        plan_id: Some(plan_id.clone()),
+                        task_id: Some(task_id.clone()),
+                        message: format!(
+                            "task '{}' references file in crate '{}' which does not exist in crates/",
+                            task_id, crate_name
+                        ),
+                    });
+                }
+            }
+            Some(("packages", _)) => {
+                if let Some(package_name) = extract_crate_from_path(file_path)
+                    && !existing_packages.contains(package_name)
+                {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Warning,
+                        rule_id: "PLAN_030".to_string(),
+                        plan_id: Some(plan_id.clone()),
+                        task_id: Some(task_id.clone()),
+                        message: format!(
+                            "task '{}' references file in package '{}' which does not exist in packages/",
+                            task_id, package_name
+                        ),
+                    });
+                }
+            }
+            _ => {
+                if !full_path.exists() {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Warning,
+                        rule_id: "PLAN_031".to_string(),
+                        plan_id: Some(plan_id.clone()),
+                        task_id: Some(task_id.clone()),
+                        message: format!(
+                            "task '{}' references '{}' which does not exist on disk",
+                            task_id, file_path
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(diagnostics)
+}
+
 /// Map a known model alias to its canonical name.
 ///
 /// Returns `Some(canonical)` if the alias is known, `None` if already
@@ -899,5 +1094,164 @@ fn normalize_model_alias(alias: &str) -> Option<&'static str> {
         "sonnet" | "claude-sonnet" => Some("claude-sonnet-4-6"),
         "opus" | "claude-opus" => Some("claude-opus-4-6"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn extract_crate_from_path_handles_workspace_roots() {
+        assert_eq!(
+            extract_crate_from_path("crates/roko-foo/src/lib.rs"),
+            Some("roko-foo")
+        );
+        assert_eq!(
+            extract_crate_from_path("packages/app-one/package.json"),
+            Some("app-one")
+        );
+        assert_eq!(extract_crate_from_path("src/lib.rs"), None);
+    }
+
+    #[test]
+    fn collect_task_file_paths_reads_files_and_write_files() {
+        let parsed: Value = toml::from_str(
+            r#"
+[meta]
+plan = "demo"
+
+[[task]]
+id = "T1"
+files = ["src/lib.rs", "docs/guide.md"]
+write_files = ["crates/roko-cli/src/plan_validate.rs", " "]
+
+[[task]]
+id = "T2"
+write_files = ["docs/guide.md", "packages/app-one/package.json"]
+"#,
+        )
+        .unwrap();
+
+        let refs = collect_task_file_paths(&parsed);
+        assert_eq!(
+            refs,
+            vec![
+                ("T1".to_string(), "src/lib.rs".to_string()),
+                ("T1".to_string(), "docs/guide.md".to_string()),
+                (
+                    "T1".to_string(),
+                    "crates/roko-cli/src/plan_validate.rs".to_string()
+                ),
+                ("T2".to_string(), "docs/guide.md".to_string()),
+                (
+                    "T2".to_string(),
+                    "packages/app-one/package.json".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_file_references_warns_for_missing_workspace_paths() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("plans/demo")).unwrap();
+        fs::create_dir_all(root.join("crates/existing-crate")).unwrap();
+        fs::write(
+            root.join("crates/existing-crate/Cargo.toml"),
+            "[package]\nname = \"existing-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/existing.md"), "# exists\n").unwrap();
+        fs::create_dir_all(root.join("packages/existing-app")).unwrap();
+        fs::write(
+            root.join("packages/existing-app/package.json"),
+            "{\n  \"name\": \"existing-app\"\n}\n",
+        )
+        .unwrap();
+
+        let tasks_path = root.join("plans/demo/tasks.toml");
+        fs::write(
+            &tasks_path,
+            r#"
+[meta]
+plan = "demo"
+
+[[task]]
+id = "T1"
+title = "Validate file refs"
+role = "implementer"
+files = [
+  "crates/existing-crate/src/lib.rs",
+  "crates/missing-crate/src/lib.rs",
+  "docs/existing.md",
+]
+write_files = [
+  "docs/missing.md",
+  "packages/existing-app/package.json",
+  "packages/missing-app/package.json",
+]
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+"#,
+        )
+        .unwrap();
+
+        let plans_dir = root.join("plans");
+
+        let no_workdir = validate_plans_dir(plans_dir.as_path(), None).unwrap();
+        assert_eq!(no_workdir.totals.errors, 0);
+        assert_eq!(no_workdir.totals.warnings, 0);
+
+        let diagnostics = validate_file_references(&tasks_path, root).unwrap();
+        assert_eq!(diagnostics.len(), 3);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diag| diag.rule_id == "PLAN_030" && diag.message.contains("missing-crate"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diag| diag.rule_id == "PLAN_030" && diag.message.contains("missing-app"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diag| diag.rule_id == "PLAN_031" && diag.message.contains("docs/missing.md"))
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diag| diag.message.contains("existing-crate/src/lib.rs"))
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diag| diag.message.contains("existing-app/package.json"))
+        );
+
+        let with_workdir =
+            validate_plans_dir_with_workdir(plans_dir.as_path(), None, Some(root)).unwrap();
+        assert_eq!(with_workdir.totals.errors, 0);
+        assert_eq!(with_workdir.totals.warnings, 3);
+        assert_eq!(with_workdir.plans.len(), 1);
+        assert!(
+            with_workdir.plans[0]
+                .diagnostics
+                .iter()
+                .any(|diag| diag.rule_id == "PLAN_030")
+        );
+        assert!(
+            with_workdir.plans[0]
+                .diagnostics
+                .iter()
+                .any(|diag| diag.rule_id == "PLAN_031")
+        );
     }
 }
