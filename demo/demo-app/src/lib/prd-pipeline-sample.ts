@@ -61,7 +61,7 @@ export const PIPELINE_EXAMPLES: PipelineScenarioExample[] = [
   },
 ];
 
-export const DEFAULT_PIPELINE_EXAMPLE_ID: PipelineExampleId = 'simple-status';
+export const DEFAULT_PIPELINE_EXAMPLE_ID: PipelineExampleId = 'funding-alert';
 
 export function getPipelineExample(id?: string): PipelineScenarioExample {
   return (
@@ -89,10 +89,6 @@ export function createPipelineIntroState(example: PipelineScenarioExample): Pipe
     example,
     plans: [],
     events: [],
-    stream: {
-      sse: 'idle',
-      ws: 'idle',
-    },
   };
 }
 

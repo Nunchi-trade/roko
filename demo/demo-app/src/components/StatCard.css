@@ -13,19 +13,19 @@
 }
 .stat-value {
   font-family: var(--mono, 'JetBrains Mono', monospace);
-  font-size: 2.2rem;
+  font-size: 1.6rem;
   font-weight: 600;
   line-height: 1;
   margin-bottom: 6px;
 }
 .stat-label {
-  font-size: 0.85rem;
+  font-size: 0.68rem;
   color: var(--text-soft);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
 .stat-sub {
-  font-size: 0.75rem;
+  font-size: 0.62rem;
   color: var(--text-dim);
   margin-top: 4px;
 }

@@ -21,7 +21,6 @@ import BenchRunDetail from './pages/BenchRunDetail';
 import BenchCompare from './pages/BenchCompare';
 import BenchShowroom from './pages/BenchShowroom';
 import SharePage from './pages/Share';
-import JobMarket from './pages/JobMarket';
 import './styles/rosedust.css';
 
 createRoot(document.getElementById('root')!).render(
@@ -49,7 +48,6 @@ createRoot(document.getElementById('root')!).render(
             <Route path="bench/compare" element={<BenchCompare />} />
             <Route path="bench/showroom" element={<BenchShowroom />} />
             <Route path="share/:token" element={<SharePage />} />
-            <Route path="job-market" element={<JobMarket />} />
           </Route>
         </Routes>
       </ErrorBoundary>

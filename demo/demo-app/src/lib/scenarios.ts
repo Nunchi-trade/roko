@@ -57,23 +57,12 @@ export interface ScenarioContext {
   pipelineExample: PipelineScenarioExample;
   paused: { current: boolean };
   running: { current: boolean };
-  speed: { current: number };
 }
-
-export type ScenarioCategory = 'core' | 'benchmarks' | 'knowledge' | 'advanced';
-
-export const SCENARIO_CATEGORIES: { id: ScenarioCategory; label: string }[] = [
-  { id: 'core', label: 'Core Flow' },
-  { id: 'benchmarks', label: 'Benchmarks' },
-  { id: 'knowledge', label: 'Knowledge' },
-  { id: 'advanced', label: 'Advanced' },
-];
 
 export interface Scenario {
   id: string;
   title: string;
   subtitle: string;
-  category: ScenarioCategory;
   panes: 1 | 2 | 4;
   labels: string[];
   panel: boolean;
@@ -81,16 +70,6 @@ export interface Scenario {
   mirageBar?: boolean;
   steps: ScenarioStep[];
   run(ctx: ScenarioContext): Promise<void>;
-}
-
-export function scenariosByCategory(scenarios: Scenario[]): Map<ScenarioCategory, Scenario[]> {
-  const map = new Map<ScenarioCategory, Scenario[]>();
-  for (const cat of SCENARIO_CATEGORIES) map.set(cat.id, []);
-  for (const s of scenarios) {
-    const list = map.get(s.category);
-    if (list) list.push(s);
-  }
-  return map;
 }
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -216,7 +195,6 @@ const prdPipeline: Scenario = {
   id: 'prd-pipeline',
   title: 'PRD Pipeline',
   subtitle: 'Pick an example, generate the PRD, generate tasks.toml, then watch routing and gates.',
-  category: 'core',
   panes: 1,
   labels: ['roko commands'],
   panel: true,
@@ -258,7 +236,7 @@ const prdPipeline: Scenario = {
       ctx.appendPipelineEvent(pipelineEvent('setup', `${example.setupDescription} This is setup, not the customer-facing demo step.`));
       logCommand('prepare workspace', 'Creates a small Rust CLI so the generated PRD and plan target real files.');
       await main.execCmd(setupCmd, 90000);
-      /* terminal preserved for presenter */
+      main.clearTerminal();
 
       await playback.waitForStep();
       const ideaCmd = `${ROKO} prd idea "${example.idea}"`;
@@ -286,17 +264,14 @@ const prdPipeline: Scenario = {
       });
       ctx.appendPipelineEvent(pipelineEvent('draft', 'Dispatching PRD writer agent.'));
       const draftResult = await showCmd(main, draftCmd, {
-        timeout: 360000,
+        timeout: 180000,
         onLog: logCommand,
         customDesc: 'Runs the PRD generator agent. The UI reads the resulting markdown from the workflow projection API.',
       });
       const draftSnapshot = await refreshWorkflowSnapshot(ctx, dir, 'draft', 'Structured PRD generated', draftCmd);
-      if (!draftSnapshot?.prd) {
+      if (!draftResult.ok || !draftSnapshot?.prd) {
         failPipeline(ctx, 'failed', 'PRD generation did not produce a draft', 'The workflow projection did not find a generated PRD draft.');
         return;
-      }
-      if (!draftResult.ok) {
-        ctx.appendPipelineEvent(pipelineEvent('draft', 'The terminal wait timed out, but the workflow projection found the PRD artifact.', 'warning'));
       }
       livePrdSlug = draftSnapshot.prd.slug || example.slug;
       setMetric('cost', '$ live');
@@ -325,7 +300,7 @@ const prdPipeline: Scenario = {
       });
       ctx.appendPipelineEvent(pipelineEvent('planning', 'Planner agent is generating plan.md and tasks.toml.'));
       const planResult = await showCmd(main, planCmd, {
-        timeout: 420000,
+        timeout: 240000,
         onLog: logCommand,
         customDesc: 'Generates implementation plan directories under .roko/plans/ with modern tasks.toml metadata and verify commands.',
       });
@@ -336,12 +311,9 @@ const prdPipeline: Scenario = {
         'Generated tasks, gates, and routing are ready to execute',
         planCmd,
       );
-      if (!planSnapshot || planSnapshot.plans.length === 0) {
+      if (!planResult.ok || !planSnapshot || planSnapshot.plans.length === 0) {
         failPipeline(ctx, 'failed', 'Plan generation did not produce tasks', 'The workflow projection did not find generated plan/task artifacts.');
         return;
-      }
-      if (!planResult.ok) {
-        ctx.appendPipelineEvent(pipelineEvent('planning', 'The terminal wait timed out, but the workflow projection found generated plan artifacts.', 'warning'));
       }
 
       await playback.waitForStep();
@@ -356,39 +328,26 @@ const prdPipeline: Scenario = {
       ctx.appendPipelineEvent(pipelineEvent('implementing', 'Starting real plan execution. Task states update from workflow events and artifacts.', 'success'));
 
       const runResult = await showCmd(main, runCmd, {
-        timeout: 600000,
+        timeout: 420000,
         onLog: logCommand,
         onGate: setGate,
         customDesc: 'Executes the generated plans through the Roko runner. The task board follows workflow SSE/WS state, gate events, and the workspace event log.',
       });
-      const finalSnapshotRaw = await fetchWorkflowSnapshot(dir);
-      const finalPlans = finalSnapshotRaw ? workflowSnapshotToPlans(finalSnapshotRaw) : [];
-      const finalTasks = finalPlans.flatMap((plan) => plan.tasks);
-      const finalDone = finalTasks.length > 0 && finalTasks.every((task) => task.status === 'done');
-      const finalOpen = finalTasks.filter((task) => task.status !== 'done').length;
-      const finalFailed = !runResult.ok || finalTasks.some((task) => task.status === 'failed' || task.status === 'blocked');
-      const finalPhase: PipelinePhase = finalDone ? 'complete' : finalFailed ? 'failed' : 'tasks';
-      const finalHeadline = finalDone
-        ? 'Generated tasks completed'
-        : finalFailed
-          ? 'Plan run ended with failures'
-          : `${finalOpen} generated task${finalOpen === 1 ? '' : 's'} still open`;
-      if (finalSnapshotRaw) {
-        applyWorkflowSnapshot(ctx, finalSnapshotRaw, finalPhase, finalHeadline, runCmd);
-      }
-      const finalSnapshot = finalSnapshotRaw;
+      const finalSnapshot = await refreshWorkflowSnapshot(
+        ctx,
+        dir,
+        runResult.ok ? 'complete' : 'failed',
+        runResult.ok ? 'Generated tasks completed' : 'Plan run ended with failures',
+        runCmd,
+      );
       if (!finalSnapshot) {
         failPipeline(ctx, 'failed', 'Workflow artifacts disappeared', 'The workflow projection could not load the final snapshot.');
       }
       ctx.appendPipelineEvent(
         pipelineEvent(
-          finalPhase,
-          finalDone
-            ? 'Implementation run finished.'
-            : finalFailed
-              ? 'Implementation run returned a non-ready prompt or failure.'
-              : 'Implementation run ended before every generated task was done.',
-          finalDone ? 'success' : finalFailed ? 'error' : 'warning',
+          runResult.ok ? 'complete' : 'failed',
+          runResult.ok ? 'Implementation run finished.' : 'Implementation run returned a non-ready prompt or failure.',
+          runResult.ok ? 'success' : 'error',
         ),
       );
       timeline.setActive(5);
@@ -402,7 +361,6 @@ const selfhost: Scenario = {
   id: 'selfhost',
   title: 'Self-Hosting',
   subtitle: 'Watch roko develop itself — from idea to running code.',
-  category: 'core',
   panes: 1,
   labels: ['self-hosting'],
   panel: true,
@@ -477,7 +435,6 @@ const prdResearchLoop: Scenario = {
   id: 'prd-research-loop',
   title: 'Research Loop',
   subtitle: 'Full pipeline: idea, draft, research, plan, execute, gates, learn.',
-  category: 'core',
   panes: 1,
   labels: ['full pipeline'],
   panel: true,
@@ -586,7 +543,7 @@ const prdResearchLoop: Scenario = {
     await playback.waitForStep();
     playback.setProgress(7, 8, `${ROKO} learn all`);
     timeline.setActive(6);
-    /* terminal preserved for presenter */
+    e.clearTerminal();
     await showCmd(e, `${ROKO} learn all`, {
       timeout: 30000,
       onLog: logCommand,
@@ -603,7 +560,7 @@ const prdResearchLoop: Scenario = {
     await playback.waitForStep();
     playback.setProgress(8, 8, `${ROKO} status`);
     timeline.setActive(7);
-    /* terminal preserved for presenter */
+    e.clearTerminal();
     await showCmd(e, `${ROKO} status`, {
       timeout: 30000,
       onLog: logCommand,
@@ -624,7 +581,6 @@ const builder: Scenario = {
   id: 'builder',
   title: 'Build',
   subtitle: 'Type a prompt. Roko builds it, validates with gates, shows cost.',
-  category: 'core',
   panes: 1,
   labels: ['builder'],
   panel: true,
@@ -646,7 +602,6 @@ const race: Scenario = {
   id: 'race',
   title: 'Cost Race',
   subtitle: 'Same task, two approaches. Left: naive single-model. Right: cascade-routed.',
-  category: 'benchmarks',
   panes: 2,
   labels: ['naive (no replan)', 'cascade (full pipeline)'],
   panel: true,
@@ -703,7 +658,6 @@ const gateRetry: Scenario = {
   id: 'gate-retry',
   title: 'Gate Retry',
   subtitle: 'Watch a task fail gates, get classified, and retry with an adjusted strategy.',
-  category: 'benchmarks',
   panes: 2,
   labels: ['task execution', 'gate status'],
   panel: true,
@@ -733,7 +687,7 @@ const gateRetry: Scenario = {
       return true;
     };
     const showGateMonitor = async (command: string, customDesc: string, timeout = 30000) => {
-      /* terminal preserved for presenter */
+      gates.clearTerminal();
       return showCmd(gates, command, {
         timeout,
         onLog: logCommand,
@@ -756,7 +710,7 @@ const gateRetry: Scenario = {
     setMetric('model', 'cascade');
 
     await task.execCmd(`${ROKO} config set learning.replan_on_gate_failure true`, 10000);
-    /* terminal preserved for presenter */
+    task.clearTerminal();
 
     let taskMetricsTracker: ReturnType<typeof setInterval> | null = trackMetrics(task, {
       onCost: c => setMetric('cost', c),
@@ -972,7 +926,6 @@ const providers: Scenario = {
   id: 'providers',
   title: 'Providers',
   subtitle: 'One prompt, four providers, simultaneously. Provider-agnostic by design.',
-  category: 'benchmarks',
   panes: 4,
   labels: ['zhipu (glm-4)', 'openai (gpt-4o)', 'anthropic (haiku)', 'moonshot (v1)'],
   panel: true,
@@ -1024,7 +977,6 @@ const providerRace: Scenario = {
   id: 'provider-race',
   title: 'Provider Race',
   subtitle: '4 providers race on the same prompt. First to pass gates wins.',
-  category: 'benchmarks',
   panes: 4,
   labels: ['anthropic (haiku)', 'openai (gpt-4o)', 'gemini (flash)', 'moonshot (v1)'],
   panel: true,
@@ -1192,7 +1144,6 @@ const explore: Scenario = {
   id: 'explore',
   title: 'Explore',
   subtitle: '18 crates, 85 routes, 100+ commands. Four capability families at once.',
-  category: 'advanced',
   panes: 4,
   labels: ['workspace', 'learning', 'config', 'knowledge'],
   panel: true,
@@ -1256,7 +1207,6 @@ const knowledgeAccumulation: Scenario = {
   id: 'knowledge-accumulation',
   title: 'Knowledge Growth',
   subtitle: 'Watch the knowledge store grow across successive runs.',
-  category: 'knowledge',
   panes: 2,
   labels: ['task runner', 'knowledge store'],
   panel: true,
@@ -1297,7 +1247,7 @@ const knowledgeAccumulation: Scenario = {
       onLog: logCommand,
       customDesc: 'Queries for error handling patterns before the store has accumulated any knowledge.',
     });
-    /* terminal preserved for presenter */
+    knowledge.clearTerminal();
 
     // Step 2: First run grows the store.
     await playback.waitForStep();
@@ -1319,7 +1269,7 @@ const knowledgeAccumulation: Scenario = {
     await playback.waitForStep();
     timeline.setActive(2);
     playback.setProgress(3, 6, `${ROKO} knowledge query ...`);
-    /* terminal preserved for presenter */
+    knowledge.clearTerminal();
     logCommand(
       'knowledge check 1',
       'Querying the store after the first run. The results should now include JSON parsing and CLI patterns.',
@@ -1339,7 +1289,7 @@ const knowledgeAccumulation: Scenario = {
     await playback.waitForStep();
     timeline.setActive(3);
     playback.setProgress(4, 6, `${ROKO} run "Add error handling..."`);
-    /* terminal preserved for presenter */
+    runner.clearTerminal();
     logCommand(
       'run 2',
       'Second task adds error handling to the existing code. Knowledge compounds with the first run.',
@@ -1356,7 +1306,7 @@ const knowledgeAccumulation: Scenario = {
     await playback.waitForStep();
     timeline.setActive(4);
     playback.setProgress(5, 6, `${ROKO} knowledge query ...`);
-    /* terminal preserved for presenter */
+    knowledge.clearTerminal();
     logCommand(
       'knowledge check 2',
       'After two runs the store should have accumulated entries across both tasks.',
@@ -1376,7 +1326,7 @@ const knowledgeAccumulation: Scenario = {
     await playback.waitForStep();
     timeline.setActive(5);
     playback.setProgress(6, 6, `${ROKO} knowledge stats`);
-    /* terminal preserved for presenter */
+    knowledge.clearTerminal();
     logCommand(
       'final state',
       'Final knowledge store statistics after two accumulation cycles.',
@@ -1400,7 +1350,6 @@ const dreamConsolidation: Scenario = {
   id: 'dream-consolidation',
   title: 'Dream Cycle',
   subtitle: 'Offline consolidation - episodes distilled into durable knowledge.',
-  category: 'knowledge',
   panes: 2,
   labels: ['dream engine', 'knowledge monitor'],
   panel: true,
@@ -1546,8 +1495,8 @@ const dreamConsolidation: Scenario = {
 
     // Step 6: report - clean panes and show the final consolidated state.
     if (!(await waitForStep(6, `${ROKO} knowledge dream report`))) return;
-    /* terminal preserved for presenter */
-    /* terminal preserved for presenter */
+    dream.clearTerminal();
+    monitor.clearTerminal();
     logCommand(
       'dream report',
       'Viewing the consolidation report after the cycle has merged distilled knowledge into the store.',
@@ -1573,7 +1522,6 @@ const chat: Scenario = {
   title: 'Chat',
   subtitle:
     'The bare command is the product. Just type roko — auto-detect, auto-init, drop into chat.',
-  category: 'advanced',
   panes: 1,
   labels: ['roko chat'],
   panel: true,
@@ -1659,7 +1607,6 @@ const knowledgeTransfer: Scenario = {
   id: 'knowledge-transfer',
   title: 'Knowledge Transfer',
   subtitle: 'Two agents build similar APIs. The second one learns from the first.',
-  category: 'knowledge',
   panes: 2,
   labels: ['Agent Alpha (cold start)', 'Agent Beta (with knowledge)'],
   panel: true,
@@ -1734,7 +1681,7 @@ const knowledgeTransfer: Scenario = {
     timeline.setActive(3);
     playback.setProgress(3, 5, 'Beta building Inventory API (with knowledge)');
 
-    /* terminal preserved for presenter */
+    beta.clearTerminal();
 
     // Sync knowledge from Alpha workspace to Beta so the playbook store is available
     await beta.execCmd(
@@ -1782,7 +1729,6 @@ const chainIntelligence: Scenario = {
   id: 'chain-intelligence',
   title: 'Chain Intelligence',
   subtitle: 'Two DeFi agents share insights through an on-chain knowledge graph on forked Ethereum.',
-  category: 'advanced',
   panes: 2,
   labels: ['Yield Scout (Alpha)', 'Risk Hedger (Beta)'],
   panel: true,
@@ -2005,7 +1951,6 @@ const mirage: Scenario = {
   id: 'mirage',
   title: 'Mirage',
   subtitle: 'Fork any EVM chain locally. Stream blocks in real-time with configurable block times.',
-  category: 'advanced',
   panes: 1,
   labels: ['mirage'],
   panel: false,
@@ -2022,7 +1967,7 @@ const mirage: Scenario = {
       await rawSleep(100);
     }
     await e.waitForPrompt(10000);
-    /* terminal preserved for presenter */
+    e.clearTerminal();
   },
 };
 

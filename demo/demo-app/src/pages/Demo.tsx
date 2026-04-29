@@ -11,6 +11,12 @@ import Timeline from '../components/Timeline';
 import CommandLog from '../components/CommandLog';
 import GateBar from '../components/GateBar';
 import PrdPipelinePanel from '../components/PrdPipelinePanel';
+import KnowledgeFlowPanel, { type InsightEvent, type AgentInfo } from '../components/KnowledgeFlowPanel';
+import EfficiencyBar, { type EfficiencyMetric } from '../components/EfficiencyBar';
+import ChainIntelPanel from '../components/ChainIntelPanel';
+import { useChainWs, type InsightEvent as ChainInsightEvent } from '../hooks/useChain';
+import type { BlockData } from '../components/ChainActivityPanel';
+import type { AgentPosition } from '../components/LivePositionsPanel';
 import {
   EMPTY_PIPELINE_STATE,
   type PipelineDemoState,
@@ -41,7 +47,6 @@ export default function Demo() {
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [speedIdx, setSpeedIdx] = useState(1);
-  const speedRef = useRef(SPEEDS[1]);
   const [playbackMode, setPlaybackMode] = useState<'auto' | 'step'>('auto');
   const scenario = SCENARIOS[activeIdx];
   const serverHealth = useServerHealth();
@@ -58,6 +63,101 @@ export default function Demo() {
   const selectedPipelineExample = getPipelineExample(pipelineExampleId);
   const [pipeline, setPipeline] = useState<PipelineDemoState>(
     createPipelineIntroState(selectedPipelineExample),
+  );
+
+  // Knowledge Transfer panel state
+  const [kfInsights, setKfInsights] = useState<InsightEvent[]>([]);
+  const [kfLeftAgent, setKfLeftAgent] = useState<AgentInfo>({ name: 'Alpha', color: '#e5918e', posts: 0, confirms: 0 });
+  const [kfRightAgent, setKfRightAgent] = useState<AgentInfo>({ name: 'Beta', color: '#8eb5e5', posts: 0, confirms: 0 });
+  const [kfMetrics, setKfMetrics] = useState<EfficiencyMetric[]>([
+    { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
+    { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
+    { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
+  ]);
+
+  // Chain Intelligence panel state
+  const chainWs = useChainWs();
+  const [ciBlocks] = useState<BlockData[]>([]);
+  const [ciPositions] = useState<AgentPosition[]>([
+    {
+      name: 'Yield Scout',
+      address: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      color: 'rose',
+      balances: [
+        { token: 'ETH', amount: 10, decimals: 4 },
+        { token: 'USDC', amount: 500000, decimals: 2 },
+      ],
+      keyMetric: { label: 'APR', value: '--' },
+    },
+    {
+      name: 'Risk Hedger',
+      address: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+      color: 'sage',
+      balances: [
+        { token: 'ETH', amount: 110, decimals: 4 },
+        { token: 'USDC', amount: 0, decimals: 2 },
+      ],
+      keyMetric: { label: 'HF', value: '--' },
+    },
+  ]);
+
+  // Map chain WS insights to KnowledgeFlowPanel InsightEvent format
+  const ciInsights: InsightEvent[] = useMemo(
+    () =>
+      chainWs.insights.map((ev: ChainInsightEvent) => ({
+        id: ev.id,
+        type: ev.type === 'stateTransition' ? 'posted' as const : ev.type,
+        agent: ev.author ?? ev.by ?? 'unknown',
+        kind: (ev.kind ?? 'heuristic') as InsightEvent['kind'],
+        content: ev.content ?? `${ev.from} -> ${ev.to}`,
+        timestamp: ev.createdAt ?? ev.at ?? Date.now(),
+      })),
+    [chainWs.insights],
+  );
+
+  const ciMetrics: EfficiencyMetric[] = useMemo(
+    () => [
+      { label: 'INSIGHTS', value: chainWs.stats.insights, color: 'bone' as const },
+      { label: 'CONFIRMS', value: chainWs.stats.confirms, color: 'success' as const },
+      {
+        label: 'REUSE',
+        value: chainWs.stats.insights > 0
+          ? Math.round((chainWs.stats.confirms / chainWs.stats.insights) * 100)
+          : 0,
+        format: (n: number) => `${n}%`,
+        color: 'dream' as const,
+      },
+      {
+        label: 'CALLS SAVED',
+        value: chainWs.stats.confirms * 3,
+        color: 'rose' as const,
+      },
+    ],
+    [chainWs.stats],
+  );
+
+  const ciLeftAgent: AgentInfo = useMemo(
+    () => ({
+      name: 'Alpha',
+      color: '#e5918e',
+      posts: ciInsights.filter((i) => i.agent === 'yield-scout' || i.agent === 'agent-alpha').length,
+      confirms: ciInsights.filter(
+        (i) => i.type === 'confirmed' && (i.agent === 'yield-scout' || i.agent === 'agent-alpha'),
+      ).length,
+    }),
+    [ciInsights],
+  );
+
+  const ciRightAgent: AgentInfo = useMemo(
+    () => ({
+      name: 'Beta',
+      color: '#8eb5e5',
+      posts: ciInsights.filter((i) => i.agent === 'risk-hedger' || i.agent === 'agent-beta').length,
+      confirms: ciInsights.filter(
+        (i) => i.type === 'confirmed' && (i.agent === 'risk-hedger' || i.agent === 'agent-beta'),
+      ).length,
+    }),
+    [ciInsights],
   );
 
   const pausedRef = useRef(false);
@@ -161,7 +261,6 @@ export default function Demo() {
       pipelineExample: selectedPipelineExample,
       paused: pausedRef,
       running: runningRef,
-      speed: speedRef,
     };
   }, [appendPipelineEvent, patchPipeline, patchPipelineStream, selectedPipelineExample, updatePipelineTask]);
 
@@ -183,6 +282,14 @@ export default function Demo() {
     setProgressText('press Play to begin');
     setProgressLabel('--');
     setPipeline(SCENARIOS[idx]?.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
+    setKfInsights([]);
+    setKfLeftAgent({ name: 'Alpha', color: '#e5918e', posts: 0, confirms: 0 });
+    setKfRightAgent({ name: 'Beta', color: '#8eb5e5', posts: 0, confirms: 0 });
+    setKfMetrics([
+      { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
+      { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
+      { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
+    ]);
   }, [selectedPipelineExample]);
 
   const handlePipelineExampleSelect = useCallback((id: string) => {
@@ -225,6 +332,14 @@ export default function Demo() {
     setStats({ model: '--', cost: '--', tokens: '--', time: '--' });
     setGates([]);
     setPipeline(scenario.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
+    setKfInsights([]);
+    setKfLeftAgent({ name: 'Alpha', color: '#e5918e', posts: 0, confirms: 0 });
+    setKfRightAgent({ name: 'Beta', color: '#8eb5e5', posts: 0, confirms: 0 });
+    setKfMetrics([
+      { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
+      { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
+      { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
+    ]);
 
     const ctx = buildContext();
     if (ctx.entries.length < scenario.panes) {
@@ -267,12 +382,7 @@ export default function Demo() {
   }, [activeIdx, selectScenario]);
 
   const cycleSpeed = useCallback(() => {
-    setSpeedIdx((prev) => {
-      const next = (prev + 1) % SPEEDS.length;
-      speedRef.current = SPEEDS[next];
-      setSpeedMultiplier(SPEEDS[next]);
-      return next;
-    });
+    setSpeedIdx((prev) => (prev + 1) % SPEEDS.length);
   }, []);
 
   useEffect(() => {
@@ -431,6 +541,53 @@ export default function Demo() {
                 isRunning={isRunning}
                 serverHealth={serverHealth}
               />
+            ) : scenario.id === 'knowledge-transfer' ? (
+              <>
+                <Pane title="TIMELINE" flat>
+                  <Timeline steps={timelineDisplay} />
+                </Pane>
+
+                <KnowledgeFlowPanel
+                  leftAgent={kfLeftAgent}
+                  rightAgent={kfRightAgent}
+                  insights={kfInsights}
+                  mode="local"
+                />
+
+                <EfficiencyBar metrics={kfMetrics} />
+
+                {gates.length > 0 && (
+                  <Pane title="GATES" flat>
+                    <div style={{ padding: '12px 16px' }}>
+                      <GateBar gates={gates} />
+                    </div>
+                  </Pane>
+                )}
+
+                <Pane title="LOG" flat>
+                  <CommandLog entries={logEntries} maxHeight="180px" />
+                </Pane>
+              </>
+            ) : scenario.id === 'chain-intelligence' ? (
+              <>
+                <Pane title="TIMELINE" flat>
+                  <Timeline steps={timelineDisplay} />
+                </Pane>
+
+                <ChainIntelPanel
+                  leftAgent={ciLeftAgent}
+                  rightAgent={ciRightAgent}
+                  insights={ciInsights}
+                  blocks={ciBlocks}
+                  positions={ciPositions}
+                  metrics={ciMetrics}
+                  mirageConnected={chainWs.connected}
+                />
+
+                <Pane title="LOG" flat>
+                  <CommandLog entries={logEntries} maxHeight="140px" />
+                </Pane>
+              </>
             ) : (
               <>
                 <Pane title="TIMELINE" flat>

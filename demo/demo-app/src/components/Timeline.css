@@ -4,53 +4,37 @@
   gap: 0;
   padding: 10px 16px;
 }
-
 .timeline-step {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 8px 0;
+  padding: 7px 0;
   position: relative;
-  transition: opacity .4s var(--ease);
 }
-
-/* Connector line between steps */
 .timeline-step:not(:last-child)::after {
   content: '';
   position: absolute;
   left: 5px;
-  top: 24px;
-  bottom: -8px;
+  top: 22px;
+  bottom: -7px;
   width: 1px;
   background: var(--glass-border);
-  transition: background .5s var(--ease);
 }
 
+/* Progress line: completed steps get a rose tint on their connector */
 .timeline-done:not(:last-child)::after {
-  background: linear-gradient(to bottom, rgba(138, 156, 134, .4), rgba(138, 156, 134, .1));
+  background: linear-gradient(to bottom, rgba(138, 90, 112, .35), rgba(255,255,255,.06));
 }
-
-.timeline-active:not(:last-child)::after {
-  background: linear-gradient(to bottom, rgba(216, 154, 178, .5), rgba(255,255,255,.06));
-}
-
-/* Marker dot */
 .timeline-marker {
   width: 11px;
   height: 11px;
   border-radius: 50%;
   border: 2px solid var(--text-dim);
   flex-shrink: 0;
-  margin-top: 3px;
-  transition: all .4s var(--ease);
+  margin-top: 2px;
+  transition: all .3s var(--ease);
 }
-
-.timeline-done .timeline-marker {
-  background: var(--success);
-  border-color: var(--success);
-  box-shadow: 0 0 6px rgba(138, 156, 134, .3);
-}
-
+.timeline-done .timeline-marker { background: var(--success); border-color: var(--success); }
 .timeline-active .timeline-marker {
   background: var(--rose-bright);
   border-color: var(--rose-bright);
@@ -62,43 +46,22 @@
   0%, 100% { box-shadow: 0 0 10px rgba(216, 154, 178, .6), 0 0 22px rgba(216, 154, 178, .25); }
   50% { box-shadow: 0 0 16px rgba(216, 154, 178, .85), 0 0 32px rgba(216, 154, 178, .4); }
 }
+.timeline-pending .timeline-marker { background: transparent; border-color: var(--text-dim); }
 
-.timeline-pending .timeline-marker {
-  background: transparent;
-  border-color: var(--text-dim);
-}
-
-/* Labels */
 .timeline-label {
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   color: var(--text-primary);
   font-family: var(--sans);
   line-height: 1.4;
-  transition: color .4s var(--ease);
 }
-
-.timeline-done .timeline-label {
-  color: var(--text-soft);
-}
-
-.timeline-active .timeline-label {
-  color: var(--rose-glow);
-  font-weight: 500;
-  text-shadow: 0 0 20px rgba(220, 165, 189, .2);
-}
-
-.timeline-pending .timeline-label {
-  color: var(--text-dim);
-}
+.timeline-done .timeline-label { color: var(--text-soft); }
+.timeline-active .timeline-label { color: var(--rose-glow); font-weight: 500; }
+.timeline-pending .timeline-label { color: var(--text-dim); }
 
 .timeline-detail {
-  font-size: 0.72rem;
+  font-size: 0.65rem;
   color: var(--text-dim);
   margin-top: 2px;
   font-family: var(--mono);
-  letter-spacing: .04em;
-}
-
-.timeline-active .timeline-detail {
-  color: var(--text-soft);
+  letter-spacing: .02em;
 }

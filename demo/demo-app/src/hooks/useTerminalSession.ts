@@ -87,6 +87,7 @@ export async function setupWorkspace(
   await handle.execCmd(`mkdir -p ${dir} && cd ${dir}`, 5000);
   await handle.execCmd(`${resolvedRoko} init`, 30000);
   await rawSleep(200);
+  handle.clearTerminal();
   return dir;
 }
 
@@ -102,6 +103,7 @@ export async function joinWorkspace(
   await handle.waitForPrompt(10000);
   await resolveRoko(handle);
   await handle.execCmd(`cd ${dir}`, 3000);
+  handle.clearTerminal();
 }
 
 // ── Command execution with logging ──────────────────────────
@@ -155,7 +157,6 @@ export async function showCmd(
   opts?: {
     timeout?: number;
     customDesc?: string;
-    speed?: number;
     onLog?: (cmd: string, desc: string) => void;
     onGate?: (name: string, status: 'pass' | 'fail') => void;
     onCost?: (cost: string) => void;
