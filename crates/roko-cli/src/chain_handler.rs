@@ -1000,10 +1000,7 @@ impl ChainToolHandler {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let url = self
-            .rpc_url
-            .as_deref()
-            .unwrap_or("http://127.0.0.1:8545");
+        let url = self.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
 
         let body = json!({
             "jsonrpc": "2.0",

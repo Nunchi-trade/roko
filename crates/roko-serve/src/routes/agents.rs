@@ -1781,12 +1781,15 @@ mod tests {
     #[tokio::test]
     async fn send_message_creates_tracked_run_and_events() {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         let response = send_message(
             State(Arc::clone(&state)),
@@ -1832,12 +1835,15 @@ mod tests {
     #[tokio::test]
     async fn register_and_issue_token() {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         let _ = register_agent(
             State(Arc::clone(&state)),
@@ -1877,12 +1883,15 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         let mut config = RokoConfig::default();
         config.agent.default_model = "claude-sonnet-4-20250514".into();
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            config,
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                config,
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         state
             .upsert_discovered_agent(AgentRegistrationRecord {
@@ -1945,12 +1954,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_logs_proxy_forwards_tail_and_body() -> std::result::Result<(), Box<dyn Error>> {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
         let (logs_url, logs_state, _handle) = spawn_mock_logs_server(
             StatusCode::OK,
             json!({
@@ -2002,12 +2014,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_logs_missing_agent_returns_404() -> std::result::Result<(), Box<dyn Error>> {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         let response = router(state)
             .oneshot(
@@ -2032,12 +2047,15 @@ mod tests {
     async fn agent_logs_sidecar_not_found_is_propagated() -> std::result::Result<(), Box<dyn Error>>
     {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
         let (logs_url, logs_state, _handle) = spawn_mock_logs_server(
             StatusCode::NOT_FOUND,
             json!({ "error": "log file missing" }),

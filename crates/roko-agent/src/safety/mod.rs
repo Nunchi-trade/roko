@@ -57,7 +57,9 @@ use roko_core::config::schema::{RokoConfig, RoleOverride};
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
 
 use self::bash::BashPolicy;
-use self::contract::{AgentContract, ContractLoadError, ContractLoadMode, GovernanceRule, Invariant};
+use self::contract::{
+    AgentContract, ContractLoadError, ContractLoadMode, GovernanceRule, Invariant,
+};
 use self::git::GitPolicy;
 use self::network::NetworkPolicy;
 use self::path::PathPolicy;

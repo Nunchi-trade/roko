@@ -224,8 +224,7 @@ fn bind_is_loopback(bind: &str) -> bool {
         return true;
     }
 
-    host.parse::<IpAddr>()
-        .is_ok_and(|addr| addr.is_loopback())
+    host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
 }
 
 #[cfg(test)]

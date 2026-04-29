@@ -381,8 +381,11 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 let feature_keyword_refs: Vec<&str> =
                     feature_keywords.iter().map(String::as_str).collect();
                 let repo_context_section: Option<String> =
-                    match crate::repo_context::build_repo_context(&workdir, &feature_keyword_refs)
-                        .await
+                    match roko_cli::repo_context::build_repo_context(
+                        &workdir,
+                        &feature_keyword_refs,
+                    )
+                    .await
                     {
                         Ok(repo_context) => {
                             if !repo_context.context_root_verified {
@@ -741,9 +744,14 @@ fn resolve_effective_model_key(
     context: &str,
 ) -> Result<String> {
     let config = crate::load_roko_config(workdir)?;
-    let selection =
-        roko_cli::model_selection::resolve_effective_model(cli_model, None, role, None, &config)
-            .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
+    let selection = roko_cli::model_selection::resolve_effective_model(
+        cli_model,
+        None,
+        role.map(str::to_string),
+        None,
+        &config,
+    )
+    .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
     selection.print_stderr();
     Ok(selection.effective_model_key)
 }

@@ -534,12 +534,15 @@ mod tests {
 
     fn test_state(runtime: Arc<dyn CliRuntime>) -> Arc<AppState> {
         let dir = tempdir().expect("create tempdir for template tests");
-        Arc::new(AppState::new(
-            dir.path().to_path_buf(),
-            runtime,
-            roko_core::config::schema::RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"))
+        Arc::new(
+            AppState::new(
+                dir.path().to_path_buf(),
+                runtime,
+                roko_core::config::schema::RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        )
     }
 
     fn test_router(state: Arc<AppState>) -> Router {

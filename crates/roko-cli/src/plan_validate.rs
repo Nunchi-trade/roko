@@ -107,6 +107,7 @@ pub fn validate_plans_dir(
 /// When `workdir` is provided, each `tasks.toml` file is scanned for declared
 /// `files` and `write_files` entries and those paths are checked against the
 /// workspace filesystem.
+#[allow(dead_code)]
 pub fn validate_plans_dir_with_workdir(
     dir: &Path,
     models: Option<&HashMap<String, ModelProfile>>,

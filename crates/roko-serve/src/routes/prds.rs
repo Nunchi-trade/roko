@@ -1020,12 +1020,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let mut roko_config = roko_core::config::schema::RokoConfig::default();
         roko_config.prd.auto_plan = auto_plan;
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            roko_config,
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                workdir,
+                Arc::new(NoOpRuntime),
+                roko_config,
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
         (dir, state)
     }
 
@@ -1034,12 +1037,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let mut roko_config = roko_core::config::schema::RokoConfig::default();
         roko_config.prd.auto_plan = true;
-        let state = Arc::new(AppState::new(
-            workdir,
-            runtime,
-            roko_config,
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                workdir,
+                runtime,
+                roko_config,
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
         (dir, state)
     }
 

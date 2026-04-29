@@ -548,12 +548,15 @@ mod tests {
         let tempdir = tempdir().expect("invariant: tempdir creates");
         let mut config = RokoConfig::default();
         config.serve.auth = auth;
-        Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            config,
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"))
+        Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                config,
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        )
     }
 
     fn auth_test_app(auth: ServeAuthConfig) -> Router {

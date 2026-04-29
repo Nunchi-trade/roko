@@ -1356,12 +1356,15 @@ mod tests {
 
     fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            dir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                dir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
         (dir, state)
     }
 

@@ -71,12 +71,9 @@ mod extraction_tests {
             ("shell".to_string(), "cargo test".to_string()),
         ];
 
-        let playbook = extract_playbook_from_episode(
-            "task-1",
-            "Implement add function",
-            &tool_calls,
-        )
-        .expect("playbook should be extracted");
+        let playbook =
+            extract_playbook_from_episode("task-1", "Implement add function", &tool_calls)
+                .expect("playbook should be extracted");
 
         assert_eq!(playbook.steps.len(), 3);
         assert_eq!(playbook.steps[0].index, 0);
@@ -143,12 +140,12 @@ mod extraction_tests {
             ("shell".to_string(), "cargo fmt --check".to_string()),
         ];
 
-        let first = extract_playbook_from_episode("t1", "Run tests", &tool_calls)
-            .expect("first playbook");
+        let first =
+            extract_playbook_from_episode("t1", "Run tests", &tool_calls).expect("first playbook");
         store.save_or_merge(&first).await.expect("save first");
 
-        let mut second = extract_playbook_from_episode("t1", "Run tests", &tool_calls)
-            .expect("second playbook");
+        let mut second =
+            extract_playbook_from_episode("t1", "Run tests", &tool_calls).expect("second playbook");
         second.id = format!("{}-retry", second.id);
         store.save_or_merge(&second).await.expect("merge second");
 
@@ -339,7 +336,11 @@ pub fn extract_playbook_from_episode(
 
     let prompt = task_prompt.trim();
     let prompt_source = {
-        let source = if prompt.is_empty() { task_id.trim() } else { prompt };
+        let source = if prompt.is_empty() {
+            task_id.trim()
+        } else {
+            prompt
+        };
         if source.is_empty() {
             "untitled task"
         } else {
@@ -485,8 +486,12 @@ fn merge_playbooks(mut existing: Playbook, incoming: &Playbook) -> Playbook {
     if incoming.steps.len() > existing.steps.len() {
         existing.steps = incoming.steps.clone();
     }
-    existing.success_count = existing.success_count.saturating_add(incoming.success_count.max(1));
-    existing.failure_count = existing.failure_count.saturating_add(incoming.failure_count);
+    existing.success_count = existing
+        .success_count
+        .saturating_add(incoming.success_count.max(1));
+    existing.failure_count = existing
+        .failure_count
+        .saturating_add(incoming.failure_count);
     existing.created_at_ms = existing.created_at_ms.min(incoming.created_at_ms);
     existing.last_used_ms = Some(Utc::now().timestamp_millis());
     existing
@@ -513,9 +518,7 @@ fn extract_tool_calls_from_value(value: &Value) -> Vec<(String, String)> {
                 }
             }
 
-            extract_tool_call_from_object(object)
-                .into_iter()
-                .collect()
+            extract_tool_call_from_object(object).into_iter().collect()
         }
         Value::String(text) => {
             let text = text.trim();
@@ -532,15 +535,18 @@ fn extract_tool_calls_from_value(value: &Value) -> Vec<(String, String)> {
 fn extract_tool_call_from_object(
     object: &serde_json::Map<String, Value>,
 ) -> Option<(String, String)> {
-    let name = extract_named_string(object, &["tool_name", "tool", "name", "action_type", "kind"])
-        .or_else(|| {
-            object
-                .get("function")
-                .and_then(Value::as_object)
-                .and_then(|function| function.get("name"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })?;
+    let name = extract_named_string(
+        object,
+        &["tool_name", "tool", "name", "action_type", "kind"],
+    )
+    .or_else(|| {
+        object
+            .get("function")
+            .and_then(Value::as_object)
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })?;
 
     let description = object
         .get("description")
@@ -979,7 +985,10 @@ impl PlaybookStore {
 
         for candidate in self.list().await? {
             let score = relevance_score(&candidate, &query, &query_terms);
-            if best.as_ref().map_or(true, |(best_score, _)| score > *best_score) {
+            if best
+                .as_ref()
+                .map_or(true, |(best_score, _)| score > *best_score)
+            {
                 best = Some((score, candidate));
             }
         }
@@ -1120,16 +1129,16 @@ mod tests {
     #[test]
     fn extract_playbook_from_episode_builds_steps_and_metadata() {
         let tool_calls = vec![
-            ("read_file".to_string(), r#"{"path":"src/lib.rs"}"#.to_string()),
+            (
+                "read_file".to_string(),
+                r#"{"path":"src/lib.rs"}"#.to_string(),
+            ),
             ("bash".to_string(), "cargo test".to_string()),
         ];
 
-        let playbook = extract_playbook_from_episode(
-            "task-1",
-            "Fix the failing tests",
-            &tool_calls,
-        )
-        .expect("playbook");
+        let playbook =
+            extract_playbook_from_episode("task-1", "Fix the failing tests", &tool_calls)
+                .expect("playbook");
 
         assert!(playbook.id.starts_with("ep-task-1-"));
         assert_eq!(playbook.name, "Learned: Fix the failing tests");
@@ -1490,7 +1499,11 @@ mod tests {
         );
         store.save_or_merge(&second).await.expect("merge second");
 
-        let loaded = store.load(&first.id).await.expect("load first").expect("some");
+        let loaded = store
+            .load(&first.id)
+            .await
+            .expect("load first")
+            .expect("some");
         assert_eq!(loaded.success_count, 2);
         assert_eq!(loaded.steps.len(), 2);
         assert!(store.load(&second.id).await.expect("load second").is_none());

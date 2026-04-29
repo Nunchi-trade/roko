@@ -588,12 +588,15 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        let state = Arc::new(AppState::new(
-            dir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            roko_core::config::schema::RokoConfig::default(),
-            deploy_backend,
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                dir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                roko_core::config::schema::RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
 
         let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
         let response = app

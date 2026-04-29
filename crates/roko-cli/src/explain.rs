@@ -237,9 +237,7 @@ fn current_invocation_is_cli_explain() -> bool {
     if !matches!(exe_name.as_str(), "roko" | "roko.exe") {
         return false;
     }
-    let args: Vec<String> = args
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
+    let args: Vec<String> = args.map(|arg| arg.to_string_lossy().into_owned()).collect();
     invocation_looks_like_cli_explain(&exe_name, args.iter().map(|s| s.as_str()))
 }
 
@@ -340,7 +338,10 @@ pub fn topic_names() -> Vec<&'static str> {
     if take_unknown_topic_exit_pending() {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "available topics: {}", names.join(", "));
-        let _ = writeln!(stderr, "run `roko explain topics` to see all topics with descriptions");
+        let _ = writeln!(
+            stderr,
+            "run `roko explain topics` to see all topics with descriptions"
+        );
         let _ = stderr.flush();
         process::exit(1);
     }
@@ -399,7 +400,14 @@ mod tests {
     fn cli_explain_detection_handles_global_flags_with_values() {
         assert!(invocation_looks_like_cli_explain(
             "roko",
-            ["--config", "/tmp/roko.toml", "--model", "gpt-4o", "explain", "gates"]
+            [
+                "--config",
+                "/tmp/roko.toml",
+                "--model",
+                "gpt-4o",
+                "explain",
+                "gates"
+            ]
         ));
         assert!(invocation_looks_like_cli_explain(
             "roko",

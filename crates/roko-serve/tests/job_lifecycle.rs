@@ -72,12 +72,15 @@ fn test_app_state() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
     let dir = tempdir().expect("tempdir");
     let config = RokoConfig::default();
     let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-    let state = Arc::new(AppState::new(
-        dir.path().to_path_buf(),
-        Arc::new(TestRuntime),
-        config,
-        deploy,
-    ).expect("AppState::new"));
+    let state = Arc::new(
+        AppState::new(
+            dir.path().to_path_buf(),
+            Arc::new(TestRuntime),
+            config,
+            deploy,
+        )
+        .expect("AppState::new"),
+    );
     let auth = ServeAuthConfig::default();
     let router = build_router(Arc::clone(&state), &[], auth);
     (dir, state, router)

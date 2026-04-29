@@ -232,7 +232,10 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     match std::fs::rename(&state_path, &backup_path) {
                         Ok(()) => {
                             if !cli.quiet {
-                                eprintln!("▸ --fresh: archived old state to {}", backup_path.display());
+                                eprintln!(
+                                    "▸ --fresh: archived old state to {}",
+                                    backup_path.display()
+                                );
                             }
                         }
                         Err(err) => {
@@ -741,9 +744,14 @@ fn resolve_effective_model_key(
     context: &str,
 ) -> Result<String> {
     let config = crate::load_roko_config(workdir)?;
-    let selection =
-        roko_cli::model_selection::resolve_effective_model(cli_model, None, role, None, &config)
-            .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
+    let selection = roko_cli::model_selection::resolve_effective_model(
+        cli_model,
+        None,
+        role.map(str::to_string),
+        None,
+        &config,
+    )
+    .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
     selection.print_stderr();
     Ok(selection.effective_model_key)
 }

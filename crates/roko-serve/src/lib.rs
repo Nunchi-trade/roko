@@ -117,9 +117,9 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
+use tracing::{debug, info, warn};
 
 use roko_core::Engram;
 use roko_core::config::schema::RokoConfig;
@@ -647,7 +647,7 @@ fn build_server_router(
     state: Arc<AppState>,
     cors_origins: &[String],
     api_auth: roko_core::config::ServeAuthConfig,
-) -> axum::Router<Arc<AppState>> {
+) -> axum::Router<()> {
     // `routes::build_router` currently installs only the top-level SPA fallback.
     // Reset it here so the final fallback can distinguish API/WS typos from browser routes.
     let api_router =
@@ -665,8 +665,10 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
     if cors_origins.is_empty() {
         CorsLayer::permissive()
     } else {
-        let allowed: Vec<axum::http::HeaderValue> =
-            cors_origins.iter().filter_map(|origin| origin.parse().ok()).collect();
+        let allowed: Vec<axum::http::HeaderValue> = cors_origins
+            .iter()
+            .filter_map(|origin| origin.parse().ok())
+            .collect();
         CorsLayer::new()
             .allow_origin(allowed)
             .allow_methods(Any)
@@ -1714,7 +1716,10 @@ mod tests {
         let thresholds_snapshot = persisted_state.state_hub.current_snapshot();
         let expected_thresholds =
             std::fs::read_to_string(&thresholds_path).expect("read seeded thresholds");
-        assert_eq!(thresholds_snapshot.gate_thresholds_json, expected_thresholds);
+        assert_eq!(
+            thresholds_snapshot.gate_thresholds_json,
+            expected_thresholds
+        );
 
         let fresh_dir = tempdir().expect("tempdir");
         let fresh_state = build_app_state(

@@ -271,7 +271,10 @@ fn learn_all_reads_the_expected_fixtures() {
     );
 
     assert!(
-        stdout.contains(&format!("Episodes: 2 entries at {}", episodes_path.display())),
+        stdout.contains(&format!(
+            "Episodes: 2 entries at {}",
+            episodes_path.display()
+        )),
         "episode summary missing or incorrect: {stdout}"
     );
     assert!(

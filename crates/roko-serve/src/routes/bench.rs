@@ -31,7 +31,10 @@ use roko_neuro::KnowledgeStore;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/bench/run", post(start_bench_run))
-        .route("/bench/run/{id}", get(get_bench_run).delete(delete_bench_run))
+        .route(
+            "/bench/run/{id}",
+            get(get_bench_run).delete(delete_bench_run),
+        )
         .route("/bench/run/{id}/status", get(bench_run_status))
         // Frontend uses /bench/runs (plural) for both listing and starting.
         .route("/bench/runs", get(list_bench_runs).post(start_bench_run))
@@ -229,12 +232,12 @@ async fn execute_bench_run(
             KnowledgeStore::for_workdir(&state.workdir),
         ))
     };
-    let mut learning_totals = if let Some((playbook_store, knowledge_store)) = learning_stores.as_ref()
-    {
-        current_learning_totals(playbook_store, knowledge_store).await
-    } else {
-        None
-    };
+    let mut learning_totals =
+        if let Some((playbook_store, knowledge_store)) = learning_stores.as_ref() {
+            current_learning_totals(playbook_store, knowledge_store).await
+        } else {
+            None
+        };
 
     for (idx, task) in suite.tasks.iter().enumerate() {
         // Publish task start.
@@ -334,7 +337,8 @@ async fn execute_bench_run(
         });
 
         if let Some((playbook_store, knowledge_store)) = learning_stores.as_ref() {
-            if let Some(current_totals) = current_learning_totals(playbook_store, knowledge_store).await
+            if let Some(current_totals) =
+                current_learning_totals(playbook_store, knowledge_store).await
             {
                 let previous_totals = learning_totals.replace(current_totals);
                 let playbooks_created = previous_totals
@@ -650,9 +654,8 @@ fn infer_context_window(slug: &str) -> u64 {
         128_000
     } else if s.contains("gemini") {
         1_000_000
-    } else if s.contains("llama") {
-        128_000
     } else {
+        // llama and other models default to 128k
         128_000
     }
 }
@@ -840,8 +843,8 @@ edition = "2024"
 }
 
 fn bench_main_contents() -> &'static str {
-    r#"fn main() {}
-"#
+    r"fn main() {}
+"
 }
 
 fn generic_lib_contents() -> &'static str {
@@ -856,9 +859,9 @@ mod tests {}
 }
 
 fn learnable_helpers_contents() -> &'static str {
-    r#"/// Type referenced by the broken import in `src/lib.rs`.
+    r"/// Type referenced by the broken import in `src/lib.rs`.
 pub struct MissingType;
-"#
+"
 }
 
 fn learnable_rust_lib_contents() -> &'static str {

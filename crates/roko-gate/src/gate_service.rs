@@ -289,7 +289,9 @@ impl GateRunner for GateService {
                     let Some(command) = shell_gates.next() else {
                         verdicts.push(skipped_gate_verdict(
                             gate_name.clone(),
-                            format!("Skipped: {gate_name} gate requires explicit command configuration"),
+                            format!(
+                                "Skipped: {gate_name} gate requires explicit command configuration"
+                            ),
                             "not wired",
                         ));
                         continue;
@@ -416,9 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_gate_for_config_runs_true_false_and_captures_stderr() {
-        let signal = Engram::builder(Kind::Task)
-            .body(Body::empty())
-            .build();
+        let signal = Engram::builder(Kind::Task).body(Body::empty()).build();
         let ctx = Context::at(0);
 
         let true_gate = GateService::shell_gate_for_config(&ShellGateCommand {

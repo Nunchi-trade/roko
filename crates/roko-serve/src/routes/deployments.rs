@@ -684,12 +684,15 @@ mod tests {
 
     fn test_state(backend: Arc<dyn DeployBackend>) -> Result<(TempDir, Arc<AppState>)> {
         let dir = tempdir().map_err(|err| anyhow!("failed to create tempdir: {err}"))?;
-        let state = Arc::new(AppState::new(
-            dir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            roko_core::config::schema::RokoConfig::default(),
-            backend,
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                dir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                roko_core::config::schema::RokoConfig::default(),
+                backend,
+            )
+            .expect("AppState::new"),
+        );
         Ok((dir, state))
     }
 

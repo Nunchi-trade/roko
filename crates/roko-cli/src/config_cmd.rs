@@ -1026,8 +1026,7 @@ fn legacy_layout_warning(config: &RokoConfig) -> Option<String> {
     if config.config_version == 1 {
         if !config.providers.is_empty() {
             return Some(
-                "roko.toml uses config version 1; run `roko config migrate` to upgrade"
-                    .to_string(),
+                "roko.toml uses config version 1; run `roko config migrate` to upgrade".to_string(),
             );
         }
         return Some(
@@ -1879,7 +1878,9 @@ command = "claude"
         legacy.config_version = 1;
         assert_eq!(
             legacy_layout_warning(&legacy).as_deref(),
-            Some("roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade")
+            Some(
+                "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+            )
         );
 
         let current = RokoConfig::default();

@@ -1093,7 +1093,9 @@ impl KnowledgeSeedRecord {
     /// Build a deterministic knowledge seed from a successful episode.
     #[must_use]
     pub fn from_successful_episode(episode: &Episode) -> Option<Self> {
-        if !episode.success || gate_counts_from_episode(episode).is_some_and(GateCounts::has_only_skipped) {
+        if !episode.success
+            || gate_counts_from_episode(episode).is_some_and(GateCounts::has_only_skipped)
+        {
             return None;
         }
 
@@ -2010,8 +2012,7 @@ impl LearningRuntime {
         }
         let episode_count = self.episode_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-        if !skip_only
-            && let Some(reflection_input) = ReflectionInput::from_episode(&input.episode)
+        if !skip_only && let Some(reflection_input) = ReflectionInput::from_episode(&input.episode)
         {
             let mut reflection_store =
                 PostGateReflectionStore::load(&self.paths.post_gate_reflections_json);
@@ -2534,10 +2535,7 @@ fn gate_counts_from_episode(episode: &Episode) -> Option<GateCounts> {
         .and_then(serde_json::Value::as_u64)
         .or_else(|| extra_u64(episode, "gates_skipped"));
 
-    if passed.is_none()
-        && failed.is_none()
-        && skipped.is_none()
-        && episode.gate_verdicts.is_empty()
+    if passed.is_none() && failed.is_none() && skipped.is_none() && episode.gate_verdicts.is_empty()
     {
         return None;
     }
@@ -2586,16 +2584,19 @@ fn backfill_gate_counts(episode: &mut Episode, counts: GateCounts) {
         .extra
         .entry("gate_pass_rate".to_string())
         .or_insert_with(|| serde_json::json!(counts.pass_rate()));
-    episode.extra.entry("gate_counts".to_string()).or_insert_with(|| {
-        serde_json::json!({
-            "passed": counts.passed,
-            "failed": counts.failed,
-            "skipped": counts.skipped,
-            "executed": counts.executed(),
-            "summary": counts.summary(),
-            "pass_rate": counts.pass_rate(),
-        })
-    });
+    episode
+        .extra
+        .entry("gate_counts".to_string())
+        .or_insert_with(|| {
+            serde_json::json!({
+                "passed": counts.passed,
+                "failed": counts.failed,
+                "skipped": counts.skipped,
+                "executed": counts.executed(),
+                "summary": counts.summary(),
+                "pass_rate": counts.pass_rate(),
+            })
+        });
 }
 
 fn extra_string_vec(episode: &Episode, key: &str) -> Option<Vec<String>> {
@@ -3882,7 +3883,10 @@ mod tests {
 
         assert_eq!(runtime.local_reward_score("router", "claude-opus-4-6"), 0.5);
         assert_eq!(runtime.local_reward_score("skill", "skill-skip-only"), 0.5);
-        assert_eq!(runtime.local_reward_score("playbook_rule", "rule-skip-only"), 0.5);
+        assert_eq!(
+            runtime.local_reward_score("playbook_rule", "rule-skip-only"),
+            0.5
+        );
         assert_eq!(runtime.cascade_router().total_observations(), 0);
         assert_eq!(runtime.skill_library().len(), 0);
         assert_eq!(runtime.pattern_miner().lock().total_episodes(), 0);

@@ -394,18 +394,9 @@ async fn gates_history_waterfall(
             let rungs: Vec<Value> = items
                 .iter()
                 .map(|item| {
-                    let rung_num = item
-                        .get("rung")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as u32;
-                    let passed = item
-                        .get("passed")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    let duration_ms = item
-                        .get("duration_ms")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
+                    let rung_num = item.get("rung").and_then(Value::as_u64).unwrap_or(0) as u32;
+                    let passed = item.get("passed").and_then(Value::as_bool).unwrap_or(false);
+                    let duration_ms = item.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
                     let name = item
                         .get("gate")
                         .and_then(Value::as_str)

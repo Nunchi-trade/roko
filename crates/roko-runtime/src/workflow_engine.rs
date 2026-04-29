@@ -1330,7 +1330,10 @@ mod tests {
             .resume(config.clone(), &checkpoint)
             .await
             .expect("resume should complete from checkpoint");
-        assert!(resumed.success, "resumed workflow should complete successfully");
+        assert!(
+            resumed.success,
+            "resumed workflow should complete successfully"
+        );
         assert!(
             resumed.run_id.starts_with("run_"),
             "resumed run_id should have run_ prefix"

@@ -12,7 +12,10 @@ fn gate_config(
 ) -> GateConfig {
     GateConfig {
         workdir: workdir.to_path_buf(),
-        enabled_gates: enabled_gates.iter().map(|gate| (*gate).to_string()).collect(),
+        enabled_gates: enabled_gates
+            .iter()
+            .map(|gate| (*gate).to_string())
+            .collect(),
         shell_gates,
         max_rung: None,
     }
@@ -100,10 +103,7 @@ async fn shell_gate_false_fails_and_is_not_skipped() {
 async fn shell_gate_failure_keeps_stderr_in_the_verdict() {
     let gate = ShellGate::new(
         "sh",
-        vec![
-            "-c".into(),
-            "printf 'shell stderr\\n' >&2; exit 1".into(),
-        ],
+        vec!["-c".into(), "printf 'shell stderr\\n' >&2; exit 1".into()],
     )
     .with_timeout_ms(1_000);
 

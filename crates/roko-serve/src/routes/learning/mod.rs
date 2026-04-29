@@ -656,12 +656,15 @@ mod tests {
             create_backend("manual", None, None, None)
                 .map_err(|err| anyhow!("failed to create manual backend: {err}"))?,
         );
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            roko_core::config::schema::RokoConfig::default(),
-            deploy_backend,
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                workdir,
+                Arc::new(NoOpRuntime),
+                roko_core::config::schema::RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
         Ok((dir, state))
     }
 
@@ -1000,8 +1003,7 @@ mod tests {
             .map_err(|err| anyhow!("failed to read c-factor trend response body: {err}"))?;
         let payload: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
-        let trend: Vec<CFactorBucket> =
-            serde_json::from_value(payload["trend"].clone()).unwrap();
+        let trend: Vec<CFactorBucket> = serde_json::from_value(payload["trend"].clone()).unwrap();
         assert_eq!(trend.len(), 24);
         assert!(trend.iter().any(|bucket| bucket.samples == 2));
         assert!(payload.get("woolley").is_some());

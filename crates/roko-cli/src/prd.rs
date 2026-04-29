@@ -688,9 +688,7 @@ async fn maybe_generate_plan_after_promote(
         slug.to_string(),
         prd_path.to_path_buf(),
         auto_execute,
-        |slug, path, dry_run| async move {
-            generate_plan_from_prd(&slug, &path, dry_run, None).await
-        },
+        |slug, path, dry_run| async move { generate_plan_from_prd(&slug, &path, dry_run).await },
     )
     .await
 }
@@ -837,14 +835,14 @@ pub async fn generate_plan_from_prd_with_failure_context(
         let task_id = format!("prd:plan:{slug}");
         let exit_code = run_agent_logged(
             AgentExecOpts {
-            prompt: &task_prompt,
-            workdir: workdir_ref,
-            model: model.or_else(|| resolved.config.agent.model.as_deref()),
-            effort: Some(resolved.config.agent.effort.as_str()),
-            system_prompt: Some(&system),
-            resume_session: None,
-            env_vars: &resolved.config.agent.env,
-            role: Some("strategist"),
+                prompt: &task_prompt,
+                workdir: workdir_ref,
+                model: model.or_else(|| resolved.config.agent.model.as_deref()),
+                effort: Some(resolved.config.agent.effort.as_str()),
+                system_prompt: Some(&system),
+                resume_session: None,
+                env_vars: &resolved.config.agent.env,
+                role: Some("strategist"),
             },
             AgentExecEpisode {
                 task_kind: "prd-plan-generate",

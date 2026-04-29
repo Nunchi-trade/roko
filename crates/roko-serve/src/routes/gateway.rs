@@ -21,9 +21,9 @@ use validator::Validate;
 use roko_agent::GatewayEventWriter;
 use roko_core::agent::{AgentRole, resolve_model};
 use roko_core::foundation::{
-    CachePolicy, ChatMessage as CoreChatMessage, MessageRole as CoreMessageRole, caller,
+    CachePolicy, ChatMessage as CoreChatMessage, MessageRole as CoreMessageRole,
     ModelCallRequest as CoreModelCallRequest, ModelCallResponse as CoreModelCallResponse,
-    ModelCaller,
+    ModelCaller, caller,
 };
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_learn::bandits::UcbBandit;
@@ -985,12 +985,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            roko_core::config::schema::RokoConfig::default(),
-            deploy_backend,
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                workdir,
+                Arc::new(NoOpRuntime),
+                roko_core::config::schema::RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
         (dir, state)
     }
 
@@ -1118,10 +1121,7 @@ mod tests {
         assert_eq!(request.max_tokens, Some(1024));
         assert_eq!(request.temperature, Some(0.7));
         assert_eq!(request.role.as_deref(), Some("agent-1"));
-        assert_eq!(
-            request.caller.as_deref(),
-            Some(caller::SERVE)
-        );
+        assert_eq!(request.caller.as_deref(), Some(caller::SERVE));
         assert_eq!(request.cache_policy, CachePolicy::Default);
         assert_eq!(request.messages[0].role, CoreMessageRole::System);
         assert_eq!(request.messages[1].role, CoreMessageRole::User);
@@ -1290,7 +1290,8 @@ mod tests {
             Arc::new(NoOpRuntime),
             config.clone(),
             deploy_backend,
-        ).expect("AppState::new");
+        )
+        .expect("AppState::new");
         state.model_call_service = Arc::new(
             ModelCallService::new(model.to_string())
                 .with_config(config)
@@ -1495,12 +1496,10 @@ mod tests {
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let mut config = roko_core::config::schema::RokoConfig::default();
         config.agent.command = Some("false".into());
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            config,
-            deploy_backend,
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(workdir, Arc::new(NoOpRuntime), config, deploy_backend)
+                .expect("AppState::new"),
+        );
         let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
 
         let response = app

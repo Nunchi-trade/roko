@@ -5,18 +5,15 @@
 
 use std::sync::{Arc, OnceLock};
 
-use chrono::{DateTime, Duration, Utc};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{Html, IntoResponse, Json, Response},
 };
+use chrono::{DateTime, Duration, Utc};
 use regex::Regex;
 use roko_core::runtime_event::{RuntimeEvent, RuntimeEventEnvelope, WorkflowOutcome};
-use roko_core::{
-    config::schema::RokoConfig,
-    obs::LogScrubber,
-};
+use roko_core::{config::schema::RokoConfig, obs::LogScrubber};
 use roko_orchestrator::{ServiceConfig, ServiceFactory};
 use roko_runtime::{
     JsonlLogger, WorkflowConfig, WorkflowEngine, WorkflowRunConfig, WorkflowRunReport,
@@ -146,7 +143,10 @@ pub async fn create_share(
     payload: Option<Json<CreateShareRequest>>,
 ) -> Response {
     let token = format!("{}-{:04x}", id, std::process::id() as u16);
-    let requested_public = payload.as_ref().map(|Json(request)| request.public).unwrap_or(false);
+    let requested_public = payload
+        .as_ref()
+        .map(|Json(request)| request.public)
+        .unwrap_or(false);
     let no_expire = payload
         .as_ref()
         .map(|Json(request)| request.no_expire)
@@ -161,9 +161,8 @@ pub async fn create_share(
             .into_response();
     }
     let now = Utc::now();
-    let loaded = load_transcript_record(&state, &token).filter(|loaded| {
-        share_expired_at(&loaded.metadata, &now).is_none()
-    });
+    let loaded = load_transcript_record(&state, &token)
+        .filter(|loaded| share_expired_at(&loaded.metadata, &now).is_none());
     let had_existing_transcript = loaded.is_some();
     let existing_public = loaded
         .as_ref()
@@ -171,7 +170,7 @@ pub async fn create_share(
         .unwrap_or(false);
     let existing_expires_at = loaded
         .as_ref()
-        .and_then(|loaded| loaded.metadata.expires_at.clone());
+        .and_then(|loaded| loaded.metadata.expires_at);
     let transcript = match loaded {
         Some(loaded) => loaded.transcript,
         None => match transcript_from_runtime_events(&state, &id, &token) {
@@ -180,7 +179,9 @@ pub async fn create_share(
                 let Some(Json(request)) = payload else {
                     return StatusCode::NOT_FOUND.into_response();
                 };
-                match run_shared_workflow(&state, &token, request, Arc::clone(&workspace_config)).await {
+                match run_shared_workflow(&state, &token, request, Arc::clone(&workspace_config))
+                    .await
+                {
                     Ok(transcript) => transcript,
                     Err(e) => {
                         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e})))
@@ -196,7 +197,9 @@ pub async fn create_share(
     } else if had_existing_transcript {
         existing_expires_at
     } else {
-        Some(default_share_expires_at(workspace_config.serve.share_ttl_days))
+        Some(default_share_expires_at(
+            workspace_config.serve.share_ttl_days,
+        ))
     };
     let metadata = ShareMetadata {
         scrubbed: true,
@@ -215,23 +218,16 @@ pub async fn create_share(
     };
     let path = shared_dir.join(format!("{token}.json"));
     let stored = SharedTranscriptRecord {
-        metadata,
+        metadata: metadata.clone(),
         transcript: transcript.clone(),
     };
-    let share_url = match share_url_for(
-        workspace_config.relay.public_url.as_deref(),
-        &token,
-        public,
-    ) {
-        Ok(url) => url,
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": error})),
-            )
-                .into_response();
-        }
-    };
+    let share_url =
+        match share_url_for(workspace_config.relay.public_url.as_deref(), &token, public) {
+            Ok(url) => url,
+            Err(error) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response();
+            }
+        };
     match serde_json::to_string_pretty(&stored) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&path, json) {
@@ -491,7 +487,10 @@ async fn run_shared_workflow(
     Ok(transcript_from_report(token.to_string(), &report))
 }
 
-fn scrub_run_transcript(transcript: RunTranscript, scrubber: &LogScrubber) -> Option<RunTranscript> {
+fn scrub_run_transcript(
+    transcript: RunTranscript,
+    scrubber: &LogScrubber,
+) -> Option<RunTranscript> {
     let mut value = serde_json::to_value(transcript).ok()?;
     scrub_json_value(&mut value, scrubber);
     serde_json::from_value(value).ok()
@@ -519,7 +518,7 @@ fn scrub_json_value(value: &mut Value, scrubber: &LogScrubber) {
 fn share_expired_at(metadata: &ShareMetadata, now: &DateTime<Utc>) -> Option<DateTime<Utc>> {
     metadata.expires_at.as_ref().and_then(|expires_at| {
         if now >= expires_at {
-            Some(expires_at.clone())
+            Some(*expires_at)
         } else {
             None
         }
@@ -1052,8 +1051,7 @@ mod tests {
             "/runs/abc123"
         );
         assert_eq!(
-            share_url_for(Some("https://share.example.com/"), "abc123", true)
-                .expect("public url"),
+            share_url_for(Some("https://share.example.com/"), "abc123", true).expect("public url"),
             "https://share.example.com/runs/abc123"
         );
         assert!(share_url_for(None, "abc123", true).is_err());

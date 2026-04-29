@@ -331,12 +331,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        let state = Arc::new(AppState::new(
-            workdir.clone(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            deploy_backend,
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                workdir.clone(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
 
         tokio::fs::write(
             workdir.join("roko.toml"),

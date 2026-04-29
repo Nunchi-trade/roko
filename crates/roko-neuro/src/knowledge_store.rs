@@ -2409,9 +2409,7 @@ pub fn extract_anti_pattern_from_failure(
     tags.sort();
     tags.dedup();
 
-    let mut refutation_evidence = format!(
-        "Gate '{gate_name}' failed with: {gate_error_snippet}"
-    );
+    let mut refutation_evidence = format!("Gate '{gate_name}' failed with: {gate_error_snippet}");
     if let Some(snippet) = &agent_output_snippet {
         refutation_evidence.push_str(" Agent output snippet: ");
         refutation_evidence.push_str(snippet);
@@ -2422,10 +2420,7 @@ pub fn extract_anti_pattern_from_failure(
     );
 
     KnowledgeEntry {
-        id: format!(
-            "anti-{task_id}-{:016x}",
-            stable_hash(id_payload.as_bytes())
-        ),
+        id: format!("anti-{task_id}-{:016x}", stable_hash(id_payload.as_bytes())),
         kind: KnowledgeKind::AntiKnowledge,
         source: Some("bench-gate-failure".to_string()),
         content,
@@ -2513,7 +2508,8 @@ fn find_similar_anti_pattern_index(
 }
 
 fn anti_pattern_similarity(existing: &KnowledgeEntry, candidate: &KnowledgeEntry) -> f64 {
-    if existing.kind != KnowledgeKind::AntiKnowledge || candidate.kind != KnowledgeKind::AntiKnowledge
+    if existing.kind != KnowledgeKind::AntiKnowledge
+        || candidate.kind != KnowledgeKind::AntiKnowledge
     {
         return 0.0;
     }
@@ -2530,7 +2526,10 @@ fn anti_pattern_similarity(existing: &KnowledgeEntry, candidate: &KnowledgeEntry
 
 fn entry_has_normalized_tag(entry: &KnowledgeEntry, tag: &str) -> bool {
     let normalized = normalize(tag);
-    entry.tags.iter().any(|entry_tag| normalize(entry_tag) == normalized)
+    entry
+        .tags
+        .iter()
+        .any(|entry_tag| normalize(entry_tag) == normalized)
 }
 
 fn reinforce_anti_pattern(existing: &mut KnowledgeEntry, candidate: &KnowledgeEntry) {
@@ -2539,18 +2538,28 @@ fn reinforce_anti_pattern(existing: &mut KnowledgeEntry, candidate: &KnowledgeEn
     existing.confirmation_count = existing.confirmation_count.saturating_add(1);
     existing.half_life_days = KnowledgeKind::AntiKnowledge.default_half_life_days();
 
-    if existing.source.as_deref().is_none_or(|source| source.trim().is_empty()) {
-        existing.source = candidate.source.clone();
+    if existing
+        .source
+        .as_deref()
+        .is_none_or(|source| source.trim().is_empty())
+    {
+        existing.source.clone_from(&candidate.source);
     }
     if existing
         .refutation_evidence
         .as_deref()
         .is_none_or(|evidence| evidence.trim().is_empty())
     {
-        existing.refutation_evidence = candidate.refutation_evidence.clone();
+        existing
+            .refutation_evidence
+            .clone_from(&candidate.refutation_evidence);
     }
 
-    if let Some(task_tag) = candidate.tags.iter().find_map(|tag| tag.strip_prefix("task:")) {
+    if let Some(task_tag) = candidate
+        .tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("task:"))
+    {
         let task_tag = task_tag.trim();
         if !task_tag.is_empty()
             && !existing

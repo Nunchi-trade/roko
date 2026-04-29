@@ -265,7 +265,10 @@ impl ClaudeCliAgent {
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("failed", "true");
-        if let Some(model) = stream_usage.model.as_deref().filter(|model| !model.trim().is_empty())
+        if let Some(model) = stream_usage
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
         {
             output = output.tag("model", model);
         }
@@ -387,7 +390,11 @@ impl ClaudeCliAgent {
 
     fn parse_stream_usage(stdout: &str) -> StreamUsage {
         let mut usage = StreamUsage::default();
-        for line in stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for line in stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             let Some(event) = Self::parse_stream_event(line) else {
                 continue;
             };
@@ -447,7 +454,8 @@ impl ClaudeCliAgent {
     }
 
     fn stream_usage_u64(usage: &Value, keys: &[&str]) -> Option<u64> {
-        keys.iter().find_map(|key| usage.get(*key).and_then(Value::as_u64))
+        keys.iter()
+            .find_map(|key| usage.get(*key).and_then(Value::as_u64))
     }
 
     fn update_stream_usage_field<T>(slot: &mut Option<T>, value: Option<T>) {
@@ -463,7 +471,10 @@ impl ClaudeCliAgent {
     }
 
     fn tool_summary(block: &Value) -> String {
-        let name = block.get("name").and_then(Value::as_str).unwrap_or("unknown");
+        let name = block
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         let mut summary = format!("tool: {name}");
 
         if let Some(input) = block.get("input") {
@@ -545,23 +556,27 @@ impl ClaudeCliAgent {
     }
 
     fn stream_requested_tool_use(events: &[Value]) -> bool {
-        events.iter().any(|event| match event.get("type").and_then(Value::as_str) {
-            Some("assistant") => event
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_array)
-                .is_some_and(|content| {
-                    content
-                        .iter()
-                        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
-                }),
-            Some("content_block_start") => event
-                .get("content_block")
-                .and_then(|block| block.get("type").and_then(Value::as_str))
-                == Some("tool_use"),
-            Some("tool") => true,
-            _ => false,
-        })
+        events
+            .iter()
+            .any(|event| match event.get("type").and_then(Value::as_str) {
+                Some("assistant") => event
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| {
+                        content.iter().any(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("tool_use")
+                        })
+                    }),
+                Some("content_block_start") => {
+                    event
+                        .get("content_block")
+                        .and_then(|block| block.get("type").and_then(Value::as_str))
+                        == Some("tool_use")
+                }
+                Some("tool") => true,
+                _ => false,
+            })
     }
 
     fn output_text(stdout: &str) -> String {
@@ -693,7 +708,12 @@ impl Agent for ClaudeCliAgent {
                 // Non-JSON output (raw text from other agents) is fine — we
                 // just skip the progress parsing.
                 if let Some(event) = Self::parse_stream_event(trimmed) {
-                    Self::emit_stream_summary(&stdout_name, &event, &mut text_bytes, &mut tool_count);
+                    Self::emit_stream_summary(
+                        &stdout_name,
+                        &event,
+                        &mut text_bytes,
+                        &mut tool_count,
+                    );
                 }
             }
             collected
@@ -726,7 +746,12 @@ impl Agent for ClaudeCliAgent {
                     if debug_enabled {
                         eprintln!("{line}");
                     }
-                    Self::emit_stream_summary(&agent_name, &event, &mut text_bytes, &mut tool_count);
+                    Self::emit_stream_summary(
+                        &agent_name,
+                        &event,
+                        &mut text_bytes,
+                        &mut tool_count,
+                    );
                 } else if debug_enabled {
                     eprintln!("{line}");
                 } else if !stderr_agent.warn_and_filter_benign(&line) {
@@ -792,7 +817,8 @@ impl Agent for ClaudeCliAgent {
         let stdout = stdout_handle.await.unwrap_or_default();
         let stderr = stderr_handle.await.unwrap_or_default();
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let stream_usage = Self::parse_stream_usage(&stdout).merge(Self::parse_stream_usage(&stderr));
+        let stream_usage =
+            Self::parse_stream_usage(&stdout).merge(Self::parse_stream_usage(&stderr));
 
         if !status.success() {
             let code = status
@@ -864,16 +890,11 @@ impl Agent for ClaudeCliAgent {
 }
 
 /// Whether usage was reported by the final Claude CLI result event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum UsageSource {
     ProviderReported,
+    #[default]
     Unknown,
-}
-
-impl Default for UsageSource {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 /// Parsed usage metadata from Claude CLI `result` events.

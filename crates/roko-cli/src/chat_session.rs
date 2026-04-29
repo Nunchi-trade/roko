@@ -11,12 +11,12 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use roko_agent::AgentRuntimeEvent;
 use roko_agent::agent::{Agent, AgentResult};
 use roko_agent::claude_cli_agent::ClaudeCliAgent;
 use roko_agent::safety::contract::AgentContract;
-use roko_agent::AgentRuntimeEvent;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
-use roko_compose::{detect_conventions, ProjectConventions, TokenCounter};
+use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
 use roko_core::foundation::ChatMessage;
 use roko_core::{Body, Context, Engram, Kind};
 use tokio::signal;
@@ -551,7 +551,7 @@ const DEFAULT_CHAT_TOOLS: &str = "Read,Glob,Grep,Bash,Edit,Write,NotebookEdit";
 fn resolve_tool_policy(workdir: &Path) -> String {
     let contract_path = workdir.join(".roko/safety/chat.yaml");
     match std::fs::read_to_string(&contract_path) {
-        Ok(content) => match serde_yaml::from_str::<AgentContract>(&content) {
+        Ok(content) => match serde_yaml_ng::from_str::<AgentContract>(&content) {
             Ok(contract) => {
                 if let Some(ref allowlist) = contract.allowed_tools {
                     if !allowlist.is_empty() {

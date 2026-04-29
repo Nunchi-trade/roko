@@ -1423,12 +1423,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            roko_core::config::schema::RokoConfig::default(),
-            deploy_backend,
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                workdir,
+                Arc::new(NoOpRuntime),
+                roko_core::config::schema::RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
         (dir, state)
     }
 
@@ -1437,12 +1440,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        let state = Arc::new(AppState::new(
-            workdir,
-            runtime,
-            roko_core::config::schema::RokoConfig::default(),
-            deploy_backend,
-        ).expect("AppState::new"));
+        let state = Arc::new(
+            AppState::new(
+                workdir,
+                runtime,
+                roko_core::config::schema::RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
         (dir, state)
     }
 

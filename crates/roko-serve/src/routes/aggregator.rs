@@ -322,9 +322,7 @@ async fn agent_trace(
     })))
 }
 
-async fn agent_topology(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn agent_topology(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let agents = known_agents(&state).await?;
 
     // Build nodes with the fields the frontend `AgentFleet` component expects:
@@ -1317,12 +1315,15 @@ mod tests {
 
     fn test_state() -> Arc<AppState> {
         let dir = tempdir().expect("tempdir");
-        Arc::new(AppState::new(
-            dir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ).expect("AppState::new"))
+        Arc::new(
+            AppState::new(
+                dir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        )
     }
 
     async fn call_json(router: &Router, uri: &str) -> Value {

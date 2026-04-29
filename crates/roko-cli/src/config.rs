@@ -3779,7 +3779,10 @@ program = "echo"
         assert!(rendered.contains("schema_version = 2"));
         assert!(rendered.contains("default_backend = \"claude\""));
         assert!(rendered.contains("default_model = \"claude-sonnet-4-6\""));
-        assert!(rendered.contains("[providers.claude_cli]") || rendered.contains("# [providers.claude_cli]"));
+        assert!(
+            rendered.contains("[providers.claude_cli]")
+                || rendered.contains("# [providers.claude_cli]")
+        );
         assert!(rendered.contains("kind = \"claude_cli\""));
         assert!(rendered.contains("command = \"claude\""));
         assert!(rendered.contains("[models.claude-sonnet-4-6]"));

@@ -16888,7 +16888,7 @@ impl PlanRunner {
         let build_system = BuildSystem::detect(exec_dir);
         let generated_tests = self.generated_test_store_for(exec_dir);
         let caps = self.gate_rung_caps(exec_dir, generated_tests.as_ref());
-        let mut selected = select_rungs(
+        let selected = select_rungs(
             self.gate_plan_complexity(plan_id),
             &caps,
             self.task_trackers
@@ -16898,7 +16898,7 @@ impl PlanRunner {
         );
 
         let mut steps: Vec<(Rung, Box<dyn Verify>)> = Vec::new();
-        let mut skipped_count = 0;
+        let mut skipped_count: usize = 0;
         for rung in selected {
             if rung == Rung::Test && gate_config.skip_tests {
                 skipped_count = skipped_count.saturating_add(1);
