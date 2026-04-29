@@ -135,7 +135,8 @@ fn extract_new_crate_proposal(line: &str) -> Option<String> {
     }
 
     for token in line.split_whitespace() {
-        let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+        let token =
+            token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
         let normalized = token.to_ascii_lowercase();
         if normalized.starts_with("roko-") || normalized.starts_with("roko_") {
             return Some(token.to_string());
@@ -223,6 +224,72 @@ pub(crate) fn validate_prd_grounding(
         artifact_valid,
         issues,
         timestamp: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+/// Sidecar record for the repository context used during generation.
+#[derive(Serialize)]
+struct ContextSidecar<'a> {
+    slug: &'a str,
+    keywords: &'a [String],
+    workspace_members: &'a [String],
+    timestamp: String,
+}
+
+/// Persist the generation context as a JSON sidecar file alongside the PRD.
+/// Non-blocking: write failures produce warnings only.
+fn persist_context_sidecar(
+    prd_drafts_dir: &std::path::Path,
+    slug: &str,
+    keywords: &[String],
+    workspace_members: &[String],
+) {
+    let sidecar_path = prd_drafts_dir.join(format!("{slug}.context.json"));
+    let sidecar = ContextSidecar {
+        slug,
+        keywords,
+        workspace_members,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+
+    match serde_json::to_string_pretty(&sidecar) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&sidecar_path, json) {
+                eprintln!(
+                    "WARNING: Failed to write context sidecar {}: {}",
+                    sidecar_path.display(),
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("WARNING: Failed to serialize context sidecar: {}", e);
+        }
+    }
+}
+
+/// Persist the validation report as a JSON sidecar file alongside the PRD.
+/// Non-blocking: write failures produce warnings only.
+fn persist_validation_sidecar(
+    prd_drafts_dir: &std::path::Path,
+    slug: &str,
+    report: &ArtifactValidationReport,
+) {
+    let sidecar_path = prd_drafts_dir.join(format!("{slug}.validation.json"));
+
+    match serde_json::to_string_pretty(report) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&sidecar_path, json) {
+                eprintln!(
+                    "WARNING: Failed to write validation sidecar {}: {}",
+                    sidecar_path.display(),
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("WARNING: Failed to serialize validation sidecar: {}", e);
+        }
     }
 }
 
@@ -403,29 +470,55 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         target.display()
                     );
                 }
+                let workspace_members: Vec<String> = if exit_code == 0 {
+                    let crates_dir = workdir.join("crates");
+                    let mut workspace_members: Vec<String> = Vec::new();
+                    if let Ok(entries) = std::fs::read_dir(&crates_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                workspace_members
+                                    .push(entry.file_name().to_string_lossy().into_owned());
+                            }
+                        }
+                    }
+                    workspace_members.sort_unstable();
+                    workspace_members.dedup();
+                    workspace_members
+                } else {
+                    Vec::new()
+                };
                 // Post-generation grounding check and semantic validation.
                 let validation_report: Option<ArtifactValidationReport> = if exit_code == 0 {
                     if let Ok(written_content) = std::fs::read_to_string(&target) {
                         check_grounding_section(&written_content, &slug);
 
-                        let crates_dir = workdir.join("crates");
-                        let mut workspace_members: Vec<String> = Vec::new();
-                        if let Ok(entries) = std::fs::read_dir(&crates_dir) {
-                            for entry in entries.flatten() {
-                                let path = entry.path();
-                                if path.is_dir() {
-                                    workspace_members
-                                        .push(entry.file_name().to_string_lossy().into_owned());
-                                }
-                            }
-                        }
-                        workspace_members.sort_unstable();
-                        workspace_members.dedup();
-
                         let mut report =
                             validate_prd_grounding(&written_content, &slug, &workspace_members);
                         report.artifact_path = target.display().to_string();
 
+                        for issue in &report.issues {
+                            eprintln!(
+                                "[{}] {}: {}",
+                                severity_label(&issue.severity),
+                                issue.category,
+                                issue.message
+                            );
+                        }
+
+                        Some(report)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if exit_code == 0 {
+                    persist_context_sidecar(&drafts, &slug, &feature_keywords, &workspace_members);
+                    if let Some(ref report) = validation_report {
+                        persist_validation_sidecar(&drafts, &slug, report);
+                        println!("Context sidecar: {}.context.json", slug);
+                        println!("Validation sidecar: {}.validation.json", slug);
                         let error_count = report
                             .issues
                             .iter()
@@ -437,15 +530,6 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                             .filter(|issue| issue.severity == Severity::Warning)
                             .count();
 
-                        for issue in &report.issues {
-                            eprintln!(
-                                "[{}] {}: {}",
-                                severity_label(&issue.severity),
-                                issue.category,
-                                issue.message
-                            );
-                        }
-
                         if report.artifact_valid {
                             println!("Artifact validation: PASSED ({warning_count} warnings)");
                         } else {
@@ -453,15 +537,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                                 "Artifact validation: FAILED ({error_count} errors, {warning_count} warnings)"
                             );
                         }
-
-                        Some(report)
-                    } else {
-                        None
                     }
-                } else {
-                    None
-                };
-                let _ = &validation_report;
+                }
                 let _ = crate::commands::util::persist_capture_episode(
                     &workdir,
                     &agent_command,
@@ -721,8 +798,8 @@ mod tests {
     #[test]
     fn extract_markdown_section_is_case_insensitive() {
         let content = "# PRD\n\n## Repository Grounding\nGrounded text.\n\n## Next\nMore text.\n";
-        let section = extract_markdown_section(content, "repository grounding")
-            .expect("grounding section");
+        let section =
+            extract_markdown_section(content, "repository grounding").expect("grounding section");
         assert_eq!(section.trim(), "Grounded text.");
     }
 
@@ -755,8 +832,18 @@ Do work.
 ";
 
         let report = validate_prd_grounding(content, "demo", &workspace_members);
-        assert!(report.issues.iter().any(|issue| issue.category == "false_negative"));
-        assert!(report.issues.iter().any(|issue| issue.category == "duplicate_crate"));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.category == "false_negative")
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.category == "duplicate_crate")
+        );
         assert!(!report.artifact_valid);
     }
 }
