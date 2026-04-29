@@ -4,6 +4,8 @@ import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import CostChart from '../../components/Charts/CostChart';
 import BarChart from '../../components/Charts/BarChart';
+import { ThresholdGaugeRow } from '../../components/ThresholdGauge';
+import type { AdaptiveThresholdsResponse } from '../../components/ThresholdGauge';
 
 /* ── useCountUp: animates from 0 → target on first mount ─── */
 
@@ -119,16 +121,18 @@ export default function CostDashboard() {
   const [cfactor, setCfactor] = useState<CFactorResponse | null>(null);
   const [router, setRouter] = useState<RouterResponse | null>(null);
   const [providerHealth, setProviderHealth] = useState<ProviderHealthResponse | null>(null);
+  const [thresholds, setThresholds] = useState<AdaptiveThresholdsResponse | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const [h, e, c, r, ph] = await Promise.all([
+      const [h, e, c, r, ph, th] = await Promise.all([
         get<HealthResponse>('/api/health'),
         get<EfficiencyResponse>('/api/learn/efficiency'),
         get<CFactorResponse>('/api/metrics/c_factor'),
         get<RouterResponse>('/api/learn/cascade-router'),
         get<ProviderHealthResponse>('/api/learn/provider-outcomes'),
+        get<AdaptiveThresholdsResponse>('/api/learn/adaptive-thresholds'),
       ]);
       if (cancelled) return;
       setHealth(h);
@@ -136,6 +140,7 @@ export default function CostDashboard() {
       setCfactor(c);
       setRouter(r);
       setProviderHealth(ph);
+      setThresholds(th);
     };
     poll();
     const id = setInterval(poll, 10_000);
@@ -392,6 +397,14 @@ export default function CostDashboard() {
             <ProviderCell key={p.name} provider={p} />
           ))}
         </div>
+      </Pane>
+
+      {/* ═══ ADAPTIVE THRESHOLDS ═══ */}
+      <Pane
+        title="ADAPTIVE GATE THRESHOLDS"
+        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>7-rung EMA</span>}
+      >
+        <ThresholdGaugeRow thresholds={thresholds?.thresholds ?? {}} />
       </Pane>
     </div>
   );
