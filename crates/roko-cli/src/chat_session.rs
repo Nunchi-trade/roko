@@ -19,9 +19,11 @@ use roko_agent::provider::claude_cli::stream::parse_stream_line;
 use roko_agent::safety::contract::AgentContract;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
 use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
+use roko_core::agent::ProviderKind;
 use roko_core::foundation::ChatMessage;
 use roko_core::{Body, Context, Engram, Kind, OperatingFrequency};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use thiserror::Error;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::signal;
 
@@ -46,6 +48,33 @@ const SKIP_DIR_NAMES: [&str; 12] = [
     "target",
     "venv",
 ];
+
+/// Errors returned by `ChatAgentSession` send operations.
+#[derive(Debug, Error)]
+pub enum SessionError {
+    /// The configured model resolves to a non-CLI provider that is not yet
+    /// supported in the chat session path.
+    ///
+    /// # Suggestions
+    ///
+    /// - Switch to a Claude CLI model: `/model claude-sonnet-4-6-20250514`
+    /// - Use `roko run "prompt"` for API provider dispatch
+    #[error(
+        "API provider chat not yet implemented for provider '{provider}' (model: '{model}'). \
+         Switch to Claude CLI with `/model claude-sonnet-4-6-20250514`, \
+         or use `roko run \"{model}\"` for API provider dispatch."
+    )]
+    ApiProviderNotImplemented {
+        /// Provider kind string (for example `anthropic_api`).
+        provider: String,
+        /// Model slug that was requested.
+        model: String,
+    },
+
+    /// Any other error (I/O, config, network, etc.).
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 /// Update the stored session id after a turn completes.
 ///
@@ -287,6 +316,25 @@ impl ChatAgentSession {
         })
     }
 
+    /// Returns `true` if the current model resolves to Claude CLI.
+    ///
+    /// Non-CLI providers are rejected until the API chat path is wired.
+    fn is_cli_provider(&self) -> bool {
+        self.model_selection.provider_kind == ProviderKind::ClaudeCli.label()
+    }
+
+    /// Build the typed error used when an unsupported provider is requested.
+    fn api_provider_not_implemented_error(&self) -> SessionError {
+        let provider = self.model_selection.provider_kind.clone();
+        let model = self.model.clone();
+        tracing::warn!(
+            provider = %provider,
+            model = %model,
+            "ChatAgentSession: API provider requested but not yet supported in chat path"
+        );
+        SessionError::ApiProviderNotImplemented { provider, model }
+    }
+
     /// Process input that may be a slash command.
     ///
     /// If the input starts with `/`, parses the command and mutates session
@@ -440,7 +488,14 @@ impl ChatAgentSession {
     }
 
     /// Send a single turn through the configured Claude CLI agent.
-    pub async fn send_turn(&mut self, prompt: &str) -> Result<TurnResult> {
+    pub async fn send_turn(
+        &mut self,
+        prompt: &str,
+    ) -> std::result::Result<TurnResult, SessionError> {
+        if !self.is_cli_provider() {
+            return Err(self.api_provider_not_implemented_error());
+        }
+
         let started = Instant::now();
         let agent = self.build_agent()?;
         let input = self.build_engram(prompt);
@@ -449,7 +504,7 @@ impl ChatAgentSession {
 
         let agent_result = tokio::select! {
             // Branch 1: Normal completion.
-            result = agent.run(&input, &ctx) => result,
+            result = agent.run(&input, &ctx) => result.map_err(SessionError::Other),
 
             // Branch 2: Session-level timeout fires before the agent's internal timeout.
             // ClaudeCliAgent has its own 120s internal timeout; this is the session's
@@ -468,7 +523,7 @@ impl ChatAgentSession {
                 tracing::info!("turn cancelled by Ctrl-C");
                 return Ok(TurnResult::cancelled(started.elapsed()));
             }
-        };
+        }?;
 
         if !agent_result.success {
             let error_text = agent_result
@@ -499,7 +554,14 @@ impl ChatAgentSession {
     /// a fresh conversation regardless of any stored session_id.
     /// The session_id is NOT updated after this call - one-shot turns
     /// are completely isolated from each other.
-    pub async fn send_turn_oneshot(&mut self, prompt: &str) -> Result<TurnResult> {
+    pub async fn send_turn_oneshot(
+        &mut self,
+        prompt: &str,
+    ) -> std::result::Result<TurnResult, SessionError> {
+        if !self.is_cli_provider() {
+            return Err(self.api_provider_not_implemented_error());
+        }
+
         // Temporarily clear session_id so build_agent() omits --resume.
         let saved_session_id = self.session_id.take();
 
@@ -517,12 +579,15 @@ impl ChatAgentSession {
         &mut self,
         prompt: &str,
         tx: tokio::sync::mpsc::Sender<AgentRuntimeEvent>,
-    ) -> Result<TurnResult> {
+    ) -> std::result::Result<TurnResult, SessionError> {
         crate::chat_session::send_turn_streaming(self, prompt, tx).await
     }
 
     /// Send a streaming turn and render its events directly to the terminal.
-    pub async fn send_turn_streaming_inline(&mut self, prompt: &str) -> Result<TurnResult> {
+    pub async fn send_turn_streaming_inline(
+        &mut self,
+        prompt: &str,
+    ) -> std::result::Result<TurnResult, SessionError> {
         crate::chat_session::send_turn_streaming_inline(self, prompt).await
     }
 
@@ -601,7 +666,12 @@ async fn send_turn_streaming_with_program(
     prompt: &str,
     tx: tokio::sync::mpsc::Sender<AgentRuntimeEvent>,
     program: &Path,
-) -> Result<TurnResult> {
+) -> std::result::Result<TurnResult, SessionError> {
+    if !session.is_cli_provider() {
+        drop(tx);
+        return Err(session.api_provider_not_implemented_error());
+    }
+
     let started = Instant::now();
     let timeout_duration = session.timeout.unwrap_or(Duration::from_secs(300));
     let mut cmd = build_streaming_command(session, program);
@@ -616,9 +686,15 @@ async fn send_turn_streaming_with_program(
                 })
                 .await;
             drop(tx);
-            return Err(anyhow::anyhow!(message));
+            return Err(anyhow::anyhow!(message).into());
         }
     };
+
+    let stderr = child.stderr.take();
+    let stderr_handle = tokio::spawn(async move {
+        let mut stderr_pipe = stderr;
+        read_pipe_to_string(&mut stderr_pipe).await
+    });
 
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
@@ -632,14 +708,9 @@ async fn send_turn_streaming_with_program(
             let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
             let _ = stderr_handle.await;
             drop(tx);
-            return Err(anyhow::anyhow!(message));
+            return Err(anyhow::anyhow!(message).into());
         }
     };
-    let stderr = child.stderr.take();
-    let stderr_handle = tokio::spawn(async move {
-        let mut stderr_pipe = stderr;
-        read_pipe_to_string(&mut stderr_pipe).await
-    });
 
     if let Some(mut stdin) = child.stdin.take()
         && let Err(error) = stdin.write_all(prompt.as_bytes()).await
@@ -653,7 +724,7 @@ async fn send_turn_streaming_with_program(
             })
             .await;
         drop(tx);
-        return Err(anyhow::anyhow!(message));
+        return Err(anyhow::anyhow!(message).into());
     }
 
     let mut stdout_lines = BufReader::new(stdout).lines();
@@ -680,7 +751,7 @@ async fn send_turn_streaming_with_program(
                         let _ = tx.send(AgentRuntimeEvent::Error { message: message.clone() }).await;
                         let _ = tx.send(AgentRuntimeEvent::Exited { exit_code: None }).await;
                         drop(tx);
-                        return Err(anyhow::anyhow!(message));
+                        return Err(anyhow::anyhow!(message).into());
                     }
                 };
 
@@ -785,7 +856,7 @@ async fn send_turn_streaming_with_program(
                 .await;
             let _ = tx.send(AgentRuntimeEvent::Exited { exit_code: None }).await;
             drop(tx);
-            return Err(anyhow::anyhow!(message));
+            return Err(anyhow::anyhow!(message).into());
         }
     };
 
@@ -839,7 +910,7 @@ pub async fn send_turn_streaming(
     session: &mut ChatAgentSession,
     prompt: &str,
     tx: tokio::sync::mpsc::Sender<AgentRuntimeEvent>,
-) -> Result<TurnResult> {
+) -> std::result::Result<TurnResult, SessionError> {
     send_turn_streaming_with_program(session, prompt, tx, Path::new("claude")).await
 }
 
@@ -850,7 +921,7 @@ pub async fn send_turn_streaming(
 pub async fn send_turn_streaming_inline(
     session: &mut ChatAgentSession,
     prompt: &str,
-) -> Result<TurnResult> {
+) -> std::result::Result<TurnResult, SessionError> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentRuntimeEvent>(256);
 
     let render_handle = tokio::spawn(async move {
@@ -1228,6 +1299,22 @@ fn preview_text(value: &str, max_chars: usize) -> String {
     preview
 }
 
+async fn read_pipe_to_string<R>(pipe: &mut Option<R>) -> String
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let Some(reader) = pipe.as_mut() else {
+        return String::new();
+    };
+
+    let mut bytes = Vec::new();
+    if reader.read_to_end(&mut bytes).await.is_err() {
+        return String::new();
+    }
+
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1334,6 +1421,40 @@ mod tests {
         let debug = agent_debug(&session);
         assert!(debug.contains("resume: Some(\"sess-abc-123\")"), "{debug}");
         assert_eq!(session.session_id.as_deref(), Some("sess-abc-123"));
+    }
+
+    #[tokio::test]
+    async fn send_turn_rejects_non_cli_provider() {
+        let mut session = test_session();
+        session.model_selection.provider_kind = "anthropic_api".to_string();
+        session.model = "gpt-4.1-nano".to_string();
+
+        let error = session.send_turn("hello").await.unwrap_err();
+        match error {
+            SessionError::ApiProviderNotImplemented { provider, model } => {
+                assert_eq!(provider, "anthropic_api");
+                assert_eq!(model, "gpt-4.1-nano");
+            }
+            other => panic!("expected ApiProviderNotImplemented, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_turn_oneshot_rejects_non_cli_provider_without_mutating_state() {
+        let mut session = test_session();
+        session.model_selection.provider_kind = "openai_compat".to_string();
+        session.model = "gpt-4.1-nano".to_string();
+        session.session_id = Some("sess-keep".to_string());
+
+        let error = session.send_turn_oneshot("hello").await.unwrap_err();
+        match error {
+            SessionError::ApiProviderNotImplemented { provider, model } => {
+                assert_eq!(provider, "openai_compat");
+                assert_eq!(model, "gpt-4.1-nano");
+            }
+            other => panic!("expected ApiProviderNotImplemented, got {other:?}"),
+        }
+        assert_eq!(session.session_id.as_deref(), Some("sess-keep"));
     }
 
     #[test]
