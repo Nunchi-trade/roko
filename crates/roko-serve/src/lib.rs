@@ -119,6 +119,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, warn};
 
@@ -717,6 +718,21 @@ fn build_server_router(
         .with_state(state);
 
     api_router.merge(fallback_router)
+}
+
+fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
+    if cors_origins.is_empty() {
+        CorsLayer::permissive()
+    } else {
+        let allowed: Vec<axum::http::HeaderValue> = cors_origins
+            .iter()
+            .filter_map(|origin| origin.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(allowed)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    }
 }
 
 fn api_or_ws_path_requires_json_404(path: &str) -> bool {
