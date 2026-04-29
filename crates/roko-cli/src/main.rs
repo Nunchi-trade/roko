@@ -1117,6 +1117,7 @@ Examples:
   roko plan run plans/my-plan       Run a specific plan
   roko plan run plans/ --approval   Run with interactive TUI approval
   roko plan run plans/ --dry-run    Preview without executing
+  roko plan run plans/ --fresh      Archive old state and start clean
   roko plan run plans/ --resume-plan .roko/state/executor.json   Resume from snapshot")]
     Run {
         /// Path to the plans directory.
@@ -1136,6 +1137,9 @@ Examples:
         /// Parse and display the plan without executing. Shows tasks, dependencies, and estimates.
         #[arg(long)]
         dry_run: bool,
+        /// Archive old run state and start from scratch (ignores any existing executor.json).
+        #[arg(long)]
+        fresh: bool,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -2239,6 +2243,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 approval: false,
                 max_retries: None,
                 dry_run: false,
+                fresh: false,
             };
             commands::plan::cmd_plan(cli, plan_cmd).await
         }
@@ -2953,6 +2958,17 @@ mod tests {
                     resume_plan: Some(_),
                     ..
                 }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_plan_fresh_flag() {
+        let cli = Cli::try_parse_from(["roko", "plan", "run", "plans", "--fresh"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Plan {
+                cmd: PlanCmd::Run { fresh: true, .. }
             })
         ));
     }
