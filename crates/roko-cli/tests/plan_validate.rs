@@ -22,6 +22,26 @@ fn run_validate(temp: &TempDir, args: &[&str]) -> assert_cmd::assert::Assert {
         .assert()
 }
 
+fn write_model_registry(root: &Path) {
+    fs::write(
+        root.join("roko.toml"),
+        r#"
+[models.claude-haiku-4-5]
+provider = "claude_cli"
+slug = "claude-haiku-4-5"
+
+[models.claude-sonnet-4-6]
+provider = "claude_cli"
+slug = "claude-sonnet-4-6"
+
+[models.claude-opus-4-6]
+provider = "claude_cli"
+slug = "claude-opus-4-6"
+"#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn plan_validate_help_shows_new_flags() {
     let assert = Command::cargo_bin("roko")
@@ -68,6 +88,98 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
     assert!(
         stdout.contains("0 diagnostics in 1 plan"),
         "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
+fn plan_validate_warns_on_known_model_aliases() {
+    let temp = TempDir::new().unwrap();
+    write_model_registry(temp.path());
+    write_plan(
+        temp.path(),
+        "aliases",
+        r#"
+[meta]
+plan = "aliases"
+
+[[task]]
+id = "T1"
+title = "Mechanical alias"
+role = "implementer"
+model_hint = "haiku"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+
+[[task]]
+id = "T2"
+title = "Focused alias"
+role = "implementer"
+model_hint = "sonnet"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+
+[[task]]
+id = "T3"
+title = "Architectural alias"
+role = "implementer"
+model_hint = "opus"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("3 diagnostics in 1 plan"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(stdout.contains("PLAN_009"), "missing PLAN_009: {stdout}");
+    assert!(
+        stdout.contains("uses model alias 'haiku'; use full name 'claude-haiku-4-5' instead"),
+        "missing haiku alias warning: {stdout}"
+    );
+    assert!(
+        stdout.contains("uses model alias 'sonnet'; use full name 'claude-sonnet-4-6' instead"),
+        "missing sonnet alias warning: {stdout}"
+    );
+    assert!(
+        stdout.contains("uses model alias 'opus'; use full name 'claude-opus-4-6' instead"),
+        "missing opus alias warning: {stdout}"
+    );
+}
+
+#[test]
+fn plan_validate_preserves_unknown_model_warning() {
+    let temp = TempDir::new().unwrap();
+    write_model_registry(temp.path());
+    write_plan(
+        temp.path(),
+        "unknown-model",
+        r#"
+[meta]
+plan = "unknown-model"
+
+[[task]]
+id = "T1"
+title = "Unknown model"
+role = "implementer"
+model_hint = "definitely-not-a-model"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("1 diagnostics in 1 plan"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(stdout.contains("PLAN_009"), "missing PLAN_009: {stdout}");
+    assert!(
+        stdout.contains("uses model 'definitely-not-a-model' which is not configured in roko.toml"),
+        "missing original unknown-model warning: {stdout}"
     );
 }
 

@@ -169,16 +169,16 @@ pub const PLAN_GENERATOR_SYSTEM_PROMPT: &str = r#"You are a task decomposition e
 2. **Precise context**: For each task, specify EXACTLY which files and line ranges to read. Not "read the crate" — "read lines 40-80 of src/lib.rs".
 3. **Executable verification**: Every acceptance criterion is a shell command that exits 0 on success, 1 on failure. No subjective criteria.
 4. **Dependency ordering**: Types before implementations. Implementations before wiring. Wiring before tests.
-5. **Model hints**: Assign the cheapest model that can handle each task. Imports → Haiku. Single function → Sonnet. Multi-module wiring → Opus.
+5. **Model hints**: Assign the cheapest model that can handle each task. Imports → `claude-haiku-4-5`. Single function → `claude-sonnet-4-6`. Multi-module wiring → `claude-opus-4-6`.
 
 ## Task tiers
 
 | Tier | Name | Max LOC | Model | Examples |
 |------|------|---------|-------|----------|
-| 0 | Mechanical | 20 | haiku | Add import, add struct field, rename function |
-| 1 | Focused | 50 | sonnet | Implement function body, write single test |
-| 2 | Integrative | 150 | sonnet/opus | Wire module A→B, implement trait for type |
-| 3 | Architectural | 300 | opus | Design new API, decompose complex feature |
+| 0 | Mechanical | 20 | `claude-haiku-4-5` | Add import, add struct field, rename function |
+| 1 | Focused | 50 | `claude-sonnet-4-6` | Implement function body, write single test |
+| 2 | Integrative | 150 | `claude-sonnet-4-6` | Wire module A→B, implement trait for type |
+| 3 | Architectural | 300 | `claude-opus-4-6` | Design new API, decompose complex feature |
 
 ## Output format
 
@@ -199,7 +199,7 @@ title = "<imperative verb phrase>"
 description = "<short outcome description>"
 status = "ready"
 tier = "mechanical"       # mechanical | focused | integrative | architectural
-model_hint = "haiku"      # cheapest model for this tier
+model_hint = "claude-haiku-4-5"  # FULL model name required: claude-haiku-4-5 | claude-sonnet-4-6 | claude-opus-4-6
 max_loc = 20              # maximum lines of change
 files = ["<path>"]        # files this task modifies
 allowed_tools = ["read_file", "grep"]
@@ -249,6 +249,18 @@ Every `[[task]]` MUST include a `role` field. Choose the most specific role:
 | `"quick-reviewer"` | Code review tasks, auditing for correctness |
 
 Missing or misspelled roles will be rejected by `roko plan validate`. The `role` field is REQUIRED.
+
+## Model names
+
+Use FULL model identifiers in the `model_hint` and `model` fields. Never use short aliases.
+
+| Alias (WRONG) | Full name (CORRECT) |
+|---------------|---------------------|
+| `"haiku"` | `"claude-haiku-4-5"` |
+| `"sonnet"` | `"claude-sonnet-4-6"` |
+| `"opus"` | `"claude-opus-4-6"` |
+
+Using aliases like `"sonnet"` will cause `PLAN_009` warnings in `roko plan validate` and may fail at execution.
 
 ## Before generating tasks, you MUST:
 
@@ -468,5 +480,18 @@ mod tests {
         assert!(prompt.contains("Add a logging system"));
         assert!(prompt.contains("Surgical scope"));
         assert!(prompt.contains("/test"));
+    }
+
+    #[test]
+    fn build_generator_system_prompt_uses_full_model_names() {
+        let prompt = build_generator_system_prompt(std::path::Path::new("/test"));
+
+        assert!(prompt.contains("## Model names"));
+        assert!(prompt.contains("| 0 | Mechanical | 20 | `claude-haiku-4-5` |"));
+        assert!(prompt.contains("| 1 | Focused | 50 | `claude-sonnet-4-6` |"));
+        assert!(prompt.contains("| 2 | Integrative | 150 | `claude-sonnet-4-6` |"));
+        assert!(prompt.contains("| 3 | Architectural | 300 | `claude-opus-4-6` |"));
+        assert!(prompt.contains("model_hint = \"claude-haiku-4-5\""));
+        assert!(!prompt.contains("| 0 | Mechanical | 20 | haiku |"));
     }
 }

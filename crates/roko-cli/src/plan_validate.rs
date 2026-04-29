@@ -486,19 +486,49 @@ fn validate_tasks_file(
         }
 
         if let (Some(model), Some(known_models)) = (normalized_field(task.model.as_deref()), models)
-            && !model_is_known(model, known_models)
         {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                rule_id: "PLAN_009".to_string(),
-                plan_id: Some(plan_id.clone()),
-                task_id: task.task_id.clone(),
-                message: format!(
-                    "task '{}' uses model '{}' which is not configured in roko.toml",
-                    task.label(),
-                    model
-                ),
-            });
+            if let Some(canonical) = normalize_model_alias(model) {
+                // Known alias: warn and point at the canonical identifier.
+                if !model_is_known(canonical, known_models) {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Warning,
+                        rule_id: "PLAN_009".to_string(),
+                        plan_id: Some(plan_id.clone()),
+                        task_id: task.task_id.clone(),
+                        message: format!(
+                            "task '{}' uses model alias '{}' (canonical: '{}'), which is not configured in roko.toml",
+                            task.label(),
+                            model,
+                            canonical
+                        ),
+                    });
+                } else {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Warning,
+                        rule_id: "PLAN_009".to_string(),
+                        plan_id: Some(plan_id.clone()),
+                        task_id: task.task_id.clone(),
+                        message: format!(
+                            "task '{}' uses model alias '{}'; use full name '{}' instead",
+                            task.label(),
+                            model,
+                            canonical
+                        ),
+                    });
+                }
+            } else if !model_is_known(model, known_models) {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    rule_id: "PLAN_009".to_string(),
+                    plan_id: Some(plan_id.clone()),
+                    task_id: task.task_id.clone(),
+                    message: format!(
+                        "task '{}' uses model '{}' which is not configured in roko.toml",
+                        task.label(),
+                        model
+                    ),
+                });
+            }
         }
     }
 
@@ -856,4 +886,18 @@ fn parse_task_role(role: &str) -> Option<AgentRole> {
 
 fn model_is_known(model: &str, known_models: &HashMap<String, ModelProfile>) -> bool {
     known_models.contains_key(model) || known_models.values().any(|profile| profile.slug == model)
+}
+
+/// Map a known model alias to its canonical name.
+///
+/// Returns `Some(canonical)` if the alias is known, `None` if already
+/// canonical or unknown.
+fn normalize_model_alias(alias: &str) -> Option<&'static str> {
+    let lower = alias.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "haiku" | "claude-haiku" => Some("claude-haiku-4-5"),
+        "sonnet" | "claude-sonnet" => Some("claude-sonnet-4-6"),
+        "opus" | "claude-opus" => Some("claude-opus-4-6"),
+        _ => None,
+    }
 }
