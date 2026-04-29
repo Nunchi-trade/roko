@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
+use serde::{Deserialize, Serialize};
 
 /// Extract feature keywords from a PRD slug and description for context lookup.
 /// Splits on hyphens, underscores, and spaces. Filters short words (<3 chars).
@@ -36,6 +37,193 @@ fn check_grounding_section(prd_content: &str, slug: &str) -> bool {
     }
 
     has_section
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Severity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ArtifactKind {
+    Prd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ValidationIssue {
+    pub(crate) severity: Severity,
+    pub(crate) category: String,
+    pub(crate) message: String,
+    pub(crate) location: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ArtifactValidationReport {
+    pub(crate) slug: String,
+    pub(crate) artifact_path: String,
+    pub(crate) artifact_kind: ArtifactKind,
+    pub(crate) process_success: bool,
+    pub(crate) artifact_valid: bool,
+    pub(crate) issues: Vec<ValidationIssue>,
+    pub(crate) timestamp: String,
+}
+
+fn severity_label(severity: &Severity) -> &'static str {
+    match severity {
+        Severity::Error => "ERROR",
+        Severity::Warning => "WARNING",
+    }
+}
+
+fn normalize_crate_name(name: &str) -> String {
+    name.trim()
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+        .to_ascii_lowercase()
+        .replace('_', "-")
+}
+
+/// Extract a markdown section by heading name (case-insensitive `## heading`).
+/// Returns the body text from after the heading until the next `##` heading or end of file.
+fn extract_markdown_section(content: &str, heading: &str) -> Option<String> {
+    let heading_lower = heading.trim().to_ascii_lowercase();
+    let mut in_section = false;
+    let mut lines: Vec<&str> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let trimmed_lower = trimmed.to_ascii_lowercase();
+
+        if let Some(rest) = trimmed_lower.strip_prefix("## ") {
+            if in_section {
+                break;
+            }
+
+            if rest.trim().starts_with(heading_lower.as_str()) {
+                in_section = true;
+            }
+
+            continue;
+        }
+
+        if in_section {
+            lines.push(line);
+        }
+    }
+
+    let body = lines.join("\n");
+    if body.trim().is_empty() {
+        None
+    } else {
+        Some(body)
+    }
+}
+
+/// Extract a proposed new crate name from a line.
+/// Matches patterns like:
+/// - "**New crates**: roko-foo"
+/// - "- roko-foo (new crate)"
+/// - "create crate `roko-bar`"
+/// - "new crate: roko-baz"
+fn extract_new_crate_proposal(line: &str) -> Option<String> {
+    let line_lower = line.to_ascii_lowercase();
+    let patterns = ["new crate", "new crates", "create crate", "add crate"];
+    if !patterns.iter().any(|pattern| line_lower.contains(pattern)) {
+        return None;
+    }
+
+    for token in line.split_whitespace() {
+        let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+        let normalized = token.to_ascii_lowercase();
+        if normalized.starts_with("roko-") || normalized.starts_with("roko_") {
+            return Some(token.to_string());
+        }
+    }
+
+    None
+}
+
+/// Validate the Repository Grounding section of a generated PRD against workspace members.
+pub(crate) fn validate_prd_grounding(
+    prd_content: &str,
+    slug: &str,
+    workspace_members: &[String],
+) -> ArtifactValidationReport {
+    let mut issues: Vec<ValidationIssue> = Vec::new();
+    let grounding_text = extract_markdown_section(prd_content, "repository grounding");
+
+    if grounding_text.is_none() {
+        issues.push(ValidationIssue {
+            severity: Severity::Warning,
+            category: "missing_section".to_string(),
+            message: "PRD has no '## Repository Grounding' section".to_string(),
+            location: None,
+        });
+    }
+
+    if let Some(text) = grounding_text.as_deref() {
+        let text_lower = text.to_ascii_lowercase();
+
+        if (text_lower.contains("no existing crates") || text_lower.contains("no relevant crates"))
+            && !workspace_members.is_empty()
+        {
+            let mut preview: Vec<String> = workspace_members.iter().take(5).cloned().collect();
+            let more = workspace_members.len().saturating_sub(preview.len());
+            if more > 0 {
+                preview.push(format!("and {more} more"));
+            }
+
+            issues.push(ValidationIssue {
+                severity: Severity::Warning,
+                category: "false_negative".to_string(),
+                message: format!(
+                    "PRD claims no existing crates but workspace has {} crate(s): {}",
+                    workspace_members.len(),
+                    preview.join(", ")
+                ),
+                location: Some("Repository Grounding".to_string()),
+            });
+        }
+
+        let workspace_members_normalized: Vec<String> = workspace_members
+            .iter()
+            .map(|member| normalize_crate_name(member))
+            .collect();
+
+        for line in text.lines() {
+            if let Some(proposed_name) = extract_new_crate_proposal(line) {
+                let proposed_normalized = normalize_crate_name(&proposed_name);
+                if workspace_members_normalized
+                    .iter()
+                    .any(|member| member == &proposed_normalized)
+                {
+                    issues.push(ValidationIssue {
+                        severity: Severity::Error,
+                        category: "duplicate_crate".to_string(),
+                        message: format!(
+                            "PRD proposes creating crate '{}' which already exists in the workspace",
+                            proposed_name
+                        ),
+                        location: Some("Repository Grounding".to_string()),
+                    });
+                }
+            }
+        }
+    }
+
+    let artifact_valid = !issues.iter().any(|issue| issue.severity == Severity::Error);
+
+    ArtifactValidationReport {
+        slug: slug.to_string(),
+        artifact_path: String::new(),
+        artifact_kind: ArtifactKind::Prd,
+        process_success: true,
+        artifact_valid,
+        issues,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    }
 }
 
 pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
@@ -215,12 +403,65 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         target.display()
                     );
                 }
-                // Post-generation grounding check: warn if the section is missing.
-                if exit_code == 0
-                    && let Ok(written_content) = std::fs::read_to_string(&target)
-                {
-                    check_grounding_section(&written_content, &slug);
-                }
+                // Post-generation grounding check and semantic validation.
+                let validation_report: Option<ArtifactValidationReport> = if exit_code == 0 {
+                    if let Ok(written_content) = std::fs::read_to_string(&target) {
+                        check_grounding_section(&written_content, &slug);
+
+                        let crates_dir = workdir.join("crates");
+                        let mut workspace_members: Vec<String> = Vec::new();
+                        if let Ok(entries) = std::fs::read_dir(&crates_dir) {
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+                                if path.is_dir() {
+                                    workspace_members
+                                        .push(entry.file_name().to_string_lossy().into_owned());
+                                }
+                            }
+                        }
+                        workspace_members.sort_unstable();
+                        workspace_members.dedup();
+
+                        let mut report =
+                            validate_prd_grounding(&written_content, &slug, &workspace_members);
+                        report.artifact_path = target.display().to_string();
+
+                        let error_count = report
+                            .issues
+                            .iter()
+                            .filter(|issue| issue.severity == Severity::Error)
+                            .count();
+                        let warning_count = report
+                            .issues
+                            .iter()
+                            .filter(|issue| issue.severity == Severity::Warning)
+                            .count();
+
+                        for issue in &report.issues {
+                            eprintln!(
+                                "[{}] {}: {}",
+                                severity_label(&issue.severity),
+                                issue.category,
+                                issue.message
+                            );
+                        }
+
+                        if report.artifact_valid {
+                            println!("Artifact validation: PASSED ({warning_count} warnings)");
+                        } else {
+                            println!(
+                                "Artifact validation: FAILED ({error_count} errors, {warning_count} warnings)"
+                            );
+                        }
+
+                        Some(report)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let _ = &validation_report;
                 let _ = crate::commands::util::persist_capture_episode(
                     &workdir,
                     &agent_command,
@@ -470,5 +711,52 @@ pub(crate) fn domain_gate_hint(domain: &str) -> &'static str {
         "ruby" => "test (rspec), lint (rubocop)",
         "java" => "compile (mvn compile), test (mvn test)",
         _ => "compile, test, lint (configure in roko.toml)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_markdown_section_is_case_insensitive() {
+        let content = "# PRD\n\n## Repository Grounding\nGrounded text.\n\n## Next\nMore text.\n";
+        let section = extract_markdown_section(content, "repository grounding")
+            .expect("grounding section");
+        assert_eq!(section.trim(), "Grounded text.");
+    }
+
+    #[test]
+    fn extract_new_crate_proposal_handles_common_patterns() {
+        assert_eq!(
+            extract_new_crate_proposal("**New crates**: roko-foo"),
+            Some("roko-foo".to_string())
+        );
+        assert_eq!(
+            extract_new_crate_proposal("- roko-bar (new crate)"),
+            Some("roko-bar".to_string())
+        );
+        assert_eq!(
+            extract_new_crate_proposal("create crate `roko-baz`"),
+            Some("roko-baz".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_prd_grounding_warns_and_errors_as_expected() {
+        let workspace_members = vec!["roko-compose".to_string(), "roko-agent".to_string()];
+        let content = "\
+## Repository Grounding
+No existing crates are relevant here.
+Create crate `roko-compose`.
+
+## Requirements
+Do work.
+";
+
+        let report = validate_prd_grounding(content, "demo", &workspace_members);
+        assert!(report.issues.iter().any(|issue| issue.category == "false_negative"));
+        assert!(report.issues.iter().any(|issue| issue.category == "duplicate_crate"));
+        assert!(!report.artifact_valid);
     }
 }
