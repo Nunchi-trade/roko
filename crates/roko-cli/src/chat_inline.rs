@@ -71,6 +71,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/retry", "resend the last message"),
     ("/export", "export conversation (markdown/json)"),
     ("/cost", "session cost summary"),
+    ("/tools", "list available tools"),
     ("/clear", "clear scrollback"),
     ("/quit", "exit the chat"),
     ("/exit", "exit the chat"),
@@ -1897,6 +1898,7 @@ fn handle_slash_command(
                 styled::continuation(theme, "/cost", "session cost summary", None),
                 styled::continuation(theme, "/stats", "detailed session statistics", None),
                 styled::continuation(theme, "/context", "token/context usage", None),
+                styled::continuation(theme, "/tools", "list available tools", None),
                 styled::continuation(theme, "/version", "version info", None),
                 styled::continuation(theme, "/history", "show input history", None),
                 styled::continuation(theme, "/copy", "copy last response to clipboard", None),
@@ -3006,6 +3008,29 @@ fn handle_slash_command(
             for _ in 0..term.viewport_height() {
                 term.push_blank()?;
             }
+        }
+
+        "/tools" => {
+            use roko_std::tool::builtin::BUILTIN_TOOL_NAMES;
+
+            let names = BUILTIN_TOOL_NAMES.as_slice();
+            let mut lines = vec![styled::section_start(
+                theme,
+                "tools",
+                &format!("{} builtin tools", names.len()),
+                None,
+            )];
+
+            for chunk in names.chunks(4) {
+                lines.push(styled::continuation(theme, "tool", &chunk.join("  "), None));
+            }
+
+            lines.push(styled::section_end(
+                theme,
+                "tip",
+                "resolved from roko-std builtins",
+            ));
+            term.push_lines(&lines)?;
         }
 
         _ => {
