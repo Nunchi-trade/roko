@@ -324,6 +324,8 @@ pub async fn run_direct_provider_chat(
 
         print!("\r\x1b[K");
 
+        print!("\r\x1b[K");
+
         print!("\x1b[33m{agent_id}>\x1b[0m ");
         std::io::stdout().flush().context("flush agent prompt")?;
 
