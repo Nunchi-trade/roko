@@ -137,6 +137,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             approval,
             max_retries,
             dry_run,
+            fresh,
         } => {
             // ── Mandatory validation: reject malformed plans before execution ──
             // Runs in both normal and `--dry-run` mode.
@@ -150,6 +151,30 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
 
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            if fresh {
+                let state_path = wd.join(".roko").join("state").join("executor.json");
+                if state_path.exists() {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    let backup_path = state_path.with_extension(format!("json.bak.{ts}"));
+                    match std::fs::rename(&state_path, &backup_path) {
+                        Ok(()) => {
+                            if !cli.quiet {
+                                eprintln!("▸ --fresh: archived old state to {}", backup_path.display());
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "warning: --fresh: could not archive {}: {err}",
+                                state_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
             let task_timeout_secs = config.executor.task_timeout_secs;
@@ -157,16 +182,18 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             // Runner v2 auto-resumes from .roko/state/executor.json if it exists.
             // Explicit --resume-plan paths are honored by copying to the standard location.
-            if let Some(ref snap_path) = resume_plan {
-                let snap_path = if snap_path.is_relative() {
-                    wd.join(snap_path)
-                } else {
-                    snap_path.clone()
-                };
-                let standard = wd.join(".roko").join("state").join("executor.json");
-                if snap_path != standard && snap_path.exists() {
-                    let _ = std::fs::create_dir_all(standard.parent().unwrap());
-                    let _ = std::fs::copy(&snap_path, &standard);
+            if !fresh {
+                if let Some(ref snap_path) = resume_plan {
+                    let snap_path = if snap_path.is_relative() {
+                        wd.join(snap_path)
+                    } else {
+                        snap_path.clone()
+                    };
+                    let standard = wd.join(".roko").join("state").join("executor.json");
+                    if snap_path != standard && snap_path.exists() {
+                        let _ = std::fs::create_dir_all(standard.parent().unwrap());
+                        let _ = std::fs::copy(&snap_path, &standard);
+                    }
                 }
             }
 
@@ -401,6 +428,16 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     eprintln!(
                         "  {status} {} — {}/{} tasks",
                         p.plan_id, p.tasks_completed, p.tasks_total,
+                    );
+                }
+            }
+
+            if v2_report.tasks_failed > 0 {
+                let state_path = wd.join(".roko").join("state").join("executor.json");
+                if state_path.exists() {
+                    eprintln!(
+                        "hint: if tasks appear stuck or state looks wrong, try: roko plan run {} --fresh",
+                        plans_dir.display()
                     );
                 }
             }
