@@ -93,6 +93,7 @@ pub mod prompt_helpers;
 pub mod prompting;
 pub mod repl;
 pub mod research;
+pub mod repo_context;
 pub mod run;
 pub mod run_inline;
 pub mod runner;
