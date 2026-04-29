@@ -3,6 +3,22 @@
 
 use crate::*;
 
+/// Extract feature keywords from a PRD slug and description for context lookup.
+/// Splits on hyphens, underscores, and spaces. Filters short words (<3 chars).
+/// Returns up to 10 lowercase unique keywords.
+fn extract_keywords_from_slug_and_description(slug: &str, description: &str) -> Vec<String> {
+    let mut words: Vec<String> = slug
+        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .chain(description.split(|c: char| c == '-' || c == '_' || c.is_whitespace()))
+        .filter(|w| w.len() >= 3)
+        .map(|w| w.to_lowercase())
+        .collect();
+    words.sort();
+    words.dedup();
+    words.truncate(10);
+    words
+}
+
 pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
     use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
@@ -34,6 +50,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             PrdDraftCmd::New { title } => {
                 let title = title.join(" ");
                 let slug = roko_cli::prd::slugify(&title);
+                let feature_keywords = extract_keywords_from_slug_and_description(&slug, &title);
                 let drafts = roko_cli::workspace_paths::drafts_dir(&workdir);
                 roko_cli::prd::ensure_dirs(&workdir)?;
                 let target = drafts.join(format!("{slug}.md"));
@@ -87,14 +104,43 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         path = target.display()
                     ),
                 );
+                let feature_keyword_refs: Vec<&str> =
+                    feature_keywords.iter().map(String::as_str).collect();
+                let repo_context_section: Option<String> =
+                    match crate::repo_context::build_repo_context(&workdir, &feature_keyword_refs)
+                        .await
+                    {
+                        Ok(repo_context) => {
+                            if !repo_context.context_root_verified {
+                                eprintln!(
+                                    "WARNING: Repository context not verified for keywords {:?}. \
+                                     Generated PRD may reference nonexistent code.",
+                                    feature_keywords
+                                );
+                            }
+                            Some(repo_context.to_prompt_section())
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "WARNING: Repository context unavailable for keywords {:?}: {err}",
+                                feature_keywords
+                            );
+                            None
+                        }
+                    };
+                let context_suffix = repo_context_section
+                    .as_deref()
+                    .map(|ctx| format!("\n\n---\n\n{ctx}"))
+                    .unwrap_or_default();
                 let task_prompt = format!(
                     "Generate a complete PRD for: {title}. \
                      If you have file tools available, search the codebase to understand \
                      what exists and write the completed PRD to {path}. \
                      Otherwise, output the complete PRD markdown with YAML frontmatter. \
                      Include specific requirements, machine-verifiable acceptance criteria, \
-                     and a design section.",
-                    path = target.display()
+                     and a design section.{context_suffix}",
+                    path = target.display(),
+                    context_suffix = context_suffix
                 );
                 // Snapshot file mtime before agent runs so we can detect
                 // whether a CLI agent wrote the file directly.
