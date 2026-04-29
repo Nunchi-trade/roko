@@ -6,22 +6,26 @@
 //! [`crate::runner::run_with_workflow_engine`], which uses `ModelCallService`
 //! for provider-agnostic model calls.
 
-use std::sync::OnceLock;
-use std::time::Instant;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::Instant,
 };
 
 use roko_agent::StreamChunk;
 use roko_agent::streaming::parse_sse_line;
 use roko_core::ContentHash;
-use roko_core::agent::{ProviderKind, resolve_model};
+use roko_core::agent::{resolve_model, AgentRole, ProviderKind};
 use roko_core::config::schema::{ModelProfile, RokoConfig};
+use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_core::DaimonPolicy;
 use roko_dreams::{load_dream_routing_advice, relevant_pattern_summaries};
 use roko_learn::{
+    cascade_router::CascadeRouter,
     cost_table::CostTable,
     episode_logger::{Episode, EpisodeLogger, Usage as EpUsage},
+    model_router::RoutingContext,
     playbook::Playbook,
 };
 use roko_neuro::{KnowledgeKind, KnowledgeQueryHit, KnowledgeTier};
@@ -168,6 +172,8 @@ pub type Result<T> = std::result::Result<T, BridgeEventsError>;
 
 /// Maximum assistant response bytes stored in one history turn.
 const MAX_HISTORY_ASSISTANT_BYTES: usize = 10_240;
+
+static CASCADE_ROUTER_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 // ── Cognitive events ─────────────────────────────────────────────────
 
@@ -353,11 +359,7 @@ async fn append_acp_episode(
         serde_json::json!(resolved.provider_kind.label()),
     );
 
-    let success = task_error.is_none()
-        && stream_error.is_none()
-        && stream_result
-            .map(|sr| matches!(sr.prompt_result.stop_reason, StopReason::EndTurn))
-            .unwrap_or(false);
+    let success = acp_dispatch_succeeded(stream_result, task_error, stream_error);
     episode.success = success;
 
     if !success {
@@ -389,6 +391,120 @@ async fn append_acp_episode(
             "failed to append ACP episode"
         );
     }
+}
+
+fn acp_routing_context(mode: &str, prompt: &str) -> RoutingContext {
+    let _prompt_len = prompt.len();
+    let task_category = if mode == "research" {
+        TaskCategory::Research
+    } else {
+        TaskCategory::Implementation
+    };
+
+    let role = match mode {
+        "plan" => AgentRole::Strategist,
+        "research" => AgentRole::Researcher,
+        _ => AgentRole::Implementer,
+    };
+
+    let mut context = RoutingContext::default();
+    context.task_category = task_category;
+    context.complexity = TaskComplexityBand::Standard;
+    context.iteration = 0;
+    context.role = role;
+    context.crate_familiarity = 0.5;
+    context.has_prior_failure = false;
+    context.conductor_load = 0.0;
+    context.active_agents = 0;
+    context.ready_queue_depth = 0;
+    context.max_queue_wait_hours = 0.0;
+    context.daimon_policy = DaimonPolicy::default();
+    context.thinking_level = None;
+    context.temperament = None;
+    context.previous_model = None;
+    context.plan_context_tokens = None;
+    context.tier_thresholds = None;
+    context
+}
+
+fn acp_dispatch_succeeded(
+    stream_result: Option<&StreamResult>,
+    task_error: Option<&str>,
+    stream_error: Option<&str>,
+) -> bool {
+    task_error.is_none()
+        && stream_error.is_none()
+        && stream_result
+            .map(|sr| matches!(sr.prompt_result.stop_reason, StopReason::EndTurn))
+            .unwrap_or(false)
+}
+
+fn cascade_router_model_slugs(roko_config: &RokoConfig, resolved_slug: &str) -> Vec<String> {
+    let mut model_slugs = roko_config.models.keys().cloned().collect::<Vec<_>>();
+    if model_slugs.is_empty() {
+        model_slugs.push(resolved_slug.to_owned());
+    }
+    model_slugs
+}
+
+fn compute_acp_reward(success: bool, wall_ms: u64, output_tokens: Option<u64>) -> f64 {
+    if !success {
+        return 0.0;
+    }
+
+    let latency_bonus = if wall_ms < 5_000 {
+        0.15
+    } else if wall_ms < 15_000 {
+        0.05
+    } else {
+        0.0
+    };
+    let token_bonus = match output_tokens {
+        Some(tokens) if tokens < 2_000 => 0.05,
+        Some(tokens) if tokens < 5_000 => 0.02,
+        _ => 0.0,
+    };
+
+    (0.8 + latency_bonus + token_bonus).min(1.0)
+}
+
+fn record_cascade_observation(
+    router_path: PathBuf,
+    model_slug: String,
+    routing_ctx: RoutingContext,
+    success: bool,
+    wall_ms: u64,
+    output_tokens: Option<u64>,
+    model_slugs: Vec<String>,
+) {
+    let _ = task::spawn_blocking(move || {
+        let _guard = CASCADE_ROUTER_IO_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let router = CascadeRouter::load_or_new(&router_path, model_slugs);
+
+        let Some(model_idx) = router.model_index_for_slug(&model_slug) else {
+            debug!(
+                model = %model_slug,
+                "skipping cascade observation: model not in router arms"
+            );
+            return;
+        };
+
+        let context_vec = routing_ctx.to_features();
+        let reward = compute_acp_reward(success, wall_ms, output_tokens);
+        router.observe(context_vec, model_idx, reward);
+
+        if let Err(error) = router.save(&router_path) {
+            warn!(
+                path = %router_path.display(),
+                error = %error,
+                "failed to persist cascade router after ACP observation"
+            );
+        }
+    });
 }
 
 fn truncate_assistant_history(text: &str) -> String {
@@ -912,6 +1028,32 @@ where
             stream_error.as_deref(),
         )
         .await;
+
+        let stream_result_ref = stream_result.as_ref().ok();
+        let dispatch_succeeded = acp_dispatch_succeeded(
+            stream_result_ref,
+            task_error.as_deref(),
+            stream_error.as_deref(),
+        );
+        let resolved = resolve_model(&roko_config_for_logging, &model_key_for_logging);
+        let model_slugs =
+            cascade_router_model_slugs(&roko_config_for_logging, &resolved.slug);
+        let routing_ctx =
+            acp_routing_context(&session.config_state.agent_mode, &prompt_text_for_logging);
+        let output_tokens = stream_result_ref
+            .and_then(|sr| sr.usage.as_ref().map(|usage| usage.output_tokens));
+        record_cascade_observation(
+            workdir_for_logging
+                .join(".roko")
+                .join("learn")
+                .join("cascade-router.json"),
+            resolved.slug,
+            routing_ctx,
+            dispatch_succeeded,
+            dispatch_started.elapsed().as_millis() as u64,
+            output_tokens,
+            model_slugs,
+        );
     }
 
     if let Some(join_error) = task_join_error {
@@ -2832,6 +2974,35 @@ mod tests {
         assert_eq!(episode.kind, "acp-pipeline-express");
         assert_eq!(episode.extra.get("workflow"), Some(&json!("express")));
         assert!(episode.success);
+    }
+
+    #[test]
+    fn acp_routing_context_maps_modes_to_roles() {
+        let plan = acp_routing_context("plan", "wire router feedback");
+        assert_eq!(plan.task_category, TaskCategory::Implementation);
+        assert_eq!(plan.role, AgentRole::Strategist);
+
+        let research = acp_routing_context("research", "find the source of truth");
+        assert_eq!(research.task_category, TaskCategory::Research);
+        assert_eq!(research.role, AgentRole::Researcher);
+
+        let code = acp_routing_context("code", "edit file");
+        assert_eq!(code.task_category, TaskCategory::Implementation);
+        assert_eq!(code.role, AgentRole::Implementer);
+    }
+
+    #[test]
+    fn acp_dispatch_reward_distinguishes_success_and_failure() {
+        assert_eq!(compute_acp_reward(false, 200, Some(120)), 0.0);
+        assert!(compute_acp_reward(true, 1_000, Some(1_000)) > 0.9);
+        assert!(compute_acp_reward(true, 20_000, None) >= 0.8);
+    }
+
+    #[test]
+    fn cascade_router_model_slugs_falls_back_when_config_is_empty() {
+        let config = RokoConfig::default();
+        let slugs = cascade_router_model_slugs(&config, "fallback-slug");
+        assert_eq!(slugs, vec!["fallback-slug".to_string()]);
     }
 
     #[test]
