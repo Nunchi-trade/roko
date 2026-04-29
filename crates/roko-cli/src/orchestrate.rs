@@ -1944,6 +1944,18 @@ pub struct PlanRunReport {
     pub agent_calls: usize,
     /// Verify results collected during execution.
     pub gate_results: Vec<(String, bool)>,
+    /// Aggregate pass/fail/skipped summary for the plan.
+    pub gate_summary: String,
+    /// Aggregate passed gate count.
+    pub gates_passed: usize,
+    /// Aggregate failed gate count.
+    pub gates_failed: usize,
+    /// Aggregate skipped gate count.
+    pub gates_skipped: usize,
+    /// Aggregate executed gate count.
+    pub gates_executed: usize,
+    /// Aggregate pass rate from executed gates only.
+    pub gate_pass_rate: f64,
 }
 
 /// Summary of the entire orchestration run across all plans.
@@ -1976,6 +1988,7 @@ fn plan_workflow_report_as_orchestration(
         failed_tasks: usize,
         agent_calls: usize,
         gate_results: Vec<(String, bool)>,
+        gate_counts: GateSummaryCounts,
     }
 
     let mut plans_by_id: BTreeMap<String, PlanAccumulator> = BTreeMap::new();
@@ -1992,10 +2005,16 @@ fn plan_workflow_report_as_orchestration(
         plan.agent_calls = plan.agent_calls.saturating_add(agent_turns);
         total_agent_calls = total_agent_calls.saturating_add(agent_turns);
 
-        for gate in task_report.report.gates {
+        let gates = task_report.report.gates;
+        for gate in &gates {
             total_gate_runs = total_gate_runs.saturating_add(1);
-            plan.gate_results.push((gate.name, gate.passed));
+            plan.gate_results.push((gate.name.clone(), gate.passed));
         }
+        plan.gate_counts.accumulate(GateSummaryCounts {
+            passed: gates.iter().filter(|gate| gate.passed).count(),
+            failed: gates.iter().filter(|gate| !gate.passed).count(),
+            skipped: 0,
+        });
     }
 
     for task_error in report.task_errors {
@@ -2006,11 +2025,20 @@ fn plan_workflow_report_as_orchestration(
 
     let plans = plans_by_id
         .into_iter()
-        .map(|(plan_id, plan)| PlanRunReport {
-            plan_id,
-            succeeded: plan.task_count > 0 && plan.failed_tasks == 0,
-            agent_calls: plan.agent_calls,
-            gate_results: plan.gate_results,
+        .map(|(plan_id, plan)| {
+            let gate_counts = plan.gate_counts;
+            PlanRunReport {
+                plan_id,
+                succeeded: plan.task_count > 0 && plan.failed_tasks == 0,
+                agent_calls: plan.agent_calls,
+                gate_results: plan.gate_results,
+                gate_summary: gate_counts.summary(),
+                gates_passed: gate_counts.passed,
+                gates_failed: gate_counts.failed,
+                gates_skipped: gate_counts.skipped,
+                gates_executed: gate_counts.executed(),
+                gate_pass_rate: gate_counts.pass_rate(),
+            }
         })
         .collect();
 
@@ -2440,6 +2468,7 @@ pub struct PlanRunner {
     /// Per-plan tracking.
     per_plan_agents: HashMap<String, usize>,
     per_plan_gates: HashMap<String, Vec<(String, bool)>>,
+    per_plan_gate_summaries: HashMap<String, GateSummaryCounts>,
     /// Episode logger for recording agent turns to `.roko/episodes.jsonl`.
     learning: LearningRuntime,
     /// Daimon affect state used to modulate future dispatches.
@@ -3668,6 +3697,64 @@ fn merge_regenerated_plan(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GateSummaryCounts {
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+}
+
+impl GateSummaryCounts {
+    fn from_verdicts(verdicts: &[Verdict], skipped: usize) -> Self {
+        let passed = verdicts.iter().filter(|verdict| verdict.passed).count();
+        let failed = verdicts.len().saturating_sub(passed);
+        Self {
+            passed,
+            failed,
+            skipped,
+        }
+    }
+
+    fn executed(self) -> usize {
+        self.passed + self.failed
+    }
+
+    fn pass_rate(self) -> f64 {
+        let executed = self.executed();
+        if executed == 0 {
+            0.0
+        } else {
+            self.passed as f64 / executed as f64
+        }
+    }
+
+    fn summary(self) -> String {
+        format!(
+            "{} passed, {} failed, {} skipped",
+            self.passed, self.failed, self.skipped
+        )
+    }
+
+    fn accumulate(&mut self, other: Self) {
+        self.passed = self.passed.saturating_add(other.passed);
+        self.failed = self.failed.saturating_add(other.failed);
+        self.skipped = self.skipped.saturating_add(other.skipped);
+    }
+}
+
+struct GateSelectionPlan {
+    steps: Vec<(Rung, Box<dyn Verify>)>,
+    skipped_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct GateRunOutcome {
+    passed: bool,
+    summary: String,
+    counts: GateSummaryCounts,
+    recorded_verdicts: Vec<RecordedGateVerdict>,
+}
+
 impl PlanRunner {
     /// Spawn MCP server processes and build a DynamicToolRegistry from their tools.
     ///
@@ -4119,6 +4206,7 @@ impl PlanRunner {
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
+            per_plan_gate_summaries: HashMap::new(),
             learning,
             daimon,
             skill_library,
@@ -4333,6 +4421,7 @@ impl PlanRunner {
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
+            per_plan_gate_summaries: HashMap::new(),
             learning,
             daimon,
             skill_library,
@@ -4544,6 +4633,7 @@ impl PlanRunner {
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
+            per_plan_gate_summaries: HashMap::new(),
             learning,
             daimon,
             skill_library,
@@ -6661,11 +6751,22 @@ impl PlanRunner {
                         PhaseKind::Complete | PhaseKind::Done
                     )
                 });
+                let gate_counts = self
+                    .per_plan_gate_summaries
+                    .get(id)
+                    .copied()
+                    .unwrap_or_default();
                 PlanRunReport {
                     plan_id: id.clone(),
                     succeeded,
                     agent_calls: self.per_plan_agents.get(id).copied().unwrap_or(0),
                     gate_results: self.per_plan_gates.get(id).cloned().unwrap_or_default(),
+                    gate_summary: gate_counts.summary(),
+                    gates_passed: gate_counts.passed,
+                    gates_failed: gate_counts.failed,
+                    gates_skipped: gate_counts.skipped,
+                    gates_executed: gate_counts.executed(),
+                    gate_pass_rate: gate_counts.pass_rate(),
                 }
             })
             .collect();
@@ -7222,11 +7323,22 @@ impl PlanRunner {
                         PhaseKind::Complete | PhaseKind::Done
                     )
                 });
+                let gate_counts = self
+                    .per_plan_gate_summaries
+                    .get(id)
+                    .copied()
+                    .unwrap_or_default();
                 PlanRunReport {
                     plan_id: id.clone(),
                     succeeded,
                     agent_calls: self.per_plan_agents.get(id).copied().unwrap_or(0),
                     gate_results: self.per_plan_gates.get(id).cloned().unwrap_or_default(),
+                    gate_summary: gate_counts.summary(),
+                    gates_passed: gate_counts.passed,
+                    gates_failed: gate_counts.failed,
+                    gates_skipped: gate_counts.skipped,
+                    gates_executed: gate_counts.executed(),
+                    gate_pass_rate: gate_counts.pass_rate(),
                 }
             })
             .collect();
@@ -7856,7 +7968,15 @@ impl PlanRunner {
                 tracing::info!("[orchestrate] RunGate plan={plan_id} rung={rung}");
                 let gate_started = std::time::Instant::now();
                 match self.run_gate_pipeline(&plan_id, rung).await {
-                    Ok(passed) => {
+                    Ok(outcome) => {
+                        let passed = outcome.passed;
+                        let summary = outcome.summary.clone();
+                        let counts = outcome.counts;
+                        let gate_passed = if counts.executed() == 0 {
+                            None
+                        } else {
+                            Some(passed)
+                        };
                         let effective_rung = self
                             .executor
                             .plan_state(&plan_id)
@@ -7864,13 +7984,29 @@ impl PlanRunner {
                             .map(|result| result.rung)
                             .unwrap_or(rung);
                         self.gate_runs += 1;
-                        self.per_plan_gates
+                        if counts.executed() > 0 {
+                            self.per_plan_gates
+                                .entry(plan_id.clone())
+                                .or_default()
+                                .push((format!("rung-{effective_rung}"), passed));
+                        }
+                        self.per_plan_gate_summaries
                             .entry(plan_id.clone())
-                            .or_default()
-                            .push((format!("rung-{effective_rung}"), passed));
+                            .and_modify(|summary| summary.accumulate(counts))
+                            .or_insert(counts);
                         self.event_log.append(
                             EventKind::GateResult,
-                            serde_json::json!({"plan_id": plan_id, "rung": effective_rung, "passed": passed}),
+                            serde_json::json!({
+                                "plan_id": plan_id,
+                                "rung": effective_rung,
+                                "passed": passed,
+                                "summary": summary.clone(),
+                                "gates_passed": counts.passed,
+                                "gates_failed": counts.failed,
+                                "gates_skipped": counts.skipped,
+                                "gates_executed": counts.executed(),
+                                "pass_rate": counts.pass_rate(),
+                            }),
                         );
                         // ── Custody audit record: gate result ─────────
                         let custody_gates: Vec<String> = self
@@ -7885,7 +8021,14 @@ impl PlanRunner {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        self.record_custody_gate(&plan_id, effective_rung, passed, &custody_gates);
+                        if counts.executed() > 0 {
+                            self.record_custody_gate(
+                                &plan_id,
+                                effective_rung,
+                                passed,
+                                &custody_gates,
+                            );
+                        }
                         // Record gate episode.
                         let wall_ms =
                             u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -7908,7 +8051,11 @@ impl PlanRunner {
                             .map(|tracker| tracker.last_gate_verdicts.clone())
                             .filter(|verdicts| !verdicts.is_empty())
                             .unwrap_or_else(|| {
-                                vec![GateVerdict::new(format!("rung-{effective_rung}"), passed)]
+                                if counts.executed() == 0 {
+                                    Vec::new()
+                                } else {
+                                    vec![GateVerdict::new(format!("rung-{effective_rung}"), passed)]
+                                }
                             });
                         ep.input_signal_hash = self
                             .task_trackers
@@ -7916,8 +8063,38 @@ impl PlanRunner {
                             .and_then(|tracker| tracker.last_impl_output_hash)
                             .map(|hash| hash.to_string())
                             .unwrap_or_else(|| plan_id.clone());
+                        ep.extra.insert(
+                            "gates_passed".to_string(),
+                            serde_json::json!(counts.passed),
+                        );
+                        ep.extra.insert(
+                            "gates_failed".to_string(),
+                            serde_json::json!(counts.failed),
+                        );
+                        ep.extra.insert(
+                            "gates_skipped".to_string(),
+                            serde_json::json!(counts.skipped),
+                        );
+                        ep.extra.insert(
+                            "gates_executed".to_string(),
+                            serde_json::json!(counts.executed()),
+                        );
+                        ep.extra.insert(
+                            "gate_summary".to_string(),
+                            serde_json::json!(summary.clone()),
+                        );
+                        ep.extra.insert(
+                            "gate_pass_rate".to_string(),
+                            serde_json::json!(counts.pass_rate()),
+                        );
                         let gate_prompt = format!("plan_id={plan_id}\nrung={effective_rung}");
-                        let gate_outcome = if passed { "passed" } else { "failed" };
+                        let gate_outcome = if passed {
+                            "passed"
+                        } else if gate_passed.is_none() {
+                            "blocked"
+                        } else {
+                            "failed"
+                        };
                         let gate_input = self.enrich_completed_run(
                             ep,
                             &gate_prompt,
@@ -7927,14 +8104,14 @@ impl PlanRunner {
                             "gate",
                             "",
                             "n/a",
-                            Some(passed),
+                            gate_passed,
                             1,
                         );
                         self.apply_knowledge_tier_feedback(&plan_id);
                         self.record_and_check_learning(gate_input, &plan_id).await;
 
                         // Emit observability metric for gate result.
-                        self.emit_gate_metric(&plan_id, effective_rung, passed, wall_ms);
+                        self.emit_gate_metric(&plan_id, effective_rung, &outcome, wall_ms);
 
                         self.emit_server_event(crate::serve::events::ServerEvent::GateResult {
                             plan_id: plan_id.clone(),
@@ -7949,20 +8126,18 @@ impl PlanRunner {
                                 task_id: format!("rung-{effective_rung}"),
                                 gate: format!("rung-{effective_rung}"),
                                 passed,
-                                message: if passed {
-                                    format!("rung-{effective_rung} passed")
-                                } else {
-                                    format!("rung-{effective_rung} failed")
-                                },
+                                message: summary.clone(),
                             },
                         );
 
-                        let _ = self.daimon.appraise(AffectEvent::GateResult {
-                            plan_id: plan_id.clone(),
-                            task_id: format!("rung-{effective_rung}"),
-                            passed,
-                            rung: effective_rung,
-                        });
+                        if counts.executed() > 0 {
+                            let _ = self.daimon.appraise(AffectEvent::GateResult {
+                                plan_id: plan_id.clone(),
+                                task_id: format!("rung-{effective_rung}"),
+                                passed,
+                                rung: effective_rung,
+                            });
+                        }
 
                         // Store gate failure context for AutoFix phase
                         if !passed {
@@ -16139,9 +16314,9 @@ impl PlanRunner {
         Ok(())
     }
 
-    /// Run gates at the specified rung level and return whether all passed.
+    /// Run gates at the specified rung level and return the overall outcome.
     #[instrument(skip_all, fields(plan_id = %plan_id, rung))]
-    async fn run_gate_pipeline(&mut self, plan_id: &str, rung: u32) -> Result<bool> {
+    async fn run_gate_pipeline(&mut self, plan_id: &str, rung: u32) -> Result<GateRunOutcome> {
         let exec_dir = self.ensure_plan_exec_dir(plan_id).await?;
         let payload = GatePayload::in_dir(&exec_dir).with_label(format!("{plan_id}:rung-{rung}"));
         let started = std::time::Instant::now();
@@ -16158,22 +16333,13 @@ impl PlanRunner {
             payload_builder = payload_builder.lineage([parent_hash]);
         }
         let payload_sig = maybe_attest_engram(payload_builder.build());
-        let (aggregate_verdict, recorded_verdicts) = if rung == 0 {
+        let (recorded_verdicts, skipped_count) = if rung == 0 {
             self.run_selected_gate_pipeline(plan_id, &payload_sig, &exec_dir)
                 .await
         } else {
             let explicit_rung = Rung::from_index(rung).unwrap_or(Rung::Integration);
             let verdicts = self.run_gate_rung(Some(plan_id), &payload_sig, rung).await;
             (
-                if verdicts.iter().all(|verdict| verdict.passed) {
-                    Verdict::pass(format!("gate-rung:{plan_id}:{rung}"))
-                } else {
-                    Verdict::fail(
-                        format!("gate-rung:{plan_id}:{rung}"),
-                        "legacy gate rung failed",
-                    )
-                    .with_detail(Self::format_gate_failure_context(&verdicts))
-                },
                 verdicts
                     .into_iter()
                     .map(|verdict| RecordedGateVerdict {
@@ -16181,6 +16347,7 @@ impl PlanRunner {
                         verdict,
                     })
                     .collect(),
+                0,
             )
         };
         let mut verdicts: Vec<Verdict> = recorded_verdicts
@@ -16209,7 +16376,9 @@ impl PlanRunner {
                     .record_pass(plan_id.to_string(), highest_passed_rung.as_index() as u8);
             }
         }
-        let all_passed = aggregate_verdict.passed && verdicts.iter().all(|verdict| verdict.passed);
+        let counts = GateSummaryCounts::from_verdicts(&verdicts, skipped_count);
+        let summary = counts.summary();
+        let all_passed = counts.failed == 0 && counts.executed() > 0;
         let primary_failed_rung = recorded_verdicts
             .iter()
             .find(|recorded| !recorded.verdict.passed)
@@ -16385,6 +16554,13 @@ impl PlanRunner {
                 "plan_id": plan_id,
                 "rung": rung,
                 "passed": all_passed,
+                "summary": summary.clone(),
+                "reason": summary.clone(),
+                "gates_passed": counts.passed,
+                "gates_failed": counts.failed,
+                "gates_skipped": counts.skipped,
+                "gates_executed": counts.executed(),
+                "pass_rate": counts.pass_rate(),
                 "duration_ms": wall_ms,
                 "selected_rungs": recorded_verdicts
                     .iter()
@@ -16394,7 +16570,7 @@ impl PlanRunner {
             }),
         );
 
-        if !all_passed {
+        if counts.executed() > 0 && !all_passed {
             let task_id = self
                 .task_trackers
                 .get(plan_id)
@@ -16435,7 +16611,12 @@ impl PlanRunner {
             }
         }
 
-        Ok(all_passed)
+        Ok(GateRunOutcome {
+            passed: all_passed,
+            summary,
+            counts,
+            recorded_verdicts,
+        })
     }
 
     /// Attempt a git merge for a plan's branch.
@@ -16674,14 +16855,17 @@ impl PlanRunner {
         task.effective_domain(config_default.as_ref())
     }
 
-    fn selected_gate_steps(&self, plan_id: &str, exec_dir: &Path) -> Vec<(Rung, Box<dyn Verify>)> {
+    fn selected_gate_steps(&self, plan_id: &str, exec_dir: &Path) -> GateSelectionPlan {
         let domain = self.current_task_domain(plan_id);
 
         // For non-code domains, use verify steps or domain-specific gate config
         // instead of the compile/test/clippy pipeline.
         if let Some(ref dom) = domain {
             if !domain_uses_compiled_gates(dom) {
-                return self.domain_gate_steps(plan_id, dom);
+                return GateSelectionPlan {
+                    steps: self.domain_gate_steps(plan_id, dom),
+                    skipped_count: 0,
+                };
             }
         }
 
@@ -16699,15 +16883,17 @@ impl PlanRunner {
                 .unwrap_or(0),
         );
 
-        selected.retain(|rung| {
-            if *rung == Rung::Test && gate_config.skip_tests {
-                return false;
-            }
-            !self.should_skip_selected_rung(*rung)
-        });
-
         let mut steps: Vec<(Rung, Box<dyn Verify>)> = Vec::new();
+        let mut skipped_count = 0;
         for rung in selected {
+            if rung == Rung::Test && gate_config.skip_tests {
+                skipped_count = skipped_count.saturating_add(1);
+                continue;
+            }
+            if self.should_skip_selected_rung(rung) {
+                skipped_count = skipped_count.saturating_add(1);
+                continue;
+            }
             match rung {
                 Rung::Compile => {
                     steps.push((rung, Box::new(CompileGate::new(build_system))));
@@ -16715,15 +16901,19 @@ impl PlanRunner {
                 Rung::Lint if caps.has_lint_tool => {
                     steps.push((rung, Box::new(ClippyGate::new(build_system))));
                 }
-                Rung::Test if !gate_config.skip_tests => {
+                Rung::Test => {
                     steps.push((rung, Box::new(TestGate::new(build_system))));
                 }
                 Rung::GeneratedTest => {
                     if let Some(store) = generated_tests.clone() {
                         steps.push((rung, Box::new(GeneratedTestGate::new(store))));
+                    } else {
+                        skipped_count = skipped_count.saturating_add(1);
                     }
                 }
-                _ => {}
+                _ => {
+                    skipped_count = skipped_count.saturating_add(1);
+                }
             }
         }
 
@@ -16731,7 +16921,10 @@ impl PlanRunner {
             steps.push((Rung::Compile, Box::new(CompileGate::new(build_system))));
         }
 
-        steps
+        GateSelectionPlan {
+            steps,
+            skipped_count,
+        }
     }
 
     /// Build gate steps for a non-code domain. Uses task verify steps or
@@ -16798,16 +16991,20 @@ impl PlanRunner {
         plan_id: &str,
         payload_sig: &Engram,
         exec_dir: &Path,
-    ) -> (Verdict, Vec<RecordedGateVerdict>) {
+    ) -> (Vec<RecordedGateVerdict>, usize) {
         let ctx = Context::now();
         let sink = Arc::new(Mutex::new(Vec::new()));
         let mut pipeline = GatePipeline::new(format!("gate-pipeline:{plan_id}"));
-        for (rung, gate) in self.selected_gate_steps(plan_id, exec_dir) {
+        let GateSelectionPlan {
+            steps,
+            skipped_count,
+        } = self.selected_gate_steps(plan_id, exec_dir);
+        for (rung, gate) in steps {
             pipeline.push(Box::new(RecordingGate::new(rung, gate, Arc::clone(&sink))));
         }
-        let aggregate = pipeline.verify(payload_sig, &ctx).await;
+        let _aggregate = pipeline.verify(payload_sig, &ctx).await;
         let verdicts = sink.lock().expect("recorded gate sink poisoned").clone();
-        (aggregate, verdicts)
+        (verdicts, skipped_count)
     }
 
     fn persist_gate_artifact(
@@ -17396,17 +17593,30 @@ impl PlanRunner {
     }
 
     /// Emit a trace event after a gate pipeline run.
-    fn emit_gate_metric(&self, plan_id: &str, rung: u32, passed: bool, wall_ms: u64) {
+    fn emit_gate_metric(&self, plan_id: &str, rung: u32, outcome: &GateRunOutcome, wall_ms: u64) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         let trace_id = Self::trace_id_for(plan_id, &format!("gate-rung-{rung}"));
+        let verdict = if outcome.counts.executed() == 0 {
+            "skipped"
+        } else if outcome.passed {
+            "pass"
+        } else {
+            "fail"
+        };
         let event = ToolTraceEvent::Custom {
             name: "gate_result".to_string(),
             data: serde_json::json!({
                 "plan_id": plan_id,
                 "rung": rung,
-                "passed": passed,
+                "passed": outcome.passed,
+                "summary": outcome.summary.clone(),
+                "gates_passed": outcome.counts.passed,
+                "gates_failed": outcome.counts.failed,
+                "gates_skipped": outcome.counts.skipped,
+                "gates_executed": outcome.counts.executed(),
+                "pass_rate": outcome.counts.pass_rate(),
                 "wall_ms": wall_ms,
             }),
             at_ms: now_ms,
@@ -17415,14 +17625,15 @@ impl PlanRunner {
 
         // Increment the well-known gate metric.
         let rung_str = format!("rung-{rung}");
-        let verdict = if passed { "pass" } else { "fail" };
-        self.metrics
-            .register_counter(
-                "roko_gate_verdicts_total",
-                "",
-                LabelSet::from_pairs(&[("gate", &rung_str), ("verdict", verdict)]),
-            )
-            .inc();
+        if verdict != "skipped" {
+            self.metrics
+                .register_counter(
+                    "roko_gate_verdicts_total",
+                    "",
+                    LabelSet::from_pairs(&[("gate", &rung_str), ("verdict", verdict)]),
+                )
+                .inc();
+        }
     }
 
     /// Feed the raw agent turn output into the conductor stream.
@@ -18483,16 +18694,12 @@ fn execution_event_summary(
         ),
         ExecutionEvent::GateResult {
             task_id,
-            gate,
-            passed,
+            message,
             ..
         } => (
             "gate_result".to_string(),
             task_id.clone(),
-            format!(
-                "Verify {gate}: {}",
-                if *passed { "passed" } else { "failed" }
-            ),
+            message.clone(),
         ),
         _ => ("execution".to_string(), String::new(), String::new()),
     }
@@ -20009,12 +20216,24 @@ acceptance = []
                     succeeded: true,
                     agent_calls: 2,
                     gate_results: vec![("compile".into(), true)],
+                    gate_summary: "1 passed, 0 failed, 0 skipped".into(),
+                    gates_passed: 1,
+                    gates_failed: 0,
+                    gates_skipped: 0,
+                    gates_executed: 1,
+                    gate_pass_rate: 1.0,
                 },
                 PlanRunReport {
                     plan_id: "p2".into(),
                     succeeded: true,
                     agent_calls: 1,
                     gate_results: vec![("test".into(), true)],
+                    gate_summary: "1 passed, 0 failed, 0 skipped".into(),
+                    gates_passed: 1,
+                    gates_failed: 0,
+                    gates_skipped: 0,
+                    gates_executed: 1,
+                    gate_pass_rate: 1.0,
                 },
             ],
             total_agent_calls: 3,
@@ -20022,6 +20241,8 @@ acceptance = []
             fleet_cfactor: None,
         };
         assert!(report.all_succeeded());
+        assert_eq!(report.plans[0].gate_summary, "1 passed, 0 failed, 0 skipped");
+        assert_eq!(report.plans[0].gates_skipped, 0);
     }
 
     #[test]
@@ -20033,12 +20254,24 @@ acceptance = []
                     succeeded: true,
                     agent_calls: 1,
                     gate_results: vec![],
+                    gate_summary: "0 passed, 0 failed, 0 skipped".into(),
+                    gates_passed: 0,
+                    gates_failed: 0,
+                    gates_skipped: 0,
+                    gates_executed: 0,
+                    gate_pass_rate: 0.0,
                 },
                 PlanRunReport {
                     plan_id: "p2".into(),
                     succeeded: false,
                     agent_calls: 1,
                     gate_results: vec![],
+                    gate_summary: "0 passed, 0 failed, 0 skipped".into(),
+                    gates_passed: 0,
+                    gates_failed: 0,
+                    gates_skipped: 0,
+                    gates_executed: 0,
+                    gate_pass_rate: 0.0,
                 },
             ],
             total_agent_calls: 2,
@@ -20046,6 +20279,8 @@ acceptance = []
             fleet_cfactor: None,
         };
         assert!(!report.all_succeeded());
+        assert_eq!(report.plans[0].gate_summary, "0 passed, 0 failed, 0 skipped");
+        assert_eq!(report.plans[1].gate_summary, "0 passed, 0 failed, 0 skipped");
     }
 
     #[test]

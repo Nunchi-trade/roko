@@ -79,6 +79,39 @@ fn affect_state_path(learn_root: &Path) -> PathBuf {
     root.join("daimon").join("affect.json")
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GateCounts {
+    passed: u64,
+    failed: u64,
+    skipped: u64,
+}
+
+impl GateCounts {
+    fn executed(self) -> u64 {
+        self.passed + self.failed
+    }
+
+    fn pass_rate(self) -> f64 {
+        let executed = self.executed();
+        if executed == 0 {
+            0.0
+        } else {
+            self.passed as f64 / executed as f64
+        }
+    }
+
+    fn summary(self) -> String {
+        format!(
+            "{} passed, {} failed, {} skipped",
+            self.passed, self.failed, self.skipped
+        )
+    }
+
+    fn has_only_skipped(self) -> bool {
+        self.executed() == 0 && self.skipped > 0
+    }
+}
+
 impl EpisodeView for EpisodeActions {
     fn actions(&self) -> &[String] {
         &self.actions
@@ -806,6 +839,8 @@ impl EfficiencySummaryRecord {
                 .saturating_add(episode.usage.output_tokens)
         };
         let prompt_section_count = prompt_section_count_from_episode(episode);
+        let gate_counts = gate_counts_from_episode(episode);
+        let has_only_skipped = gate_counts.is_some_and(GateCounts::has_only_skipped);
 
         Self {
             schema_version: RUNTIME_FEEDBACK_SCHEMA_VERSION,
@@ -841,8 +876,15 @@ impl EfficiencySummaryRecord {
                 .unwrap_or(episode.external_actions.len() as u64)
                 .min(u64::from(u32::MAX)) as u32,
             tool_calls: episode.external_actions.len().min(u32::MAX as usize) as u32,
-            gate_passed: Some(episode.success),
-            outcome: if episode.success {
+            gate_passed: if has_only_skipped {
+                None
+            } else {
+                Some(episode.success)
+            },
+            outcome: if has_only_skipped {
+                extra_string(episode, "provider_model_outcome_status")
+                    .unwrap_or_else(|| "blocked".to_string())
+            } else if episode.success {
                 "success".to_string()
             } else {
                 episode
@@ -857,6 +899,21 @@ impl EfficiencySummaryRecord {
                 "kind": episode.kind.clone(),
                 "trigger_kind": episode.trigger_kind.clone(),
                 "gate_count": episode.gate_verdicts.len(),
+                "gate_summary": gate_counts.map(|counts| counts.summary()),
+                "gate_pass_rate": gate_counts.map(|counts| counts.pass_rate()),
+                "gate_counts": gate_counts.map(|counts| serde_json::json!({
+                    "passed": counts.passed,
+                    "failed": counts.failed,
+                    "skipped": counts.skipped,
+                    "executed": counts.executed(),
+                    "summary": counts.summary(),
+                    "pass_rate": counts.pass_rate(),
+                })),
+                "gates_passed": gate_counts.map(|counts| counts.passed),
+                "gates_failed": gate_counts.map(|counts| counts.failed),
+                "gates_skipped": gate_counts.map(|counts| counts.skipped),
+                "gates_executed": gate_counts.map(|counts| counts.executed()),
+                "provider_model_outcome_status": extra_string(episode, "provider_model_outcome_status"),
             }),
         }
     }
@@ -931,6 +988,7 @@ impl GateOutcomeRecord {
             .unwrap_or(0)
             .min(u64::from(u32::MAX)) as u32;
         let duration_ms = nonzero_u64(extra_u64(episode, "gate_duration_ms").unwrap_or(0));
+        let gate_counts = gate_counts_from_episode(episode);
 
         episode
             .gate_verdicts
@@ -960,6 +1018,20 @@ impl GateOutcomeRecord {
                 metadata: serde_json::json!({
                     "source": "episode",
                     "episode_kind": episode.kind.clone(),
+                    "gate_counts": gate_counts.map(|counts| serde_json::json!({
+                        "passed": counts.passed,
+                        "failed": counts.failed,
+                        "skipped": counts.skipped,
+                        "executed": counts.executed(),
+                        "summary": counts.summary(),
+                        "pass_rate": counts.pass_rate(),
+                    })),
+                    "gates_passed": gate_counts.map(|counts| counts.passed),
+                    "gates_failed": gate_counts.map(|counts| counts.failed),
+                    "gates_skipped": gate_counts.map(|counts| counts.skipped),
+                    "gates_executed": gate_counts.map(|counts| counts.executed()),
+                    "gate_summary": gate_counts.map(|counts| counts.summary()),
+                    "gate_pass_rate": gate_counts.map(|counts| counts.pass_rate()),
                 }),
             })
             .collect()
@@ -1021,7 +1093,7 @@ impl KnowledgeSeedRecord {
     /// Build a deterministic knowledge seed from a successful episode.
     #[must_use]
     pub fn from_successful_episode(episode: &Episode) -> Option<Self> {
-        if !episode.success {
+        if !episode.success || gate_counts_from_episode(episode).is_some_and(GateCounts::has_only_skipped) {
             return None;
         }
 
@@ -1908,6 +1980,27 @@ impl LearningRuntime {
     ) -> Result<LearningUpdate, LearningRuntimeError> {
         let mut update = LearningUpdate::default();
 
+        let gate_counts = gate_counts_from_episode(&input.episode);
+        let skip_only = gate_counts.is_some_and(GateCounts::has_only_skipped);
+        if let Some(counts) = gate_counts {
+            backfill_gate_counts(&mut input.episode, counts);
+        }
+        if skip_only {
+            input.episode.success = false;
+            if input
+                .episode
+                .failure_reason
+                .as_ref()
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                input.episode.failure_reason = Some("all gates skipped".to_string());
+            }
+            input.episode.extra.insert(
+                "provider_model_outcome_status".to_string(),
+                serde_json::json!("blocked"),
+            );
+        }
+
         input.episode.attach_all_fingerprints();
         self.apply_affect_signature(&mut input.episode);
         self.episode_logger.append(&input.episode).await?;
@@ -1917,7 +2010,9 @@ impl LearningRuntime {
         }
         let episode_count = self.episode_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-        if let Some(reflection_input) = ReflectionInput::from_episode(&input.episode) {
+        if !skip_only
+            && let Some(reflection_input) = ReflectionInput::from_episode(&input.episode)
+        {
             let mut reflection_store =
                 PostGateReflectionStore::load(&self.paths.post_gate_reflections_json);
             let observation =
@@ -1957,7 +2052,7 @@ impl LearningRuntime {
 
         let provider_for_outcome = input.provider.clone();
 
-        if let Some(provider) = input.provider {
+        if !skip_only && let Some(provider) = input.provider {
             if input.episode.success {
                 self.provider_health.record_success(&provider);
             } else {
@@ -1988,7 +2083,7 @@ impl LearningRuntime {
             update.knowledge_seed_recorded = ApplyStatus::Applied;
         }
 
-        if let Some(playbook_id) = input.playbook_id {
+        if !skip_only && let Some(playbook_id) = input.playbook_id {
             if self
                 .playbook_store
                 .record_outcome(&playbook_id, input.episode.success)
@@ -2002,14 +2097,15 @@ impl LearningRuntime {
         let local_reward_rule_id = input.playbook_rule_id.clone();
         let local_reward_skill_id = input.matched_skill_id.clone();
 
-        if let Some(rule_id) = input.playbook_rule_id {
+        if !skip_only && let Some(rule_id) = input.playbook_rule_id {
             self.playbook_rules
                 .record_outcome(&rule_id, input.episode.success);
             self.playbook_rules.save()?;
             update.playbook_rule_updated = ApplyStatus::Applied;
         }
 
-        if let Some(skill_id) = input.matched_skill_id
+        if !skip_only
+            && let Some(skill_id) = input.matched_skill_id
             && self.skill_library.get(&skill_id).is_some()
         {
             self.skill_library
@@ -2019,13 +2115,14 @@ impl LearningRuntime {
         }
 
         let generator = TemplatePatternGenerator;
-        if self.update_frequency.skill_mining_due(episode_count)
+        if !skip_only
+            && self.update_frequency.skill_mining_due(episode_count)
             && let Some(skill) = self.skill_library.extract(&input.episode, &generator).await
         {
             update.extracted_skill_id = Some(skill.name);
         }
 
-        if let Some(metric) = input.task_metric {
+        if !skip_only && let Some(metric) = input.task_metric {
             append_task_metric(&self.paths.task_metrics_jsonl, &metric).await?;
             let metrics_snapshot = {
                 let mut guard = self.task_metrics.lock().await;
@@ -2036,20 +2133,22 @@ impl LearningRuntime {
                 compute_regression_report(&metrics_snapshot, &self.regression);
         }
 
-        if self.update_frequency.distiller_due(episode_count) {
+        if !skip_only && self.update_frequency.distiller_due(episode_count) {
             self.append_cfactor_snapshot().await?;
         }
 
         // ── Pattern mining ──────────────────────────────────────────────
         let actions = EpisodeActions::from_episode(&input.episode);
-        if self.update_frequency.pattern_discovery_due(episode_count) && !actions.actions.is_empty()
+        if !skip_only
+            && self.update_frequency.pattern_discovery_due(episode_count)
+            && !actions.actions.is_empty()
         {
             self.pattern_miner.lock().ingest_episode(&actions);
             update.patterns_ingested = true;
         }
 
         // ── Cascade router observation ─────────────────────────────────
-        if self.update_frequency.router_due(episode_count) {
+        if !skip_only && self.update_frequency.router_due(episode_count) {
             update.router_updated = self.update_cascade_router(&input.episode);
         }
 
@@ -2062,7 +2161,8 @@ impl LearningRuntime {
         }
 
         // ── Prompt experiment outcome ────────────────────────────────────
-        if self.update_frequency.experiments_due(episode_count)
+        if !skip_only
+            && self.update_frequency.experiments_due(episode_count)
             && let Some(ref variant_id) = input.experiment_variant_id
         {
             let mut store = self.experiment_store.lock();
@@ -2095,16 +2195,18 @@ impl LearningRuntime {
         // participated in this run so the Optimas-style reward functions
         // learn which local choices correlate with global task success.
         let success = input.episode.success;
-        if let Some(model) = extra_string(&input.episode, "model") {
+        if !skip_only && let Some(model) = extra_string(&input.episode, "model") {
             self.observe_local_reward("router", &model, success);
         }
-        if let Some(ref skill_id) = local_reward_skill_id {
+        if !skip_only && let Some(ref skill_id) = local_reward_skill_id {
             self.observe_local_reward("skill", skill_id, success);
         }
-        if let Some(ref rule_id) = local_reward_rule_id {
+        if !skip_only && let Some(ref rule_id) = local_reward_rule_id {
             self.observe_local_reward("playbook_rule", rule_id, success);
         }
-        self.save_local_rewards();
+        if !skip_only {
+            self.save_local_rewards();
+        }
 
         Ok(update)
     }
@@ -2118,24 +2220,27 @@ impl LearningRuntime {
         };
 
         let mut engine = self.affect_engine.lock();
-        for (rung, verdict) in episode.gate_verdicts.iter().enumerate() {
-            let _ = engine.appraise(AffectEvent::GateResult {
-                plan_id: String::new(),
-                task_id: task_key.clone(),
-                passed: verdict.passed,
-                rung: rung as u32,
-            });
-        }
-        if episode.success {
-            let _ = engine.appraise(AffectEvent::TaskOutcome {
-                task_id: task_key.clone(),
-                succeeded: true,
-            });
-        } else {
-            let _ = engine.appraise(AffectEvent::TaskOutcome {
-                task_id: task_key.clone(),
-                succeeded: false,
-            });
+        let skip_only = gate_counts_from_episode(episode).is_some_and(GateCounts::has_only_skipped);
+        if !skip_only {
+            for (rung, verdict) in episode.gate_verdicts.iter().enumerate() {
+                let _ = engine.appraise(AffectEvent::GateResult {
+                    plan_id: String::new(),
+                    task_id: task_key.clone(),
+                    passed: verdict.passed,
+                    rung: rung as u32,
+                });
+            }
+            if episode.success {
+                let _ = engine.appraise(AffectEvent::TaskOutcome {
+                    task_id: task_key.clone(),
+                    succeeded: true,
+                });
+            } else {
+                let _ = engine.appraise(AffectEvent::TaskOutcome {
+                    task_id: task_key.clone(),
+                    succeeded: false,
+                });
+            }
         }
 
         let state = engine.query();
@@ -2408,6 +2513,89 @@ fn extra_u64(episode: &Episode, key: &str) -> Option<u64> {
 
 fn extra_bool(episode: &Episode, key: &str) -> Option<bool> {
     episode.extra.get(key).and_then(serde_json::Value::as_bool)
+}
+
+fn gate_counts_from_episode(episode: &Episode) -> Option<GateCounts> {
+    let gate_counts = episode
+        .extra
+        .get("gate_counts")
+        .and_then(serde_json::Value::as_object);
+
+    let passed = gate_counts
+        .and_then(|counts| counts.get("passed"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| extra_u64(episode, "gates_passed"));
+    let failed = gate_counts
+        .and_then(|counts| counts.get("failed"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| extra_u64(episode, "gates_failed"));
+    let skipped = gate_counts
+        .and_then(|counts| counts.get("skipped"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| extra_u64(episode, "gates_skipped"));
+
+    if passed.is_none()
+        && failed.is_none()
+        && skipped.is_none()
+        && episode.gate_verdicts.is_empty()
+    {
+        return None;
+    }
+
+    Some(GateCounts {
+        passed: passed.unwrap_or_else(|| {
+            episode
+                .gate_verdicts
+                .iter()
+                .filter(|verdict| verdict.passed)
+                .count() as u64
+        }),
+        failed: failed.unwrap_or_else(|| {
+            episode
+                .gate_verdicts
+                .iter()
+                .filter(|verdict| !verdict.passed)
+                .count() as u64
+        }),
+        skipped: skipped.unwrap_or(0),
+    })
+}
+
+fn backfill_gate_counts(episode: &mut Episode, counts: GateCounts) {
+    episode
+        .extra
+        .entry("gates_passed".to_string())
+        .or_insert_with(|| serde_json::json!(counts.passed));
+    episode
+        .extra
+        .entry("gates_failed".to_string())
+        .or_insert_with(|| serde_json::json!(counts.failed));
+    episode
+        .extra
+        .entry("gates_skipped".to_string())
+        .or_insert_with(|| serde_json::json!(counts.skipped));
+    episode
+        .extra
+        .entry("gates_executed".to_string())
+        .or_insert_with(|| serde_json::json!(counts.executed()));
+    episode
+        .extra
+        .entry("gate_summary".to_string())
+        .or_insert_with(|| serde_json::json!(counts.summary()));
+    episode
+        .extra
+        .entry("gate_pass_rate".to_string())
+        .or_insert_with(|| serde_json::json!(counts.pass_rate()));
+    episode.extra.entry("gate_counts".to_string()).or_insert_with(|| {
+        serde_json::json!({
+            "passed": counts.passed,
+            "failed": counts.failed,
+            "skipped": counts.skipped,
+            "executed": counts.executed(),
+            "summary": counts.summary(),
+            "pass_rate": counts.pass_rate(),
+        })
+    });
 }
 
 fn extra_string_vec(episode: &Episode, key: &str) -> Option<Vec<String>> {
@@ -3502,6 +3690,20 @@ mod tests {
         ep
     }
 
+    fn skipped_only_episode() -> Episode {
+        let mut ep = sample_episode(true);
+        ep.gate_verdicts.clear();
+        ep.extra
+            .insert("gates_passed".to_string(), serde_json::json!(0_u64));
+        ep.extra
+            .insert("gates_failed".to_string(), serde_json::json!(0_u64));
+        ep.extra
+            .insert("gates_skipped".to_string(), serde_json::json!(3_u64));
+        ep.extra
+            .insert("gates_executed".to_string(), serde_json::json!(0_u64));
+        ep
+    }
+
     fn episode_at(task_id: &str, minutes_ago: i64, success: bool) -> Episode {
         let mut ep = sample_episode(success);
         ep.id = format!("{task_id}-id");
@@ -3615,6 +3817,139 @@ mod tests {
         assert!(pad.contains_key("pleasure"));
         assert!(pad.contains_key("arousal"));
         assert!(pad.contains_key("dominance"));
+    }
+
+    #[tokio::test]
+    async fn skipped_only_gate_runs_are_blocked_not_passed_and_do_not_update_learning() {
+        let tmp = TempDir::new().unwrap();
+        let mut runtime = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec!["claude-opus-4-6".to_string()],
+        )
+        .await
+        .unwrap();
+        runtime.set_update_frequency(UpdateFrequency {
+            router_every_n_episodes: 1,
+            gate_thresholds_every_n: 1,
+            experiments_every_n: 1,
+            skill_mining_every_n: 1,
+            pattern_discovery_every_n: 1,
+            distiller_every_n: 1,
+        });
+
+        let mut experiment = PromptExperiment::new(
+            "skip-only-exp",
+            "model-routing",
+            vec![PromptVariant {
+                id: "blocked".to_string(),
+                name: "Blocked".to_string(),
+                section_name: "model-routing".to_string(),
+                content: String::new(),
+                slug: Some("claude-opus-4-6".to_string()),
+                active: true,
+            }],
+        );
+        experiment.min_trials_per_variant = 100;
+        runtime.experiment_store().lock().register(experiment);
+
+        let mut input = CompletedRunInput::from_episode(skipped_only_episode())
+            .with_task_metric(sample_metric(1, true, 0.42));
+        input.provider = Some("anthropic".to_string());
+        input.playbook_id = Some("playbook-skip-only".to_string());
+        input.playbook_rule_id = Some("rule-skip-only".to_string());
+        input.matched_skill_id = Some("skill-skip-only".to_string());
+        input.experiment_variant_id = Some("blocked".to_string());
+
+        let update = runtime.record_completed_run(input).await.unwrap();
+
+        assert_eq!(update.episode_logged, ApplyStatus::Applied);
+        assert_eq!(update.cost_logged, ApplyStatus::Applied);
+        assert_eq!(update.provider_model_outcome_recorded, ApplyStatus::Applied);
+        assert_eq!(update.efficiency_summary_recorded, ApplyStatus::Applied);
+        assert_eq!(update.gate_outcomes_recorded, 0);
+        assert_eq!(update.provider_updated, ApplyStatus::Skipped);
+        assert_eq!(update.playbook_updated, ApplyStatus::Skipped);
+        assert_eq!(update.playbook_rule_updated, ApplyStatus::Skipped);
+        assert_eq!(update.matched_skill_updated, ApplyStatus::Skipped);
+        assert_eq!(update.reflection_recorded, ApplyStatus::Skipped);
+        assert_eq!(update.reflection_candidate_updated, ApplyStatus::Skipped);
+        assert_eq!(update.knowledge_seed_recorded, ApplyStatus::Skipped);
+        assert_eq!(update.router_updated, false);
+        assert!(update.extracted_skill_id.is_none());
+        assert!(update.regression_report.is_none());
+        assert!(!update.patterns_ingested);
+
+        assert_eq!(runtime.local_reward_score("router", "claude-opus-4-6"), 0.5);
+        assert_eq!(runtime.local_reward_score("skill", "skill-skip-only"), 0.5);
+        assert_eq!(runtime.local_reward_score("playbook_rule", "rule-skip-only"), 0.5);
+        assert_eq!(runtime.cascade_router().total_observations(), 0);
+        assert_eq!(runtime.skill_library().len(), 0);
+        assert_eq!(runtime.pattern_miner().lock().total_episodes(), 0);
+        assert!(!runtime.paths().cfactor_jsonl.exists());
+        assert!(!runtime.paths().task_metrics_jsonl.exists());
+
+        let persisted = std::fs::read_to_string(&runtime.paths().episodes_jsonl).unwrap();
+        let episode: Episode = serde_json::from_str(persisted.lines().next().unwrap())
+            .expect("persisted skip-only episode");
+        assert!(!episode.success);
+        assert_eq!(
+            episode
+                .failure_reason
+                .as_deref()
+                .expect("skip-only failure reason"),
+            "all gates skipped"
+        );
+        assert_eq!(
+            episode
+                .extra
+                .get("provider_model_outcome_status")
+                .and_then(serde_json::Value::as_str),
+            Some("blocked")
+        );
+        assert_eq!(
+            episode
+                .extra
+                .get("gate_summary")
+                .and_then(serde_json::Value::as_str),
+            Some("0 passed, 0 failed, 3 skipped")
+        );
+        assert_eq!(
+            episode
+                .extra
+                .get("gate_counts")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|counts| counts.get("skipped"))
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            episode
+                .extra
+                .get("gate_pass_rate")
+                .and_then(serde_json::Value::as_f64),
+            Some(0.0)
+        );
+        assert_eq!(
+            gate_counts_from_episode(&episode)
+                .expect("gate counts")
+                .summary(),
+            "0 passed, 0 failed, 3 skipped"
+        );
+        assert!(
+            EfficiencySummaryRecord::from_episode(&episode)
+                .gate_passed
+                .is_none()
+        );
+        assert!(GateOutcomeRecord::from_episode(&episode).is_empty());
+        assert!(KnowledgeSeedRecord::from_successful_episode(&episode).is_none());
+
+        let experiment_store = runtime.experiment_store().lock();
+        let variant_trials = experiment_store
+            .get("skip-only-exp")
+            .and_then(|exp| exp.stats.get("blocked"))
+            .map(|stats| stats.trials);
+        assert_eq!(variant_trials, Some(0));
     }
 
     #[tokio::test]
