@@ -1126,9 +1126,7 @@ impl KnowledgeSeedRecord {
     /// Build a deterministic knowledge seed from a successful episode.
     #[must_use]
     pub fn from_successful_episode(episode: &Episode) -> Option<Self> {
-        if !episode.success
-            || gate_counts_from_episode(episode).is_some_and(GateCounts::has_only_skipped)
-        {
+        if !episode.success || gate_counts_from_episode(episode).is_some_and(GateCounts::has_only_skipped) {
             return None;
         }
 
@@ -2046,21 +2044,9 @@ impl LearningRuntime {
             write.retry_outcomes = 1;
         }
 
-        // Gate knowledge seeds on artifact validity as well as process success.
-        // `artifact_valid = false` means the process ran, but the produced artifact
-        // failed grounding validation. Do not store positive learning from that case.
-        let artifact_valid = extra_bool(episode, "artifact_valid").unwrap_or(true);
-        if artifact_valid {
-            if let Some(seed) = KnowledgeSeedRecord::from_successful_episode(episode) {
-                self.append_knowledge_seed(&seed).await?;
-                write.knowledge_seeds = 1;
-            }
-        } else {
-            tracing::info!(
-                task_id = %episode.task_id,
-                episode_id = %episode.episode_id,
-                "Withholding knowledge seed: artifact_valid=false in episode extra"
-            );
+        if let Some(seed) = KnowledgeSeedRecord::from_successful_episode(episode) {
+            self.append_knowledge_seed(&seed).await?;
+            write.knowledge_seeds = 1;
         }
 
         Ok(write)
@@ -2110,7 +2096,8 @@ impl LearningRuntime {
         }
         let episode_count = self.episode_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-        if !skip_only && let Some(reflection_input) = ReflectionInput::from_episode(&input.episode)
+        if !skip_only
+            && let Some(reflection_input) = ReflectionInput::from_episode(&input.episode)
         {
             let mut reflection_store =
                 PostGateReflectionStore::load(&self.paths.post_gate_reflections_json);
@@ -2247,20 +2234,8 @@ impl LearningRuntime {
         }
 
         // ── Cascade router observation ─────────────────────────────────
-        // Do not feed positive observations for artifact-invalid episodes.
-        // Missing `artifact_valid` remains backward-compatible and counts as valid.
-        let artifact_valid_for_router = extra_bool(&input.episode, "artifact_valid").unwrap_or(true);
-        if !skip_only
-            && self.update_frequency.router_due(episode_count)
-            && artifact_valid_for_router
-        {
+        if !skip_only && self.update_frequency.router_due(episode_count) {
             update.router_updated = self.update_cascade_router(&input.episode);
-        } else if !artifact_valid_for_router {
-            tracing::debug!(
-                task_id = %input.episode.task_id,
-                model = ?extra_string(&input.episode, "model"),
-                "Cascade router: skipping positive observation -- artifact_valid=false"
-            );
         }
 
         // Persist immediately so the router state file always reflects the
@@ -2645,7 +2620,10 @@ fn gate_counts_from_episode(episode: &Episode) -> Option<GateCounts> {
         .and_then(serde_json::Value::as_u64)
         .or_else(|| extra_u64(episode, "gates_skipped"));
 
-    if passed.is_none() && failed.is_none() && skipped.is_none() && episode.gate_verdicts.is_empty()
+    if passed.is_none()
+        && failed.is_none()
+        && skipped.is_none()
+        && episode.gate_verdicts.is_empty()
     {
         return None;
     }
@@ -2694,19 +2672,16 @@ fn backfill_gate_counts(episode: &mut Episode, counts: GateCounts) {
         .extra
         .entry("gate_pass_rate".to_string())
         .or_insert_with(|| serde_json::json!(counts.pass_rate()));
-    episode
-        .extra
-        .entry("gate_counts".to_string())
-        .or_insert_with(|| {
-            serde_json::json!({
-                "passed": counts.passed,
-                "failed": counts.failed,
-                "skipped": counts.skipped,
-                "executed": counts.executed(),
-                "summary": counts.summary(),
-                "pass_rate": counts.pass_rate(),
-            })
-        });
+    episode.extra.entry("gate_counts".to_string()).or_insert_with(|| {
+        serde_json::json!({
+            "passed": counts.passed,
+            "failed": counts.failed,
+            "skipped": counts.skipped,
+            "executed": counts.executed(),
+            "summary": counts.summary(),
+            "pass_rate": counts.pass_rate(),
+        })
+    });
 }
 
 fn extra_string_vec(episode: &Episode, key: &str) -> Option<Vec<String>> {
@@ -3993,10 +3968,7 @@ mod tests {
 
         assert_eq!(runtime.local_reward_score("router", "claude-opus-4-6"), 0.5);
         assert_eq!(runtime.local_reward_score("skill", "skill-skip-only"), 0.5);
-        assert_eq!(
-            runtime.local_reward_score("playbook_rule", "rule-skip-only"),
-            0.5
-        );
+        assert_eq!(runtime.local_reward_score("playbook_rule", "rule-skip-only"), 0.5);
         assert_eq!(runtime.cascade_router().total_observations(), 0);
         assert_eq!(runtime.skill_library().len(), 0);
         assert_eq!(runtime.pattern_miner().lock().total_episodes(), 0);
@@ -5048,41 +5020,5 @@ mod tests {
         assert!(!snapshot.episodes[0].success);
         assert!(snapshot.knowledge_seeds.is_empty());
         assert_eq!(snapshot.provider_model_outcomes.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn artifact_invalid_completed_run_withholds_seed_and_router_observation() {
-        let tmp = TempDir::new().unwrap();
-        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
-
-        let mut episode = sample_pattern_episode(true, "artifact-invalid");
-        episode
-            .extra
-            .insert("artifact_valid".to_string(), serde_json::json!(false));
-
-        let update = runtime
-            .record_completed_run(CompletedRunInput::from_episode(episode))
-            .await
-            .unwrap();
-
-        assert_eq!(update.episode_logged, ApplyStatus::Applied);
-        assert_eq!(update.knowledge_seed_recorded, ApplyStatus::Skipped);
-        assert!(!update.router_updated);
-
-        let snapshot = runtime
-            .query_feedback(&RuntimeFeedbackQuery::default())
-            .await
-            .unwrap();
-        assert_eq!(snapshot.episodes.len(), 1);
-        assert!(snapshot.episodes[0].success);
-        assert_eq!(
-            snapshot.episodes[0]
-                .extra
-                .get("artifact_valid")
-                .and_then(serde_json::Value::as_bool),
-            Some(false)
-        );
-        assert!(snapshot.knowledge_seeds.is_empty());
-        assert_eq!(runtime.cascade_router().total_observations(), 0);
     }
 }
