@@ -58,6 +58,43 @@ pub struct ProjectionEnvelope<T> {
     pub data: T,
 }
 
+/// Data quality summary attached to responses that read from on-disk telemetry.
+///
+/// Consumers should check `has_real_data` before rendering charts or metrics.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DataQuality {
+    /// Whether the source file existed and contained at least one entry.
+    pub has_real_data: bool,
+    /// Total number of entries read from the source.
+    pub entry_count: usize,
+    /// Number of entries where `cost_usd` was zero or absent.
+    pub null_cost_count: usize,
+}
+
+impl DataQuality {
+    /// Compute quality from a slice of efficiency events.
+    pub fn from_efficiency_events(events: &[AgentEfficiencyEvent]) -> Self {
+        Self::from_counts(
+            !events.is_empty(),
+            events.len(),
+            events.iter().filter(|event| event.cost_usd == 0.0).count(),
+        )
+    }
+
+    /// Construct a summary from explicit counts.
+    pub const fn from_counts(
+        has_real_data: bool,
+        entry_count: usize,
+        null_cost_count: usize,
+    ) -> Self {
+        Self {
+            has_real_data,
+            entry_count,
+            null_cost_count,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Invalidation policy
 // ---------------------------------------------------------------------------
@@ -895,8 +932,9 @@ impl RuntimeProjectionSet {
         let records = self.cost_evidence(query);
         let summary = summarize_cost_evidence(&records, self.snapshot.stats.cost_usd_total);
         json!({
-            "total_cost_usd": summary.get("total_cost_usd").cloned().unwrap_or(Value::from(0.0)),
+            "total_cost_usd": summary.get("total_cost_usd").cloned().unwrap_or(Value::Null),
             "summary": summary,
+            "data_quality": summarize_cost_data_quality(&records),
             "records": limited_values(records, query.limit.unwrap_or(250)),
             "agents": self
                 .snapshot
@@ -1049,21 +1087,36 @@ impl RuntimeProjectionSet {
 
     fn cascade_router_state(&self) -> Value {
         match self.feedback.cascade_router_json.clone() {
-            Some(value) => json!({
-                "state": "available",
-                "source": self.feedback.cascade_router_path.display().to_string(),
-                "value": value,
-            }),
-            None if !self.snapshot.cascade_router_json.trim().is_empty() => json_blob_state(
-                self.snapshot.cascade_router_json.as_str(),
-                "cascade_router_not_loaded",
-                "/api/learning/cascade-router",
-            ),
+            Some(value) => {
+                let data_quality = cascade_router_data_quality(Some(&value));
+                json!({
+                    "state": "available",
+                    "source": self.feedback.cascade_router_path.display().to_string(),
+                    "value": value,
+                    "data_quality": data_quality,
+                })
+            }
+            None if !self.snapshot.cascade_router_json.trim().is_empty() => {
+                let mut node = json_blob_state(
+                    self.snapshot.cascade_router_json.as_str(),
+                    "cascade_router_not_loaded",
+                    "/api/learning/cascade-router",
+                );
+                if let Some(object) = node.as_object_mut() {
+                    let data_quality = cascade_router_data_quality(object.get("value"));
+                    object.insert(
+                        "data_quality".to_string(),
+                        serde_json::to_value(data_quality).unwrap_or(Value::Null),
+                    );
+                }
+                node
+            }
             None => json!({
                 "state": "missing",
                 "reason": "cascade_router_not_loaded",
                 "endpoint": "/api/learning/cascade-router",
                 "source": self.feedback.cascade_router_path.display().to_string(),
+                "data_quality": DataQuality::default(),
             }),
         }
     }
@@ -2537,6 +2590,10 @@ fn summarize_cost_evidence(records: &[Value], statehub_total_cost_usd: f64) -> V
     let mut cached_tokens = 0_u64;
     let mut duration_ms = 0_u64;
     let mut successes = 0_u64;
+    let null_cost_count = records
+        .iter()
+        .filter(|record| value_f64(record, "cost_usd") == 0.0)
+        .count();
     let mut by_provider: BTreeMap<String, f64> = BTreeMap::new();
     let mut by_model: BTreeMap<String, f64> = BTreeMap::new();
     let mut by_plan: BTreeMap<String, f64> = BTreeMap::new();
@@ -2560,21 +2617,38 @@ fn summarize_cost_evidence(records: &[Value], statehub_total_cost_usd: f64) -> V
     }
 
     let record_count = records.len() as u64;
+    let data_quality = DataQuality::from_counts(
+        !records.is_empty(),
+        records.len(),
+        null_cost_count,
+    );
+    let total_cost_value = if record_count == 0 || null_cost_count == records.len() {
+        Value::Null
+    } else {
+        Value::from(total_cost)
+    };
+    let avg_cost_value = if record_count == 0 || null_cost_count == records.len() {
+        Value::Null
+    } else {
+        Value::from(total_cost / record_count as f64)
+    };
     json!({
-        "total_cost_usd": if total_cost > 0.0 { total_cost } else { statehub_total_cost_usd },
+        "total_cost_usd": total_cost_value,
         "records_total_cost_usd": total_cost,
         "statehub_total_cost_usd": statehub_total_cost_usd,
         "total_input_tokens": input_tokens,
         "total_output_tokens": output_tokens,
         "total_cached_tokens": cached_tokens,
         "record_count": records.len(),
-        "avg_cost_usd": if record_count == 0 { 0.0 } else { total_cost / record_count as f64 },
+        "avg_cost_usd": avg_cost_value,
         "avg_duration_ms": if record_count == 0 { 0.0 } else { duration_ms as f64 / record_count as f64 },
         "success_rate": ratio(successes, record_count),
         "by_provider": by_provider,
         "by_model": by_model,
         "by_plan": by_plan,
         "by_task": by_task,
+        "null_cost_count": null_cost_count,
+        "data_quality": data_quality,
     })
 }
 
@@ -2583,6 +2657,34 @@ fn add_cost(map: &mut BTreeMap<String, f64>, key: &str, cost: f64) {
         return;
     }
     *map.entry(key.to_string()).or_default() += cost;
+}
+
+fn summarize_cost_data_quality(records: &[Value]) -> DataQuality {
+    DataQuality::from_counts(
+        !records.is_empty(),
+        records.len(),
+        records
+            .iter()
+            .filter(|record| value_f64(record, "cost_usd") == 0.0)
+            .count(),
+    )
+}
+
+fn cascade_router_data_quality(value: Option<&Value>) -> DataQuality {
+    let entry_count = value
+        .map(|value| {
+            let mut slugs = BTreeSet::new();
+            if let Some(items) = value.get("model_slugs").and_then(Value::as_array) {
+                slugs.extend(items.iter().filter_map(Value::as_str).map(ToOwned::to_owned));
+            }
+            if let Some(items) = value.get("confidence_stats").and_then(Value::as_object) {
+                slugs.extend(items.keys().cloned());
+            }
+            slugs.len()
+        })
+        .unwrap_or(0);
+
+    DataQuality::from_counts(entry_count > 0, entry_count, 0)
 }
 
 #[derive(Debug, Default)]
@@ -2811,5 +2913,18 @@ mod tests {
         assert_eq!(decoded.version, 1);
         assert_eq!(decoded.cursor, 42);
         assert!(!decoded.recovered);
+    }
+
+    #[test]
+    fn summarize_cost_evidence_preserves_missing_data_as_null() {
+        let summary = summarize_cost_evidence(&[], 12.34);
+
+        assert!(summary["total_cost_usd"].is_null());
+        assert_eq!(summary["records_total_cost_usd"], 0.0);
+        assert_eq!(summary["statehub_total_cost_usd"], 12.34);
+        assert_eq!(summary["null_cost_count"], 0);
+        assert_eq!(summary["data_quality"]["has_real_data"], false);
+        assert_eq!(summary["data_quality"]["entry_count"], 0);
+        assert_eq!(summary["data_quality"]["null_cost_count"], 0);
     }
 }

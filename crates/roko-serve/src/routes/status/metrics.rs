@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::error::ApiError;
 use crate::event_bus::Envelope;
-use crate::projection_contract::{ProjectionQuery, RuntimeProjectionSet};
+use crate::projection_contract::{DataQuality, ProjectionQuery, RuntimeProjectionSet};
 use crate::state::AppState;
 use roko_learn::cascade_router::CascadeStage;
 use roko_learn::cfactor::{AgentDispatchBias, CFactor, CFactorComponents};
@@ -296,10 +296,11 @@ struct TemplateSummary {
 #[serde(rename_all = "snake_case")]
 struct CFactorMetricsResponse {
     source: CFactorMetricsSource,
-    composite: CFactorCompositeSummary,
-    sub_metrics: CFactorComponents,
+    data_quality: DataQuality,
+    composite: Option<CFactorCompositeSummary>,
+    sub_metrics: Option<CFactorComponents>,
     per_agent: Vec<CFactorAgentSummary>,
-    per_fleet: FleetCFactor,
+    per_fleet: Option<FleetCFactor>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -513,7 +514,9 @@ fn build_model_efficiency_response(
                 .sum::<u64>()
         })
         .unwrap_or(0);
-    let current_stage = cascade_stage_for_observations(total_observations).label();
+    let current_stage = snapshot
+        .as_ref()
+        .map(|_| cascade_stage_for_observations(total_observations).label().to_string());
 
     let mut models: BTreeMap<String, ModelEfficiencyAggregate> = BTreeMap::new();
     if let Some(snapshot) = &snapshot {
@@ -534,21 +537,32 @@ fn build_model_efficiency_response(
         }
     }
 
+    let data_quality = DataQuality::from_efficiency_events(events);
     let mut rows: Vec<Value> = models
         .into_iter()
         .map(|(model, aggregate)| {
-            let cost_per_success = if aggregate.successful_episodes == 0 {
-                0.0
+            let total_cost_usd = if aggregate.total_episodes == 0 {
+                Value::Null
             } else {
-                aggregate.total_cost_usd / aggregate.successful_episodes as f64
+                json!(aggregate.total_cost_usd)
+            };
+            let cost_per_success = if aggregate.successful_episodes == 0 {
+                Value::Null
+            } else {
+                json!(aggregate.total_cost_usd / aggregate.successful_episodes as f64)
+            };
+            let success_rate = if aggregate.total_episodes == 0 {
+                Value::Null
+            } else {
+                json!(ratio(aggregate.successful_episodes, aggregate.total_episodes))
             };
             json!({
                 "model": model,
                 "total_episodes": aggregate.total_episodes,
                 "successful_episodes": aggregate.successful_episodes,
-                "total_cost_usd": aggregate.total_cost_usd,
+                "total_cost_usd": total_cost_usd,
                 "cost_per_successful_episode_usd": cost_per_success,
-                "success_rate": ratio(aggregate.successful_episodes, aggregate.total_episodes),
+                "success_rate": success_rate,
             })
         })
         .collect();
@@ -564,6 +578,7 @@ fn build_model_efficiency_response(
         "source": path.display().to_string(),
         "current_stage": current_stage,
         "total_observations": total_observations,
+        "data_quality": data_quality,
         "models": rows,
     })
 }
@@ -939,20 +954,32 @@ fn build_cfactor_metrics_response(
     events: &[AgentEfficiencyEvent],
     fleet: FleetCFactor,
 ) -> Value {
-    let composite = history.last().cloned().unwrap_or_default();
+    let composite = history.last().cloned();
     let per_agent = composite
-        .agent_contributions
-        .iter()
-        .map(|contribution| CFactorAgentSummary {
-            agent_id: contribution.agent_id.clone(),
-            episode_count: contribution.episode_count,
-            without_agent_overall: contribution.without_agent_overall,
-            contribution_score: contribution.contribution_score,
-            dispatch_bias: dispatch_bias_label(
-                composite.dispatch_bias_for_agent(contribution.agent_id.as_str()),
-            ),
+        .as_ref()
+        .map(|composite| {
+            composite
+                .agent_contributions
+                .iter()
+                .map(|contribution| CFactorAgentSummary {
+                    agent_id: contribution.agent_id.clone(),
+                    episode_count: contribution.episode_count,
+                    without_agent_overall: contribution.without_agent_overall,
+                    contribution_score: contribution.contribution_score,
+                    dispatch_bias: dispatch_bias_label(
+                        composite.dispatch_bias_for_agent(contribution.agent_id.as_str()),
+                    ),
+                })
+                .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
+    let data_quality = DataQuality::from_counts(
+        !history.is_empty() || !events.is_empty(),
+        events.len().max(history.len()),
+        events.iter().filter(|event| event.cost_usd == 0.0).count(),
+    );
+    let per_fleet = (!events.is_empty()).then_some(fleet);
+    let sub_metrics = composite.as_ref().map(|composite| composite.components.clone());
 
     let response = CFactorMetricsResponse {
         source: CFactorMetricsSource {
@@ -961,15 +988,16 @@ fn build_cfactor_metrics_response(
             composite_history_count: history.len(),
             efficiency_event_count: events.len(),
         },
-        composite: CFactorCompositeSummary {
+        data_quality,
+        composite: composite.map(|composite| CFactorCompositeSummary {
             overall: composite.overall,
             computed_at: composite.computed_at,
             episode_count: composite.episode_count,
             history_count: history.len(),
-        },
-        sub_metrics: composite.components,
+        }),
+        sub_metrics,
         per_agent,
-        per_fleet: fleet,
+        per_fleet,
     };
 
     serde_json::to_value(response).unwrap_or_else(|e| {
@@ -1196,4 +1224,76 @@ async fn top_templates(state: &AppState, window_start: DateTime<Utc>) -> Vec<Tem
 
     templates.truncate(5);
     templates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routes::learning::router_state::{CascadeSnapshotData, PersistedModelStatsData};
+    use roko_learn::efficiency::FleetCFactor;
+    use std::path::Path;
+
+    #[test]
+    fn c_factor_metrics_do_not_invent_a_default_composite() {
+        let response = build_cfactor_metrics_response(
+            Path::new("/tmp/c-factor.jsonl"),
+            &[],
+            Path::new("/tmp/efficiency.jsonl"),
+            &[],
+            FleetCFactor::default(),
+        );
+
+        assert_eq!(response["data_quality"]["has_real_data"], false);
+        assert_eq!(response["data_quality"]["entry_count"], 0);
+        assert_eq!(response["data_quality"]["null_cost_count"], 0);
+        assert!(response["composite"].is_null());
+        assert!(response["sub_metrics"].is_null());
+        assert!(response["per_fleet"].is_null());
+    }
+
+    #[test]
+    fn model_efficiency_reports_null_costs_for_empty_rows() {
+        let snapshot = Some(CascadeSnapshotData {
+            model_slugs: vec!["claude-sonnet-4-5".to_string()],
+            confidence_stats: std::collections::HashMap::from([(
+                "claude-sonnet-4-5".to_string(),
+                PersistedModelStatsData {
+                    trials: 0,
+                    successes: 0,
+                },
+            )]),
+        });
+
+        let response = build_model_efficiency_response(
+            Path::new("/tmp/cascade-router.json"),
+            snapshot,
+            &[],
+        );
+
+        assert_eq!(response["data_quality"]["has_real_data"], false);
+        assert_eq!(response["data_quality"]["entry_count"], 0);
+        assert_eq!(response["data_quality"]["null_cost_count"], 0);
+
+        let model = response["models"]
+            .as_array()
+            .and_then(|models| models.first())
+            .expect("expected one model row");
+        assert!(model["total_cost_usd"].is_null());
+        assert!(model["cost_per_successful_episode_usd"].is_null());
+        assert!(model["success_rate"].is_null());
+    }
+
+    #[test]
+    fn model_efficiency_reports_null_stage_without_snapshot() {
+        let response = build_model_efficiency_response(
+            Path::new("/tmp/cascade-router.json"),
+            None,
+            &[],
+        );
+
+        assert!(response["current_stage"].is_null());
+        assert_eq!(response["data_quality"]["has_real_data"], false);
+        assert_eq!(response["data_quality"]["entry_count"], 0);
+        assert_eq!(response["data_quality"]["null_cost_count"], 0);
+    }
 }

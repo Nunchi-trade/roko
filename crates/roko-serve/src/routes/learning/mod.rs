@@ -6,6 +6,7 @@ pub(crate) mod router_state;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -14,10 +15,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::error::ApiError;
-use crate::projection_contract::{ProjectionQuery, RuntimeProjectionSet};
+use crate::projection_contract::{DataQuality, ProjectionQuery, RuntimeProjectionSet};
 use crate::state::AppState;
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::efficiency::AgentEfficiencyEvent;
+use roko_learn::provider_health::{HealthState, ProviderStatus};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -70,105 +72,13 @@ async fn costs(
     Ok(Json(projections.project("cost_state", &query)?))
 }
 
-/// `GET /api/learning/provider-outcomes` — provider health data shaped for the
-/// demo `ProviderCell` component.
-///
-/// Returns `{ providers: [{ name, status, models, success_rate, ... }] }`.
+/// `GET /api/learning/provider-outcomes` — provider/model outcome proof surface.
 async fn provider_outcomes(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ProjectionQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    // Try to get raw projection data to enrich our response.
     let projections = RuntimeProjectionSet::load(&state).await?;
-    let raw = projections
-        .project("provider_state", &query)
-        .unwrap_or(json!({}));
-
-    // If the projection already returns a non-empty providers list, pass it through.
-    if raw
-        .get("providers")
-        .and_then(Value::as_array)
-        .is_some_and(|a| !a.is_empty())
-    {
-        return Ok(Json(raw));
-    }
-
-    // Otherwise, build provider summaries from efficiency events.
-    let events = projections.efficiency_events();
-
-    let mut providers: HashMap<String, ProviderAccumulator> = HashMap::new();
-    for event in events {
-        let provider_name = event
-            .model
-            .split('/')
-            .next()
-            .unwrap_or(&event.model)
-            .to_string();
-        let acc = providers.entry(provider_name).or_default();
-        acc.total_requests += 1;
-        if event.gate_passed {
-            acc.successes += 1;
-        } else {
-            acc.errors += 1;
-        }
-        acc.total_duration_ms += event.duration_ms;
-        if !acc.models.contains(&event.model) {
-            acc.models.push(event.model.clone());
-        }
-        acc.total_cost_usd += event.cost_usd;
-    }
-
-    let providers: Vec<Value> = providers
-        .into_iter()
-        .map(|(name, acc)| {
-            let success_rate = if acc.total_requests > 0 {
-                acc.successes as f64 / acc.total_requests as f64
-            } else {
-                1.0
-            };
-            let avg_latency_ms = if acc.total_requests > 0 {
-                acc.total_duration_ms as f64 / acc.total_requests as f64
-            } else {
-                0.0
-            };
-            let status = if success_rate >= 0.97 {
-                "healthy"
-            } else if success_rate >= 0.90 {
-                "degraded"
-            } else {
-                "unhealthy"
-            };
-            let cost_per_1k = if acc.total_requests > 0 {
-                acc.total_cost_usd / acc.total_requests as f64 * 1000.0
-            } else {
-                0.0
-            };
-            json!({
-                "name": name,
-                "status": status,
-                "models": acc.models,
-                "success_rate": success_rate,
-                "avg_latency_ms": avg_latency_ms as u64,
-                "p95_latency_ms": (avg_latency_ms * 1.5) as u64,
-                "cost_per_1k_tokens": cost_per_1k,
-                "total_requests": acc.total_requests,
-                "errors_24h": acc.errors,
-                "last_error": "",
-            })
-        })
-        .collect();
-
-    Ok(Json(json!({ "providers": providers })))
-}
-
-#[derive(Default)]
-struct ProviderAccumulator {
-    total_requests: u64,
-    successes: u64,
-    errors: u64,
-    total_duration_ms: u64,
-    total_cost_usd: f64,
-    models: Vec<String>,
+    Ok(Json(projections.project("provider_state", &query)?))
 }
 
 /// `GET /api/learning/retries` — retry attempt proof surface.
@@ -222,10 +132,21 @@ async fn learn_router_snapshot(
         .get("cascade_router")
         .cloned()
         .unwrap_or(Value::Null);
-    Ok(Json(source_projection_payload(
-        node,
-        projections.evidence(),
-    )))
+    let raw_router = node
+        .get("value")
+        .cloned()
+        .unwrap_or_else(|| node.clone());
+    let models = cascade_router_availability(&state, &raw_router);
+    let data_quality = cascade_router_data_quality(&raw_router);
+    let mut payload = source_projection_payload(node, projections.evidence());
+    if let Value::Object(map) = &mut payload {
+        map.insert("models".to_string(), Value::Array(models));
+        map.insert(
+            "data_quality".to_string(),
+            serde_json::to_value(data_quality).unwrap_or(Value::Null),
+        );
+    }
+    Ok(Json(payload))
 }
 
 /// `GET /api/executor/state` — return the executor snapshot as JSON.
@@ -316,6 +237,7 @@ fn build_efficiency_response_with_evidence(
         } else {
             total_duration_ms as f64 / task_count
         },
+        data_quality: DataQuality::from_efficiency_events(events),
         cost_trend,
         tasks: task_summaries,
         evidence,
@@ -369,46 +291,98 @@ fn source_projection_payload(node: Value, evidence: Value) -> Value {
     }
 }
 
-/// Map numeric rung IDs to the canonical gate names the frontend expects.
-fn rung_id_to_name(rung: u32) -> &'static str {
-    match rung {
-        0 => "compile",
-        1 => "clippy",
-        2 => "test",
-        3 => "diff",
-        4 => "fmt",
-        5 => "custom",
-        6 => "judge",
-        _ => "unknown",
+fn cascade_router_availability(state: &AppState, router: &Value) -> Vec<Value> {
+    let config = state.load_roko_config();
+    let providers_by_slug: HashMap<String, String> = config
+        .effective_models()
+        .into_values()
+        .map(|profile| (profile.slug, profile.provider))
+        .collect();
+    let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for slug in cascade_router_slugs(router) {
+        if !seen.insert(slug.clone()) {
+            continue;
+        }
+        let available = providers_by_slug
+            .get(&slug)
+            .map(|provider| provider_status_available(&state.provider_health.get(provider)))
+            .unwrap_or(false);
+        models.push(json!({
+            "model_slug": slug,
+            "available": available,
+        }));
+    }
+
+    models.sort_by(|a, b| {
+        a.get("model_slug")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("model_slug").and_then(Value::as_str).unwrap_or(""))
+    });
+
+    models
+}
+
+fn cascade_router_data_quality(router: &Value) -> DataQuality {
+    let entry_count = cascade_router_slugs(router).len();
+    DataQuality::from_counts(entry_count > 0, entry_count, 0)
+}
+
+fn cascade_router_slugs(router: &Value) -> Vec<String> {
+    let mut slugs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    if let Some(values) = router.get("model_slugs").and_then(Value::as_array) {
+        for slug in values.iter().filter_map(Value::as_str).map(ToOwned::to_owned) {
+            if seen.insert(slug.clone()) {
+                slugs.push(slug);
+            }
+        }
+    }
+    if let Some(keys) = router.get("confidence_stats").and_then(Value::as_object) {
+        for slug in keys.keys().cloned() {
+            if seen.insert(slug.clone()) {
+                slugs.push(slug);
+            }
+        }
+    }
+
+    slugs
+}
+
+fn provider_status_available(status: &ProviderStatus) -> bool {
+    match status.state {
+        HealthState::Healthy => true,
+        HealthState::Unhealthy { recovery_at } => Instant::now() >= recovery_at,
+        HealthState::Probing => false,
     }
 }
 
 /// Build a structured response from the adaptive gate threshold store.
-///
-/// The response uses a `thresholds` map keyed by rung name (e.g. `"compile"`)
-/// with fields matching the frontend `RungThreshold` interface.
 fn build_adaptive_thresholds_response(
     path: &std::path::Path,
     thresholds: &AdaptiveThresholds,
 ) -> AdaptiveThresholdsResponse {
-    let map: std::collections::BTreeMap<String, RungThresholdDetail> = thresholds
+    let mut rungs: Vec<RungThresholdSummary> = thresholds
         .all_rungs()
-        .map(|(rung, stats)| {
-            let name = rung_id_to_name(*rung).to_string();
-            let detail = RungThresholdDetail {
-                mean_pass_rate: stats.ema_pass_rate,
-                ema_threshold: 0.7, // sensible default; gate skip threshold
-                rung_count: stats.total_observations,
-                consecutive_passes: stats.consecutive_passes,
-            };
-            (name, detail)
+        .map(|(rung, stats)| RungThresholdSummary {
+            rung: *rung,
+            ema_pass_rate: stats.ema_pass_rate,
+            total_observations: stats.total_observations,
+            consecutive_passes: stats.consecutive_passes,
+            suggested_max_retries: thresholds.suggested_max_retries(*rung),
+            should_skip_rung: thresholds.should_skip_rung(*rung),
         })
         .collect();
 
+    rungs.sort_by_key(|summary| summary.rung);
+
     AdaptiveThresholdsResponse {
         source: path.display().to_string(),
-        tracked_rungs: map.len(),
-        thresholds: map,
+        tracked_rungs: rungs.len(),
+        rungs,
     }
 }
 
@@ -472,32 +446,31 @@ struct EfficiencyResponse {
     cost_per_task: f64,
     tokens_per_task: f64,
     avg_task_duration: f64,
+    data_quality: DataQuality,
     cost_trend: Vec<CostTrendPoint>,
     tasks: Vec<TaskEfficiencySummary>,
     evidence: Value,
 }
 
 /// Structured API response for `GET /api/learn/adaptive-thresholds`.
-///
-/// The `thresholds` map is keyed by rung name (`"compile"`, `"clippy"`, etc.)
-/// to match the shape the demo `ThresholdGaugeRow` component expects.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 struct AdaptiveThresholdsResponse {
     source: String,
     tracked_rungs: usize,
-    /// Keyed by rung name (e.g. `"compile"`, `"clippy"`).
-    thresholds: std::collections::BTreeMap<String, RungThresholdDetail>,
+    rungs: Vec<RungThresholdSummary>,
 }
 
-/// One rung entry shaped for the frontend `ThresholdGauge` component.
+/// One rung entry from the adaptive threshold store.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
-struct RungThresholdDetail {
-    mean_pass_rate: f64,
-    ema_threshold: f64,
-    rung_count: u64,
+struct RungThresholdSummary {
+    rung: u32,
+    ema_pass_rate: f64,
+    total_observations: u64,
     consecutive_passes: u32,
+    suggested_max_retries: u32,
+    should_skip_rung: bool,
 }
 
 #[cfg(test)]
@@ -769,6 +742,17 @@ mod tests {
         .await
         .map_err(|err| anyhow!("failed to write gate thresholds fixture: {err}"))?;
 
+        let mut config = state.load_roko_config().as_ref().clone();
+        config.models.insert(
+            "sonnet-4-5".into(),
+            roko_core::config::schema::ModelProfile {
+                provider: "anthropic".into(),
+                slug: "claude-sonnet-4-5".into(),
+                ..Default::default()
+            },
+        );
+        state.store_roko_config(config);
+
         let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
 
         let cascade_response = app
@@ -797,6 +781,23 @@ mod tests {
                 .len(),
             2
         );
+        assert_eq!(cascade_payload["data_quality"]["has_real_data"], true);
+        assert_eq!(cascade_payload["data_quality"]["entry_count"], 2);
+        assert_eq!(cascade_payload["data_quality"]["null_cost_count"], 0);
+        let models = cascade_payload["models"]
+            .as_array()
+            .expect("invariant: cascade response should contain a models array");
+        assert_eq!(models.len(), 2);
+        let sonnet = models
+            .iter()
+            .find(|model| model["model_slug"] == "claude-sonnet-4-5")
+            .expect("configured model should be present");
+        assert_eq!(sonnet["available"], true);
+        let haiku = models
+            .iter()
+            .find(|model| model["model_slug"] == "claude-haiku-3-5")
+            .expect("unconfigured model should be present");
+        assert_eq!(haiku["available"], false);
 
         let cost_tiers_response = app
             .clone()
@@ -839,6 +840,18 @@ mod tests {
             .map_err(|err| anyhow!("failed to parse gate-thresholds alias response body: {err}"))?;
         assert_eq!(thresholds_payload["hello"], "world");
         Ok(())
+    }
+
+    #[test]
+    fn efficiency_response_exposes_data_quality_for_empty_events() {
+        let response = build_efficiency_response_with_evidence(
+            &[],
+            json!({"state": "not_loaded"}),
+        );
+
+        assert!(!response.data_quality.has_real_data);
+        assert_eq!(response.data_quality.entry_count, 0);
+        assert_eq!(response.data_quality.null_cost_count, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -943,9 +956,8 @@ mod tests {
             .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
         assert_eq!(
             payload
-                .get("trend")
-                .and_then(|v| v.as_array())
-                .expect("invariant: c-factor trend response should contain a trend array")
+                .as_array()
+                .expect("invariant: c-factor trend response should be an array")
                 .len(),
             0
         );
@@ -1005,12 +1017,10 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .map_err(|err| anyhow!("failed to read c-factor trend response body: {err}"))?;
-        let payload: serde_json::Value = serde_json::from_slice(&body)
+        let payload: Vec<CFactorBucket> = serde_json::from_slice(&body)
             .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
-        let trend: Vec<CFactorBucket> = serde_json::from_value(payload["trend"].clone()).unwrap();
-        assert_eq!(trend.len(), 24);
-        assert!(trend.iter().any(|bucket| bucket.samples == 2));
-        assert!(payload.get("woolley").is_some());
+        assert_eq!(payload.len(), 24);
+        assert!(payload.iter().any(|bucket| bucket.samples == 2));
         Ok(())
     }
 
@@ -1018,10 +1028,10 @@ mod tests {
     fn adaptive_thresholds_response_exposes_per_rung_ema_values() {
         let mut thresholds = AdaptiveThresholds::new();
         for _ in 0..5 {
-            thresholds.update(2, true); // rung 2 = "test"
+            thresholds.update(2, true);
         }
         for _ in 0..3 {
-            thresholds.update(1, false); // rung 1 = "clippy"
+            thresholds.update(1, false);
         }
 
         let response = build_adaptive_thresholds_response(
@@ -1031,16 +1041,17 @@ mod tests {
 
         assert_eq!(response.source, "/tmp/.roko/learn/gate-thresholds.json");
         assert_eq!(response.tracked_rungs, 2);
-
-        // Thresholds are now keyed by name.
-        let clippy = response.thresholds.get("clippy").expect("clippy rung");
-        assert_eq!(clippy.rung_count, 3);
-        assert_eq!(clippy.consecutive_passes, 0);
-        assert!((clippy.mean_pass_rate - 0.0).abs() < 1e-9);
-
-        let test = response.thresholds.get("test").expect("test rung");
-        assert_eq!(test.rung_count, 5);
-        assert_eq!(test.consecutive_passes, 5);
-        assert!((test.mean_pass_rate - 1.0).abs() < 1e-9);
+        assert_eq!(response.rungs.len(), 2);
+        assert_eq!(response.rungs[0].rung, 1);
+        assert_eq!(response.rungs[0].total_observations, 3);
+        assert_eq!(response.rungs[0].consecutive_passes, 0);
+        assert_eq!(response.rungs[0].suggested_max_retries, 3);
+        assert!((response.rungs[0].ema_pass_rate - 0.0).abs() < 1e-9);
+        assert_eq!(response.rungs[1].rung, 2);
+        assert_eq!(response.rungs[1].total_observations, 5);
+        assert_eq!(response.rungs[1].consecutive_passes, 5);
+        assert_eq!(response.rungs[1].suggested_max_retries, 1);
+        assert!((response.rungs[1].ema_pass_rate - 1.0).abs() < 1e-9);
+        assert!(!response.rungs[1].should_skip_rung);
     }
 }
