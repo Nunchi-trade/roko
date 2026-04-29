@@ -787,3 +787,286 @@ use ./module-c
         assert!(do_not_create.is_empty());
     }
 }
+
+/// Directories to exclude from file and symbol search.
+pub const EXCLUDED_DIRS: &[&str] = &["target", "node_modules", ".git", "tmp", "vendor", ".roko"];
+
+/// Source file extensions to include in symbol search.
+const SOURCE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "go", "py", "toml", "json"];
+
+/// Find key files whose names or contents match any of the feature keywords.
+///
+/// Relevance scoring is higher for stronger filename matches and lowest for
+/// content-only matches.
+#[must_use]
+pub fn find_key_files(root: &Path, keywords: &[&str], max_files: usize) -> Vec<PathBuf> {
+    if max_files == 0 {
+        return Vec::new();
+    }
+
+    let keywords = normalize_keywords(keywords);
+    if keywords.is_empty() {
+        return Vec::new();
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut scored: Vec<(u8, PathBuf)> = Vec::new();
+
+    walk_source_dir(root, root, &deadline, &mut |rel_path: &Path| {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+
+        let abs_path = root.join(rel_path);
+        let mut score = score_path_keywords(rel_path, &keywords);
+        if score > 0 {
+            if is_binary_path(&abs_path) {
+                return;
+            }
+        } else if has_allowed_extension(rel_path, SOURCE_EXTENSIONS) {
+            if is_binary_path(&abs_path) {
+                return;
+            }
+            if file_contains_any_keyword(&abs_path, &keywords, &deadline) {
+                score = 1;
+            }
+        }
+
+        if score > 0 {
+            scored.push((score, rel_path.to_path_buf()));
+        }
+    });
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.truncate(max_files);
+    scored.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Find symbol matches (lines containing keywords) in source files.
+///
+/// Definition-like lines are prioritized ahead of other matching lines. The
+/// returned symbol text is truncated to 200 characters.
+#[must_use]
+pub fn find_symbol_matches(root: &Path, keywords: &[&str], max_hits: usize) -> Vec<SymbolHit> {
+    if max_hits == 0 {
+        return Vec::new();
+    }
+
+    let keywords = normalize_keywords(keywords);
+    if keywords.is_empty() {
+        return Vec::new();
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut definition_hits: Vec<SymbolHit> = Vec::new();
+    let mut other_hits: Vec<SymbolHit> = Vec::new();
+
+    walk_source_dir(root, root, &deadline, &mut |rel_path: &Path| {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+
+        if !has_allowed_extension(rel_path, SOURCE_EXTENSIONS) {
+            return;
+        }
+
+        let abs_path = root.join(rel_path);
+        if is_binary_path(&abs_path) {
+            return;
+        }
+
+        let Ok(file) = std::fs::File::open(&abs_path) else {
+            return;
+        };
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = String::new();
+        let mut line_idx = 0usize;
+
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+
+            line.clear();
+            let Ok(bytes_read) = std::io::BufRead::read_line(&mut reader, &mut line) else {
+                return;
+            };
+            if bytes_read == 0 {
+                break;
+            }
+
+            line_idx += 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let lowered = trimmed.to_lowercase();
+            if !keywords.iter().any(|keyword| lowered.contains(keyword)) {
+                continue;
+            }
+
+            let hit = SymbolHit {
+                file: rel_path.to_path_buf(),
+                line: line_idx as u32,
+                text: trimmed.chars().take(200).collect(),
+            };
+
+            if is_definition_line(trimmed) {
+                definition_hits.push(hit);
+            } else {
+                other_hits.push(hit);
+            }
+
+            if definition_hits.len() + other_hits.len() >= max_hits.saturating_mul(3) {
+                break;
+            }
+        }
+    });
+
+    let mut result = definition_hits;
+    result.extend(other_hits);
+    result.truncate(max_hits);
+    result
+}
+
+/// Recursive directory walker that skips `EXCLUDED_DIRS` and respects a deadline.
+fn walk_source_dir<F>(root: &Path, dir: &Path, deadline: &std::time::Instant, cb: &mut F)
+where
+    F: FnMut(&Path),
+{
+    if std::time::Instant::now() >= *deadline {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let mut sorted_entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    sorted_entries.sort_by_key(|entry| entry.path());
+
+    for entry in sorted_entries {
+        if std::time::Instant::now() >= *deadline {
+            return;
+        }
+
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+
+        let abs = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if file_type.is_dir() {
+            if EXCLUDED_DIRS
+                .iter()
+                .any(|excluded| excluded.eq_ignore_ascii_case(name_str.as_ref()))
+            {
+                continue;
+            }
+            walk_source_dir(root, &abs, deadline, cb);
+        } else if file_type.is_file() {
+            if let Ok(rel) = abs.strip_prefix(root) {
+                cb(rel);
+            }
+        }
+    }
+}
+
+/// Returns true if the first 512 bytes of the file contain a null byte.
+fn is_binary_path(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+
+    let mut buffer = [0_u8; 512];
+    let Ok(bytes_read) = std::io::Read::read(&mut file, &mut buffer) else {
+        return false;
+    };
+
+    buffer[..bytes_read].contains(&0)
+}
+
+fn normalize_keywords(keywords: &[&str]) -> Vec<String> {
+    let mut normalized: Vec<String> = keywords
+        .iter()
+        .map(|keyword| keyword.trim().to_lowercase())
+        .filter(|keyword| !keyword.is_empty())
+        .collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
+}
+
+fn score_path_keywords(rel_path: &Path, keywords: &[String]) -> u8 {
+    let stem = rel_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let rel_lower = rel_path.to_string_lossy().to_lowercase();
+
+    let mut score = 0_u8;
+    for keyword in keywords {
+        let keyword = keyword.as_str();
+        if stem == keyword {
+            score = score.max(4);
+        } else if stem.contains(keyword) {
+            score = score.max(3);
+        } else if rel_lower.contains(keyword) {
+            score = score.max(2);
+        }
+    }
+
+    score
+}
+
+fn has_allowed_extension(path: &Path, extensions: &[&str]) -> bool {
+    let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+
+    extensions
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+}
+
+fn file_contains_any_keyword(path: &Path, keywords: &[String], deadline: &std::time::Instant) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+
+    loop {
+        if std::time::Instant::now() >= *deadline {
+            return false;
+        }
+
+        line.clear();
+        let Ok(bytes_read) = std::io::BufRead::read_line(&mut reader, &mut line) else {
+            return false;
+        };
+        if bytes_read == 0 {
+            return false;
+        }
+
+        let lowered = line.to_lowercase();
+        if keywords.iter().any(|keyword| lowered.contains(keyword)) {
+            return true;
+        }
+    }
+}
+
+fn is_definition_line(trimmed: &str) -> bool {
+    trimmed.contains("fn ")
+        || trimmed.contains("struct ")
+        || trimmed.contains("enum ")
+        || trimmed.contains("trait ")
+        || trimmed.contains("type ")
+        || trimmed.contains("impl ")
+        || trimmed.starts_with("pub ")
+}
