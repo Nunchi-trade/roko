@@ -2489,11 +2489,14 @@ pub fn global_config_path() -> PathBuf {
     canonical
 }
 
-/// Merge providers and models from the global config into `config`.
+/// Merge providers, models, and chain fallbacks from the global config into
+/// `config`.
 ///
-/// Any provider/model in the global file that is *not* already in `config`
-/// gets inserted. This lets project `roko.toml` files override specific
-/// entries while inheriting the rest from `~/.roko/config.toml`.
+/// Project `roko.toml` always wins. Anything the project leaves unset (a
+/// missing provider entry, a missing model entry, an unset `chain.wallet_key`,
+/// etc.) gets backfilled from `~/.roko/config.toml`. This is how secrets like
+/// `chain.wallet_key` live exclusively in the global file (`perms 600`) and
+/// never end up in a committed project file.
 pub fn merge_global_providers(config: &mut roko_core::config::schema::RokoConfig) {
     let global_path = global_config_path();
     if !global_path.exists() {
@@ -2518,6 +2521,26 @@ pub fn merge_global_providers(config: &mut roko_core::config::schema::RokoConfig
     }
     for (name, model) in global.models {
         config.models.entry(name).or_insert(model);
+    }
+
+    // Chain secrets / fallbacks: project [chain] takes precedence; a global
+    // value fills in any field the project leaves unset. This is how a
+    // private `wallet_key` lives in `~/.roko/config.toml` without ever being
+    // committed to the project's `roko.toml`.
+    if config.chain.wallet_key.is_none() {
+        config.chain.wallet_key = global.chain.wallet_key;
+    }
+    if config.chain.rpc_url.is_none() {
+        config.chain.rpc_url = global.chain.rpc_url;
+    }
+    if config.chain.chain_id.is_none() {
+        config.chain.chain_id = global.chain.chain_id;
+    }
+    if config.chain.deployer.is_none() {
+        config.chain.deployer = global.chain.deployer;
+    }
+    if config.chain.follower.is_none() {
+        config.chain.follower = global.chain.follower;
     }
 }
 

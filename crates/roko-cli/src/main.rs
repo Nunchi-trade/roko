@@ -44,7 +44,7 @@ use roko_cli::{
 };
 use roko_core::agent::{AgentRole, ProviderKind};
 use roko_core::config::ServeDeployWebhookConfig;
-use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::config::schema::{ChainMode, ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::{ContentHash, Context, DaimonPolicy, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
@@ -112,6 +112,35 @@ pub enum LogFormat {
     Text,
     /// Structured JSON logs.
     Json,
+}
+
+/// CLI mirror of [`ChainMode`] (kept here so `clap::ValueEnum` doesn't leak
+/// into `roko-core`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliChainMode {
+    /// Light client (default): JSON-RPC state reads against a Daeji node
+    /// plus `kora_nodeStatus` liveness. No historical state retained
+    /// locally; threshold-cert verification is a follow-up.
+    Light,
+    /// Follower mode: same JSON-RPC + `kora_nodeStatus` backend as Light;
+    /// future revisions add a local block cache once Daeji's secondary-peer
+    /// protocol streams blocks.
+    Follower,
+    /// HTTP JSON-RPC client. Trusts the remote node — no on-agent verification.
+    Rpc,
+    /// In-memory mock backend. Tests only.
+    Mock,
+}
+
+impl CliChainMode {
+    fn to_chain_mode(self) -> ChainMode {
+        match self {
+            Self::Light => ChainMode::Light,
+            Self::Follower => ChainMode::Follower,
+            Self::Rpc => ChainMode::Rpc,
+            Self::Mock => ChainMode::Mock,
+        }
+    }
 }
 
 impl std::fmt::Display for Effort {
@@ -260,6 +289,15 @@ struct Cli {
     /// Run as a headless daemon (background service).
     #[arg(long, global = true)]
     headless: bool,
+
+    /// Override the chain read-side mode (`rpc`, `light`, `follower`, `mock`).
+    ///
+    /// Takes precedence over `[chain].mode` in `roko.toml`. `light` (default)
+    /// and `follower` both speak Ethereum JSON-RPC + `kora_nodeStatus` against
+    /// a Daeji node; `rpc` uses plain JSON-RPC without the liveness layer;
+    /// `mock` uses an in-memory backend for tests.
+    #[arg(long, global = true, value_enum)]
+    chain_mode: Option<CliChainMode>,
 
     /// Control color output: auto (default), always, never.
     ///
@@ -1523,6 +1561,7 @@ fn main() {
 
     let mut cli = Cli::parse();
     apply_env_overrides(&mut cli);
+    roko_cli::orchestrate::set_chain_mode_override(cli.chain_mode.map(CliChainMode::to_chain_mode));
 
     // ── TUI mode detection ─────────────────────────────────────────
     let tui_mode = matches!(&cli.command, Some(Command::Serve { tui: true, .. }));

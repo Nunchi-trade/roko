@@ -173,6 +173,7 @@ pub async fn run_doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         &loaded_config,
     ));
     checks.push(check_layout_basics(&workdir));
+    checks.push(check_chain_mode(&workdir));
     checks.push(check_serve_auth(&loaded_config));
     checks.push(check_serve_health(options.serve_url.as_deref(), &loaded_config).await?);
 
@@ -414,6 +415,100 @@ fn check_layout_basics(workdir: &Path) -> DoctorCheck {
             path: Some(root),
             url: None,
         }
+    }
+}
+
+fn check_chain_mode(workdir: &Path) -> DoctorCheck {
+    use roko_core::config::schema::{ChainMode, RokoConfig};
+
+    // Mirror `load_roko_config` from `main.rs` (kept local to avoid a
+    // public-API churn). Includes the global-config fallback so a
+    // `wallet_key` / `rpc_url` set only in `~/.roko/config.toml` shows up here.
+    let path = workdir.join("roko.toml");
+    let mut config = if path.is_file() {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => RokoConfig::from_toml(&text).unwrap_or_default(),
+            Err(_) => RokoConfig::default(),
+        }
+    } else {
+        RokoConfig::default()
+    };
+    crate::config::merge_global_providers(&mut config);
+
+    let configured = config.chain.mode;
+    let active = crate::orchestrate::effective_chain_mode_for_doctor(configured);
+    let overridden = active != configured;
+
+    let (status, message, detail) = match active {
+        ChainMode::Light | ChainMode::Follower => match config.chain.rpc_url.as_deref() {
+            Some(url) => (
+                DoctorStatus::Ok,
+                format!("chain.mode = {active} → {url} (rpc + kora_nodeStatus liveness)"),
+                Some(format!(
+                    "light and follower share the same backend today — \
+                     threshold-cert verification (light vs trusted-rpc) and local block cache \
+                     (follower vs light) are not yet wired.{}",
+                    if overridden {
+                        format!(" Override active: --chain-mode={active} (config = {configured}).")
+                    } else {
+                        String::new()
+                    }
+                )),
+            ),
+            None => (
+                DoctorStatus::Warn,
+                format!("chain.mode = {active} but no rpc_url configured"),
+                Some(format!(
+                    "set [chain].rpc_url in roko.toml (or ~/.roko/config.toml) to point at a Daeji node, or pass --chain-mode mock for tests.{}",
+                    if overridden {
+                        format!(" Override active: --chain-mode={active} (config = {configured}).")
+                    } else {
+                        String::new()
+                    }
+                )),
+            ),
+        },
+        ChainMode::Rpc => match config.chain.rpc_url.as_deref() {
+            Some(url) => (
+                DoctorStatus::Ok,
+                format!("chain.mode = rpc → {url}"),
+                if overridden {
+                    Some(format!(
+                        "Override active: --chain-mode=rpc (config = {configured})."
+                    ))
+                } else {
+                    None
+                },
+            ),
+            None => (
+                DoctorStatus::Warn,
+                "chain.mode = rpc but no rpc_url configured".to_string(),
+                Some(
+                    "set [chain].rpc_url in roko.toml or pass --chain-mode mock for tests"
+                        .to_string(),
+                ),
+            ),
+        },
+        ChainMode::Mock => (
+            DoctorStatus::Ok,
+            "chain.mode = mock (in-memory test backend)".to_string(),
+            if overridden {
+                Some(format!(
+                    "Override active: --chain-mode=mock (config = {configured})."
+                ))
+            } else {
+                None
+            },
+        ),
+    };
+
+    DoctorCheck {
+        id: "chain_mode".to_string(),
+        status,
+        message,
+        detail,
+        path: None,
+        url: None,
     }
 }
 

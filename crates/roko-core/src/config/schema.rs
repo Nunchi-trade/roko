@@ -1395,9 +1395,96 @@ impl Default for OneirographyConfig {
     }
 }
 
+/// How an agent connects to the chain for read access.
+///
+/// Selecting a mode is independent of `wallet_key` (writes always go through
+/// the configured RPC endpoint when present, regardless of the read-side
+/// backend).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ChainMode {
+    /// Embedded light client (default): subscribes to threshold-signed view
+    /// certificates and verifies state reads locally. No historical state.
+    #[default]
+    Light,
+    /// `alto-follower` subprocess with full history. Use when the agent
+    /// needs replays, log indexing, or audit-time queries.
+    Follower,
+    /// HTTP JSON-RPC client against a remote node. No on-agent verification —
+    /// trusts the RPC. Used for dev / prototyping or when the chain isn't
+    /// reachable as a follower.
+    Rpc,
+    /// In-memory mock for tests. Serves chain tools deterministically without
+    /// any network or subprocess.
+    Mock,
+}
+
+impl ChainMode {
+    /// Stable label used in logs and `roko doctor` output.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Follower => "follower",
+            Self::Rpc => "rpc",
+            Self::Mock => "mock",
+        }
+    }
+}
+
+impl fmt::Display for ChainMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Configuration for `mode = "light" | "follower"` — `alto-follower` runs
+/// as an in-process library, not a subprocess.
+///
+/// Mirrors the inputs alto-follower's actor constructors take. Shape is
+/// stable across `light` and `follower` modes — the difference between them
+/// is purely `pruning_depth` (and the QMDB variant alto-follower picks
+/// internally).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FollowerConfig {
+    /// Validator HTTP endpoint that serves finalization certificates and
+    /// blocks. Single source — no separate indexer service needed.
+    #[serde(default)]
+    pub source_url: Option<String>,
+    /// Hex-encoded BLS12-381 threshold public key. Verifies finalization
+    /// signatures.
+    #[serde(default)]
+    pub identity_pubkey: Option<String>,
+    /// Local directory for finalized blocks + state. Defaults to
+    /// `.roko/chain/follower/` under the workspace root.
+    #[serde(default)]
+    pub directory: Option<PathBuf>,
+    /// Blocks retained before pruning. `0` = light-client mode (no history),
+    /// `None` = retain all (full follower).
+    #[serde(default)]
+    pub pruning_depth: Option<u64>,
+    /// `true` = start from chain tip; `false` = backfill from genesis.
+    #[serde(default = "default_follower_tip")]
+    pub tip: bool,
+    /// Worker thread count for alto-follower's internal actor pool. `None` =
+    /// share the main tokio runtime.
+    #[serde(default)]
+    pub worker_threads: Option<u32>,
+    /// Threshold-signature verification thread count. `None` = share the
+    /// main runtime.
+    #[serde(default)]
+    pub signature_threads: Option<u32>,
+}
+
+fn default_follower_tip() -> bool {
+    true
+}
+
 /// Chain connection settings used by the `chain.*` tool domain.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ChainConfig {
+    /// Read-side connection mode. See [`ChainMode`].
+    #[serde(default)]
+    pub mode: ChainMode,
     /// HTTP JSON-RPC endpoint (e.g. `https://mirage-devnet.up.railway.app`).
     #[serde(default)]
     pub rpc_url: Option<String>,
@@ -1425,6 +1512,9 @@ pub struct ChainConfig {
     /// Deployer / funder address.
     #[serde(default)]
     pub deployer: Option<String>,
+    /// Subprocess settings for `mode = "light"` and `mode = "follower"`.
+    #[serde(default)]
+    pub follower: Option<FollowerConfig>,
 }
 
 /// Relay registration and workspace discovery settings.
@@ -6036,5 +6126,74 @@ threshold = "BLOCK_LOW_AND_ABOVE"
         let config: SubscriptionConfig = toml::from_str(toml_str).unwrap();
         assert!(config.trigger_config.is_none());
         assert_eq!(config.debounce_ms, 0);
+    }
+
+    #[test]
+    fn chain_mode_default_is_light() {
+        let mode: ChainMode = Default::default();
+        assert_eq!(mode, ChainMode::Light);
+        assert_eq!(mode.label(), "light");
+    }
+
+    #[test]
+    fn chain_mode_serializes_lowercase() {
+        let json = serde_json::to_string(&ChainMode::Follower).unwrap();
+        assert_eq!(json, "\"follower\"");
+        let parsed: ChainMode = serde_json::from_str("\"rpc\"").unwrap();
+        assert_eq!(parsed, ChainMode::Rpc);
+    }
+
+    #[test]
+    fn chain_mode_label_matches_display() {
+        for m in [
+            ChainMode::Light,
+            ChainMode::Follower,
+            ChainMode::Rpc,
+            ChainMode::Mock,
+        ] {
+            assert_eq!(format!("{m}"), m.label());
+        }
+    }
+
+    #[test]
+    fn chain_config_default_uses_light_mode() {
+        let config = ChainConfig::default();
+        assert_eq!(config.mode, ChainMode::Light);
+        assert!(config.rpc_url.is_none());
+        assert!(config.follower.is_none());
+    }
+
+    #[test]
+    fn chain_config_parses_mode_from_toml() {
+        let toml_str = r#"
+            mode = "follower"
+            rpc_url = "http://localhost:8545"
+            chain_id = 1337
+
+            [follower]
+            source_url = "https://validator.example/"
+            identity_pubkey = "0xdeadbeef"
+            pruning_depth = 0
+        "#;
+        let config: ChainConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.mode, ChainMode::Follower);
+        assert_eq!(config.chain_id, Some(1337));
+        let follower = config.follower.expect("follower section parses");
+        assert_eq!(
+            follower.source_url.as_deref(),
+            Some("https://validator.example/")
+        );
+        assert_eq!(follower.pruning_depth, Some(0));
+        // tip defaults to true.
+        assert!(follower.tip);
+    }
+
+    #[test]
+    fn chain_config_omits_mode_falls_back_to_default() {
+        let toml_str = r#"
+            rpc_url = "http://localhost:8545"
+        "#;
+        let config: ChainConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.mode, ChainMode::Light);
     }
 }
