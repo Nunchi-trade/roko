@@ -57,6 +57,7 @@ pub mod credentials;
 pub mod custody;
 pub mod daemon;
 pub mod demo_cmd;
+pub mod demo_seed;
 pub mod deployment;
 pub mod dispatch;
 #[cfg(feature = "legacy-orchestrate")]
