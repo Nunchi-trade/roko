@@ -4664,3 +4664,79 @@ mod tests {
         assert!((updated.balance - 0.3).abs() < f64::EPSILON);
     }
 }
+
+#[cfg(test)]
+mod anti_pattern_tests {
+    use super::*;
+    use crate::{KnowledgeKind, KnowledgeTier};
+
+    #[test]
+    fn test_extract_creates_anti_knowledge() {
+        let entry = extract_anti_pattern_from_failure(
+            "task-1",
+            "Implement add function",
+            "compile",
+            "error[E0425]: cannot find value `x` in this scope",
+            Some("fn add(a: i32, b: i32) -> i32 { x + y }"),
+        );
+
+        assert_eq!(entry.kind, KnowledgeKind::AntiKnowledge);
+        assert_eq!(entry.tier, KnowledgeTier::Transient);
+        assert!(entry.content.contains("compile"));
+        assert!(entry.content.contains("E0425"));
+        assert!(entry.tags.contains(&"gate:compile".to_string()));
+        assert!(entry.tags.contains(&"task:task-1".to_string()));
+        assert!(entry.confidence > 0.0 && entry.confidence <= 1.0);
+    }
+
+    #[test]
+    fn test_extract_without_agent_output() {
+        let entry = extract_anti_pattern_from_failure(
+            "task-2",
+            "Fix imports",
+            "test",
+            "test failed: expected true, got false",
+            None,
+        );
+
+        assert_eq!(entry.kind, KnowledgeKind::AntiKnowledge);
+        assert!(entry.content.contains("test"));
+        assert!(!entry.content.contains("Agent output"));
+    }
+
+    #[test]
+    fn test_extract_tags_include_error_codes() {
+        let entry = extract_anti_pattern_from_failure(
+            "task-3",
+            "Type error task",
+            "compile",
+            "error[E0308]: mismatched types",
+            None,
+        );
+
+        assert!(entry.tags.iter().any(|tag| tag.starts_with("error:")));
+    }
+
+    #[test]
+    fn test_anti_pattern_is_queryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KnowledgeStore::new(dir.path().join("knowledge.jsonl"));
+
+        let entry = extract_anti_pattern_from_failure(
+            "task-4",
+            "Implement iterator",
+            "compile",
+            "error[E0277]: trait bound not satisfied",
+            None,
+        );
+
+        store.add(entry).unwrap();
+
+        let results = store
+            .query_kind("Implement iterator", KnowledgeKind::AntiKnowledge, 5)
+            .unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].kind, KnowledgeKind::AntiKnowledge);
+        assert!(results[0].content.contains("E0277"));
+    }
+}
