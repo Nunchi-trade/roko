@@ -22,6 +22,7 @@ function getFallback(path: string): unknown {
   if (path.includes('/statehub/events')) return Demo.DEMO_EVENTS;
   if (path.includes('/dashboard')) return Demo.DEMO_DASHBOARD;
   if (path.includes('/learn/provider-outcomes') || path.includes('/providers/health')) return Demo.DEMO_PROVIDER_HEALTH;
+  if (path.includes('/cost-race') || path.includes('/bench/cost-summary')) return Demo.DEMO_COST_RACE;
   if (path.includes('/bench/suites')) return BenchDemo.DEMO_BENCH_SUITES;
   if (path.includes('/bench/models')) return BenchDemo.DEMO_BENCH_MODELS;
   if (path.includes('/bench/runs')) return BenchDemo.DEMO_BENCH_RUNS;

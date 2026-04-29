@@ -404,3 +404,14 @@ export const DEMO_PROVIDER_HEALTH = {
     },
   ],
 };
+
+// Cost race (model cost accumulation data)
+export const DEMO_COST_RACE = {
+  models: [
+    { model: 'claude-sonnet-4', cost_usd: 0.48, tokens: 72400, tasks: 24, color: '#C8B890' },
+    { model: 'claude-haiku-3', cost_usd: 0.18, tokens: 54200, tasks: 31, color: '#8A9C86' },
+    { model: 'claude-opus-4', cost_usd: 0.62, tokens: 14800, tasks: 8, color: '#AA7088' },
+    { model: 'gpt-4o', cost_usd: 0.34, tokens: 48600, tasks: 15, color: '#D8A878' },
+    { model: 'gemini-2.5-pro', cost_usd: 0.21, tokens: 38400, tasks: 12, color: '#9A8AB8' },
+  ],
+};
