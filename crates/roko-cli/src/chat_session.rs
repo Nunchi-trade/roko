@@ -11,8 +11,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Result;
+use roko_agent::safety::contract::AgentContract;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
-use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
+use roko_compose::{detect_conventions, ProjectConventions, TokenCounter};
 use roko_core::foundation::ChatMessage;
 
 use crate::config::Config;
@@ -79,11 +80,11 @@ impl ChatAgentSession {
         model_selection: EffectiveModelSelection,
     ) -> Result<Self> {
         let system_prompt = build_chat_system_prompt(&workdir, config);
-        let allowed_tools_csv = resolve_allowed_tools_csv_stub(config, &workdir);
+        let allowed_tools_csv = resolve_tool_policy(&workdir);
         let mcp_config = discover_mcp_config_stub(config, &workdir);
         let effort = config.agent.effort.clone();
-        let timeout = (config.agent.timeout_ms > 0)
-            .then(|| Duration::from_millis(config.agent.timeout_ms));
+        let timeout =
+            (config.agent.timeout_ms > 0).then(|| Duration::from_millis(config.agent.timeout_ms));
 
         Ok(Self {
             workdir,
@@ -128,12 +129,16 @@ fn build_chat_system_prompt(workdir: &Path, config: &Config) -> String {
         }
     }
 
-    let token_budget = config.prompt.token_budget.clamp(1, CHAT_SYSTEM_PROMPT_TOKEN_BUDGET);
-    let prompt = builder
-        .with_token_budget(token_budget)
-        .build_with_counter(&TokenCounter::Heuristic {
-            chars_per_token: 4.0,
-        });
+    let token_budget = config
+        .prompt
+        .token_budget
+        .clamp(1, CHAT_SYSTEM_PROMPT_TOKEN_BUDGET);
+    let prompt =
+        builder
+            .with_token_budget(token_budget)
+            .build_with_counter(&TokenCounter::Heuristic {
+                chars_per_token: 4.0,
+            });
 
     if prompt.trim().is_empty() {
         role_identity.to_string()
@@ -161,6 +166,47 @@ fn gather_workspace_context(workdir: &Path) -> Result<String> {
     }
 
     Ok(parts.join("\n"))
+}
+
+/// Default tools for interactive chat when no safety contract is found.
+const DEFAULT_CHAT_TOOLS: &str = "Read,Glob,Grep,Bash,Edit,Write,NotebookEdit";
+
+/// Resolve tool allowlist from safety contracts.
+///
+/// Looks for an `AgentContract` for the "chat" role at `.roko/safety/chat.yaml`.
+/// If found, uses its `allowed_tools` field. If not found, falls back to a
+/// read-oriented default set and logs a debug message.
+fn resolve_tool_policy(workdir: &Path) -> String {
+    let contract_path = workdir.join(".roko/safety/chat.yaml");
+    match std::fs::read_to_string(&contract_path) {
+        Ok(content) => match serde_yaml::from_str::<AgentContract>(&content) {
+            Ok(contract) => {
+                if let Some(ref allowlist) = contract.allowed_tools {
+                    if !allowlist.is_empty() {
+                        let tools = allowlist.join(",");
+                        tracing::debug!("chat tool policy from contract: {}", tools);
+                        return tools;
+                    }
+                }
+                tracing::debug!("chat contract has no allowed_tools, using defaults");
+                DEFAULT_CHAT_TOOLS.to_string()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to parse chat contract at {}: {e}",
+                    contract_path.display()
+                );
+                DEFAULT_CHAT_TOOLS.to_string()
+            }
+        },
+        Err(_) => {
+            tracing::debug!(
+                "no chat safety contract at {}, using default tools",
+                contract_path.display()
+            );
+            DEFAULT_CHAT_TOOLS.to_string()
+        }
+    }
 }
 
 fn gather_workspace_conventions(workdir: &Path) -> Option<String> {
@@ -193,13 +239,7 @@ fn gather_workspace_conventions(workdir: &Path) -> Option<String> {
 fn collect_workspace_samples(workdir: &Path) -> (Vec<String>, Vec<String>) {
     let mut source_samples = Vec::new();
     let mut file_listing = Vec::new();
-    collect_workspace_samples_from_dir(
-        workdir,
-        workdir,
-        0,
-        &mut source_samples,
-        &mut file_listing,
-    );
+    collect_workspace_samples_from_dir(workdir, workdir, 0, &mut source_samples, &mut file_listing);
     (source_samples, file_listing)
 }
 
@@ -338,19 +378,29 @@ fn is_workspace_source_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
         Some(
-            "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "kt" | "swift" | "rb"
-                | "c" | "h" | "cpp" | "hpp" | "cs" | "lua" | "sh"
+            "rs" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "py"
+                | "go"
+                | "java"
+                | "kt"
+                | "swift"
+                | "rb"
+                | "c"
+                | "h"
+                | "cpp"
+                | "hpp"
+                | "cs"
+                | "lua"
+                | "sh"
         )
     )
 }
 
 fn is_skipped_dir_name(name: &str) -> bool {
     SKIP_DIR_NAMES.contains(&name)
-}
-
-fn resolve_allowed_tools_csv_stub(_config: &Config, _workdir: &Path) -> String {
-    // Placeholder until R3_A03 wires the safety/tool policy contract.
-    String::new()
 }
 
 fn discover_mcp_config_stub(_config: &Config, _workdir: &Path) -> Option<PathBuf> {
