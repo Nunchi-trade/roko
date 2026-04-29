@@ -32,6 +32,9 @@ pub struct ServeConfig {
     /// Cloud deployment settings.
     #[serde(default)]
     pub deploy: ServeDeployConfig,
+    /// Acknowledge risk of binding to a public address without authentication.
+    #[serde(default)]
+    pub acknowledge_public_risk: bool,
 }
 
 impl Default for ServeConfig {
@@ -43,6 +46,7 @@ impl Default for ServeConfig {
             auto_orchestrate: true,
             auth: ServeAuthConfig::default(),
             deploy: ServeDeployConfig::default(),
+            acknowledge_public_risk: false,
         }
     }
 }
