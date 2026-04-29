@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { relativeTime } from '../lib/format';
+import { handleRowKeyDown } from '../lib/a11y';
 import Pane from './Pane';
 import './ChainActivityPanel.css';
 
@@ -84,7 +85,9 @@ export default function ChainActivityPanel({ blocks, maxBlocks = 20 }: ChainActi
                 key={block.number}
                 className={`ca-block${isOpen ? ' expanded' : ''}`}
               >
-                <div className="ca-block-head" onClick={() => toggle(block.number)}>
+                <div className="ca-block-head" tabIndex={0} role="button"
+                     onClick={() => toggle(block.number)}
+                     onKeyDown={(e) => handleRowKeyDown(e, () => toggle(block.number))}>
                   <span className="ca-block-num">
                     Block {formatBlockNum(block.number)}
                   </span>

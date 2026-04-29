@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router';
 import { useBench } from '../hooks/useBench';
+import { handleRowKeyDown } from '../lib/a11y';
 import { useRokoConfig } from '../hooks/useRokoConfig';
 import type { AgentStrategy, BenchRun } from '../lib/bench-types';
 import Pane from '../components/Pane';
@@ -535,7 +536,7 @@ export default function Bench() {
                       <thead><tr><th style={{ width: 32 }}></th><th>Date</th><th>Suite</th><th>Model</th><th>Strategy</th><th>Pass Rate</th><th>Cost</th><th>Duration</th><th>Status</th><th>Actions</th></tr></thead>
                       <tbody>
                         {filteredHistory.map((run) => (
-                          <tr key={run.id} className={historySelected.has(run.id) ? 'diff-changed' : ''}>
+                          <tr key={run.id} tabIndex={0} role="row" className={historySelected.has(run.id) ? 'diff-changed' : ''} onKeyDown={(e) => handleRowKeyDown(e, () => toggleHistorySelect(run.id))}>
                             <td><input type="checkbox" checked={historySelected.has(run.id)} onChange={() => toggleHistorySelect(run.id)} style={{ accentColor: 'var(--rose-bright)' }} /></td>
                             <td className="mono">{new Date(run.started_at).toLocaleDateString()}</td>
                             <td>{run.suite_name}</td>

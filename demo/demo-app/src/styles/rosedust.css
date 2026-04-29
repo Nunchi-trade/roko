@@ -836,3 +836,30 @@ section + section::before {
   .lead { font-size: 16px }
   .axiom { padding: 28px 24px }
 }
+
+/* ═══════════════════════════════════════════════════════════
+   FOCUS RINGS — keyboard navigation
+   ═══════════════════════════════════════════════════════════ */
+
+[tabIndex="0"]:focus-visible,
+[role="button"]:focus-visible,
+[role="row"]:focus-visible,
+[role="columnheader"]:focus-visible {
+  outline: 1px solid var(--rose-dim);
+  outline-offset: -1px;
+  box-shadow: 0 0 0 2px rgba(184, 122, 148, 0.2);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   REDUCED MOTION — global override
+   ═══════════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

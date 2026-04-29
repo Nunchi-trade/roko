@@ -263,6 +263,8 @@ export default function KnowledgeGraph() {
           <div style={{ position: 'relative', height: 260 }}>
             <canvas
               ref={canvasRef}
+              role="img"
+              aria-label="Knowledge graph network visualization"
               style={{ width: '100%', height: '100%', display: 'block' }}
             />
             {/* HUD overlays */}

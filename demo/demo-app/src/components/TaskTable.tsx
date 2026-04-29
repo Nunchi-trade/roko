@@ -1,5 +1,6 @@
 import { useState, useMemo, Fragment } from 'react';
 import type { BenchTaskResult, TaskStatus } from '../lib/bench-types';
+import { handleRowKeyDown } from '../lib/a11y';
 
 interface TaskTableProps {
   results: BenchTaskResult[];
@@ -87,16 +88,16 @@ export default function TaskTable({ results, showDifficulty = true, showOutputPr
         />
       </div>
 
-      <table className="task-table">
+      <table className="task-table" role="table">
         <thead>
           <tr>
-            <th onClick={() => handleSort('task_name')}>Task{arrow('task_name')}</th>
-            {showDifficulty && <th onClick={() => handleSort('difficulty')}>Diff{arrow('difficulty')}</th>}
-            <th onClick={() => handleSort('status')}>Status{arrow('status')}</th>
-            <th onClick={() => handleSort('cost_usd')}>Cost{arrow('cost_usd')}</th>
-            <th onClick={() => handleSort('tokens')}>Tokens{arrow('tokens')}</th>
-            <th onClick={() => handleSort('duration_ms')}>Duration{arrow('duration_ms')}</th>
-            <th onClick={() => handleSort('model')}>Model{arrow('model')}</th>
+            <th tabIndex={0} role="columnheader" onClick={() => handleSort('task_name')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('task_name'); } }}>Task{arrow('task_name')}</th>
+            {showDifficulty && <th tabIndex={0} role="columnheader" onClick={() => handleSort('difficulty')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('difficulty'); } }}>Diff{arrow('difficulty')}</th>}
+            <th tabIndex={0} role="columnheader" onClick={() => handleSort('status')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('status'); } }}>Status{arrow('status')}</th>
+            <th tabIndex={0} role="columnheader" onClick={() => handleSort('cost_usd')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('cost_usd'); } }}>Cost{arrow('cost_usd')}</th>
+            <th tabIndex={0} role="columnheader" onClick={() => handleSort('tokens')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('tokens'); } }}>Tokens{arrow('tokens')}</th>
+            <th tabIndex={0} role="columnheader" onClick={() => handleSort('duration_ms')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('duration_ms'); } }}>Duration{arrow('duration_ms')}</th>
+            <th tabIndex={0} role="columnheader" onClick={() => handleSort('model')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('model'); } }}>Model{arrow('model')}</th>
             <th>Gates</th>
           </tr>
         </thead>
@@ -105,7 +106,10 @@ export default function TaskTable({ results, showDifficulty = true, showOutputPr
             <Fragment key={r.task_id}>
               <tr
                 className={`task-row task-row-${r.status}`}
+                tabIndex={0}
+                role="row"
                 onClick={() => setExpandedId(expandedId === r.task_id ? null : r.task_id)}
+                onKeyDown={(e) => handleRowKeyDown(e, () => setExpandedId(expandedId === r.task_id ? null : r.task_id))}
                 style={{ cursor: 'pointer' }}
               >
                 <td className="task-name">{r.task_name}</td>

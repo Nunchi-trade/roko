@@ -12,12 +12,17 @@ import Mosaic, { MosaicCell } from '../components/Mosaic';
 import Timeline from '../components/Timeline';
 import CommandLog from '../components/CommandLog';
 import GateBar from '../components/GateBar';
+import GateVerdictCard, { type GateEntry } from '../components/GateVerdictCard';
 import PrdPipelinePanel from '../components/PrdPipelinePanel';
 import KnowledgeFlowPanel, { type InsightEvent, type AgentInfo } from '../components/KnowledgeFlowPanel';
 import EfficiencyBar, { type EfficiencyMetric } from '../components/EfficiencyBar';
 import ChainIntelPanel from '../components/ChainIntelPanel';
 import RevealWhen from '../components/RevealWhen';
+import { ConfidenceMeter, ModelSlot, CrystallizeTransition } from '../components/inference';
+import { AgentHandoff } from '../components/agent';
 import { useChainWs, type InsightEvent as ChainInsightEvent } from '../hooks/useChain';
+import { useLearningStats } from '../hooks/useLearningStats';
+import { useAgentHandoffs } from '../hooks/useAgentHandoffs';
 import type { BlockData } from '../components/ChainActivityPanel';
 import type { AgentPosition } from '../components/LivePositionsPanel';
 import {
@@ -64,6 +69,14 @@ export default function Demo() {
   const serverHealth = useServerHealth();
   const { defaultModel } = useRokoConfig();
   const { ensureWorkspace, createWorkspace: createWs } = useWorkspace();
+  const learningStats = useLearningStats();
+  const { handoffs, activeHandoff } = useAgentHandoffs();
+
+  // SSE-driven inference state for ModelSlot and CrystallizeTransition
+  const [inferenceModel, setInferenceModel] = useState('--');
+  const [inferenceTier, setInferenceTier] = useState<'T0' | 'T1' | 'T2'>('T1');
+  const [allGatesPass, setAllGatesPass] = useState(false);
+  const allGatesPassTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Sidebar state
   const [stats, setStats] = useState({ model: '--', cost: '--', tokens: '--', time: '--' });
@@ -555,6 +568,43 @@ export default function Demo() {
   const hasStats = stats.model !== '--' || stats.cost !== '--' || stats.tokens !== '--' || stats.time !== '--';
   const hasKfMetrics = kfMetrics.some((m) => m.value > 0);
 
+  // T7.57: Detect when all gates pass for CrystallizeTransition
+  useEffect(() => {
+    if (gates.length > 0 && gates.every((g) => g.status === 'pass')) {
+      setAllGatesPass(true);
+      // Auto-dismiss after 3s
+      if (allGatesPassTimer.current) clearTimeout(allGatesPassTimer.current);
+      allGatesPassTimer.current = setTimeout(() => setAllGatesPass(false), 3000);
+    } else {
+      setAllGatesPass(false);
+    }
+  }, [gates]);
+
+  // T7.59: Track model from stats for ModelSlot
+  useEffect(() => {
+    if (stats.model !== '--') {
+      setInferenceModel(stats.model);
+      // Infer tier from model name heuristic
+      const m = stats.model.toLowerCase();
+      if (m.includes('opus') || m.includes('gpt-4') || m.includes('o1') || m.includes('o3')) {
+        setInferenceTier('T0');
+      } else if (m.includes('sonnet') || m.includes('gpt-3.5') || m.includes('gemini')) {
+        setInferenceTier('T1');
+      } else {
+        setInferenceTier('T2');
+      }
+    }
+  }, [stats.model]);
+
+  // Map gates to GateVerdictCard GateEntry[] format
+  const gateEntries: GateEntry[] = useMemo(
+    () => gates.map((g) => ({
+      name: g.name,
+      status: g.status as GateEntry['status'],
+    })),
+    [gates],
+  );
+
   // Grid class for 4-pane scenarios (2x2)
   const gridCols = scenario.panes === 4 ? 2 : scenario.panes;
 
@@ -636,18 +686,71 @@ export default function Demo() {
         {scenario.panel && (
           <div className="demo-sidebar">
             {scenario.id === 'prd-pipeline' ? (
-              <PrdPipelinePanel
-                state={pipeline}
-                examples={PIPELINE_EXAMPLES}
-                selectedExampleId={pipelineExampleId}
-                onSelectExample={handlePipelineExampleSelect}
-                selectorDisabled={isRunning}
-                onRun={handlePlay}
-                isRunning={isRunning}
-                serverHealth={serverHealth}
-              />
+              <>
+                <PrdPipelinePanel
+                  state={pipeline}
+                  examples={PIPELINE_EXAMPLES}
+                  selectedExampleId={pipelineExampleId}
+                  onSelectExample={handlePipelineExampleSelect}
+                  selectorDisabled={isRunning}
+                  onRun={handlePlay}
+                  isRunning={isRunning}
+                  serverHealth={serverHealth}
+                  learningStats={learningStats}
+                />
+
+                {/* T7.53: Agent handoff flow for PRD Pipeline */}
+                <RevealWhen visible={handoffs.length > 0}>
+                  <Pane title="AGENT FLOW" flat>
+                    <div style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {handoffs.slice(-3).map((h) => (
+                        <AgentHandoff
+                          key={h.id}
+                          from={h.from}
+                          to={h.to}
+                          status={h.status}
+                          direction="forward"
+                          label={h.label}
+                          compact
+                        />
+                      ))}
+                    </div>
+                  </Pane>
+                </RevealWhen>
+
+                {/* T7.58: Confidence meter for PRD Pipeline */}
+                <RevealWhen visible={learningStats.totalDecisions > 0}>
+                  <div style={{ padding: '4px 16px' }}>
+                    <ConfidenceMeter
+                      confidence={learningStats.routerConfidence}
+                      trend={learningStats.confidenceTrend}
+                      decisions={learningStats.totalDecisions}
+                      label="ROUTER CONFIDENCE"
+                      compact
+                    />
+                  </div>
+                </RevealWhen>
+              </>
             ) : scenario.id === 'knowledge-transfer' ? (
               <>
+                {/* T7.53: Active agent handoff in knowledge-transfer scenario */}
+                <RevealWhen visible={activeHandoff !== null}>
+                  {activeHandoff && (
+                    <Pane title="HANDOFF" flat>
+                      <div style={{ padding: '8px 12px' }}>
+                        <AgentHandoff
+                          from={activeHandoff.from}
+                          to={activeHandoff.to}
+                          status={activeHandoff.status}
+                          direction="forward"
+                          label={activeHandoff.label}
+                          compact
+                        />
+                      </div>
+                    </Pane>
+                  )}
+                </RevealWhen>
+
                 <RevealWhen visible={timelineDisplay.length > 0}>
                   <Pane title="TIMELINE" flat>
                     <Timeline steps={timelineDisplay} />
@@ -667,12 +770,15 @@ export default function Demo() {
                   <EfficiencyBar metrics={kfMetrics} />
                 </RevealWhen>
 
+                {/* T7.54: Replace GateBar with GateVerdictCard + T7.57: CrystallizeTransition */}
                 <RevealWhen visible={gates.length > 0}>
-                  <Pane title="GATES" flat>
-                    <div style={{ padding: '12px 16px' }}>
-                      <GateBar gates={gates} />
-                    </div>
-                  </Pane>
+                  <CrystallizeTransition active={allGatesPass}>
+                    <Pane title="GATES" flat>
+                      <div style={{ padding: '12px 16px' }}>
+                        <GateVerdictCard gates={gateEntries} compact />
+                      </div>
+                    </Pane>
+                  </CrystallizeTransition>
                 </RevealWhen>
 
                 <RevealWhen visible={logEntries.length > 0}>

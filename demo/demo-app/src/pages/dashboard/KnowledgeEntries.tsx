@@ -370,9 +370,15 @@ export default function KnowledgeEntries() {
                 {entries.map((entry) => (
                   <tr
                     key={entry.id}
+                    tabIndex={0}
+                    role="row"
                     style={{ transition: 'background .15s' }}
                     onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,.03)'; }}
                     onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'ArrowDown') { e.preventDefault(); (e.currentTarget.nextElementSibling as HTMLElement | null)?.focus(); }
+                      if (e.key === 'ArrowUp') { e.preventDefault(); (e.currentTarget.previousElementSibling as HTMLElement | null)?.focus(); }
+                    }}
                   >
                     <td style={tdStyle}>{entry.label ?? entry.id}</td>
                     <td style={tdStyle}>

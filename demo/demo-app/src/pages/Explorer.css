@@ -248,6 +248,13 @@
   text-shadow: 0 0 28px currentColor, 0 0 48px rgba(220, 165, 189, 0.2);
 }
 
+/* Stat value color variants (extracted from inline styles) */
+.expl-stat-value--episodes { color: var(--rose-bright); }
+.expl-stat-value--cost     { color: var(--bone); }
+.expl-stat-value--agents   { color: var(--dream-bright); }
+.expl-stat-value--gate     { color: var(--success); }
+.expl-stat-value--duration { color: var(--rose-glow); }
+
 .expl-spark {
   width: 100%;
   height: 28px;

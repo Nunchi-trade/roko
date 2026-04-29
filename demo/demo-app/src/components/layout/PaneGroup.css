@@ -1,0 +1,30 @@
+/* PaneGroup -- horizontal/vertical pane stack with shared resize handles */
+
+.pane-group {
+  position: relative;
+}
+
+.pane-group__handle--horizontal {
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.pane-group__handle--horizontal:hover {
+  background: rgba(216, 154, 178, 0.3);
+}
+
+.pane-group__handle--vertical {
+  cursor: row-resize;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.pane-group__handle--vertical:hover {
+  background: rgba(216, 154, 178, 0.3);
+}
+
+.pane-group__handle:active {
+  background: var(--rose-bright, #d89ab2);
+  opacity: 0.5;
+}

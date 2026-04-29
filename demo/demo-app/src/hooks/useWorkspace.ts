@@ -75,6 +75,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [createWorkspace],
   );
 
+  // TODO(T5.9): Server-side workspace GC — the roko-serve backend should run a
+  // background TTL sweep (e.g. 1-hour TTL, 5-min interval) to remove stale
+  // /tmp/roko-ws-* directories. This is out of scope for the frontend; the
+  // destroyWorkspace call below handles explicit user-initiated cleanup.
+  // See: crates/roko-serve/src/state.rs for the server startup location.
+
   const destroyWorkspace = useCallback(async (id: string) => {
     await fetch(`${SERVE_URL}/api/workspaces/${encodeURIComponent(id)}`, {
       method: 'DELETE',

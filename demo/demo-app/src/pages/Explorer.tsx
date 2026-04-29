@@ -666,27 +666,27 @@ export default function Explorer() {
       <div className="expl-stat-strip">
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="database" size={14} tone="rose" />EPISODES</span>
-          <span className="expl-stat-value" style={{ color: 'var(--rose-bright)' }}>{episodes.length}</span>
+          <span className="expl-stat-value expl-stat-value--episodes">{episodes.length}</span>
           <canvas ref={epSparkRef} className="expl-spark" role="img" aria-label="Episodes sparkline" />
         </div>
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="cost" size={14} tone="bone" />COST</span>
-          <span className="expl-stat-value" style={{ color: 'var(--bone)' }}>${stats.totalCost.toFixed(3)}</span>
+          <span className="expl-stat-value expl-stat-value--cost">${stats.totalCost.toFixed(3)}</span>
           <canvas ref={costSparkRef} className="expl-spark" role="img" aria-label="Cost sparkline" />
         </div>
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="agent" size={14} tone="dream" />AGENTS</span>
-          <span className="expl-stat-value" style={{ color: 'var(--dream-bright)' }}>{stats.agentCount}</span>
+          <span className="expl-stat-value expl-stat-value--agents">{stats.agentCount}</span>
           <canvas ref={agentSparkRef} className="expl-spark" role="img" aria-label="Agent activity sparkline" />
         </div>
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="gate" size={14} tone="success" />GATE PASS</span>
-          <span className="expl-stat-value" style={{ color: 'var(--success)' }}>{stats.gatePass.toFixed(0)}%</span>
+          <span className="expl-stat-value expl-stat-value--gate">{stats.gatePass.toFixed(0)}%</span>
           <canvas ref={gateSparkRef} className="expl-spark" role="img" aria-label="Gate pass rate sparkline" />
         </div>
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="duration" size={14} tone="rose" />AVG DURATION</span>
-          <span className="expl-stat-value" style={{ color: 'var(--rose-glow)' }}>{stats.avgDuration.toFixed(1)}s</span>
+          <span className="expl-stat-value expl-stat-value--duration">{stats.avgDuration.toFixed(1)}s</span>
           <canvas ref={durSparkRef} className="expl-spark" role="img" aria-label="Duration sparkline" />
         </div>
       </div>

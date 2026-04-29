@@ -5,12 +5,12 @@ import Curtain from './Curtain';
 import ScrollTrack from './ScrollTrack';
 import TopNav from './TopNav';
 import ComponentErrorBoundary from './design/ComponentErrorBoundary';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { useDataHub } from '../app/DataHub';
 
 const LazyHeroParticleField = lazy(() => import('./HeroParticleField'));
 
 export default function AppShell() {
-  const { dataMode } = useApiWithFallback();
+  const serverStatus = useDataHub((s) => s.serverStatus);
 
   useEffect(() => {
     const io = new IntersectionObserver(
@@ -39,7 +39,7 @@ export default function AppShell() {
       <Curtain />
       <ScrollTrack />
       <TopNav />
-      {dataMode === 'seed' && (
+      {serverStatus === 'disconnected' && (
         <div
           style={{
             position: 'fixed',
@@ -58,7 +58,7 @@ export default function AppShell() {
             userSelect: 'none',
           }}
         >
-          SEED DATA
+          OFFLINE
         </div>
       )}
       <div className="app-frame" style={{ paddingTop: 48, position: 'relative', zIndex: 1, minHeight: '100vh' }}>

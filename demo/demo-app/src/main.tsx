@@ -2,9 +2,8 @@ import { StrictMode, Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route } from 'react-router';
 import ErrorBoundary from './components/ErrorBoundary';
-import { EventStreamProvider } from './contexts/EventStreamContext';
-import { WorkspaceProvider } from './hooks/useWorkspace';
 import AppShell from './components/AppShell';
+import { bootstrapTransport } from './app/bootstrap';
 import './styles/rosedust.css';
 import './styles/animations.css';
 
@@ -46,11 +45,13 @@ function RouteLoading() {
   );
 }
 
+// Initialize transport layer before React render.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _cleanupTransport = bootstrapTransport();
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
-      <EventStreamProvider>
-      <WorkspaceProvider>
       <ErrorBoundary>
         <Suspense fallback={<RouteLoading />}>
           <Routes>
@@ -78,8 +79,6 @@ createRoot(document.getElementById('root')!).render(
           </Routes>
         </Suspense>
       </ErrorBoundary>
-      </WorkspaceProvider>
-      </EventStreamProvider>
     </BrowserRouter>
   </StrictMode>,
 );

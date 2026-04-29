@@ -15,3 +15,4 @@ export { default as VerticalTimeline } from './VerticalTimeline';
 export { default as CircularProgress } from './CircularProgress';
 export { default as MilestoneProgress } from './MilestoneProgress';
 export { default as ComponentErrorBoundary } from './ComponentErrorBoundary';
+export { default as DataSurface } from './DataSurface';
