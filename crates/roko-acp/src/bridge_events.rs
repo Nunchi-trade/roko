@@ -14,6 +14,7 @@ use std::{
 };
 
 use roko_agent::StreamChunk;
+use roko_agent::safety::{SafetyLayer, ViolationSeverity};
 use roko_agent::streaming::parse_sse_line;
 use roko_core::ContentHash;
 use roko_core::DaimonPolicy;
@@ -823,6 +824,40 @@ where
     let review_strictness = session.config_state.review_strictness.clone();
 
     let shared_run = session.shared_run.clone();
+    // SP-1: build a restrictive layer per dispatch; missing contracts fall closed.
+    let pre_dispatch_violation = {
+        let safety = SafetyLayer::with_defaults().with_role(&session.config_state.agent_mode);
+        match safety.pre_dispatch_check(
+            &session.session_id,
+            "session-prompt",
+            &session.config_state.agent_mode,
+            workdir,
+        ) {
+            Ok(()) => None,
+            Err(violation) => {
+                match violation.severity {
+                    ViolationSeverity::Block => {
+                        error!(
+                            session_id = %session.session_id,
+                            violation = ?violation.violation_type,
+                            message = %violation.message,
+                            "ACP pre-dispatch safety check BLOCKED dispatch"
+                        );
+                        Some(violation)
+                    }
+                    ViolationSeverity::Warn => {
+                        warn!(
+                            session_id = %session.session_id,
+                            violation = ?violation.violation_type,
+                            message = %violation.message,
+                            "ACP pre-dispatch safety warning"
+                        );
+                        None
+                    }
+                }
+            }
+        }
+    };
 
     // Shared channel for the workflow engine path: the cognitive task writes the
     // WorkflowRunReport's actual cost (which was aggregated from AgentCompleted events)
@@ -831,6 +866,27 @@ where
     let workflow_cost_sink_task = Arc::clone(&workflow_cost_sink);
 
     let cognitive_task = tokio::spawn(async move {
+        if let Some(violation) = pre_dispatch_violation {
+            let message = violation.message;
+            let _ = event_sender
+                .send(CognitiveEvent::TokenChunk(format!(
+                    "Safety check blocked this action: {}",
+                    message
+                )))
+                .await;
+            let _ = event_sender
+                .send(CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                })
+            .await;
+            return Err(anyhow::anyhow!(
+                "ACP pre-dispatch safety violation: {}",
+                message
+            )
+            .into());
+        }
+
         if is_slash_command {
             return run_slash_command(
                 &session_id,
@@ -1026,7 +1082,11 @@ where
         Ok(Ok(())) => (None, None),
         Ok(Err(e)) => {
             let error_text = e.to_string();
-            error!(error = %error_text, "cognitive task failed");
+            if error_text.starts_with("ACP pre-dispatch safety violation:") {
+                warn!(error = %error_text, "cognitive task blocked before dispatch");
+            } else {
+                error!(error = %error_text, "cognitive task failed");
+            }
             (Some(error_text), None)
         }
         Err(join_error) => {
@@ -1039,6 +1099,32 @@ where
         }
     };
     let stream_error = stream_result.as_ref().err().map(|err| err.to_string());
+
+    if let Ok(ref sr) = stream_result {
+        if !sr.assistant_text.is_empty() {
+            let safety = SafetyLayer::with_defaults().with_role(&session.config_state.agent_mode);
+            let violations = safety.post_dispatch_check(
+                &session.session_id,
+                "session-prompt",
+                &session.config_state.agent_mode,
+                &sr.assistant_text,
+                &[],
+            );
+            for v in &violations {
+                // The response has already streamed; block-level findings are only logged here.
+                match v.severity {
+                    ViolationSeverity::Warn | ViolationSeverity::Block => {
+                        warn!(
+                            session_id = %session.session_id,
+                            violation = ?v.violation_type,
+                            message = %v.message,
+                            "ACP post-dispatch safety violation"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     if !is_slash_command {
         // For the workflow engine path, the cognitive task wrote the actual provider cost

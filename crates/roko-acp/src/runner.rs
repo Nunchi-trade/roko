@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use roko_agent::claude_cli_agent::build_settings_json;
 use roko_agent::{Agent as RokoAgent, ClaudeCliAgent};
+use roko_agent::safety::contract::AgentContract;
+use roko_agent::safety::{SafetyLayer, SafetyViolation, ViolationSeverity};
 use roko_core::foundation::EventConsumer as CoreEventConsumer;
 use roko_core::{
     Body, Context, Engram, Kind, RuntimeEvent as CoreRuntimeEvent, Verify,
@@ -813,6 +815,43 @@ fn driver_event_run_id(event: &RuntimeDriverEvent) -> &str {
 
 fn core_runtime_event_from_driver(event: RuntimeDriverEvent) -> CoreRuntimeEvent {
     event
+}
+
+/// Build a restrictive `SafetyLayer` for an ACP session mode.
+fn safety_layer_for_mode(mode: &str) -> SafetyLayer {
+    let mode = mode.trim();
+    if mode.is_empty() {
+        return SafetyLayer::with_defaults().with_contract(AgentContract::restricted("default"));
+    }
+    SafetyLayer::with_defaults().with_role(mode)
+}
+
+/// Build a restrictive `SafetyLayer` for a pipeline phase role.
+fn safety_layer_for_pipeline_role(role: &str) -> SafetyLayer {
+    safety_layer_for_mode(role)
+}
+
+fn log_safety_violations(role: &str, violations: &[SafetyViolation]) {
+    for violation in violations {
+        match violation.severity {
+            ViolationSeverity::Block => {
+                error!(
+                    role,
+                    violation = ?violation.violation_type,
+                    message = %violation.message,
+                    "ACP pipeline safety violation (BLOCK)"
+                );
+            }
+            ViolationSeverity::Warn => {
+                warn!(
+                    role,
+                    violation = ?violation.violation_type,
+                    message = %violation.message,
+                    "ACP pipeline safety violation (warn)"
+                );
+            }
+        }
+    }
 }
 
 /// Run a workflow pipeline, emitting ACP events as it progresses.
@@ -1618,7 +1657,7 @@ async fn run_multi_role_review(
 
 /// Run a single agent phase using ClaudeCliAgent and stream output.
 async fn run_agent_phase(
-    _session_id: &str,
+    session_id: &str,
     role: &str,
     prompt: &str,
     workdir: &Path,
@@ -1641,6 +1680,16 @@ async fn run_agent_phase(
 
     match &output {
         Ok(text) => {
+            let safety = safety_layer_for_pipeline_role(role);
+            let violations: Vec<SafetyViolation> = safety.post_dispatch_check(
+                session_id,
+                "pipeline-phase",
+                role,
+                text,
+                &[],
+            );
+            log_safety_violations(role, &violations);
+
             let _ = event_sender
                 .send(CognitiveEvent::ToolCallComplete {
                     tool_call_id,
