@@ -368,7 +368,7 @@ pub async fn cmd_validate(workdir: &Path) -> Result<()> {
 }
 
 /// Migrate a legacy project-local `roko.toml` into explicit provider/model tables.
-pub fn cmd_migrate(workdir: &Path, dry_run: bool) -> Result<()> {
+pub fn cmd_migrate(workdir: &Path, dry_run: bool, yes: bool) -> Result<()> {
     let paths = resolve_paths(workdir);
     let config_path = validate_config_path(&paths, workdir)?;
     let text = fs::read_to_string(&config_path)
@@ -395,7 +395,7 @@ pub fn cmd_migrate(workdir: &Path, dry_run: bool) -> Result<()> {
             }
 
             println!();
-            if !prompt_bool("Apply changes?", false)? {
+            if !yes && !prompt_bool("Apply changes?", false)? {
                 return Err(anyhow!("cancelled"));
             }
 

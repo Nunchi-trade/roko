@@ -95,9 +95,13 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             config_cmd::cmd_validate(&wd).await
         }
-        ConfigCmd::Migrate { workdir, dry_run } => {
+        ConfigCmd::Migrate {
+            workdir,
+            dry_run,
+            yes,
+        } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            config_cmd::cmd_migrate(&wd, dry_run)
+            config_cmd::cmd_migrate(&wd, dry_run, yes)
         }
         // ── Providers ───────────────────────────────────────────────
         ConfigCmd::Providers { cmd } => match cmd {

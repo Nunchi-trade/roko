@@ -1510,6 +1510,9 @@ enum ConfigCmd {
         /// Print the proposed migration without writing changes.
         #[arg(long)]
         dry_run: bool,
+        /// Skip the confirmation prompt and apply the migration immediately.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     // ── Providers ───────────────────────────────────────────────────
