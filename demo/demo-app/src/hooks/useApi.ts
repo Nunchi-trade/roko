@@ -1,7 +1,13 @@
 import { useCallback, useMemo } from 'react';
 import { SERVE_URL } from '../lib/serve-url';
 
-/** Simple fetch wrapper with base URL resolution. */
+/**
+ * Simple fetch wrapper with base URL resolution.
+ *
+ * @deprecated Use `api` from `src/transport/api.ts` for REST calls.
+ *   The transport-layer `api` singleton works outside React and is
+ *   used by `bootstrapTransport()` and DataHub actions.
+ */
 export function useApi() {
   const get = useCallback(async <T = unknown>(path: string): Promise<T> => {
     const res = await fetch(`${SERVE_URL}${path}`);

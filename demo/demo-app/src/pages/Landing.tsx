@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router';
 import HeroScene from '../components/HeroScene';
-import '../components/HeroScene.css';
+import '../components/HeroScene/HeroScene.css';
 import './Landing.css';
 
 const LOOP_PHASES = [

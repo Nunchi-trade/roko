@@ -7,6 +7,8 @@ import ConfigDiff from '../components/ConfigDiff';
 import RadarChart from '../components/Charts/RadarChart';
 import { ComponentErrorBoundary } from '../components/design';
 import './Bench.css';
+import '../styles/bench-compare.css';
+import '../styles/bench-race.css';
 
 const RUN_COLORS = [
   'var(--rose)',          // --rose

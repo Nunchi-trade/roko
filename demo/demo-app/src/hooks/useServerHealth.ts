@@ -5,6 +5,10 @@ export type ServerStatus = 'connected' | 'disconnected' | 'checking';
 
 /**
  * Poll /health every `intervalMs` and track connection state.
+ *
+ * @deprecated Use `useServerStatus()` or `useServerConnected()` from
+ *   `src/data/selectors.ts` instead. Health polling is now handled once
+ *   in `src/app/bootstrap.ts` via `bootstrapTransport()`.
  */
 export function useServerHealth(intervalMs = 5000) {
   const [status, setStatus] = useState<ServerStatus>('checking');

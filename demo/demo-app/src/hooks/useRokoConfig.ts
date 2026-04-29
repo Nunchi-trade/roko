@@ -41,6 +41,12 @@ const DEFAULT_CONFIG_STATE: RokoConfigState = {
 
 export const RokoConfigContext = createContext<RokoConfigState>(DEFAULT_CONFIG_STATE);
 
+/**
+ * @deprecated Use `useConfigSlice()` from `src/data/selectors.ts` for config
+ *   state, or individual selectors `useDefaultModel()` / `useDefaultBackend()`
+ *   / `useFullConfig()`. Config fetching is now handled by `bootstrapTransport()`
+ *   and the DataHub store.
+ */
 export function useRokoConfig() {
   return useContext(RokoConfigContext);
 }
@@ -90,7 +96,14 @@ function applyConfig(
   setProviders(deriveProviders(rawModels, cfg?.providers as Record<string, { kind: string }>));
 }
 
-/** Hook that manages fetching + polling + writing config. Used inside RokoConfigProvider. */
+/**
+ * Hook that manages fetching + polling + writing config. Used inside RokoConfigProvider.
+ *
+ * @deprecated The 15-second config poll here duplicates the initial fetch in
+ *   `bootstrapTransport()` and SSE-triggered refetch via the `config_reloaded`
+ *   event in DataHub. New consumers should use `useConfigSlice()` from
+ *   `src/data/selectors.ts`.
+ */
 export function useRokoConfigState(): RokoConfigState {
   const { get, put, isLive } = useLiveApi();
   const [fullConfig, setFullConfig] = useState<Record<string, unknown>>({});
@@ -168,7 +181,12 @@ export function useRokoConfigState(): RokoConfigState {
   };
 }
 
-/** Context provider — wrap in AppShell so all pages can access config */
+/**
+ * Context provider — wrap in AppShell so all pages can access config.
+ *
+ * @deprecated Migrate consumers to `useConfigSlice()` / `useDefaultModel()`
+ *   from `src/data/selectors.ts`, then remove this provider from the tree.
+ */
 export function RokoConfigProvider({ children }: { children: ReactNode }) {
   const value = useRokoConfigState();
   return createElement(RokoConfigContext.Provider, { value }, children);

@@ -25,12 +25,14 @@ import BenchLearningInsights from '../components/BenchLearningInsights';
 import MatrixBuilder from '../components/MatrixBuilder';
 import MatrixRaceTrack from '../components/MatrixRaceTrack';
 import MatrixDetailView from '../components/MatrixDetailView';
-import { ComponentErrorBoundary } from '../components/design';
+import { ComponentErrorBoundary, DataSurface } from '../components/design';
 import { Sparkle } from '../components/Celebration';
 import { PulseIcon, SpinnerIcon, CheckmarkIcon, CrossIcon } from '../components/icons/AnimatedIcons';
 import { useMatrixBench } from '../hooks/useMatrixBench';
 import { useCountUp, fmtCount, fmtCost } from '../hooks/useCountUp';
 import './Bench.css';
+import '../styles/bench-compare.css';
+import '../styles/bench-race.css';
 
 /* ── Animated number counter ── */
 function AnimatedNumber({ value, prefix = '', suffix = '', decimals = 0 }: {
@@ -249,6 +251,11 @@ export default function Bench() {
         ))}
       </div>
 
+      <DataSurface
+        loading={suitesLoading && historyLoading}
+        empty={connectionState === 'offline' && suites.length === 0 && history.length === 0}
+        emptyLabel="Server offline. Start roko serve to use benchmarks."
+      >
       <div className="bench-body">
         {/* ── Configure ── */}
         {tab === 'configure' && (
@@ -834,6 +841,7 @@ export default function Bench() {
         )}
 
       </div>
+      </DataSurface>
     </div>
   );
 }

@@ -11,6 +11,7 @@ import { getCssVar } from '../../lib/color';
 import { roleColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
+import DataSurface from '../../components/design/DataSurface';
 import '../../styles/table.css';
 import './CascadeRouter.css';
 import './dashboard.css';
@@ -213,6 +214,11 @@ export default function CascadeRouter() {
   }, [rows]);
 
   return (
+    <DataSurface
+      loading={loading}
+      empty={!loading && rows.length === 0 && roleEntries.length === 0}
+      emptyLabel="No cascade router data. Run a plan to populate model statistics."
+    >
     <div className="dash-page--full">
       {/* TOP MOSAIC */}
       <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
@@ -341,5 +347,6 @@ export default function CascadeRouter() {
         </div>
       </div>
     </div>
+    </DataSurface>
   );
 }

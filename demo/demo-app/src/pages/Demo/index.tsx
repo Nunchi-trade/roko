@@ -1,50 +1,48 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { SCENARIOS, type ScenarioContext } from '../lib/scenarios';
-import { PlaybackController, TimelineStepper, type TimelineStepState } from '../lib/playback-controller';
-import { useTerminal, type TerminalHandle } from '../hooks/useTerminal';
-import { setSpeedMultiplier } from '../lib/terminal-session';
-import { markStart, markEnd, measure, clearMarks } from '../lib/perf-markers';
-import { useServerHealth } from '../hooks/useServerHealth';
-import { useRokoConfig } from '../hooks/useRokoConfig';
-import { useWorkspace } from '../hooks/useWorkspace';
-import { useToast } from '../components/Toast';
-import { lookupCmdDesc } from '../lib/cmd-descriptions';
-import Tooltip from '../components/Tooltip';
-import type { GateEntry } from '../components/GateVerdictCard';
-import type { InsightEvent, AgentInfo } from '../components/KnowledgeFlowPanel';
-import type { EfficiencyMetric } from '../components/EfficiencyBar';
-import { useChainWs, type InsightEvent as ChainInsightEvent } from '../hooks/useChain';
-import { useLearningStats } from '../hooks/useLearningStats';
-import { useAgentHandoffs } from '../hooks/useAgentHandoffs';
-import type { BlockData } from '../components/ChainActivityPanel';
-import type { AgentPosition } from '../components/LivePositionsPanel';
+import { SCENARIOS, type ScenarioContext } from '../../lib/scenarios';
+import { PlaybackController, TimelineStepper, type TimelineStepState } from '../../lib/playback-controller';
+import type { TerminalHandle } from '../../hooks/useTerminal';
+import { setSpeedMultiplier } from '../../lib/terminal-session';
+import { markStart, markEnd, measure, clearMarks } from '../../lib/perf-markers';
+import { useServerHealth } from '../../hooks/useServerHealth';
+import { useRokoConfig } from '../../hooks/useRokoConfig';
+import { useWorkspace } from '../../hooks/useWorkspace';
+import { useToast } from '../../components/Toast';
+import { lookupCmdDesc } from '../../lib/cmd-descriptions';
+import Tooltip from '../../components/Tooltip';
+import type { GateEntry } from '../../components/GateVerdictCard';
+import type { InsightEvent, AgentInfo } from '../../components/KnowledgeFlowPanel';
+import type { EfficiencyMetric } from '../../components/EfficiencyBar';
+import { useChainWs, type InsightEvent as ChainInsightEvent } from '../../hooks/useChain';
+import { useLearningStats } from '../../hooks/useLearningStats';
+import { useAgentHandoffs } from '../../hooks/useAgentHandoffs';
+import type { BlockData } from '../../components/ChainActivityPanel';
+import type { AgentPosition } from '../../components/LivePositionsPanel';
 import {
   EMPTY_PIPELINE_STATE,
   type PipelineDemoState,
   type PipelineEvent,
   type PipelineStreamState,
   type PipelineTask,
-} from '../lib/prd-pipeline-types';
+} from '../../lib/prd-pipeline-types';
 import {
   createPipelineIntroState,
   DEFAULT_PIPELINE_EXAMPLE_ID,
   getPipelineExample,
   PIPELINE_EXAMPLES,
-} from '../lib/prd-pipeline-sample';
-import { SERVE_URL } from '../lib/serve-url';
-import { ConfettiBurst, SuccessRing } from '../components/Celebration';
-import ScenarioPreview from '../components/ScenarioPreview';
-import SidebarRenderer from '../components/SidebarRenderer';
-import DemoStatusBar from '../components/DemoStatusBar';
-import { PulseIcon, SpinnerIcon, CrossIcon, CheckmarkIcon, WaveformIcon } from '../components/icons/AnimatedIcons';
-import type { AgentIdentity } from '../components/Spectre/AgentIdentity';
-import { ROLE_PALETTES } from '../components/Spectre/AgentIdentity';
-import SpectreAvatar from '../components/Spectre/SpectreAvatar';
+} from '../../lib/prd-pipeline-sample';
+import { SERVE_URL } from '../../lib/serve-url';
+import { ConfettiBurst, SuccessRing } from '../../components/Celebration';
+import ScenarioPreview from '../../components/ScenarioPreview';
+import SidebarRenderer from '../../components/SidebarRenderer';
+import DemoStatusBar from '../../components/DemoStatusBar';
+import { PulseIcon, SpinnerIcon, CrossIcon } from '../../components/icons/AnimatedIcons';
+import DemoCompletionOverlay from './DemoCompletionOverlay';
+import TerminalPaneWithHandle, { type TerminalPaneState } from './TerminalPaneWithHandle';
+import BottomTerminalPane from './BottomTerminalPane';
 import '@xterm/xterm/css/xterm.css';
-import '../components/Terminal/TerminalPane.css';
+import '../../components/Terminal/TerminalPane.css';
 import './Demo.css';
-
-// Moved into component as useRef (see playbackRef / timelineRef)
 
 const SPEEDS = [0.5, 1, 2, 4];
 
@@ -72,12 +70,6 @@ const CAT_COLORS: Record<string, string> = {
   exploration: 'var(--dream-bright)',
   learning: 'var(--status-success)',
   chain: 'var(--warning)',
-};
-
-
-type TerminalPaneState = {
-  status: TerminalHandle['status'];
-  connected: boolean;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -139,7 +131,7 @@ export default function Demo() {
   const allGatesPassTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showGateRing, setShowGateRing] = useState(false);
 
-  // Tab bar state — completed scenarios and sliding indicator
+  // Tab bar state
   const [completedScenarios, setCompletedScenarios] = useState<Set<number>>(() => new Set());
   const tabListRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -172,7 +164,7 @@ export default function Demo() {
     { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
   ]);
 
-  // Chain Intelligence panel state — only connect when the scenario needs it
+  // Chain Intelligence panel state
   const chainWs = useChainWs(scenario.id === 'chain-intelligence');
   const [ciBlocks] = useState<BlockData[]>([]);
   const [ciPositions] = useState<AgentPosition[]>([
@@ -198,7 +190,6 @@ export default function Demo() {
     },
   ]);
 
-  // Map chain WS insights to KnowledgeFlowPanel InsightEvent format
   const ciInsights: InsightEvent[] = useMemo(
     () =>
       chainWs.insights.map((ev: ChainInsightEvent) => ({
@@ -452,7 +443,6 @@ export default function Demo() {
       setIsRunning(false);
     }
 
-    // Cinematic exit -> enter transition
     setScenarioAnim('exit');
     setScenarioComplete(false);
     setShowBurst(false);
@@ -529,7 +519,6 @@ export default function Demo() {
     if (completionOverlayTimer.current) clearTimeout(completionOverlayTimer.current);
     if (completionAutoDismissTimer.current) clearTimeout(completionAutoDismissTimer.current);
 
-    // ── 3-2-1 Countdown ──
     setLaunchingBtn(true);
     setIntroDismissing(true);
     setTimeout(() => {
@@ -537,21 +526,18 @@ export default function Demo() {
       setIntroDismissing(false);
     }, 550);
 
-    // Run countdown: 3, 2, 1
     for (const n of [3, 2, 1]) {
       setCountdownNum(n);
       await sleep(800);
     }
     setCountdownNum(null);
 
-    // Transition from fullscreen to split layout
     setTermBlackout(true);
     setIsFullscreen(false);
     await sleep(600);
     setTermBlackout(false);
     setLaunchingBtn(false);
 
-    // Now reveal terminals
     setTermReveal(true);
     setTimeout(() => setTermReveal(false), 600);
     setIsRunning(true);
@@ -618,7 +604,6 @@ export default function Demo() {
         console.debug(`[perf] scenario-run: ${scenarioMs.toFixed(1)}ms`);
       }
 
-      // Completion celebration
       setCompletedScenarios(prev => new Set(prev).add(activeIdx));
       setScenarioComplete(true);
       setShowBurst(true);
@@ -628,12 +613,10 @@ export default function Demo() {
         setShowBurst(false);
       }, 1400);
 
-      // Show completion overlay after confetti settles
       if (completionOverlayTimer.current) clearTimeout(completionOverlayTimer.current);
       if (completionAutoDismissTimer.current) clearTimeout(completionAutoDismissTimer.current);
       completionOverlayTimer.current = setTimeout(() => {
         setShowCompletionOverlay(true);
-        // Auto-dismiss after 8s
         completionAutoDismissTimer.current = setTimeout(() => {
           setShowCompletionOverlay(false);
         }, 8000);
@@ -679,7 +662,6 @@ export default function Demo() {
 
   const handleRunAgain = useCallback(() => {
     dismissCompletionOverlay();
-    // Small delay so overlay dismisses visually before re-play
     setTimeout(() => handlePlay(), 150);
   }, [dismissCompletionOverlay, handlePlay]);
 
@@ -780,10 +762,6 @@ export default function Demo() {
     [scenario.id, scenario.labels],
   );
 
-  // Create refs synchronously during render (not in useEffect) so they're
-  // available when child TerminalPaneWithHandle components mount and write
-  // their handles. Using useEffect caused a race: children wrote to old refs
-  // that were then replaced by the parent effect.
   const stableRefs = useMemo(
     () => Array.from(
       { length: scenario.panes },
@@ -825,11 +803,9 @@ export default function Demo() {
   const hasStats = stats.model !== '--' || stats.cost !== '--' || stats.tokens !== '--' || stats.time !== '--';
   const hasKfMetrics = kfMetrics.some((m) => m.value > 0);
 
-  // T7.57: Detect when all gates pass for CrystallizeTransition
   useEffect(() => {
     if (gates.length > 0 && gates.every((g) => g.status === 'pass')) {
       setAllGatesPass(true);
-      // Auto-dismiss after 3s
       if (allGatesPassTimer.current) clearTimeout(allGatesPassTimer.current);
       allGatesPassTimer.current = setTimeout(() => setAllGatesPass(false), 3000);
     } else {
@@ -837,11 +813,9 @@ export default function Demo() {
     }
   }, [gates]);
 
-  // T7.59: Track model from stats for ModelSlot
   useEffect(() => {
     if (stats.model !== '--') {
       setInferenceModel(stats.model);
-      // Infer tier from model name heuristic
       const m = stats.model.toLowerCase();
       if (m.includes('opus') || m.includes('gpt-4') || m.includes('o1') || m.includes('o3')) {
         setInferenceTier('T0');
@@ -853,7 +827,6 @@ export default function Demo() {
     }
   }, [stats.model]);
 
-  // Map gates to GateVerdictCard GateEntry[] format
   const gateEntries: GateEntry[] = useMemo(
     () => gates.map((g) => ({
       name: g.name,
@@ -862,16 +835,12 @@ export default function Demo() {
     [gates],
   );
 
-  // Grid columns: 1->1, 2->2, 3-4->2 (2x2), 5-6->3 (3x2)
-  const gridCols = scenario.panes <= 1 ? 1
-    : scenario.panes <= 4 ? 2
-    : 3;
+  const gridCols = scenario.panes === 4 ? 2 : scenario.panes;
 
   return (
     <div className="demo-page">
       {/* ── Top bar (tabs + merged playback) ── */}
       <div className={`demo-tabs-bar${isRunning ? ' demo-tabs-bar--running' : ''}`}>
-        {/* Progress fill bar */}
         {isRunning && progressTotal > 0 && (
           <div
             className="demo-topbar-fill"
@@ -915,7 +884,6 @@ export default function Demo() {
             {serverHealth === 'connected' ? 'serve live' : serverHealth === 'checking' ? 'checking serve' : 'serve offline'}
           </div>
 
-          {/* Playback controls — merged into top bar */}
           {isRunning ? (
             <button className="demo-ctrl-btn btn-interactive" onClick={handlePauseResume} title="Pause (Space)">
               {isPaused ? '\u25B6' : '\u275A\u275A'}
@@ -941,7 +909,6 @@ export default function Demo() {
             {'\u21BA'}
           </button>
 
-          {/* Mode toggle */}
           <div className="demo-mode-toggle">
             <div className={`demo-mode-toggle-track${playbackMode === 'step' ? ' at-step' : ''}`} />
             <button
@@ -958,7 +925,6 @@ export default function Demo() {
             </button>
           </div>
 
-          {/* Speed pills */}
           <div className="demo-pb-speed-pills">
             {SPEEDS.map((s, i) => (
               <button
@@ -971,7 +937,6 @@ export default function Demo() {
             ))}
           </div>
 
-          {/* Progress + command preview (visible when running) */}
           {isRunning && (
             <div className="demo-topbar-playback">
               <div className="demo-topbar-progress">
@@ -981,7 +946,6 @@ export default function Demo() {
             </div>
           )}
 
-          {/* Bottom terminal toggle */}
           <Tooltip content={bottomTermOpen ? 'Hide shell' : 'Open shell'} placement="bottom">
             <button
               className={`demo-ctrl-btn btn-interactive${bottomTermOpen ? ' play' : ''}`}
@@ -1015,7 +979,6 @@ export default function Demo() {
         scenario.id === 'prd-pipeline' ? 'demo-main-pipeline' : '',
         isFullscreen ? 'demo-main--fullscreen' : '',
       ].filter(Boolean).join(' ')}>
-        {/* Terminal zone */}
         <div className={[
           'demo-terminals',
           isRunning ? 'gradient-border-active' : 'gradient-border-subtle',
@@ -1036,7 +999,6 @@ export default function Demo() {
             onDone={() => setShowGateRing(false)}
           />
 
-          {/* ── Countdown overlay ── */}
           {countdownNum !== null && (
             <div className="demo-countdown-overlay">
               <span key={countdownNum} className="demo-countdown-num">{countdownNum}</span>
@@ -1044,7 +1006,6 @@ export default function Demo() {
             </div>
           )}
 
-          {/* ── Completion summary overlay ── */}
           {showCompletionOverlay && (
             <DemoCompletionOverlay
               title={scenario.title}
@@ -1080,13 +1041,11 @@ export default function Demo() {
                 scenarioId={scenario.id}
                 scenarioCategory={scenario.category}
                 isRunning={isRunning}
-                agent={scenario.agents?.[i]}
               />
             ))}
           </div>
         </div>
 
-        {/* Sidebar */}
         {scenario.panel && (
           <div className="demo-sidebar">
             <SidebarRenderer
@@ -1150,320 +1109,6 @@ export default function Demo() {
           />
         )}
       </div>
-    </div>
-  );
-}
-
-/* ── Completion summary overlay ─────────────────────────────── */
-
-function useCountUp(target: number, duration = 600): number {
-  const [value, setValue] = useState(0);
-  const frameRef = useRef<number>(0);
-  useEffect(() => {
-    const start = performance.now();
-    const tick = (now: number) => {
-      const progress = Math.min((now - start) / duration, 1);
-      const eased = 1 - (1 - progress) * (1 - progress);
-      setValue(Math.round(target * eased));
-      if (progress < 1) frameRef.current = requestAnimationFrame(tick);
-    };
-    frameRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frameRef.current);
-  }, [target, duration]);
-  return value;
-}
-
-function DemoCompletionOverlay({
-  title, stats, gates, onDismiss, onRunAgain, onNextScenario, hasNext,
-}: {
-  title: string;
-  stats: { model: string; cost: string; tokens: string; time: string };
-  gates: { name: string; status: 'pass' | 'fail' | 'pending' }[];
-  onDismiss: () => void;
-  onRunAgain: () => void;
-  onNextScenario: () => void;
-  hasNext: boolean;
-}) {
-  const [dismissing, setDismissing] = useState(false);
-  const passCount = gates.filter((g) => g.status === 'pass').length;
-  const failCount = gates.filter((g) => g.status === 'fail').length;
-  const animatedPass = useCountUp(passCount, 500);
-  const animatedFail = useCountUp(failCount, 500);
-  const doDismiss = useCallback(() => { setDismissing(true); setTimeout(() => onDismiss(), 350); }, [onDismiss]);
-
-  return (
-    <div className={`demo-completion-overlay${dismissing ? ' dismissing' : ''}`} onClick={doDismiss}>
-      <div className="demo-completion-card" onClick={(e) => e.stopPropagation()}>
-        <div className="demo-completion-header">
-          <span className="demo-completion-title">{title}</span>
-          <span className="demo-completion-badge">COMPLETE</span>
-        </div>
-        <div className="demo-completion-stats">
-          {stats.model !== '--' && (
-            <div className="demo-completion-stat">
-              <span className="demo-completion-stat-label">MODEL</span>
-              <span className="demo-completion-stat-value mono">{stats.model}</span>
-            </div>
-          )}
-          {stats.cost !== '--' && (
-            <div className="demo-completion-stat">
-              <span className="demo-completion-stat-label">COST</span>
-              <span className="demo-completion-stat-value mono">{stats.cost}</span>
-            </div>
-          )}
-          {stats.time !== '--' && (
-            <div className="demo-completion-stat">
-              <span className="demo-completion-stat-label">DURATION</span>
-              <span className="demo-completion-stat-value mono">{stats.time}</span>
-            </div>
-          )}
-          {gates.length > 0 && (
-            <div className="demo-completion-stat">
-              <span className="demo-completion-stat-label">GATES</span>
-              <span className="demo-completion-stat-value demo-completion-gates">
-                <span className="demo-completion-gate-pass">
-                  <CheckmarkIcon size={12} color="var(--success)" />
-                  {animatedPass}
-                </span>
-                {failCount > 0 && (
-                  <span className="demo-completion-gate-fail">
-                    <CrossIcon size={12} color="var(--rose-bright)" />
-                    {animatedFail}
-                  </span>
-                )}
-              </span>
-            </div>
-          )}
-        </div>
-        <div className="demo-completion-actions">
-          <button className="demo-completion-btn demo-completion-btn-again" onClick={(e) => { e.stopPropagation(); setDismissing(true); setTimeout(() => onRunAgain(), 350); }}>
-            Run Again
-          </button>
-          {hasNext && (
-            <button className="demo-completion-btn demo-completion-btn-next" onClick={(e) => { e.stopPropagation(); setDismissing(true); setTimeout(() => onNextScenario(), 350); }}>
-              Next Scenario {'\u2192'}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** Map scenario + label to a CSS color for scenario-aware label styling */
-function getLabelColor(scenarioId: string, label: string, category: string): string | undefined {
-  const lower = label.toLowerCase();
-  if (scenarioId === 'race') {
-    if (lower.includes('naive')) return 'var(--warning)';
-    if (lower.includes('cascade')) return '#6bb8a8';
-  }
-  if (scenarioId === 'providers' || scenarioId === 'provider-race') {
-    if (lower.includes('anthropic')) return 'var(--rose-bright)';
-    if (lower.includes('openai')) return '#6bb87a';
-    if (lower.includes('zhipu')) return '#68a8d8';
-    if (lower.includes('gemini')) return '#68a8d8';
-    if (lower.includes('moonshot')) return 'var(--warning)';
-    return 'var(--dream-bright)';
-  }
-  if (scenarioId === 'explore') {
-    if (lower.includes('workspace') || lower.includes('status')) return 'var(--success)';
-    if (lower.includes('learn')) return 'var(--dream-bright)';
-    if (lower.includes('config')) return 'var(--warning)';
-    if (lower.includes('knowledge')) return '#b888d8';
-    return 'var(--rose-glow)';
-  }
-  if (category === 'comparison') return '#6bb8a8';
-  if (category === 'learning') return 'var(--dream-bright)';
-  if (category === 'chain') return 'var(--warning)';
-  if (category === 'exploration') return 'var(--success)';
-  return undefined;
-}
-
-function TerminalPaneWithHandle({
-  sessionId,
-  label,
-  handleRef,
-  paneIndex,
-  onStatusChange,
-  termReveal,
-  scenarioId,
-  scenarioCategory,
-  isRunning,
-  agent,
-}: {
-  sessionId: string;
-  label: string;
-  handleRef: React.RefObject<TerminalHandle | null> | undefined;
-  paneIndex: number;
-  onStatusChange?: (index: number, state: TerminalPaneState) => void;
-  termReveal?: boolean;
-  scenarioId: string;
-  scenarioCategory: string;
-  isRunning: boolean;
-  agent?: AgentIdentity;
-}) {
-  const { attach, status, handle } = useTerminal(sessionId);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const [hasOutput, setHasOutput] = useState(false);
-  const [cmdEcho, setCmdEcho] = useState<string | null>(null);
-  const cmdEchoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [focused, setFocused] = useState(false);
-
-  useEffect(() => {
-    if (handleRef && 'current' in handleRef) {
-      (handleRef as React.MutableRefObject<TerminalHandle | null>).current = handle.current;
-    }
-    onStatusChange?.(paneIndex, {
-      status,
-      connected: status === 'connected' && handle.current?.ws?.readyState === WebSocket.OPEN,
-    });
-  }, [handleRef, handle, onStatusChange, paneIndex, status]);
-
-  // Detect output activity via DOM mutations on the terminal body
-  useEffect(() => {
-    const body = bodyRef.current;
-    if (!body) return;
-    let activityTimeout: ReturnType<typeof setTimeout> | null = null;
-    const observer = new MutationObserver(() => {
-      setHasOutput(true);
-      if (activityTimeout) clearTimeout(activityTimeout);
-      activityTimeout = setTimeout(() => setHasOutput(false), 800);
-    });
-    observer.observe(body, { childList: true, subtree: true, characterData: true });
-    return () => {
-      observer.disconnect();
-      if (activityTimeout) clearTimeout(activityTimeout);
-    };
-  }, []);
-
-  // Command echo: listen for typed commands via custom event
-  useEffect(() => {
-    function onCmdTyped(e: Event) {
-      const detail = (e as CustomEvent<{ sessionId: string; cmd: string }>).detail;
-      if (detail.sessionId !== sessionId) return;
-      setCmdEcho(detail.cmd);
-      if (cmdEchoTimer.current) clearTimeout(cmdEchoTimer.current);
-      cmdEchoTimer.current = setTimeout(() => setCmdEcho(null), 2000);
-    }
-    window.addEventListener('roko-cmd-typed', onCmdTyped);
-    return () => {
-      window.removeEventListener('roko-cmd-typed', onCmdTyped);
-      if (cmdEchoTimer.current) clearTimeout(cmdEchoTimer.current);
-    };
-  }, [sessionId]);
-
-  const revealClass = termReveal
-    ? `term-reveal ${paneIndex % 2 === 0 ? 'from-left' : 'from-right'}`
-    : '';
-  const revealDelay = termReveal ? { animationDelay: `${paneIndex * 80}ms` } : undefined;
-  const agentRoleColor = agent ? ROLE_PALETTES[agent.role][0] : undefined;
-  const labelColor = agentRoleColor ?? getLabelColor(scenarioId, label, scenarioCategory);
-  const labelStyle = labelColor
-    ? { color: labelColor, textShadow: `0 0 8px ${labelColor}44` } as const
-    : undefined;
-  const paneClasses = [
-    'demo-term-pane',
-    `demo-term-${status}`,
-    revealClass,
-    focused ? 'demo-term-focused' : '',
-  ].filter(Boolean).join(' ');
-
-  const bodyCallbackRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      (bodyRef as React.MutableRefObject<HTMLDivElement | null>).current = node;
-      attach(node);
-    },
-    [attach],
-  );
-
-  return (
-    <div
-      className={paneClasses}
-      style={revealDelay}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      tabIndex={-1}
-    >
-      <div className="demo-term-head">
-        <span className="demo-term-num">{paneIndex + 1}</span>
-        {agent && (
-          <span className="demo-term-avatar">
-            <SpectreAvatar identity={agent} size={16} />
-          </span>
-        )}
-        <Tooltip content={status === 'connected' ? 'Terminal connected' : status === 'connecting' ? 'Connecting...' : 'Disconnected'} placement="right" variant="code">
-          <span className={`demo-term-dot ${status}`}>
-            {status === 'connected'
-              ? <PulseIcon size={8} color="var(--success)" />
-              : status === 'connecting'
-                ? <SpinnerIcon size={8} />
-                : <CrossIcon size={8} color="var(--rose-dim)" />}
-          </span>
-        </Tooltip>
-        <span className="demo-term-label" style={labelStyle}>{'\u2308'} {label} {'\u230B'}</span>
-        {agent && (
-          <span className="demo-term-role">{agent.role}</span>
-        )}
-        {hasOutput && isRunning && (
-          <span className="demo-term-waveform">
-            <WaveformIcon size={10} color={labelColor ?? 'var(--rose-dim)'} />
-          </span>
-        )}
-        <span className="demo-term-status">{status}</span>
-      </div>
-      {cmdEcho && (
-        <div className="demo-term-cmd-echo">{cmdEcho}</div>
-      )}
-      <div className="demo-term-body" ref={bodyCallbackRef} />
-      <div className="demo-term-vignette" />
-    </div>
-  );
-}
-
-/* ── Collapsible bottom terminal ─────────────────────────────── */
-
-function BottomTerminalPane({
-  sessionId,
-  handleRef,
-  workspaceDir,
-}: {
-  sessionId: string;
-  handleRef: React.RefObject<TerminalHandle | null>;
-  workspaceDir: string;
-}) {
-  const { attach, status, handle } = useTerminal(sessionId);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const cdSent = useRef(false);
-
-  useEffect(() => {
-    if (handleRef && 'current' in handleRef) {
-      (handleRef as React.MutableRefObject<TerminalHandle | null>).current = handle.current;
-    }
-  }, [handleRef, handle]);
-
-  // Auto-cd into workspace when connected
-  useEffect(() => {
-    if (status === 'connected' && workspaceDir && !cdSent.current && handle.current?.ws?.readyState === WebSocket.OPEN) {
-      cdSent.current = true;
-      handle.current.sendRaw(`cd ${workspaceDir}\r`);
-    }
-  }, [status, workspaceDir, handle]);
-
-  const bodyCallbackRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      (bodyRef as React.MutableRefObject<HTMLDivElement | null>).current = node;
-      attach(node);
-    },
-    [attach],
-  );
-
-  return (
-    <div className="demo-bottom-term-body" ref={bodyCallbackRef}>
-      {status === 'connecting' && (
-        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <SpinnerIcon size={16} />
-        </div>
-      )}
     </div>
   );
 }

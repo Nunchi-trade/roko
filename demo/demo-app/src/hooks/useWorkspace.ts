@@ -3,6 +3,12 @@
  *
  * Instead of creating workspaces via slow PTY commands (mkdir, roko init, curl config),
  * this hook calls `POST /api/workspaces` which creates them server-side instantly.
+ *
+ * @deprecated Use `useWorkspaceSlice()` or `useWorkspaceActions()` from
+ *   `src/data/selectors.ts` / `src/hooks/useWorkspaceActions.ts`. The DataHub
+ *   store now manages workspace state and the server workdir fetch is handled
+ *   by `bootstrapTransport()`. The `WorkspaceProvider` context can be removed
+ *   once all consumers migrate.
  */
 import { createContext, useContext, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -106,6 +112,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
 // ── Hook ─────────────────────────────────────────────────────
 
+/**
+ * @deprecated Use `useWorkspaceSlice()` from `src/data/selectors.ts` or
+ *   `useWorkspaceActions()` from `src/hooks/useWorkspaceActions.ts`.
+ */
 export function useWorkspace(): WorkspaceContextValue {
   const ctx = useContext(WorkspaceContext);
   if (!ctx) {

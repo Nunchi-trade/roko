@@ -8,8 +8,10 @@ import Mosaic, { MosaicCell } from '../components/Mosaic';
 import TimelineChart from '../components/Charts/TimelineChart';
 import HeatmapChart from '../components/Charts/HeatmapChart';
 import TaskTable from '../components/TaskTable';
-import { ComponentErrorBoundary } from '../components/design';
+import { ComponentErrorBoundary, DataSurface } from '../components/design';
 import './Bench.css';
+import '../styles/bench-compare.css';
+import '../styles/bench-race.css';
 import './BenchRunDetail.css';
 
 /* ═══════════════════════════════════════════════════════════
@@ -671,9 +673,13 @@ export default function BenchRunDetail() {
   const { id } = useParams<{ id: string }>();
   const { get } = useLiveApi();
   const [run, setRun] = useState<BenchRun | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
+    setLoading(true);
+    setError(null);
     (async () => {
       try {
         const data = await get<BenchRun>(`/api/bench/runs/${id}`);
@@ -681,7 +687,12 @@ export default function BenchRunDetail() {
           setRun(data);
           return;
         }
-      } catch { /* show not-found */ }
+        setError(`Run ${id} not found`);
+      } catch {
+        setError(`Failed to load run ${id}`);
+      } finally {
+        setLoading(false);
+      }
     })();
   }, [id, get]);
 
@@ -714,11 +725,9 @@ export default function BenchRunDetail() {
   if (!run) {
     return (
       <div className="bench-page">
-        <div className="bench-body">
-          <div className="bench-empty">
-            <p className="bench-empty-text">Loading run {id}...</p>
-          </div>
-        </div>
+        <DataSurface loading={loading} error={error} empty={!loading && !error} emptyLabel={`Run ${id} not found`}>
+          <div />
+        </DataSurface>
       </div>
     );
   }

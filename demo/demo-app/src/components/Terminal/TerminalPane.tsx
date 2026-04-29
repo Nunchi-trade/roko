@@ -1,14 +1,18 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { useTerminal } from '../../hooks/useTerminal';
+import type { AgentIdentity } from '../Spectre/AgentIdentity';
+import { ROLE_PALETTES } from '../Spectre/AgentIdentity';
+import SpectreAvatar from '../Spectre/SpectreAvatar';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalPane.css';
 
 interface TerminalPaneProps {
   sessionId: string;
   label?: string;
+  agent?: AgentIdentity;
 }
 
-export default function TerminalPane({ sessionId, label }: TerminalPaneProps) {
+export default function TerminalPane({ sessionId, label, agent }: TerminalPaneProps) {
   const { attach, status } = useTerminal(sessionId);
   const paneRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -46,11 +50,22 @@ export default function TerminalPane({ sessionId, label }: TerminalPaneProps) {
   // every PTY write, causing visible opacity jitter during streaming output.
   // The connection pulse (just-connected) is sufficient visual feedback.
 
+  const roleColor = agent ? ROLE_PALETTES[agent.role][0] : undefined;
+  const borderStyle = roleColor
+    ? { borderLeftColor: roleColor } as const
+    : undefined;
+
   return (
-    <div className="terminal-pane" ref={paneRef}>
+    <div className="terminal-pane" ref={paneRef} style={borderStyle}>
       <div className="pane-header">
+        {agent && (
+          <SpectreAvatar identity={agent} size={18} />
+        )}
         <span className={`pane-dot ${status}`} />
-        <span className="pane-label">{label ?? sessionId}</span>
+        <span className="pane-label">{label ?? agent?.name ?? sessionId}</span>
+        {agent && (
+          <span className="pane-role">{agent.role}</span>
+        )}
         <span className="pane-status">{status}</span>
       </div>
       <div className="pane-body" ref={bodyCallbackRef} />

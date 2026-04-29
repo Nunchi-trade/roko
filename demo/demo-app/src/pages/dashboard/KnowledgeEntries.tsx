@@ -11,6 +11,7 @@ import { getCssVar } from '../../lib/color';
 import { domainColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
+import DataSurface from '../../components/design/DataSurface';
 import '../../styles/table.css';
 import './KnowledgeEntries.css';
 import './dashboard.css';
@@ -299,6 +300,11 @@ export default function KnowledgeEntries() {
   }, [entries]);
 
   return (
+    <DataSurface
+      loading={loading}
+      empty={!loading && entries.length === 0}
+      emptyLabel="No knowledge entries found. Use roko knowledge to populate the store."
+    >
     <div className="dash-page--full">
       {/* TOP MOSAIC */}
       <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
@@ -410,5 +416,6 @@ export default function KnowledgeEntries() {
         </Pane>
       </div>
     </div>
+    </DataSurface>
   );
 }

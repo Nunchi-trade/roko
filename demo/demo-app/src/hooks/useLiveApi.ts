@@ -2,6 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useApi } from './useApi';
 import { SERVE_URL } from '../lib/serve-url';
 
+// ── Module-level health probe singleton ─────────────────────────────
+//
+// @deprecated — This module-level singleton duplicates the health polling
+// now handled by `bootstrapTransport()` in `src/app/bootstrap.ts`.
+// New code should read `useServerConnected()` or `useServerStatus()`
+// from `src/data/selectors.ts` instead.
+//
 // Shared server reachability state. It is intentionally re-probed because the
 // demo UI is commonly opened before `roko serve` is ready.
 let _serverLive: boolean | null = null; // null = unknown
@@ -36,6 +43,12 @@ function probeServer(): Promise<void> {
   return _healthProbeInFlight;
 }
 
+/**
+ * @deprecated Use `useServerConnected()` from `src/data/selectors.ts` for
+ *   health status, and `api` from `src/transport/api.ts` for REST calls.
+ *   The module-level `_serverLive` / `probeServer()` singleton is superseded
+ *   by the single health poll in `bootstrapTransport()`.
+ */
 export function useLiveApi() {
   const api = useApi();
   const [isLive, setIsLive] = useState(_serverLive === true);
