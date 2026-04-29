@@ -585,7 +585,7 @@ impl LlmBackend for CursorAgent {
     ) -> Result<BackendResponse, LlmError> {
         let body = self.build_chat_completion_body(messages, tools, session, true)?;
 
-        let mut req = reqwest::Client::new()
+        let mut req = crate::provider::shared_http_client()
             .post(self.chat_completion_endpoint())
             .timeout(Duration::from_millis(self.timeout_ms));
         for (key, value) in self.headers() {

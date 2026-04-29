@@ -118,11 +118,14 @@ pub struct ReqwestPoster {
 }
 
 impl ReqwestPoster {
-    /// Build a new poster with a fresh `reqwest::Client`.
+    /// Build a new poster backed by the shared `reqwest::Client`.
+    ///
+    /// This reuses the process-wide connection pool so agent instances do not
+    /// pay a fresh TCP+TLS handshake for every new backend.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::shared_http_client(),
         }
     }
 

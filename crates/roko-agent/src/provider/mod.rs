@@ -55,7 +55,8 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub mod anthropic_api;
@@ -83,6 +84,30 @@ static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
 const DEFAULT_PROVIDER_MAX_CONCURRENT: usize = 10;
 pub const PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX: &str = "pplx.search_options=";
+
+/// Process-wide shared HTTP client with pooled connections.
+///
+/// A single `reqwest::Client` keeps TCP and TLS connections warm across all
+/// provider adapters, avoiding redundant handshakes when new backends are
+/// constructed for the same process.
+static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .expect("failed to build shared HTTP client")
+});
+
+/// Return the process-wide shared HTTP client.
+///
+/// All production HTTP posters should use this client so requests can reuse
+/// pooled connections instead of paying a fresh TLS handshake per backend.
+#[must_use]
+pub fn shared_http_client() -> reqwest::Client {
+    SHARED_HTTP_CLIENT.clone()
+}
 
 thread_local! {
     static ACTIVE_SAFETY_LAYER: RefCell<Option<SafetyLayer>> = const { RefCell::new(None) };

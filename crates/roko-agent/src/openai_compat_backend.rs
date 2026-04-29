@@ -386,7 +386,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         let body_bytes = self.build_body(messages, tools, session, true)?;
         self.rate_limiter.acquire(&self.provider_id).await;
 
-        let mut req = reqwest::Client::new()
+        let mut req = crate::provider::shared_http_client()
             .post(self.endpoint())
             .timeout(Duration::from_millis(self.timeout_ms));
         for (key, value) in self.headers() {
