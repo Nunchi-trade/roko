@@ -472,6 +472,18 @@ fn workflow_config_for_template(workflow_template: &str) -> WorkflowConfig {
     }
 }
 
+/// Convert a `PipelineBandConfig` from `roko.toml` into a `WorkflowConfig` for the V2 engine.
+fn workflow_config_from_band(band: &roko_core::config::PipelineBandConfig) -> WorkflowConfig {
+    WorkflowConfig {
+        has_strategy: band.strategist,
+        has_review: band.reviewers,
+        max_iterations: band.max_iterations,
+        // When reviewers are disabled, one autofix attempt is enough.
+        // When reviewers are enabled, allow two rounds.
+        max_autofix_attempts: if band.reviewers { 2 } else { 1 },
+    }
+}
+
 pub fn workflow_enabled_gate_names(gates: &[GateConfig]) -> Vec<String> {
     gates
         .iter()
@@ -537,16 +549,44 @@ pub async fn run_with_workflow_engine_with_hub(
     shell_gates: Vec<CoreShellGateCommand>,
     external_hub: Option<&StateHub>,
 ) -> anyhow::Result<WorkflowRunReport> {
-    let report = run_workflow_engine_report_with_hub(
+    let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
+    eprintln!(
+        "model: {} via {} (source: {})",
+        selection.effective_model_key, selection.provider_key, selection.source
+    );
+
+    let pipeline_config = model_config.pipeline.clone();
+    let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
+
+    // Use the pipeline bands declared in roko.toml for the interactive run path.
+    let workflow = match workflow_template {
+        "express" | "mechanical" => workflow_config_from_band(&pipeline_config.mechanical),
+        "focused" => workflow_config_from_band(&pipeline_config.focused),
+        "integrative" => workflow_config_from_band(&pipeline_config.integrative),
+        "full" | "architectural" => workflow_config_from_band(&pipeline_config.architectural),
+        "standard" => workflow_config_from_band(&pipeline_config.mechanical),
+        _ => workflow_config_for_template(workflow_template),
+    };
+    let workflow_label = match workflow_template {
+        "express" | "mechanical" | "standard" => "mechanical",
+        "focused" => "focused",
+        "integrative" => "integrative",
+        "full" | "architectural" => "architectural",
+        _ => workflow_template,
+    };
+
+    let report = run_workflow_engine_with_services(
         prompt,
         workdir,
-        workflow_template,
+        workflow,
         enabled_gates,
         shell_gates,
         external_hub,
+        services,
+        selection.provider_key,
     )
     .await?;
-    print_workflow_run_report(prompt, workflow_template, &report);
+    print_workflow_run_report(prompt, workflow_label, &report);
     Ok(report)
 }
 
@@ -557,6 +597,36 @@ pub async fn run_workflow_engine_report_with_hub(
     enabled_gates: Vec<String>,
     shell_gates: Vec<CoreShellGateCommand>,
     external_hub: Option<&StateHub>,
+) -> anyhow::Result<WorkflowRunReport> {
+    let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
+    eprintln!(
+        "model: {} via {} (source: {})",
+        selection.effective_model_key, selection.provider_key, selection.source
+    );
+    let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
+
+    run_workflow_engine_with_services(
+        prompt,
+        workdir,
+        workflow_config_for_template(workflow_template),
+        enabled_gates,
+        shell_gates,
+        external_hub,
+        services,
+        selection.provider_key,
+    )
+    .await
+}
+
+async fn run_workflow_engine_with_services(
+    prompt: &str,
+    workdir: &std::path::Path,
+    workflow: WorkflowConfig,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+    external_hub: Option<&StateHub>,
+    services: EffectServices,
+    provider_key: String,
 ) -> anyhow::Result<WorkflowRunReport> {
     use roko_runtime::effect_driver::RuntimeEvent;
     use roko_runtime::jsonl_logger::{EventConsumer as RuntimeEventConsumer, JsonlLogger};
@@ -571,17 +641,10 @@ pub async fn run_workflow_engine_report_with_hub(
         }
     }
 
-    let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
-    eprintln!(
-        "model: {} via {} (source: {})",
-        selection.effective_model_key, selection.provider_key, selection.source
-    );
-    let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
-
     let config = WorkflowRunConfig {
         prompt: prompt.to_string(),
         workdir: workdir.to_path_buf(),
-        workflow: workflow_config_for_template(workflow_template),
+        workflow,
         enabled_gates,
         shell_gates,
         commit_prefix: Some("feat".to_string()),
@@ -606,7 +669,7 @@ pub async fn run_workflow_engine_report_with_hub(
         .await
         .map_err(|error| anyhow!("workflow engine failed: {error}"))?;
 
-    result.provider = Some(selection.provider_key.clone());
+    result.provider = Some(provider_key);
 
     Ok(result)
 }
@@ -3268,6 +3331,33 @@ mod tests {
             );
             assert_eq!(workflow.max_iterations, 2);
         }
+    }
+
+    #[test]
+    fn workflow_config_from_band_maps_pipeline_fields() {
+        let mechanical = roko_core::config::PipelineBandConfig {
+            strategist: false,
+            reviewers: false,
+            reviewer_mode: roko_core::config::PipelineReviewerMode::Quick,
+            max_iterations: 1,
+        };
+        let workflow = workflow_config_from_band(&mechanical);
+        assert!(!workflow.has_strategy);
+        assert!(!workflow.has_review);
+        assert_eq!(workflow.max_iterations, 1);
+        assert_eq!(workflow.max_autofix_attempts, 1);
+
+        let architectural = roko_core::config::PipelineBandConfig {
+            strategist: true,
+            reviewers: true,
+            reviewer_mode: roko_core::config::PipelineReviewerMode::Full,
+            max_iterations: 3,
+        };
+        let workflow = workflow_config_from_band(&architectural);
+        assert!(workflow.has_strategy);
+        assert!(workflow.has_review);
+        assert_eq!(workflow.max_iterations, 3);
+        assert_eq!(workflow.max_autofix_attempts, 2);
     }
 
     #[cfg(feature = "legacy-orchestrate")]
