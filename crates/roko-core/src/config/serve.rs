@@ -32,7 +32,14 @@ pub struct ServeConfig {
     /// Cloud deployment settings.
     #[serde(default)]
     pub deploy: ServeDeployConfig,
-    /// Acknowledge risk of binding to a public address without authentication.
+    /// Whether `roko` with no subcommand should auto-start the HTTP server.
+    ///
+    /// Disabled by default so the control plane is opt-in.
+    #[serde(default)]
+    pub auto_start: bool,
+    /// Set to `true` to acknowledge the risk of a public bind without auth.
+    ///
+    /// Required when binding to a non-loopback address with `auth.enabled = false`.
     #[serde(default)]
     pub acknowledge_public_risk: bool,
 }
@@ -46,6 +53,7 @@ impl Default for ServeConfig {
             auto_orchestrate: true,
             auth: ServeAuthConfig::default(),
             deploy: ServeDeployConfig::default(),
+            auto_start: false,
             acknowledge_public_risk: false,
         }
     }
@@ -176,6 +184,16 @@ mod tests {
     #[test]
     fn default_share_ttl_days_is_seven() {
         assert_eq!(ServeConfig::default().share_ttl_days, 7);
+    }
+
+    #[test]
+    fn default_acknowledge_public_risk_is_false() {
+        assert!(!ServeConfig::default().acknowledge_public_risk);
+    }
+
+    #[test]
+    fn default_auto_start_is_false() {
+        assert!(!ServeConfig::default().auto_start);
     }
 }
 

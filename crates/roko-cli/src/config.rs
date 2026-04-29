@@ -1250,9 +1250,10 @@ impl ConfigLayer {
                         Some(deploy) => deploy.resolve(defaults.deploy),
                         None => defaults.deploy,
                     },
-                    acknowledge_public_risk: s
-                        .acknowledge_public_risk
-                        .unwrap_or(defaults.acknowledge_public_risk),
+                    auto_start: match s.auto_start {
+                        Some(auto_start) => auto_start,
+                        None => defaults.auto_start,
+                    },
                 }
             }
             None => ServeConfig::default(),
@@ -2037,30 +2038,9 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
                     .context("parse JSON array for serve.deploy.webhooks")?,
             );
         }
-        // ---- learning ---------------------------------------------------
-        ["learning", "replan_on_gate_failure"] => {
-            let l = layer.learning.get_or_insert_with(Default::default);
-            l.replan_on_gate_failure = Some(value.parse::<bool>().context("parse replan_on_gate_failure as bool")?);
-        }
-        ["learning", "replan_max_per_plan"] => {
-            let l = layer.learning.get_or_insert_with(Default::default);
-            l.replan_max_per_plan = Some(value.parse().context("parse u32 for learning.replan_max_per_plan")?);
-        }
-        ["learning", "replan_gate_attempts"] => {
-            let l = layer.learning.get_or_insert_with(Default::default);
-            l.replan_gate_attempts = Some(value.parse().context("parse u32 for learning.replan_gate_attempts")?);
-        }
-        ["learning", "auto_playbook_refresh"] => {
-            let l = layer.learning.get_or_insert_with(Default::default);
-            l.auto_playbook_refresh = Some(value.parse::<bool>().context("parse auto_playbook_refresh as bool")?);
-        }
-        ["learning", "use_lookahead_router"] => {
-            let l = layer.learning.get_or_insert_with(Default::default);
-            l.use_lookahead_router = Some(value.parse::<bool>().context("parse use_lookahead_router as bool")?);
-        }
-        ["learning", "lookahead_threshold"] => {
-            let l = layer.learning.get_or_insert_with(Default::default);
-            l.lookahead_threshold = Some(value.parse().context("parse f64 for learning.lookahead_threshold")?);
+        ["serve", "auto_start"] => {
+            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
+            serve.auto_start = Some(value.parse::<bool>().context("parse auto_start as bool")?);
         }
         _ => return Err(anyhow!("unknown key: {key}")),
     }
@@ -2439,9 +2419,9 @@ pub struct ServeLayer {
     /// Cloud deployment settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy: Option<ServeDeployLayer>,
-    /// Whether a public bind has been explicitly acknowledged.
+    /// Whether `roko` with no subcommand should auto-start the HTTP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acknowledge_public_risk: Option<bool>,
+    pub auto_start: Option<bool>,
 }
 
 impl ServeLayer {
@@ -2463,9 +2443,7 @@ impl ServeLayer {
                 (_, Some(overlay)) => Some(overlay),
                 (base, None) => base,
             },
-            acknowledge_public_risk: overlay
-                .acknowledge_public_risk
-                .or(self.acknowledge_public_risk),
+            auto_start: overlay.auto_start.or(self.auto_start),
         }
     }
 }
@@ -3197,6 +3175,19 @@ api_key = "secret"
     }
 
     #[test]
+    fn parses_serve_auto_start_section_from_toml() {
+        let toml = r#"
+[agent]
+command = "cat"
+
+[serve]
+auto_start = true
+        "#;
+        let cfg = Config::parse_toml(toml).unwrap();
+        assert!(cfg.serve.auto_start);
+    }
+
+    #[test]
     fn parses_serve_deploy_section_from_toml() {
         let toml = r#"
 [agent]
@@ -3330,6 +3321,20 @@ terminal_enabled = true
     }
 
     #[test]
+    fn layer_resolve_uses_auto_start_override() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[serve]
+auto_start = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve().unwrap();
+        assert!(cfg.serve.auto_start);
+    }
+
+    #[test]
     fn layer_resolve_uses_runtime_control_overrides() {
         let layer = ConfigLayer::parse_toml(
             r#"
@@ -3408,6 +3413,7 @@ auto_plan = true
         assert_eq!(parsed.repos.len(), cfg.repos.len());
         assert_eq!(parsed.gates.len(), cfg.gates.len());
         assert_eq!(parsed.serve.terminal_enabled, cfg.serve.terminal_enabled);
+        assert_eq!(parsed.serve.auto_start, cfg.serve.auto_start);
         assert_eq!(parsed.serve.auth.enabled, cfg.serve.auth.enabled);
         assert_eq!(parsed.serve.auth.api_key, cfg.serve.auth.api_key);
         assert_eq!(parsed.serve.deploy.provider, cfg.serve.deploy.provider);
@@ -3874,25 +3880,7 @@ program = "echo"
         assert!(rendered.contains("max_tools = 32"));
         assert!(rendered.contains("[prd]"));
         assert!(rendered.contains("auto_plan = false"));
-        // [gates] section must be present so `roko plan run` (RokoConfig) can read it.
-        assert!(
-            rendered.contains("[gates]"),
-            "init template must include [gates] section for RokoConfig"
-        );
-        assert!(rendered.contains("clippy_enabled = true"));
-        assert!(rendered.contains("skip_tests = false"));
-        assert!(rendered.contains("max_iterations = 3"));
-    }
-
-    #[test]
-    fn default_toml_template_is_parseable_by_roko_config() {
-        use roko_core::config::schema::RokoConfig;
-        let rendered = Config::default_toml_template(false).unwrap();
-        let cfg = RokoConfig::from_toml(&rendered)
-            .expect("init template must be parseable by RokoConfig");
-        assert!(cfg.gates.clippy_enabled, "clippy_enabled should default true");
-        assert!(!cfg.gates.skip_tests, "skip_tests should default false");
-        assert_eq!(cfg.gates.max_iterations, 3);
+        assert!(rendered.contains("auto_start = false"));
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! `roko` with no args launches inline chat with:
 //! - Auto-detected auth (Claude CLI → API key → prompt)
 //! - In-process dispatch (no sidecar required)
-//! - Background `roko serve` for HTTP/dashboard (disable with `--no-serve`)
+//! - Optional background `roko serve` for HTTP/dashboard via `serve.auto_start`
+//!   (disable with `--no-serve`)
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,11 +46,16 @@ pub async fn cmd_unified_chat(
     // 4. Load config for serve (best-effort)
     let config = load_config_or_defaults(config_path, &workdir)?;
 
-    // 5. Start serve in background (tracing already routed to file by main.rs)
+    // 5. Start serve in background only when the resolved config opts in.
     let serve_state = if no_serve {
         None
-    } else {
+    } else if load_auto_start_config(&config) {
         spawn_background_serve(&config, &workdir).await
+    } else {
+        if !quiet {
+            eprintln!("Tip: run `roko serve` to start the HTTP control plane");
+        }
+        None
     };
 
     if !quiet {
@@ -236,6 +242,11 @@ fn load_config_or_defaults(
     }
 }
 
+/// Read the resolved `serve.auto_start` flag from the already-loaded config.
+fn load_auto_start_config(config: &crate::config::Config) -> bool {
+    config.serve.auto_start
+}
+
 fn build_oneshot_session(
     config: &crate::config::Config,
     auth: &AuthMethod,
@@ -299,5 +310,13 @@ mod tests {
         let config = load_config_or_defaults(None, tmp.path()).unwrap();
         // Should get a valid default config without error
         assert!(!config.agent.command.is_empty());
+    }
+
+    #[test]
+    fn load_auto_start_config_reads_resolved_flag() {
+        let mut config = crate::config::Config::default();
+        assert!(!load_auto_start_config(&config));
+        config.serve.auto_start = true;
+        assert!(load_auto_start_config(&config));
     }
 }

@@ -838,8 +838,9 @@ impl RokoConfig {
         let _ = writeln!(out, "# -- TUI preferences --");
         let _ = writeln!(out, "[tui]");
         let _ = writeln!(out, "refresh_rate_ms = {}\n", c.tui.refresh_rate_ms);
-        let _ = writeln!(out, "# -- API auth --");
+        let _ = writeln!(out, "# -- Serve settings / API auth --");
         let _ = writeln!(out, "[serve]");
+        let _ = writeln!(out, "auto_start = {}", c.serve.auto_start);
         let _ = writeln!(out, "auto_orchestrate = {}", c.serve.auto_orchestrate);
         let _ = writeln!(out, "[serve.auth]");
         let _ = writeln!(out, "enabled = {}", c.serve.auth.enabled);
@@ -1562,6 +1563,7 @@ default_model = "claude-sonnet-4-6"
         assert!(example.contains("[budget]"));
         assert!(example.contains("[tui]"));
         assert!(example.contains("[serve]"));
+        assert!(example.contains("auto_start = false"));
     }
     #[test]
     fn example_toml_is_valid_toml() {
