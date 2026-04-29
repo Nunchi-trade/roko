@@ -12,8 +12,6 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::repo_context::RepoContextPack;
-
 const NAMING_GLOSSARY_RELATIVE_PATH: &str = "docs/00-architecture/01-naming-and-glossary.md";
 const NAMING_GLOSSARY_MAX_LINES: usize = 160;
 const CLAUDE_MD_RELATIVE_PATH: &str = "CLAUDE.md";
@@ -171,16 +169,16 @@ pub const PLAN_GENERATOR_SYSTEM_PROMPT: &str = r#"You are a task decomposition e
 2. **Precise context**: For each task, specify EXACTLY which files and line ranges to read. Not "read the crate" — "read lines 40-80 of src/lib.rs".
 3. **Executable verification**: Every acceptance criterion is a shell command that exits 0 on success, 1 on failure. No subjective criteria.
 4. **Dependency ordering**: Types before implementations. Implementations before wiring. Wiring before tests.
-5. **Model hints**: Assign the cheapest model that can handle each task. Imports → `claude-haiku-4-5`. Single function → `claude-sonnet-4-6`. Multi-module wiring → `claude-opus-4-6`.
+5. **Model hints**: Assign the cheapest model that can handle each task. Imports → Haiku. Single function → Sonnet. Multi-module wiring → Opus.
 
 ## Task tiers
 
 | Tier | Name | Max LOC | Model | Examples |
 |------|------|---------|-------|----------|
-| 0 | Mechanical | 20 | `claude-haiku-4-5` | Add import, add struct field, rename function |
-| 1 | Focused | 50 | `claude-sonnet-4-6` | Implement function body, write single test |
-| 2 | Integrative | 150 | `claude-sonnet-4-6` | Wire module A→B, implement trait for type |
-| 3 | Architectural | 300 | `claude-opus-4-6` | Design new API, decompose complex feature |
+| 0 | Mechanical | 20 | haiku | Add import, add struct field, rename function |
+| 1 | Focused | 50 | sonnet | Implement function body, write single test |
+| 2 | Integrative | 150 | sonnet/opus | Wire module A→B, implement trait for type |
+| 3 | Architectural | 300 | opus | Design new API, decompose complex feature |
 
 ## Output format
 
@@ -201,7 +199,7 @@ title = "<imperative verb phrase>"
 description = "<short outcome description>"
 status = "ready"
 tier = "mechanical"       # mechanical | focused | integrative | architectural
-model_hint = "claude-haiku-4-5"  # FULL model name required: claude-haiku-4-5 | claude-sonnet-4-6 | claude-opus-4-6
+model_hint = "haiku"      # cheapest model for this tier
 max_loc = 20              # maximum lines of change
 files = ["<path>"]        # files this task modifies
 allowed_tools = ["read_file", "grep"]
@@ -252,18 +250,6 @@ Every `[[task]]` MUST include a `role` field. Choose the most specific role:
 
 Missing or misspelled roles will be rejected by `roko plan validate`. The `role` field is REQUIRED.
 
-## Model names
-
-Use FULL model identifiers in the `model_hint` and `model` fields. Never use short aliases.
-
-| Alias (WRONG) | Full name (CORRECT) |
-|---------------|---------------------|
-| `"haiku"` | `"claude-haiku-4-5"` |
-| `"sonnet"` | `"claude-sonnet-4-6"` |
-| `"opus"` | `"claude-opus-4-6"` |
-
-Using aliases like `"sonnet"` will cause `PLAN_009` warnings in `roko plan validate` and may fail at execution.
-
 ## Before generating tasks, you MUST:
 
 1. Search the codebase to understand what exists:
@@ -309,18 +295,6 @@ pub fn build_generator_system_prompt(workdir: &Path) -> String {
 /// Build the full prompt for plan generation from a source input.
 #[must_use]
 pub fn build_generation_prompt(workdir: &Path, source: &str, source_type: &str) -> String {
-    build_generation_prompt_with_context(workdir, source, source_type, None)
-}
-
-/// Build the full prompt for plan generation from a source input and optional
-/// repository context.
-#[must_use]
-pub fn build_generation_prompt_with_context(
-    workdir: &Path,
-    source: &str,
-    source_type: &str,
-    repo_context: Option<&RepoContextPack>,
-) -> String {
     let mut prompt = build_generator_system_prompt(workdir);
     let _ = writeln!(prompt, "\n---\n");
     let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
@@ -328,69 +302,12 @@ pub fn build_generation_prompt_with_context(
         prompt,
         "## Source type: {source_type}\n\n## Source content:\n\n{source}"
     );
-    append_repo_context_prompt(&mut prompt, repo_context);
     prompt
-}
-
-/// Build a prompt for regenerating an existing plan in place (§11).
-///
-/// Strips the existing tasks to just `id`/`title`/`depends_on` and asks the
-/// agent to fill in `tier`, `model_hint`, `read_files`, `verify`, `context`,
-/// and `max_loc`.
-#[must_use]
-pub fn build_regeneration_prompt(workdir: &Path, existing_tasks_toml: &str) -> String {
-    build_regeneration_prompt_with_context(workdir, existing_tasks_toml, None, None)
-}
-
-/// Build a prompt for regenerating an existing plan in place (§11) with
-/// optional validation feedback and repository context.
-#[must_use]
-pub fn build_regeneration_prompt_with_context(
-    workdir: &Path,
-    existing_tasks_toml: &str,
-    validation_errors: Option<&str>,
-    repo_context: Option<&RepoContextPack>,
-) -> String {
-    let mut prompt = build_generator_system_prompt(workdir);
-    let _ = writeln!(prompt, "\n---\n");
-    let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
-    let _ = writeln!(prompt, "## Task: Regenerate plan\n");
-    let _ = writeln!(
-        prompt,
-        "The following tasks.toml exists but is missing full metadata (description, tier, model_hint, \
-         read_files, verify, context, max_loc, mcp_servers). Your job is to read the codebase and fill in \
-         every field for each task. Keep the existing id, title, description, and depends_on. Add:\n\
-         - `tier` (mechanical/focused/integrative/architectural)\n\
-         - `model_hint` (the cheapest model for that tier)\n\
-         - `max_loc` (estimated lines of change)\n\
-         - `allowed_tools`, `denied_tools`, and `mcp_servers` (per-task tool/MCP constraints)\n\
-         - `[task.context]` with read_files, symbols, anti_patterns\n\
-         - `[[task.verify]]` with at least compile + test checks\n\n\
-         ## Existing tasks.toml:\n\n```toml\n{existing_tasks_toml}\n```"
-    );
-    if let Some(validation_errors) = validation_errors.filter(|errors| !errors.trim().is_empty()) {
-        let _ = writeln!(
-            prompt,
-            "\n## Previous Plan Validation Errors\nThe previous plan had the following validation issues that MUST be fixed:\n\n{}\n\nFix ALL errors. Warnings should be addressed if possible.",
-            validation_errors
-        );
-    }
-    append_repo_context_prompt(&mut prompt, repo_context);
-    prompt
-}
-
-fn append_repo_context_prompt(prompt: &mut String, repo_context: Option<&RepoContextPack>) {
-    let Some(repo_context) = repo_context else {
-        return;
-    };
-
-    let _ = writeln!(prompt, "\n---\n\n{}", repo_context.to_prompt_section());
 }
 
 #[cfg(test)]
 mod template_tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn build_generator_system_prompt_includes_naming_glossary_excerpt_when_present() {
@@ -424,62 +341,6 @@ mod template_tests {
     }
 
     #[test]
-    fn build_generation_prompt_with_context_includes_repo_context() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo_context = RepoContextPack {
-            root: temp.path().to_path_buf(),
-            project_kind: crate::repo_context::ProjectKind::Rust,
-            workspace_members: vec!["roko-compose".to_string()],
-            key_files: vec![PathBuf::from("crates/roko-compose/src/lib.rs")],
-            matching_symbols: Vec::new(),
-            related_prds: Vec::new(),
-            related_plans: Vec::new(),
-            do_not_create: vec!["roko-compose".to_string()],
-            keywords: vec!["compose".to_string()],
-            context_root_verified: true,
-        };
-
-        let prompt = build_generation_prompt_with_context(
-            temp.path(),
-            "Compose a grounded plan",
-            "prompt",
-            Some(&repo_context),
-        );
-
-        assert!(prompt.contains("Compose a grounded plan"));
-        assert!(prompt.contains("## Repository Context"));
-        assert!(prompt.contains("roko-compose"));
-    }
-
-    #[test]
-    fn build_regeneration_prompt_with_context_includes_validation_and_context() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo_context = RepoContextPack {
-            root: temp.path().to_path_buf(),
-            project_kind: crate::repo_context::ProjectKind::Rust,
-            workspace_members: vec!["roko-core".to_string()],
-            key_files: vec![PathBuf::from("crates/roko-core/src/lib.rs")],
-            matching_symbols: Vec::new(),
-            related_prds: Vec::new(),
-            related_plans: Vec::new(),
-            do_not_create: vec!["roko-core".to_string()],
-            keywords: vec!["core".to_string()],
-            context_root_verified: true,
-        };
-
-        let prompt = build_regeneration_prompt_with_context(
-            temp.path(),
-            "[[task]]\nid = \"T1\"\n",
-            Some("- **ERROR** [PLAN_003]: task 'T1' is missing required field 'role'"),
-            Some(&repo_context),
-        );
-
-        assert!(prompt.contains("Previous Plan Validation Errors"));
-        assert!(prompt.contains("PLAN_003"));
-        assert!(prompt.contains("## Repository Context"));
-    }
-
-    #[test]
     fn resolves_missing_template_to_default() {
         let template = PlanTemplateKind::resolve(None);
         assert_eq!(template.label(), "default");
@@ -505,6 +366,33 @@ mod template_tests {
         assert!(guidance.contains("gate strictness: standard"));
         assert!(guidance.contains("max task count: 12"));
     }
+}
+
+/// Build a prompt for regenerating an existing plan in place (§11).
+///
+/// Strips the existing tasks to just `id`/`title`/`depends_on` and asks the
+/// agent to fill in `tier`, `model_hint`, `read_files`, `verify`, `context`,
+/// and `max_loc`.
+#[must_use]
+pub fn build_regeneration_prompt(workdir: &Path, existing_tasks_toml: &str) -> String {
+    let mut prompt = build_generator_system_prompt(workdir);
+    let _ = writeln!(prompt, "\n---\n");
+    let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
+    let _ = writeln!(prompt, "## Task: Regenerate plan\n");
+    let _ = writeln!(
+        prompt,
+        "The following tasks.toml exists but is missing full metadata (description, tier, model_hint, \
+         read_files, verify, context, max_loc, mcp_servers). Your job is to read the codebase and fill in \
+         every field for each task. Keep the existing id, title, description, and depends_on. Add:\n\
+         - `tier` (mechanical/focused/integrative/architectural)\n\
+         - `model_hint` (the cheapest model for that tier)\n\
+         - `max_loc` (estimated lines of change)\n\
+         - `allowed_tools`, `denied_tools`, and `mcp_servers` (per-task tool/MCP constraints)\n\
+         - `[task.context]` with read_files, symbols, anti_patterns\n\
+         - `[[task.verify]]` with at least compile + test checks\n\n\
+         ## Existing tasks.toml:\n\n```toml\n{existing_tasks_toml}\n```"
+    );
+    prompt
 }
 
 fn append_naming_glossary_prompt(prompt: &mut String, workdir: &Path) {
@@ -580,18 +468,5 @@ mod tests {
         assert!(prompt.contains("Add a logging system"));
         assert!(prompt.contains("Surgical scope"));
         assert!(prompt.contains("/test"));
-    }
-
-    #[test]
-    fn build_generator_system_prompt_uses_full_model_names() {
-        let prompt = build_generator_system_prompt(std::path::Path::new("/test"));
-
-        assert!(prompt.contains("## Model names"));
-        assert!(prompt.contains("| 0 | Mechanical | 20 | `claude-haiku-4-5` |"));
-        assert!(prompt.contains("| 1 | Focused | 50 | `claude-sonnet-4-6` |"));
-        assert!(prompt.contains("| 2 | Integrative | 150 | `claude-sonnet-4-6` |"));
-        assert!(prompt.contains("| 3 | Architectural | 300 | `claude-opus-4-6` |"));
-        assert!(prompt.contains("model_hint = \"claude-haiku-4-5\""));
-        assert!(!prompt.contains("| 0 | Mechanical | 20 | haiku |"));
     }
 }
