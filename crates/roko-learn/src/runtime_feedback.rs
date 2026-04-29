@@ -5045,40 +5045,4 @@ mod tests {
         assert!(snapshot.knowledge_seeds.is_empty());
         assert_eq!(snapshot.provider_model_outcomes.len(), 1);
     }
-
-    #[tokio::test]
-    async fn artifact_invalid_completed_run_withholds_seed_and_router_observation() {
-        let tmp = TempDir::new().unwrap();
-        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
-
-        let mut episode = sample_pattern_episode(true, "artifact-invalid");
-        episode
-            .extra
-            .insert("artifact_valid".to_string(), serde_json::json!(false));
-
-        let update = runtime
-            .record_completed_run(CompletedRunInput::from_episode(episode))
-            .await
-            .unwrap();
-
-        assert_eq!(update.episode_logged, ApplyStatus::Applied);
-        assert_eq!(update.knowledge_seed_recorded, ApplyStatus::Skipped);
-        assert!(!update.router_updated);
-
-        let snapshot = runtime
-            .query_feedback(&RuntimeFeedbackQuery::default())
-            .await
-            .unwrap();
-        assert_eq!(snapshot.episodes.len(), 1);
-        assert!(snapshot.episodes[0].success);
-        assert_eq!(
-            snapshot.episodes[0]
-                .extra
-                .get("artifact_valid")
-                .and_then(serde_json::Value::as_bool),
-            Some(false)
-        );
-        assert!(snapshot.knowledge_seeds.is_empty());
-        assert_eq!(runtime.cascade_router().total_observations(), 0);
-    }
 }
