@@ -9,11 +9,81 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let summaries =
                 roko_cli::plan::summarize_discovered_plans(&wd).map_err(|e| anyhow!("{e}"))?;
+            let executor_state = read_executor_state(&wd);
+            let has_run_state = executor_state.is_some();
+            let state_entries = executor_state.clone().unwrap_or_default();
+            let state_map: std::collections::HashMap<String, (usize, usize)> = state_entries
+                .iter()
+                .cloned()
+                .map(|(id, done, total)| (id, (done, total)))
+                .collect();
+
+            let mut summaries = summaries;
+            for summary in &mut summaries {
+                if let Some((tasks_done, tasks_total)) = state_map.get(&summary.id).copied() {
+                    summary.tasks_done = tasks_done;
+                    summary.task_count = tasks_total;
+                    summary.completed = tasks_total > 0 && tasks_done == tasks_total;
+                }
+            }
 
             if cli.json {
-                println!("{}", roko_cli::plan::format_plan_list_json(&summaries));
+                let entries: Vec<serde_json::Value> = summaries
+                    .iter()
+                    .map(|summary| {
+                        serde_json::json!({
+                            "id": summary.id.as_str(),
+                            "title": summary.title.as_str(),
+                            "task_count": summary.task_count,
+                            "tasks_done": summary.tasks_done,
+                            "tasks_failed": summary.tasks_failed,
+                            "completed": summary.completed,
+                            "has_run_state": has_run_state,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
-                println!("{}", roko_cli::plan::format_plan_list(&summaries));
+                if summaries.is_empty() {
+                    if has_run_state {
+                        println!("no plans found in discovery path");
+                    } else {
+                        println!("no run state found");
+                    }
+                } else {
+                    println!(
+                        "{:<16} {:<40} {:<12} {}",
+                        "ID", "TITLE", "PROGRESS", "STATUS"
+                    );
+                    for summary in &summaries {
+                        let status =
+                            if summary.task_count > 0 && summary.tasks_done == summary.task_count {
+                                "done"
+                            } else if summary.tasks_done > 0 {
+                                "in-progress"
+                            } else {
+                                "pending"
+                            };
+                        println!(
+                            "{:<16} {:<40} {:<12} {}",
+                            summary.id.as_str(),
+                            summary.title.as_str(),
+                            format!("{}/{}", summary.tasks_done, summary.task_count),
+                            status
+                        );
+                    }
+                    if !has_run_state {
+                        println!("(no run state found — counts from tasks.toml files)");
+                    }
+                }
+
+                for (plan_id, _, _) in &state_entries {
+                    if !plan_path_exists(&wd, plan_id) {
+                        println!(
+                            "warning: state references missing plan: {plan_id} (not found in plans/ or .roko/plans/)"
+                        );
+                    }
+                }
             }
             Ok(EXIT_SUCCESS)
         }
@@ -137,13 +207,47 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             approval,
             max_retries,
             dry_run,
+            fresh,
         } => {
+            // ── Mandatory validation: reject malformed plans before execution ──
+            // Runs in both normal and `--dry-run` mode.
+            if let Some(exit_code) = validate_before_run(&plans_dir) {
+                return Ok(exit_code);
+            }
+
             // ── Dry-run mode: parse plans + show summary without executing ──
             if dry_run {
                 return cmd_plan_dry_run(&plans_dir, cli).await;
             }
 
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            if fresh {
+                let state_path = wd.join(".roko").join("state").join("executor.json");
+                if state_path.exists() {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    let backup_path = state_path.with_extension(format!("json.bak.{ts}"));
+                    match std::fs::rename(&state_path, &backup_path) {
+                        Ok(()) => {
+                            if !cli.quiet {
+                                eprintln!(
+                                    "▸ --fresh: archived old state to {}",
+                                    backup_path.display()
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "warning: --fresh: could not archive {}: {err}",
+                                state_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
             let task_timeout_secs = config.executor.task_timeout_secs;
@@ -151,16 +255,18 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             // Runner v2 auto-resumes from .roko/state/executor.json if it exists.
             // Explicit --resume-plan paths are honored by copying to the standard location.
-            if let Some(ref snap_path) = resume_plan {
-                let snap_path = if snap_path.is_relative() {
-                    wd.join(snap_path)
-                } else {
-                    snap_path.clone()
-                };
-                let standard = wd.join(".roko").join("state").join("executor.json");
-                if snap_path != standard && snap_path.exists() {
-                    let _ = std::fs::create_dir_all(standard.parent().unwrap());
-                    let _ = std::fs::copy(&snap_path, &standard);
+            if !fresh {
+                if let Some(ref snap_path) = resume_plan {
+                    let snap_path = if snap_path.is_relative() {
+                        wd.join(snap_path)
+                    } else {
+                        snap_path.clone()
+                    };
+                    let standard = wd.join(".roko").join("state").join("executor.json");
+                    if snap_path != standard && snap_path.exists() {
+                        let _ = std::fs::create_dir_all(standard.parent().unwrap());
+                        let _ = std::fs::copy(&snap_path, &standard);
+                    }
                 }
             }
 
@@ -284,6 +390,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 workdir: wd.clone(),
                 plan_dir: plans_dir.clone(),
                 model: roko_config.agent.default_model.clone(),
+                cli_model_override: cli.model.clone(),
                 timeout_secs: task_timeout_secs,
                 max_retries: max_retries.unwrap_or(2),
                 approval,
@@ -394,6 +501,16 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     eprintln!(
                         "  {status} {} — {}/{} tasks",
                         p.plan_id, p.tasks_completed, p.tasks_total,
+                    );
+                }
+            }
+
+            if v2_report.tasks_failed > 0 {
+                let state_path = wd.join(".roko").join("state").join("executor.json");
+                if state_path.exists() {
+                    eprintln!(
+                        "hint: if tasks appear stuck or state looks wrong, try: roko plan run {} --fresh",
+                        plans_dir.display()
                     );
                 }
             }
@@ -630,12 +747,12 @@ fn resolve_effective_model_key(
     let selection = roko_cli::model_selection::resolve_effective_model(
         cli_model,
         None,
-        role.map(str::to_owned),
+        role.map(str::to_string),
         None,
         &config,
     )
     .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
-    eprintln!("[{context}] effective selection: {}", selection.reason);
+    selection.print_stderr();
     Ok(selection.effective_model_key)
 }
 
@@ -812,6 +929,47 @@ pub(crate) async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32>
     Ok(EXIT_SUCCESS)
 }
 
+/// Run plan validation before `plan run` starts any agents.
+///
+/// Returns `Some(exit_code)` when validation fails, or `None` when the plan
+/// set is valid enough to continue.
+fn validate_before_run(plans_dir: &Path) -> Option<i32> {
+    let current_dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("error: cannot resolve cwd for validation: {error}");
+            return Some(1);
+        }
+    };
+
+    let config_path = current_dir.join("roko.toml");
+    let models = if config_path.is_file() {
+        std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|text| toml::from_str::<roko_core::config::schema::RokoConfig>(&text).ok())
+            .map(|config| crate::commands::config_cmd::configured_models(&config))
+    } else {
+        None
+    };
+
+    let report = match plan_validate::validate_plans_dir(plans_dir, models.as_ref()) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("error: plan validation failed: {error:#}");
+            return Some(1);
+        }
+    };
+
+    let code = report.exit_code(false);
+    if code != 0 {
+        eprintln!("{}", plan_validate::render_text(&report));
+        eprintln!("error: plan validation failed — fix the errors above before running");
+        Some(1)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> Result<i32> {
     let current_dir =
         std::env::current_dir().context("resolve current directory for plan validation")?;
@@ -912,4 +1070,182 @@ pub(crate) fn preserve_completed_task_status(
         };
 
     regenerated
+}
+
+pub(crate) fn read_executor_state(
+    workdir: &std::path::Path,
+) -> Option<Vec<(String, usize, usize)>> {
+    let executor_path = workdir.join(".roko").join("state").join("executor.json");
+    if !executor_path.is_file() {
+        return None;
+    }
+
+    let contents = std::fs::read_to_string(&executor_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+
+    if let Some(plans) = value.get("plans").and_then(serde_json::Value::as_array) {
+        let mut entries = Vec::with_capacity(plans.len());
+        for plan in plans {
+            let id = json_str_field(plan, &["plan_id", "id"]).unwrap_or("unknown");
+            let tasks_done =
+                json_usize_field(plan, &["tasks_completed", "completed_tasks"]).unwrap_or(0);
+            let tasks_total =
+                json_usize_field(plan, &["tasks_total", "total_tasks", "task_count"]).unwrap_or(0);
+            entries.push((id.to_string(), tasks_done, tasks_total));
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        return Some(entries);
+    }
+
+    if let Some(plan_states) = value
+        .get("plan_states")
+        .and_then(serde_json::Value::as_object)
+    {
+        let completed_counts = read_run_state_completed_counts(workdir);
+        let discovered_totals = discovered_plan_totals(workdir);
+        let mut entries = Vec::with_capacity(plan_states.len());
+
+        for (plan_id, plan_state) in plan_states {
+            let tasks_total = discovered_totals.get(plan_id).copied().unwrap_or_else(|| {
+                json_usize_field(plan_state, &["tasks_total", "total_tasks", "task_count"])
+                    .unwrap_or(0)
+            });
+            let mut tasks_done = completed_counts.get(plan_id).copied().unwrap_or(0);
+            if tasks_done == 0
+                && tasks_total > 0
+                && json_str_field(
+                    plan_state
+                        .get("current_phase")
+                        .unwrap_or(&serde_json::Value::Null),
+                    &["kind"],
+                )
+                .is_some_and(|kind| {
+                    kind.eq_ignore_ascii_case("complete") || kind.eq_ignore_ascii_case("completed")
+                })
+            {
+                tasks_done = tasks_total;
+            }
+            entries.push((plan_id.clone(), tasks_done, tasks_total));
+        }
+
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        return Some(entries);
+    }
+
+    if let Some(tasks) = value.get("tasks").and_then(serde_json::Value::as_array) {
+        let mut progress: std::collections::BTreeMap<String, (usize, usize)> =
+            std::collections::BTreeMap::new();
+        for task in tasks {
+            let Some(plan_id) = json_str_field(task, &["plan", "plan_id"]) else {
+                continue;
+            };
+            let entry = progress.entry(plan_id.to_string()).or_insert((0, 0));
+            entry.0 += 1;
+
+            let status = task
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if matches!(
+                status.as_str(),
+                "done" | "complete" | "completed" | "passed" | "skipped"
+            ) {
+                entry.1 += 1;
+            }
+        }
+
+        return Some(
+            progress
+                .into_iter()
+                .map(|(plan_id, (tasks_total, tasks_done))| (plan_id, tasks_done, tasks_total))
+                .collect(),
+        );
+    }
+
+    Some(Vec::new())
+}
+
+fn discovered_plan_totals(workdir: &std::path::Path) -> std::collections::HashMap<String, usize> {
+    roko_cli::plan::summarize_discovered_plans(workdir)
+        .ok()
+        .map(|summaries| {
+            summaries
+                .into_iter()
+                .map(|summary| (summary.id, summary.task_count))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn read_run_state_completed_counts(
+    workdir: &std::path::Path,
+) -> std::collections::HashMap<String, usize> {
+    let run_state_path = workdir.join(".roko").join("state").join("run-state.json");
+    let Ok(contents) = std::fs::read_to_string(&run_state_path) else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return std::collections::HashMap::new();
+    };
+    let Some(completed_tasks) = value
+        .get("completed_tasks")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return std::collections::HashMap::new();
+    };
+
+    completed_tasks
+        .iter()
+        .map(|(plan_id, tasks)| {
+            (
+                plan_id.clone(),
+                tasks.as_array().map_or(0, std::vec::Vec::len),
+            )
+        })
+        .collect()
+}
+
+fn json_str_field<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+}
+
+fn json_usize_field(value: &serde_json::Value, keys: &[&str]) -> Option<usize> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_u64))
+        .map(|count| count as usize)
+}
+
+pub(crate) fn plan_path_exists(workdir: &std::path::Path, plan_id: &str) -> bool {
+    let plan_dir = workdir.join("plans").join(plan_id);
+    let roko_plan_dir = workdir.join(".roko").join("plans").join(plan_id);
+    plan_dir.exists() || roko_plan_dir.exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn read_executor_state_returns_none_without_snapshot() {
+        let dir = tempdir().expect("tempdir");
+        assert!(read_executor_state(dir.path()).is_none());
+    }
+
+    #[test]
+    fn read_executor_state_parses_plans_array() {
+        let dir = tempdir().expect("tempdir");
+        let state_dir = dir.path().join(".roko").join("state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        std::fs::write(
+            state_dir.join("executor.json"),
+            r#"{"plans":[{"plan_id":"plan-a","tasks_completed":1,"tasks_total":3}]}"#,
+        )
+        .expect("write executor state");
+
+        let state = read_executor_state(dir.path()).expect("state");
+        assert_eq!(state, vec![("plan-a".to_string(), 1, 3)]);
+    }
 }

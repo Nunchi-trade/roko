@@ -551,7 +551,7 @@ pub async fn run_with_workflow_engine_with_hub(
     external_hub: Option<&StateHub>,
 ) -> anyhow::Result<WorkflowRunReport> {
     let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
-    selection.print_stderr();
+    eprintln!("[model] {} via {} ({})", selection.effective_model_key, selection.provider_key, selection.reason);
 
     let pipeline_config = model_config.pipeline.clone();
     let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
@@ -597,7 +597,7 @@ pub async fn run_workflow_engine_report_with_hub(
     external_hub: Option<&StateHub>,
 ) -> anyhow::Result<WorkflowRunReport> {
     let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
-    selection.print_stderr();
+    eprintln!("[model] {} via {} ({})", selection.effective_model_key, selection.provider_key, selection.reason);
     let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
 
     run_workflow_engine_with_services(

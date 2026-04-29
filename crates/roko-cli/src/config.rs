@@ -1205,9 +1205,6 @@ impl ConfigLayer {
                         Some(deploy) => deploy.resolve(defaults.deploy),
                         None => defaults.deploy,
                     },
-                    acknowledge_public_risk: s
-                        .acknowledge_public_risk
-                        .unwrap_or(defaults.acknowledge_public_risk),
                 }
             }
             None => ServeConfig::default(),

@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentBackend, AgentRole};
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
-use roko_core::OperatingFrequency;
 use roko_fs::{RokoLayout, atomic_write_bytes, atomic_write_json};
 use roko_learn::cfactor::{
     AgentCFactorContribution, CFactor, CFactorComponents, CollectivePathology,
@@ -163,7 +163,10 @@ struct SeededCascadeSnapshot {
 }
 
 /// Seed a new workspace with demo-only data.
-pub fn seed_demo_workspace(workdir: impl AsRef<Path>, config: Option<&RokoConfig>) -> Result<DemoSeedReport> {
+pub fn seed_demo_workspace(
+    workdir: impl AsRef<Path>,
+    config: Option<&RokoConfig>,
+) -> Result<DemoSeedReport> {
     let workdir = workdir.as_ref();
     let roko_dir = workdir.join(".roko");
     let layout = RokoLayout::for_project(workdir);
@@ -188,23 +191,15 @@ pub fn seed_demo_workspace(workdir: impl AsRef<Path>, config: Option<&RokoConfig
     let efficiency_events = build_efficiency_events(&task_specs, &model_pool, now);
     let task_metrics = build_task_metrics(&task_specs, &model_pool, config_hash, now);
     let cfactors = build_cfactor_snapshots(&task_specs, now);
-    let knowledge_seeds = build_knowledge_seeds(
-        &task_specs,
-        &episode_reference_ids,
-        &model_pool,
-        now,
-    );
+    let knowledge_seeds =
+        build_knowledge_seeds(&task_specs, &episode_reference_ids, &model_pool, now);
     let knowledge_entries = build_knowledge_entries(
         &demo_knowledge_entry_specs(),
         &episode_reference_ids,
         &model_pool,
         now,
     );
-    let cascade_snapshot = build_cascade_snapshot(
-        &task_specs,
-        &model_pool,
-        now,
-    );
+    let cascade_snapshot = build_cascade_snapshot(&task_specs, &model_pool, now);
 
     let mut report = DemoSeedReport::default();
 
@@ -492,7 +487,9 @@ fn demo_knowledge_entry_specs() -> Vec<DemoKnowledgeEntrySpec> {
             model_generality: 0.98,
             tier: KnowledgeTier::Working,
             refuted_insight_id: Some("seed-knowledge-005"),
-            refutation_evidence: Some("demo data is synthetic and must remain visibly distinct from production telemetry"),
+            refutation_evidence: Some(
+                "demo data is synthetic and must remain visibly distinct from production telemetry",
+            ),
             balance: 0.85,
             confirmation_count: 1,
             catalytic_score: 1,
@@ -593,15 +590,16 @@ fn build_episodes(
             "source": "seed",
             "sections": prompt_sections_json(spec, true),
         }));
-        episode.extra.insert("source".to_string(), Value::String("seed".to_string()));
+        episode
+            .extra
+            .insert("source".to_string(), Value::String("seed".to_string()));
         episode.extra.insert(
             "plan_id".to_string(),
             Value::String(spec.plan_id.to_string()),
         );
-        episode.extra.insert(
-            "domain".to_string(),
-            Value::String(spec.domain.to_string()),
-        );
+        episode
+            .extra
+            .insert("domain".to_string(), Value::String(spec.domain.to_string()));
         episode.extra.insert(
             "task_title".to_string(),
             Value::String(spec.title.to_string()),
@@ -627,11 +625,8 @@ fn build_efficiency_events(
         let primary_model = model_for_slot(model_pool, spec.model_slot);
         let secondary_model = model_for_slot(model_pool, spec.model_slot + 1);
         let primary_time = seeded_datetime(now, spec.age_hours, spec.age_minutes);
-        let secondary_time = seeded_datetime(
-            now,
-            spec.age_hours.saturating_sub(1),
-            spec.age_minutes + 17,
-        );
+        let secondary_time =
+            seeded_datetime(now, spec.age_hours.saturating_sub(1), spec.age_minutes + 17);
 
         events.push(build_efficiency_event(
             spec,
@@ -662,17 +657,10 @@ fn build_task_metrics(
     let mut metrics = Vec::with_capacity(specs.len());
     for spec in specs {
         let model = model_for_slot(model_pool, spec.model_slot);
-        let completed_at = seeded_datetime(
-            now,
-            spec.age_hours.saturating_sub(1),
-            spec.age_minutes + 58,
-        );
+        let completed_at =
+            seeded_datetime(now, spec.age_hours.saturating_sub(1), spec.age_minutes + 58);
         let wall_time_ms = wall_time_for_task(spec);
-        let mut metric = TaskMetric::new(
-            config_hash.clone(),
-            spec.plan_id,
-            spec.task_id,
-        );
+        let mut metric = TaskMetric::new(config_hash.clone(), spec.plan_id, spec.task_id);
         metric.timestamp = completed_at.to_rfc3339();
         metric.run_id = "seed-run-20260429".to_string();
         metric.iteration = if spec.success { 1 } else { 2 };
@@ -845,7 +833,11 @@ fn build_knowledge_seeds(
             source_episodes: source_episodes.clone(),
             source_model: Some(model),
             model_generality: spec.seed_model_generality,
-            tags: spec.seed_tags.iter().map(|tag| (*tag).to_string()).collect(),
+            tags: spec
+                .seed_tags
+                .iter()
+                .map(|tag| (*tag).to_string())
+                .collect(),
             plan_id: spec.plan_id.to_string(),
             task_id: spec.task_id.to_string(),
             evidence: vec![KnowledgeSeedEvidence {
@@ -1169,7 +1161,6 @@ fn prompt_sections_json(spec: &DemoTaskSpec, primary: bool) -> Vec<Value> {
         .collect()
 }
 
-
 fn existing_episode_ids(workdir: &Path) -> Vec<String> {
     let mut ids = Vec::new();
     let mut seen = HashSet::new();
@@ -1305,7 +1296,9 @@ fn seeded_jsonl_line<T: Serialize>(item: &T) -> Result<String> {
 
 fn config_hash(config: Option<&RokoConfig>) -> ConfigHash {
     match config {
-        Some(config) => ConfigHash::of(config).unwrap_or_else(|_| ConfigHash("seed-demo-config".to_string())),
+        Some(config) => {
+            ConfigHash::of(config).unwrap_or_else(|_| ConfigHash("seed-demo-config".to_string()))
+        }
         None => ConfigHash("seed-demo-config".to_string()),
     }
 }
@@ -1472,11 +1465,7 @@ fn episode_cost(spec: &DemoTaskSpec, cached: bool) -> f64 {
         "complex" => 0.31,
         _ => 0.16,
     };
-    if cached {
-        base
-    } else {
-        base + 0.04
-    }
+    if cached { base } else { base + 0.04 }
 }
 
 fn efficiency_input_tokens(spec: &DemoTaskSpec, primary: bool) -> u64 {
@@ -1486,7 +1475,11 @@ fn efficiency_input_tokens(spec: &DemoTaskSpec, primary: bool) -> u64 {
         "complex" => 1_680,
         _ => 1_080,
     };
-    if primary { base } else { base.saturating_sub(260) }
+    if primary {
+        base
+    } else {
+        base.saturating_sub(260)
+    }
 }
 
 fn efficiency_output_tokens(spec: &DemoTaskSpec, primary: bool) -> u64 {
@@ -1496,7 +1489,11 @@ fn efficiency_output_tokens(spec: &DemoTaskSpec, primary: bool) -> u64 {
         "complex" => 560,
         _ => 320,
     };
-    if primary { base } else { base.saturating_sub(120) }
+    if primary {
+        base
+    } else {
+        base.saturating_sub(120)
+    }
 }
 
 fn efficiency_cache_read_tokens(spec: &DemoTaskSpec, primary: bool) -> u64 {
@@ -1526,11 +1523,7 @@ fn efficiency_cost_usd(spec: &DemoTaskSpec, primary: bool) -> f64 {
         "complex" => 0.15,
         _ => 0.06,
     };
-    if primary {
-        base
-    } else {
-        base * 0.65
-    }
+    if primary { base } else { base * 0.65 }
 }
 
 fn task_metric_input_tokens(spec: &DemoTaskSpec) -> u64 {
@@ -1579,11 +1572,7 @@ fn task_metric_sections_included(spec: &DemoTaskSpec) -> u32 {
 }
 
 fn task_metric_sections_dropped(spec: &DemoTaskSpec) -> u32 {
-    if spec.success {
-        0
-    } else {
-        1
-    }
+    if spec.success { 0 } else { 1 }
 }
 
 fn tool_calls_for_task(spec: &DemoTaskSpec, primary: bool) -> Vec<ToolCallMeta> {
@@ -1644,7 +1633,10 @@ fn episode_external_actions(spec: &DemoTaskSpec) -> Vec<Value> {
 
 fn episode_reflection(spec: &DemoTaskSpec) -> String {
     if spec.success {
-        format!("The {} task converged after the {} gate passed.", spec.domain, spec.gate)
+        format!(
+            "The {} task converged after the {} gate passed.",
+            spec.domain, spec.gate
+        )
     } else {
         format!(
             "The {} task needed a second pass because the {} gate reported drift.",
@@ -1655,8 +1647,14 @@ fn episode_reflection(spec: &DemoTaskSpec) -> String {
 
 fn episode_reasoning_summary(spec: &DemoTaskSpec) -> String {
     if spec.success {
-        format!("Chose the {} model path and kept the prompt tight.", spec.domain)
+        format!(
+            "Chose the {} model path and kept the prompt tight.",
+            spec.domain
+        )
     } else {
-        format!("Reviewed the {} failure and rerouted to a safer repair path.", spec.domain)
+        format!(
+            "Reviewed the {} failure and rerouted to a safer repair path.",
+            spec.domain
+        )
     }
 }
