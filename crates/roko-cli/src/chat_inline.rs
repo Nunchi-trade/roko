@@ -4219,38 +4219,61 @@ fn push_tool_outputs(
     if tool_outputs.is_empty() {
         return Ok(());
     }
+    let use_unicode = crate::inline::should_use_inline();
     for output in tool_outputs {
         let tool_label = output.tool_name.as_deref().unwrap_or("tool");
-        // Show first line of output as preview, truncated
-        let preview = output
-            .content
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(80)
-            .collect::<String>();
+
+        // Infer success/failure from the tool content.
+        let is_error = output.content.is_empty()
+            || output.content.starts_with("Error:")
+            || output.content.starts_with("error:");
+
         let line_count = output.content.lines().count();
-        let suffix = if line_count > 1 {
-            format!(" (+{} lines)", line_count - 1)
+        let summary = if is_error {
+            let first = output.content.lines().next().unwrap_or("failed");
+            let mut chars = first.chars();
+            let truncated: String = chars.by_ref().take(60).collect();
+            if chars.next().is_some() {
+                format!("{truncated}...")
+            } else {
+                truncated
+            }
+        } else if line_count > 1 {
+            format!("{line_count} lines")
+        } else if output.content.is_empty() {
+            "ok".to_string()
         } else {
-            String::new()
+            format!("{} bytes", output.content.len())
         };
 
-        let tool_sym = symbols::TOOL;
+        let (success_symbol, failure_symbol) = if use_unicode {
+            (symbols::PASS, symbols::FAIL)
+        } else {
+            ("+", "x")
+        };
+        let (indicator, indicator_style, summary_style) = if is_error {
+            (
+                failure_symbol,
+                Style::default().fg(Theme::EMBER),
+                Style::default().fg(Theme::EMBER),
+            )
+        } else {
+            (
+                success_symbol,
+                Style::default().fg(Theme::SAGE),
+                Style::default().fg(Theme::TEXT_DIM),
+            )
+        };
         term.push_lines(&[Line::from(vec![
             Span::styled(
-                format!("  {tool_sym} "),
-                Style::default().fg(Theme::TEXT_DIM),
+                format!("  {indicator} "),
+                indicator_style,
             ),
             Span::styled(
-                tool_label.to_string(),
+                format!("[{tool_label}]"),
                 Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  {preview}{suffix}"),
-                Style::default().fg(Theme::TEXT_DIM),
-            ),
+            Span::styled(format!("  {summary}"), summary_style),
         ])])?;
     }
     term.push_lines(&[Line::raw("")])?;
