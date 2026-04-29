@@ -11,18 +11,18 @@ use crate::agent_config::{
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
+use crate::episode::EpisodePolicy;
 use crate::knowledge_helpers::{build_strategy_fragment_context, query_anti_knowledge_patterns};
 use crate::learning_helpers::{
     load_or_create_playbook_store, load_or_create_skill_library, playbook_query_context,
     render_prior_experience,
 };
-use crate::episode::EpisodePolicy;
 use crate::model_selection::{EffectiveModelSelection, resolve_effective_model};
 use crate::output_format;
 #[cfg(feature = "legacy-orchestrate")]
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
-use crate::task_helpers::extract_task_symbols;
 use crate::state_hub::{StateHub, StateHubSender};
+use crate::task_helpers::extract_task_symbols;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::provider::is_known_protocol_command;
@@ -126,6 +126,7 @@ struct DispatchOutcome {
     agent_result: AgentResult,
     external_actions: Vec<ExternalAction>,
     injected_playbook_ids: Vec<String>,
+    model_selection: Option<EffectiveModelSelection>,
 }
 
 /// Write a RunReport to `.roko/shared/{token}.json` and return the token.
@@ -550,10 +551,7 @@ pub async fn run_with_workflow_engine_with_hub(
     external_hub: Option<&StateHub>,
 ) -> anyhow::Result<WorkflowRunReport> {
     let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
-    eprintln!(
-        "model: {} via {} (source: {})",
-        selection.effective_model_key, selection.provider_key, selection.source
-    );
+    selection.print_stderr();
 
     let pipeline_config = model_config.pipeline.clone();
     let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
@@ -599,10 +597,7 @@ pub async fn run_workflow_engine_report_with_hub(
     external_hub: Option<&StateHub>,
 ) -> anyhow::Result<WorkflowRunReport> {
     let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
-    eprintln!(
-        "model: {} via {} (source: {})",
-        selection.effective_model_key, selection.provider_key, selection.source
-    );
+    selection.print_stderr();
     let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
 
     run_workflow_engine_with_services(
@@ -745,15 +740,18 @@ pub async fn run_plan_with_workflow_engine(
     let triples: Vec<(String, String, String)> = tasks
         .iter()
         .map(|(task_id, prompt)| {
-            let plan_id = task_id
-                .split(':')
-                .next()
-                .unwrap_or(task_id)
-                .to_string();
+            let plan_id = task_id.split(':').next().unwrap_or(task_id).to_string();
             (plan_id, task_id.clone(), prompt.clone())
         })
         .collect();
-    run_plan_prompts_core(triples, workdir, workflow_template, enabled_gates, shell_gates).await
+    run_plan_prompts_core(
+        triples,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        shell_gates,
+    )
+    .await
 }
 
 pub async fn run_plan_tasks_with_workflow_engine(
@@ -771,7 +769,14 @@ pub async fn run_plan_tasks_with_workflow_engine(
             (pt.plan_id.clone(), pt.task.id.clone(), prompt)
         })
         .collect();
-    run_plan_prompts_core(triples, workdir, workflow_template, enabled_gates, shell_gates).await
+    run_plan_prompts_core(
+        triples,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        shell_gates,
+    )
+    .await
 }
 
 /// Shared accumulator loop for both plan-running entry points.
@@ -1175,6 +1180,7 @@ pub async fn run_once(
         agent_result,
         external_actions,
         injected_playbook_ids,
+        model_selection,
     } = dispatch_agent(workdir, config, &prompt, prompt_text, &ctx, strategy).await?;
 
     // Optionally post-process the agent output to strip ANSI escapes and
@@ -1288,6 +1294,7 @@ pub async fn run_once(
         &verdict_summary,
         &agent_result,
         &external_actions,
+        model_selection.as_ref(),
     )
     .await
     {
@@ -1335,13 +1342,7 @@ pub async fn run_once(
         value: f64::from(agent_result.usage.cost_usd),
     });
 
-    record_injected_playbook_outcomes(
-        workdir,
-        strategy,
-        &injected_playbook_ids,
-        task_passed,
-    )
-    .await;
+    record_injected_playbook_outcomes(workdir, strategy, &injected_playbook_ids, task_passed).await;
 
     let total_signals = substrate
         .len()
@@ -1718,7 +1719,8 @@ fn render_relevant_playbooks(playbooks: &[Playbook]) -> String {
 fn render_common_mistakes_section(patterns: &[String]) -> String {
     use std::fmt::Write as _;
 
-    let mut body = String::from("## Common Mistakes to Avoid\n\nKnown anti-patterns and failure modes:\n");
+    let mut body =
+        String::from("## Common Mistakes to Avoid\n\nKnown anti-patterns and failure modes:\n");
     for pattern in patterns {
         let pattern = pattern.trim();
         if pattern.is_empty() {
@@ -1844,13 +1846,39 @@ async fn dispatch_agent(
     crate::config::merge_global_providers(&mut routing_config);
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
     let use_provider_routing = has_routing && config.agent.command == "claude";
+    let (cli_model_override, _) = workflow_cli_overrides();
+    let resolved_cli_model = if let Some(requested_model) = cli_model_override.clone() {
+        Some(
+            resolve_effective_model(
+                Some(requested_model),
+                None,
+                Some(config.prompt.role.clone()),
+                None,
+                &routing_config,
+            )
+            .map_err(|error| anyhow!("resolve legacy run model selection: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let selected_model_override = resolved_cli_model
+        .as_ref()
+        .map(|selection| selection.backend_slug.clone());
+    if let Some(selection) = resolved_cli_model.as_ref() {
+        tracing::info!(
+            model = %selection.effective_model_key,
+            backend_slug = %selection.backend_slug,
+            provider = %selection.provider_key,
+            source = %selection.source,
+            "[run] resolved model selection"
+        );
+    }
 
     if use_provider_routing {
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
-        let model = config
-            .agent
-            .model
+        let model = selected_model_override
             .clone()
+            .or_else(|| config.agent.model.clone())
             .unwrap_or_else(|| routing_config.agent.default_model.clone());
         let StrategyPromptAugmentation {
             system_prompt,
@@ -1892,24 +1920,36 @@ async fn dispatch_agent(
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
             injected_playbook_ids,
+            model_selection: resolved_cli_model.clone(),
         })
     } else if config.agent.command == "claude" && has_anthropic_api_key(config) {
         // Anthropic API tool loop — direct HTTP calls with full tool visibility.
-        return run_anthropic_api_tool_loop(workdir, config, prompt_text, strategy).await;
+        return run_anthropic_api_tool_loop(
+            workdir,
+            config,
+            selected_model_override.clone(),
+            prompt_text,
+            strategy,
+            resolved_cli_model.clone(),
+        )
+        .await;
     } else if config.agent.command == "claude" {
         // Claude CLI keeps its own prompt/tool/settings wiring internally.
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
         let (extra_args, resume_from_args) = split_resume_arg(&config.agent.args);
         let optional_resume = optional_resume_session_id(config, resume_from_args);
-        let model = config.agent.model.clone().unwrap_or_else(|| {
-            // Prefer the routing config's default_model (from roko.toml or global config)
-            // over hardcoded Claude. This ensures ZAI_API_KEY / glm-5.1 setups work.
-            if !routing_config.agent.default_model.is_empty() {
-                routing_config.agent.default_model.clone()
-            } else {
-                "claude-sonnet-4-6".to_string()
-            }
-        });
+        let model = selected_model_override
+            .clone()
+            .or_else(|| config.agent.model.clone())
+            .unwrap_or_else(|| {
+                // Prefer the routing config's default_model (from roko.toml or global config)
+                // over hardcoded Claude. This ensures ZAI_API_KEY / glm-5.1 setups work.
+                if !routing_config.agent.default_model.is_empty() {
+                    routing_config.agent.default_model.clone()
+                } else {
+                    "claude-sonnet-4-6".to_string()
+                }
+            });
         let StrategyPromptAugmentation {
             system_prompt,
             injected_playbook_ids,
@@ -1961,14 +2001,28 @@ async fn dispatch_agent(
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
             injected_playbook_ids,
+            model_selection: resolved_cli_model.clone(),
         })
     } else if config.agent.command == "ollama" {
-        Ok(run_ollama_agentic_single(workdir, config, prompt_text, strategy).await)
+        Ok(run_ollama_agentic_single(
+            workdir,
+            config,
+            selected_model_override.clone(),
+            prompt_text,
+            strategy,
+            resolved_cli_model.clone(),
+        )
+        .await)
     } else if is_known_protocol_command(&config.agent.command) {
-        let model = config
-            .agent
-            .model
+        let model = selected_model_override
             .clone()
+            .or_else(|| {
+                config
+                    .agent
+                    .model
+                    .clone()
+                    .and_then(|model| (!model.is_empty()).then_some(model))
+            })
             .unwrap_or_else(|| config.agent.command.clone());
         let fallback_config = synthesize_known_protocol_config(&config.agent.command, &model);
 
@@ -2000,12 +2054,18 @@ async fn dispatch_agent(
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
             injected_playbook_ids: Vec::new(),
+            model_selection: resolved_cli_model.clone(),
         })
     } else {
-        let model = config
-            .agent
-            .model
+        let model = selected_model_override
             .clone()
+            .or_else(|| {
+                config
+                    .agent
+                    .model
+                    .clone()
+                    .and_then(|model| (!model.is_empty()).then_some(model))
+            })
             .unwrap_or_else(|| config.agent.command.clone());
         let fallback_config = synthesize_subprocess_config(&config.agent.command);
         let agent = spawn_agent_scoped(
@@ -2036,6 +2096,7 @@ async fn dispatch_agent(
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
             injected_playbook_ids: Vec::new(),
+            model_selection: resolved_cli_model.clone(),
         })
     }
 }
@@ -2045,8 +2106,10 @@ async fn dispatch_agent(
 async fn run_ollama_agentic_single(
     workdir: &Path,
     config: &Config,
+    model_override: Option<String>,
     prompt_text: &str,
     strategy: Option<BenchStrategy>,
+    model_selection: Option<EffectiveModelSelection>,
 ) -> DispatchOutcome {
     use parking_lot::RwLock;
     use roko_agent::dispatcher::ToolDispatcher;
@@ -2056,10 +2119,8 @@ async fn run_ollama_agentic_single(
     use std::time::Instant;
 
     let started = Instant::now();
-    let model = config
-        .agent
-        .model
-        .clone()
+    let model = model_override
+        .or_else(|| config.agent.model.clone())
         .unwrap_or_else(|| "llama3.1:8b".to_string());
 
     let base_url = config
@@ -2140,12 +2201,14 @@ async fn run_ollama_agentic_single(
             agent_result: AgentResult::ok(sig).with_usage(usage),
             external_actions,
             injected_playbook_ids,
+            model_selection,
         }
     } else {
         DispatchOutcome {
             agent_result: AgentResult::fail(sig).with_usage(usage),
             external_actions,
             injected_playbook_ids,
+            model_selection,
         }
     }
 }
@@ -2194,8 +2257,10 @@ fn resolve_anthropic_api_key(config: &Config) -> Option<String> {
 async fn run_anthropic_api_tool_loop(
     workdir: &Path,
     config: &Config,
+    model_override: Option<String>,
     prompt_text: &str,
     strategy: Option<BenchStrategy>,
+    model_selection: Option<EffectiveModelSelection>,
 ) -> Result<DispatchOutcome> {
     use parking_lot::RwLock;
     use roko_agent::dispatcher::ToolDispatcher;
@@ -2209,10 +2274,8 @@ async fn run_anthropic_api_tool_loop(
     let api_key =
         resolve_anthropic_api_key(config).ok_or_else(|| anyhow!("ANTHROPIC_API_KEY not found"))?;
 
-    let model = config
-        .agent
-        .model
-        .clone()
+    let model = model_override
+        .or_else(|| config.agent.model.clone())
         .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
 
     // Build backend + translator.
@@ -2324,12 +2387,14 @@ async fn run_anthropic_api_tool_loop(
             agent_result: AgentResult::ok(sig).with_usage(usage),
             external_actions,
             injected_playbook_ids,
+            model_selection,
         })
     } else {
         Ok(DispatchOutcome {
             agent_result: AgentResult::fail(sig).with_usage(usage),
             external_actions,
             injected_playbook_ids,
+            model_selection,
         })
     }
 }
@@ -2418,9 +2483,7 @@ fn extract_playbook_from_output_text(prompt: &str, output_text: Option<&str>) ->
     roko_learn::playbook::extract_playbook_from_episode("bench-output", prompt, &tool_calls)
 }
 
-fn extract_tool_calls_from_output_text(
-    output_text: Option<&str>,
-) -> Option<Vec<(String, String)>> {
+fn extract_tool_calls_from_output_text(output_text: Option<&str>) -> Option<Vec<(String, String)>> {
     let text = non_empty(output_text?)?;
     let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
     if !value.is_array() && !value.is_object() {
@@ -2428,9 +2491,7 @@ fn extract_tool_calls_from_output_text(
     }
 
     let mut episode = Episode::new("bench-output", "bench-output");
-    episode
-        .extra
-        .insert("tool_calls".to_string(), value);
+    episode.extra.insert("tool_calls".to_string(), value);
     let tool_calls = roko_learn::playbook::extract_tool_calls_from_episode(&episode);
     (!tool_calls.is_empty()).then_some(tool_calls)
 }
@@ -2477,6 +2538,7 @@ async fn append_episode_log(
     verdicts: &[(String, bool)],
     agent_result: &AgentResult,
     external_actions: &[ExternalAction],
+    model_selection: Option<&EffectiveModelSelection>,
 ) -> Result<()> {
     let agent_id = agent_result
         .output
@@ -2515,10 +2577,23 @@ async fn append_episode_log(
         "role".to_string(),
         serde_json::json!(normalized_role_label(&config.prompt.role)),
     );
+    let resolved_model_value = model_selection
+        .map(|selection| selection.effective_model_key.clone())
+        .unwrap_or_else(|| resolved_model(config));
     episode.extra.insert(
         "model".to_string(),
-        serde_json::json!(resolved_model(config)),
+        serde_json::json!(resolved_model_value.as_str()),
     );
+    episode.extra.insert(
+        "resolved_model".to_string(),
+        serde_json::json!(resolved_model_value.as_str()),
+    );
+    if let Some(selection) = model_selection {
+        episode.extra.insert(
+            "selection_source".to_string(),
+            serde_json::json!(selection.source.to_string()),
+        );
+    }
     episode.extra.insert(
         "provider".to_string(),
         serde_json::json!(infer_provider(config)),
@@ -3142,7 +3217,7 @@ mod tests {
             assembled: TokioMutex::new(Vec::new()),
         });
         let services = EffectServices {
-            default_model: "share-mock-model".to_string(),
+            model: "share-mock-model".to_string(),
             model_caller: Arc::new(ShareMockModelCaller),
             prompt_assembler: prompt_assembler.clone(),
             feedback_sink: Arc::new(ShareMockFeedbackSink {
