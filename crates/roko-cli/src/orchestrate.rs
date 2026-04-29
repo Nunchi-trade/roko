@@ -2671,7 +2671,7 @@ struct TaskTracker {
     artifact_valid: Option<bool>,
     /// Knowledge entry ids surfaced in the most recent task context.
     last_context_knowledge_ids: Vec<String>,
-    /// Last detailed gate verdicts emitted for this plan.
+    /// Last detailed gate verdicts emitted for this plan, with short signatures.
     last_gate_verdicts: Vec<GateVerdict>,
     /// Last runtime-facing gate verdict summaries emitted for this plan.
     last_gate_verdict_summaries: Vec<GateVerdictSummary>,
@@ -3169,8 +3169,8 @@ fn cascade_context_vec(
 
 /// Returns true for tasks whose primary output is a document or plan that
 /// requires grounding validation (R4). For these tasks, the cascade router
-/// positive observation is gated on `artifact_valid` in addition to
-/// `result.success`.
+/// positive observation is gated on `artifact_valid` plus a real gate pass in
+/// addition to `result.success`.
 fn is_artifact_producing_task(task_def: Option<&crate::task_parser::TaskDef>) -> bool {
     let Some(td) = task_def else {
         return false;
@@ -3235,6 +3235,65 @@ fn artifact_validation_allows_reward(
     tracker_artifact_valid
         .or_else(|| artifact_valid_from_output(output))
         .unwrap_or(true)
+}
+
+/// Extract a short diagnostic signature from a runtime gate verdict.
+///
+/// Stubbed gates are collapsed into a stable `stub-not-yet-implemented`
+/// marker so downstream learning filters can recognize them even after the
+/// verdict is copied into tracker state.
+fn gate_verdict_signature(verdict: &Verdict) -> Option<String> {
+    if verdict.gate.contains("stub")
+        || verdict.reason.contains("not yet implemented")
+        || verdict
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("not yet implemented"))
+    {
+        return Some("stub-not-yet-implemented".to_string());
+    }
+
+    verdict
+        .error_digest
+        .clone()
+        .or_else(|| (!verdict.reason.is_empty()).then(|| verdict.reason.clone()))
+}
+
+/// Returns true if the stored gate verdict looks like a stub or placeholder.
+fn is_stub_gate_verdict(verdict: &GateVerdict) -> bool {
+    verdict.gate.contains("stub")
+        || verdict
+            .signature
+            .as_deref()
+            .is_some_and(|signature| {
+                signature.contains("not yet implemented") || signature.contains("stub-")
+            })
+}
+
+/// Decide whether positive learning should be withheld for this success.
+fn positive_learning_withhold_reason(
+    artifact_valid: bool,
+    gate_verdicts: &[GateVerdict],
+) -> Option<String> {
+    let mut reasons = Vec::new();
+
+    if !artifact_valid {
+        reasons.push("artifact validation failed".to_string());
+    }
+
+    if gate_verdicts.is_empty() {
+        reasons.push("no real gate pass recorded".to_string());
+    } else if gate_verdicts.iter().any(is_stub_gate_verdict) {
+        reasons.push("stub gate pass does not count as real success".to_string());
+    } else if gate_verdicts.iter().any(|verdict| !verdict.passed) {
+        reasons.push("gate verdicts did not all pass".to_string());
+    }
+
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(reasons.join("; "))
+    }
 }
 
 fn gate_failure_errors(tracker: Option<&TaskTracker>) -> Vec<String> {
@@ -10765,104 +10824,117 @@ impl PlanRunner {
         }
 
         // ── Observe cascade router for bandit learning (§9) ─────────
-        if result.success && artifact_valid {
+        if result.success {
             use roko_core::TaskComplexityBand;
             use roko_core::config::schema::RewardWeights;
             use roko_learn::model_router::CONTEXT_DIM;
 
-            let model = self.effective_model();
-            if let Some(model_idx) = self.learning.cascade_router().model_index_for_slug(&model) {
-                let task_tier = task_def
-                    .as_ref()
-                    .map(|td| td.tier.as_str())
-                    .unwrap_or("focused");
-                // Keep the 17-dim LinUCB shape and reserve the trailing slots
-                // so the raw success-path observation matches the router schema.
-                let mut context_vec = vec![0.0; CONTEXT_DIM];
-                let tier_idx = match task_tier {
-                    "mechanical" => 0,
-                    "focused" => 1,
-                    "integrative" => 2,
-                    "architectural" => 3,
-                    _ => 1,
-                };
-                context_vec[tier_idx] = 1.0;
-
-                let complexity = match task_tier {
-                    "mechanical" => TaskComplexityBand::Fast,
-                    "architectural" => TaskComplexityBand::Complex,
-                    _ => TaskComplexityBand::Standard,
-                };
-                context_vec[4] = match complexity {
-                    TaskComplexityBand::Fast => 0.0,
-                    TaskComplexityBand::Complex => 1.0,
-                    TaskComplexityBand::Standard => 0.5,
-                    _ => 0.5,
-                };
-
-                let iteration = self
-                    .task_trackers
-                    .get(plan_id)
-                    .map(|tracker| f64::from(tracker.impl_round.saturating_add(1)))
-                    .unwrap_or(1.0);
-                context_vec[5] = (iteration / 10.0).min(1.0);
-                context_vec[6..10].copy_from_slice(&role_hash_features("Implementer"));
-                context_vec[10] = 0.5;
-                context_vec[11] = if self
-                    .task_trackers
-                    .get(plan_id)
-                    .is_some_and(|tracker| tracker.gate_failure_count > 0)
-                {
-                    1.0
-                } else {
-                    0.0
-                };
-                context_vec[16] = 1.0;
-
-                let normalized_cost = if self.config.budget.max_task_usd > 0.0 {
-                    (f64::from(result.usage.cost_usd) / self.config.budget.max_task_usd).min(1.0)
-                } else {
-                    0.0
-                };
-                let normalized_duration = {
-                    let timeout_ms = self.effective_task_timeout_ms(task_def.as_ref());
-                    if timeout_ms > 0 {
-                        (wall_ms as f64 / timeout_ms as f64).min(1.0)
-                    } else {
-                        0.0
-                    }
-                };
-                let reward_weights = load_roko_config(&self.workdir)
-                    .map(|cfg| cfg.routing.weights.for_tier(task_tier))
-                    .unwrap_or_else(|_| RewardWeights::default());
-
-                self.learning.cascade_router().observe_multi_objective(
-                    context_vec,
-                    model_idx,
-                    1.0,
-                    normalized_cost,
-                    normalized_duration,
-                    &reward_weights,
-                );
-                cascade_router_observed = true;
-            } else {
-                tracing::debug!(
+            let gate_verdicts = self
+                .task_trackers
+                .get(plan_id)
+                .map(|tracker| tracker.last_gate_verdicts.clone())
+                .unwrap_or_default();
+            if let Some(reason) = positive_learning_withhold_reason(artifact_valid, &gate_verdicts)
+            {
+                tracing::info!(
                     plan_id = %plan_id,
                     task_id = %task_id,
-                    model = %model,
-                    "skipping cascade observation: model not found in router arms"
+                    artifact_valid,
+                    gate_verdict_count = gate_verdicts.len(),
+                    reason = %reason,
+                    "Withholding positive learning: {reason}"
                 );
+                // Mark the episode so learning runtime does not apply a fallback
+                // router observation for the same successful turn.
+                cascade_router_observed = true;
+            } else {
+                let model = self.effective_model();
+                if let Some(model_idx) =
+                    self.learning.cascade_router().model_index_for_slug(&model)
+                {
+                    let task_tier = task_def
+                        .as_ref()
+                        .map(|td| td.tier.as_str())
+                        .unwrap_or("focused");
+                    // Keep the 17-dim LinUCB shape and reserve the trailing slots
+                    // so the raw success-path observation matches the router schema.
+                    let mut context_vec = vec![0.0; CONTEXT_DIM];
+                    let tier_idx = match task_tier {
+                        "mechanical" => 0,
+                        "focused" => 1,
+                        "integrative" => 2,
+                        "architectural" => 3,
+                        _ => 1,
+                    };
+                    context_vec[tier_idx] = 1.0;
+
+                    let complexity = match task_tier {
+                        "mechanical" => TaskComplexityBand::Fast,
+                        "architectural" => TaskComplexityBand::Complex,
+                        _ => TaskComplexityBand::Standard,
+                    };
+                    context_vec[4] = match complexity {
+                        TaskComplexityBand::Fast => 0.0,
+                        TaskComplexityBand::Complex => 1.0,
+                        TaskComplexityBand::Standard => 0.5,
+                        _ => 0.5,
+                    };
+
+                    let iteration = self
+                        .task_trackers
+                        .get(plan_id)
+                        .map(|tracker| f64::from(tracker.impl_round.saturating_add(1)))
+                        .unwrap_or(1.0);
+                    context_vec[5] = (iteration / 10.0).min(1.0);
+                    context_vec[6..10].copy_from_slice(&role_hash_features("Implementer"));
+                    context_vec[10] = 0.5;
+                    context_vec[11] = if self
+                        .task_trackers
+                        .get(plan_id)
+                        .is_some_and(|tracker| tracker.gate_failure_count > 0)
+                    {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    context_vec[16] = 1.0;
+
+                    let normalized_cost = if self.config.budget.max_task_usd > 0.0 {
+                        (f64::from(result.usage.cost_usd) / self.config.budget.max_task_usd)
+                            .min(1.0)
+                    } else {
+                        0.0
+                    };
+                    let normalized_duration = {
+                        let timeout_ms = self.effective_task_timeout_ms(task_def.as_ref());
+                        if timeout_ms > 0 {
+                            (wall_ms as f64 / timeout_ms as f64).min(1.0)
+                        } else {
+                            0.0
+                        }
+                    };
+                    let reward_weights = load_roko_config(&self.workdir)
+                        .map(|cfg| cfg.routing.weights.for_tier(task_tier))
+                        .unwrap_or_else(|_| RewardWeights::default());
+
+                    self.learning.cascade_router().observe_multi_objective(
+                        context_vec,
+                        model_idx,
+                        1.0,
+                        normalized_cost,
+                        normalized_duration,
+                        &reward_weights,
+                    );
+                    cascade_router_observed = true;
+                } else {
+                    tracing::debug!(
+                        plan_id = %plan_id,
+                        task_id = %task_id,
+                        model = %model,
+                        "skipping cascade observation: model not found in router arms"
+                    );
+                }
             }
-        } else if result.success {
-            tracing::info!(
-                plan_id = %plan_id,
-                task_id = %task_id,
-                artifact_valid = artifact_valid,
-                "withholding cascade router reward for artifact-producing task"
-            );
-            // Mark the episode so learning runtime does not apply a fallback
-            // router observation for the same successful turn.
-            cascade_router_observed = true;
         }
 
         // ── Feed outcome into lookahead router calibration ────────
@@ -16581,7 +16653,13 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_gate_verdicts = verdicts
                 .iter()
-                .map(|verdict| GateVerdict::new(verdict.gate.clone(), verdict.passed))
+                .map(|verdict| {
+                    let mut tracked = GateVerdict::new(verdict.gate.clone(), verdict.passed);
+                    if let Some(signature) = gate_verdict_signature(verdict) {
+                        tracked = tracked.with_signature(signature);
+                    }
+                    tracked
+                })
                 .collect();
             tracker.last_gate_verdict_summaries = Self::summarize_runtime_verdicts(&verdicts);
             tracker.last_gate_failure_rung = primary_failed_rung.map(Rung::as_index);
@@ -20141,6 +20219,54 @@ title = "Test task"
             Some(false),
             &tag_output
         ));
+    }
+
+    #[test]
+    fn gate_verdict_signature_marks_stub_verdicts() {
+        let verdict = Verdict::fail("stub-llm-judge", "LLM judge gate not yet implemented");
+        assert_eq!(
+            gate_verdict_signature(&verdict),
+            Some("stub-not-yet-implemented".to_string())
+        );
+    }
+
+    #[test]
+    fn stub_gate_verdict_detection_matches_gate_name_and_signature() {
+        assert!(is_stub_gate_verdict(&GateVerdict::new("stub-llm-judge", true)));
+        assert!(is_stub_gate_verdict(
+            &GateVerdict::new("judge", true).with_signature("stub-not-yet-implemented")
+        ));
+        assert!(is_stub_gate_verdict(
+            &GateVerdict::new("judge", true).with_signature("LLM judge gate not yet implemented")
+        ));
+        assert!(!is_stub_gate_verdict(&GateVerdict::new("compile", true)));
+    }
+
+    #[test]
+    fn positive_learning_withhold_reason_blocks_stub_and_missing_gates() {
+        let real_gate = GateVerdict::new("compile", true);
+        let stub_gate = GateVerdict::new("stub-llm-judge", true)
+            .with_signature("stub-not-yet-implemented");
+
+        assert_eq!(
+            positive_learning_withhold_reason(true, std::slice::from_ref(&real_gate)),
+            None
+        );
+        assert!(
+            positive_learning_withhold_reason(false, std::slice::from_ref(&real_gate))
+                .expect("artifact failure reason")
+                .contains("artifact validation failed")
+        );
+        assert!(
+            positive_learning_withhold_reason(true, std::slice::from_ref(&stub_gate))
+                .expect("stub reason")
+                .contains("stub gate pass")
+        );
+        assert!(
+            positive_learning_withhold_reason(true, &[])
+                .expect("empty gate reason")
+                .contains("no real gate pass recorded")
+        );
     }
 
     #[test]
