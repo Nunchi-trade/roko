@@ -824,7 +824,17 @@ export default function Demo() {
                 <RevealWhen visible={hasStats}>
                   <div className="demo-stats-mosaic">
                     <Mosaic columns={2}>
-                      <MosaicCell label="MODEL" value={stats.model} mono color="rose" />
+                      {/* T7.59: ModelSlot replaces plain text MODEL cell */}
+                      <MosaicCell
+                        label="MODEL"
+                        mono
+                        color="rose"
+                        value={
+                          inferenceModel !== '--'
+                            ? <ModelSlot model={inferenceModel} tier={inferenceTier} size="sm" />
+                            : '--'
+                        }
+                      />
                       <MosaicCell label="COST" value={stats.cost} mono color="bone" />
                       <MosaicCell label="TOKENS" value={stats.tokens} mono color="dream" />
                       <MosaicCell label="TIME" value={stats.time} mono color="warning" />
@@ -832,12 +842,28 @@ export default function Demo() {
                   </div>
                 </RevealWhen>
 
+                {/* T7.58: Confidence meter in default sidebar */}
+                <RevealWhen visible={learningStats.totalDecisions > 0}>
+                  <div style={{ padding: '4px 16px' }}>
+                    <ConfidenceMeter
+                      confidence={learningStats.routerConfidence}
+                      trend={learningStats.confidenceTrend}
+                      decisions={learningStats.totalDecisions}
+                      label="ROUTER CONFIDENCE"
+                      compact
+                    />
+                  </div>
+                </RevealWhen>
+
+                {/* T7.54: GateVerdictCard + T7.57: CrystallizeTransition on all-pass */}
                 <RevealWhen visible={gates.length > 0}>
-                  <Pane title="GATES" flat>
-                    <div style={{ padding: '12px 16px' }}>
-                      <GateBar gates={gates} />
-                    </div>
-                  </Pane>
+                  <CrystallizeTransition active={allGatesPass}>
+                    <Pane title="GATES" flat>
+                      <div style={{ padding: '12px 16px' }}>
+                        <GateVerdictCard gates={gateEntries} compact />
+                      </div>
+                    </Pane>
+                  </CrystallizeTransition>
                 </RevealWhen>
 
                 <RevealWhen visible={logEntries.length > 0}>

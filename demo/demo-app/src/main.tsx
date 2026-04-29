@@ -46,8 +46,8 @@ function RouteLoading() {
 }
 
 // Initialize transport layer before React render.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _cleanupTransport = bootstrapTransport();
+// Cleanup is stored at module scope for HMR teardown if needed.
+void bootstrapTransport();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
