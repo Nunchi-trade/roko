@@ -152,4 +152,4 @@ pub use task_runner::{
     ConductorBandit, CostTable, EventBus, ModelPricing, TaskResult, TaskRunner, TaskRunnerError,
 };
 pub use tool_loop::{OnTurnCallback, ToolLoopAgent, TurnProgress};
-pub use usage::Usage;
+pub use usage::{Usage, UsageObservation, UsageSource};

@@ -339,6 +339,7 @@ impl CompositeAgent {
                     output: result.output,
                     trace,
                     usage,
+                    usage_obs: Some(usage.into()),
                     success: false,
                 };
             }
@@ -348,6 +349,7 @@ impl CompositeAgent {
             output: current,
             trace,
             usage,
+            usage_obs: Some(usage.into()),
             success,
         }
     }
@@ -384,6 +386,7 @@ impl CompositeAgent {
             output,
             trace,
             usage,
+            usage_obs: Some(usage.into()),
             success,
         }
     }
@@ -442,6 +445,7 @@ impl CompositeAgent {
             output: aggregate.output,
             trace,
             usage,
+            usage_obs: Some(usage.into()),
             success: fanout.success && aggregate.success,
         }
     }

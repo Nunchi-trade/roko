@@ -694,6 +694,7 @@ fn scrub_agent_result(result: &AgentResult, policy: &ScrubPolicy) -> AgentResult
             .map(|signal| scrub_signal(signal, policy))
             .collect(),
         usage: result.usage,
+        usage_obs: result.usage_obs.clone(),
         success: result.success,
     }
 }
@@ -15351,6 +15352,7 @@ impl PlanRunner {
                     output: task_result.output,
                     trace: Vec::new(),
                     usage,
+                    usage_obs: Some(usage.into()),
                     success: task_result.gate_passed,
                 },
             )
@@ -15452,6 +15454,7 @@ impl PlanRunner {
                     output: output_signal,
                     trace: Vec::new(),
                     usage: output.total_usage,
+                    usage_obs: Some(output.total_usage.into()),
                     success,
                 },
             )
@@ -15575,6 +15578,7 @@ impl PlanRunner {
                     output: task_result.output,
                     trace: Vec::new(),
                     usage,
+                    usage_obs: Some(usage.into()),
                     success: task_result.gate_passed,
                 },
             )
@@ -19701,6 +19705,7 @@ acceptance = []
             output,
             trace: vec![trace],
             usage: roko_agent::Usage::zero(),
+            usage_obs: None,
             success: true,
         };
 

@@ -1,6 +1,6 @@
 //! The `Agent` trait and `AgentResult` type.
 
-use crate::usage::Usage;
+use crate::usage::{Usage, UsageObservation};
 use async_trait::async_trait;
 use roko_core::{Body, ContentHash, Context, Engram, EngramBuilder, Kind};
 
@@ -15,8 +15,11 @@ pub struct AgentResult {
     /// diff updates, errors). These are ordered chronologically.
     pub trace: Vec<Engram>,
 
-    /// Token usage + cost.
+    /// Legacy token usage + cost, kept for compatibility.
     pub usage: Usage,
+
+    /// Canonical usage observation with optional provenance.
+    pub usage_obs: Option<UsageObservation>,
 
     /// Whether the agent ran successfully (non-zero exit / connection errors = false).
     pub success: bool,
@@ -30,6 +33,7 @@ impl AgentResult {
             output,
             trace: Vec::new(),
             usage: Usage::zero(),
+            usage_obs: None,
             success: true,
         }
     }
@@ -41,6 +45,7 @@ impl AgentResult {
             output,
             trace: Vec::new(),
             usage: Usage::zero(),
+            usage_obs: None,
             success: false,
         }
     }
@@ -52,10 +57,19 @@ impl AgentResult {
         self
     }
 
-    /// Attach usage metrics.
+    /// Attach legacy usage metrics and mirror them into `usage_obs`.
     #[must_use]
-    pub const fn with_usage(mut self, usage: Usage) -> Self {
+    pub fn with_usage(mut self, usage: Usage) -> Self {
         self.usage = usage;
+        self.usage_obs = Some(usage.into());
+        self
+    }
+
+    /// Attach a canonical usage observation and derive the legacy counters.
+    #[must_use]
+    pub fn with_usage_obs(mut self, usage_obs: UsageObservation) -> Self {
+        self.usage = usage_obs.clone().into();
+        self.usage_obs = Some(usage_obs);
         self
     }
 
@@ -204,5 +218,6 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(r.usage.input_tokens, 100);
+        assert!(r.usage_obs.is_some());
     }
 }
