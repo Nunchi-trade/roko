@@ -38,7 +38,7 @@ export default function Bench() {
     selectedSuiteId, setSelectedSuiteId, selectedSuite,
     suites, models, history,
     activeRun, activeRunSummary, feed,
-    startRun, cancelRun,
+    startRun, cancelRun, exportRun, importRun,
     lastCompletedRun,
   } = bench;
 
@@ -392,49 +392,78 @@ export default function Bench() {
         {/* ── History Tab ── */}
         {tab === 'history' && (
           <div className="bench-history">
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+              <label className="btn btn-sm" style={{ cursor: 'pointer', fontSize: 11, padding: '4px 12px' }}>
+                Import Run
+                <input
+                  type="file"
+                  accept=".json"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) importRun(file);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+            </div>
+
             {history.length === 0 ? (
               <div className="bench-empty">
                 <p className="bench-empty-text">No runs recorded yet.</p>
               </div>
             ) : (
-              <Pane title="RUN HISTORY">
-                <div className="task-table-wrap">
-                  <table className="task-table">
-                    <thead>
-                      <tr>
-                        <th>Date</th>
-                        <th>Suite</th>
-                        <th>Model</th>
-                        <th>Strategy</th>
-                        <th>Pass Rate</th>
-                        <th>Cost</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {history.map((run) => (
-                        <tr key={run.id}>
-                          <td className="mono">{new Date(run.started_at).toLocaleDateString()}</td>
-                          <td>{run.suite_name}</td>
-                          <td className="mono">{run.config.model.split('-').slice(0, 2).join('-')}</td>
-                          <td>{run.config.strategy.replace(/_/g, ' ')}</td>
-                          <td className="mono">
-                            {run.summary ? `${(run.summary.pass_rate * 100).toFixed(0)}%` : '-'}
-                          </td>
-                          <td className="mono">
-                            {run.summary ? `$${run.summary.total_cost_usd.toFixed(3)}` : '-'}
-                          </td>
-                          <td>
-                            <span className={`status-badge status-${run.status === 'completed' ? 'pass' : run.status}`}>
-                              {run.status.toUpperCase()}
-                            </span>
-                          </td>
+              <>
+                <Pane title="RUN HISTORY">
+                  <div className="task-table-wrap">
+                    <table className="task-table">
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Suite</th>
+                          <th>Model</th>
+                          <th>Strategy</th>
+                          <th>Pass Rate</th>
+                          <th>Cost</th>
+                          <th>Status</th>
+                          <th>Actions</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </Pane>
+                      </thead>
+                      <tbody>
+                        {history.map((run) => (
+                          <tr key={run.id}>
+                            <td className="mono">{new Date(run.started_at).toLocaleDateString()}</td>
+                            <td>{run.suite_name}</td>
+                            <td className="mono">{run.config.model.split('-').slice(0, 2).join('-')}</td>
+                            <td>{run.config.strategy.replace(/_/g, ' ')}</td>
+                            <td className="mono">
+                              {run.summary ? `${(run.summary.pass_rate * 100).toFixed(0)}%` : '-'}
+                            </td>
+                            <td className="mono">
+                              {run.summary ? `$${run.summary.total_cost_usd.toFixed(3)}` : '-'}
+                            </td>
+                            <td>
+                              <span className={`status-badge status-${run.status === 'completed' ? 'pass' : run.status}`}>
+                                {run.status.toUpperCase()}
+                              </span>
+                            </td>
+                            <td>
+                              <button
+                                className="btn btn-sm"
+                                onClick={() => exportRun(run.id)}
+                                title="Download as JSON"
+                                style={{ fontSize: 11, padding: '2px 8px' }}
+                              >
+                                Export
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Pane>
+              </>
             )}
           </div>
         )}

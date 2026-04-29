@@ -270,6 +270,56 @@ export function useBench() {
     setActiveRun((prev) => prev ? { ...prev, status: 'cancelled' } : null);
   }, [activeRun, post]);
 
+  const exportRun = useCallback(async (runId: string) => {
+    let data: BenchRun | null = null;
+    try {
+      data = await get<BenchRun>(`/api/bench/export/${runId}`);
+    } catch {
+      // Fallback below.
+    }
+
+    if (!data?.id) data = history.find((r) => r.id === runId) ?? null;
+    if (!data) return;
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `bench_${runId.slice(0, 8)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [get, history]);
+
+  const importRun = useCallback((file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target?.result;
+        if (typeof text !== 'string') return;
+
+        const data = JSON.parse(text) as Partial<BenchRun>;
+        if (
+          !data ||
+          typeof data !== 'object' ||
+          !data.id ||
+          !data.suite_id ||
+          !Array.isArray(data.results)
+        ) {
+          console.warn('Invalid bench run file: missing required fields');
+          return;
+        }
+
+        const imported: BenchRun = { ...(data as BenchRun), kind: 'comparison' };
+        setHistory((prev) => prev.some((r) => r.id === imported.id) ? prev : [imported, ...prev]);
+      } catch (err) {
+        console.warn('Failed to parse bench run file:', err);
+      }
+    };
+    reader.readAsText(file);
+  }, []);
+
   const selectedSuite = suites.find((s) => s.id === selectedSuiteId);
 
   // Last completed run for results tab
@@ -320,6 +370,8 @@ export function useBench() {
     feed,
     startRun,
     cancelRun,
+    exportRun,
+    importRun,
 
     // Results shortcut
     lastCompletedRun,
