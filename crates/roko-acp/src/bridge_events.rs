@@ -7,11 +7,14 @@
 //! for provider-agnostic model calls.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use roko_agent::StreamChunk;
 use roko_agent::streaming::parse_sse_line;
+use roko_core::ContentHash;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
+use roko_learn::episode_logger::{Episode, EpisodeLogger, Usage as EpUsage};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
@@ -193,6 +196,117 @@ pub struct StreamResult {
     pub prompt_result: SessionPromptResult,
     /// Accumulated assistant text from TokenChunk events.
     pub assistant_text: String,
+}
+
+async fn append_acp_episode(
+    roko_config: &RokoConfig,
+    workdir: &Path,
+    session: &AcpSession,
+    model_key: &str,
+    prompt_text: &str,
+    workflow_config: &str,
+    is_pipeline_dispatch: bool,
+    dispatch_started: Instant,
+    stream_result: Option<&StreamResult>,
+    task_error: Option<&str>,
+    stream_error: Option<&str>,
+) {
+    let resolved = resolve_model(roko_config, model_key);
+    let elapsed = dispatch_started.elapsed();
+    let input_hash = ContentHash::of(prompt_text.as_bytes()).to_hex();
+    let output_source = stream_result
+        .map(|sr| sr.assistant_text.as_str())
+        .filter(|text| !text.is_empty())
+        .or(task_error)
+        .or(stream_error)
+        .unwrap_or("");
+    let output_hash = ContentHash::of(output_source.as_bytes()).to_hex();
+    let mode = session.config_state.agent_mode.clone();
+    let mut episode = Episode::new(mode.clone(), session.session_id.clone());
+
+    episode.kind = if is_pipeline_dispatch {
+        format!("acp-pipeline-{workflow_config}")
+    } else {
+        "acp-dispatch".to_string()
+    };
+    episode.agent_template = mode.clone();
+    episode.model = resolved.slug.clone();
+    episode.backend = resolved.provider_kind.label().to_string();
+    episode.trigger_kind = if is_pipeline_dispatch {
+        "acp_pipeline".to_string()
+    } else {
+        "acp_dispatch".to_string()
+    };
+    episode.trigger_signal_hash = input_hash.clone();
+    episode.input_signal_hash = input_hash;
+    episode.output_signal_hash = output_hash;
+    episode.episode_id = episode.id.clone();
+    episode.duration_secs = elapsed.as_secs_f64();
+    episode.usage = EpUsage {
+        wall_ms: elapsed.as_millis() as u64,
+        ..EpUsage::default()
+    };
+    episode
+        .extra
+        .insert("entry_point".to_string(), serde_json::json!("acp"));
+    episode
+        .extra
+        .insert("model".to_string(), serde_json::json!(resolved.slug));
+    episode
+        .extra
+        .insert("mode".to_string(), serde_json::json!(mode));
+    episode.extra.insert(
+        "session_id".to_string(),
+        serde_json::json!(session.session_id.clone()),
+    );
+    episode.extra.insert(
+        "routing_mode".to_string(),
+        serde_json::json!(session.config_state.routing_mode.clone()),
+    );
+    episode
+        .extra
+        .insert("workflow".to_string(), serde_json::json!(workflow_config));
+    episode.extra.insert(
+        "provider_kind".to_string(),
+        serde_json::json!(resolved.provider_kind.label()),
+    );
+
+    let success = task_error.is_none()
+        && stream_error.is_none()
+        && stream_result
+            .map(|sr| matches!(sr.prompt_result.stop_reason, StopReason::EndTurn))
+            .unwrap_or(false);
+    episode.success = success;
+
+    if !success {
+        let failure_reason = task_error
+            .or(stream_error)
+            .map(str::to_string)
+            .or_else(|| {
+                stream_result.map(|sr| match sr.prompt_result.stop_reason {
+                    StopReason::Cancelled => "cancelled".to_string(),
+                    StopReason::MaxTokens => "max_tokens".to_string(),
+                    StopReason::MaxTurnRequests => "max_turn_requests".to_string(),
+                    StopReason::Refusal => "refusal".to_string(),
+                    StopReason::EndTurn => "unknown failure".to_string(),
+                })
+            })
+            .unwrap_or_else(|| "unknown failure".to_string());
+        episode.failure_reason = Some(failure_reason);
+    }
+
+    let episodes_path = workdir.join(".roko").join("episodes.jsonl");
+    if let Some(parent) = episodes_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let logger = EpisodeLogger::new(&episodes_path);
+    if let Err(err) = logger.append(&episode).await {
+        error!(
+            session_id = %session.session_id,
+            error = %err,
+            "failed to append ACP episode"
+        );
+    }
 }
 
 fn truncate_assistant_history(text: &str) -> String {
@@ -458,7 +572,13 @@ where
     let cancel_token = session.cancel_token.clone();
     let session_id = session.session_id.clone();
     let workdir = workdir.to_path_buf();
+    let workdir_for_logging = workdir.clone();
     let roko_config = roko_config.clone();
+    let roko_config_for_logging = roko_config.clone();
+    let prompt_text_for_logging = prompt_text.clone();
+    let model_key_for_logging = model_key.clone();
+    let dispatch_started = Instant::now();
+    let is_pipeline_dispatch = pipeline_template.is_some();
 
     let clippy_enabled = session.config_state.clippy_enabled;
     let tests_enabled = session.config_state.tests_enabled;
@@ -482,7 +602,8 @@ where
 
         if let Some(template) = pipeline_template {
             if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
-                return Ok(crate::runner::run_workflow_pipeline(
+                let legacy_run = shared_run.clone();
+                let result = crate::runner::run_workflow_pipeline(
                     &session_id,
                     &prompt_text,
                     &workdir,
@@ -495,12 +616,36 @@ where
                     },
                     cancel_token,
                     event_sender,
-                    shared_run,
+                    legacy_run.clone(),
                 )
-                .await?);
+                .await;
+
+                result?;
+
+                let final_phase = legacy_run
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|run| run.pipeline.phase.clone());
+
+                return match final_phase {
+                    Some(crate::pipeline::PipelinePhase::Complete) => Ok(()),
+                    Some(crate::pipeline::PipelinePhase::Halted { reason }) => {
+                        Err(anyhow::anyhow!("workflow pipeline halted: {reason}"))
+                    }
+                    Some(crate::pipeline::PipelinePhase::Cancelled) => {
+                        Err(anyhow::anyhow!("workflow pipeline cancelled"))
+                    }
+                    Some(phase) => Err(anyhow::anyhow!(
+                        "workflow pipeline ended in unexpected phase: {phase:?}"
+                    )),
+                    None => Err(anyhow::anyhow!(
+                        "workflow pipeline completed without shared run state"
+                    )),
+                };
             }
 
-            run_with_workflow_engine(
+            let report = run_with_workflow_engine(
                 &session_id,
                 &prompt_text,
                 &workdir,
@@ -508,6 +653,14 @@ where
                 event_sender,
             )
             .await?;
+
+            if !report.success {
+                return Err(anyhow::anyhow!(
+                    "workflow engine reported unsuccessful run: {}",
+                    report.output
+                ));
+            }
+
             return Ok(());
         }
 
@@ -584,9 +737,44 @@ where
     )
     .await;
 
-    let task_result = cognitive_task.await?;
-    if let Err(e) = task_result {
-        error!(error = %e, "cognitive task failed");
+    let task_result = cognitive_task.await;
+    let (task_error, task_join_error) = match task_result {
+        Ok(Ok(())) => (None, None),
+        Ok(Err(e)) => {
+            let error_text = e.to_string();
+            error!(error = %error_text, "cognitive task failed");
+            (Some(error_text), None)
+        }
+        Err(join_error) => {
+            let error_text = join_error.to_string();
+            error!(error = %error_text, "cognitive task failed to join");
+            (
+                Some(error_text),
+                Some(BridgeEventsError::TaskJoin(join_error)),
+            )
+        }
+    };
+    let stream_error = stream_result.as_ref().err().map(|err| err.to_string());
+
+    if !is_slash_command {
+        append_acp_episode(
+            &roko_config_for_logging,
+            &workdir_for_logging,
+            session,
+            &model_key_for_logging,
+            &prompt_text_for_logging,
+            &workflow_config,
+            is_pipeline_dispatch,
+            dispatch_started,
+            stream_result.as_ref().ok(),
+            task_error.as_deref(),
+            stream_error.as_deref(),
+        )
+        .await;
+    }
+
+    if let Some(join_error) = task_join_error {
+        return Err(join_error);
     }
 
     // Push assistant turn after streaming completes (skip slash commands).
@@ -630,7 +818,7 @@ async fn run_claude_cognitive_task(
         })
         .await;
 
-    Ok(())
+    Err(anyhow::anyhow!("Claude CLI dispatch is disabled in this ACP path").into())
 }
 
 // ── OpenAI-compatible provider dispatch ──────────────────────────────
@@ -716,7 +904,7 @@ async fn run_openai_compat_cognitive_task(
                     usage: None,
                 })
                 .await;
-            return Ok(());
+            return Err(anyhow::anyhow!("failed to connect to {base_url}: {e}").into());
         }
     };
 
@@ -735,7 +923,7 @@ async fn run_openai_compat_cognitive_task(
                 usage: None,
             })
             .await;
-        return Ok(());
+        return Err(anyhow::anyhow!("provider returned {status}: {error_text}").into());
     }
 
     // Stream SSE chunks.
@@ -743,6 +931,7 @@ async fn run_openai_compat_cognitive_task(
     let mut pending = Vec::new();
     let mut total_input = 0u64;
     let mut total_output = 0u64;
+    let mut stream_error: Option<String> = None;
 
     loop {
         if cancel_token.is_cancelled() {
@@ -760,6 +949,7 @@ async fn run_openai_compat_cognitive_task(
             Ok(None) => break,
             Err(e) => {
                 warn!(session_id, error = %e, "error reading SSE chunk");
+                stream_error = Some(e.to_string());
                 break;
             }
         };
@@ -799,6 +989,7 @@ async fn run_openai_compat_cognitive_task(
                     StreamChunk::Done(_) => {}
                     StreamChunk::Error(e) => {
                         warn!(session_id, error = %e, "stream error from provider");
+                        stream_error = Some(e.to_string());
                     }
                     StreamChunk::ToolCallDelta { .. } => {
                         // Tool calls not yet surfaced via ACP for openai-compat.
@@ -837,7 +1028,11 @@ async fn run_openai_compat_cognitive_task(
         })
         .await;
 
-    Ok(())
+    if let Some(error) = stream_error {
+        Err(anyhow::anyhow!("provider stream error: {error}").into())
+    } else {
+        Ok(())
+    }
 }
 
 // ── Slash command dispatch ───────────────────────────────────────────
@@ -1722,7 +1917,8 @@ async fn resolve_at_mention(label: &str, workdir: &Path) -> anyhow::Result<Strin
             Ok(format!("--- git status ---\n{truncated}"))
         }
         _ => {
-            let (rel_path, contents) = resolve_local_file_contents(Path::new(label), workdir).await?;
+            let (rel_path, contents) =
+                resolve_local_file_contents(Path::new(label), workdir).await?;
             Ok(format!("--- {} ---\n{contents}", rel_path.display()))
         }
     }
@@ -1741,9 +1937,9 @@ async fn resolve_local_file_contents(
     let workdir_canonical = workdir
         .canonicalize()
         .unwrap_or_else(|_| workdir.to_path_buf());
-    let canonical = full_path.canonicalize().map_err(|error| {
-        anyhow::anyhow!("cannot canonicalize {}: {error}", full_path.display())
-    })?;
+    let canonical = full_path
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot canonicalize {}: {error}", full_path.display()))?;
     if !canonical.starts_with(&workdir_canonical) {
         return Err(anyhow::anyhow!(
             "path {} is outside workdir",
@@ -1768,8 +1964,7 @@ fn extract_at_mentions(text: &str) -> Vec<String> {
     while let Some(relative_at) = text[search_start..].find('@') {
         let at_index = search_start + relative_at;
         let prev = text[..at_index].chars().next_back();
-        if matches!(prev, Some(c) if c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
-        {
+        if matches!(prev, Some(c) if c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
             search_start = at_index + 1;
             continue;
         }
@@ -1779,15 +1974,22 @@ fn extract_at_mentions(text: &str) -> Vec<String> {
             let ch = text[end..].chars().next().expect("valid char boundary");
             if ch.is_whitespace()
                 || ch == '@'
-                || matches!(ch, ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '<' | '>')
+                || matches!(
+                    ch,
+                    ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '<' | '>'
+                )
             {
                 break;
             }
             end += ch.len_utf8();
         }
 
-        let label = text[at_index + 1..end]
-            .trim_matches(|ch: char| matches!(ch, ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '<' | '>' | '\'' | '"'));
+        let label = text[at_index + 1..end].trim_matches(|ch: char| {
+            matches!(
+                ch,
+                ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '<' | '>' | '\'' | '"'
+            )
+        });
         if !label.is_empty() && !label.starts_with('@') {
             mentions.push(label.to_owned());
         }
@@ -1814,10 +2016,7 @@ fn truncate_with_limit(text: &str, limit: usize, suffix: &str) -> String {
     truncated
 }
 
-fn ensure_git_output_success(
-    output: &std::process::Output,
-    command: &str,
-) -> anyhow::Result<()> {
+fn ensure_git_output_success(output: &std::process::Output, command: &str) -> anyhow::Result<()> {
     if output.status.success() {
         return Ok(());
     }
@@ -1854,6 +2053,17 @@ mod tests {
         transport::StdioTransport,
         types::{JsonRpcNotification, SessionNewParams},
     };
+
+    fn test_session(model: &str, workflow: &str) -> AcpSession {
+        let mut session = AcpSession::new(SessionNewParams {
+            session_name: None,
+            client_capabilities: None,
+            mcp_servers: Vec::new(),
+        });
+        session.config_state.model = model.to_string();
+        session.config_state.workflow = workflow.to_string();
+        session
+    }
 
     #[tokio::test]
     async fn stream_events_to_editor_emits_notifications_and_returns_completion() {
@@ -1967,6 +2177,104 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn append_acp_episode_records_single_dispatch_episode() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path();
+        let session = test_session("claude-sonnet-4-6", "none");
+        let roko_config = RokoConfig::default();
+        let stream_result = StreamResult {
+            prompt_result: SessionPromptResult {
+                stop_reason: StopReason::EndTurn,
+            },
+            assistant_text: "hello from acp".to_string(),
+        };
+        let dispatch_started = Instant::now();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+        append_acp_episode(
+            &roko_config,
+            workdir,
+            &session,
+            &session.config_state.model,
+            "trim a file",
+            &session.config_state.workflow,
+            false,
+            dispatch_started,
+            Some(&stream_result),
+            None,
+            None,
+        )
+        .await;
+
+        let episodes_path = workdir.join(".roko").join("episodes.jsonl");
+        let episodes = EpisodeLogger::read_all(&episodes_path)
+            .await
+            .expect("read episodes");
+
+        assert_eq!(episodes.len(), 1);
+        let episode = &episodes[0];
+        assert_eq!(episode.kind, "acp-dispatch");
+        assert_eq!(episode.agent_template, "code");
+        assert_eq!(episode.task_id, session.session_id);
+        assert_eq!(episode.extra.get("entry_point"), Some(&json!("acp")));
+        assert_eq!(
+            episode.extra.get("session_id"),
+            Some(&json!(episode.task_id.clone()))
+        );
+        assert_eq!(
+            episode.extra.get("routing_mode"),
+            Some(&json!("auto_override"))
+        );
+        assert!(episode.usage.wall_ms > 0);
+        assert!(episode.success);
+        assert_eq!(episode.failure_reason, None);
+    }
+
+    #[tokio::test]
+    async fn append_acp_episode_records_pipeline_kind() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path();
+        let session = test_session("claude-sonnet-4-6", "express");
+        let roko_config = RokoConfig::default();
+        let stream_result = StreamResult {
+            prompt_result: SessionPromptResult {
+                stop_reason: StopReason::EndTurn,
+            },
+            assistant_text: "pipeline complete".to_string(),
+        };
+        let dispatch_started = Instant::now();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+        append_acp_episode(
+            &roko_config,
+            workdir,
+            &session,
+            &session.config_state.model,
+            "wire ACP logging",
+            &session.config_state.workflow,
+            true,
+            dispatch_started,
+            Some(&stream_result),
+            None,
+            None,
+        )
+        .await;
+
+        let episodes_path = workdir.join(".roko").join("episodes.jsonl");
+        let episodes = EpisodeLogger::read_all(&episodes_path)
+            .await
+            .expect("read episodes");
+
+        assert_eq!(episodes.len(), 1);
+        let episode = &episodes[0];
+        assert_eq!(episode.kind, "acp-pipeline-express");
+        assert_eq!(episode.extra.get("workflow"), Some(&json!("express")));
+        assert!(episode.success);
+    }
+
     #[test]
     fn assistant_history_truncation_caps_bytes_and_preserves_boundaries() {
         let text = "é".repeat(6_000);
@@ -1999,7 +2307,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let workdir = tmp.path();
         let file_path = workdir.join("src/main.rs");
-        std::fs::create_dir_all(file_path.parent().expect("parent directory")).expect("create dirs");
+        std::fs::create_dir_all(file_path.parent().expect("parent directory"))
+            .expect("create dirs");
         std::fs::write(&file_path, "fn main() {}\n").expect("write file");
 
         let prompt = vec![
