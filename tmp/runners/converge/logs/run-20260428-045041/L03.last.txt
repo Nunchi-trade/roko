@@ -1,7 +1,0 @@
-Created [deny.toml](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/deny.toml) at the workspace root.
-
-Verification:
-- `cargo deny check 2>&1 | head -5` shows no `deny.toml` parse error. In the default environment it stops on sandboxed Cargo cache writes.
-- With `CARGO_HOME=/tmp/cargo-deny-home`, config parsing succeeds; full advisory check is blocked by installed `cargo-deny 0.18.4` not supporting a current RustSec CVSS 4.0 advisory.
-- `CARGO_HOME=/tmp/cargo-deny-home cargo deny check --hide-inclusion-graph licenses bans sources` reaches `bans ok, licenses ok, sources ok`.
-- Done probes passed: section grep count `9`, `MIT` present, `crates.io` present.

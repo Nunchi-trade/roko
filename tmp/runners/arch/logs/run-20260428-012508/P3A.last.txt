@@ -1,8 +1,0 @@
-Implemented `AcpAdapter` in [acp_adapter.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-acp/src/acp_adapter.rs) and exported it from [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-acp/src/lib.rs:8).
-
-The adapter implements `EventConsumer`, filters by `run_id`, and maps runtime agent/gate/phase/completion events into the current `CognitiveEvent` protocol shape used by `roko-acp`.
-
-Verified with:
-- `grep` done-criteria checks
-- `cargo check -p roko-acp`
-- `cargo test -p roko-acp acp_adapter` — 3 passed

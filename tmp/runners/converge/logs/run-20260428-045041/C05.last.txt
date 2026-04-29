@@ -1,8 +1,0 @@
-Implemented `print_cost_actual` in [output_format.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/output_format.rs:128), reusing `fmt_tokens`, coloring under-budget deltas green and over-budget deltas yellow, and omitting tiny deltas within `$0.0001`.
-
-Added the requested no-panic unit tests in the same file.
-
-Verification:
-- Grep done-criteria checks: passed
-- `cargo check -p roko-cli`: passed
-- `cargo test -p roko-cli --lib output_format`: failed before running the filtered tests due existing out-of-scope test-build errors in `crates/roko-cli/src/tui/app.rs` and `crates/roko-cli/src/orchestrate.rs` involving `shared_state_hub` / `StateHubSender` type mismatch.

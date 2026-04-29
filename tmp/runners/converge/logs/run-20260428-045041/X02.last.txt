@@ -1,9 +1,0 @@
-Implemented the stream parser consolidation.
-
-Changed:
-- [streaming.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/streaming.rs:37): added `UnifiedStreamEvent`, `StreamJsonParser`, `OpenAiSseParser`, `ClaudeCliParser`, and conversion helpers.
-- [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/lib.rs:146): re-exported the new public parser types and trait.
-
-Verification:
-- `cargo check -p roko-agent` passed.
-- Required grep checks each returned exactly one match, including preserved `fn parse_sse_line`.
