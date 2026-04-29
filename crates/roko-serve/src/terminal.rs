@@ -72,6 +72,9 @@ pub struct SendInputRequest {
     pub input: String,
 }
 
+const TERMINAL_DISABLED_ERROR: &str = "Terminal disabled";
+const TERMINAL_DISABLED_HINT: &str = "Set serve.terminal_enabled=true or use --enable-terminal";
+
 /// Manages all active PTY sessions.
 pub struct SessionManager {
     pub(crate) sessions: Mutex<HashMap<String, PtySession>>,
@@ -387,4 +390,32 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
             axum::routing::post(send_input),
         )
         .route("/ws/terminal/{id}", axum::routing::get(ws_terminal))
+}
+
+/// Return placeholder terminal routes that reject every request with 403.
+pub fn disabled_routes() -> axum::Router<Arc<AppState>> {
+    axum::Router::new()
+        .route(
+            "/api/terminal/sessions",
+            axum::routing::any(terminal_disabled),
+        )
+        .route(
+            "/api/terminal/sessions/{id}",
+            axum::routing::any(terminal_disabled),
+        )
+        .route(
+            "/api/terminal/sessions/{id}/input",
+            axum::routing::any(terminal_disabled),
+        )
+        .route("/ws/terminal/{id}", axum::routing::any(terminal_disabled))
+}
+
+async fn terminal_disabled(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": TERMINAL_DISABLED_ERROR,
+            "hint": TERMINAL_DISABLED_HINT,
+        })),
+    )
 }

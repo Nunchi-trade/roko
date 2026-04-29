@@ -462,6 +462,9 @@ Examples:
         /// (zero-copy, no file polling).
         #[arg(long)]
         tui: bool,
+        /// Expose the PTY terminal routes.
+        #[arg(long)]
+        enable_terminal: bool,
     },
     /// Start ACP (Agent Client Protocol) server for editor integration.
     Acp {
@@ -2072,14 +2075,30 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             port,
             workdir,
             tui,
+            enable_terminal,
         } => {
             let wd = workdir.clone().unwrap_or_else(|| resolve_workdir(cli));
             let config = resolve_config_for_workdir(cli, &wd)?;
             let repo_registry = RepoRegistry::load(&config, &wd).unwrap_or_default();
             let runtime = RokoCliRuntime::new(config, repo_registry).into_arc();
+
+            let mut roko_config = load_roko_config(&wd)?;
+            if let Some(bind) = bind.as_ref() {
+                roko_config.server.bind = bind.clone();
+            }
+            if let Some(port) = port {
+                roko_config.server.port = port;
+            }
+            if enable_terminal {
+                roko_config.serve.terminal_enabled = true;
+            }
+
+            let server_config =
+                roko_serve::ServerBuildConfig::new(wd.clone(), runtime, roko_config, bind, port);
+            let server_builder = roko_serve::ServerBuilder::new(server_config);
+
             if tui {
-                let (state, server_handle) =
-                    roko_serve::start_server_background(wd.clone(), runtime, bind, port).await?;
+                let (state, server_handle) = server_builder.start_background().await?;
                 // TODO(converge): pass server's SharedStateHub once roko-core
                 // re-exports StateHub to unify the duplicated #[path] types.
                 let tui_result =
@@ -2093,7 +2112,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 }
                 tui_result
             } else {
-                roko_serve::run_server(wd, runtime, bind, port).await?;
+                server_builder.run().await?;
                 Ok(EXIT_SUCCESS)
             }
         }
