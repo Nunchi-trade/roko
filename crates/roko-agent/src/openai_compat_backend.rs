@@ -36,6 +36,16 @@ fn shared_rate_limiter() -> Arc<ProviderRateLimiter> {
     )
 }
 
+fn compute_headers(api_key: &str, extra_headers: &[(String, String)]) -> Vec<(String, String)> {
+    let mut headers = Vec::with_capacity(2 + extra_headers.len());
+    headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    if !api_key.is_empty() {
+        headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
+    }
+    headers.extend(extra_headers.iter().cloned());
+    headers
+}
+
 /// HTTP adapter for OpenAI-compatible `/chat/completions` endpoints.
 pub struct OpenAiCompatLlmBackend {
     api_key: String,
@@ -48,6 +58,8 @@ pub struct OpenAiCompatLlmBackend {
     extra_body_params: Map<String, Value>,
     rate_limiter: Arc<ProviderRateLimiter>,
     poster: Box<dyn HttpPoster>,
+    /// Pre-computed HTTP headers (Content-Type + Auth + extras).
+    computed_headers: Vec<(String, String)>,
     /// When true, omit `session_id`, `thread_id`, and `conversation_id` from
     /// request bodies. Strict OpenAI-compatible providers (e.g. Cerebras)
     /// reject unknown top-level fields.
@@ -67,8 +79,10 @@ impl OpenAiCompatLlmBackend {
     #[must_use]
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         let model = model.into();
+        let api_key = api_key.into();
+        let computed_headers = compute_headers(&api_key, &[]);
         Self {
-            api_key: api_key.into(),
+            api_key,
             provider_id: model.clone(),
             model,
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -78,6 +92,7 @@ impl OpenAiCompatLlmBackend {
             extra_body_params: Map::new(),
             rate_limiter: shared_rate_limiter(),
             poster: Box::new(ReqwestPoster::new()),
+            computed_headers,
             skip_session_fields: false,
             disable_parallel_tool_calls: false,
             normalize_tool_call_content: false,
@@ -118,6 +133,7 @@ impl OpenAiCompatLlmBackend {
         let mut extra_headers: Vec<(String, String)> = extra_headers.into_iter().collect();
         extra_headers.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         self.extra_headers = extra_headers;
+        self.computed_headers = compute_headers(&self.api_key, &self.extra_headers);
         self
     }
 
@@ -177,16 +193,9 @@ impl OpenAiCompatLlmBackend {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
+    /// Return a clone of the cached request headers.
     fn headers(&self) -> Vec<(String, String)> {
-        let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
-        if !self.api_key.is_empty() {
-            headers.push((
-                "Authorization".to_string(),
-                format!("Bearer {}", self.api_key),
-            ));
-        }
-        headers.extend(self.extra_headers.iter().cloned());
-        headers
+        self.computed_headers.clone()
     }
 
     fn build_body(
@@ -363,7 +372,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             .poster
             .post_json(
                 &self.endpoint(),
-                &self.headers(),
+                &self.computed_headers,
                 &body_bytes,
                 self.timeout_ms,
             )
@@ -389,8 +398,8 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         let mut req = crate::provider::shared_http_client()
             .post(self.endpoint())
             .timeout(Duration::from_millis(self.timeout_ms));
-        for (key, value) in self.headers() {
-            req = req.header(key, value);
+        for (key, value) in &self.computed_headers {
+            req = req.header(key.as_str(), value.as_str());
         }
 
         let response = req.body(body_bytes).send().await.map_err(|e| {
@@ -725,6 +734,128 @@ mod tests {
         assert_eq!(requests[0].body["model"], "glm-5.1");
         assert_eq!(requests[0].body["thinking"]["type"], "enabled");
         assert_eq!(requests[0].body["tools"][0]["function"]["name"], "echo");
+    }
+
+    #[test]
+    fn headers_are_cached_and_recomputed_for_extra_headers() {
+        let backend = OpenAiCompatLlmBackend::new("test-key", "glm-5.1");
+
+        let first = backend.headers();
+        let second = backend.headers();
+
+        assert_eq!(
+            first,
+            vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Authorization".to_string(), "Bearer test-key".to_string()),
+            ]
+        );
+        assert_eq!(first, second);
+
+        let updated = backend
+            .with_extra_headers(HashMap::from([
+                ("X-B".to_string(), "2".to_string()),
+                ("X-A".to_string(), "1".to_string()),
+            ]))
+            .headers();
+
+        assert_eq!(
+            updated,
+            vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Authorization".to_string(), "Bearer test-key".to_string()),
+                ("X-A".to_string(), "1".to_string()),
+                ("X-B".to_string(), "2".to_string()),
+            ]
+        );
+    }
+
+    struct HeaderPointerPoster {
+        responses: Mutex<VecDeque<Result<String, HttpPostError>>>,
+        auth_ptrs: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl HeaderPointerPoster {
+        fn new(
+            responses: Vec<Result<String, HttpPostError>>,
+        ) -> (Self, Arc<Mutex<Vec<usize>>>) {
+            let auth_ptrs = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    responses: Mutex::new(responses.into_iter().collect()),
+                    auth_ptrs: auth_ptrs.clone(),
+                },
+                auth_ptrs,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl HttpPoster for HeaderPointerPoster {
+        async fn post_json(
+            &self,
+            _url: &str,
+            headers: &[(String, String)],
+            _body: &[u8],
+            _timeout_ms: u64,
+        ) -> Result<String, HttpPostError> {
+            let auth_ptr = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.as_ptr() as usize)
+                .expect("authorization header");
+            self.auth_ptrs
+                .lock()
+                .expect("auth ptr lock")
+                .push(auth_ptr);
+            self.responses
+                .lock()
+                .expect("responses lock")
+                .pop_front()
+                .expect("mock response queued")
+        }
+    }
+
+    #[tokio::test]
+    async fn request_path_reuses_cached_authorization_header() {
+        let (poster, auth_ptrs) = HeaderPointerPoster::new(vec![
+            Ok(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "done"
+                    }
+                }]
+            })
+            .to_string()),
+            Ok(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "done"
+                    }
+                }]
+            })
+            .to_string()),
+        ]);
+        let backend = OpenAiCompatLlmBackend::new("test-key", "glm-5.1")
+            .with_poster(Box::new(poster));
+        let messages = [serde_json::json!({ "role": "user", "content": "hi" })];
+        let tools = RenderedTools::JsonArray(serde_json::json!([]));
+        let session = SessionState::default();
+
+        backend
+            .send_turn(&messages, &tools, &session)
+            .await
+            .expect("first send turn");
+        backend
+            .send_turn(&messages, &tools, &session)
+            .await
+            .expect("second send turn");
+
+        let auth_ptrs = auth_ptrs.lock().expect("auth ptr lock");
+        assert_eq!(auth_ptrs.len(), 2);
+        assert_eq!(auth_ptrs[0], auth_ptrs[1]);
     }
 
     #[tokio::test]
