@@ -38,6 +38,19 @@ const SKIP_DIR_NAMES: [&str; 12] = [
     "venv",
 ];
 
+/// Result of processing a potential slash command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlashResult {
+    /// Command recognized and session state updated. String is user-facing message.
+    Updated(String),
+    /// Command recognized but had an error. String is the error message.
+    Error(String),
+    /// Input starts with `/` but command is not recognized.
+    Unknown(String),
+    /// Input is not a slash command.
+    NotACommand,
+}
+
 /// Unified agent session for interactive and one-shot CLI modes.
 ///
 /// Delegates to `ClaudeCliAgent` for Claude CLI turns and to provider
@@ -45,6 +58,8 @@ const SKIP_DIR_NAMES: [&str; 12] = [
 pub struct ChatAgentSession {
     /// Working directory for the agent.
     pub workdir: PathBuf,
+    /// Mutable model string used by slash commands and future turns.
+    pub model: String,
     /// Resolved model identity (provider + slug + source).
     pub model_selection: EffectiveModelSelection,
     /// Reasoning effort level: `"low"`, `"medium"`, `"high"`, `"max"`.
@@ -85,9 +100,11 @@ impl ChatAgentSession {
         let effort = config.agent.effort.clone();
         let timeout =
             (config.agent.timeout_ms > 0).then(|| Duration::from_millis(config.agent.timeout_ms));
+        let model = model_selection.effective_model_key.clone();
 
         Ok(Self {
             workdir,
+            model,
             model_selection,
             effort,
             system_prompt,
@@ -99,6 +116,108 @@ impl ChatAgentSession {
             settings_json: None,
             timeout,
         })
+    }
+
+    /// Process input that may be a slash command.
+    ///
+    /// If the input starts with `/`, parses the command and mutates session
+    /// state as needed. Regular chat text returns [`SlashResult::NotACommand`].
+    pub fn handle_slash_command(&mut self, input: &str) -> SlashResult {
+        let trimmed = input.trim();
+        if !trimmed.starts_with('/') {
+            return SlashResult::NotACommand;
+        }
+
+        let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+        let cmd = parts[0];
+        let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+        match cmd {
+            "/system" => {
+                if arg.is_empty() {
+                    let preview = preview_text(&self.system_prompt, 200);
+                    SlashResult::Updated(format!(
+                        "Current system prompt ({} chars): {}",
+                        self.system_prompt.chars().count(),
+                        preview,
+                    ))
+                } else {
+                    self.system_prompt = arg.to_string();
+                    SlashResult::Updated(format!(
+                        "System prompt set ({} chars)",
+                        arg.chars().count()
+                    ))
+                }
+            }
+            "/model" => {
+                if arg.is_empty() {
+                    SlashResult::Updated(format!("Current model: {}", self.model))
+                } else {
+                    self.model = arg.to_string();
+                    SlashResult::Updated(format!("Model set to: {arg}"))
+                }
+            }
+            "/effort" => match arg {
+                "low" | "medium" | "high" | "max" => {
+                    self.effort = arg.to_string();
+                    SlashResult::Updated(format!("Effort set to: {arg}"))
+                }
+                "" => SlashResult::Updated(format!("Current effort: {}", self.effort)),
+                other => SlashResult::Error(format!(
+                    "Invalid effort level: {other} (use low/medium/high/max)"
+                )),
+            },
+            "/reset" => {
+                self.session_id = None;
+                self.api_history.clear();
+                SlashResult::Updated("Session reset: cleared session_id and history".to_string())
+            }
+            "/tools" => {
+                if arg.is_empty() {
+                    SlashResult::Updated(format!("Current tools: {}", self.allowed_tools_csv))
+                } else {
+                    self.allowed_tools_csv = arg.to_string();
+                    SlashResult::Updated(format!("Tools set to: {arg}"))
+                }
+            }
+            "/mcp" => {
+                if arg.is_empty() {
+                    let status = match &self.mcp_config {
+                        Some(path) => format!("MCP config: {}", path.display()),
+                        None => "No MCP config".to_string(),
+                    };
+                    SlashResult::Updated(status)
+                } else {
+                    let path = PathBuf::from(arg);
+                    if path.exists() {
+                        self.mcp_config = Some(path.clone());
+                        SlashResult::Updated(format!("MCP config set to: {}", path.display()))
+                    } else {
+                        SlashResult::Error(format!("MCP config not found: {}", path.display()))
+                    }
+                }
+            }
+            _ => SlashResult::Unknown(cmd.to_string()),
+        }
+    }
+
+    #[cfg(test)]
+    /// Clone the session for test assertions.
+    fn clone_for_test(&self) -> Self {
+        Self {
+            workdir: self.workdir.clone(),
+            model: self.model.clone(),
+            model_selection: self.model_selection.clone(),
+            effort: self.effort.clone(),
+            system_prompt: self.system_prompt.clone(),
+            allowed_tools_csv: self.allowed_tools_csv.clone(),
+            mcp_config: self.mcp_config.clone(),
+            session_id: self.session_id.clone(),
+            api_history: self.api_history.clone(),
+            http_client: reqwest::Client::new(),
+            settings_json: self.settings_json.clone(),
+            timeout: self.timeout,
+        }
     }
 }
 
@@ -453,4 +572,240 @@ fn home_dir() -> Option<PathBuf> {
 fn shared_http_client() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
+fn preview_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+    preview
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use roko_core::foundation::{ChatMessage, MessageRole};
+    use tempfile::tempdir;
+
+    fn test_model_selection() -> EffectiveModelSelection {
+        EffectiveModelSelection {
+            requested_model: Some("claude-sonnet-4-6".to_string()),
+            effective_model_key: "claude-sonnet-4-6".to_string(),
+            provider_key: "claude_cli".to_string(),
+            provider_kind: "claude_cli".to_string(),
+            backend_slug: "claude-sonnet-4-6".to_string(),
+            source: crate::model_selection::SelectionSource::ProjectDefault,
+            reason: "test selection".to_string(),
+        }
+    }
+
+    /// Construct a minimal session for testing slash commands.
+    fn test_session() -> ChatAgentSession {
+        let model_selection = test_model_selection();
+        let model = model_selection.effective_model_key.clone();
+        ChatAgentSession {
+            workdir: PathBuf::from("/tmp/test"),
+            model,
+            model_selection,
+            effort: "medium".to_string(),
+            system_prompt: String::new(),
+            allowed_tools_csv: DEFAULT_CHAT_TOOLS.to_string(),
+            mcp_config: None,
+            session_id: None,
+            api_history: Vec::new(),
+            http_client: reqwest::Client::new(),
+            settings_json: None,
+            timeout: None,
+        }
+    }
+
+    #[test]
+    fn slash_system_shows_current() {
+        let mut s = test_session().clone_for_test();
+        s.system_prompt = "test prompt".to_string();
+        match s.handle_slash_command("/system") {
+            SlashResult::Updated(msg) => assert!(msg.contains("test prompt")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_system_sets_new() {
+        let mut s = test_session();
+        match s.handle_slash_command("/system You are a Rust expert") {
+            SlashResult::Updated(msg) => assert!(msg.contains("System prompt set")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+        assert_eq!(s.system_prompt, "You are a Rust expert");
+    }
+
+    #[test]
+    fn slash_system_preview_truncates_safely() {
+        let mut s = test_session();
+        s.system_prompt = "é".repeat(210);
+        match s.handle_slash_command("/system") {
+            SlashResult::Updated(msg) => {
+                assert!(msg.contains("Current system prompt"));
+                assert!(msg.ends_with("..."));
+            }
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_model_shows_current() {
+        let mut s = test_session().clone_for_test();
+        match s.handle_slash_command("/model") {
+            SlashResult::Updated(msg) => assert!(msg.contains("claude-sonnet-4-6")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_model_sets_new() {
+        let mut s = test_session();
+        match s.handle_slash_command("/model claude-opus-4-5") {
+            SlashResult::Updated(msg) => assert!(msg.contains("Model set to:")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+        assert_eq!(s.model, "claude-opus-4-5");
+    }
+
+    #[test]
+    fn slash_effort_valid_low() {
+        let mut s = test_session();
+        assert!(matches!(
+            s.handle_slash_command("/effort low"),
+            SlashResult::Updated(_)
+        ));
+        assert_eq!(s.effort, "low");
+    }
+
+    #[test]
+    fn slash_effort_valid_high() {
+        let mut s = test_session();
+        assert!(matches!(
+            s.handle_slash_command("/effort high"),
+            SlashResult::Updated(_)
+        ));
+        assert_eq!(s.effort, "high");
+    }
+
+    #[test]
+    fn slash_effort_valid_max() {
+        let mut s = test_session();
+        assert!(matches!(
+            s.handle_slash_command("/effort max"),
+            SlashResult::Updated(_)
+        ));
+        assert_eq!(s.effort, "max");
+    }
+
+    #[test]
+    fn slash_effort_shows_current_when_no_arg() {
+        let mut s = test_session().clone_for_test();
+        match s.handle_slash_command("/effort") {
+            SlashResult::Updated(msg) => assert!(msg.contains("medium")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_effort_invalid() {
+        let mut s = test_session();
+        assert!(matches!(
+            s.handle_slash_command("/effort turbo"),
+            SlashResult::Error(_)
+        ));
+        assert_eq!(s.effort, "medium");
+    }
+
+    #[test]
+    fn slash_reset_clears_session() {
+        let mut s = test_session();
+        s.session_id = Some("sess-123".to_string());
+        s.api_history.push(ChatMessage {
+            role: MessageRole::User,
+            content: "hello".to_string(),
+        });
+        match s.handle_slash_command("/reset") {
+            SlashResult::Updated(msg) => assert!(msg.contains("Session reset")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+        assert!(s.session_id.is_none());
+        assert!(s.api_history.is_empty());
+    }
+
+    #[test]
+    fn slash_tools_shows_current() {
+        let mut s = test_session().clone_for_test();
+        match s.handle_slash_command("/tools") {
+            SlashResult::Updated(msg) => assert!(msg.contains("Read")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_tools_sets_new() {
+        let mut s = test_session();
+        match s.handle_slash_command("/tools Read,Edit") {
+            SlashResult::Updated(msg) => assert!(msg.contains("Tools set to:")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+        assert_eq!(s.allowed_tools_csv, "Read,Edit");
+    }
+
+    #[test]
+    fn slash_mcp_shows_none() {
+        let mut s = test_session().clone_for_test();
+        match s.handle_slash_command("/mcp") {
+            SlashResult::Updated(msg) => assert!(msg.contains("No MCP")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_mcp_sets_new() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("mcp.json");
+        std::fs::write(&path, "{}").expect("write mcp config");
+
+        let mut s = test_session();
+        match s.handle_slash_command(&format!("/mcp {}", path.display())) {
+            SlashResult::Updated(msg) => assert!(msg.contains("MCP config set to:")),
+            other => panic!("expected Updated, got {other:?}"),
+        }
+        assert_eq!(s.mcp_config.as_deref(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn slash_mcp_invalid_path() {
+        let mut s = test_session();
+        assert!(matches!(
+            s.handle_slash_command("/mcp /nonexistent/path/mcp.json"),
+            SlashResult::Error(_)
+        ));
+        assert!(s.mcp_config.is_none());
+    }
+
+    #[test]
+    fn regular_text_returns_not_a_command() {
+        let mut s = test_session();
+        assert_eq!(
+            s.handle_slash_command("hello world"),
+            SlashResult::NotACommand
+        );
+    }
+
+    #[test]
+    fn unknown_slash_returns_unknown() {
+        let mut s = test_session();
+        assert!(matches!(
+            s.handle_slash_command("/banana"),
+            SlashResult::Unknown(_)
+        ));
+    }
 }
