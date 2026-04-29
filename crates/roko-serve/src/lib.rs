@@ -112,11 +112,14 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as AnyhowContext, Result};
+use axum::response::IntoResponse;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
 
 use roko_core::Engram;
 use roko_core::config::schema::RokoConfig;
@@ -279,7 +282,7 @@ impl ServerBuilder {
             Arc::clone(&state.relay_health),
         );
 
-        let router = routes::build_router(
+        let router = build_server_router(
             Arc::clone(&state),
             &self.config.roko_config.server.cors_origins,
             self.config.roko_config.serve.auth.clone(),
@@ -618,7 +621,7 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
     // It creates a feedback loop: EventBus → StateHub → EventBus → ∞.
     let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
     let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
-    let router = routes::build_router(
+    let router = build_server_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,
         roko_config.serve.auth.clone(),
@@ -638,6 +641,60 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
 
     info!("server stopped");
     Ok(())
+}
+
+fn build_server_router(
+    state: Arc<AppState>,
+    cors_origins: &[String],
+    api_auth: roko_core::config::ServeAuthConfig,
+) -> axum::Router<Arc<AppState>> {
+    // `routes::build_router` currently installs only the top-level SPA fallback.
+    // Reset it here so the final fallback can distinguish API/WS typos from browser routes.
+    let api_router =
+        routes::build_router(Arc::clone(&state), cors_origins, api_auth).reset_fallback();
+    let fallback_router = axum::Router::new()
+        .fallback(serve_api_or_spa_fallback)
+        .layer(TraceLayer::new_for_http())
+        .layer(build_cors_layer(cors_origins))
+        .with_state(state);
+
+    api_router.merge(fallback_router)
+}
+
+fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
+    if cors_origins.is_empty() {
+        CorsLayer::permissive()
+    } else {
+        let allowed: Vec<axum::http::HeaderValue> =
+            cors_origins.iter().filter_map(|origin| origin.parse().ok()).collect();
+        CorsLayer::new()
+            .allow_origin(allowed)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    }
+}
+
+fn api_or_ws_path_requires_json_404(path: &str) -> bool {
+    matches!(path, "/api" | "/ws" | "/roko-ws")
+        || path.starts_with("/api/")
+        || path.starts_with("/ws/")
+        || path.starts_with("/roko-ws/")
+}
+
+async fn serve_api_or_spa_fallback(req: axum::extract::Request) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    if api_or_ws_path_requires_json_404(&path) {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": "not_found",
+                "message": format!("No route matches {path}"),
+            })),
+        )
+            .into_response();
+    }
+
+    crate::embedded::serve_embedded(req).await
 }
 
 fn build_app_state(
@@ -1500,4 +1557,70 @@ async fn shutdown_signal(state: Arc<AppState>) {
     let _ = tokio::signal::ctrl_c().await;
     info!("received ctrl-c, shutting down");
     state.shutdown().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::serve_api_or_spa_fallback;
+
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode, header::CONTENT_TYPE};
+    use serde_json::Value;
+
+    async fn fallback_response(path: &str) -> axum::response::Response {
+        let request = Request::builder()
+            .uri(path)
+            .body(Body::empty())
+            .expect("build request");
+        serve_api_or_spa_fallback(request).await
+    }
+
+    #[tokio::test]
+    async fn api_paths_return_json_404() {
+        let response = fallback_response("/api/nonexistent").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .expect("content type");
+        assert!(content_type.starts_with("application/json"));
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("parse body");
+        assert_eq!(json["error"].as_str(), Some("not_found"));
+        assert_eq!(
+            json["message"].as_str(),
+            Some("No route matches /api/nonexistent")
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_paths_return_json_404() {
+        let response = fallback_response("/ws/nonexistent").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .expect("content type");
+        assert!(content_type.starts_with("application/json"));
+    }
+
+    #[tokio::test]
+    async fn non_api_paths_still_serve_spa_html() {
+        let response = fallback_response("/nonexistent-page").await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .expect("content type");
+        assert!(content_type.starts_with("text/html"));
+    }
 }
