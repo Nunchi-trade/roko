@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use async_trait::async_trait;
 use roko_core::config::schema::RokoConfig;
+use roko_learn::playbook::PlaybookStore;
 use roko_serve::bench::{BenchConfigOverrides, BenchStrategy};
 use roko_serve::runtime::{
     CliRuntime, DashboardInfo, PlanExecutionResult, PlanGenerationResult, RepoInfo, RunResult,
@@ -31,6 +32,8 @@ pub struct RokoCliRuntime {
     repo_registry: RepoRegistry,
     // Lazily bound to the workspace used by the first bench task that needs it.
     knowledge_store: OnceLock<KnowledgeStore>,
+    // Lazily bound to the workspace used by the first bench task that earns a playbook.
+    playbook_store: OnceLock<PlaybookStore>,
 }
 
 impl RokoCliRuntime {
@@ -40,6 +43,7 @@ impl RokoCliRuntime {
             config,
             repo_registry,
             knowledge_store: OnceLock::new(),
+            playbook_store: OnceLock::new(),
         }
     }
 
@@ -72,35 +76,59 @@ impl CliRuntime for RokoCliRuntime {
         }
         let report = run_once(workdir, &config, prompt, Some(overrides.strategy), None).await?;
         let success = report.overall_success();
+        let prompt_id = report.prompt_id.clone();
+        let failed_gate = if !success && !matches!(overrides.strategy, BenchStrategy::Minimal) {
+            Some(report.first_failed_gate().unwrap_or("unknown").to_string())
+        } else {
+            None
+        };
+        let output_text = report.output_text;
 
-        if !success && !matches!(overrides.strategy, BenchStrategy::Minimal) {
-            let gate_name = report.first_failed_gate().unwrap_or("unknown");
-            let gate_error = report
-                .output_text
+        if let Some(gate_name) = failed_gate.as_deref() {
+            let gate_error = output_text
                 .as_deref()
                 .and_then(non_empty_string)
                 .unwrap_or_else(|| "unknown error".to_string());
             let knowledge_store = self.knowledge_store(workdir);
 
             if let Err(err) = knowledge_store.record_anti_pattern_from_failure(
-                &report.prompt_id,
+                &prompt_id,
                 prompt,
                 gate_name,
                 gate_error.as_str(),
-                report.output_text.as_deref(),
+                output_text.as_deref(),
             ) {
                 tracing::warn!(
                     error = %err,
-                    task_id = %report.prompt_id,
+                    task_id = %prompt_id,
                     gate = gate_name,
                     "failed to save anti-pattern"
                 );
             }
         }
 
+        if success && !matches!(overrides.strategy, BenchStrategy::Minimal) {
+            match crate::run::extract_bench_playbook(workdir, prompt, output_text.as_deref()).await {
+                Ok(Some(playbook)) => {
+                    let playbook_store = self.playbook_store(workdir);
+                    if let Err(err) = playbook_store.save_or_merge(&playbook).await {
+                        tracing::warn!(
+                            error = %err,
+                            playbook_id = %playbook.id,
+                            "failed to save extracted playbook"
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to extract bench playbook");
+                }
+            }
+        }
+
         Ok(RunResult {
             success,
-            output_text: report.output_text,
+            output_text,
             usage: None,
         })
     }
@@ -194,6 +222,15 @@ impl RokoCliRuntime {
         // be initialized on demand from the workspace passed into that call.
         self.knowledge_store
             .get_or_init(|| KnowledgeStore::for_workdir(workdir))
+    }
+
+    fn playbook_store(&self, workdir: &Path) -> &PlaybookStore {
+        // `run_once_with_config` is the only bench entry point that creates
+        // playbooks, so this store can be initialized on demand from the same
+        // workspace.
+        self.playbook_store.get_or_init(|| {
+            PlaybookStore::new(workdir.join(".roko").join("learn").join("playbooks"))
+        })
     }
 }
 
