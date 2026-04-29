@@ -1,5 +1,3 @@
-import type { ProviderGroup } from '../hooks/useRokoConfig';
-
 export interface ConfigModelOption {
   key: string;
   name: string;
@@ -9,7 +7,12 @@ export interface ConfigModelOption {
 
 export type RawConfigModels = Record<string, { provider: string; slug: string }>;
 
-export function flattenProviderModels(providers: ProviderGroup[]): ConfigModelOption[] {
+interface ProviderModelGroup {
+  provider: string;
+  models: { key: string; name: string; slug: string }[];
+}
+
+export function flattenProviderModels(providers: ProviderModelGroup[]): ConfigModelOption[] {
   return providers.flatMap((provider) =>
     provider.models.map((model) => ({
       key: model.key,

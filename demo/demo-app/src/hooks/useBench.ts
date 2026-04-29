@@ -9,12 +9,9 @@ import type {
   BenchTaskResult,
   BenchRunSummary,
   BenchGateConfig,
+  BenchLearningEvent,
+  ParetoFrontierResponse,
 } from '../lib/bench-types';
-import {
-  DEMO_BENCH_SUITES,
-  DEMO_BENCH_MODELS,
-  DEMO_BENCH_RUNS,
-} from '../lib/bench-demo-data';
 
 export interface BenchConfig {
   strategy: AgentStrategy;
@@ -39,10 +36,12 @@ export interface ActiveRun {
 
 interface FeedItem {
   text: string;
-  type: 'pass' | 'fail' | 'info' | 'start';
+  type: 'pass' | 'fail' | 'info' | 'start' | 'learning';
   ts: string;
   cost?: number;
 }
+
+export type ConnectionState = 'connecting' | 'connected' | 'offline';
 
 const DEFAULT_CONFIG: BenchConfig = {
   strategy: 'full_cascade',
@@ -56,7 +55,7 @@ const DEFAULT_CONFIG: BenchConfig = {
 };
 
 export function useBench() {
-  const { get, post } = useApiWithFallback();
+  const { get, post, isLive } = useApiWithFallback();
 
   // Config
   const [config, setConfig] = useState<BenchConfig>(DEFAULT_CONFIG);
@@ -67,12 +66,22 @@ export function useBench() {
   const [models, setModels] = useState<BenchModel[]>([]);
   const [history, setHistory] = useState<BenchRun[]>([]);
 
+  // Loading states
+  const [suitesLoading, setSuitesLoading] = useState(true);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
+
   // Active run
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [activeRunLearning, setActiveRunLearning] = useState<BenchLearningEvent[]>([]);
 
   // Comparison
   const [compareIds, setCompareIds] = useState<string[]>([]);
+
+  // Pareto
+  const [pareto, setPareto] = useState<ParetoFrontierResponse | null>(null);
 
   // SSE
   const { lastEvent, events: _sseEvents, clear: clearSSE } = useBenchSSE({
@@ -83,42 +92,67 @@ export function useBench() {
   // Polling ref for active run
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Fetch suites + models + history on mount
+  // Update connection state from isLive
   useEffect(() => {
+    setConnectionState(isLive ? 'connected' : 'offline');
+  }, [isLive]);
+
+  // Fetch suites on mount
+  useEffect(() => {
+    setSuitesLoading(true);
     (async () => {
       try {
         const s = await get<BenchSuite[]>('/api/bench/suites');
         if (Array.isArray(s) && s.length > 0) setSuites(s);
-        else setSuites(DEMO_BENCH_SUITES);
+        else setSuites([]);
       } catch {
-        setSuites(DEMO_BENCH_SUITES);
+        setSuites([]);
+      } finally {
+        setSuitesLoading(false);
       }
     })();
   }, [get]);
 
+  // Fetch models on mount
   useEffect(() => {
+    setModelsLoading(true);
     (async () => {
       try {
         const m = await get<BenchModel[]>('/api/bench/models');
         if (Array.isArray(m) && m.length > 0) setModels(m);
-        else setModels(DEMO_BENCH_MODELS);
+        else setModels([]);
       } catch {
-        setModels(DEMO_BENCH_MODELS);
+        setModels([]);
+      } finally {
+        setModelsLoading(false);
       }
     })();
   }, [get]);
 
+  // Fetch history on mount
   useEffect(() => {
+    setHistoryLoading(true);
     (async () => {
       try {
         const h = await get<BenchRun[]>('/api/bench/runs');
         if (Array.isArray(h) && h.length > 0) setHistory(h);
-        else setHistory(DEMO_BENCH_RUNS);
+        else setHistory([]);
       } catch {
-        setHistory(DEMO_BENCH_RUNS);
+        setHistory([]);
+      } finally {
+        setHistoryLoading(false);
       }
     })();
   }, [get]);
+
+  // ETA computation
+  const eta = (() => {
+    if (!activeRun || activeRun.status !== 'running' || activeRun.results.length === 0) return null;
+    const elapsed = Date.now() - activeRun.startedAt;
+    const avgPerTask = elapsed / activeRun.results.length;
+    const remaining = activeRun.total - activeRun.results.length;
+    return Math.round(avgPerTask * remaining);
+  })();
 
   // Process SSE events
   useEffect(() => {
@@ -182,16 +216,34 @@ export function useBench() {
           .then((h) => { if (Array.isArray(h) && h.length > 0) setHistory(h); })
           .catch(() => {});
         break;
+
+      case 'BenchLearning':
+        setActiveRunLearning((prev) => [...prev, lastEvent as BenchLearningEvent]);
+        setFeed((f): FeedItem[] => [
+          { text: `Learning: ${(lastEvent as BenchLearningEvent).insight}`, type: 'learning' as const, ts },
+          ...f,
+        ].slice(0, 100));
+        break;
     }
   }, [lastEvent, get]);
 
   // Cleanup polling on unmount
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
+  const fetchPareto = useCallback(async () => {
+    try {
+      const data = await get<ParetoFrontierResponse>('/api/bench/pareto');
+      if (data && Array.isArray(data.points)) setPareto(data);
+    } catch {
+      setPareto(null);
+    }
+  }, [get]);
+
   const startRun = useCallback(async (model: string, provider: string) => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     clearSSE();
     setFeed([]);
+    setActiveRunLearning([]);
 
     const suite = suites.find((s) => s.id === selectedSuiteId) ?? suites[0];
     if (!suite) return;
@@ -216,7 +268,15 @@ export function useBench() {
         },
       });
 
-      const runId = res.id ?? `demo-${Date.now()}`;
+      const runId = res.id;
+      if (!runId) {
+        setFeed((f): FeedItem[] => [
+          { text: 'Server unavailable — run bench locally with `roko bench`', type: 'fail' as const, ts },
+          ...f,
+        ]);
+        return;
+      }
+
       setActiveRun({
         id: runId,
         progress: 0,
@@ -364,10 +424,18 @@ export function useBench() {
     models,
     history,
 
+    // Loading
+    suitesLoading,
+    modelsLoading,
+    historyLoading,
+    connectionState,
+
     // Active run
     activeRun,
     activeRunSummary,
+    activeRunLearning,
     feed,
+    eta,
     startRun,
     cancelRun,
     exportRun,
@@ -379,5 +447,9 @@ export function useBench() {
     // Comparison
     compareIds,
     setCompareIds,
+
+    // Pareto
+    pareto,
+    fetchPareto,
   };
 }

@@ -95,13 +95,21 @@ export async function setupWorkspace(
 
   // Fetch live config from serve process and write it into the workspace.
   // This gives the ephemeral dir all providers/models from the UI-managed config.
+  const configCopyFailureMarker = '__ROKO_CONFIG_COPY_FAILED__';
+  handle.outputBuffer = '';
   await handle.execCmd(
-    `curl -sf ${ABSOLUTE_SERVE_URL}/api/config/toml -o roko.toml || echo "warning: could not copy live roko config from ${ABSOLUTE_SERVE_URL}/api/config/toml"`,
+    `curl -sf ${ABSOLUTE_SERVE_URL}/api/config/toml -o roko.toml || echo ${configCopyFailureMarker}`,
     10000,
   );
+  const configCopyFailed = handle.outputBuffer.includes(configCopyFailureMarker);
 
   await rawSleep(200);
   handle.clearTerminal();
+  if (configCopyFailed) {
+    handle.terminal.writeln(
+      `warning: could not copy live roko config from ${ABSOLUTE_SERVE_URL}/api/config/toml`,
+    );
+  }
   return dir;
 }
 
