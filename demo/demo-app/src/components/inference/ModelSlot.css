@@ -1,0 +1,75 @@
+/* ModelSlot -- slot-machine character animation */
+
+.model-slot {
+  --tier-t0: #8ac4a0;
+  --tier-t1: var(--bone);
+  --tier-t2: var(--rose-bright);
+
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  padding: 2px 4px;
+}
+
+/* ── Sizes ── */
+
+.model-slot--sm { font-size: var(--text-xs); }
+.model-slot--md { font-size: var(--text-sm); }
+.model-slot--lg { font-size: var(--text-lg); }
+
+/* ── Tier tints ── */
+
+.model-slot--t0 {
+  color: var(--tier-t0);
+  background: rgba(138, 196, 160, 0.10);
+}
+
+.model-slot--t1 {
+  color: var(--tier-t1);
+  background: rgba(212, 200, 156, 0.10);
+}
+
+.model-slot--t2 {
+  color: var(--tier-t2);
+  background: rgba(216, 154, 178, 0.10);
+}
+
+/* ── Character reel ── */
+
+.slot-reel {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: top;
+}
+
+.slot-reel--sm { height: var(--text-xs); }
+.slot-reel--md { height: var(--text-sm); }
+.slot-reel--lg { height: var(--text-lg); }
+
+.slot-reel__inner {
+  display: block;
+  will-change: transform;
+}
+
+.slot-reel__inner--spinning {
+  animation: slot-spin var(--duration-smooth) var(--ease) forwards;
+}
+
+@keyframes slot-spin {
+  0%   { transform: translateY(0); }
+  50%  { transform: translateY(-200%); }
+  100% { transform: translateY(-100%); }
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .slot-reel__inner--spinning {
+    animation: none;
+    transform: translateY(-100%);
+  }
+}

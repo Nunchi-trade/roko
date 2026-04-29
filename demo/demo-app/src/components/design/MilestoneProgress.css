@@ -1,0 +1,198 @@
+/* MilestoneProgress -- linear bar with milestone diamond markers */
+
+.milestone-progress {
+  position: relative;
+  width: 100%;
+}
+
+/* ── Track ── */
+
+.milestone-progress__track {
+  position: relative;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--border-soft);
+  overflow: visible;
+}
+
+/* ── Fill bar ── */
+
+.milestone-progress__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--rose-dim), var(--rose-bright));
+  transition: width 600ms var(--ease);
+  position: relative;
+}
+
+/* ── Milestone markers ── */
+
+.milestone-progress__markers {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.milestone-progress__marker {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%) rotate(45deg);
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--text-ghost);
+  transition: background var(--duration-smooth), transform var(--duration-smooth),
+    box-shadow var(--duration-smooth);
+  z-index: 1;
+}
+
+.milestone-progress__marker--reached {
+  background: var(--rose-bright);
+  box-shadow: 0 0 8px var(--rose-bright);
+  animation: ms-pop 300ms var(--ease) both;
+}
+
+/* ── Labels row ── */
+
+.milestone-progress__labels {
+  position: relative;
+  width: 100%;
+  margin-top: 8px;
+}
+
+.milestone-progress__label {
+  position: absolute;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-ghost);
+  white-space: nowrap;
+  transition: color var(--duration-smooth);
+}
+
+.milestone-progress__label--reached {
+  color: var(--text-dim);
+}
+
+/* ── Milestone icon ── */
+
+.milestone-progress__marker-icon {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%) rotate(-45deg);
+  font-size: 8px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Sparkle on cross ── */
+
+.milestone-progress__sparkle {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+}
+
+.milestone-progress__sparkle--active {
+  animation: ms-sparkle 600ms var(--ease) both;
+}
+
+.milestone-progress__sparkle::before,
+.milestone-progress__sparkle::after {
+  content: '';
+  position: absolute;
+  background: var(--rose-bright);
+  border-radius: 50%;
+}
+
+.milestone-progress__sparkle--active::before {
+  width: 3px;
+  height: 3px;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  animation: ms-sparkle-dot 600ms var(--ease) both;
+}
+
+.milestone-progress__sparkle--active::after {
+  width: 2px;
+  height: 2px;
+  bottom: 0;
+  right: 0;
+  animation: ms-sparkle-dot 600ms 100ms var(--ease) both;
+}
+
+/* ── Keyframes ── */
+
+@keyframes ms-pop {
+  0% {
+    transform: translate(-50%, -50%) rotate(45deg) scale(0.6);
+    opacity: 0.5;
+  }
+  60% {
+    transform: translate(-50%, -50%) rotate(45deg) scale(1.3);
+  }
+  100% {
+    transform: translate(-50%, -50%) rotate(45deg) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes ms-sparkle {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.5);
+  }
+  50% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.5);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(2);
+  }
+}
+
+@keyframes ms-sparkle-dot {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) scale(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateX(-50%) scale(1.5);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-8px) scale(0);
+  }
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .milestone-progress__fill {
+    transition: none;
+  }
+
+  .milestone-progress__marker--reached {
+    animation: none;
+  }
+
+  .milestone-progress__sparkle--active {
+    animation: none;
+    display: none;
+  }
+
+  .milestone-progress__sparkle--active::before,
+  .milestone-progress__sparkle--active::after {
+    animation: none;
+  }
+}

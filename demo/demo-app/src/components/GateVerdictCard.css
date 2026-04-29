@@ -1,0 +1,533 @@
+/* ═══════════════════════════════════════════════════════════
+   GATE VERDICT CARD — expressive binary pass/fail visualization
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── keyframes ── */
+
+@keyframes gate-pass-flash {
+  0%   { background-color: rgba(122, 138, 120, 0.35); }
+  100% { background-color: rgba(122, 138, 120, 0.15); }
+}
+
+@keyframes gate-fail-pulse {
+  0%   { background-color: rgba(212, 138, 110, 0.12); }
+  20%  { background-color: rgba(212, 138, 110, 0.32); }
+  40%  { background-color: rgba(212, 138, 110, 0.12); }
+  60%  { background-color: rgba(212, 138, 110, 0.28); }
+  100% { background-color: rgba(212, 138, 110, 0.12); }
+}
+
+@keyframes gate-running-spin {
+  0%        { content: "\2820\280B"; }  /* braille chars encoded */
+  12.5%     { content: "\2820\2819"; }
+  25%       { content: "\2820\2839"; }
+  37.5%     { content: "\2820\2838"; }
+  50%       { content: "\2820\283C"; }
+  62.5%     { content: "\2820\2834"; }
+  75%       { content: "\2820\2826"; }
+  87.5%     { content: "\2820\2827"; }
+  100%      { content: "\2820\2807"; }
+}
+
+@keyframes gate-running-border {
+  0%   { background-position: 0 0; }
+  100% { background-position: 24px 0; }
+}
+
+@keyframes gate-running-border-v {
+  0%   { background-position: 0 0; }
+  100% { background-position: 0 24px; }
+}
+
+@keyframes gate-pass-heartbeat {
+  0%, 100% { box-shadow: 0 0 0 rgba(122, 138, 120, 0); }
+  50%      { box-shadow: 0 0 10px rgba(122, 138, 120, 0.12); }
+}
+
+@keyframes gate-all-pass-sweep {
+  0%   { left: -100%; opacity: 1; }
+  100% { left: 100%;  opacity: 0; }
+}
+
+@keyframes gate-connector-flow {
+  0%   { background-position: 0 0; }
+  100% { background-position: 16px 0; }
+}
+
+@keyframes gate-connector-flow-v {
+  0%   { background-position: 0 0; }
+  100% { background-position: 0 16px; }
+}
+
+@keyframes gate-cell-enter {
+  0%   { opacity: 0; transform: scale(0.9); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes gate-running-glow {
+  0%, 100% { box-shadow: 0 0 6px rgba(216, 168, 120, 0.10); }
+  50%      { box-shadow: 0 0 14px rgba(216, 168, 120, 0.25); }
+}
+
+/* ── container ── */
+
+.gate-verdict-card {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  font-family: var(--mono);
+  position: relative;
+  overflow: hidden;
+}
+
+.gate-verdict-card--horizontal {
+  flex-direction: row;
+  align-items: center;
+}
+
+.gate-verdict-card--vertical {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* ── all-pass celebration ── */
+
+.gate-verdict-all-pass {
+  background: linear-gradient(
+    135deg,
+    rgba(122, 138, 120, 0.06) 0%,
+    rgba(122, 138, 120, 0.02) 100%
+  );
+  border-radius: var(--radius-md);
+}
+
+.gate-verdict-all-pass::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(122, 138, 120, 0.12) 40%,
+    rgba(122, 138, 120, 0.20) 50%,
+    rgba(122, 138, 120, 0.12) 60%,
+    transparent 100%
+  );
+  animation: gate-all-pass-sweep 1s var(--ease) forwards;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ── individual gate cell ── */
+
+.gate-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  padding: var(--sp-3) var(--sp-4);
+  min-width: 96px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+  cursor: default;
+  transition: border-color var(--duration-smooth) var(--ease),
+              background-color var(--duration-smooth) var(--ease),
+              box-shadow var(--duration-smooth) var(--ease);
+  animation: gate-cell-enter 0.35s var(--ease) both;
+}
+
+.gate-cell--clickable {
+  cursor: pointer;
+}
+
+.gate-cell--clickable:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+/* ── pseudo box-drawing corners ── */
+
+.gate-cell::before,
+.gate-cell::after {
+  position: absolute;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-ghost);
+  pointer-events: none;
+  line-height: 1;
+  opacity: 0.5;
+}
+
+.gate-cell::before {
+  content: '\250C';  /* top-left corner */
+  top: 1px;
+  left: 3px;
+}
+
+.gate-cell::after {
+  content: '\2518';  /* bottom-right corner */
+  bottom: 1px;
+  right: 3px;
+}
+
+/* ── gate cell: pass ── */
+
+.gate-cell--pass {
+  background: rgba(122, 138, 120, 0.15);
+  border-color: rgba(122, 138, 120, 0.4);
+  animation: gate-cell-enter 0.35s var(--ease) both,
+             gate-pass-flash 0.4s ease-out,
+             gate-pass-heartbeat 4s ease-in-out 1s infinite;
+}
+
+.gate-cell--pass::before,
+.gate-cell--pass::after {
+  color: rgba(138, 156, 134, 0.5);
+}
+
+/* ── gate cell: fail ── */
+
+.gate-cell--fail {
+  background: rgba(212, 138, 110, 0.12);
+  border-color: rgba(212, 138, 110, 0.4);
+  box-shadow: 0 0 12px rgba(212, 138, 110, 0.3);
+  animation: gate-cell-enter 0.35s var(--ease) both,
+             gate-fail-pulse 0.6s ease-out;
+}
+
+.gate-cell--fail::before,
+.gate-cell--fail::after {
+  color: rgba(212, 138, 110, 0.5);
+}
+
+/* ── gate cell: running ── */
+
+.gate-cell--running {
+  border-color: transparent;
+  background:
+    linear-gradient(var(--glass-bg), var(--glass-bg)) padding-box,
+    repeating-linear-gradient(
+      90deg,
+      rgba(216, 168, 120, 0.4) 0,
+      rgba(216, 168, 120, 0.4) 6px,
+      transparent 6px,
+      transparent 12px
+    ) border-box;
+  border: 1.5px solid transparent;
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  animation: gate-cell-enter 0.35s var(--ease) both,
+             gate-running-glow 2s ease-in-out infinite;
+}
+
+/* marching-ants overlay for running border */
+.gate-cell--running::before {
+  content: '';
+  position: absolute;
+  inset: -1.5px;
+  border-radius: var(--radius-md);
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(216, 168, 120, 0.45) 0,
+    rgba(216, 168, 120, 0.45) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  padding: 1.5px;
+  animation: gate-running-border 1.5s linear infinite;
+  pointer-events: none;
+}
+
+.gate-cell--running::after {
+  content: '\2518';
+  /* keep the corner character */
+}
+
+/* ── gate cell: pending ── */
+
+.gate-cell--pending {
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.06);
+  border-style: dashed;
+  opacity: 0.55;
+}
+
+.gate-cell--pending::before,
+.gate-cell--pending::after {
+  opacity: 0.25;
+}
+
+/* ── gate cell: skip ── */
+
+.gate-cell--skip {
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.05);
+  opacity: 0.4;
+}
+
+/* ── gate icon ── */
+
+.gate-cell__icon {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.06em;
+}
+
+.gate-cell--pass .gate-cell__icon {
+  color: var(--success);
+  text-shadow: 0 0 10px rgba(138, 156, 134, 0.6);
+}
+
+.gate-cell--fail .gate-cell__icon {
+  color: var(--rose-bright);
+  text-shadow: 0 0 14px rgba(212, 138, 110, 0.5),
+               0 0 28px rgba(212, 138, 110, 0.2);
+}
+
+.gate-cell--running .gate-cell__icon {
+  color: var(--warning);
+}
+
+/* braille spinner -- implemented with CSS counter + steps */
+.gate-cell--running .gate-cell__spinner {
+  display: inline-block;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--warning);
+  width: 1em;
+  text-align: center;
+}
+
+.gate-cell--pending .gate-cell__icon {
+  color: var(--text-ghost);
+}
+
+.gate-cell--skip .gate-cell__icon {
+  color: var(--text-ghost);
+  text-decoration: line-through;
+}
+
+/* ── gate name ── */
+
+.gate-cell__name {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+
+.gate-cell--pass .gate-cell__name  { color: var(--success); }
+.gate-cell--fail .gate-cell__name  { color: var(--rose-bright); }
+.gate-cell--running .gate-cell__name { color: var(--warning); }
+.gate-cell--pending .gate-cell__name { color: var(--text-ghost); }
+.gate-cell--skip .gate-cell__name {
+  color: var(--text-ghost);
+  text-decoration: line-through;
+}
+
+/* ── gate duration ── */
+
+.gate-cell__duration {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  line-height: 1;
+}
+
+/* ── gate message (tooltip-like) ── */
+
+.gate-cell__message {
+  font-size: 10px;
+  color: var(--text-dim);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+/* ── connectors ── */
+
+.gate-connector {
+  flex-shrink: 0;
+  position: relative;
+}
+
+/* horizontal connectors */
+.gate-verdict-card--horizontal .gate-connector {
+  width: 20px;
+  height: 1px;
+  align-self: center;
+}
+
+.gate-verdict-card--horizontal .gate-connector::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+/* vertical connectors */
+.gate-verdict-card--vertical .gate-connector {
+  width: 1px;
+  height: 16px;
+  align-self: center;
+}
+
+.gate-verdict-card--vertical .gate-connector::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  bottom: 0;
+}
+
+/* connector states */
+.gate-connector--pending::after {
+  border: none;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--text-ghost) 0,
+    var(--text-ghost) 3px,
+    transparent 3px,
+    transparent 6px
+  );
+  opacity: 0.3;
+}
+
+.gate-verdict-card--vertical .gate-connector--pending::after {
+  background: repeating-linear-gradient(
+    180deg,
+    var(--text-ghost) 0,
+    var(--text-ghost) 3px,
+    transparent 3px,
+    transparent 6px
+  );
+}
+
+.gate-connector--pass::after {
+  background: rgba(122, 138, 120, 0.5);
+  box-shadow: 0 0 6px rgba(122, 138, 120, 0.25);
+}
+
+.gate-connector--fail::after {
+  background: rgba(212, 138, 110, 0.5);
+  box-shadow: 0 0 6px rgba(212, 138, 110, 0.2);
+}
+
+.gate-connector--running::after {
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(216, 168, 120, 0.5) 0,
+    rgba(216, 168, 120, 0.5) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+  animation: gate-connector-flow 0.8s linear infinite;
+}
+
+.gate-verdict-card--vertical .gate-connector--running::after {
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(216, 168, 120, 0.5) 0,
+    rgba(216, 168, 120, 0.5) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+  animation: gate-connector-flow-v 0.8s linear infinite;
+}
+
+/* ── compact mode ── */
+
+.gate-verdict-card--compact .gate-cell {
+  min-width: 64px;
+  padding: var(--sp-1) var(--sp-2);
+  gap: 2px;
+}
+
+.gate-verdict-card--compact .gate-cell__icon {
+  font-size: var(--text-sm);
+}
+
+.gate-verdict-card--compact .gate-cell__name {
+  font-size: 10px;
+}
+
+.gate-verdict-card--compact .gate-cell__duration,
+.gate-verdict-card--compact .gate-cell__message {
+  display: none;
+}
+
+.gate-verdict-card--compact .gate-connector {
+  width: 12px;
+}
+
+.gate-verdict-card--vertical.gate-verdict-card--compact .gate-connector {
+  width: 1px;
+  height: 8px;
+}
+
+/* box-drawing corners hidden in compact */
+.gate-verdict-card--compact .gate-cell::before,
+.gate-verdict-card--compact .gate-cell::after {
+  display: none;
+}
+
+/* ── stagger animation delays ── */
+
+.gate-cell:nth-child(1)  { animation-delay: 0ms; }
+.gate-cell:nth-child(2)  { animation-delay: 60ms; }
+.gate-cell:nth-child(3)  { animation-delay: 120ms; }
+.gate-cell:nth-child(4)  { animation-delay: 180ms; }
+.gate-cell:nth-child(5)  { animation-delay: 240ms; }
+.gate-cell:nth-child(6)  { animation-delay: 300ms; }
+.gate-cell:nth-child(7)  { animation-delay: 360ms; }
+.gate-cell:nth-child(8)  { animation-delay: 420ms; }
+.gate-cell:nth-child(9)  { animation-delay: 480ms; }
+.gate-cell:nth-child(10) { animation-delay: 540ms; }
+
+/* ── reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .gate-cell,
+  .gate-cell--pass,
+  .gate-cell--fail,
+  .gate-cell--running,
+  .gate-cell--running::before,
+  .gate-connector--running::after,
+  .gate-verdict-all-pass::after,
+  .gate-cell--running .gate-cell__spinner {
+    animation: none !important;
+  }
+
+  .gate-cell {
+    opacity: 1;
+    transform: none;
+  }
+
+  .gate-cell--pending {
+    opacity: 0.55;
+  }
+
+  .gate-cell--skip {
+    opacity: 0.4;
+  }
+}

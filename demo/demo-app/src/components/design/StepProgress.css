@@ -1,0 +1,259 @@
+/* StepProgress -- stepped progress indicator with gradient lines */
+
+.step-progress {
+  display: flex;
+  align-items: flex-start;
+}
+
+/* ── Horizontal ── */
+
+.step-progress--horizontal {
+  flex-direction: row;
+}
+
+.step-progress--horizontal .step-progress__step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  position: relative;
+}
+
+.step-progress--horizontal .step-progress__connector {
+  position: absolute;
+  top: calc(var(--circle-size) / 2);
+  left: calc(50% + var(--circle-size) / 2 + 4px);
+  right: calc(-50% + var(--circle-size) / 2 + 4px);
+  height: 2px;
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.step-progress--horizontal .step-progress__connector-fill {
+  width: 100%;
+  height: 100%;
+  transform-origin: left;
+}
+
+/* ── Vertical ── */
+
+.step-progress--vertical {
+  flex-direction: column;
+  gap: 0;
+}
+
+.step-progress--vertical .step-progress__step {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  position: relative;
+}
+
+.step-progress--vertical .step-progress__connector {
+  position: absolute;
+  left: calc(var(--circle-size) / 2 - 1px);
+  top: calc(var(--circle-size) + 4px);
+  bottom: calc(-4px);
+  width: 2px;
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.step-progress--vertical .step-progress__connector-fill {
+  width: 100%;
+  height: 100%;
+  transform-origin: top;
+}
+
+.step-progress--vertical .step-progress__content {
+  margin-left: 12px;
+  padding-bottom: 24px;
+}
+
+/* ── Size: md ── */
+
+.step-progress--md {
+  --circle-size: 18px;
+  --circle-font: 9px;
+  --label-font: 10px;
+  --detail-font: 10px;
+}
+
+/* ── Size: sm ── */
+
+.step-progress--sm {
+  --circle-size: 14px;
+  --circle-font: 7px;
+  --label-font: 9px;
+  --detail-font: 9px;
+}
+
+/* ── Circle ── */
+
+.step-progress__circle {
+  width: var(--circle-size);
+  height: var(--circle-size);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: var(--circle-font);
+  line-height: 1;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
+  transition: background var(--duration-smooth), border-color var(--duration-smooth),
+    box-shadow var(--duration-smooth);
+  border: 1.5px solid transparent;
+}
+
+/* ── Circle status variants ── */
+
+.step-progress__circle--pending {
+  background: transparent;
+  border-color: var(--text-ghost);
+  color: var(--text-ghost);
+}
+
+.step-progress__circle--active {
+  background: var(--rose-bright);
+  border-color: var(--rose-bright);
+  color: var(--bg-void);
+  box-shadow: 0 0 8px var(--rose-bright), 0 0 16px rgba(216, 154, 178, 0.3);
+  animation: step-active-pulse 2.4s ease-in-out infinite;
+}
+
+.step-progress__circle--complete {
+  background: var(--status-success);
+  border-color: var(--status-success);
+  color: var(--bg-void);
+}
+
+.step-progress__circle--failed {
+  background: var(--status-error);
+  border-color: var(--status-error);
+  color: var(--bg-void);
+}
+
+.step-progress__circle--skipped {
+  background: transparent;
+  border-color: var(--text-ghost);
+  color: var(--text-ghost);
+}
+
+/* ── Connector fill ── */
+
+.step-progress__connector-fill--pending {
+  background: var(--text-ghost);
+  opacity: 0.4;
+}
+
+.step-progress__connector-fill--drawing {
+  animation: step-line-draw 600ms var(--ease) forwards;
+}
+
+/* ── Labels ── */
+
+.step-progress__label {
+  font-family: var(--mono);
+  font-size: var(--label-font);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  color: var(--text-dim);
+  margin-top: 6px;
+  text-align: center;
+  transition: color var(--duration-smooth);
+}
+
+.step-progress--vertical .step-progress__label {
+  margin-top: 0;
+  text-align: left;
+}
+
+.step-progress__step--active .step-progress__label {
+  color: var(--rose-bright);
+}
+
+.step-progress__step--complete .step-progress__label {
+  color: var(--status-success);
+}
+
+.step-progress__step--failed .step-progress__label {
+  color: var(--status-error);
+}
+
+.step-progress__detail {
+  font-family: var(--mono);
+  font-size: var(--detail-font);
+  color: var(--text-ghost);
+  margin-top: 2px;
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+
+.step-progress--vertical .step-progress__detail {
+  text-align: left;
+}
+
+/* ── Icon slot ── */
+
+.step-progress__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  line-height: 1;
+}
+
+/* ── Keyframes ── */
+
+@keyframes step-active-pulse {
+  0%, 100% {
+    box-shadow: 0 0 8px var(--rose-bright), 0 0 16px rgba(216, 154, 178, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 12px var(--rose-bright), 0 0 24px rgba(216, 154, 178, 0.5);
+  }
+}
+
+@keyframes step-line-draw {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.step-progress--vertical .step-progress__connector-fill--drawing {
+  animation-name: step-line-draw-v;
+}
+
+@keyframes step-line-draw-v {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .step-progress__circle--active {
+    animation: none;
+  }
+
+  .step-progress__connector-fill--drawing {
+    animation: none;
+    transform: scaleX(1);
+  }
+
+  .step-progress--vertical .step-progress__connector-fill--drawing {
+    transform: scaleY(1);
+  }
+}

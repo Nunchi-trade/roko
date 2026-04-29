@@ -1,0 +1,160 @@
+/* LazyPane — connection-aware loading pane */
+
+.lazy-pane {
+  position: relative;
+  border: 1px solid var(--glass-border);
+  border-left: 2px solid var(--rose-dim);
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg);
+  overflow: hidden;
+  transition: border-color var(--duration-smooth), box-shadow var(--duration-smooth);
+}
+
+/* Border flash on state change */
+.lazy-pane--flash {
+  border-color: var(--rose-glow);
+  box-shadow: 0 0 12px rgba(232, 181, 206, 0.15);
+}
+
+/* ── Status bar ── */
+
+.lazy-pane__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+
+.lazy-pane__led {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.lazy-pane__led--connecting {
+  background: var(--status-warning);
+  box-shadow: 0 0 6px var(--status-warning);
+  animation: status-blink 1.2s ease-in-out infinite;
+}
+
+.lazy-pane__led--connected {
+  background: var(--status-active);
+  box-shadow: 0 0 6px var(--status-active);
+}
+
+.lazy-pane__led--error {
+  background: var(--status-error);
+  box-shadow: 0 0 6px var(--status-error);
+}
+
+.lazy-pane__led--disconnected {
+  background: var(--text-ghost);
+  box-shadow: none;
+}
+
+/* ── Skeleton area ── */
+
+.lazy-pane__skeleton {
+  padding: 12px;
+}
+
+/* ── Content ── */
+
+.lazy-pane__content {
+  animation: fadeIn 200ms ease-out;
+}
+
+.lazy-pane__content--dimmed {
+  opacity: 0.5;
+  pointer-events: none;
+  filter: saturate(0.4);
+}
+
+/* ── Disconnected banner ── */
+
+.lazy-pane__banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(251, 113, 133, 0.08);
+  border-bottom: 1px solid rgba(251, 113, 133, 0.15);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--status-error);
+}
+
+/* ── Error panel ── */
+
+.lazy-pane__error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 16px;
+  min-height: 120px;
+}
+
+.lazy-pane__error-icon {
+  font-size: 16px;
+  color: var(--status-error);
+  line-height: 1;
+}
+
+.lazy-pane__error-msg {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.lazy-pane__reconnect {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 6px 14px;
+  transition: border-color 150ms, color 150ms;
+}
+
+.lazy-pane__reconnect:hover {
+  border-color: var(--border-strong);
+  color: var(--text-soft);
+}
+
+.lazy-pane__countdown {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  letter-spacing: 0.06em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lazy-pane--flash {
+    transition: none;
+  }
+  .lazy-pane__content {
+    animation: none;
+  }
+  .lazy-pane__led--connecting {
+    animation: none;
+  }
+}

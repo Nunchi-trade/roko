@@ -1,0 +1,200 @@
+/* FloatingChat — draggable floating chat widget */
+
+.fchat {
+  position: fixed;
+  z-index: var(--z-floating);
+  width: 340px;
+  height: 420px;
+  display: flex;
+  flex-direction: column;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.fchat--minimized {
+  height: 40px;
+}
+
+/* ── Header ── */
+
+.fchat-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
+  min-height: 40px;
+}
+
+.fchat-header:active {
+  cursor: grabbing;
+}
+
+.fchat-agent-name {
+  flex: 1 1 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fchat-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color var(--duration-snap) ease, background var(--duration-snap) ease;
+}
+
+.fchat-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Messages ── */
+
+.fchat-messages {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.fchat--minimized .fchat-messages,
+.fchat--minimized .fchat-input-bar {
+  display: none;
+}
+
+.fchat-msg {
+  max-width: 85%;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.fchat-msg--user {
+  align-self: flex-end;
+  background: var(--rose-deep);
+  color: var(--rose-bright);
+}
+
+.fchat-msg--assistant {
+  align-self: flex-start;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--text-primary);
+}
+
+.fchat-msg-time {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-ghost);
+  margin-top: 2px;
+}
+
+/* ── Typing indicator ── */
+
+.fchat-typing {
+  align-self: flex-start;
+  display: flex;
+  gap: 4px;
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.fchat-typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+  animation: fchat-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.fchat-typing-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.fchat-typing-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes fchat-dot-pulse {
+  0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
+  30% { opacity: 1; transform: scale(1); }
+}
+
+/* ── Input bar ── */
+
+.fchat-input-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--glass-border);
+  flex-shrink: 0;
+}
+
+.fchat-input {
+  flex: 1 1 auto;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  padding: var(--sp-1) 0;
+}
+
+.fchat-input::placeholder {
+  color: var(--text-ghost);
+}
+
+.fchat-send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--rose-deep);
+  color: var(--rose-bright);
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background var(--duration-snap) ease,
+    color var(--duration-snap) ease;
+}
+
+.fchat-send:hover {
+  background: var(--rose-ember);
+  color: var(--rose-glow);
+}
+
+.fchat-send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

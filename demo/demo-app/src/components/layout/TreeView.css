@@ -1,0 +1,140 @@
+/* TreeView -- hierarchical expandable tree */
+
+.tree-view {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  letter-spacing: .04em;
+  color: var(--text-primary);
+  user-select: none;
+  outline: none;
+}
+
+/* ── single node row ── */
+
+.tree-node__row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 28px;
+  padding: 0 var(--sp-3);
+  cursor: pointer;
+  transition: background var(--duration-snap);
+}
+
+.tree-node__row:hover {
+  background: rgba(255,255,255,0.03);
+}
+
+.tree-node__row--selected {
+  background: var(--rose-deep);
+  color: var(--rose-bright);
+}
+
+.tree-node__row--selected:hover {
+  background: var(--rose-deep);
+}
+
+.tree-node__row:focus-visible {
+  outline: 1px solid var(--rose-dim);
+  outline-offset: -1px;
+}
+
+/* ── indent region ── */
+
+.tree-node__indent {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.tree-node__guide {
+  position: relative;
+  width: 1px;
+  flex-shrink: 0;
+}
+
+.tree-node__guide::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  border-left: 1px dotted var(--border-soft);
+}
+
+/* ── chevron ── */
+
+.tree-node__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 200ms var(--ease);
+}
+
+.tree-node__chevron--expanded {
+  transform: rotate(90deg);
+}
+
+.tree-node__chevron--leaf {
+  visibility: hidden;
+}
+
+/* ── status dot ── */
+
+.tree-node__status {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tree-node__status--default  { background: var(--text-ghost); }
+.tree-node__status--active   { background: var(--status-active); }
+.tree-node__status--success  { background: var(--status-success); }
+.tree-node__status--error    { background: var(--status-error); }
+.tree-node__status--warning  { background: var(--status-warning); }
+
+/* ── icon slot ── */
+
+.tree-node__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+
+/* ── label ── */
+
+.tree-node__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+  letter-spacing: .04em;
+}
+
+/* ── badge ── */
+
+.tree-node__badge {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* ── children collapse animation ── */
+
+.tree-node__children {
+  overflow: hidden;
+  transition: height 200ms var(--ease);
+}

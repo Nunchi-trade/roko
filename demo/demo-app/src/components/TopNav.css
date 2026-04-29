@@ -1,3 +1,7 @@
+/* ═══════════════════════════════════════════════════════════
+   TopNav · Terminal / Demoscene ASCII Aesthetic
+   ═══════════════════════════════════════════════════════════ */
+
 .topnav {
   top: 0;
   left: 0;
@@ -5,15 +9,14 @@
   z-index: var(--z-nav);
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 0 var(--sp-6);
   height: var(--nav-h);
   background: var(--bg-void);
   border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(16px);
   will-change: auto;
   position: sticky;
   flex-shrink: 0;
+  gap: 0;
 }
 
 /* Gradient accent line along the bottom border */
@@ -24,10 +27,19 @@
   left: 0;
   right: 0;
   height: 1px;
-  background: linear-gradient(to right, transparent 0%, var(--rose-dim) 30%, var(--rose-glow) 50%, var(--rose-dim) 70%, transparent 100%);
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    var(--rose-dim) 30%,
+    var(--rose-glow) 50%,
+    var(--rose-dim) 70%,
+    transparent 100%
+  );
   opacity: .5;
   pointer-events: none;
 }
+
+/* ── Brand ────────────────────────────────────────────── */
 
 .topnav .brand {
   display: flex;
@@ -37,159 +49,196 @@
 }
 
 .topnav .brand .mark {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--rose-glow);
-  box-shadow: 0 0 10px var(--rose-glow), 0 0 22px rgba(232, 181, 206, .5), 0 0 40px rgba(232, 181, 206, .2);
+  box-shadow:
+    0 0 8px var(--rose-glow),
+    0 0 18px rgba(232, 181, 206, .5),
+    0 0 36px rgba(232, 181, 206, .2);
   animation: mark-breathe 3s ease-in-out infinite;
 }
 
 @keyframes mark-breathe {
-  0%, 100% { box-shadow: 0 0 10px var(--rose-glow), 0 0 22px rgba(232, 181, 206, .5), 0 0 40px rgba(232, 181, 206, .2); }
-  50% { box-shadow: 0 0 14px var(--rose-glow), 0 0 32px rgba(232, 181, 206, .7), 0 0 56px rgba(232, 181, 206, .3); }
+  0%, 100% {
+    box-shadow:
+      0 0 8px var(--rose-glow),
+      0 0 18px rgba(232, 181, 206, .5),
+      0 0 36px rgba(232, 181, 206, .2);
+  }
+  50% {
+    box-shadow:
+      0 0 12px var(--rose-glow),
+      0 0 28px rgba(232, 181, 206, .7),
+      0 0 48px rgba(232, 181, 206, .3);
+  }
 }
 
-.topnav .brand b {
-  font-family: var(--display);
-  font-size: 23px;
-  font-style: italic;
-  letter-spacing: .01em;
+.topnav .brand .brand-text {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  font-style: normal;
+  letter-spacing: .18em;
   color: var(--rose-glow);
-  font-weight: 400;
+  text-transform: uppercase;
   line-height: 1;
-  text-shadow: 0 0 18px rgba(232, 181, 206, .22);
+  text-shadow: 0 0 14px rgba(232, 181, 206, .2);
 }
+
+/* ── Separator ────────────────────────────────────────── */
+
+.topnav .nav-sep {
+  font-family: var(--mono);
+  font-size: 16px;
+  color: var(--text-ghost);
+  margin: 0 var(--sp-4);
+  line-height: 1;
+  user-select: none;
+  opacity: .6;
+}
+
+/* ── Links ────────────────────────────────────────────── */
 
 .topnav .links {
   display: flex;
-  gap: 4px;
+  gap: 2px;
 }
 
-.topnav .links a {
+.topnav .links .nav-link {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  font-family: var(--sans);
-  font-size: var(--text-md);
-  letter-spacing: .03em;
-  text-transform: none;
-  color: var(--text-primary);
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--radius-md);
-  transition: color var(--duration-snap), background var(--duration-snap);
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: 2px;
+  transition:
+    color var(--duration-snap),
+    background var(--duration-snap);
   position: relative;
-  overflow: hidden;
+  text-decoration: none;
+  min-width: 0;
+  white-space: nowrap;
 }
 
-.topnav .links a .flat-icon {
-  width: 25px;
-  height: 25px;
-  border-radius: 6px;
-  opacity: .82;
+.topnav .links .nav-link .nav-link-inner {
+  display: inline-block;
+  min-width: 5.8ch;
+  text-align: center;
 }
 
-.topnav .links a.active .flat-icon,
-.topnav .links a:hover .flat-icon {
-  --icon-color: var(--rose-glow);
-  --icon-bg: rgba(220, 165, 189, .13);
-  --icon-border: rgba(220, 165, 189, .28);
-  opacity: 1;
+/* Hover: brackets appear, text brightens */
+.topnav .links .nav-link:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, .03);
 }
 
-/* Hover underline grows from center outward */
-.topnav .links a::before {
-  content: '';
-  position: absolute;
-  bottom: 2px;
-  left: 50%;
-  right: 50%;
-  height: 1px;
-  background: var(--rose-dim);
-  transition: left .25s var(--ease), right .25s var(--ease), background .25s;
+.topnav .links .nav-link:hover .nav-link-inner::before {
+  content: '[ ';
+  color: var(--text-ghost);
 }
 
-.topnav .links a:hover {
-  color: var(--text-strong);
-  background: rgba(255,255,255,.03);
+.topnav .links .nav-link:hover .nav-link-inner::after {
+  content: ' ]';
+  color: var(--text-ghost);
 }
 
-.topnav .links a:hover::before {
-  left: 12px;
-  right: 12px;
-  background: var(--rose-glow);
-}
-
-.topnav .links a.active {
+/* Active: arrow indicators, rose glow */
+.topnav .links .nav-link.active {
   color: var(--rose-glow);
+  text-shadow: 0 0 12px rgba(232, 181, 206, .25);
 }
 
-.topnav .links a.active::after {
+/* Remove hover brackets on active link — the arrows are the indicator */
+.topnav .links .nav-link.active:hover .nav-link-inner::before,
+.topnav .links .nav-link.active:hover .nav-link-inner::after {
+  content: none;
+}
+
+/* Active underline glow */
+.topnav .links .nav-link.active::after {
   content: '';
   position: absolute;
-  bottom: -1px;
+  bottom: 0;
   left: 20%;
   right: 20%;
-  height: 2px;
+  height: 1px;
   background: var(--rose-glow);
-  box-shadow: 0 0 8px rgba(220, 165, 189, .4);
-  border-radius: 1px;
+  box-shadow: 0 0 6px rgba(220, 165, 189, .4);
 }
 
-/* Status pill */
+/* ── Status Pill ──────────────────────────────────────── */
+
 .topnav .right {
   display: flex;
   align-items: center;
+  margin-left: auto;
 }
 
 .topnav .status-pill {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-family: var(--sans);
-  font-size: var(--text-sm);
-  letter-spacing: .04em;
-  text-transform: none;
-  padding: var(--sp-1) var(--sp-3);
-  border-radius: var(--radius-md);
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: .10em;
+  text-transform: uppercase;
+  padding: 3px 10px;
+  border-radius: 2px;
   border: 1px solid var(--border-soft);
+  white-space: nowrap;
 }
 
+.topnav .status-pill .status-char {
+  font-size: 8px;
+  line-height: 1;
+}
+
+/* Live state */
 .topnav .status-pill.live {
   color: var(--success);
   border-color: rgba(122, 138, 120, .25);
   animation: pill-glow 2.5s ease-in-out infinite;
 }
 
-@keyframes pill-glow {
-  0%, 100% { box-shadow: 0 0 0 rgba(138, 156, 134, 0); background: transparent; }
-  50% { box-shadow: 0 0 10px rgba(138, 156, 134, .15), inset 0 0 8px rgba(138, 156, 134, .05); background: rgba(138, 156, 134, .04); }
-}
-
-.topnav .status-pill.live .status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--success);
-  box-shadow: 0 0 6px rgba(122, 138, 120, .6);
+.topnav .status-pill.live .status-char {
+  text-shadow: 0 0 4px rgba(138, 156, 134, .8);
   animation: pulse-dot 2.4s ease-in-out infinite;
 }
 
+@keyframes pill-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 rgba(138, 156, 134, 0);
+    background: transparent;
+  }
+  50% {
+    box-shadow:
+      0 0 8px rgba(138, 156, 134, .12),
+      inset 0 0 6px rgba(138, 156, 134, .04);
+    background: rgba(138, 156, 134, .03);
+  }
+}
+
+/* Demo/seed state */
 .topnav .status-pill.demo {
   color: var(--warning);
   border-color: rgba(200, 154, 104, .2);
 }
 
-.topnav .status-pill.demo .status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warning);
-  box-shadow: 0 0 6px rgba(200, 154, 104, .4);
+.topnav .status-pill.demo .status-char {
+  text-shadow: 0 0 3px rgba(200, 154, 104, .5);
 }
 
-/* pulse-dot → shared: src/styles/animations.css */
+/* ── Responsive ───────────────────────────────────────── */
 
 @media (max-width: 900px) {
-  .topnav .links { display: none }
+  .topnav .links { display: none; }
+  .topnav .nav-sep { display: none; }
 }

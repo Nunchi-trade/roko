@@ -1,0 +1,203 @@
+/* VerticalTimeline -- vertical timeline with cards and status rail */
+
+.vtimeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.vtimeline--scrollable {
+  overflow-y: auto;
+  position: relative;
+}
+
+/* Gradient fade at bottom when scrollable */
+.vtimeline--scrollable::after {
+  content: '';
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  background: linear-gradient(to top, var(--bg-void), transparent);
+  pointer-events: none;
+  flex-shrink: 0;
+}
+
+/* ── Rail ── */
+
+.vtimeline__rail {
+  position: absolute;
+  left: 54px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+
+/* ── Entry ── */
+
+.vtimeline__entry {
+  display: flex;
+  align-items: flex-start;
+  position: relative;
+  opacity: 0;
+  animation: vtl-fade-in 300ms var(--ease) forwards;
+}
+
+/* Stagger: each entry delays by 80ms more */
+.vtimeline__entry:nth-child(1) { animation-delay: 0ms; }
+.vtimeline__entry:nth-child(2) { animation-delay: 80ms; }
+.vtimeline__entry:nth-child(3) { animation-delay: 160ms; }
+.vtimeline__entry:nth-child(4) { animation-delay: 240ms; }
+.vtimeline__entry:nth-child(5) { animation-delay: 320ms; }
+.vtimeline__entry:nth-child(6) { animation-delay: 400ms; }
+.vtimeline__entry:nth-child(7) { animation-delay: 480ms; }
+.vtimeline__entry:nth-child(8) { animation-delay: 560ms; }
+.vtimeline__entry:nth-child(9) { animation-delay: 640ms; }
+.vtimeline__entry:nth-child(10) { animation-delay: 720ms; }
+
+/* Beyond 10, no extra delay */
+.vtimeline__entry:nth-child(n+11) {
+  animation-delay: 800ms;
+}
+
+/* ── Timestamp ── */
+
+.vtimeline__timestamp {
+  width: 48px;
+  flex-shrink: 0;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-ghost);
+  line-height: 1.2;
+  padding-top: 8px;
+  padding-right: 8px;
+}
+
+/* ── Node ── */
+
+.vtimeline__node {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 10px;
+  position: relative;
+  z-index: 1;
+  transition: background var(--duration-smooth), box-shadow var(--duration-smooth);
+}
+
+.vtimeline__node--success {
+  background: var(--status-success);
+  box-shadow: 0 0 6px var(--status-success);
+}
+
+.vtimeline__node--error {
+  background: var(--status-error);
+  box-shadow: 0 0 6px var(--status-error);
+}
+
+.vtimeline__node--warning {
+  background: var(--status-warning);
+  box-shadow: 0 0 6px var(--status-warning);
+}
+
+.vtimeline__node--info {
+  background: var(--rose-bright);
+  box-shadow: 0 0 6px var(--rose-dim);
+}
+
+.vtimeline__node--pending {
+  background: var(--text-ghost);
+  animation: pulse-dot 2.4s ease-in-out infinite;
+}
+
+/* Rail widens at active nodes */
+.vtimeline__node--info::before,
+.vtimeline__node--pending::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 8px;
+  width: 4px;
+  height: 20px;
+  background: var(--rose-dim);
+  border-radius: 2px;
+  opacity: 0.5;
+}
+
+/* ── Card ── */
+
+.vtimeline__card {
+  flex: 1;
+  margin-left: 12px;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--duration-smooth), box-shadow var(--duration-smooth);
+}
+
+.vtimeline__card:hover {
+  border-color: rgba(204, 144, 168, 0.18);
+  box-shadow: var(--glow-rose-soft);
+}
+
+.vtimeline__card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.vtimeline__card-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.vtimeline__card-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.vtimeline__card-description {
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-soft);
+}
+
+/* ── Keyframes ── */
+
+@keyframes vtl-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .vtimeline__entry {
+    animation: none;
+    opacity: 1;
+  }
+
+  .vtimeline__node--pending {
+    animation: none;
+  }
+}

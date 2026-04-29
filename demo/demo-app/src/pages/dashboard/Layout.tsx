@@ -17,13 +17,12 @@ const shellStyle: CSSProperties = {
   flexDirection: 'column',
   flex: 1,
   minHeight: 0,
-  overflow: 'hidden',
 };
 
 const navStyle: CSSProperties = {
   display: 'flex',
   gap: 4,
-  padding: 'var(--sp-1) var(--sp-6)',
+  padding: 'var(--sp-1) var(--sp-4)',
   borderBottom: '1px solid var(--glass-2-border)',
   background: 'rgba(8, 8, 12, 0.7)',
   backdropFilter: 'blur(8px)',
@@ -56,7 +55,7 @@ const activeLinkStyle: CSSProperties = {
 const bodyStyle: CSSProperties = {
   flex: 1,
   minHeight: 0,
-  padding: 'var(--sp-3) var(--sp-6) var(--sp-5)',
+  padding: 'var(--sp-2) var(--sp-4) var(--sp-4)',
   overflowY: 'auto',
 };
 

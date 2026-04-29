@@ -820,13 +820,14 @@ function TerminalPaneWithHandle({
   }, [handleRef, handle, onStatusChange, paneIndex, status]);
 
   return (
-    <div className="demo-term-pane">
+    <div className={`demo-term-pane demo-term-${status}`}>
       <div className="demo-term-head">
         <span className={`demo-term-dot ${status}`} />
-        <span className="demo-term-label">{label}</span>
+        <span className="demo-term-label">{'\u2308'} {label} {'\u230B'}</span>
         <span className="demo-term-status">{status}</span>
       </div>
       <div className="demo-term-body" ref={attach} />
+      <div className="demo-term-vignette" />
     </div>
   );
 }

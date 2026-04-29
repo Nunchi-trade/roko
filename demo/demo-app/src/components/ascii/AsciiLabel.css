@@ -1,0 +1,77 @@
+/* AsciiLabel ── institutional mono label with optional frame */
+
+.ascii-label {
+  font-family: var(--mono);
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  line-height: 1;
+}
+
+/* ── sizes ── */
+.ascii-label--xs { font-size: 10px; letter-spacing: 0.14em; }
+.ascii-label--sm { font-size: 11px; letter-spacing: 0.12em; }
+.ascii-label--md { font-size: 12px; letter-spacing: 0.10em; }
+.ascii-label--lg { font-size: 14px; letter-spacing: 0.08em; }
+
+/* ── frame delimiters ── */
+.ascii-label__frame {
+  color: var(--text-ghost);
+}
+
+.ascii-label__frame--left {
+  margin-right: 0.4em;
+}
+
+.ascii-label__frame--right {
+  margin-left: 0.4em;
+}
+
+/* ── glow ── */
+.ascii-label--glow {
+  text-shadow: 0 0 8px currentColor;
+}
+
+.ascii-label--glow .ascii-label__frame {
+  text-shadow: none;
+}
+
+/* ── typewriter animation ── */
+.ascii-label__typewriter {
+  display: inline;
+  overflow: hidden;
+}
+
+.ascii-label__typewriter-char {
+  opacity: 0;
+  animation: asciiCharAppear 0.05s forwards;
+}
+
+.ascii-label__cursor {
+  display: inline-block;
+  width: 0.6em;
+  color: var(--rose-dim);
+  animation: asciiCursorBlink 0.6s step-end infinite;
+}
+
+@keyframes asciiCharAppear {
+  to { opacity: 1; }
+}
+
+@keyframes asciiCursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ── flicker animation ── */
+.ascii-label__flicker-char {
+  display: inline;
+}
+
+.ascii-label__flicker-char--glitching {
+  color: var(--text-ghost);
+}

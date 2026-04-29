@@ -6,17 +6,19 @@
 .settings-page {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
-  padding: 2rem;
-  gap: 1.5rem;
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-4) var(--sp-6);
+  gap: var(--sp-3);
   max-width: 960px;
   margin: 0 auto;
+  width: 100%;
 }
 
 .settings-header {
   display: flex;
   align-items: baseline;
-  gap: 1rem;
+  gap: var(--sp-3);
 }
 
 .settings-title {
@@ -55,8 +57,8 @@
 .settings-section {
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1.25rem;
+  border-radius: var(--radius-lg);
+  padding: var(--sp-3);
 }
 
 .settings-section h2 {
@@ -114,8 +116,8 @@
 .settings-field {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
 }
 
 .settings-field:last-child {
@@ -154,8 +156,8 @@
 
 .settings-actions {
   display: flex;
-  gap: 0.75rem;
-  margin-top: 0.75rem;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
 }
 
 .settings-actions button {
@@ -201,4 +203,26 @@
   font-size: 1rem;
   font-style: italic;
   padding: 0.5rem 0;
+}
+
+/* ── Offline state ── */
+
+.settings-offline .settings-section,
+.settings-offline .settings-actions {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.settings-offline-banner {
+  padding: 0.75rem 1rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-lg);
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.settings-offline-banner code {
+  font-family: var(--mono);
+  color: var(--rose);
 }

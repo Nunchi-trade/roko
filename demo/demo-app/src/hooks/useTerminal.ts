@@ -74,9 +74,22 @@ export function useTerminal(sessionId?: string) {
     const term = new Terminal({
       theme: rosedustTheme,
       fontFamily: "'JetBrainsMono Nerd Font Mono', 'JetBrains Mono', 'SF Mono', monospace",
-      fontSize: 13,
+      fontSize: 12,
+      lineHeight: 1.1,
+      letterSpacing: 0,
       cursorBlink: true,
+      cursorStyle: 'bar',
+      cursorWidth: 2,
+      cursorInactiveStyle: 'outline',
+      scrollback: 5000,
+      drawBoldTextInBrightColors: false,
+      fontWeight: '400',
+      fontWeightBold: '600',
+      minimumContrastRatio: 1,
+      smoothScrollDuration: 80,
       allowProposedApi: true,
+      overviewRulerWidth: 8,
+      customGlyphs: true,
     });
 
     // Core addons
@@ -107,7 +120,18 @@ export function useTerminal(sessionId?: string) {
       // DOM renderer fallback — fine for low-end GPUs
     }
 
-    requestAnimationFrame(() => { if (!disposed) { try { fitAddon.fit(); } catch { /* disposed */ } } });
+    // Push cursor to bottom so text anchors at the bottom
+    requestAnimationFrame(() => {
+      if (!disposed) {
+        try {
+          fitAddon.fit();
+          const rows = term.rows;
+          if (rows > 1) {
+            term.write('\n'.repeat(rows - 1));
+          }
+        } catch { /* disposed */ }
+      }
+    });
 
     // Internal output buffer, capped high enough for artifact scraping.
     let outBuf = '';

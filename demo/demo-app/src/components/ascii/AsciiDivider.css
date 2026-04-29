@@ -1,0 +1,28 @@
+/* AsciiDivider ── horizontal rule with box-drawing characters */
+
+.ascii-divider {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  font-family: var(--mono);
+  color: var(--text-ghost);
+  user-select: none;
+  line-height: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ascii-divider__segment {
+  flex: 1;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.ascii-divider__label {
+  flex: none;
+  padding: 0 0.8em;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}

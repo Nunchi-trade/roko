@@ -1,0 +1,113 @@
+/* CrystallizeTransition -- achievement celebration particle overlay */
+
+.crystallize-transition {
+  position: relative;
+}
+
+/* ── Canvas overlay ── */
+
+.crystallize-transition__canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: var(--z-floating);
+  border-radius: inherit;
+}
+
+/* ── Prismatic shimmer overlay ── */
+
+.crystallize-transition__shimmer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: calc(var(--z-floating) - 1);
+  border-radius: inherit;
+  opacity: 0;
+  background: linear-gradient(
+    135deg,
+    rgba(216, 154, 178, 0.15) 0%,
+    rgba(228, 216, 176, 0.1) 25%,
+    rgba(164, 164, 200, 0.12) 50%,
+    rgba(216, 154, 178, 0.1) 75%,
+    rgba(228, 216, 176, 0.15) 100%
+  );
+  background-size: 300% 300%;
+}
+
+.crystallize-transition__shimmer--active {
+  animation: crystallize-shimmer 600ms ease-out forwards;
+}
+
+@keyframes crystallize-shimmer {
+  0% {
+    opacity: 0.8;
+    background-position: 0% 0%;
+  }
+  50% {
+    opacity: 0.5;
+    background-position: 100% 100%;
+  }
+  100% {
+    opacity: 0;
+    background-position: 50% 50%;
+  }
+}
+
+/* ── Ring pulse ── */
+
+.crystallize-transition__ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px solid rgba(216, 154, 178, 0.5);
+  pointer-events: none;
+  z-index: calc(var(--z-floating) - 1);
+  opacity: 0;
+}
+
+.crystallize-transition__ring--active {
+  animation: crystallize-ring 800ms ease-out forwards;
+}
+
+@keyframes crystallize-ring {
+  0% {
+    width: 0;
+    height: 0;
+    opacity: 0.8;
+    border-width: 2px;
+    border-color: rgba(216, 154, 178, 0.6);
+  }
+  100% {
+    width: 120%;
+    height: 120%;
+    opacity: 0;
+    border-width: 1px;
+    border-color: rgba(216, 154, 178, 0);
+  }
+}
+
+/* ── Reduced motion: skip particles, brief flash only ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .crystallize-transition__canvas {
+    display: none;
+  }
+
+  .crystallize-transition__shimmer--active {
+    animation: crystallize-flash-reduced 300ms ease-out forwards;
+  }
+
+  .crystallize-transition__ring--active {
+    animation: none;
+    display: none;
+  }
+}
+
+@keyframes crystallize-flash-reduced {
+  0%   { opacity: 0.3; }
+  100% { opacity: 0; }
+}

@@ -93,7 +93,7 @@ export default function Settings() {
   };
 
   return (
-    <div className="settings-page">
+    <div className={`settings-page${isLive ? '' : ' settings-offline'}`}>
       <div className="settings-header">
         <span className="settings-title">Settings</span>
         <span className="settings-subtitle">manage providers, models, and defaults</span>
@@ -102,6 +102,12 @@ export default function Settings() {
           {isLive ? 'connected' : 'offline'}
         </div>
       </div>
+
+      {!isLive && (
+        <div className="settings-offline-banner">
+          Server offline — start <code>roko serve</code> to manage settings
+        </div>
+      )}
 
       {/* ── Providers ── */}
       <div className="settings-section">

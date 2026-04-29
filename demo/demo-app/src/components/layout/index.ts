@@ -6,3 +6,6 @@ export { Tabs } from './Tabs';
 export { ScrollArea } from './ScrollArea';
 export { PhaseRail } from './PhaseRail';
 export { MetricStrip } from './MetricStrip';
+export { default as TreeView } from './TreeView';
+export { default as VirtualList } from './VirtualList';
+export { default as ResizablePane } from './ResizablePane';

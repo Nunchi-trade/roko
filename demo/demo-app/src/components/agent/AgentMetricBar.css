@@ -1,0 +1,93 @@
+/* AgentMetricBar — horizontal metric strip */
+
+.agent-metric-bar {
+  display: flex;
+  align-items: stretch;
+}
+
+/* ── Single metric ── */
+
+.agent-metric-bar__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 14px;
+  min-width: 0;
+}
+
+.agent-metric-bar__item + .agent-metric-bar__item {
+  border-left: 1px solid var(--border-soft);
+}
+
+/* ── Label ── */
+
+.agent-metric-bar__label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* ── Value row ── */
+
+.agent-metric-bar__value-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.agent-metric-bar__value {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 300;
+  font-size: var(--text-lg);
+  color: var(--rose-glow);
+  line-height: 1.1;
+  text-shadow: 0 0 16px currentColor;
+}
+
+.agent-metric-bar__unit {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-ghost);
+}
+
+/* ── Trend ── */
+
+.agent-metric-bar__trend {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+  margin-left: 2px;
+}
+
+.agent-metric-bar__trend--up {
+  color: var(--status-warning);
+}
+
+.agent-metric-bar__trend--down {
+  color: var(--success);
+}
+
+.agent-metric-bar__trend--flat {
+  color: var(--text-ghost);
+}
+
+/* ── Compact mode ── */
+
+.agent-metric-bar--compact .agent-metric-bar__item {
+  padding: 4px 10px;
+}
+
+.agent-metric-bar--compact .agent-metric-bar__label {
+  font-size: 10px;
+}
+
+.agent-metric-bar--compact .agent-metric-bar__value {
+  font-size: var(--text-sm);
+}

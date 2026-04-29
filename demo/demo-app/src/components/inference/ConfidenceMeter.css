@@ -1,0 +1,231 @@
+/* ConfidenceMeter -- cascade router learning confidence visualization */
+
+/* ══════════════════════════════════════════
+   Full mode (card layout)
+   ══════════════════════════════════════════ */
+
+.confidence-meter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+/* ── Header row ── */
+
+.confidence-meter__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.confidence-meter__label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  color: var(--text-dim);
+}
+
+.confidence-meter__decisions {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  color: var(--text-ghost);
+}
+
+/* ── Track + fill ── */
+
+.confidence-meter__track {
+  position: relative;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+
+.confidence-meter__fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 600ms var(--ease);
+  position: relative;
+}
+
+/* Fill gradients by confidence tier */
+
+.confidence-meter__fill--dim {
+  background: linear-gradient(90deg, var(--text-ghost), var(--text-dim));
+}
+
+.confidence-meter__fill--building {
+  background: linear-gradient(90deg, var(--bone-dim), var(--bone));
+}
+
+.confidence-meter__fill--confident {
+  background: linear-gradient(90deg, var(--rose-dim), var(--rose-bright));
+}
+
+.confidence-meter__fill--prismatic {
+  background: linear-gradient(90deg, var(--rose), var(--bone), var(--dream-bright));
+  animation: cm-prismatic-shift 4s ease-in-out infinite;
+}
+
+/* Shimmer overlay for high confidence */
+
+.confidence-meter__fill--prismatic::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.15) 40%,
+    rgba(255, 255, 255, 0.25) 50%,
+    rgba(255, 255, 255, 0.15) 60%,
+    transparent 100%
+  );
+  animation: cm-shimmer-sweep 2.5s ease-in-out infinite;
+}
+
+/* ── Footer row ── */
+
+.confidence-meter__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.confidence-meter__pct {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-soft);
+}
+
+.confidence-meter__trend {
+  font-family: var(--mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+}
+
+.confidence-meter__trend--improving { color: var(--status-success); }
+.confidence-meter__trend--stable    { color: var(--text-dim); }
+.confidence-meter__trend--declining { color: var(--status-warning); }
+
+/* ── Crystallization flash ── */
+
+.confidence-meter__track--crystallize {
+  animation: cm-crystallize 600ms var(--ease) both;
+}
+
+/* ══════════════════════════════════════════
+   Compact mode (inline strip)
+   ══════════════════════════════════════════ */
+
+.confidence-meter--compact {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.confidence-meter--compact .confidence-meter__header {
+  flex-shrink: 0;
+  gap: var(--sp-1);
+}
+
+.confidence-meter--compact .confidence-meter__label {
+  font-size: 9px;
+}
+
+.confidence-meter--compact .confidence-meter__track {
+  height: 3px;
+  flex: 1;
+  min-width: 40px;
+}
+
+.confidence-meter--compact .confidence-meter__inline-stats {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--text-soft);
+}
+
+.confidence-meter--compact .confidence-meter__footer {
+  display: none;
+}
+
+.confidence-meter--compact .confidence-meter__decisions {
+  display: none;
+}
+
+/* ── Keyframes ── */
+
+@keyframes cm-prismatic-shift {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes cm-shimmer-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+
+@keyframes cm-crystallize {
+  0% {
+    box-shadow: none;
+  }
+  30% {
+    box-shadow: 0 0 12px rgba(220, 165, 189, 0.6),
+                0 0 24px rgba(220, 165, 189, 0.3);
+  }
+  60% {
+    box-shadow: 0 0 8px rgba(220, 165, 189, 0.4);
+  }
+  100% {
+    box-shadow: none;
+  }
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .confidence-meter__fill {
+    transition: none;
+  }
+
+  .confidence-meter__fill--prismatic {
+    animation: none;
+  }
+
+  .confidence-meter__fill--prismatic::after {
+    animation: none;
+    display: none;
+  }
+
+  .confidence-meter__track--crystallize {
+    animation: none;
+  }
+}

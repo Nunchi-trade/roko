@@ -1,0 +1,193 @@
+/* CommandPalette — Cmd+K fuzzy search overlay */
+
+.cmdpal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-floating);
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  justify-content: center;
+  padding-top: 20vh;
+  opacity: 0;
+  transition: opacity 200ms var(--ease);
+}
+
+.cmdpal-backdrop--open {
+  opacity: 1;
+}
+
+.cmdpal-backdrop--closing {
+  opacity: 0;
+  transition-duration: 150ms;
+}
+
+/* ── Container ── */
+
+.cmdpal-container {
+  width: 90vw;
+  max-width: 540px;
+  background: var(--bg-raised);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  align-self: flex-start;
+  transform: scale(0.96) translateY(-8px);
+  opacity: 0;
+  transition:
+    transform 200ms var(--ease),
+    opacity 200ms var(--ease);
+}
+
+.cmdpal-backdrop--open .cmdpal-container {
+  transform: scale(1) translateY(0);
+  opacity: 1;
+}
+
+.cmdpal-backdrop--closing .cmdpal-container {
+  transform: scale(0.96) translateY(-8px);
+  opacity: 0;
+  transition-duration: 150ms;
+}
+
+/* ── Search input ── */
+
+.cmdpal-input-wrap {
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.cmdpal-input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  color: var(--text-primary);
+  caret-color: var(--rose-glow);
+}
+
+.cmdpal-input::placeholder {
+  color: var(--text-ghost);
+}
+
+.cmdpal-input:focus {
+  box-shadow: 0 2px 0 0 var(--rose-glow);
+}
+
+/* ── Results list ── */
+
+.cmdpal-results {
+  max-height: calc(8 * 44px);
+  overflow-y: auto;
+  padding: var(--sp-2) 0;
+}
+
+/* ── Category divider ── */
+
+.cmdpal-category {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-ghost);
+  padding: var(--sp-2) var(--sp-5) var(--sp-1);
+}
+
+/* ── Result item ── */
+
+.cmdpal-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-5);
+  cursor: pointer;
+  transition: background var(--duration-snap) ease;
+  min-height: 36px;
+}
+
+.cmdpal-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.cmdpal-item--active {
+  background: var(--rose-deep);
+  color: var(--rose-bright);
+}
+
+.cmdpal-item--active:hover {
+  background: var(--rose-deep);
+}
+
+.cmdpal-item-icon {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+}
+
+.cmdpal-item--active .cmdpal-item-icon {
+  color: var(--rose-bright);
+}
+
+.cmdpal-item-label {
+  flex: 1 1 auto;
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cmdpal-item--active .cmdpal-item-label {
+  color: var(--rose-bright);
+}
+
+.cmdpal-item-category {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-ghost);
+  padding: 1px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.cmdpal-item--active .cmdpal-item-category {
+  border-color: rgba(216, 154, 178, 0.3);
+  color: var(--rose-dim);
+}
+
+.cmdpal-item-shortcut {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-ghost);
+  flex-shrink: 0;
+}
+
+.cmdpal-item--active .cmdpal-item-shortcut {
+  color: var(--rose-dim);
+}
+
+/* ── Empty state ── */
+
+.cmdpal-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-8) var(--sp-5);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-ghost);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}

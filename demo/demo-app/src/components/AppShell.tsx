@@ -55,7 +55,7 @@ export default function AppShell() {
           SEED DATA
         </div>
       )}
-      <div className="app-frame" style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+      <div className="app-frame" style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
         <Outlet />
       </div>
     </>

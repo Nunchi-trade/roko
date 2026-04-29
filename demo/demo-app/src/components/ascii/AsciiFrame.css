@@ -1,0 +1,85 @@
+/* AsciiFrame ── box-drawing frame around content */
+
+.ascii-frame {
+  position: relative;
+  font-family: var(--mono);
+  color: var(--border);
+}
+
+/* ── top border row ── */
+.ascii-frame__top {
+  display: flex;
+  align-items: center;
+  line-height: 1;
+  user-select: none;
+  overflow: hidden;
+  white-space: nowrap;
+  color: inherit;
+}
+
+.ascii-frame__corner {
+  flex: none;
+  color: inherit;
+}
+
+.ascii-frame__title {
+  flex: none;
+  padding: 0 0.5em;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.ascii-frame__status {
+  flex: none;
+  padding: 0 0.5em;
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--rose-dim);
+}
+
+.ascii-frame__hfill {
+  flex: 1;
+  overflow: hidden;
+  min-width: 0;
+  color: inherit;
+}
+
+/* ── body area ── */
+.ascii-frame__body {
+  display: flex;
+  min-height: 0;
+}
+
+.ascii-frame__vbar {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  user-select: none;
+  color: inherit;
+  line-height: 1;
+}
+
+.ascii-frame__vbar-char {
+  writing-mode: vertical-lr;
+  /* repeat vertical bar character to fill height */
+}
+
+.ascii-frame__content {
+  flex: 1;
+  min-width: 0;
+  padding: var(--sp-3);
+}
+
+/* ── bottom border row ── */
+.ascii-frame__bottom {
+  display: flex;
+  align-items: center;
+  line-height: 1;
+  user-select: none;
+  overflow: hidden;
+  white-space: nowrap;
+  color: inherit;
+}

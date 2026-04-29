@@ -1,0 +1,22 @@
+/* LoadingTransition — CRT dither reveal */
+
+.loading-transition {
+  position: relative;
+}
+
+.loading-transition canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.loading-transition__content {
+  animation: fadeIn 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-transition__content {
+    animation: none;
+  }
+}

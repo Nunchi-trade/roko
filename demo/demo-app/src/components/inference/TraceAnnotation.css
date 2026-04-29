@@ -1,0 +1,128 @@
+/* TraceAnnotation -- horizontal inline trace/log annotation strip */
+
+.trace-ann {
+  --tier-t0: #8ac4a0;
+  --tier-t1: var(--bone);
+  --tier-t2: var(--rose-bright);
+
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  white-space: nowrap;
+  transition: background-color 300ms ease, border-color 300ms ease, box-shadow 300ms ease;
+}
+
+/* ── Confidence intensity bands ── */
+
+.trace-ann--conf-ghost {
+  color: var(--text-ghost);
+}
+
+.trace-ann--conf-dim {
+  color: var(--text-dim);
+}
+
+.trace-ann--conf-normal {
+  color: var(--text-soft);
+}
+
+.trace-ann--conf-strong {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+/* ── Agent pill ── */
+
+.trace-ann__agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.trace-ann__agent-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.trace-ann__agent-name {
+  color: var(--text-soft);
+}
+
+/* ── Tier + Model pill ── */
+
+.trace-ann__tier-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 4px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.trace-ann__tier {
+  font-weight: var(--weight-semibold);
+}
+
+.trace-ann__tier--t0 { color: var(--tier-t0); }
+.trace-ann__tier--t1 { color: var(--tier-t1); }
+.trace-ann__tier--t2 { color: var(--tier-t2); }
+
+.trace-ann__model {
+  color: var(--text-dim);
+}
+
+/* ── Confidence pill ── */
+
+.trace-ann__conf {
+  padding-left: 4px;
+  border-left: 1px solid var(--border-soft);
+}
+
+/* ── Token pills ── */
+
+.trace-ann__tokens {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 4px;
+  border-left: 1px solid var(--border-soft);
+  color: var(--text-dim);
+}
+
+.trace-ann__tok-in {
+  color: var(--text-dim);
+}
+
+.trace-ann__tok-out {
+  color: var(--text-soft);
+}
+
+/* ── Cost pill ── */
+
+.trace-ann__cost {
+  padding-left: 4px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.trace-ann__cost--low  { color: var(--tier-t0); }
+.trace-ann__cost--mid  { color: var(--bone); }
+.trace-ann__cost--high { color: var(--rose-bright); }
+
+/* ── Latency pill ── */
+
+.trace-ann__latency {
+  padding-left: 4px;
+  border-left: 1px solid var(--border-soft);
+  color: var(--text-ghost);
+}

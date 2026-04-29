@@ -7,12 +7,11 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
 }
 
 /* ── Hero ── */
 .bench-hero {
-  padding: var(--sp-4) var(--sp-6) var(--sp-3);
+  padding: var(--sp-3) var(--sp-6) var(--sp-2);
   border-bottom: 1px solid var(--glass-border);
   position: relative;
   overflow: hidden;
@@ -41,7 +40,7 @@
 }
 .bench-page-title {
   font-family: var(--display);
-  font-size: 1.8rem;
+  font-size: 1.5rem;
   color: var(--text-strong);
   font-weight: 300;
   font-style: italic;
@@ -55,7 +54,7 @@
   letter-spacing: .01em;
 }
 .bench-hero-stats {
-  margin-top: 20px;
+  margin-top: 12px;
 }
 .bench-back {
   color: var(--text-dim);

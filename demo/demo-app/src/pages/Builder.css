@@ -5,7 +5,8 @@
 .builder-page {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 48px);
+  flex: 1;
+  min-height: 0;
 }
 
 /* ── Header ── */
@@ -65,7 +66,6 @@
   display: grid;
   grid-template-columns: 200px 1fr;
   flex: 1;
-  overflow: hidden;
   min-height: 0;
 }
 

@@ -3,18 +3,17 @@ import { NavLink, Link } from 'react-router';
 import { useApi } from '../hooks/useApi';
 import { fmtUptime } from '../lib/format';
 import { useServerHealth } from '../hooks/useServerHealth';
-import FlatIcon, { type FlatIconName } from './FlatIcon';
 import './TopNav.css';
 
 const NAV_LINKS = [
-  { to: '/demo', label: 'Demo', icon: 'demo' },
-  { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
-  { to: '/bench', label: 'Bench', icon: 'bench' },
-  { to: '/explorer', label: 'Explorer', icon: 'explorer' },
-  { to: '/builder', label: 'Builder', icon: 'builder' },
-  { to: '/terminal', label: 'Terminal', icon: 'terminal' },
-  { to: '/settings', label: 'Settings', icon: 'settings' },
-] satisfies Array<{ to: string; label: string; icon: FlatIconName }>;
+  { to: '/demo', label: 'DEMO' },
+  { to: '/dashboard', label: 'DASH' },
+  { to: '/bench', label: 'BENCH' },
+  { to: '/explorer', label: 'EXPLORE' },
+  { to: '/builder', label: 'BUILD' },
+  { to: '/terminal', label: 'TERM' },
+  { to: '/settings', label: 'CONFIG' },
+];
 
 interface HealthResponse {
   status?: string;
@@ -43,28 +42,37 @@ export default function TopNav() {
     return () => { cancelled = true; clearInterval(id); };
   }, [get]);
 
+  const isLive = serverHealth === 'connected' && uptime != null;
+
   return (
     <nav className="topnav">
       <Link to="/" className="brand" style={{ textDecoration: 'none' }}>
         <span className="mark" aria-hidden="true" />
-        <b>nunchi</b>
+        <span className="brand-text">{'\u2308'} NUNCHI {'\u230B'}</span>
       </Link>
+
+      <span className="nav-sep" aria-hidden="true">{'\u2502'}</span>
+
       <div className="links">
         {NAV_LINKS.map((l) => (
           <NavLink
             key={l.to}
             to={l.to}
-            className={({ isActive }) => isActive ? 'active' : ''}
+            className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
           >
-            <FlatIcon name={l.icon} size={13} tone="muted" />
-            {l.label}
+            {({ isActive }) => (
+              <span className="nav-link-inner">
+                {isActive ? `\u25B8 ${l.label} \u25C2` : l.label}
+              </span>
+            )}
           </NavLink>
         ))}
       </div>
+
       <div className="right">
-        <span className={`status-pill ${serverHealth === 'connected' ? 'live' : 'demo'}`}>
-          <span className="status-dot" />
-          {serverHealth === 'connected' && uptime != null ? `Live ${fmtUptime(uptime)}` : 'Demo'}
+        <span className={`status-pill ${isLive ? 'live' : 'demo'}`}>
+          <span className="status-char">{isLive ? '\u25CF' : '\u25CB'}</span>
+          {isLive ? `LIVE ${fmtUptime(uptime)}` : 'SEED'}
         </span>
       </div>
     </nav>
