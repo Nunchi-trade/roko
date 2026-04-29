@@ -13,6 +13,7 @@ export interface BenchGateConfig {
 
 export interface BenchRunConfig {
   model: string;
+  backend?: string;
   provider?: string;
   temperature?: number;
   max_tokens?: number;
@@ -29,6 +30,7 @@ export interface BenchTask {
   id: string;
   name: string;
   prompt: string;
+  expected_output?: string;
   expected_outcome?: string;
   difficulty: number; // 1-5
   tags: string[];
@@ -86,7 +88,7 @@ export interface BenchRun {
   config: BenchRunConfig;
   suite_id: string;
   suite_name: string;
-  status: 'pending' | 'running' | 'completed' | 'cancelled';
+  status: 'pending' | 'running' | 'completed' | 'cancelled' | 'failed';
   results: BenchTaskResult[];
   summary?: BenchRunSummary;
   started_at: string;
@@ -142,14 +144,138 @@ export interface BenchRunCompletedEvent {
 }
 
 export interface BenchLearningEvent {
-  type: 'BenchLearning';
+  type: 'BenchLearning' | 'BenchLearningEvent';
   bench_id: string;
-  insight: string;
+  task_id?: string;
+  insight?: string;
   metric?: string;
   before?: number;
   after?: number;
   confidence?: number;
+  playbooks_created?: number;
+  anti_patterns_created?: number;
+  total_playbooks?: number;
+  total_anti_patterns?: number;
 }
+
+// ── Matrix types ──
+
+export interface MatrixLane {
+  model: string;
+  backend?: string;
+  strategy: AgentStrategy;
+  label?: string;
+  overrides: Partial<BenchRunConfig>;
+}
+
+export interface MatrixRun {
+  id: string;
+  suite_id: string;
+  lane_ids: string[];
+  status: 'running' | 'completed' | 'cancelled' | 'partial_failure';
+  started_at: string;
+  finished_at?: string;
+  label?: string;
+}
+
+export interface ConfigPreset {
+  id: string;
+  label: string;
+  strategy: AgentStrategy;
+  temperature?: number;
+  maxTokens?: number;
+  description: string;
+}
+
+// Matrix SSE events
+
+export interface MatrixRunStartedEvent {
+  type: 'MatrixRunStarted';
+  matrix_id: string;
+  suite_id: string;
+  lane_ids: string[];
+  total_lanes: number;
+}
+
+export interface MatrixLaneCompletedEvent {
+  type: 'MatrixLaneCompleted';
+  matrix_id: string;
+  lane_id: string;
+  pass_rate: number;
+  cost_usd: number;
+}
+
+export interface MatrixRunCompletedEvent {
+  type: 'MatrixRunCompleted';
+  matrix_id: string;
+  summary: MatrixLaneSummary[];
+}
+
+export interface MatrixLaneSummary {
+  lane_id: string;
+  model: string;
+  strategy: AgentStrategy;
+  pass_rate: number;
+  cost_usd: number;
+  duration_ms: number;
+  total_tasks: number;
+  passed: number;
+  failed: number;
+}
+
+// ── SWE-bench types ──
+
+export interface SweDataset {
+  id: string;
+  name: string;
+  total_instances: number;
+  description?: string;
+}
+
+export interface SweInstance {
+  instance_id: string;
+  repo: string;
+  resolved: boolean;
+  duration_ms: number;
+  error?: string;
+}
+
+export interface SweRun {
+  id: string;
+  dataset: string;
+  status: 'running' | 'completed' | 'cancelled';
+  agent_mode: string;
+  total_instances: number;
+  resolved: number;
+  instances: SweInstance[];
+  started_at: string;
+  finished_at?: string;
+}
+
+export interface SweRunStartedEvent {
+  type: 'SweRunStarted';
+  run_id: string;
+  dataset: string;
+  total_instances: number;
+}
+
+export interface SweInstanceCompletedEvent {
+  type: 'SweInstanceCompleted';
+  run_id: string;
+  instance_id: string;
+  resolved: boolean;
+  duration_ms: number;
+}
+
+export interface SweRunCompletedEvent {
+  type: 'SweRunCompleted';
+  run_id: string;
+  resolved: number;
+  total: number;
+  pass_rate: number;
+}
+
+// ── Pareto types ──
 
 export interface ParetoFrontierPoint {
   run_id: string;
@@ -157,13 +283,46 @@ export interface ParetoFrontierPoint {
   model?: string;
   provider?: string;
   cost_usd: number;
+  total_cost_usd?: number;
   pass_rate: number;
   duration_ms?: number;
 }
 
 export interface ParetoFrontierResponse {
   points: ParetoFrontierPoint[];
+  frontier?: ParetoFrontierPoint[];
   generated_at?: string;
+}
+
+export interface BenchAgentOutputEvent {
+  type: 'BenchAgentOutput';
+  bench_id: string;
+  task_id: string;
+  agent_id: string;
+  content: string;
+  done: boolean;
+  tool_calls?: any[];
+  reasoning?: string;
+}
+
+export interface BenchGateVerdictEvent {
+  type: 'BenchGateVerdict';
+  bench_id: string;
+  task_id: string;
+  gate: string;
+  passed: boolean;
+  message?: string;
+  duration_ms: number;
+}
+
+export interface BenchTokenVelocityEvent {
+  type: 'BenchTokenVelocity';
+  bench_id: string;
+  task_id: string;
+  tokens_per_second: number;
+  tokens_in: number;
+  tokens_out: number;
+  duration_ms: number;
 }
 
 export type BenchSSEEvent =
@@ -172,4 +331,13 @@ export type BenchSSEEvent =
   | BenchTaskCompletedEvent
   | BenchProgressEvent
   | BenchRunCompletedEvent
-  | BenchLearningEvent;
+  | BenchLearningEvent
+  | BenchAgentOutputEvent
+  | BenchGateVerdictEvent
+  | BenchTokenVelocityEvent
+  | MatrixRunStartedEvent
+  | MatrixLaneCompletedEvent
+  | MatrixRunCompletedEvent
+  | SweRunStartedEvent
+  | SweInstanceCompletedEvent
+  | SweRunCompletedEvent;

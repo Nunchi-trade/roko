@@ -24,7 +24,7 @@ pub enum AuthMethod {
     OpenAiCompat {
         key: String,
         base_url: String,
-        /// Model to use (e.g. "gpt-4o", "glm-5.1"). Falls back to "gpt-4o".
+        /// Model to use (e.g. "gpt-5.4-mini", "glm-5.1"). Falls back to "gpt-5.4-mini".
         model: Option<String>,
     },
     /// No auth found — user needs to set up.

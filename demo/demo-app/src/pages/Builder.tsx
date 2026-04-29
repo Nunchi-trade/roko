@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useTerminal } from '../hooks/useTerminal';
-import { setupWorkspace, showCmd, getRoko } from '../hooks/useTerminalSession';
+import { enterWorkspace, showCmd, getRoko } from '../hooks/useTerminalSession';
 import { useRokoConfig } from '../hooks/useRokoConfig';
+import { useWorkspace } from '../hooks/useWorkspace';
 import GateBar from '../components/GateBar';
 import Pane from '../components/Pane';
 import './Builder.css';
@@ -52,6 +53,7 @@ export default function Builder() {
 
   // Use only live config for model list.
   const { providers: liveProviders, isLive, defaultModel } = useRokoConfig();
+  const { ensureWorkspace } = useWorkspace();
 
   const { liveModelCatalog, liveAllModels } = useMemo(() => {
     const catalog: BuilderProviderGroup[] = liveProviders.map(p => ({
@@ -84,16 +86,17 @@ export default function Builder() {
 
   const { attach, status, handle } = useTerminal('builder-pty');
 
-  // Setup workspace on mount
+  // Setup workspace on mount — create server-side, then cd into it
   useEffect(() => {
     if (setupDoneRef.current) return;
     const h = handle.current;
     if (!h) return;
     setupDoneRef.current = true;
-    setupWorkspace(h, 'roko-builder').then(dir => {
-      workspaceRef.current = dir;
+    ensureWorkspace('roko-builder').then(ws => {
+      workspaceRef.current = ws.path;
+      enterWorkspace(h, ws.path);
     });
-  }, [handle, status]);
+  }, [handle, status, ensureWorkspace]);
 
   // Close model dropdown on outside click
   useEffect(() => {

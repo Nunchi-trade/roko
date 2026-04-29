@@ -32,6 +32,9 @@ pub struct RunResult {
     /// Gateway falls back to a character-based heuristic when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<RunResultUsage>,
+    /// Structured gate results collected during execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_results: Vec<RuntimeGateResult>,
 }
 
 /// Result of generating an implementation plan from a PRD.
@@ -80,6 +83,88 @@ pub struct RepoInfo {
     pub branch: String,
 }
 
+/// Options for starting a SWE-bench run via the HTTP API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SweBenchRunOptions {
+    /// Optional path to a local JSONL dataset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_path: Option<PathBuf>,
+    /// Agent mode (e.g. "gold", "empty", "command").
+    #[serde(default = "default_agent_mode")]
+    pub agent_mode: String,
+    /// Maximum number of instances to run.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Offset into the dataset.
+    #[serde(default)]
+    pub offset: usize,
+    /// Whether to record learning episodes.
+    #[serde(default)]
+    pub record_learning: bool,
+}
+
+fn default_agent_mode() -> String {
+    "gold".to_string()
+}
+
+fn default_batch_size() -> usize {
+    10
+}
+
+/// Per-instance result from a SWE-bench run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct SweBenchInstanceResult {
+    /// SWE-bench instance id.
+    pub instance_id: String,
+    /// Repository label.
+    #[serde(default)]
+    pub repo: String,
+    /// Whether the patch was a valid unified diff.
+    #[serde(default)]
+    pub format_valid: bool,
+    /// Whether `git apply --check` accepted the patch.
+    #[serde(default)]
+    pub apply_check: bool,
+    /// Whether the test command passed.
+    #[serde(default)]
+    pub tests_passed: bool,
+    /// Final proxy outcome.
+    #[serde(default)]
+    pub resolved: bool,
+    /// Patch size in bytes.
+    #[serde(default)]
+    pub patch_bytes: usize,
+    /// Wall-clock runtime in milliseconds.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Short failure reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+/// Result of a SWE-bench run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SweBenchRunResult {
+    /// Stable run id.
+    pub run_id: String,
+    /// Dataset label.
+    #[serde(default)]
+    pub dataset: String,
+    /// Agent mode used.
+    #[serde(default)]
+    pub agent_mode: String,
+    /// Number of instances evaluated.
+    pub total: usize,
+    /// Number of instances resolved.
+    pub resolved: usize,
+    /// Pass rate (resolved / total).
+    pub pass_rate: f64,
+    /// Per-instance results.
+    #[serde(default)]
+    pub instances: Vec<SweBenchInstanceResult>,
+}
+
 /// Snapshot of session status (mirrors `roko_cli::SessionStatus` fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStatusInfo {
@@ -120,6 +205,7 @@ impl CliRuntime for NoOpRuntime {
             success: true,
             output_text: None,
             usage: None,
+            gate_results: Vec::new(),
         })
     }
 
@@ -229,5 +315,16 @@ pub trait CliRuntime: Send + Sync + 'static {
     /// cross-repo context into agent system prompts during dispatch.
     fn list_repos(&self) -> Vec<RepoInfo> {
         Vec::new()
+    }
+
+    /// Run a SWE-bench evaluation. Returns per-instance results.
+    ///
+    /// The default returns an error since not all runtimes support SWE-bench.
+    async fn run_swe_bench(
+        &self,
+        _workdir: &std::path::Path,
+        _options: SweBenchRunOptions,
+    ) -> anyhow::Result<SweBenchRunResult> {
+        anyhow::bail!("runtime does not support SWE-bench")
     }
 }

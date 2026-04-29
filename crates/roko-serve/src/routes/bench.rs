@@ -21,12 +21,15 @@ use serde_json::{Value, json};
 
 use crate::bench::{
     self, BenchConfigOverrides, BenchRun, BenchRunIndexEntry, BenchRunKind, BenchRunStatus,
-    BenchRunSummary, BenchStrategy, BenchSuite, BenchTaskResult,
+    BenchRunSummary, BenchStrategy, BenchSuite, BenchTaskResult, MatrixLaneConfig, MatrixRun,
+    MatrixRunStatus,
 };
 use crate::error::ApiError;
 use crate::events::ServerEvent;
-use crate::state::{AppState, BenchRunHandle};
+use crate::state::{AppState, BenchRunHandle, MatrixRunHandle};
+use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::playbook::PlaybookStore;
+use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 use roko_neuro::KnowledgeStore;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -54,6 +57,13 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/bench/pareto", get(pareto_frontier))
         .route("/bench/export/{id}", get(export_bench_run))
         .route("/bench/events", get(bench_events_sse))
+        // Matrix (multi-lane) bench runs.
+        .route(
+            "/bench/matrix",
+            get(list_matrix_runs).post(start_matrix_run),
+        )
+        .route("/bench/matrix/{id}", get(get_matrix_run))
+        .route("/bench/matrix/{id}/cancel", post(cancel_matrix_run))
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +199,7 @@ async fn execute_bench_run(
     let total_tasks = suite.tasks.len();
     let mut results = Vec::new();
 
-    let bench_workdir = match scaffold_bench_workdir(&suite.id, &run_id).await {
+    let bench_workdir = match scaffold_bench_workdir(&suite.id, &run_id, &state.workdir).await {
         Ok(path) => path,
         Err(err) => {
             tracing::warn!(
@@ -226,13 +236,25 @@ async fn execute_bench_run(
     };
     let _bench_workdir_cleanup = BenchWorkdirCleanup::new(bench_workdir.clone());
 
-    let learning_stores = if matches!(overrides.strategy, BenchStrategy::Minimal) {
+    let learn_root = state.workdir.join(".roko").join("learn");
+    let learning_rt = if matches!(overrides.strategy, BenchStrategy::Minimal) {
         None
     } else {
+        match LearningRuntime::open_under(&learn_root).await {
+            Ok(rt) => Some(rt),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to open LearningRuntime for bench run");
+                None
+            }
+        }
+    };
+    let learning_stores = if learning_rt.is_some() {
         Some((
-            PlaybookStore::new(state.workdir.join(".roko").join("learn").join("playbooks")),
+            PlaybookStore::new(learn_root.join("playbooks")),
             KnowledgeStore::for_workdir(&state.workdir),
         ))
+    } else {
+        None
     };
     let mut learning_totals =
         if let Some((playbook_store, knowledge_store)) = learning_stores.as_ref() {
@@ -290,6 +312,18 @@ async fn execute_bench_run(
                     .as_ref()
                     .map(|t| t.chars().take(500).collect());
 
+                let gate_verdicts: Vec<serde_json::Value> = run_result
+                    .gate_results
+                    .iter()
+                    .map(|g| {
+                        json!({
+                            "gate": g.gate,
+                            "passed": g.passed,
+                            "message": g.detail,
+                        })
+                    })
+                    .collect();
+
                 BenchTaskResult {
                     task_id: task.id.clone(),
                     task_name: task.name.clone(),
@@ -302,7 +336,7 @@ async fn execute_bench_run(
                     tokens_in: input_tokens,
                     tokens_out: output_tokens,
                     cost_usd,
-                    gate_verdicts: Vec::new(),
+                    gate_verdicts,
                     retries_used: 0,
                     output_preview,
                     error: None,
@@ -335,7 +369,70 @@ async fn execute_bench_run(
             result: result_value,
         });
 
+        // Emit per-gate verdicts.
+        for v in &task_result.gate_verdicts {
+            let gate = v
+                .get("gate")
+                .and_then(|g| g.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let passed = v.get("passed").and_then(|p| p.as_bool()).unwrap_or(false);
+            let message = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string());
+            state.event_bus.publish(ServerEvent::BenchGateVerdict {
+                bench_id: run_id.clone(),
+                task_id: task_result.task_id.clone(),
+                gate,
+                passed,
+                message,
+                duration_ms: task_result.duration_ms,
+            });
+        }
+
+        // Emit token velocity.
+        let duration_secs = task_result.duration_ms as f64 / 1000.0;
+        let tokens_per_second = if duration_secs > 0.0 {
+            (task_result.tokens_in + task_result.tokens_out) as f64 / duration_secs
+        } else {
+            0.0
+        };
+        state.event_bus.publish(ServerEvent::BenchTokenVelocity {
+            bench_id: run_id.clone(),
+            task_id: task_result.task_id.clone(),
+            tokens_per_second,
+            tokens_in: task_result.tokens_in,
+            tokens_out: task_result.tokens_out,
+            duration_ms: task_result.duration_ms,
+        });
+
+        // Emit agent output preview.
+        if let Some(ref preview) = task_result.output_preview {
+            state.event_bus.publish(ServerEvent::BenchAgentOutput {
+                bench_id: run_id.clone(),
+                task_id: task_result.task_id.clone(),
+                agent_id: task_result.model.clone(),
+                content: preview.clone(),
+                done: true,
+                tool_calls: None,
+                reasoning: None,
+            });
+        }
+
         results.push(task_result);
+
+        // Record episode via LearningRuntime when available.
+        if let Some(ref rt) = learning_rt {
+            let last = results.last().expect("just pushed");
+            let episode = bench_task_to_episode(last, task, &overrides, &run_id, &suite.id);
+            if let Err(err) = rt
+                .record_completed_run(CompletedRunInput::from_episode(episode))
+                .await
+            {
+                tracing::warn!(error = %err, task_id = %task.id, "failed to record bench episode");
+            }
+        }
 
         // Compute cumulative cost so far.
         let cost_so_far: f64 = results.iter().map(|r| r.cost_usd).sum();
@@ -680,9 +777,9 @@ fn model_pricing(slug: &str) -> (f64, f64) {
         (0.015, 0.075)
     } else if s.contains("sonnet") {
         (0.003, 0.015)
-    } else if s.contains("gpt-4o-mini") {
+    } else if s.contains("gpt-5.4-mini") || s.contains("gpt-4o-mini") {
         (0.00015, 0.0006)
-    } else if s.contains("gpt-4o") || s.contains("gpt-4") {
+    } else if s.contains("gpt-5") || s.contains("gpt-4") {
         (0.005, 0.015)
     } else if s.contains("o3-mini") || s.contains("o1-mini") {
         (0.0011, 0.0044)
@@ -716,7 +813,7 @@ fn infer_context_window(slug: &str) -> u64 {
     let s = slug.to_lowercase();
     if s.contains("haiku") || s.contains("sonnet") || s.contains("opus") {
         200_000
-    } else if s.contains("gpt-4o") {
+    } else if s.contains("gpt-5") || s.contains("gpt-4") {
         128_000
     } else if s.contains("gemini") {
         1_000_000
@@ -729,7 +826,21 @@ fn infer_context_window(slug: &str) -> u64 {
 /// `GET /api/bench/pareto` -- compute pareto frontier.
 async fn pareto_frontier(State(state): State<Arc<AppState>>) -> Json<Value> {
     let frontier = bench::compute_pareto_frontier(&state.workdir).await;
-    Json(json!({ "frontier": frontier }))
+    let points: Vec<Value> = frontier
+        .iter()
+        .map(|point| {
+            json!({
+                "run_id": point.run_id,
+                "suite_id": point.suite_id,
+                "model": point.model,
+                "label": point.label,
+                "pass_rate": point.pass_rate,
+                "cost_usd": point.total_cost_usd,
+                "total_cost_usd": point.total_cost_usd,
+            })
+        })
+        .collect();
+    Json(json!({ "frontier": frontier, "points": points }))
 }
 
 /// `GET /api/bench/export/:id` -- export a bench run as JSON.
@@ -742,6 +853,349 @@ async fn export_bench_run(
         .map_err(|e| ApiError::internal(format!("failed to load run: {e}")))?
         .ok_or_else(|| ApiError::not_found("bench run not found"))?;
     Ok(Json(serde_json::to_value(run).unwrap_or_default()))
+}
+
+// ---------------------------------------------------------------------------
+// Matrix (multi-lane) bench run handlers
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct StartMatrixRequest {
+    suite_id: String,
+    lanes: Vec<MatrixLaneConfigInput>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MatrixLaneConfigInput {
+    model: String,
+    #[serde(default)]
+    backend: Option<String>,
+    #[serde(default)]
+    strategy: BenchStrategy,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `POST /api/bench/matrix` -- start a matrix (multi-lane) bench run.
+async fn start_matrix_run(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<StartMatrixRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.lanes.is_empty() {
+        return Err(ApiError::bad_request("at least one lane is required"));
+    }
+
+    bench::ensure_builtin_suites(&state.workdir).await;
+    let suite = bench::load_suite(&state.workdir, &body.suite_id)
+        .await
+        .ok_or_else(|| ApiError::not_found("suite not found"))?;
+
+    let matrix_id = uuid::Uuid::new_v4().to_string();
+    let started_at = now_secs();
+
+    let mut lane_ids = Vec::with_capacity(body.lanes.len());
+    let mut lane_configs = Vec::with_capacity(body.lanes.len());
+    let mut lane_handles = Vec::with_capacity(body.lanes.len());
+
+    for (i, lane_input) in body.lanes.iter().enumerate() {
+        let lane_id = uuid::Uuid::new_v4().to_string();
+        let lane_label = lane_input
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("lane-{i}"));
+
+        let overrides = BenchConfigOverrides {
+            model: Some(lane_input.model.clone()),
+            backend: lane_input.backend.clone(),
+            strategy: lane_input.strategy,
+            ..BenchConfigOverrides::default()
+        };
+
+        let run_label = format!("matrix:{matrix_id}:{lane_label}");
+
+        // Create the per-lane BenchRun.
+        let run = BenchRun {
+            id: lane_id.clone(),
+            suite_id: suite.id.clone(),
+            suite_name: suite.name.clone(),
+            kind: BenchRunKind::Comparison,
+            overrides: overrides.clone(),
+            label: Some(run_label.clone()),
+            status: BenchRunStatus::Running,
+            started_at,
+            finished_at: None,
+            results: Vec::new(),
+            summary: None,
+            current_task_index: 0,
+            total_tasks: suite.tasks.len(),
+        };
+        if let Err(e) = bench::save_bench_run(&state.workdir, &run).await {
+            tracing::warn!(error = %e, "failed to save matrix lane run");
+        }
+
+        let index_entry = BenchRunIndexEntry {
+            id: lane_id.clone(),
+            suite_id: suite.id.clone(),
+            suite_name: suite.name.clone(),
+            status: BenchRunStatus::Running,
+            started_at,
+            finished_at: None,
+            label: Some(run_label),
+            model: Some(lane_input.model.clone()),
+            pass_rate: None,
+            total_cost_usd: None,
+        };
+        let _ = bench::append_index_entry(&state.workdir, &index_entry).await;
+
+        // Spawn the bench run for this lane (reuses existing execute_bench_run).
+        let handle = tokio::spawn(execute_bench_run(
+            Arc::clone(&state),
+            lane_id.clone(),
+            suite.clone(),
+            overrides.clone(),
+            Some(format!("matrix:{matrix_id}:{lane_label}")),
+            started_at,
+        ));
+
+        // Also register in active_bench_runs so per-lane cancel works.
+        state.active_bench_runs.write().await.insert(
+            lane_id.clone(),
+            BenchRunHandle {
+                id: lane_id.clone(),
+                handle: tokio::spawn(async {}), // placeholder; real handle in matrix
+            },
+        );
+
+        lane_ids.push(lane_id);
+        lane_configs.push(MatrixLaneConfig {
+            model: lane_input.model.clone(),
+            backend: lane_input.backend.clone(),
+            strategy: lane_input.strategy,
+            label: Some(lane_label),
+            overrides,
+        });
+        lane_handles.push(handle);
+    }
+
+    // Save the matrix record.
+    let matrix_run = MatrixRun {
+        id: matrix_id.clone(),
+        suite_id: suite.id.clone(),
+        suite_name: suite.name.clone(),
+        lane_ids: lane_ids.clone(),
+        lanes: lane_configs,
+        status: MatrixRunStatus::Running,
+        started_at,
+        finished_at: None,
+        label: body.label.clone(),
+    };
+    if let Err(e) = bench::save_matrix_run(&state.workdir, &matrix_run).await {
+        tracing::warn!(error = %e, "failed to save matrix run");
+    }
+
+    // Publish start event.
+    state.event_bus.publish(ServerEvent::MatrixRunStarted {
+        matrix_id: matrix_id.clone(),
+        suite_id: suite.id.clone(),
+        lane_ids: lane_ids.clone(),
+        total_lanes: lane_ids.len(),
+    });
+
+    // Store the matrix handle.
+    state.active_matrix_runs.write().await.insert(
+        matrix_id.clone(),
+        MatrixRunHandle {
+            id: matrix_id.clone(),
+            lane_handles,
+        },
+    );
+
+    // Spawn a monitor task that watches lane completion.
+    let monitor_state = Arc::clone(&state);
+    let monitor_matrix_id = matrix_id.clone();
+    let monitor_lane_ids = lane_ids.clone();
+    tokio::spawn(async move {
+        monitor_matrix_completion(monitor_state, monitor_matrix_id, monitor_lane_ids).await;
+    });
+
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(json!({ "id": matrix_id, "matrix_id": matrix_id, "lane_ids": lane_ids })),
+    ))
+}
+
+/// Background monitor that polls lane statuses and publishes matrix events.
+async fn monitor_matrix_completion(state: Arc<AppState>, matrix_id: String, lane_ids: Vec<String>) {
+    let mut completed_lanes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut lane_summaries: Vec<Value> = Vec::new();
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let mut all_done = true;
+        for lane_id in &lane_ids {
+            if completed_lanes.contains(lane_id) {
+                continue;
+            }
+            if let Ok(Some(run)) = bench::load_bench_run(&state.workdir, lane_id).await {
+                if run.status == BenchRunStatus::Running {
+                    all_done = false;
+                } else {
+                    completed_lanes.insert(lane_id.clone());
+                    let pass_rate = run.summary.as_ref().map(|s| s.pass_rate).unwrap_or(0.0);
+                    let cost_usd = run
+                        .summary
+                        .as_ref()
+                        .map(|s| s.total_cost_usd)
+                        .unwrap_or(0.0);
+
+                    state.event_bus.publish(ServerEvent::MatrixLaneCompleted {
+                        matrix_id: matrix_id.clone(),
+                        lane_id: lane_id.clone(),
+                        pass_rate,
+                        cost_usd,
+                    });
+
+                    lane_summaries.push(json!({
+                        "lane_id": lane_id,
+                        "model": run.overrides.model,
+                        "strategy": run.overrides.strategy,
+                        "status": run.status,
+                        "pass_rate": pass_rate,
+                        "cost_usd": cost_usd,
+                        "duration_ms": run.summary.as_ref().map(|s| s.total_duration_ms).unwrap_or(0),
+                        "total_tasks": run.summary.as_ref().map(|s| s.total_tasks).unwrap_or(run.total_tasks),
+                        "passed": run.summary.as_ref().map(|s| s.passed).unwrap_or(0),
+                        "failed": run.summary.as_ref().map(|s| s.failed).unwrap_or(0),
+                        "summary": run.summary,
+                    }));
+                }
+            } else {
+                all_done = false;
+            }
+        }
+
+        if all_done {
+            break;
+        }
+    }
+
+    // Determine overall status.
+    let any_failed = lane_summaries.iter().any(|s| {
+        s.get("status")
+            .and_then(|v| serde_json::from_value::<BenchRunStatus>(v.clone()).ok())
+            .is_some_and(|status| {
+                matches!(status, BenchRunStatus::Failed | BenchRunStatus::Cancelled)
+            })
+    });
+
+    let finished_at = now_secs();
+    let overall_status = if any_failed {
+        MatrixRunStatus::PartialFailure
+    } else {
+        MatrixRunStatus::Completed
+    };
+
+    // Update and save matrix run.
+    if let Ok(Some(mut matrix)) = bench::load_matrix_run(&state.workdir, &matrix_id).await {
+        matrix.status = overall_status;
+        matrix.finished_at = Some(finished_at);
+        let _ = bench::save_matrix_run(&state.workdir, &matrix).await;
+    }
+
+    // Publish completion event.
+    state.event_bus.publish(ServerEvent::MatrixRunCompleted {
+        matrix_id: matrix_id.clone(),
+        summary: lane_summaries,
+    });
+
+    // Clean up handle.
+    state.active_matrix_runs.write().await.remove(&matrix_id);
+}
+
+/// `GET /api/bench/matrix/:id` -- get full matrix run status.
+async fn get_matrix_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let matrix = bench::load_matrix_run(&state.workdir, &id)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to load matrix run: {e}")))?
+        .ok_or_else(|| ApiError::not_found("matrix run not found"))?;
+
+    // Load per-lane run details.
+    let mut lane_details = Vec::with_capacity(matrix.lane_ids.len());
+    for (i, lane_id) in matrix.lane_ids.iter().enumerate() {
+        let lane_config = matrix.lanes.get(i);
+        let run = bench::load_bench_run(&state.workdir, lane_id)
+            .await
+            .ok()
+            .flatten();
+        lane_details.push(json!({
+            "lane_id": lane_id,
+            "config": lane_config,
+            "run": run.as_ref().map(|r| serde_json::to_value(r).unwrap_or_default()),
+        }));
+    }
+
+    Ok(Json(json!({
+        "id": matrix.id,
+        "suite_id": matrix.suite_id,
+        "suite_name": matrix.suite_name,
+        "status": matrix.status,
+        "started_at": matrix.started_at,
+        "finished_at": matrix.finished_at,
+        "label": matrix.label,
+        "lanes": lane_details,
+    })))
+}
+
+/// `POST /api/bench/matrix/:id/cancel` -- cancel all lanes of a matrix run.
+async fn cancel_matrix_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Abort all lane handles.
+    let removed = state.active_matrix_runs.write().await.remove(&id);
+    if let Some(handle) = removed {
+        for lane_handle in handle.lane_handles {
+            lane_handle.abort();
+        }
+    }
+
+    // Also try to cancel individual lane bench runs.
+    if let Ok(Some(matrix)) = bench::load_matrix_run(&state.workdir, &id).await {
+        for lane_id in &matrix.lane_ids {
+            let removed_bench = state.active_bench_runs.write().await.remove(lane_id);
+            if let Some(bench_handle) = removed_bench {
+                bench_handle.handle.abort();
+            }
+            if let Ok(Some(mut run)) = bench::load_bench_run(&state.workdir, lane_id).await {
+                if run.status == BenchRunStatus::Running {
+                    run.status = BenchRunStatus::Cancelled;
+                    run.finished_at = Some(now_secs());
+                    let _ = bench::save_bench_run(&state.workdir, &run).await;
+                }
+            }
+        }
+
+        // Update matrix status.
+        if let Ok(Some(mut m)) = bench::load_matrix_run(&state.workdir, &id).await {
+            m.status = MatrixRunStatus::Cancelled;
+            m.finished_at = Some(now_secs());
+            let _ = bench::save_matrix_run(&state.workdir, &m).await;
+        }
+    }
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/bench/matrix` -- list all matrix runs.
+async fn list_matrix_runs(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let runs = bench::list_matrix_runs(&state.workdir).await;
+    Json(serde_json::to_value(runs).unwrap_or_default())
 }
 
 /// `GET /api/bench/events` -- SSE stream filtered to bench events.
@@ -759,9 +1213,15 @@ async fn bench_events_sse(
                         ServerEvent::BenchRunStarted { .. }
                             | ServerEvent::BenchTaskStarted { .. }
                             | ServerEvent::BenchTaskCompleted { .. }
+                            | ServerEvent::BenchGateVerdict { .. }
+                            | ServerEvent::BenchTokenVelocity { .. }
+                            | ServerEvent::BenchAgentOutput { .. }
                             | ServerEvent::BenchLearningEvent { .. }
                             | ServerEvent::BenchProgress { .. }
                             | ServerEvent::BenchRunCompleted { .. }
+                            | ServerEvent::MatrixRunStarted { .. }
+                            | ServerEvent::MatrixLaneCompleted { .. }
+                            | ServerEvent::MatrixRunCompleted { .. }
                     );
                     if !is_bench {
                         continue;
@@ -784,6 +1244,59 @@ async fn bench_events_sse(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Build an [`Episode`] from a completed bench task result.
+fn bench_task_to_episode(
+    result: &BenchTaskResult,
+    task: &bench::BenchTask,
+    overrides: &BenchConfigOverrides,
+    run_id: &str,
+    suite_id: &str,
+) -> Episode {
+    let task_id = format!("{run_id}/{}", task.id);
+    let mut episode = Episode::new(format!("bench-{suite_id}"), task_id);
+    episode.kind = "bench_task".to_string();
+    episode.episode_id = format!("bench-{run_id}-{}", task.id);
+    episode.agent_template = format!("bench/{suite_id}");
+    episode.model = overrides
+        .model
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    episode.backend = overrides
+        .backend
+        .clone()
+        .unwrap_or_else(|| "roko-bench".to_string());
+    episode.trigger_kind = "bench".to_string();
+    episode.completed_at = chrono::Utc::now();
+    episode.duration_secs = result.duration_ms as f64 / 1000.0;
+    episode.success = result.passed();
+    episode.turns = 1;
+    episode.tokens_used = result.tokens_in.saturating_add(result.tokens_out);
+    episode.usage = Usage {
+        input_tokens: result.tokens_in,
+        output_tokens: result.tokens_out,
+        cost_usd: result.cost_usd,
+        wall_ms: result.duration_ms,
+        ..Usage::default()
+    };
+    episode.gate_verdicts = result
+        .gate_verdicts
+        .iter()
+        .filter_map(|v| {
+            let gate = v.get("gate")?.as_str()?;
+            let passed = v.get("passed")?.as_bool()?;
+            Some(GateVerdict::new(gate, passed))
+        })
+        .collect();
+    if episode.gate_verdicts.is_empty() {
+        // Synthesize a basic verdict from the pass/fail status.
+        episode
+            .gate_verdicts
+            .push(GateVerdict::new("bench:outcome", result.passed()));
+    }
+    episode.failure_reason = result.error.clone();
+    episode
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -840,7 +1353,11 @@ impl Drop for BenchWorkdirCleanup {
     }
 }
 
-async fn scaffold_bench_workdir(suite_id: &str, run_id: &str) -> anyhow::Result<PathBuf> {
+async fn scaffold_bench_workdir(
+    suite_id: &str,
+    run_id: &str,
+    server_workdir: &std::path::Path,
+) -> anyhow::Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!("roko-bench-{run_id}"));
 
     if tokio::fs::try_exists(&dir)
@@ -868,6 +1385,35 @@ async fn scaffold_bench_workdir(suite_id: &str, run_id: &str) -> anyhow::Result<
         } else {
             write_scaffold_file(&lib_rs_path, generic_lib_contents()).await?;
         }
+
+        // Copy roko.toml from the server workspace so the agent dispatch can
+        // find provider/model configuration (API keys, endpoints, etc.).
+        let server_roko_toml = server_workdir.join("roko.toml");
+        if tokio::fs::try_exists(&server_roko_toml)
+            .await
+            .unwrap_or(false)
+        {
+            let _ = tokio::fs::copy(&server_roko_toml, dir.join("roko.toml")).await;
+        }
+
+        // Initialize a git repo so agent tooling (Claude CLI, etc.) can work.
+        let dir_clone = dir.clone();
+        tokio::task::spawn_blocking(move || {
+            for args in [
+                &["init"][..],
+                &["add", "-A"][..],
+                &["commit", "-m", "bench scaffold", "--allow-empty"][..],
+            ] {
+                let _ = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&dir_clone)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        })
+        .await
+        .ok();
 
         Ok::<(), anyhow::Error>(())
     }

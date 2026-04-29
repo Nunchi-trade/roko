@@ -1,12 +1,14 @@
-import { useEffect } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { Outlet } from 'react-router';
 import Grain from './Grain';
-import HeroParticleField from './HeroParticleField';
 import Curtain from './Curtain';
 import ScrollTrack from './ScrollTrack';
 import TopNav from './TopNav';
 import ConfigWidget from './ConfigWidget';
 import { RokoConfigProvider } from '../hooks/useRokoConfig';
+import { WorkspaceProvider } from '../hooks/useWorkspace';
+
+const HeroParticleField = lazy(() => import('./HeroParticleField'));
 
 export default function AppShell() {
   useEffect(() => {
@@ -27,15 +29,29 @@ export default function AppShell() {
 
   return (
     <RokoConfigProvider>
-      <Grain />
-      <HeroParticleField />
-      <Curtain />
-      <ScrollTrack />
-      <TopNav />
-      <ConfigWidget />
-      <div className="app-frame" style={{ paddingTop: 64, position: 'relative', zIndex: 1, minHeight: '100vh' }}>
-        <Outlet />
-      </div>
+      <WorkspaceProvider>
+        <Grain />
+        <Suspense fallback={null}>
+          <HeroParticleField />
+        </Suspense>
+        <Curtain />
+        <ScrollTrack />
+        <TopNav />
+        <ConfigWidget />
+        <div className="app-frame" style={{
+          paddingTop: 'var(--nav-h)',
+          position: 'relative',
+          zIndex: 1,
+          height: '100vh',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}>
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <Outlet />
+          </div>
+        </div>
+      </WorkspaceProvider>
     </RokoConfigProvider>
   );
 }

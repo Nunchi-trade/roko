@@ -1,0 +1,124 @@
+/* ═══════════════════════════════════════════════════════════
+   MATRIX DETAIL VIEW — side-by-side task results
+   ═══════════════════════════════════════════════════════════ */
+
+.matrix-detail {
+  width: 100%;
+}
+
+.matrix-detail-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: var(--glass-bg);
+}
+
+.matrix-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.matrix-detail-task-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--bg-void);
+  min-width: 140px;
+  max-width: 180px;
+  padding: 8px 10px;
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  font-size: 11px;
+  border-bottom: 1px solid var(--glass-border);
+  border-right: 1px solid var(--glass-border);
+}
+
+.matrix-detail-lane-header {
+  text-align: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--glass-border);
+  min-width: 100px;
+  white-space: nowrap;
+}
+
+.matrix-detail-lane-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.matrix-detail-lane-rate {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 500;
+  margin-top: 2px;
+}
+.matrix-detail-lane-rate.pass { color: var(--success); }
+.matrix-detail-lane-rate.fail { color: var(--rose-bright); }
+
+.matrix-detail-lane-cost {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--bone-dim);
+  margin-left: 6px;
+}
+
+.matrix-detail-task-name {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg-void);
+  padding: 4px 10px;
+  color: var(--text-primary);
+  font-size: 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.02);
+  border-right: 1px solid var(--glass-border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.matrix-detail-cell {
+  text-align: center;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.02);
+}
+
+/* Task result chips */
+.matrix-detail-chip {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  cursor: default;
+}
+
+.chip-pass {
+  background: var(--success);
+  box-shadow: 0 0 4px rgba(122,138,120,.3);
+}
+.chip-fail {
+  background: var(--rose-bright);
+  box-shadow: 0 0 4px rgba(170,112,136,.3);
+}
+.chip-pending {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+}
+.chip-running {
+  background: var(--bone-dim);
+  border: 1px solid var(--bone);
+  animation: benchlive-pulse 1s infinite;
+}
+.chip-skipped {
+  background: var(--text-dim);
+  opacity: 0.4;
+}

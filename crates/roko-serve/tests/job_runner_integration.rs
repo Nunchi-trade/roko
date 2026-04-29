@@ -39,6 +39,7 @@ impl CliRuntime for TestRuntime {
                     .to_string(),
             ),
             usage: None,
+            gate_results: Vec::new(),
         })
     }
 

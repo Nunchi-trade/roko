@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useLiveApi } from '../hooks/useLiveApi';
+import FlatIcon, { inferIcon } from '../components/FlatIcon';
 import './Explorer.css';
 
 /* ═══════════════════════════════════════════════════════════
@@ -93,14 +94,7 @@ function getProviders(health: HealthData | null): Record<string, { healthy: bool
     if (keys.length > 0 && keys.some((k) => k !== 'healthy' && k !== 'total' && k !== 'unhealthy')) {
       return prov as Record<string, { healthy: boolean }>;
     }
-    const total = (prov as unknown as { total?: number }).total ?? 5;
-    const healthy = (prov as unknown as { healthy?: number }).healthy ?? 4;
-    const names = ['Anthropic', 'OpenAI', 'Google', 'Ollama', 'Perplexity'];
-    const result: Record<string, { healthy: boolean }> = {};
-    for (let i = 0; i < Math.min(total, names.length); i++) {
-      result[names[i]] = { healthy: i < healthy };
-    }
-    return result;
+    return {};
   }
   return {};
 }
@@ -371,7 +365,7 @@ export default function Explorer() {
     };
 
     // Draw agent labels
-    ctx.font = '10px JetBrains Mono, monospace';
+    ctx.font = '13px JetBrains Mono, monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     for (let i = 0; i < agents.length; i++) {
@@ -393,7 +387,7 @@ export default function Explorer() {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillStyle = '#7a6a78';
-    ctx.font = '9px JetBrains Mono, monospace';
+    ctx.font = '12px JetBrains Mono, monospace';
     const numLabels = Math.max(Math.floor(drawW / 100), 3);
     for (let i = 0; i <= numLabels; i++) {
       const t = minT + (i / numLabels) * timeSpan;
@@ -481,7 +475,7 @@ export default function Explorer() {
     ctx.fill();
     ctx.stroke();
 
-    ctx.font = '9px JetBrains Mono, monospace';
+    ctx.font = '12px JetBrains Mono, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     const kinds = Object.keys(KIND_COLORS);
@@ -513,7 +507,7 @@ export default function Explorer() {
       ctx.fill();
       ctx.stroke();
 
-      ctx.font = '10px JetBrains Mono, monospace';
+      ctx.font = '13px JetBrains Mono, monospace';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       ctx.fillStyle = '#e0d4e0';
@@ -609,42 +603,47 @@ export default function Explorer() {
 
       {/* ── 1. Floating header ── */}
       <header className="expl-header">
-        <span className="expl-title">Explorer</span>
+        <span className="expl-title">
+          <FlatIcon name="explorer" size={18} tone="rose" />
+          Explorer
+        </span>
         <span className="expl-live-badge">
-          <span className="expl-live-dot" />
+          <FlatIcon name="status" size={13} tone={health?.status === 'ok' ? 'success' : 'warning'} />
           LIVE
         </span>
 
         <div className="expl-header-pills">
           <span className="expl-pill">
+            <FlatIcon name="status" size={13} tone={health?.status === 'ok' ? 'success' : 'warning'} />
             <span className="expl-pill-label">Status</span>
             <span className="expl-pill-value" style={{ color: health?.status === 'ok' ? 'var(--success)' : 'var(--rose-bright)' }}>
               {health?.status === 'ok' ? 'online' : (health?.status ?? 'ok')}
             </span>
           </span>
           <span className="expl-pill">
+            <FlatIcon name="clock" size={13} tone="dream" />
             <span className="expl-pill-label">Uptime</span>
             <span className="expl-pill-value">{fmtUptime(health?.uptime_secs ?? 0)}</span>
           </span>
           <span className="expl-pill">
+            <FlatIcon name="hash" size={13} tone="muted" />
             <span className="expl-pill-label">Version</span>
             <span className="expl-pill-value">{health?.version ?? '0.1.0'}</span>
           </span>
           <span className="expl-pill">
+            <FlatIcon name="agent" size={13} tone="dream" />
             <span className="expl-pill-label">Agents</span>
             <span className="expl-pill-value">{health?.active_agents ?? 0}</span>
           </span>
           <span className="expl-pill">
+            <FlatIcon name="task" size={13} tone="bone" />
             <span className="expl-pill-label">Plans</span>
             <span className="expl-pill-value">{health?.active_plans ?? 0}</span>
           </span>
         </div>
 
         <button className="expl-refresh" onClick={refresh} title="Refresh data">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-            <path d="M1.5 7a5.5 5.5 0 0 1 9.9-3.3M12.5 7a5.5 5.5 0 0 1-9.9 3.3" />
-            <path d="M11.4 1v2.7h-2.7M2.6 13v-2.7h2.7" />
-          </svg>
+          <FlatIcon name="refresh" size={14} tone="rose" />
         </button>
       </header>
 
@@ -662,27 +661,27 @@ export default function Explorer() {
       {/* ── 3. Stat strip with sparklines ── */}
       <div className="expl-stat-strip">
         <div className="expl-stat-pill">
-          <span className="expl-stat-label">EPISODES</span>
+          <span className="expl-stat-label"><FlatIcon name="database" size={14} tone="rose" />EPISODES</span>
           <span className="expl-stat-value" style={{ color: 'var(--rose-bright)' }}>{episodes.length}</span>
           <canvas ref={epSparkRef} className="expl-spark" />
         </div>
         <div className="expl-stat-pill">
-          <span className="expl-stat-label">COST</span>
+          <span className="expl-stat-label"><FlatIcon name="cost" size={14} tone="bone" />COST</span>
           <span className="expl-stat-value" style={{ color: 'var(--bone)' }}>${stats.totalCost.toFixed(3)}</span>
           <canvas ref={costSparkRef} className="expl-spark" />
         </div>
         <div className="expl-stat-pill">
-          <span className="expl-stat-label">AGENTS</span>
+          <span className="expl-stat-label"><FlatIcon name="agent" size={14} tone="dream" />AGENTS</span>
           <span className="expl-stat-value" style={{ color: 'var(--dream-bright)' }}>{stats.agentCount}</span>
           <canvas ref={agentSparkRef} className="expl-spark" />
         </div>
         <div className="expl-stat-pill">
-          <span className="expl-stat-label">GATE PASS</span>
+          <span className="expl-stat-label"><FlatIcon name="gate" size={14} tone="success" />GATE PASS</span>
           <span className="expl-stat-value" style={{ color: 'var(--success)' }}>{stats.gatePass.toFixed(0)}%</span>
           <canvas ref={gateSparkRef} className="expl-spark" />
         </div>
         <div className="expl-stat-pill">
-          <span className="expl-stat-label">AVG DURATION</span>
+          <span className="expl-stat-label"><FlatIcon name="duration" size={14} tone="rose" />AVG DURATION</span>
           <span className="expl-stat-value" style={{ color: 'var(--rose-glow)' }}>{stats.avgDuration.toFixed(1)}s</span>
           <canvas ref={durSparkRef} className="expl-spark" />
         </div>
@@ -690,7 +689,7 @@ export default function Explorer() {
 
       {/* ── 4. Activity heatmap ── */}
       <div className="expl-heatmap-section">
-        <span className="expl-section-label">ACTIVITY DENSITY</span>
+        <span className="expl-section-label"><FlatIcon name="activity" size={15} tone="rose" />ACTIVITY DENSITY</span>
         <div className="expl-heatmap">
           {heatmapData.map((count, hour) => (
             <div
@@ -731,22 +730,24 @@ export default function Explorer() {
                 {/* Top row: badges + time */}
                 <div className="expl-card-top">
                   <span className="expl-card-kind" style={{ background: kindColor(ep.kind) + '22', color: kindColor(ep.kind) }}>
+                    <FlatIcon name={inferIcon(ep.kind)} size={13} tone="muted" />
                     {ep.kind}
                   </span>
                   {ep.model && (
-                    <span className="expl-card-model">{ep.model}</span>
+                    <span className="expl-card-model"><FlatIcon name="model" size={13} tone="dream" />{ep.model}</span>
                   )}
                   <span className="expl-card-time">
+                    <FlatIcon name="clock" size={13} tone="muted" />
                     {ep.timestamp_ms ? relativeTime(ep.timestamp_ms) : ''}
                   </span>
                 </div>
 
                 {/* Agent name */}
-                <div className="expl-card-agent">{ep.agent_id ?? 'system'}</div>
+                <div className="expl-card-agent"><FlatIcon name="agent" size={14} tone="rose" />{ep.agent_id ?? 'system'}</div>
 
                 {/* Task ID */}
                 {ep.task_id && (
-                  <div className="expl-card-task">{ep.task_id}</div>
+                  <div className="expl-card-task"><FlatIcon name="task" size={14} tone="bone" />{ep.task_id}</div>
                 )}
 
                 {/* Gate verdict dots */}
@@ -765,13 +766,13 @@ export default function Explorer() {
                 {/* Meta chips */}
                 <div className="expl-card-meta">
                   {ep.usage?.cost_usd != null && (
-                    <span className="expl-chip cost">${ep.usage.cost_usd.toFixed(3)}</span>
+                    <span className="expl-chip cost"><FlatIcon name="cost" size={12} tone="bone" />${ep.usage.cost_usd.toFixed(3)}</span>
                   )}
                   {ep.duration_secs != null && (
-                    <span className="expl-chip dur">{ep.duration_secs.toFixed(1)}s</span>
+                    <span className="expl-chip dur"><FlatIcon name="duration" size={12} tone="muted" />{ep.duration_secs.toFixed(1)}s</span>
                   )}
                   {ep.turns != null && (
-                    <span className="expl-chip turns">{ep.turns}t</span>
+                    <span className="expl-chip turns"><FlatIcon name="route" size={12} tone="dream" />{ep.turns}t</span>
                   )}
                 </div>
 
@@ -816,16 +817,14 @@ export default function Explorer() {
         <div className="expl-drawer-body">
           {/* Left: Provider health */}
           <div className="expl-drawer-providers">
-            <div className="expl-section-label">PROVIDER HEALTH</div>
+            <div className="expl-section-label"><FlatIcon name="provider" size={15} tone="success" />PROVIDER HEALTH</div>
             {provEntries.length === 0 ? (
               <div className="expl-empty">No providers configured</div>
             ) : (
               <div className="expl-provider-list">
                 {provEntries.map(([name, info]) => (
                   <div key={name} className={`provider-card${info.healthy ? ' provider-card--healthy' : ''}`}>
-                    <span className={`provider-led ${info.healthy ? 'healthy' : 'unhealthy'}`}>
-                      {info.healthy && <span className="provider-led-pulse" />}
-                    </span>
+                    <FlatIcon name="provider" size={14} tone={info.healthy ? 'success' : 'warning'} />
                     <span className="provider-name">{name}</span>
                     <span className={`provider-badge ${info.healthy ? 'ok' : 'down'}`}>
                       {info.healthy ? 'ok' : 'down'}
@@ -838,7 +837,7 @@ export default function Explorer() {
 
           {/* Right: Event stream */}
           <div className="expl-drawer-events">
-            <div className="expl-section-label">EVENT STREAM</div>
+            <div className="expl-section-label"><FlatIcon name="event" size={15} tone="dream" />EVENT STREAM</div>
             <div className="expl-event-list">
               {events.length === 0 ? (
                 <div className="expl-empty">No events recorded yet</div>
@@ -846,7 +845,7 @@ export default function Explorer() {
                 events.slice(0, 16).map((evt, i) => (
                   <div key={`${evt?.type ?? 'evt'}-${i}`} className="expl-event-item">
                     <span className="expl-event-ts">{safeTimestamp(evt?.timestamp)}</span>
-                    <span className="expl-event-badge">{evt?.type ?? 'unknown'}</span>
+                    <span className="expl-event-badge"><FlatIcon name={inferIcon(evt?.type ?? 'event')} size={12} tone="muted" />{evt?.type ?? 'unknown'}</span>
                     <span className="expl-event-payload">{safePayload(evt?.payload)}</span>
                   </div>
                 ))

@@ -2,17 +2,18 @@ import { useEffect, useState } from 'react';
 import { NavLink, Link } from 'react-router';
 import { useApi } from '../hooks/useApi';
 import { useServerHealth } from '../hooks/useServerHealth';
+import FlatIcon, { type FlatIconName } from './FlatIcon';
 import './TopNav.css';
 
 const NAV_LINKS = [
-  { to: '/demo', label: 'Demo' },
-  { to: '/dashboard', label: 'Dashboard' },
-  { to: '/bench', label: 'Bench' },
-  { to: '/explorer', label: 'Explorer' },
-  { to: '/builder', label: 'Builder' },
-  { to: '/terminal', label: 'Terminal' },
-  { to: '/settings', label: 'Settings' },
-];
+  { to: '/demo', label: 'Demo', icon: 'demo' },
+  { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
+  { to: '/bench', label: 'Bench', icon: 'bench' },
+  { to: '/explorer', label: 'Explorer', icon: 'explorer' },
+  { to: '/builder', label: 'Builder', icon: 'builder' },
+  { to: '/terminal', label: 'Terminal', icon: 'terminal' },
+  { to: '/settings', label: 'Settings', icon: 'settings' },
+] satisfies Array<{ to: string; label: string; icon: FlatIconName }>;
 
 interface HealthResponse {
   status?: string;
@@ -62,6 +63,7 @@ export default function TopNav() {
             to={l.to}
             className={({ isActive }) => isActive ? 'active' : ''}
           >
+            <FlatIcon name={l.icon} size={13} tone="muted" />
             {l.label}
           </NavLink>
         ))}

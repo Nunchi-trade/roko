@@ -429,6 +429,10 @@ pub struct AppState {
 
     /// Active bench runs (keyed by run_id).
     pub active_bench_runs: RwLock<HashMap<String, BenchRunHandle>>,
+    /// Active matrix (multi-lane) bench runs (keyed by matrix_id).
+    pub active_matrix_runs: RwLock<HashMap<String, MatrixRunHandle>>,
+    /// Ephemeral workspaces created via the API (keyed by workspace id).
+    pub ephemeral_workspaces: RwLock<HashMap<String, WorkspaceInfo>>,
 }
 
 /// A tracked bench run with its background task handle.
@@ -437,6 +441,25 @@ pub struct BenchRunHandle {
     pub id: String,
     /// Background task driving the bench execution.
     pub handle: JoinHandle<()>,
+}
+
+/// A tracked matrix (multi-lane) bench run.
+pub struct MatrixRunHandle {
+    /// Matrix run identifier.
+    pub id: String,
+    /// Per-lane task handles.
+    pub lane_handles: Vec<JoinHandle<()>>,
+}
+
+/// Metadata for an ephemeral workspace created via the API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    /// Unique workspace identifier (prefix + timestamp).
+    pub id: String,
+    /// Absolute path to the workspace directory.
+    pub path: PathBuf,
+    /// Unix timestamp (seconds) when the workspace was created.
+    pub created_at: u64,
 }
 
 impl AppState {
@@ -549,6 +572,8 @@ impl AppState {
             batch_progress: RwLock::new(HashMap::new()),
             terminal_sessions: crate::terminal::SessionManager::new(layout_root),
             active_bench_runs: RwLock::new(HashMap::new()),
+            active_matrix_runs: RwLock::new(HashMap::new()),
+            ephemeral_workspaces: RwLock::new(HashMap::new()),
         })
     }
 

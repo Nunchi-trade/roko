@@ -40,6 +40,7 @@ impl CliRuntime for TestRuntime {
             success: true,
             output_text: Some("test runtime output".to_string()),
             usage: None,
+            gate_results: Vec::new(),
         })
     }
 

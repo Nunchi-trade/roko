@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, Fragment } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from 'react';
 import { useLiveApi } from '../hooks/useLiveApi';
 import type { BenchRun } from '../lib/bench-types';
 import Pane from '../components/Pane';
@@ -50,6 +50,7 @@ export default function BenchCompare() {
   const [allRuns, setAllRuns] = useState<BenchRun[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>(getIdsFromUrl);
   const [fullRuns, setFullRuns] = useState<BenchRun[]>([]);
+  const didAutoSelectRef = useRef(selectedIds.length > 0);
 
   // Fetch all runs on mount
   useEffect(() => {
@@ -67,9 +68,10 @@ export default function BenchCompare() {
 
   // Auto-select first two runs if nothing from URL
   useEffect(() => {
-    if (selectedIds.length > 0 || allRuns.length < 2) return;
+    if (didAutoSelectRef.current || selectedIds.length > 0 || allRuns.length < 2) return;
+    didAutoSelectRef.current = true;
     setSelectedIds([allRuns[0].id, allRuns[1].id]);
-  }, [allRuns]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [allRuns, selectedIds.length]);
 
   // Sync selectedIds -> URL
   useEffect(() => {
@@ -114,9 +116,11 @@ export default function BenchCompare() {
   // ── Selection actions ──
 
   const addRun = useCallback((id: string) => {
-    if (!id || selectedIds.includes(id)) return;
-    setSelectedIds((prev) => [...prev, id].slice(0, 6));
-  }, [selectedIds]);
+    setSelectedIds((prev) => {
+      if (!id || prev.includes(id)) return prev;
+      return [...prev, id].slice(0, 6);
+    });
+  }, []);
 
   const removeRun = useCallback((id: string) => {
     setSelectedIds((prev) => prev.filter((x) => x !== id));

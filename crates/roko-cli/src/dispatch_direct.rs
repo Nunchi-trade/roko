@@ -272,7 +272,7 @@ async fn dispatch_openai_compat(
 ) -> Result<DispatchResult> {
     let client = reqwest::Client::new();
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let model_name = model.unwrap_or("gpt-4o");
+    let model_name = model.unwrap_or("gpt-5.4-mini");
 
     let body = serde_json::json!({
         "model": model_name,

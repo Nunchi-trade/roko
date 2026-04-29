@@ -5,6 +5,7 @@ import { useTerminal, type TerminalHandle } from '../hooks/useTerminal';
 import { setSpeedMultiplier } from '../hooks/useTerminalSession';
 import { useServerHealth } from '../hooks/useServerHealth';
 import { useRokoConfig } from '../hooks/useRokoConfig';
+import { useWorkspace } from '../hooks/useWorkspace';
 import { lookupCmdDesc } from '../lib/cmd-descriptions';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
@@ -62,6 +63,7 @@ export default function Demo() {
   const scenario = SCENARIOS[activeIdx];
   const serverHealth = useServerHealth();
   const { defaultModel } = useRokoConfig();
+  const { ensureWorkspace, createWorkspace: createWs } = useWorkspace();
 
   // Sidebar state
   const [stats, setStats] = useState({ model: '--', cost: '--', tokens: '--', time: '--' });
@@ -87,8 +89,8 @@ export default function Demo() {
     { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
   ]);
 
-  // Chain Intelligence panel state
-  const chainWs = useChainWs();
+  // Chain Intelligence panel state — only connect when the scenario needs it
+  const chainWs = useChainWs(scenario.id === 'chain-intelligence');
   const [ciBlocks] = useState<BlockData[]>([]);
   const [ciPositions] = useState<AgentPosition[]>([
     {
@@ -174,6 +176,7 @@ export default function Demo() {
 
   const pausedRef = useRef(false);
   const runningRef = useRef(false);
+  const workspaceDirRef = useRef<string>('');
   const handleRefs = useRef<(React.RefObject<TerminalHandle | null>)[]>([]);
   const [terminalStates, setTerminalStates] = useState<TerminalPaneState[]>([]);
 
@@ -235,8 +238,11 @@ export default function Demo() {
     }));
   }, []);
 
-  const buildContext = useCallback((): ScenarioContext => {
-    const entries = handleRefs.current
+  const buildContext = useCallback((
+    workspaceDir: string,
+    scenarioEntries?: TerminalHandle[],
+  ): ScenarioContext => {
+    const entries = scenarioEntries ?? handleRefs.current
       .map((ref) => ref.current)
       .filter((h): h is TerminalHandle =>
         h !== null && h.status === 'connected' && h.ws?.readyState === WebSocket.OPEN,
@@ -244,6 +250,11 @@ export default function Demo() {
 
     return {
       entries,
+      workspaceDir,
+      createWorkspace: async (prefix: string) => {
+        const ws = await createWs(prefix);
+        return ws.path;
+      },
       playback,
       timeline,
       setMetric: (key: string, value: string) => {
@@ -283,7 +294,7 @@ export default function Demo() {
       paused: pausedRef,
       running: runningRef,
     };
-  }, [appendPipelineEvent, defaultModel, patchPipeline, patchPipelineStream, selectedPipelineExample, updatePipelineTask]);
+  }, [appendPipelineEvent, createWs, defaultModel, patchPipeline, patchPipelineStream, selectedPipelineExample, updatePipelineTask]);
 
   const getReadyTerminalEntries = useCallback((): TerminalHandle[] => (
     handleRefs.current
@@ -295,7 +306,7 @@ export default function Demo() {
   ), [scenario.panes]);
 
   const waitForTerminalReadiness = useCallback(async (): Promise<TerminalHandle[] | null> => {
-    const timeoutMs = 20000;
+    const timeoutMs = 10000;
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs && runningRef.current) {
@@ -304,7 +315,7 @@ export default function Demo() {
 
       setProgressLabel('Terminals');
       setProgressText(`waiting for terminals (${entries.length}/${scenario.panes})...`);
-      await sleep(150);
+      await sleep(50);
     }
 
     const entries = getReadyTerminalEntries();
@@ -410,8 +421,12 @@ export default function Demo() {
       ]);
       return;
     }
-    const ctx = { ...buildContext(), entries };
     try {
+      setProgressLabel('Workspace');
+      setProgressText(`creating live workspace for ${scenario.title}`);
+      const ws = await ensureWorkspace(`roko-${scenario.id}`);
+      workspaceDirRef.current = ws.path;
+      const ctx = buildContext(ws.path, entries);
       await scenario.run(ctx);
     } catch (err) {
       console.error('Scenario error:', err);
@@ -420,7 +435,7 @@ export default function Demo() {
     runningRef.current = false;
     setIsRunning(false);
     setIsPaused(false);
-  }, [scenario, serverHealth, buildContext, selectedPipelineExample, waitForTerminalReadiness, getReadyTerminalEntries]);
+  }, [scenario, serverHealth, buildContext, selectedPipelineExample, waitForTerminalReadiness, getReadyTerminalEntries, ensureWorkspace]);
 
   const handlePauseResume = useCallback(() => {
     pausedRef.current = !isPaused;
@@ -492,19 +507,28 @@ export default function Demo() {
 
   const sessionIds = useMemo(
     () => scenario.labels.map((_, i) => `demo-${scenario.id}-${i}-${Date.now()}`),
-    [activeIdx], // eslint-disable-line react-hooks/exhaustive-deps
+    [scenario.id, scenario.labels],
   );
 
-  useEffect(() => {
-    handleRefs.current = Array.from(
+  // Create refs synchronously during render (not in useEffect) so they're
+  // available when child TerminalPaneWithHandle components mount and write
+  // their handles. Using useEffect caused a race: children wrote to old refs
+  // that were then replaced by the parent effect.
+  const stableRefs = useMemo(
+    () => Array.from(
       { length: scenario.panes },
       () => ({ current: null }) as React.RefObject<TerminalHandle | null>,
-    );
+    ),
+    [scenario.id, scenario.panes],
+  );
+  handleRefs.current = stableRefs;
+
+  useEffect(() => {
     setTerminalStates(Array.from(
       { length: scenario.panes },
       () => ({ status: 'connecting' as const, connected: false }),
     ));
-  }, [scenario.panes, activeIdx]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [scenario.id, scenario.panes]);
 
   const updateTerminalState = useCallback((
     index: number,

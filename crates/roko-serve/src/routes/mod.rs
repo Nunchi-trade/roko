@@ -34,11 +34,13 @@ pub mod shared_runs;
 mod sse;
 mod status;
 mod subscriptions;
+mod swe_bench;
 mod team;
 mod templates;
 mod vision_loop;
 mod webhooks;
 mod workflows;
+mod workspaces;
 mod ws;
 
 use std::convert::Infallible;
@@ -108,7 +110,9 @@ pub fn build_router(
         .merge(vision_loop::routes())
         .merge(team::routes())
         .merge(bench::routes())
+        .merge(swe_bench::routes())
         .merge(workflows::routes())
+        .merge(workspaces::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())

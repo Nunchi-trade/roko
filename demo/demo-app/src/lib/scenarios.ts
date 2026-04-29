@@ -5,8 +5,7 @@
  */
 import type { TerminalHandle } from '../hooks/useTerminal';
 import {
-  setupWorkspace,
-  joinWorkspace,
+  enterWorkspace,
   showCmd,
   trackMetrics,
   getRoko,
@@ -59,6 +58,10 @@ export interface ScenarioContext {
   activeModel?: string;
   paused: { current: boolean };
   running: { current: boolean };
+  /** Server-created workspace directory path (pre-created before scenario runs). */
+  workspaceDir: string;
+  /** Create an additional workspace for multi-workspace scenarios. */
+  createWorkspace: (prefix: string) => Promise<string>;
 }
 
 export interface Scenario {
@@ -183,11 +186,13 @@ function failPipeline(ctx: ScenarioContext, phase: PipelinePhase, headline: stri
 
 function rustSetupCommand(example: PipelineScenarioExample): string {
   const name = example.repoName.replace(/[^a-zA-Z0-9_]/g, '_');
+  // Scaffold a minimal Rust project. Skip compilation — the gates in `plan run`
+  // handle compile/test/clippy. Running `cargo test` here added 10-15s of dead wait.
   return [
     'mkdir -p src',
     `printf '[package]\\nname = "${name}"\\nversion = "0.1.0"\\nedition = "2021"\\n\\n[dependencies]\\n' > Cargo.toml`,
     `printf 'fn main() {\\n    println!("${example.label} demo");\\n}\\n' > src/main.rs`,
-    'cargo test',
+    `printf '#[test]\\nfn it_works() { assert_eq!(2 + 2, 4); }\\n' > src/lib.rs`,
   ].join(' && ');
 }
 
@@ -221,7 +226,8 @@ const prdPipeline: Scenario = {
       events: [pipelineEvent('setup', `Starting live PRD pipeline for ${example.label}.`)],
     });
 
-    const dir = await setupWorkspace(main, example.workspacePrefix);
+    const dir = ctx.workspaceDir;
+    await enterWorkspace(main, dir);
     const closeWorkflowStreams = startWorkflowSubscriptions(ctx, dir);
     const ROKO = getRoko();
     timeline.init(this.steps);
@@ -237,7 +243,7 @@ const prdPipeline: Scenario = {
       });
       ctx.appendPipelineEvent(pipelineEvent('setup', `${example.setupDescription} This is setup, not the customer-facing demo step.`));
       logCommand('prepare workspace', 'Creates a small Rust CLI so the generated PRD and plan target real files.');
-      await main.execCmd(setupCmd, 90000);
+      await main.execCmd(setupCmd, 10000);
       main.clearTerminal();
 
       await playback.waitForStep();
@@ -377,9 +383,9 @@ const prdResearchLoop: Scenario = {
     { label: 'Learn', sublabel: 'learn all' },
     { label: 'Summary', sublabel: 'status + efficiency' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, workspaceDir }) {
     const e = entries[0];
-    await setupWorkspace(e, 'roko-research-loop');
+    await enterWorkspace(e, workspaceDir);
     const ROKO = getRoko();
     setMetric('model', 'cascade');
     timeline.init(this.steps);
@@ -517,11 +523,11 @@ const race: Scenario = {
     { label: 'Naive run', sublabel: '--no-replan' },
     { label: 'Cascade run', sublabel: 'full pipeline' },
   ],
-  async run({ entries, playback, timeline, setMetric, logCommand }) {
+  async run({ entries, playback, timeline, setMetric, logCommand, workspaceDir }) {
     const [left, right] = entries;
 
-    const dir = await setupWorkspace(left, 'roko-race');
-    await joinWorkspace(right, dir);
+    await enterWorkspace(left, workspaceDir);
+    await enterWorkspace(right, workspaceDir);
 
     const ROKO = getRoko();
     timeline.init(this.steps);
@@ -577,10 +583,10 @@ const gateRetry: Scenario = {
     { label: 'Retry', sublabel: 'second attempt' },
     { label: 'Pass', sublabel: 'gates green' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, running, paused }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, running, paused, workspaceDir }) {
     const [task, gates] = entries;
-    const dir = await setupWorkspace(task, 'roko-retry');
-    await joinWorkspace(gates, dir);
+    await enterWorkspace(task, workspaceDir);
+    await enterWorkspace(gates, workspaceDir);
 
     const ROKO = getRoko();
     const totalSteps = 6;
@@ -834,22 +840,20 @@ const providers: Scenario = {
   title: 'Providers',
   subtitle: 'One prompt, four providers, simultaneously. Provider-agnostic by design.',
   panes: 4,
-  labels: ['zhipu (glm-4)', 'openai (gpt-4o)', 'anthropic (haiku)', 'moonshot (v1)'],
+  labels: ['zhipu (glm-4)', 'openai (gpt-5.4-mini)', 'anthropic (haiku)', 'moonshot (v1)'],
   panel: true,
   promptBar: false,
   steps: [
     { label: 'Zhipu GLM-4', sublabel: 'dispatch' },
-    { label: 'OpenAI GPT-4o', sublabel: 'dispatch' },
+    { label: 'OpenAI GPT-5.4-Mini', sublabel: 'dispatch' },
     { label: 'Anthropic Haiku', sublabel: 'dispatch' },
     { label: 'Moonshot v1', sublabel: 'dispatch' },
   ],
-  async run({ entries, playback, timeline, logCommand }) {
+  async run({ entries, playback, timeline, logCommand, workspaceDir }) {
     const providerNames = ['zhipu', 'openai', 'anthropic', 'moonshot'];
 
-    const dir = await setupWorkspace(entries[0], 'roko-providers');
-    for (const e of entries.slice(1)) {
-      await joinWorkspace(e, dir);
-    }
+    await enterWorkspace(entries[0], workspaceDir);
+    await Promise.all(entries.slice(1).map(e => enterWorkspace(e, workspaceDir)));
 
     const ROKO = getRoko();
     timeline.init(this.steps);
@@ -885,7 +889,7 @@ const providerRace: Scenario = {
   title: 'Provider Race',
   subtitle: '4 providers race on the same prompt. First to pass gates wins.',
   panes: 4,
-  labels: ['anthropic (haiku)', 'openai (gpt-4o)', 'gemini (flash)', 'moonshot (v1)'],
+  labels: ['anthropic (haiku)', 'openai (gpt-5.4-mini)', 'gemini (flash)', 'moonshot (v1)'],
   panel: true,
   promptBar: false,
   steps: [
@@ -895,10 +899,10 @@ const providerRace: Scenario = {
     { label: 'Winner', sublabel: 'first to pass' },
     { label: 'Cost summary', sublabel: 'compare totals' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, workspaceDir }) {
     const providerNames = ['anthropic', 'openai', 'gemini', 'moonshot'];
-    const providerModels = ['haiku', 'gpt-4o', 'flash', 'v1'];
-    const providerLabels = ['anthropic (haiku)', 'openai (gpt-4o)', 'gemini (flash)', 'moonshot (v1)'];
+    const providerModels = ['haiku', 'gpt-5.4-mini', 'flash', 'v1'];
+    const providerLabels = ['anthropic (haiku)', 'openai (gpt-5.4-mini)', 'gemini (flash)', 'moonshot (v1)'];
     const costs: (string | null)[] = [null, null, null, null];
     const tokens: (string | null)[] = [null, null, null, null];
     const finishOrder: number[] = [];
@@ -930,10 +934,8 @@ const providerRace: Scenario = {
     timeline.setActive(0);
     playback.setProgress(0, 5, 'initializing workspaces...');
 
-    const dir = await setupWorkspace(entries[0], 'roko-provider-race');
-    for (const e of entries.slice(1)) {
-      await joinWorkspace(e, dir);
-    }
+    await enterWorkspace(entries[0], workspaceDir);
+    await Promise.all(entries.slice(1).map(e => enterWorkspace(e, workspaceDir)));
 
     const ROKO = getRoko();
     setMetric('model', 'provider race');
@@ -1069,11 +1071,9 @@ const explore: Scenario = {
     { label: 'knowledge query', sublabel: 'knowledge' },
     { label: 'explain', sublabel: 'knowledge' },
   ],
-  async run({ entries, playback, timeline, logCommand, paused, running }) {
-    const dir = await setupWorkspace(entries[0], 'roko-explore');
-    for (const e of entries.slice(1)) {
-      await joinWorkspace(e, dir);
-    }
+  async run({ entries, playback, timeline, logCommand, paused, running, workspaceDir }) {
+    await enterWorkspace(entries[0], workspaceDir);
+    await Promise.all(entries.slice(1).map(e => enterWorkspace(e, workspaceDir)));
 
     const ROKO = getRoko();
     timeline.init(this.steps);
@@ -1126,11 +1126,11 @@ const knowledgeAccumulation: Scenario = {
     { label: 'Knowledge growth', sublabel: 'query after run 2' },
     { label: 'Final state', sublabel: 'knowledge stats' },
   ],
-  async run({ entries, playback, timeline, setMetric, logCommand }) {
+  async run({ entries, playback, timeline, setMetric, logCommand, workspaceDir }) {
     const [runner, knowledge] = entries;
 
-    const dir = await setupWorkspace(runner, 'roko-knowledge');
-    await joinWorkspace(knowledge, dir);
+    await enterWorkspace(runner, workspaceDir);
+    await enterWorkspace(knowledge, workspaceDir);
     const ROKO = getRoko();
 
     timeline.init(this.steps);
@@ -1270,10 +1270,10 @@ const dreamConsolidation: Scenario = {
     { label: 'Integration', sublabel: 'knowledge merge' },
     { label: 'Report', sublabel: 'dream report' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, running, paused }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, running, paused, workspaceDir }) {
     const [dream, monitor] = entries;
-    const dir = await setupWorkspace(dream, 'roko-dream');
-    await joinWorkspace(monitor, dir);
+    await enterWorkspace(dream, workspaceDir);
+    await enterWorkspace(monitor, workspaceDir);
     const ROKO = getRoko();
     const totalSteps = this.steps.length;
 
@@ -1438,9 +1438,9 @@ const chat: Scenario = {
     { label: 'Send message', sublabel: 'explain cascade routing' },
     { label: 'Slash commands', sublabel: '/status, /model' },
   ],
-  async run({ entries, playback, timeline, logCommand }) {
+  async run({ entries, playback, timeline, logCommand, workspaceDir }) {
     const e = entries[0];
-    await setupWorkspace(e, 'roko-chat');
+    await enterWorkspace(e, workspaceDir);
     const ROKO = getRoko();
 
     timeline.init(this.steps);
@@ -1535,8 +1535,12 @@ const knowledgeTransfer: Scenario = {
     timeline.setActive(0);
     playback.setProgress(0, 5, 'Setting up workspaces');
 
-    const dirA = await setupWorkspace(alpha, 'roko-user-api');
-    const dirB = await setupWorkspace(beta, 'roko-inventory-api');
+    const dirA = ctx.workspaceDir;
+    const dirB = await ctx.createWorkspace('roko-inventory-api');
+    await Promise.all([
+      enterWorkspace(alpha, dirA),
+      enterWorkspace(beta, dirB),
+    ]);
 
     // Beta shows waiting state while Alpha builds
     await beta.execCmd('echo "Waiting for Agent Alpha to finish..."', 5000);
@@ -1648,11 +1652,11 @@ const chainIntelligence: Scenario = {
     { label: 'Cross-pollination', sublabel: 'insights compound' },
     { label: 'Results', sublabel: 'efficiency metrics' },
   ],
-  async run({ entries, playback, timeline, setMetric, logCommand, running, paused }) {
+  async run({ entries, playback, timeline, setMetric, logCommand, running, paused, workspaceDir }) {
     const [alpha, beta] = entries;
 
-    const dir = await setupWorkspace(alpha, 'roko-chain-intel');
-    await joinWorkspace(beta, dir);
+    await enterWorkspace(alpha, workspaceDir);
+    await enterWorkspace(beta, workspaceDir);
 
     const ROKO = getRoko();
     timeline.init(this.steps);

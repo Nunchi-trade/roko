@@ -579,6 +579,7 @@ mod tests {
                 success: true,
                 output_text: None,
                 usage: None,
+                gate_results: Vec::new(),
             })
         }
 

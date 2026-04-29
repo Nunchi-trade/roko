@@ -26,7 +26,8 @@ const MODEL_COLORS: Record<string, string> = {
   'claude-sonnet-4': '#C8B890',
   'claude-haiku-3': '#8A9C86',
   'claude-opus-4': '#AA7088',
-  'gpt-4o': '#D8A878',
+  'gpt-5.4': '#D8A878',
+  'gpt-5.4-mini': '#D8C098',
   'gemini-2.5-pro': '#9A8AB8',
 };
 

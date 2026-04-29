@@ -2,6 +2,8 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { useContextEventSubscription } from '../../contexts/EventStreamContext';
+import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 
 /* ── Types ────────────────────────────────────────────────── */
 
@@ -166,29 +168,26 @@ export default function CascadeRouter() {
   const [state, setState] = useState<CascadeState>({});
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const poll = async () => {
-      try {
-        const data = await get<CascadeState>('/api/learn/cascade-router');
-        if (cancelled) return;
-        setState(data ?? {});
-      } catch {
-        /* keep previous */
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-
-    poll();
-    const id = window.setInterval(poll, 10000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
+  const fetchState = useCallback(async () => {
+    try {
+      const data = await get<CascadeState>('/api/learn/cascade-router');
+      setState(data ?? {});
+    } catch {
+      /* keep previous */
+    } finally {
+      setLoading(false);
+    }
   }, [get]);
+
+  // Initial fetch on mount
+  useEffect(() => { fetchState(); }, [fetchState]);
+
+  // SSE-triggered refetch
+  const debouncedRefetch = useDebouncedRefetch(fetchState, 2000);
+  useContextEventSubscription(
+    ['inference_completed'],
+    debouncedRefetch,
+  );
 
   const rows = useMemo(
     () => Object.entries(state.confidence_stats ?? {}).sort(([a], [b]) => a.localeCompare(b)),
@@ -224,11 +223,11 @@ export default function CascadeRouter() {
     <div style={pageStyle}>
       {/* ═══ TOP MOSAIC ═══ */}
       <Mosaic columns={5}>
-        <MosaicCell label="MODELS" value={rows.length || 4} color="rose" mono />
-        <MosaicCell label="OBSERVATIONS" value={(state.total_observations ?? stats.totalTrials) || 312} color="bone" mono />
-        <MosaicCell label="AVG CONFIDENCE" value={`${(stats.avgConfidence * 100 || 89.2).toFixed(1)}%`} color="success" mono />
-        <MosaicCell label="BEST MODEL" value={stats.bestModel !== '—' ? stats.bestModel : 'sonnet-4'} color="dream" />
-        <MosaicCell label="ROLES ASSIGNED" value={roleEntries.length || 5} color="warning" mono />
+        <MosaicCell label="MODELS" value={rows.length} color="rose" mono />
+        <MosaicCell label="OBSERVATIONS" value={state.total_observations ?? stats.totalTrials} color="bone" mono />
+        <MosaicCell label="AVG CONFIDENCE" value={`${(stats.avgConfidence * 100).toFixed(1)}%`} color="success" mono />
+        <MosaicCell label="BEST MODEL" value={stats.bestModel} color="dream" />
+        <MosaicCell label="ROLES ASSIGNED" value={roleEntries.length} color="warning" mono />
       </Mosaic>
 
       {/* ═══ MAIN CONTENT: 3-column layout ═══ */}

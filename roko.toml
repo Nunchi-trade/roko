@@ -295,13 +295,13 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.gpt-4o]
+[models.gpt54]
 provider = "openai"
-slug = "gpt-4o"
+slug = "gpt-5.4"
 context_window = 128000
 supports_tools = true
 supports_thinking = false
-supports_vision = false
+supports_vision = true
 supports_web_search = false
 supports_mcp_tools = false
 supports_partial = false
@@ -314,13 +314,13 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.codex-mini]
+[models.gpt54-mini]
 provider = "openai"
-slug = "codex-mini-latest"
+slug = "gpt-5.4-mini"
 context_window = 128000
 supports_tools = true
 supports_thinking = false
-supports_vision = false
+supports_vision = true
 supports_web_search = false
 supports_mcp_tools = false
 supports_partial = false
@@ -447,10 +447,10 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.gpt41-mini]
+[models.gpt53-codex]
 provider = "openai"
-slug = "gpt-4.1-mini"
-context_window = 128000
+slug = "gpt-5.3-codex"
+context_window = 192000
 supports_tools = true
 supports_thinking = false
 supports_vision = false
@@ -458,7 +458,7 @@ supports_web_search = false
 supports_mcp_tools = false
 supports_partial = false
 supports_grounding = false
-supports_code_execution = false
+supports_code_execution = true
 supports_caching = false
 tool_format = "openai_json"
 supports_search = false
@@ -561,10 +561,10 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.gpt41-nano]
+[models.gpt52-codex]
 provider = "openai"
-slug = "gpt-4.1-nano"
-context_window = 128000
+slug = "gpt-5.2-codex"
+context_window = 192000
 supports_tools = true
 supports_thinking = false
 supports_vision = false
@@ -572,7 +572,7 @@ supports_web_search = false
 supports_mcp_tools = false
 supports_partial = false
 supports_grounding = false
-supports_code_execution = false
+supports_code_execution = true
 supports_caching = false
 tool_format = "openai_json"
 supports_search = false
@@ -618,10 +618,10 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.gpt41]
+[models.gpt51-codex]
 provider = "openai"
-slug = "gpt-4.1"
-context_window = 128000
+slug = "gpt-5.1-codex"
+context_window = 192000
 supports_tools = true
 supports_thinking = false
 supports_vision = false
@@ -629,7 +629,7 @@ supports_web_search = false
 supports_mcp_tools = false
 supports_partial = false
 supports_grounding = false
-supports_code_execution = false
+supports_code_execution = true
 supports_caching = false
 tool_format = "openai_json"
 supports_search = false

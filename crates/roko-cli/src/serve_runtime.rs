@@ -61,11 +61,13 @@ impl CliRuntime for RokoCliRuntime {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
         });
+        let gate_results = report_gate_results(&report);
         let output_text = report.output_text;
         Ok(RunResult {
             success,
             output_text,
             usage,
+            gate_results,
         })
     }
 
@@ -92,6 +94,7 @@ impl CliRuntime for RokoCliRuntime {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
         });
+        let gate_results = report_gate_results(&report);
         let output_text = report.output_text;
 
         if let Some(gate_name) = failed_gate.as_deref() {
@@ -141,6 +144,7 @@ impl CliRuntime for RokoCliRuntime {
             success,
             output_text,
             usage,
+            gate_results,
         })
     }
 
@@ -558,6 +562,23 @@ fn build_runner_config(
         feedback_facade: None,
         projection: None,
     }
+}
+
+/// Map gate verdicts from a [`RunReport`] to [`RuntimeGateResult`]s.
+fn report_gate_results(report: &crate::run::RunReport) -> Vec<RuntimeGateResult> {
+    report
+        .gate_verdicts
+        .iter()
+        .map(|(gate, passed)| RuntimeGateResult {
+            gate: gate.clone(),
+            passed: *passed,
+            detail: if *passed {
+                "passed".to_string()
+            } else {
+                "failed".to_string()
+            },
+        })
+        .collect()
 }
 
 fn non_empty_string(value: &str) -> Option<String> {

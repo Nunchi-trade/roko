@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import DreamPhaseViz from '../../components/DreamPhaseViz';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { useContextEventSubscription } from '../../contexts/EventStreamContext';
+import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 
 /* ── Types ────────────────────────────────────────────────── */
 
@@ -37,23 +39,28 @@ export default function DreamsView() {
   const [journal, setJournal] = useState<DreamJournal | null>(null);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const poll = async () => {
-      const [j, e] = await Promise.all([
-        get<DreamJournal>('/api/dream/journal').catch(() => null),
-        get<KnowledgeEntry[]>('/api/knowledge/entries').catch(() => []),
-      ]);
-      if (cancelled) return;
-      setJournal(j);
-      setEntries(Array.isArray(e) ? e : ((e as { items?: KnowledgeEntry[] }).items ?? []));
-    };
-
-    poll();
-    const id = setInterval(poll, 30_000);
-    return () => { cancelled = true; clearInterval(id); };
+  const fetchAll = useCallback(async () => {
+    const [j, e] = await Promise.all([
+      get<DreamJournal>('/api/dream/journal').catch(() => null),
+      get<KnowledgeEntry[]>('/api/knowledge/entries').catch(() => []),
+    ]);
+    setJournal(j);
+    setEntries(Array.isArray(e) ? e : ((e as { items?: KnowledgeEntry[] }).items ?? []));
   }, [get]);
+
+  // Initial fetch + 60s fallback poll
+  useEffect(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, 60_000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
+
+  // SSE-triggered refetch
+  const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
+  useContextEventSubscription(
+    ['dream_started', 'dream_completed', 'dream_phase_changed'],
+    debouncedRefetch,
+  );
 
   /* Derived stats */
   const totalEpisodes = journal?.phases.reduce((s, p) => s + p.episodes_processed, 0) ?? 0;
@@ -70,12 +77,12 @@ export default function DreamsView() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {/* ═══ TOP MOSAIC ═══ */}
       <Mosaic columns={6}>
-        <MosaicCell label="CYCLES" value={journal?.cycle_count ?? 12} color="dream" mono sub={journal?.last_cycle ? `last: ${new Date(journal.last_cycle).toLocaleDateString()}` : 'periodic'} />
-        <MosaicCell label="PHASES" value={`${completedPhases || 4}/4`} color="success" mono />
-        <MosaicCell label="EPISODES" value={totalEpisodes || 847} color="rose" mono />
-        <MosaicCell label="CLUSTERS" value={totalClusters || 42} color="bone" mono />
-        <MosaicCell label="KNOWLEDGE" value={totalKnowledge || 18} color="warning" mono sub="entries written" />
-        <MosaicCell label="PLAYBOOKS" value={totalPlaybooks || 7} color="dream" mono />
+        <MosaicCell label="CYCLES" value={journal?.cycle_count ?? 0} color="dream" mono sub={journal?.last_cycle ? `last: ${new Date(journal.last_cycle).toLocaleDateString()}` : 'none'} />
+        <MosaicCell label="PHASES" value={`${completedPhases}/${journal?.phases.length ?? 0}`} color="success" mono />
+        <MosaicCell label="EPISODES" value={totalEpisodes} color="rose" mono />
+        <MosaicCell label="CLUSTERS" value={totalClusters} color="bone" mono />
+        <MosaicCell label="KNOWLEDGE" value={totalKnowledge} color="warning" mono sub="entries written" />
+        <MosaicCell label="PLAYBOOKS" value={totalPlaybooks} color="dream" mono />
       </Mosaic>
 
       {/* ═══ PHASE VISUALIZATION ═══ */}

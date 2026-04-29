@@ -2,13 +2,13 @@
   top: 0;
   left: 0;
   right: 0;
-  z-index: 9995;
+  z-index: var(--z-nav);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 28px;
-  height: 64px;
-  background: rgba(8, 8, 12, .78);
+  padding: 0 var(--sp-6);
+  height: var(--nav-h);
+  background: rgba(8, 8, 12, .82);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(16px);
   will-change: auto;
@@ -66,16 +66,34 @@
 }
 
 .topnav .links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   font-family: var(--sans);
-  font-size: 15px;
+  font-size: var(--text-md);
   letter-spacing: .03em;
   text-transform: none;
-  color: var(--text-soft);
-  padding: 8px 12px;
-  border-radius: 6px;
-  transition: color .2s, background .2s;
+  color: var(--text-primary);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  transition: color var(--duration-snap), background var(--duration-snap);
   position: relative;
   overflow: hidden;
+}
+
+.topnav .links a .flat-icon {
+  width: 25px;
+  height: 25px;
+  border-radius: 6px;
+  opacity: .82;
+}
+
+.topnav .links a.active .flat-icon,
+.topnav .links a:hover .flat-icon {
+  --icon-color: var(--rose-glow);
+  --icon-bg: rgba(220, 165, 189, .13);
+  --icon-border: rgba(220, 165, 189, .28);
+  opacity: 1;
 }
 
 /* Hover underline grows from center outward */
@@ -128,11 +146,11 @@
   align-items: center;
   gap: 7px;
   font-family: var(--sans);
-  font-size: 15px;
+  font-size: var(--text-sm);
   letter-spacing: .04em;
   text-transform: none;
-  padding: 6px 12px;
-  border-radius: 6px;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-soft);
 }
 

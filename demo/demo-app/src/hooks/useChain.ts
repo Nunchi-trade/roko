@@ -72,12 +72,13 @@ const MAX_PHEROMONES = 200;
 /** Exponential backoff: 1s, 2s, 4s, 8s, … capped at 30s */
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
+const MAX_RETRIES = 5;
 
 // ---------------------------------------------------------------------------
 // useChainWs — real WebSocket hook
 // ---------------------------------------------------------------------------
 
-export function useChainWs(): ChainWsState {
+export function useChainWs(enabled = true): ChainWsState {
   const [connected, setConnected] = useState(false);
   const [insights, setInsights] = useState<InsightEvent[]>([]);
   const [pheromones, setPheromones] = useState<PheromoneEvent[]>([]);
@@ -86,6 +87,7 @@ export function useChainWs(): ChainWsState {
 
   const wsRef = useRef<WebSocket | null>(null);
   const backoffRef = useRef(INITIAL_BACKOFF_MS);
+  const retriesRef = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
 
@@ -102,6 +104,7 @@ export function useChainWs(): ChainWsState {
     ws.onopen = () => {
       if (!mountedRef.current) return;
       backoffRef.current = INITIAL_BACKOFF_MS;
+      retriesRef.current = 0;
       setError(null);
       // connected state is set when we receive the server confirmation message
     };
@@ -155,6 +158,12 @@ export function useChainWs(): ChainWsState {
       wsRef.current = null;
       setConnected(false);
 
+      retriesRef.current += 1;
+      if (retriesRef.current > MAX_RETRIES) {
+        setError('mirage-rs unreachable — chain features disabled');
+        return;
+      }
+
       // Schedule reconnect with exponential backoff
       const delay = backoffRef.current;
       backoffRef.current = Math.min(delay * 2, MAX_BACKOFF_MS);
@@ -165,23 +174,31 @@ export function useChainWs(): ChainWsState {
 
     ws.onerror = () => {
       if (!mountedRef.current) return;
-      setError('WebSocket error — will retry');
+      if (retriesRef.current >= MAX_RETRIES) {
+        setError('mirage-rs unreachable — chain features disabled');
+      } else {
+        setError('WebSocket error — will retry');
+      }
       // onclose fires after onerror, so reconnect is handled there
     };
   }, []);
 
   const refresh = useCallback(() => {
     backoffRef.current = INITIAL_BACKOFF_MS;
+    retriesRef.current = 0;
     if (reconnectTimer.current) {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;
     }
+    setError(null);
     connect();
   }, [connect]);
 
   useEffect(() => {
     mountedRef.current = true;
-    connect();
+    if (enabled) {
+      connect();
+    }
 
     return () => {
       mountedRef.current = false;
@@ -189,7 +206,7 @@ export function useChainWs(): ChainWsState {
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [connect]);
+  }, [connect, enabled]);
 
   return { connected, insights, pheromones, stats, error, refresh };
 }

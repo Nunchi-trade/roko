@@ -1,10 +1,23 @@
 import { useState, useCallback } from 'react';
 import { useTerminal } from '../hooks/useTerminal';
+import { useWorkspace } from '../hooks/useWorkspace';
+import { enterWorkspace } from '../hooks/useTerminalSession';
 import './Terminal.css';
 
 /** Individual terminal pane using useTerminal hook internally. */
-function TerminalPaneReal({ sessionId, label, onClose }: { sessionId: string; label: string; onClose?: () => void }) {
-  const { attach, status } = useTerminal(sessionId);
+function TerminalPaneReal({ sessionId, label, onClose, workspacePath }: {
+  sessionId: string;
+  label: string;
+  onClose?: () => void;
+  workspacePath?: string | null;
+}) {
+  const { attach, status, handle } = useTerminal(sessionId);
+
+  const handleCdWorkspace = useCallback(() => {
+    const h = handle.current;
+    if (!h || !workspacePath) return;
+    enterWorkspace(h, workspacePath);
+  }, [handle, workspacePath]);
 
   return (
     <div className="term-pane-real">
@@ -12,6 +25,9 @@ function TerminalPaneReal({ sessionId, label, onClose }: { sessionId: string; la
         <span className={`term-conn-dot ${status}`} />
         <span className="term-pane-label">{label}</span>
         <span className="term-pane-status">{status}</span>
+        {workspacePath && (
+          <button className="term-init-btn" onClick={handleCdWorkspace} title={`cd ${workspacePath}`}>cd ws</button>
+        )}
         {onClose && (
           <button className="term-close-btn" onClick={onClose} aria-label={`Close ${label}`}>&times;</button>
         )}
@@ -31,6 +47,8 @@ export default function Terminal() {
     { id: `t-${Date.now()}`, label: 'shell 1' },
   ]);
   const [columns, setColumns] = useState<1 | 2 | 4>(1);
+  const [initDone, setInitDone] = useState(false);
+  const { ensureWorkspace } = useWorkspace();
 
   const addTerminal = useCallback(() => {
     const n = terminals.length + 1;
@@ -45,6 +63,15 @@ export default function Terminal() {
     setTerminals([]);
   }, []);
 
+  const [workspacePath, setWorkspacePath] = useState<string | null>(null);
+
+  const handleInitWorkspace = useCallback(async () => {
+    if (initDone) return;
+    setInitDone(true);
+    const ws = await ensureWorkspace('roko-terminal');
+    setWorkspacePath(ws.path);
+  }, [initDone, ensureWorkspace]);
+
   const COL_OPTIONS: (1 | 2 | 4)[] = [1, 2, 4];
 
   return (
@@ -52,6 +79,14 @@ export default function Terminal() {
       <div className="terminal-toolbar">
         <span className="terminal-page-title">Terminal</span>
         <div className="terminal-controls">
+          <button
+            className={`term-btn${initDone ? ' active' : ''}`}
+            onClick={handleInitWorkspace}
+            disabled={initDone}
+            title="Create a roko workspace"
+          >
+            {initDone ? 'ws ready' : 'Init workspace'}
+          </button>
           <button className="term-btn-add" onClick={addTerminal}>+</button>
           {COL_OPTIONS.map(c => (
             <button
@@ -72,7 +107,7 @@ export default function Terminal() {
           <div className={`term-grid cols-${columns}`}>
             {terminals.map(t => (
               <div key={t.id} className="term-cell">
-                <TerminalPaneReal sessionId={t.id} label={t.label} onClose={() => removeTerminal(t.id)} />
+                <TerminalPaneReal sessionId={t.id} label={t.label} onClose={() => removeTerminal(t.id)} workspacePath={workspacePath} />
               </div>
             ))}
           </div>

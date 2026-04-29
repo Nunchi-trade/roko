@@ -149,7 +149,7 @@ export function normalizePipelineRouteTier(
   const model = (modelHint ?? '').toLowerCase();
   const roleText = (role ?? '').toLowerCase();
   if (model.includes('opus') || model.includes('gpt-5') || roleText.includes('security')) return 'T3';
-  if (model.includes('sonnet') || model.includes('gpt-4') || roleText.includes('integr')) return 'T2';
+  if (model.includes('sonnet') || model.includes('codex') || roleText.includes('integr')) return 'T2';
   if (model.includes('haiku') || roleText.includes('verify') || roleText.includes('test')) return 'T1';
 
   if ((maxLoc ?? 0) >= 100 || verifyCount >= 4) return 'T3';

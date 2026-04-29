@@ -1397,6 +1397,7 @@ mod tests {
                 success: self.success,
                 output_text: None,
                 usage: None,
+                gate_results: Vec::new(),
             })
         }
 

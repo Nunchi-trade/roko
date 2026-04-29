@@ -48,6 +48,7 @@ impl CliRuntime for RecordingRuntime {
             success: true,
             output_text: None,
             usage: None,
+            gate_results: Vec::new(),
         })
     }
 

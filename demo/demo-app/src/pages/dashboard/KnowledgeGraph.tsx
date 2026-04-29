@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { useContextEventSubscription } from '../../contexts/EventStreamContext';
+import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 
@@ -135,23 +137,30 @@ export default function KnowledgeGraph() {
   const rafRef = useRef<number>(0);
   const frameRef = useRef<number>(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      const [eData, edData] = await Promise.all([
-        get<KnowledgeEntry[] | { items?: KnowledgeEntry[] }>('/api/knowledge/entries'),
-        get<KnowledgeEdge[] | { items?: KnowledgeEdge[] }>('/api/knowledge/edges'),
-      ]);
-      if (cancelled) return;
-      const e = Array.isArray(eData) ? eData : ((eData as { items?: KnowledgeEntry[] }).items ?? []);
-      const ed = Array.isArray(edData) ? edData : ((edData as { items?: KnowledgeEdge[] }).items ?? []);
-      setEntries(e);
-      setEdges(ed);
-    };
-    poll();
-    const id = setInterval(poll, 30_000);
-    return () => { cancelled = true; clearInterval(id); };
+  const fetchAll = useCallback(async () => {
+    const [eData, edData] = await Promise.all([
+      get<KnowledgeEntry[] | { items?: KnowledgeEntry[] }>('/api/knowledge/entries'),
+      get<KnowledgeEdge[] | { items?: KnowledgeEdge[] }>('/api/knowledge/edges'),
+    ]);
+    const e = Array.isArray(eData) ? eData : ((eData as { items?: KnowledgeEntry[] }).items ?? []);
+    const ed = Array.isArray(edData) ? edData : ((edData as { items?: KnowledgeEdge[] }).items ?? []);
+    setEntries(e);
+    setEdges(ed);
   }, [get]);
+
+  // Initial fetch + 60s fallback poll
+  useEffect(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, 60_000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
+
+  // SSE-triggered refetch
+  const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
+  useContextEventSubscription(
+    ['knowledge_updated', 'knowledge_created', 'knowledge_deleted'],
+    debouncedRefetch,
+  );
 
   /* Unique domains */
   const domains = new Set(entries.map((e) => e.domain).filter(Boolean));
@@ -254,11 +263,11 @@ export default function KnowledgeGraph() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {/* ═══ TOP MOSAIC ═══ */}
       <Mosaic columns={5}>
-        <MosaicCell label="NODES" value={entries.length || 18} color="rose" mono />
-        <MosaicCell label="EDGES" value={edges.length || 28} color="bone" mono />
-        <MosaicCell label="DOMAINS" value={domains.size || 5} color="dream" mono />
-        <MosaicCell label="CITATIONS" value={totalCitations || 142} color="warning" mono />
-        <MosaicCell label="AVG CITATIONS" value={(avgCitations || 7.9).toFixed(1)} color="success" mono />
+        <MosaicCell label="NODES" value={entries.length} color="rose" mono />
+        <MosaicCell label="EDGES" value={edges.length} color="bone" mono />
+        <MosaicCell label="DOMAINS" value={domains.size} color="dream" mono />
+        <MosaicCell label="CITATIONS" value={totalCitations} color="warning" mono />
+        <MosaicCell label="AVG CITATIONS" value={avgCitations.toFixed(1)} color="success" mono />
       </Mosaic>
 
       {/* ═══ GRAPH + DOMAIN BREAKDOWN ═══ */}

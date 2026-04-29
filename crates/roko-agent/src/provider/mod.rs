@@ -420,10 +420,10 @@ fn provider_kind_for_known_protocol_command(command: &str) -> Option<ProviderKin
 }
 
 /// Find the first configured provider matching a given kind.
-fn provider_for_kind<'a>(
-    providers: &'a HashMap<String, ProviderConfig>,
+fn provider_for_kind(
+    providers: &HashMap<String, ProviderConfig>,
     kind: ProviderKind,
-) -> Option<(String, &'a ProviderConfig)> {
+) -> Option<(String, &ProviderConfig)> {
     let exact_key = kind.label();
     if let Some(provider) = providers.get(exact_key) {
         if provider.kind == kind {

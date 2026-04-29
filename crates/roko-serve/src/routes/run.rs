@@ -271,6 +271,7 @@ async fn record_run_failure(state: &AppState, run_id: &str, error_message: &str)
             success: false,
             output_text: None,
             usage: None,
+            gate_results: Vec::new(),
         });
     }
 }

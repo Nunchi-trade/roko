@@ -10,6 +10,9 @@ import type {
   BenchRunSummary,
   BenchGateConfig,
   BenchLearningEvent,
+  BenchAgentOutputEvent,
+  BenchGateVerdictEvent,
+  BenchTokenVelocityEvent,
   ParetoFrontierResponse,
 } from '../lib/bench-types';
 
@@ -30,7 +33,7 @@ export interface ActiveRun {
   total: number;
   costSoFar: number;
   results: BenchTaskResult[];
-  status: 'running' | 'completed' | 'cancelled';
+  status: 'running' | 'completed' | 'cancelled' | 'failed';
   startedAt: number;
 }
 
@@ -76,6 +79,12 @@ export function useBench() {
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [activeRunLearning, setActiveRunLearning] = useState<BenchLearningEvent[]>([]);
+
+  // Live visualization state
+  const [agentOutput, setAgentOutput] = useState<string[]>([]);
+  const [currentAgentId, setCurrentAgentId] = useState<string | null>(null);
+  const [gateVerdicts, setGateVerdicts] = useState<{ taskId: string; gate: string; passed: boolean; message?: string; durationMs: number }[]>([]);
+  const [tokenVelocity, setTokenVelocity] = useState<{ taskId: string; tokensPerSecond: number }[]>([]);
 
   // Comparison
   const [compareIds, setCompareIds] = useState<string[]>([]);
@@ -161,6 +170,8 @@ export function useBench() {
 
     switch (lastEvent.type) {
       case 'BenchTaskStarted':
+        setAgentOutput([]);
+        setCurrentAgentId(null);
         setFeed((f): FeedItem[] => [
           { text: `Started: ${lastEvent.task_name}`, type: 'start' as const, ts },
           ...f,
@@ -175,15 +186,22 @@ export function useBench() {
             results: [...prev.results, lastEvent.result],
           };
         });
-        setFeed((f): FeedItem[] => [
-          {
+        setFeed((f): FeedItem[] => {
+          const items: FeedItem[] = [{
             text: `${lastEvent.result.task_name}: ${lastEvent.result.status === 'pass' ? 'PASS' : 'FAIL'}`,
             type: (lastEvent.result.status === 'pass' ? 'pass' : 'fail') as FeedItem['type'],
             ts,
             cost: lastEvent.result.cost_usd,
-          },
-          ...f,
-        ].slice(0, 100));
+          }];
+          if (lastEvent.result.error) {
+            items.push({
+              text: `  Error: ${lastEvent.result.error.slice(0, 150)}`,
+              type: 'fail' as const,
+              ts,
+            });
+          }
+          return [...items, ...f].slice(0, 100);
+        });
         break;
 
       case 'BenchProgress':
@@ -218,12 +236,55 @@ export function useBench() {
         break;
 
       case 'BenchLearning':
-        setActiveRunLearning((prev) => [...prev, lastEvent as BenchLearningEvent]);
+      case 'BenchLearningEvent': {
+        const learningEvent = lastEvent as BenchLearningEvent;
+        const insight = learningEvent.insight
+          ?? `Learning artifacts: ${learningEvent.playbooks_created ?? 0} playbooks, ${learningEvent.anti_patterns_created ?? 0} anti-patterns`;
+        setActiveRunLearning((prev) => [...prev, learningEvent]);
         setFeed((f): FeedItem[] => [
-          { text: `Learning: ${(lastEvent as BenchLearningEvent).insight}`, type: 'learning' as const, ts },
+          { text: `Learning: ${insight}`, type: 'learning' as const, ts },
           ...f,
         ].slice(0, 100));
         break;
+      }
+
+      case 'BenchAgentOutput': {
+        const ev = lastEvent as BenchAgentOutputEvent;
+        setCurrentAgentId(ev.agent_id);
+        if (ev.content) {
+          setAgentOutput((prev) => [...prev, ev.content]);
+        }
+        break;
+      }
+
+      case 'BenchGateVerdict': {
+        const ev = lastEvent as BenchGateVerdictEvent;
+        setGateVerdicts((prev) => [...prev, {
+          taskId: ev.task_id,
+          gate: ev.gate,
+          passed: ev.passed,
+          message: ev.message,
+          durationMs: ev.duration_ms,
+        }]);
+        setFeed((f): FeedItem[] => [
+          {
+            text: `Gate ${ev.gate}: ${ev.passed ? 'PASS' : 'FAIL'} (${ev.duration_ms}ms)`,
+            type: (ev.passed ? 'pass' : 'fail') as FeedItem['type'],
+            ts,
+          },
+          ...f,
+        ].slice(0, 100));
+        break;
+      }
+
+      case 'BenchTokenVelocity': {
+        const ev = lastEvent as BenchTokenVelocityEvent;
+        setTokenVelocity((prev) => [...prev, {
+          taskId: ev.task_id,
+          tokensPerSecond: ev.tokens_per_second,
+        }]);
+        break;
+      }
     }
   }, [lastEvent, get]);
 
@@ -233,7 +294,16 @@ export function useBench() {
   const fetchPareto = useCallback(async () => {
     try {
       const data = await get<ParetoFrontierResponse>('/api/bench/pareto');
-      if (data && Array.isArray(data.points)) setPareto(data);
+      const points = Array.isArray(data.points)
+        ? data.points
+        : Array.isArray(data.frontier)
+          ? data.frontier.map((point) => ({
+              ...point,
+              cost_usd: point.cost_usd ?? point.total_cost_usd ?? 0,
+            }))
+          : [];
+      if (points.length > 0) setPareto({ ...data, points });
+      else setPareto({ points: [] });
     } catch {
       setPareto(null);
     }
@@ -244,6 +314,10 @@ export function useBench() {
     clearSSE();
     setFeed([]);
     setActiveRunLearning([]);
+    setAgentOutput([]);
+    setCurrentAgentId(null);
+    setGateVerdicts([]);
+    setTokenVelocity([]);
 
     const suite = suites.find((s) => s.id === selectedSuiteId) ?? suites[0];
     if (!suite) return;
@@ -291,13 +365,13 @@ export function useBench() {
       pollRef.current = setInterval(async () => {
         try {
           const run = await get<BenchRun>(`/api/bench/runs/${runId}`);
-          if (run.status === 'completed' || run.status === 'cancelled') {
+          if (run.status === 'completed' || run.status === 'cancelled' || run.status === 'failed') {
             if (pollRef.current) clearInterval(pollRef.current);
             setActiveRun((prev) => {
               if (!prev) return prev;
               return {
                 ...prev,
-                status: run.status as 'completed' | 'cancelled',
+                status: run.status as 'completed' | 'cancelled' | 'failed',
                 results: run.results,
                 progress: run.results.length,
                 total: run.summary?.total_tasks ?? prev.total,
@@ -438,6 +512,12 @@ export function useBench() {
     cancelRun,
     exportRun,
     importRun,
+
+    // Live visualization
+    agentOutput,
+    currentAgentId,
+    gateVerdicts,
+    tokenVelocity,
 
     // Results shortcut
     lastCompletedRun,

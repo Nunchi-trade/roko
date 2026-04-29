@@ -49,6 +49,8 @@ export function useBenchSSE({ benchId, enabled = true }: UseBenchSSEOptions = {}
 
         try {
           const parsed = JSON.parse(e.data) as BenchSSEEvent;
+          const eventBenchId = 'bench_id' in parsed ? parsed.bench_id : undefined;
+          if (benchId && eventBenchId && eventBenchId !== benchId) return;
           setLastEvent(parsed);
           setEvents((prev) => [...prev, parsed]);
         } catch {

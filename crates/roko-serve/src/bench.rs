@@ -702,8 +702,8 @@ pub fn estimate_cost_usd(model: Option<&str>, input_tokens: u64, output_tokens: 
         m if m.contains("haiku") => (0.00025, 0.00125),
         m if m.contains("sonnet") => (0.003, 0.015),
         m if m.contains("opus") => (0.015, 0.075),
-        m if m.contains("gpt-4o-mini") => (0.00015, 0.0006),
-        m if m.contains("gpt-4o") => (0.005, 0.015),
+        m if m.contains("gpt-5.4-mini") || m.contains("gpt-4o-mini") => (0.00015, 0.0006),
+        m if m.contains("gpt-5") || m.contains("gpt-4o") => (0.005, 0.015),
         m if m.contains("o3-mini") => (0.0011, 0.0044),
         m if m.contains("gemini") => (0.00125, 0.01),
         m if m.contains("llama") || m.contains("cerebras") => (0.0001, 0.0001),
@@ -1370,4 +1370,121 @@ pub async fn ensure_builtin_suites(workdir: &Path) {
     if !learnable_path.exists() {
         let _ = save_suite(workdir, &builtin_learnable_rust_suite()).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Matrix run types and storage
+// ---------------------------------------------------------------------------
+
+/// Status of a matrix (multi-lane) bench run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatrixRunStatus {
+    /// At least one lane is still executing.
+    Running,
+    /// All lanes completed successfully.
+    Completed,
+    /// The matrix run was cancelled.
+    Cancelled,
+    /// Some lanes failed or were cancelled.
+    PartialFailure,
+}
+
+/// Configuration for a single matrix lane (one model/strategy combination).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatrixLaneConfig {
+    /// Model slug for this lane.
+    pub model: String,
+    /// Optional backend override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Execution strategy for this lane.
+    #[serde(default)]
+    pub strategy: BenchStrategy,
+    /// Optional lane label for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Full overrides (built from model/backend/strategy fields).
+    #[serde(default)]
+    pub overrides: BenchConfigOverrides,
+}
+
+/// A matrix run: the same suite executed across N lane configurations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatrixRun {
+    /// Unique matrix run identifier.
+    pub id: String,
+    /// Suite that was executed.
+    pub suite_id: String,
+    /// Suite name (denormalized).
+    pub suite_name: String,
+    /// Per-lane bench run IDs (indices match `lanes`).
+    pub lane_ids: Vec<String>,
+    /// Lane configurations.
+    pub lanes: Vec<MatrixLaneConfig>,
+    /// Overall status.
+    pub status: MatrixRunStatus,
+    /// When the matrix run started — Unix seconds.
+    #[serde(
+        serialize_with = "serialize_timestamp_iso",
+        deserialize_with = "deserialize_timestamp_iso"
+    )]
+    pub started_at: u64,
+    /// When the matrix run finished — Unix seconds.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_opt_timestamp_iso",
+        deserialize_with = "deserialize_opt_timestamp_iso"
+    )]
+    pub finished_at: Option<u64>,
+    /// Optional label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+fn matrix_dir(workdir: &Path) -> PathBuf {
+    bench_dir(workdir).join("matrix")
+}
+
+fn matrix_path(workdir: &Path, matrix_id: &str) -> PathBuf {
+    matrix_dir(workdir).join(format!("{matrix_id}.json"))
+}
+
+/// Save a matrix run to disk.
+pub async fn save_matrix_run(workdir: &Path, run: &MatrixRun) -> anyhow::Result<()> {
+    let path = matrix_path(workdir, &run.id);
+    let json = serde_json::to_string_pretty(run)?;
+    write_text_atomically(&path, &json).await
+}
+
+/// Load a matrix run from disk.
+pub async fn load_matrix_run(workdir: &Path, matrix_id: &str) -> anyhow::Result<Option<MatrixRun>> {
+    let path = matrix_path(workdir, matrix_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = tokio::fs::read_to_string(&path).await?;
+    let run: MatrixRun = serde_json::from_str(&data)?;
+    Ok(Some(run))
+}
+
+/// List all matrix runs (newest first).
+pub async fn list_matrix_runs(workdir: &Path) -> Vec<MatrixRun> {
+    let dir = matrix_dir(workdir);
+    let mut runs = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                if let Ok(data) = tokio::fs::read_to_string(&path).await {
+                    if let Ok(run) = serde_json::from_str::<MatrixRun>(&data) {
+                        runs.push(run);
+                    }
+                }
+            }
+        }
+    }
+    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+    runs
 }

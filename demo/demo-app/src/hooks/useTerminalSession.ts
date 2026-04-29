@@ -47,7 +47,7 @@ export async function resolveRoko(handle: TerminalHandle): Promise<string> {
       marker +
       '\r',
   );
-  await handle.waitForMarker(marker, 8000);
+  await handle.waitForMarker(marker, 4000);
   const buf = handle.outputBuffer;
   if (buf.includes('__ROKO_PATH__')) resolvedRoko = 'roko';
   else if (buf.includes('__ROKO_REL__')) resolvedRoko = './target/release/roko';
@@ -74,10 +74,8 @@ export function getRoko(): string {
  * Create an ephemeral workspace: mktemp, cd, roko init, fetch live config, clear terminal.
  * Returns the workspace directory path.
  *
- * After `roko init` creates the bare `.roko/` structure, we pull the live
- * `roko.toml` from the serve process so the workspace inherits all configured
- * providers and models. This prevents "Missing required config field" errors
- * when the Builder runs `roko run --model <key>`.
+ * Optimized to use a SINGLE PTY round-trip for all setup steps (mkdir, cd,
+ * roko init, config copy) instead of 5 sequential commands.
  */
 export async function setupWorkspace(
   handle: TerminalHandle,
@@ -86,30 +84,28 @@ export async function setupWorkspace(
   // Wait for WS connection + initial prompt
   const wsOk = await waitForOpen(handle);
   if (!wsOk) return '/tmp/roko-unavailable';
-  await handle.waitForPrompt(10000);
-  await resolveRoko(handle);
+  await handle.waitForPrompt(5000);
 
   const dir = `/tmp/${dirPrefix}-${Date.now()}`;
-  await handle.execCmd(`mkdir -p ${dir} && cd ${dir}`, 5000);
-  await handle.execCmd(`${resolvedRoko} init`, 30000);
+  const ROKO = rokoResolved ? resolvedRoko : 'roko';
 
-  // Fetch live config from serve process and write it into the workspace.
-  // This gives the ephemeral dir all providers/models from the UI-managed config.
-  const configCopyFailureMarker = '__ROKO_CONFIG_COPY_FAILED__';
-  handle.outputBuffer = '';
-  await handle.execCmd(
-    `curl -sf ${ABSOLUTE_SERVE_URL}/api/config/toml -o roko.toml || echo ${configCopyFailureMarker}`,
-    10000,
-  );
-  const configCopyFailed = handle.outputBuffer.includes(configCopyFailureMarker);
+  // Single atomic command: resolve roko path + create workspace + init + copy config.
+  // This replaces 5 sequential PTY round-trips with 1.
+  const setupCmd = [
+    `mkdir -p ${dir}`,
+    `cd ${dir}`,
+    `${ROKO} init`,
+    `curl -sf --connect-timeout 2 --max-time 5 ${ABSOLUTE_SERVE_URL}/api/config/toml -o roko.toml 2>/dev/null; true`,
+  ].join(' && ');
 
-  await rawSleep(200);
-  handle.clearTerminal();
-  if (configCopyFailed) {
-    handle.terminal.writeln(
-      `warning: could not copy live roko config from ${ABSOLUTE_SERVE_URL}/api/config/toml`,
-    );
+  await handle.execCmd(setupCmd, 30000);
+
+  if (!rokoResolved) {
+    resolvedRoko = ROKO;
+    rokoResolved = true;
   }
+
+  handle.clearTerminal();
   return dir;
 }
 
@@ -122,7 +118,28 @@ export async function joinWorkspace(
 ): Promise<void> {
   const wsOk = await waitForOpen(handle);
   if (!wsOk) return;
-  await handle.waitForPrompt(10000);
+  await handle.waitForPrompt(5000);
+  if (!rokoResolved) {
+    resolvedRoko = 'roko';
+    rokoResolved = true;
+  }
+  await handle.execCmd(`cd ${dir}`, 3000);
+  handle.clearTerminal();
+}
+
+// ── Fast workspace entry (server-created) ────────────────────
+
+/**
+ * Enter a workspace that was already created server-side via POST /api/workspaces.
+ * Much faster than setupWorkspace() since it only needs to `cd` into the directory.
+ */
+export async function enterWorkspace(
+  handle: TerminalHandle,
+  dir: string,
+): Promise<void> {
+  const wsOk = await waitForOpen(handle);
+  if (!wsOk) return;
+  await handle.waitForPrompt(5000);
   await resolveRoko(handle);
   await handle.execCmd(`cd ${dir}`, 3000);
   handle.clearTerminal();
@@ -143,8 +160,6 @@ export interface GateResult {
   status: 'pass' | 'fail';
 }
 
-let showCmdSeq = 0;
-
 async function typeVisibleCommandAndWait(
   handle: TerminalHandle,
   cmd: string,
@@ -152,17 +167,15 @@ async function typeVisibleCommandAndWait(
 ): Promise<boolean> {
   if (!handle?.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
 
-  const marker = `__RK_SHOW_${(++showCmdSeq).toString(36)}_${Date.now().toString(36)}__`;
   for (const ch of cmd) {
     if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
     handle.ws.send(ch);
-    await adjustedSleep(10 + Math.random() * 5);
+    await adjustedSleep(6 + Math.random() * 3);
   }
-  await adjustedSleep(40);
+  await adjustedSleep(20);
   if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
   handle.ws.send('\r');
-  handle.sendRaw(`printf '\\n${marker}\\n'\r`);
-  return handle.waitForMarker(marker, timeout);
+  return handle.waitForPrompt(timeout);
 }
 
 /**
@@ -272,11 +285,11 @@ function detectFromOutput(
 /**
  * Wait for WebSocket to be open (max 8s).
  */
-async function waitForOpen(handle: TerminalHandle, timeout = 8000): Promise<boolean> {
+async function waitForOpen(handle: TerminalHandle, timeout = 5000): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     if (handle.ws && handle.ws.readyState === WebSocket.OPEN) return true;
-    await rawSleep(100);
+    await rawSleep(30);
   }
   return false;
 }

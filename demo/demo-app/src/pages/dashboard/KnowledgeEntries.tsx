@@ -2,6 +2,8 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { useContextEventSubscription } from '../../contexts/EventStreamContext';
+import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 
 interface KnowledgeEntry {
   id: string;
@@ -262,30 +264,31 @@ export default function KnowledgeEntries() {
   const [loading, setLoading] = useState(true);
   const [lastLoaded, setLastLoaded] = useState<string>('—');
 
+  const fetchEntries = useCallback(async () => {
+    try {
+      const data = await get<KnowledgeEntry[]>('/api/knowledge/entries');
+      setEntries(Array.isArray(data) ? data : ((data as { items?: KnowledgeEntry[] }).items ?? []));
+      setLastLoaded(new Date().toLocaleTimeString());
+    } catch {
+      /* keep previous data */
+    } finally {
+      setLoading(false);
+    }
+  }, [get]);
+
+  // Initial fetch + 60s fallback poll
   useEffect(() => {
-    let cancelled = false;
+    fetchEntries();
+    const id = window.setInterval(fetchEntries, 60_000);
+    return () => window.clearInterval(id);
+  }, [fetchEntries]);
 
-    const poll = async () => {
-      try {
-        const data = await get<KnowledgeEntry[]>('/api/knowledge/entries');
-        if (cancelled) return;
-        setEntries(Array.isArray(data) ? data : ((data as { items?: KnowledgeEntry[] }).items ?? []));
-        setLastLoaded(new Date().toLocaleTimeString());
-      } catch {
-        /* keep previous data */
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-
-    poll();
-    const id = window.setInterval(poll, 30000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, []);
+  // SSE-triggered refetch
+  const debouncedRefetch = useDebouncedRefetch(fetchEntries, 2000);
+  useContextEventSubscription(
+    ['knowledge_updated', 'knowledge_created', 'knowledge_deleted'],
+    debouncedRefetch,
+  );
 
   const stats = useMemo(() => {
     const domains = new Set(entries.map((entry) => entry.domain).filter(Boolean));
@@ -309,18 +312,18 @@ export default function KnowledgeEntries() {
     <div style={pageStyle}>
       {/* ═══ TOP MOSAIC ═══ */}
       <Mosaic columns={5}>
-        <MosaicCell label="TOTAL ENTRIES" value={entries.length || 18} color="rose" mono sub={loading ? 'loading' : `updated ${lastLoaded}`} />
-        <MosaicCell label="DOMAINS" value={stats.domains || 5} color="bone" mono />
-        <MosaicCell label="TOTAL CITATIONS" value={stats.citationTotal || 142} color="dream" mono />
-        <MosaicCell label="AVG CONFIDENCE" value={percent(stats.avgConfidence) !== '—' ? percent(stats.avgConfidence) : '84%'} color="success" mono />
-        <MosaicCell label="HIGH CONFIDENCE" value={stats.highConfidence || 14} color="warning" mono sub=">= 80%" />
+        <MosaicCell label="TOTAL ENTRIES" value={entries.length} color="rose" mono sub={loading ? 'loading' : `updated ${lastLoaded}`} />
+        <MosaicCell label="DOMAINS" value={stats.domains} color="bone" mono />
+        <MosaicCell label="TOTAL CITATIONS" value={stats.citationTotal} color="dream" mono />
+        <MosaicCell label="AVG CONFIDENCE" value={percent(stats.avgConfidence)} color="success" mono />
+        <MosaicCell label="HIGH CONFIDENCE" value={stats.highConfidence} color="warning" mono sub=">= 80%" />
       </Mosaic>
 
       {/* ═══ CHARTS ROW ═══ */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
         <Pane
           title="DOMAIN DISTRIBUTION"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{stats.domains || 5} domains</span>}
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{stats.domains} domains</span>}
         >
           <DomainChart entries={entries} height={110} />
         </Pane>

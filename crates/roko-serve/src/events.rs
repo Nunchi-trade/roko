@@ -483,6 +483,94 @@ pub enum ServerEvent {
         bench_id: String,
         summary: serde_json::Value,
     },
+
+    /// A matrix (multi-lane) bench run was started.
+    #[serde(rename = "MatrixRunStarted")]
+    MatrixRunStarted {
+        matrix_id: String,
+        suite_id: String,
+        lane_ids: Vec<String>,
+        total_lanes: usize,
+    },
+
+    /// A single lane of a matrix run completed.
+    #[serde(rename = "MatrixLaneCompleted")]
+    MatrixLaneCompleted {
+        matrix_id: String,
+        lane_id: String,
+        pass_rate: f64,
+        cost_usd: f64,
+    },
+
+    /// A matrix run completed — includes per-lane summaries.
+    #[serde(rename = "MatrixRunCompleted")]
+    MatrixRunCompleted {
+        matrix_id: String,
+        summary: Vec<serde_json::Value>,
+    },
+
+    /// A gate verdict for a bench task.
+    #[serde(rename = "BenchGateVerdict")]
+    BenchGateVerdict {
+        bench_id: String,
+        task_id: String,
+        gate: String,
+        passed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        duration_ms: u64,
+    },
+
+    /// Token throughput for a bench task.
+    #[serde(rename = "BenchTokenVelocity")]
+    BenchTokenVelocity {
+        bench_id: String,
+        task_id: String,
+        tokens_per_second: f64,
+        tokens_in: u64,
+        tokens_out: u64,
+        duration_ms: u64,
+    },
+
+    /// Agent output snapshot for a bench task.
+    #[serde(rename = "BenchAgentOutput")]
+    BenchAgentOutput {
+        bench_id: String,
+        task_id: String,
+        agent_id: String,
+        content: String,
+        done: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_calls: Option<Vec<Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+    },
+
+    /// A SWE-bench run was started.
+    #[serde(rename = "SweRunStarted")]
+    SweRunStarted {
+        run_id: String,
+        dataset: String,
+        total_instances: usize,
+    },
+
+    /// A SWE-bench instance completed.
+    #[serde(rename = "SweInstanceCompleted")]
+    SweInstanceCompleted {
+        run_id: String,
+        instance_id: String,
+        resolved: bool,
+        duration_ms: u64,
+    },
+
+    /// A SWE-bench run completed with summary stats.
+    #[serde(rename = "SweRunCompleted")]
+    SweRunCompleted {
+        run_id: String,
+        resolved: u32,
+        total: u32,
+        pass_rate: f64,
+    },
 }
 
 #[cfg(test)]
@@ -672,5 +760,65 @@ mod tests {
         assert_eq!(json["anti_patterns_created"], 2);
         assert_eq!(json["total_playbooks"], 9);
         assert_eq!(json["total_anti_patterns"], 4);
+    }
+
+    #[test]
+    fn bench_gate_verdict_serializes() {
+        let event = ServerEvent::BenchGateVerdict {
+            bench_id: "run-1".into(),
+            task_id: "task-3".into(),
+            gate: "compile".into(),
+            passed: true,
+            message: Some("ok".into()),
+            duration_ms: 1200,
+        };
+
+        let json = serde_json::to_value(event).expect("serialize bench gate verdict");
+        assert_eq!(json["type"], "BenchGateVerdict");
+        assert_eq!(json["bench_id"], "run-1");
+        assert_eq!(json["gate"], "compile");
+        assert_eq!(json["passed"], true);
+        assert_eq!(json["message"], "ok");
+        assert_eq!(json["duration_ms"], 1200);
+    }
+
+    #[test]
+    fn bench_token_velocity_serializes() {
+        let event = ServerEvent::BenchTokenVelocity {
+            bench_id: "run-1".into(),
+            task_id: "task-3".into(),
+            tokens_per_second: 42.5,
+            tokens_in: 100,
+            tokens_out: 50,
+            duration_ms: 3529,
+        };
+
+        let json = serde_json::to_value(event).expect("serialize bench token velocity");
+        assert_eq!(json["type"], "BenchTokenVelocity");
+        assert_eq!(json["tokens_per_second"], 42.5);
+        assert_eq!(json["tokens_in"], 100);
+        assert_eq!(json["tokens_out"], 50);
+        assert_eq!(json["duration_ms"], 3529);
+    }
+
+    #[test]
+    fn bench_agent_output_serializes() {
+        let event = ServerEvent::BenchAgentOutput {
+            bench_id: "run-1".into(),
+            task_id: "task-3".into(),
+            agent_id: "sonnet".into(),
+            content: "hello world".into(),
+            done: true,
+            tool_calls: None,
+            reasoning: Some("thought about it".into()),
+        };
+
+        let json = serde_json::to_value(event).expect("serialize bench agent output");
+        assert_eq!(json["type"], "BenchAgentOutput");
+        assert_eq!(json["agent_id"], "sonnet");
+        assert_eq!(json["content"], "hello world");
+        assert_eq!(json["done"], true);
+        assert!(json.get("tool_calls").is_none());
+        assert_eq!(json["reasoning"], "thought about it");
     }
 }

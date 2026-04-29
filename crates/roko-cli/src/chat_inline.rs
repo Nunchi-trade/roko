@@ -2206,7 +2206,7 @@ fn handle_slash_command(
                         AuthMethod::OpenAiCompat {
                             model, base_url, ..
                         } => {
-                            let m = model.as_deref().unwrap_or("gpt-4o");
+                            let m = model.as_deref().unwrap_or("gpt-5.4-mini");
                             format!("{m} ({base_url})")
                         }
                         AuthMethod::NeedsSetup => "none".to_string(),

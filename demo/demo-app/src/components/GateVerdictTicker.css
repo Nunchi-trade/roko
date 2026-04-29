@@ -1,0 +1,99 @@
+/* ═══════════════════════════════════════════════════════════
+   GATE VERDICT TICKER
+   ═══════════════════════════════════════════════════════════ */
+
+.gate-verdict-ticker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 6px 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
+}
+
+.gate-verdict-ticker::-webkit-scrollbar {
+  height: 4px;
+}
+.gate-verdict-ticker::-webkit-scrollbar-track {
+  background: transparent;
+}
+.gate-verdict-ticker::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px;
+}
+
+.gate-verdict-divider {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+.gate-verdict-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  flex-shrink: 0;
+  animation: gate-chip-in 0.3s var(--ease) both;
+  border: 1px solid transparent;
+}
+
+@keyframes gate-chip-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.gate-verdict-chip.pass {
+  background: rgba(122, 138, 120, 0.12);
+  border-color: rgba(122, 138, 120, 0.2);
+  color: var(--success);
+}
+
+.gate-verdict-chip.fail {
+  background: rgba(170, 112, 136, 0.12);
+  border-color: rgba(170, 112, 136, 0.2);
+  color: var(--rose-bright);
+}
+
+.gate-verdict-chip.dimmed {
+  opacity: 0.5;
+}
+
+.gate-verdict-icon {
+  font-weight: 700;
+  font-size: var(--text-xs);
+}
+
+.gate-verdict-name {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gate-verdict-ms {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+
+.gate-verdict-empty {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  padding: 6px 0;
+  letter-spacing: 0.04em;
+}

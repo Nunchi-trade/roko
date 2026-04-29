@@ -15,9 +15,17 @@ import SuiteSelector from '../components/SuiteSelector';
 import TaskTable from '../components/TaskTable';
 import ConfigDiff from '../components/ConfigDiff';
 import CostRace from '../components/CostRace';
+import AgentOutputStream from '../components/AgentOutputStream';
+import GateVerdictTicker from '../components/GateVerdictTicker';
+import TokenVelocitySparkline from '../components/TokenVelocitySparkline';
+import BenchLearningInsights from '../components/BenchLearningInsights';
+import MatrixBuilder from '../components/MatrixBuilder';
+import MatrixRaceTrack from '../components/MatrixRaceTrack';
+import MatrixDetailView from '../components/MatrixDetailView';
+import { useMatrixBench } from '../hooks/useMatrixBench';
 import './Bench.css';
 
-type Tab = 'configure' | 'live' | 'results' | 'history' | 'compare' | 'analysis';
+type Tab = 'configure' | 'live' | 'results' | 'history' | 'compare' | 'analysis' | 'learning';
 
 const STRATEGIES: { id: AgentStrategy; label: string; desc: string }[] = [
   { id: 'minimal', label: 'Minimal', desc: 'Basic agent, no enrichment' },
@@ -33,6 +41,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'history', label: 'History' },
   { id: 'compare', label: 'Compare' },
   { id: 'analysis', label: 'Analysis' },
+  { id: 'learning', label: 'Learning' },
 ];
 
 const RUN_COLORS = [
@@ -47,8 +56,13 @@ function formatEta(ms: number | null): string {
   return `~${Math.round(s / 60)}m ${s % 60}s`;
 }
 
+type ConfigureMode = 'single' | 'matrix';
+type LiveViewMode = 'race' | 'detail';
+
 export default function Bench() {
   const [tab, setTab] = useState<Tab>('configure');
+  const [configureMode, setConfigureMode] = useState<ConfigureMode>('single');
+  const [liveViewMode, setLiveViewMode] = useState<LiveViewMode>('race');
   const { defaultModel, defaultBackend } = useRokoConfig();
 
   const bench = useBench();
@@ -57,11 +71,15 @@ export default function Bench() {
     selectedSuiteId, setSelectedSuiteId, selectedSuite,
     suites, models, history,
     suitesLoading, historyLoading, connectionState,
-    activeRun, activeRunSummary, feed, eta,
+    activeRun, activeRunSummary, activeRunLearning, feed, eta,
+    agentOutput, currentAgentId, gateVerdicts, tokenVelocity,
     startRun, cancelRun, exportRun, importRun,
     compareIds, setCompareIds,
     pareto, fetchPareto,
   } = bench;
+
+  // Matrix mode
+  const matrix = useMatrixBench(models);
 
   // Fetch pareto data when analysis tab opens
   useEffect(() => {
@@ -134,6 +152,7 @@ export default function Bench() {
           <button key={t.id} className={`bench-tab${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}
             {t.id === 'live' && activeRun?.status === 'running' && <span className="bench-tab-dot" />}
+            {t.id === 'learning' && activeRun?.status === 'running' && <span className="bench-tab-dot" style={{ background: 'var(--dream-bright)' }} />}
           </button>
         ))}
       </div>
@@ -141,125 +160,224 @@ export default function Bench() {
       <div className="bench-body">
         {/* ── Configure ── */}
         {tab === 'configure' && (
-          <div className="bench-config-layout">
-            <div className="bench-config-left">
-              <Pane title="TEST SUITE">
-                {suitesLoading ? <div className="bench-skeleton" style={{ height: 120 }} />
-                  : suites.length === 0 ? <p className="bench-empty-text">No suites. Start roko serve.</p>
-                  : <SuiteSelector suites={suites} value={selectedSuiteId} onChange={setSelectedSuiteId} />}
-              </Pane>
-
-              <Pane title="AGENT STRATEGY">
-                <div className="config-cards">
-                  {STRATEGIES.map((s) => (
-                    <button key={s.id} className={`config-card${config.strategy === s.id ? ' selected' : ''}`}
-                      onClick={() => setConfig({ ...config, strategy: s.id })}>
-                      <span className="card-label">{s.label}</span>
-                      <span className="card-desc">{s.desc}</span>
-                    </button>
-                  ))}
-                </div>
-              </Pane>
-
-              <Pane title="MODEL">
-                <div className="bench-model-display">
-                  <div className="param-row">
-                    <span className="param-label">Model</span>
-                    <span className="param-value mono">{defaultModel || '--'}</span>
-                  </div>
-                  <div className="param-row">
-                    <span className="param-label">Backend</span>
-                    <span className="param-value mono">{defaultBackend || '--'}</span>
-                  </div>
-                  <p className="bench-model-hint">Change via config pill</p>
-                </div>
-              </Pane>
+          <>
+            <div className="bench-mode-toggle">
+              <button className={`bench-mode-btn${configureMode === 'single' ? ' active' : ''}`} onClick={() => setConfigureMode('single')}>Single</button>
+              <button className={`bench-mode-btn${configureMode === 'matrix' ? ' active' : ''}`} onClick={() => setConfigureMode('matrix')}>Matrix</button>
             </div>
 
-            <div className="bench-config-right">
-              <Pane title="PARAMETERS">
-                <div className="config-params">
-                  <label className="param-row">
-                    <span className="param-label">Temperature</span>
-                    <input type="range" min="0" max="1" step="0.1" value={config.temperature}
-                      onChange={(e) => setConfig({ ...config, temperature: Number(e.target.value) })}
-                      className="param-slider" />
-                    <span className="param-value">{config.temperature}</span>
-                  </label>
-                  <label className="param-row">
-                    <span className="param-label">Max Tokens</span>
-                    <input type="number" className="config-input" value={config.maxTokens}
-                      onChange={(e) => setConfig({ ...config, maxTokens: Number(e.target.value) })} style={{ maxWidth: 120 }} />
-                  </label>
-                  <label className="param-row">
-                    <span className="param-label">Timeout (s)</span>
-                    <input type="number" className="config-input" value={config.timeoutSecs}
-                      onChange={(e) => setConfig({ ...config, timeoutSecs: Number(e.target.value) })} style={{ maxWidth: 120 }} />
-                  </label>
-                  <label className="param-row">
-                    <span className="param-label">Retries</span>
-                    <input type="number" className="config-input" min="0" max="3" value={config.retries}
-                      onChange={(e) => setConfig({ ...config, retries: Number(e.target.value) })} style={{ maxWidth: 80 }} />
-                  </label>
-                  <div className="param-row">
-                    <span className="param-label">Gates</span>
-                    <div className="gate-toggles">
-                      {(['compile', 'test', 'clippy', 'diff'] as const).map((g) => (
-                        <label key={g} className="gate-toggle">
-                          <input type="checkbox" checked={config.gates[g]}
-                            onChange={(e) => setConfig({ ...config, gates: { ...config.gates, [g]: e.target.checked } })} />
-                          <span>{g}</span>
-                        </label>
+            {/* Shared suite selector */}
+            <Pane title="TEST SUITE">
+              {suitesLoading ? <div className="bench-skeleton" style={{ height: 120 }} />
+                : suites.length === 0 ? <p className="bench-empty-text">No suites. Start roko serve.</p>
+                : <SuiteSelector suites={suites} value={selectedSuiteId} onChange={setSelectedSuiteId} />}
+            </Pane>
+
+            {configureMode === 'single' ? (
+              <div className="bench-config-layout">
+                <div className="bench-config-left">
+                  <Pane title="AGENT STRATEGY">
+                    <div className="config-cards">
+                      {STRATEGIES.map((s) => (
+                        <button key={s.id} className={`config-card${config.strategy === s.id ? ' selected' : ''}`}
+                          onClick={() => setConfig({ ...config, strategy: s.id })}>
+                          <span className="card-label">{s.label}</span>
+                          <span className="card-desc">{s.desc}</span>
+                        </button>
                       ))}
                     </div>
+                  </Pane>
+
+                  <Pane title="MODEL">
+                    <div className="bench-model-display">
+                      <div className="param-row">
+                        <span className="param-label">Model</span>
+                        <span className="param-value mono">{defaultModel || '--'}</span>
+                      </div>
+                      <div className="param-row">
+                        <span className="param-label">Backend</span>
+                        <span className="param-value mono">{defaultBackend || '--'}</span>
+                      </div>
+                      <p className="bench-model-hint">Change via config pill</p>
+                    </div>
+                  </Pane>
+                </div>
+
+                <div className="bench-config-right">
+                  <Pane title="PARAMETERS">
+                    <div className="config-params">
+                      <label className="param-row">
+                        <span className="param-label">Temperature</span>
+                        <input type="range" min="0" max="1" step="0.1" value={config.temperature}
+                          onChange={(e) => setConfig({ ...config, temperature: Number(e.target.value) })}
+                          className="param-slider" />
+                        <span className="param-value">{config.temperature}</span>
+                      </label>
+                      <label className="param-row">
+                        <span className="param-label">Max Tokens</span>
+                        <input type="number" className="config-input" value={config.maxTokens}
+                          onChange={(e) => setConfig({ ...config, maxTokens: Number(e.target.value) })} style={{ maxWidth: 120 }} />
+                      </label>
+                      <label className="param-row">
+                        <span className="param-label">Timeout (s)</span>
+                        <input type="number" className="config-input" value={config.timeoutSecs}
+                          onChange={(e) => setConfig({ ...config, timeoutSecs: Number(e.target.value) })} style={{ maxWidth: 120 }} />
+                      </label>
+                      <label className="param-row">
+                        <span className="param-label">Retries</span>
+                        <input type="number" className="config-input" min="0" max="3" value={config.retries}
+                          onChange={(e) => setConfig({ ...config, retries: Number(e.target.value) })} style={{ maxWidth: 80 }} />
+                      </label>
+                      <div className="param-row">
+                        <span className="param-label">Gates</span>
+                        <div className="gate-toggles">
+                          {(['compile', 'test', 'clippy', 'diff'] as const).map((g) => (
+                            <label key={g} className="gate-toggle">
+                              <input type="checkbox" checked={config.gates[g]}
+                                onChange={(e) => setConfig({ ...config, gates: { ...config.gates, [g]: e.target.checked } })} />
+                              <span>{g}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </Pane>
+
+                  <Pane title="COST CALCULATOR">
+                    <div className="bench-cost-calc">
+                      {selectedSuite && (
+                        <>
+                          <div className="cost-calc-row"><span className="cost-calc-label">Suite est.</span><span className="cost-calc-value">${selectedSuite.estimated_cost_usd.toFixed(2)}</span></div>
+                          {estimatedCost != null && <div className="cost-calc-row"><span className="cost-calc-label">Model est.</span><span className="cost-calc-value">${estimatedCost.toFixed(3)}</span></div>}
+                          <div className="cost-calc-row"><span className="cost-calc-label">Tasks</span><span className="cost-calc-value">{selectedSuite.tasks.length}</span></div>
+                          <div className="cost-calc-row"><span className="cost-calc-label">Strategy</span><span className="cost-calc-value">{config.strategy.replace(/_/g, ' ')}</span></div>
+                        </>
+                      )}
+                    </div>
+                  </Pane>
+
+                  <div className="bench-run-btn">
+                    <button className="btn"
+                      onClick={() => { startRun(defaultModel, defaultBackend); setTab('live'); }}
+                      disabled={activeRun?.status === 'running' || connectionState === 'offline'}>
+                      {activeRun?.status === 'running' ? 'Running...' : 'Run Benchmark'}
+                    </button>
                   </div>
                 </div>
-              </Pane>
-
-              <Pane title="COST CALCULATOR">
-                <div className="bench-cost-calc">
-                  {selectedSuite && (
-                    <>
-                      <div className="cost-calc-row"><span className="cost-calc-label">Suite est.</span><span className="cost-calc-value">${selectedSuite.estimated_cost_usd.toFixed(2)}</span></div>
-                      {estimatedCost != null && <div className="cost-calc-row"><span className="cost-calc-label">Model est.</span><span className="cost-calc-value">${estimatedCost.toFixed(3)}</span></div>}
-                      <div className="cost-calc-row"><span className="cost-calc-label">Tasks</span><span className="cost-calc-value">{selectedSuite.tasks.length}</span></div>
-                      <div className="cost-calc-row"><span className="cost-calc-label">Strategy</span><span className="cost-calc-value">{config.strategy.replace(/_/g, ' ')}</span></div>
-                    </>
-                  )}
-                </div>
-              </Pane>
-
-              <div className="bench-run-btn">
-                <button className="btn"
-                  onClick={() => { startRun(defaultModel, defaultBackend); setTab('live'); }}
-                  disabled={activeRun?.status === 'running' || connectionState === 'offline'}>
-                  {activeRun?.status === 'running' ? 'Running...' : 'Run Benchmark'}
-                </button>
               </div>
-            </div>
-          </div>
+            ) : (
+              <Pane title="MATRIX BUILDER">
+                <MatrixBuilder
+                  models={models}
+                  selectedModels={matrix.selectedModels}
+                  toggleModel={matrix.toggleModel}
+                  presets={matrix.presets}
+                  togglePreset={matrix.togglePreset}
+                  cells={matrix.cells}
+                  totalLanes={matrix.totalLanes}
+                  matrixStatus={matrix.status}
+                  estimatedCostPerLane={selectedSuite?.estimated_cost_usd ?? 0}
+                  onLaunch={() => {
+                    if (selectedSuiteId) {
+                      matrix.startMatrix(selectedSuiteId, {
+                        temperature: config.temperature,
+                        max_tokens: config.maxTokens,
+                        timeout_secs: config.timeoutSecs,
+                        retries: config.retries,
+                        gates: config.gates,
+                      });
+                      setTab('live');
+                    }
+                  }}
+                  disabled={connectionState === 'offline'}
+                />
+              </Pane>
+            )}
+          </>
         )}
 
         {/* ── Live ── */}
         {tab === 'live' && (
           <div className="bench-live">
-            {!activeRun ? (
+            {matrix.status !== 'idle' ? (
+              /* Matrix live view */
+              <>
+                <div className="bench-live-header">
+                  <span className={`benchlive-dot${matrix.status === 'running' ? '' : ' disconnected'}`} />
+                  <span className="bench-live-status">MATRIX {matrix.status.toUpperCase()}</span>
+                  <span className="bench-live-progress">{matrix.totalLanes} lanes</span>
+                  <div className="bench-mode-toggle" style={{ marginLeft: 'auto', marginBottom: 0 }}>
+                    <button className={`bench-mode-btn${liveViewMode === 'race' ? ' active' : ''}`} onClick={() => setLiveViewMode('race')}>Race</button>
+                    <button className={`bench-mode-btn${liveViewMode === 'detail' ? ' active' : ''}`} onClick={() => setLiveViewMode('detail')}>Detail</button>
+                  </div>
+                </div>
+
+                {liveViewMode === 'race' ? (
+                  <Pane title="MATRIX RACE TRACK">
+                    <MatrixRaceTrack
+                      cells={matrix.cells}
+                      selectedModels={matrix.selectedModels}
+                      presetLabels={matrix.presets.map((p) => p.label)}
+                      totalTasksPerLane={selectedSuite?.tasks.length ?? 0}
+                    />
+                  </Pane>
+                ) : (
+                  <Pane title="MATRIX DETAIL">
+                    <MatrixDetailView
+                      cells={matrix.cells}
+                      selectedModels={matrix.selectedModels}
+                      presetLabels={matrix.presets.map((p) => p.label)}
+                      tasks={selectedSuite?.tasks ?? []}
+                    />
+                  </Pane>
+                )}
+
+                <Pane title="ACTIVITY FEED">
+                  <div className="feed-list">
+                    {feed.map((item, i) => (
+                      <div key={i} className={`feed-item feed-${item.type}`}>
+                        <span className="feed-ts">{item.ts}</span>
+                        <span className="feed-text">{item.text}</span>
+                        {item.cost != null && <span className="feed-cost">${item.cost.toFixed(3)}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </Pane>
+              </>
+            ) : !activeRun ? (
               <div className="bench-empty--no-runs">
                 <p className="bench-empty-text">No active run.</p>
                 <button className="btn" onClick={() => setTab('configure')}>Start from Configure</button>
               </div>
             ) : (
+              /* Single run live view (unchanged) */
               <>
                 <div className="bench-live-header">
                   <span className={`benchlive-dot${activeRun.status === 'running' ? '' : ' disconnected'}`} />
                   <span className="bench-live-status">{activeRun.status === 'running' ? 'RUNNING' : activeRun.status.toUpperCase()}</span>
-                  <span className="bench-live-progress">{activeRun.progress}/{activeRun.total}</span>
+                  <span className="bench-live-progress">
+                    {activeRun.progress}/{activeRun.total}
+                    {activeRun.results.length > 0 && (
+                      <span className="bench-live-breakdown">
+                        {' '}(<span style={{ color: 'var(--success)' }}>{activeRun.results.filter(r => r.status === 'pass').length}P</span>
+                        {' / '}
+                        <span style={{ color: 'var(--rose-bright)' }}>{activeRun.results.filter(r => r.status === 'fail').length}F</span>)
+                      </span>
+                    )}
+                  </span>
                   {eta != null && <span className="bench-live-eta">ETA {formatEta(eta)}</span>}
                   <span className="bench-live-cost">${activeRun.costSoFar.toFixed(3)}</span>
                   {activeRun.status === 'running' && (
                     <button className="btn btn-sm" onClick={cancelRun} style={{ marginLeft: 'auto' }}>Cancel</button>
                   )}
                 </div>
+                {activeRun.status !== 'running' && activeRun.results.length > 0 && activeRun.results.every(r => r.status === 'fail') && (
+                  <div className="bench-live-error-banner">
+                    All tasks failed. {activeRun.results[0]?.error
+                      ? <>First error: <code>{activeRun.results[0].error.slice(0, 200)}</code></>
+                      : 'Check that the configured model/provider has valid API credentials.'}
+                  </div>
+                )}
                 <div className="bench-live-progress-bar">
                   <div className="bench-live-progress-fill" style={{ width: `${activeRun.total > 0 ? (activeRun.progress / activeRun.total) * 100 : 0}%` }} />
                 </div>
@@ -302,6 +420,23 @@ export default function Bench() {
                         </div>
                       ))}
                     </div>
+                  </Pane>
+                </div>
+
+                <div className="bench-live-visualizations">
+                  <Pane title="AGENT OUTPUT">
+                    <AgentOutputStream lines={agentOutput} agentId={currentAgentId} />
+                  </Pane>
+                  <Pane title="GATE VERDICTS">
+                    <GateVerdictTicker
+                      verdicts={gateVerdicts}
+                      currentTaskId={activeRun.results.length < activeRun.total
+                        ? feed.find((f) => f.type === 'start')?.text.replace('Started: ', '')
+                        : undefined}
+                    />
+                  </Pane>
+                  <Pane title="TOKEN VELOCITY">
+                    <TokenVelocitySparkline points={tokenVelocity} height={120} />
                   </Pane>
                 </div>
 
@@ -550,6 +685,16 @@ export default function Bench() {
             </Pane>
           </div>
         )}
+
+        {/* ── Learning ── */}
+        {tab === 'learning' && (
+          <BenchLearningInsights
+            history={history}
+            learningEvents={activeRunLearning}
+            isRunning={activeRun?.status === 'running'}
+          />
+        )}
+
       </div>
     </div>
   );

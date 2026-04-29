@@ -93,21 +93,21 @@ export function useTerminal(sessionId?: string) {
     // Inline image support (Sixel + iTerm2 protocol)
     term.loadAddon(new ImageAddon());
 
-    term.open(el);
-
     // Track disposal state for async callbacks.
     let disposed = false;
+
+    term.open(el);
 
     // GPU-accelerated WebGL renderer with DOM fallback
     try {
       const webglAddon = new WebglAddon();
-      webglAddon.onContextLoss(() => webglAddon.dispose());
+      webglAddon.onContextLoss(() => { if (!disposed) webglAddon.dispose(); });
       term.loadAddon(webglAddon);
     } catch {
       // DOM renderer fallback — fine for low-end GPUs
     }
 
-    requestAnimationFrame(() => { if (!disposed) fitAddon.fit(); });
+    requestAnimationFrame(() => { if (!disposed) { try { fitAddon.fit(); } catch { /* disposed */ } } });
 
     // Internal output buffer, capped high enough for artifact scraping.
     let outBuf = '';
@@ -149,18 +149,18 @@ export function useTerminal(sessionId?: string) {
 
     handle.waitForPrompt = async (timeout = 60000): Promise<boolean> => {
       const start = Date.now();
-      await sleep(500);
+      await sleep(80);
       while (Date.now() - start < timeout) {
         const tail = stripAnsi(outBuf).slice(-300);
         if (PROMPT_RE.test(tail)) {
           const snapshot = outBuf.length;
-          await sleep(400);
+          await sleep(120);
           if (outBuf.length === snapshot) {
             const recheck = stripAnsi(outBuf).slice(-300);
             if (PROMPT_RE.test(recheck)) return true;
           }
         }
-        await sleep(100);
+        await sleep(30);
       }
       return false;
     };
@@ -169,7 +169,7 @@ export function useTerminal(sessionId?: string) {
       const start = Date.now();
       while (Date.now() - start < timeout) {
         if (outBuf.includes(marker)) return true;
-        await sleep(100);
+        await sleep(30);
       }
       return false;
     };
@@ -213,6 +213,7 @@ export function useTerminal(sessionId?: string) {
     });
 
     function connectWs() {
+      if (disposed) return;
       const ws = new WebSocket(`${WS_BASE}/ws/terminal/${id}`);
       ws.binaryType = 'arraybuffer';
 
@@ -220,11 +221,13 @@ export function useTerminal(sessionId?: string) {
         if (disposed) { ws.close(); return; }
         handle.ws = ws;
         handle.status = 'connected';
-        setStatus('connected');
+        if (!disposed) setStatus('connected');
         try {
-          const dims = fitAddon.proposeDimensions();
-          if (dims) {
-            ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+          if (!disposed) {
+            const dims = fitAddon.proposeDimensions();
+            if (dims) {
+              ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+            }
           }
         } catch {
           // Terminal may have been disposed between open and this callback
@@ -232,6 +235,7 @@ export function useTerminal(sessionId?: string) {
       };
 
       ws.onmessage = (e: MessageEvent) => {
+        if (disposed) return;
         if (e.data instanceof ArrayBuffer) {
           const text = new TextDecoder().decode(e.data);
           term.write(new Uint8Array(e.data));
@@ -245,15 +249,15 @@ export function useTerminal(sessionId?: string) {
       ws.onclose = () => {
         handle.ws = null;
         handle.status = 'disconnected';
-        setStatus('disconnected');
-        if (mountedRef.current) {
-          reconnectTimer = setTimeout(connectWs, 2000);
+        if (!disposed) setStatus('disconnected');
+        if (!disposed && mountedRef.current) {
+          reconnectTimer = setTimeout(connectWs, 500);
         }
       };
 
       ws.onerror = () => {
         handle.status = 'disconnected';
-        setStatus('disconnected');
+        if (!disposed) setStatus('disconnected');
       };
     }
 

@@ -102,11 +102,24 @@ function workflowQuery(root: string): string {
   return `root=${encodeURIComponent(root)}`;
 }
 
-export async function fetchWorkflowSnapshot(root: string, id = 'latest'): Promise<WorkflowSnapshot | null> {
-  const res = await fetch(`${SERVE_URL}/api/workflows/${encodeURIComponent(id)}?${workflowQuery(root)}`);
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`workflow snapshot failed: ${res.status}`);
-  return await res.json() as WorkflowSnapshot;
+export async function fetchWorkflowSnapshot(root: string, id = 'latest', retries = 3): Promise<WorkflowSnapshot | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(`${SERVE_URL}/api/workflows/${encodeURIComponent(id)}?${workflowQuery(root)}`);
+      if (res.status === 404) return null;
+      if (res.status === 400 && attempt < retries) {
+        // Workspace may not exist on server yet — wait and retry
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+        continue;
+      }
+      if (!res.ok) return null;
+      return await res.json() as WorkflowSnapshot;
+    } catch {
+      if (attempt >= retries) return null;
+      await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
+  return null;
 }
 
 export function openWorkflowSubscriptions(root: string, handlers: WorkflowSubscriptionHandlers): () => void {
@@ -151,30 +164,64 @@ export function openWorkflowSubscriptions(root: string, handlers: WorkflowSubscr
     }
   };
 
-  const sse = new EventSource(`${SERVE_URL}/api/workflows/latest/stream?${workflowQuery(root)}`);
+  let sse: EventSource | null = null;
+  let ws: WebSocket | null = null;
+  let sseErrorCount = 0;
+  let sseRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  const MAX_SSE_ERRORS = 5;
+
+  function connectSse() {
+    if (closed) return;
+    sse = new EventSource(`${SERVE_URL}/api/workflows/latest/stream?${workflowQuery(root)}`);
+
+    sse.onopen = () => {
+      sseErrorCount = 0;
+      patchStatus({ sse: 'live', message: 'SSE projection stream connected' });
+    };
+
+    sse.onerror = () => {
+      if (closed) {
+        patchStatus({ sse: 'closed' });
+        return;
+      }
+      sseErrorCount += 1;
+      // Close to prevent EventSource's built-in auto-reconnect loop.
+      // We'll retry manually with backoff up to a limit.
+      sse?.close();
+      sse = null;
+      if (sseErrorCount > MAX_SSE_ERRORS) {
+        patchStatus({ sse: 'error', message: 'SSE stream failed — workspace may not exist yet' });
+        return;
+      }
+      patchStatus({ sse: 'error', message: `SSE reconnecting (${sseErrorCount}/${MAX_SSE_ERRORS})` });
+      sseRetryTimer = setTimeout(connectSse, Math.min(1000 * 2 ** sseErrorCount, 15_000));
+    };
+
+    sse.addEventListener('state', (event) => {
+      try {
+        handleFrame(JSON.parse((event as MessageEvent).data) as WorkflowFrame, 'sse');
+      } catch (err) {
+        handlers.onError?.(err instanceof Error ? err.message : String(err));
+      }
+    });
+    sse.addEventListener('delta', (event) => {
+      try {
+        handleFrame(JSON.parse((event as MessageEvent).data) as WorkflowFrame, 'sse');
+      } catch (err) {
+        handlers.onError?.(err instanceof Error ? err.message : String(err));
+      }
+    });
+  }
+
   patchStatus({ sse: 'connecting', ws: 'connecting', workdir: root, message: 'Connecting workflow streams' });
 
-  sse.onopen = () => patchStatus({ sse: 'live', message: 'SSE projection stream connected' });
-  sse.onerror = () => patchStatus({ sse: closed ? 'closed' : 'error', message: 'SSE stream disconnected' });
-  sse.addEventListener('state', (event) => {
-    try {
-      handleFrame(JSON.parse((event as MessageEvent).data) as WorkflowFrame, 'sse');
-    } catch (err) {
-      handlers.onError?.(err instanceof Error ? err.message : String(err));
-    }
-  });
-  sse.addEventListener('delta', (event) => {
-    try {
-      handleFrame(JSON.parse((event as MessageEvent).data) as WorkflowFrame, 'sse');
-    } catch (err) {
-      handlers.onError?.(err instanceof Error ? err.message : String(err));
-    }
-  });
+  // Workspace is now created server-side before subscriptions open — connect immediately.
+  connectSse();
 
-  const ws = new WebSocket(`${WS_BASE}/api/workflow/ws`);
+  ws = new WebSocket(`${WS_BASE}/api/workflow/ws`);
   ws.onopen = () => {
     patchStatus({ ws: 'live', message: 'WebSocket projection stream connected' });
-    ws.send(JSON.stringify({
+    ws?.send(JSON.stringify({
       type: 'subscribe',
       root,
       projections: ['workflow.artifacts', 'workflow.execution', 'workflow.gates', 'workflow.agents'],
@@ -192,8 +239,9 @@ export function openWorkflowSubscriptions(root: string, handlers: WorkflowSubscr
 
   return () => {
     closed = true;
-    sse.close();
-    ws.close();
+    if (sseRetryTimer) clearTimeout(sseRetryTimer);
+    sse?.close();
+    ws?.close();
     patchStatus({ sse: 'closed', ws: 'closed', message: 'Workflow streams closed' });
   };
 }

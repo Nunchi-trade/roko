@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type {
   PipelineDemoState,
   PipelineEvent,
@@ -11,6 +12,8 @@ import type {
 import type { ServerStatus } from '../hooks/useServerHealth';
 import './PrdPipelinePanel.css';
 
+/* ── Constants ── */
+
 const PHASES: { id: PipelinePhase; label: string }[] = [
   { id: 'idea', label: 'Idea' },
   { id: 'draft', label: 'PRD' },
@@ -21,23 +24,17 @@ const PHASES: { id: PipelinePhase; label: string }[] = [
 ];
 
 const PHASE_ORDER: PipelinePhase[] = [
-  'idle',
-  'setup',
-  'idea',
-  'draft',
-  'published',
-  'planning',
-  'tasks',
-  'implementing',
-  'complete',
-  'failed',
+  'idle', 'setup', 'idea', 'draft', 'published',
+  'planning', 'tasks', 'implementing', 'complete', 'failed',
 ];
+
+/* ── Helpers ── */
 
 function phaseIndex(phase: PipelinePhase): number {
   return PHASE_ORDER.indexOf(phase);
 }
 
-function displayTaskStatus(status: PipelineTaskStatus): string {
+function statusLabel(status: PipelineTaskStatus): string {
   if (status === 'active') return 'working';
   if (status === 'done') return 'done';
   if (status === 'failed') return 'failed';
@@ -45,100 +42,76 @@ function displayTaskStatus(status: PipelineTaskStatus): string {
   return 'pending';
 }
 
-function statusClass(status: PipelineTaskStatus): string {
-  return `pipeline-task-${status}`;
+function tierLabel(tier: PipelineRouteTier): string {
+  if (tier === 'T1') return 'T1 fast';
+  if (tier === 'T2') return 'T2 build';
+  return 'T3 risk';
 }
 
-function planProgress(plan: PipelinePlan): { done: number; total: number; active: number } {
+function planProgress(plan: PipelinePlan) {
   const total = plan.tasks.length;
-  const done = plan.tasks.filter((task) => task.status === 'done').length;
-  const active = plan.tasks.filter((task) => task.status === 'active').length;
+  const done = plan.tasks.filter((t) => t.status === 'done').length;
+  const active = plan.tasks.filter((t) => t.status === 'active').length;
   return { done, total, active };
 }
 
-function totalProgress(plans: PipelinePlan[]): { done: number; total: number; active: number } {
+function totalProgress(plans: PipelinePlan[]) {
   return plans.reduce(
-    (acc, plan) => {
-      const p = planProgress(plan);
-      return {
-        done: acc.done + p.done,
-        total: acc.total + p.total,
-        active: acc.active + p.active,
-      };
+    (acc, p) => {
+      const s = planProgress(p);
+      return { done: acc.done + s.done, total: acc.total + s.total, active: acc.active + s.active };
     },
     { done: 0, total: 0, active: 0 },
   );
 }
 
 function allTasks(plans: PipelinePlan[]): PipelineTask[] {
-  return plans.flatMap((plan) => plan.tasks);
-}
-
-function shortList(items: string[], max = 3): string {
-  if (items.length === 0) return 'none';
-  if (items.length <= max) return items.join(', ');
-  return `${items.slice(0, max).join(', ')} +${items.length - max}`;
+  return plans.flatMap((p) => p.tasks);
 }
 
 function routeSummary(plans: PipelinePlan[]) {
-  const summary: Record<PipelineRouteTier, { count: number; active: number; models: Set<string> }> = {
-    T1: { count: 0, active: 0, models: new Set<string>() },
-    T2: { count: 0, active: 0, models: new Set<string>() },
-    T3: { count: 0, active: 0, models: new Set<string>() },
+  const out: Record<PipelineRouteTier, { count: number; active: number; models: Set<string> }> = {
+    T1: { count: 0, active: 0, models: new Set() },
+    T2: { count: 0, active: 0, models: new Set() },
+    T3: { count: 0, active: 0, models: new Set() },
   };
-  for (const task of allTasks(plans)) {
-    const tier = task.routeTier ?? 'T1';
-    summary[tier].count += 1;
-    if (task.status === 'active') summary[tier].active += 1;
-    if (task.modelHint) summary[tier].models.add(task.modelHint);
+  for (const t of allTasks(plans)) {
+    const tier = t.routeTier ?? 'T1';
+    out[tier].count += 1;
+    if (t.status === 'active') out[tier].active += 1;
+    if (t.modelHint) out[tier].models.add(t.modelHint);
   }
-  return summary;
+  return out;
 }
 
 function gateSummary(plans: PipelinePlan[]) {
   const counts = new Map<string, { count: number; command?: string }>();
-  for (const task of allTasks(plans)) {
-    for (const verify of task.verify) {
-      const phase = verify.phase || 'verify';
-      const existing = counts.get(phase) ?? { count: 0, command: verify.command };
-      existing.count += 1;
-      existing.command = existing.command ?? verify.command;
-      counts.set(phase, existing);
+  for (const t of allTasks(plans)) {
+    for (const v of t.verify) {
+      const phase = v.phase || 'verify';
+      const prev = counts.get(phase) ?? { count: 0, command: v.command };
+      prev.count += 1;
+      prev.command = prev.command ?? v.command;
+      counts.set(phase, prev);
     }
   }
   return Array.from(counts.entries())
-    .map(([phase, data]) => ({ phase, ...data }))
+    .map(([phase, d]) => ({ phase, ...d }))
     .sort((a, b) => b.count - a.count || a.phase.localeCompare(b.phase));
 }
 
-function routeLabel(tier: PipelineRouteTier): string {
-  if (tier === 'T1') return 'T1 fast';
-  if (tier === 'T2') return 'T2 build';
-  return 'T3 risk';
+function connectionDot(status?: string): string {
+  return `pp-conn pp-conn-${status ?? 'idle'}`;
 }
 
-function connectionClass(status?: string): string {
-  return `pipeline-stream-${status ?? 'idle'}`;
-}
-
-function runLabel(status: ServerStatus, isRunning: boolean): string {
-  if (isRunning) return 'Running live';
-  if (status === 'checking') return 'Checking serve';
-  if (status === 'disconnected') return 'Serve offline';
+function runBtnLabel(status: ServerStatus, running: boolean): string {
+  if (running) return 'Running';
+  if (status === 'checking') return 'Checking';
+  if (status === 'disconnected') return 'Offline';
   return 'Start live run';
 }
 
-function EmptyState() {
-  return (
-    <div className="pipeline-empty">
-      <div className="pipeline-empty-kicker">Live pipeline</div>
-      <div className="pipeline-empty-title">PRD, plan, and task artifacts will appear here.</div>
-      <div className="pipeline-empty-sub">
-        The scenario subscribes to workflow SSE and WebSocket projections, then renders generated artifacts as they appear.
-      </div>
-    </div>
-  );
-}
+/* ── Main component ── */
 
 export default function PrdPipelinePanel({
   state,
@@ -159,72 +132,115 @@ export default function PrdPipelinePanel({
   isRunning?: boolean;
   serverHealth?: ServerStatus;
 }) {
-  const progress = totalProgress(state.plans);
+  const progress = useMemo(() => totalProgress(state.plans), [state.plans]);
   const currentPhase = phaseIndex(state.phase);
-  const tasks = allTasks(state.plans);
-  const routes = routeSummary(state.plans);
-  const gates = gateSummary(state.plans);
+  const tasks = useMemo(() => allTasks(state.plans), [state.plans]);
+  const routes = useMemo(() => routeSummary(state.plans), [state.plans]);
+  const gates = useMemo(() => gateSummary(state.plans), [state.plans]);
+
+  const hasPrd = !!state.prd;
+  const hasPlans = state.plans.length > 0;
+  const hasTasks = tasks.length > 0;
+  const hasEvents = state.events.length > 0;
+  const pctDone = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
 
   return (
-    <div className="pipeline-panel">
-      {examples.length > 0 && onSelectExample && (
-        <div className="pipeline-example-switcher">
-          {examples.map((example) => (
+    <div className="pp">
+      {/* ── Top: two columns ── */}
+      <div className="pp-top">
+        {/* Left: job brief */}
+        <div className="pp-brief">
+          <div className="pp-kicker">
+            {state.source === 'live' ? 'live' : 'ready'}
+            {state.example ? ` · ${state.example.complexity}` : ''}
+          </div>
+          <h2 className="pp-title">{state.headline}</h2>
+
+          {state.example?.stageQuote && (
+            <blockquote className="pp-quote">{state.example.stageQuote}</blockquote>
+          )}
+          {state.example && <p className="pp-idea">{state.example.idea}</p>}
+
+          {state.example && state.example.why.length > 0 && (
+            <div className="pp-tags">
+              {state.example.why.map((w) => (
+                <span key={w}>{w}</span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Right: controls + progress */}
+        <div className="pp-sidebar">
+          {onRun && (
             <button
-              key={example.id}
-              className={selectedExampleId === example.id ? 'active' : ''}
-              onClick={() => onSelectExample(example.id)}
+              className="pp-run-btn"
+              onClick={onRun}
+              disabled={isRunning || serverHealth !== 'connected'}
+            >
+              {runBtnLabel(serverHealth, isRunning)}
+            </button>
+          )}
+
+          <div className="pp-score">
+            {progress.total > 0 && (
+              <div className="pp-ring">
+                <svg viewBox="0 0 36 36">
+                  <circle className="pp-ring-bg" cx="18" cy="18" r="15.5" />
+                  <circle
+                    className="pp-ring-fg"
+                    cx="18" cy="18" r="15.5"
+                    strokeDasharray={`${pctDone} ${100 - pctDone}`}
+                    strokeDashoffset="25"
+                  />
+                </svg>
+                <span className="pp-ring-label">{pctDone}%</span>
+              </div>
+            )}
+            <div className="pp-score-text">
+              <span className="pp-score-num">{progress.done}</span>
+              <span className="pp-score-sep">/ {progress.total || '--'}</span>
+              <span className="pp-score-sub">
+                {progress.active > 0 ? `${progress.active} active` : 'tasks'}
+              </span>
+            </div>
+          </div>
+
+          {state.stream && (
+            <div className="pp-stream">
+              <span className={connectionDot(state.stream.sse)}>SSE</span>
+              <span className={connectionDot(state.stream.ws)}>WS</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Example selector ── */}
+      {examples.length > 0 && onSelectExample && (
+        <div className="pp-examples">
+          {examples.map((ex) => (
+            <button
+              key={ex.id}
+              className={selectedExampleId === ex.id ? 'active' : ''}
+              onClick={() => onSelectExample(ex.id)}
               disabled={selectorDisabled}
             >
-              <span>{example.complexity}</span>
-              <b>{example.label}</b>
+              <b>{ex.label}</b>
+              <span>{ex.complexity}</span>
             </button>
           ))}
         </div>
       )}
 
-      <div className="pipeline-hero">
-        <div className="pipeline-hero-copy">
-          <div className="pipeline-eyebrow">
-            {state.source === 'live' ? 'live artifacts' : 'awaiting live run'}
-            {state.example ? ` / ${state.example.complexity}` : ''}
-          </div>
-          <h2>{state.headline}</h2>
-          <p>
-            Watch the job become a PRD, then a plan, then routed tasks with verification gates and live execution state.
-          </p>
-          <div className="pipeline-hero-actions">
-            {onRun && (
-              <button
-                type="button"
-                className="pipeline-primary-action"
-                onClick={onRun}
-                disabled={isRunning || serverHealth !== 'connected'}
-              >
-                {runLabel(serverHealth, isRunning)}
-              </button>
-            )}
-            {state.currentCommand && <div className="pipeline-command">{state.currentCommand}</div>}
-          </div>
-          {state.stream && <StreamStatus stream={state.stream} />}
-        </div>
-        <div className="pipeline-hero-visual">
-          <div className="pipeline-score">
-            <span>{progress.done}</span>
-            <b>/ {progress.total || '--'}</b>
-            <em>{progress.active > 0 ? `${progress.active} working` : 'tasks'}</em>
-          </div>
-        </div>
-      </div>
-
-      <div className="pipeline-phase-rail">
+      {/* ── Phase rail ── */}
+      <div className="pp-rail">
         {PHASES.map((phase) => {
-          const phaseStep = phaseIndex(phase.id);
-          const status = state.phase === 'failed'
-            ? phaseStep < currentPhase ? 'done' : 'pending'
-            : phaseStep < currentPhase ? 'done' : phaseStep === currentPhase ? 'active' : 'pending';
+          const idx = phaseIndex(phase.id);
+          const s = state.phase === 'failed'
+            ? idx < currentPhase ? 'done' : 'pending'
+            : idx < currentPhase ? 'done' : idx === currentPhase ? 'active' : 'pending';
           return (
-            <div key={phase.id} className={`pipeline-phase pipeline-phase-${status}`}>
+            <div key={phase.id} className={`pp-phase pp-phase-${s}`}>
               <span />
               <b>{phase.label}</b>
             </div>
@@ -232,217 +248,166 @@ export default function PrdPipelinePanel({
         })}
       </div>
 
-      {state.example && (
-        <section className="pipeline-example-brief">
-          {state.example.stageQuote && <blockquote>{state.example.stageQuote}</blockquote>}
-          <p>{state.example.idea}</p>
-          <div className="pipeline-why-list">
-            {state.example.why.map((item) => (
-              <span key={item}>{item}</span>
-            ))}
+      {/* ── Current command ── */}
+      {state.currentCommand && (
+        <div className="pp-cmd">{state.currentCommand}</div>
+      )}
+
+      {/* ── PRD card (appears when generated) ── */}
+      {hasPrd && state.prd && (
+        <section className="pp-section pp-reveal">
+          <div className="pp-section-head">
+            <span>PRD</span>
+            <b>{state.prd.status}</b>
+          </div>
+          <h3>{state.prd.title}</h3>
+          <p className="pp-excerpt">{state.prd.excerpt}</p>
+          <div className="pp-prd-stats">
+            <span>{state.prd.requirements.length} requirements</span>
+            <span>{state.prd.acceptance.length} acceptance</span>
+            <span className="mono">{state.prd.slug}</span>
           </div>
         </section>
       )}
 
-      {state.prd || state.plans.length > 0 ? (
-        <>
-          <div className="pipeline-artifact-grid">
-            <div className="pipeline-artifact-col">
-              {state.prd && (
-                <section className="pipeline-prd">
-                  <div className="pipeline-section-head">
-                    <span>Generated PRD</span>
-                    <b>{state.prd.status}</b>
-                  </div>
-                  <h3>{state.prd.title}</h3>
-                  <p>{state.prd.excerpt}</p>
-                  <div className="pipeline-prd-grid">
-                    <Metric label="requirements" value={String(state.prd.requirements.length)} />
-                    <Metric label="acceptance" value={String(state.prd.acceptance.length)} />
-                    <Metric label="slug" value={state.prd.slug} mono />
-                  </div>
-                </section>
-              )}
-
-              <section className="pipeline-plans">
-                <div className="pipeline-section-head">
-                  <span>Generated Plans</span>
-                  <b>{state.plans.length}</b>
-                </div>
-                {state.plans.length === 0 ? (
-                  <div className="pipeline-muted">Waiting for plan generation.</div>
-                ) : (
-                  <div className="pipeline-plan-list">
-                    {state.plans.map((plan) => (
-                      <PlanCard key={plan.id} plan={plan} />
-                    ))}
-                  </div>
-                )}
-              </section>
+      {/* ── Plans + routing two-column grid ── */}
+      {hasPlans && (
+        <div className="pp-grid pp-reveal">
+          <section className="pp-section">
+            <div className="pp-section-head">
+              <span>Plans</span>
+              <b>{state.plans.length}</b>
             </div>
-
-            <div className="pipeline-artifact-col">
-              {tasks.length > 0 && (
-                <section className="pipeline-insights">
-                  <div className="pipeline-section-head">
-                    <span>Routing & Gates</span>
-                    <b>{tasks.length} tasks</b>
-                  </div>
-                  <div className="pipeline-route-grid">
-                    {(['T1', 'T2', 'T3'] as PipelineRouteTier[]).map((tier) => {
-                      const data = routes[tier];
-                      return (
-                        <div key={tier} className={`pipeline-route-card pipeline-route-${tier.toLowerCase()}`}>
-                          <span>{routeLabel(tier)}</span>
-                          <b>{data.count}</b>
-                          <em>{data.active > 0 ? `${data.active} working` : shortList(Array.from(data.models), 1)}</em>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div className="pipeline-gate-list">
-                    {gates.length === 0 ? (
-                      <span className="pipeline-gate-empty">waiting for verify gates</span>
-                    ) : (
-                      gates.slice(0, 7).map((gate) => (
-                        <span key={gate.phase} title={gate.command}>
-                          <b>{gate.phase}</b>
-                          {gate.count}
-                        </span>
-                      ))
-                    )}
-                  </div>
-                </section>
-              )}
-
-              <section className="pipeline-tasks">
-                <div className="pipeline-section-head">
-                  <span>Task Board</span>
-                  <b>{progress.done}/{progress.total}</b>
-                </div>
-                {state.plans.flatMap((plan) => plan.tasks).length === 0 ? (
-                  <div className="pipeline-muted">Waiting for tasks.toml.</div>
-                ) : (
-                  <div className="pipeline-task-list">
-                    {state.plans.map((plan) =>
-                      plan.tasks.map((task) => (
-                        <TaskRow key={`${plan.id}:${task.id}`} planId={plan.id} task={task} />
-                      )),
-                    )}
-                  </div>
-                )}
-              </section>
+            <div className="pp-plan-list">
+              {state.plans.map((plan) => (
+                <PlanCard key={plan.id} plan={plan} />
+              ))}
             </div>
-          </div>
-        </>
-      ) : (
-        <EmptyState />
+          </section>
+
+          {hasTasks && (
+            <section className="pp-section">
+              <div className="pp-section-head">
+                <span>Routing</span>
+                <b>{tasks.length} tasks</b>
+              </div>
+              <div className="pp-route-grid">
+                {(['T1', 'T2', 'T3'] as PipelineRouteTier[]).map((tier) => {
+                  const d = routes[tier];
+                  if (d.count === 0) return null;
+                  return (
+                    <div key={tier} className={`pp-route-card pp-tier-${tier.toLowerCase()}`}>
+                      <b>{d.count}</b>
+                      <span>{tierLabel(tier)}</span>
+                      {d.active > 0 && <em>{d.active} active</em>}
+                    </div>
+                  );
+                })}
+              </div>
+              {gates.length > 0 && (
+                <div className="pp-gates">
+                  {gates.slice(0, 6).map((g) => (
+                    <span key={g.phase} title={g.command}>
+                      <b>{g.phase}</b> {g.count}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+        </div>
       )}
 
-      <section className="pipeline-events">
-        <div className="pipeline-section-head">
-          <span>Artifact Log</span>
-          <b>{state.lastUpdated ?? '--'}</b>
-        </div>
-        <div className="pipeline-event-list">
-          {state.events.slice(-7).map((event) => (
-            <EventRow key={event.id} event={event} />
-          ))}
-          {state.events.length === 0 && <div className="pipeline-muted">No artifact events yet.</div>}
-        </div>
-      </section>
+      {/* ── Task board ── */}
+      {hasTasks && (
+        <section className="pp-section pp-reveal">
+          <div className="pp-section-head">
+            <span>Tasks</span>
+            <b>{progress.done}/{progress.total}</b>
+          </div>
+          <div className="pp-task-list">
+            {state.plans.map((plan) =>
+              plan.tasks.map((task) => (
+                <TaskRow key={`${plan.id}:${task.id}`} planId={plan.id} task={task} />
+              )),
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* ── Event log ── */}
+      {hasEvents && (
+        <section className="pp-section pp-section-log pp-reveal">
+          <div className="pp-section-head">
+            <span>Log</span>
+            <b>{state.lastUpdated ?? ''}</b>
+          </div>
+          <div className="pp-event-list">
+            {state.events.slice(-5).map((ev) => (
+              <EventRow key={ev.id} event={ev} />
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
 
-function Metric({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="pipeline-metric">
-      <span>{label}</span>
-      <b className={mono ? 'mono' : undefined}>{value}</b>
-    </div>
-  );
-}
-
-function StreamStatus({ stream }: { stream: NonNullable<PipelineDemoState['stream']> }) {
-  return (
-    <div className="pipeline-stream-row">
-      <span className={connectionClass(stream.sse)}>
-        <b /> SSE {stream.sse}
-      </span>
-      <span className={connectionClass(stream.ws)}>
-        <b /> WS {stream.ws}
-      </span>
-      {stream.workflowId && <em>{stream.workflowId}</em>}
-      {stream.cursor != null && <em>#{stream.cursor}</em>}
-    </div>
-  );
-}
+/* ── Sub-components ── */
 
 function PlanCard({ plan }: { plan: PipelinePlan }) {
-  const progress = planProgress(plan);
-  const pct = progress.total === 0 ? 0 : Math.round((progress.done / progress.total) * 100);
+  const { done, total } = planProgress(plan);
+  const pct = total === 0 ? 0 : Math.round((done / total) * 100);
 
   return (
-    <article className={`pipeline-plan-card pipeline-plan-${plan.status}`}>
-      <div className="pipeline-plan-top">
+    <article className={`pp-plan pp-plan-${plan.status}`}>
+      <div className="pp-plan-head">
         <div>
           <h4>{plan.title}</h4>
-          <span>{plan.id}</span>
+          <span className="pp-plan-id">{plan.id}</span>
         </div>
-        <b>{pct}%</b>
+        <b className="pp-plan-pct">{pct}%</b>
       </div>
-      <div className="pipeline-plan-bar">
+      <div className="pp-plan-bar">
         <span style={{ width: `${pct}%` }} />
       </div>
-      <p>{plan.excerpt || 'Plan details will appear after generation.'}</p>
-      <div className="pipeline-plan-meta">
-        <span>{progress.total} tasks</span>
-        {plan.estimatedMinutes != null && <span>{plan.estimatedMinutes}m est</span>}
+      {plan.excerpt && <p className="pp-excerpt">{plan.excerpt}</p>}
+      <div className="pp-plan-meta">
+        <span>{total} tasks</span>
+        {plan.estimatedMinutes != null && <span>{plan.estimatedMinutes}m</span>}
       </div>
     </article>
   );
 }
 
 function TaskRow({ planId, task }: { planId: string; task: PipelineTask }) {
-  const routeTier: PipelineRouteTier = task.routeTier ?? 'T1';
+  const tier: PipelineRouteTier = task.routeTier ?? 'T1';
   return (
-    <article className={`pipeline-task-row ${statusClass(task.status)}`}>
-      <div className="pipeline-task-status">
-        <span />
-        <b>{displayTaskStatus(task.status)}</b>
-      </div>
-      <div className="pipeline-task-main">
-        <div className="pipeline-task-title">
-          <div>
-            <span>{planId}:{task.id}</span>
-            <h4>{task.title}</h4>
+    <article className={`pp-task pp-task-${task.status}`}>
+      <div className="pp-task-dot" />
+      <div className="pp-task-body">
+        <div className="pp-task-top">
+          <h4>{task.title}</h4>
+          <div className="pp-task-badges">
+            <b className={`pp-tier-badge pp-tier-${tier.toLowerCase()}`}>{tier}</b>
+            <span className="pp-task-status-label">{statusLabel(task.status)}</span>
           </div>
-          <b className={`pipeline-route-badge pipeline-route-badge-${routeTier.toLowerCase()}`}>
-            {routeTier}
-          </b>
         </div>
         {task.description && <p>{task.description}</p>}
-        <div className="pipeline-task-meta">
-          <span>{task.tier ?? routeLabel(routeTier)}</span>
-          {task.phase && <span>{task.phase}</span>}
+        <div className="pp-task-meta">
+          <span>{planId}:{task.id}</span>
+          {task.modelHint && <span>{task.modelHint}</span>}
           {task.role && <span>{task.role}</span>}
-          <span>{task.modelHint ?? 'model pending'}</span>
-          {task.agentId && <span>{task.agentId}</span>}
-          {task.maxLoc != null && <span>{task.maxLoc} max loc</span>}
-          <span>{shortList(task.files)}</span>
-          {task.dependsOn.length > 0 && <span>after {task.dependsOn.join(', ')}</span>}
-          {task.dependsOnPlan && task.dependsOnPlan.length > 0 && <span>after plan {task.dependsOnPlan.join(', ')}</span>}
+          {task.files.length > 0 && <span>{task.files.length} files</span>}
         </div>
         {task.verify.length > 0 && (
-          <div className="pipeline-task-verify">
-            {task.verify.slice(0, 2).map((verify, i) => (
-              <code key={`${task.id}-verify-${i}`} className={`pipeline-verify-${verify.status ?? 'pending'}`}>
-                <span>{verify.phase}</span>
-                {verify.command}
+          <div className="pp-task-gates">
+            {task.verify.slice(0, 3).map((v, i) => (
+              <code key={`${task.id}-v-${i}`} className={`pp-gate-${v.status ?? 'pending'}`}>
+                {v.phase}: {v.command}
               </code>
             ))}
-            {task.verify.length > 2 && <em>+{task.verify.length - 2} more gates</em>}
+            {task.verify.length > 3 && <em>+{task.verify.length - 3}</em>}
           </div>
         )}
       </div>
@@ -452,8 +417,8 @@ function TaskRow({ planId, task }: { planId: string; task: PipelineTask }) {
 
 function EventRow({ event }: { event: PipelineEvent }) {
   return (
-    <div className={`pipeline-event pipeline-event-${event.kind ?? 'info'}`}>
-      <span>{event.ts}</span>
+    <div className={`pp-event pp-event-${event.kind ?? 'info'}`}>
+      <span className="pp-event-ts">{event.ts}</span>
       <b>{event.phase}</b>
       <p>{event.text}</p>
     </div>

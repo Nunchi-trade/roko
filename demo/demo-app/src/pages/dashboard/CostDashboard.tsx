@@ -1,5 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { useContextEventSubscription } from '../../contexts/EventStreamContext';
+import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import CostChart from '../../components/Charts/CostChart';
@@ -13,21 +15,28 @@ import type { AdaptiveThresholdsResponse } from '../../components/ThresholdGauge
 function useCountUp(target: number, duration = 900): number {
   const [val, setVal] = useState(0);
   const prevTarget = useRef<number | null>(null);
+  const valRef = useRef(0);
+
   useEffect(() => {
-    if (target === 0) return;
     if (prevTarget.current === target) return;
     prevTarget.current = target;
     const start = performance.now();
-    const from = val;
+    const from = valRef.current;
+    let frame = 0;
     const tick = (now: number) => {
       const t = Math.min((now - start) / duration, 1);
       const eased = 1 - Math.pow(1 - t, 3);
-      setVal(from + (target - from) * eased);
-      if (t < 1) requestAnimationFrame(tick);
-      else setVal(target);
+      const next = from + (target - from) * eased;
+      valRef.current = next;
+      setVal(next);
+      if (t < 1) frame = requestAnimationFrame(tick);
+      else {
+        valRef.current = target;
+        setVal(target);
+      }
     };
-    requestAnimationFrame(tick);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
   }, [target, duration]);
   return val;
 }
@@ -130,38 +139,41 @@ export default function CostDashboard() {
   const [providerHealth, setProviderHealth] = useState<ProviderHealthResponse | null>(null);
   const [thresholds, setThresholds] = useState<AdaptiveThresholdsResponse | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      const [h, e, c, t, r, ph, th] = await Promise.all([
-        get<HealthResponse>('/api/health'),
-        get<EfficiencyResponse>('/api/learn/efficiency'),
-        get<CFactorResponse>('/api/metrics/c_factor'),
-        get<CFactorTrendResponse>('/api/c-factor/trend?window=24h'),
-        get<RouterResponse>('/api/learn/cascade-router'),
-        get<ProviderHealthResponse>('/api/learn/provider-outcomes'),
-        get<AdaptiveThresholdsResponse>('/api/learn/adaptive-thresholds'),
-      ]);
-      if (cancelled) return;
-      setHealth(h);
-      setEfficiency(e);
-      setCfactor(c);
-      setCfactorTrend(t);
-      setRouter(r);
-      setProviderHealth(ph);
-      setThresholds(th);
-    };
-    poll();
-    const id = setInterval(poll, 10_000);
-    return () => { cancelled = true; clearInterval(id); };
+  const fetchAll = useCallback(async () => {
+    const [h, e, c, t, r, ph, th] = await Promise.all([
+      get<HealthResponse>('/api/health'),
+      get<EfficiencyResponse>('/api/learn/efficiency'),
+      get<CFactorResponse>('/api/metrics/c_factor'),
+      get<CFactorTrendResponse>('/api/c-factor/trend?window=24h'),
+      get<RouterResponse>('/api/learn/cascade-router'),
+      get<ProviderHealthResponse>('/api/learn/provider-outcomes'),
+      get<AdaptiveThresholdsResponse>('/api/learn/adaptive-thresholds'),
+    ]);
+    setHealth(h);
+    setEfficiency(e);
+    setCfactor(c);
+    setCfactorTrend(t);
+    setRouter(r);
+    setProviderHealth(ph);
+    setThresholds(th);
   }, [get]);
+
+  // Initial fetch on mount
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // SSE-triggered refetch
+  const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
+  useContextEventSubscription(
+    ['efficiency_event', 'gate_result', 'episode', 'inference_completed'],
+    debouncedRefetch,
+  );
 
   /* Derived */
   const snap = health?.statehub?.snapshot;
-  const totalCost = efficiency?.total_cost ?? snap?.cost_usd_total ?? 1.42;
-  const episodes = snap?.episodes_total ?? 847;
+  const totalCost = efficiency?.total_cost ?? snap?.cost_usd_total ?? 0;
+  const episodes = snap?.episodes_total ?? 0;
   const isOnline = health?.status === 'ok';
-  const composite = cfactor?.composite?.overall ?? 0.847;
+  const composite = cfactor?.composite?.overall ?? 0;
   const subMetrics = cfactor?.sub_metrics ?? {};
 
   /* Animated counters */
@@ -199,13 +211,18 @@ export default function CostDashboard() {
   /* Derive current model: most-assigned model in role_table */
   const currentModel = (() => {
     const rt = router?.role_table;
-    if (!rt || Object.keys(rt).length === 0) return 'claude-haiku';
+    if (!rt || Object.keys(rt).length === 0) return '—';
     const modelCounts: Record<string, number> = {};
     for (const model of Object.values(rt)) {
       modelCounts[model] = (modelCounts[model] ?? 0) + 1;
     }
-    return Object.entries(modelCounts).sort(([, a], [, b]) => b - a)[0]?.[0] ?? 'claude-haiku';
+    return Object.entries(modelCounts).sort(([, a], [, b]) => b - a)[0]?.[0] ?? '—';
   })();
+
+  const gatesPassed = snap?.gates_passed ?? 0;
+  const gatesFailed = snap?.gates_failed ?? 0;
+  const gateTotal = gatesPassed + gatesFailed;
+  const gatePassRate = gateTotal > 0 ? `${((gatesPassed / gateTotal) * 100).toFixed(1)}%` : '—';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -222,22 +239,22 @@ export default function CostDashboard() {
                 animation: isOnline ? 'pulse-dot 2s ease-in-out infinite' : 'none',
                 display: 'inline-block',
               }} />
-              <span style={{ fontFamily: 'var(--mono)', letterSpacing: '.04em' }}>{isOnline ? 'Online' : 'Demo'}</span>
+              <span style={{ fontFamily: 'var(--mono)', letterSpacing: '.04em' }}>{isOnline ? 'Online' : 'Offline'}</span>
             </span>
           }
           color="success"
-          sub={health?.providers ? `${health.providers.healthy}/${health.providers.total} providers` : '4/5 providers'}
+          sub={health?.providers ? `${health.providers.healthy}/${health.providers.total} providers` : '0/0 providers'}
         />
         <MosaicCell
           label="UPTIME"
-          value={fmtUptime(health?.uptime_secs ?? 14523)}
+          value={fmtUptime(health?.uptime_secs ?? 0)}
           color="bone"
           mono
           sub="continuous"
         />
         <MosaicCell
           label="VERSION"
-          value={health?.version ?? '0.9.2'}
+          value={health?.version ?? '—'}
           color="bone"
           mono
           sub="roko-serve"
@@ -247,21 +264,21 @@ export default function CostDashboard() {
           value={animComposite.toFixed(3)}
           color="rose"
           mono
-          sub={`${cfactor?.composite?.episode_count ?? 847} episodes`}
+          sub={`${cfactor?.composite?.episode_count ?? 0} episodes`}
         />
         <MosaicCell
           label="TOTAL COST"
           value={`$${animCost.toFixed(2)}`}
           color="warning"
           mono
-          sub={`$${(efficiency?.cost_per_task ?? 0.017).toFixed(3)}/task`}
+          sub={`$${(efficiency?.cost_per_task ?? 0).toFixed(3)}/task`}
         />
         <MosaicCell
           label="EPISODES"
           value={Math.round(animEpisodes).toLocaleString()}
           color="dream"
           mono
-          sub={`${snap?.gates_passed ?? 791} gates passed`}
+          sub={`${gatesPassed} gates passed`}
         />
       </Mosaic>
 
@@ -357,22 +374,22 @@ export default function CostDashboard() {
             }}>
               <ActivityBlock
                 label="Active Plans"
-                value={String(health?.active_plans ?? 2)}
+                value={String(health?.active_plans ?? 0)}
                 color="var(--bone)"
               />
               <ActivityBlock
                 label="Active Agents"
-                value={String(health?.active_agents ?? 5)}
+                value={String(health?.active_agents ?? 0)}
                 color="var(--rose-bright)"
               />
               <ActivityBlock
                 label="Gate Pass Rate"
-                value={`${(((snap?.gates_passed ?? 791) / ((snap?.gates_passed ?? 791) + (snap?.gates_failed ?? 56))) * 100).toFixed(1)}%`}
+                value={gatePassRate}
                 color="var(--success)"
               />
               <ActivityBlock
                 label="Cost/Task"
-                value={`$${(efficiency?.cost_per_task ?? 0.017).toFixed(3)}`}
+                value={`$${(efficiency?.cost_per_task ?? 0).toFixed(3)}`}
                 color="var(--warning)"
               />
             </div>

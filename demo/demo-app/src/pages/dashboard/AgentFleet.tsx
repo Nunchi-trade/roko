@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { useContextEventSubscription } from '../../contexts/EventStreamContext';
+import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 
@@ -431,21 +433,23 @@ export default function AgentFleet() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [topology, setTopology] = useState<TopoData>(EMPTY_TOPOLOGY);
 
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      const data = await get<Agent[]>('/api/managed-agents');
-      if (!cancelled) setAgents(Array.isArray(data) ? data : []);
+  const fetchAll = useCallback(async () => {
+    const data = await get<Agent[]>('/api/managed-agents');
+    setAgents(Array.isArray(data) ? data : []);
 
-      const topo = await get<TopoData>('/api/agents/topology');
-      if (!cancelled) {
-        setTopology((prev) => (sameTopology(prev, topo) ? prev : topo));
-      }
-    };
-    poll();
-    const id = setInterval(poll, 5_000);
-    return () => { cancelled = true; clearInterval(id); };
+    const topo = await get<TopoData>('/api/agents/topology');
+    setTopology((prev) => (sameTopology(prev, topo) ? prev : topo));
   }, [get]);
+
+  // Initial fetch on mount
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // SSE-triggered refetch
+  const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
+  useContextEventSubscription(
+    ['agent_spawned', 'agent_started', 'agent_stopped'],
+    debouncedRefetch,
+  );
 
   /* Derived */
   const active = agents.filter((a) => isAgentActive(a)).length;
@@ -459,10 +463,10 @@ export default function AgentFleet() {
       <style>{FLEET_STYLES}</style>
       {/* ═══ TOP MOSAIC ═══ */}
       <Mosaic columns={4}>
-        <MosaicCell label="TOTAL" value={agents.length || 5} color="bone" mono />
-        <MosaicCell label="ACTIVE" value={active || 3} color="success" mono />
+        <MosaicCell label="TOTAL" value={agents.length} color="bone" mono />
+        <MosaicCell label="ACTIVE" value={active} color="success" mono />
         <MosaicCell label="AVG REPUTATION" value={avgRep} color="warning" mono />
-        <MosaicCell label="TASKS DONE" value={totalTasks || 827} color="rose" mono />
+        <MosaicCell label="TASKS DONE" value={totalTasks} color="rose" mono />
       </Mosaic>
 
       {/* ═══ TOPOLOGY + AGENT CARDS SIDE BY SIDE ═══ */}
@@ -482,7 +486,7 @@ export default function AgentFleet() {
           maxHeight: 320,
         }}>
         {agents.map((agent) => {
-          const rep = agent.performance?.reputation ?? agent.reputation ?? 85;
+          const rep = agent.performance?.reputation ?? agent.reputation ?? 0;
           const active = isAgentActive(agent);
           const isIdle = agent.status === 'idle';
           const tasks = agentTasks(agent);

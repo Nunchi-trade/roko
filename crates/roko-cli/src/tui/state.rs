@@ -352,7 +352,7 @@ pub fn model_context_limit(model: &str) -> u64 {
 
     if model.contains("gemini") && model.contains("pro") {
         1_000_000
-    } else if model.contains("gpt-4o") {
+    } else if model.contains("gpt-5") || model.contains("gpt-4") {
         128_000
     } else if model.contains("claude") {
         200_000
