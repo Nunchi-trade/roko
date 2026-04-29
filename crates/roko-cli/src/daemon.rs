@@ -331,7 +331,7 @@ pub async fn daemon_start(workdir: &Path, foreground: bool, port: u16) -> Result
         core_config,
         deploy_backend,
         daimon_strategy_space,
-    ));
+    )?);
 
     let dream_config = dreams::DreamLoopConfig {
         auto_dream: dream_settings.auto_dream,

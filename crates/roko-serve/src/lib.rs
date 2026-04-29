@@ -236,10 +236,10 @@ impl ServerBuilder {
         let workdir = self.config.workdir.clone();
         let runtime = Arc::clone(&self.config.runtime);
         let roko_config = self.config.roko_config.clone();
-        let state = Arc::clone(
-            self.state
-                .get_or_insert_with(|| Arc::new(build_app_state(workdir, runtime, roko_config))),
-        );
+        if self.state.is_none() {
+            self.state = Some(Arc::new(build_app_state(workdir, runtime, roko_config)?));
+        }
+        let state = Arc::clone(self.state.as_ref().expect("state just set"));
         if let Err(err) = state.restore_snapshot().await {
             warn!(error = %err, "failed to restore server state snapshot; starting fresh");
         }
@@ -644,7 +644,7 @@ fn build_app_state(
     workdir: PathBuf,
     runtime: Arc<dyn CliRuntime>,
     mut roko_config: RokoConfig,
-) -> AppState {
+) -> anyhow::Result<AppState> {
     // Auto-configure Privy JWT auth: always set the app ID (it's a project
     // constant) and auto-enable auth when a stored Privy credential exists.
     if roko_config.serve.auth.privy_app_id.is_none() {
@@ -659,7 +659,7 @@ fn build_app_state(
         }
     }
     let deploy_backend = create_deploy_backend(&roko_config);
-    let state = AppState::new(workdir, runtime, roko_config, deploy_backend);
+    let state = AppState::new(workdir, runtime, roko_config, deploy_backend)?;
     let _ = state.state_hub.bootstrap_from_workdir(&state.workdir);
     // Seed StateHub with persisted marketplace jobs so the TUI sees them on connect.
     let jobs = scan_marketplace_jobs(&state.workdir);
@@ -697,7 +697,7 @@ fn build_app_state(
     // return real data instead of empty arrays (audit finding A3).
     seed_default_registries(&state);
 
-    state
+    Ok(state)
 }
 
 /// Populate the connector and feed registries with default entries that

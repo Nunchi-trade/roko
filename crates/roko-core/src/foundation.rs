@@ -62,35 +62,16 @@ pub struct ModelCallRequest {
     pub cache_policy: CachePolicy,
 }
 
-/// Who originated this model call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum CallerIdentity {
-    Cli,
-    Acp,
-    Serve,
-    Research,
-    Dreams,
-    Test,
-}
-
-impl CallerIdentity {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Cli => "cli",
-            Self::Acp => "acp",
-            Self::Serve => "serve",
-            Self::Research => "research",
-            Self::Dreams => "dreams",
-            Self::Test => "test",
-        }
-    }
-}
-
-impl From<CallerIdentity> for String {
-    fn from(identity: CallerIdentity) -> Self {
-        identity.as_str().to_string()
-    }
+/// Caller-surface constants for `ModelCallRequest::caller`.
+///
+/// These are plain string constants rather than an enum because the `caller`
+/// field is `Option<String>`. The constants prevent typos and serve as a
+/// single source of truth for the set of recognised caller surfaces.
+pub mod caller {
+    pub const CLI: &str = "cli";
+    pub const SERVE: &str = "serve";
+    pub const RESEARCH: &str = "research";
+    pub const DREAMS: &str = "dreams";
 }
 
 /// Cache behaviour for this request.

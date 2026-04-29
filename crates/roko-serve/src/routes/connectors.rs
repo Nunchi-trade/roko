@@ -146,7 +146,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             RokoConfig::default(),
             deploy_backend,
-        ))
+        ).expect("AppState::new"))
     }
 
     #[tokio::test]

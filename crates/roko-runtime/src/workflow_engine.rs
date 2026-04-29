@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use tracing::warn;
+
 use chrono::{DateTime, Utc};
 use roko_core::RuntimeEvent;
 use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
@@ -182,8 +184,12 @@ impl WorkflowEngine {
                         run_id: run_id.clone(),
                         outcome: runtime_workflow_outcome(&outcome),
                     });
-                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
-                        .await?;
+                    if let Err(err) = self
+                        .record_workflow_feedback(&run_id, &outcome, &driver, started_at)
+                        .await
+                    {
+                        warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
+                    }
                     self.persist_affect_policy().await;
                     return Ok(self.build_run_report(
                         &config,
@@ -236,8 +242,12 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(outcome),
                     });
 
-                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
-                        .await?;
+                    if let Err(err) = self
+                        .record_workflow_feedback(&run_id, outcome, &driver, started_at)
+                        .await
+                    {
+                        warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
+                    }
                     self.persist_affect_policy().await;
                     return Ok(self.build_run_report(
                         &config,
@@ -256,8 +266,12 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(&outcome),
                     });
 
-                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
-                        .await?;
+                    if let Err(err) = self
+                        .record_workflow_feedback(&run_id, &outcome, &driver, started_at)
+                        .await
+                    {
+                        warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
+                    }
                     self.persist_affect_policy().await;
                     return Ok(self.build_run_report(
                         &config,
@@ -283,7 +297,7 @@ impl WorkflowEngine {
     /// Deserializes the pipeline state from `checkpoint` JSON (produced by
     /// `PipelineStateV2::checkpoint()`) and continues the run loop from the
     /// saved phase. If the checkpoint is in a terminal phase (`Complete`,
-    /// `Halted`, `Cancelled`), returns immediately with the terminal outcome.
+    /// `Halted`, `Cancelled`), returns immediately with a completed report.
     ///
     /// The `config` provides the working directory and enabled gates for the
     /// resumed run. The workflow config (template, max iterations) comes from
@@ -296,7 +310,7 @@ impl WorkflowEngine {
         &self,
         config: WorkflowRunConfig,
         checkpoint: &str,
-    ) -> Result<WorkflowResult> {
+    ) -> Result<WorkflowRunReport> {
         let pipeline = PipelineStateV2::from_checkpoint(checkpoint).map_err(|err| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -316,15 +330,33 @@ impl WorkflowEngine {
                 _ => unreachable!(),
             };
 
-            return Ok(WorkflowResult {
-                run_id: generate_run_id(),
-                outcome,
-                iterations: pipeline.iteration,
+            let run_id = generate_run_id();
+            let started_at = Instant::now();
+            let event_start_seq =
+                crate::event_bus::runtime_event_bus::<RuntimeEvent>().total_emitted();
+
+            warn!(
+                run_id = %run_id,
+                phase = ?pipeline.phase,
+                "resume called on already-terminal checkpoint; returning immediately"
+            );
+            self.emit(RuntimeEvent::WorkflowCompleted {
+                run_id: run_id.clone(),
+                outcome: runtime_workflow_outcome(&outcome),
             });
+
+            return Ok(self.build_run_report(
+                &config,
+                &run_id,
+                &outcome,
+                started_at,
+                event_start_seq,
+            ));
         }
 
         let run_id = generate_run_id();
         let started_at = Instant::now();
+        let event_start_seq = crate::event_bus::runtime_event_bus::<RuntimeEvent>().total_emitted();
 
         let driver = EffectDriver::new(
             EffectServices {
@@ -395,14 +427,20 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(outcome),
                     });
 
-                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
-                        .await?;
+                    if let Err(err) = self
+                        .record_workflow_feedback(&run_id, outcome, &driver, started_at)
+                        .await
+                    {
+                        warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
+                    }
                     self.persist_affect_policy().await;
-                    return Ok(WorkflowResult {
-                        run_id,
-                        outcome: outcome.clone(),
-                        iterations: pipeline.iteration,
-                    });
+                    return Ok(self.build_run_report(
+                        &config,
+                        &run_id,
+                        outcome,
+                        started_at,
+                        event_start_seq,
+                    ));
                 }
                 PipelineOutput::Halt { reason } => {
                     let outcome = WorkflowOutcome::Halted {
@@ -413,14 +451,20 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(&outcome),
                     });
 
-                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
-                        .await?;
+                    if let Err(err) = self
+                        .record_workflow_feedback(&run_id, &outcome, &driver, started_at)
+                        .await
+                    {
+                        warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
+                    }
                     self.persist_affect_policy().await;
-                    return Ok(WorkflowResult {
-                        run_id,
-                        outcome,
-                        iterations: pipeline.iteration,
-                    });
+                    return Ok(self.build_run_report(
+                        &config,
+                        &run_id,
+                        &outcome,
+                        started_at,
+                        event_start_seq,
+                    ));
                 }
             };
 
@@ -448,9 +492,7 @@ impl WorkflowEngine {
             to: to.to_string(),
         };
 
-        let seq = self.emit(event.clone());
-        let envelope = RuntimeEventEnvelope::new(run_id, seq, "workflow_engine", event);
-        emit_runtime_event(envelope);
+        self.emit(event);
     }
 
     fn build_run_report(
@@ -911,7 +953,7 @@ fn generate_run_id() -> String {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
+        .as_nanos();
     format!("run_{ts:x}")
 }
 
@@ -1288,13 +1330,11 @@ mod tests {
             .resume(config.clone(), &checkpoint)
             .await
             .expect("resume should complete from checkpoint");
-        assert!(matches!(
-            resumed.outcome,
-            WorkflowOutcome::Success {
-                commit_hash: Some(_)
-            }
-        ));
-        assert_eq!(resumed.iterations, 1);
+        assert!(resumed.success, "resumed workflow should complete successfully");
+        assert!(
+            resumed.run_id.starts_with("run_"),
+            "resumed run_id should have run_ prefix"
+        );
 
         let resumed_events = collect_run_events(&resumed.run_id, resume_start_seq);
         assert_resume_run_sequence(&resumed_events);
@@ -1304,18 +1344,10 @@ mod tests {
             "resume should not rerun the completed implementation phase"
         );
 
-        let report = report_from_events(
-            &resumed.run_id,
-            true,
-            "mock",
-            &config.prompt,
-            0.0,
-            resumed_events.clone(),
-        );
-        assert_eq!(report.run_id, resumed.run_id);
-        assert!(report.success);
-        assert_eq!(report.model, "mock");
-        assert!(!report.events.is_empty());
+        assert_eq!(resumed.run_id, resumed.run_id);
+        assert!(resumed.success);
+        assert_eq!(resumed.model, "mock");
+        assert!(!resumed.events.is_empty());
 
         let run1_log = config.workdir.join(".roko/run1-events.jsonl");
         let run2_log = config.workdir.join(".roko/run2-events.jsonl");

@@ -553,7 +553,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config,
             Arc::new(ManualBackend::default()),
-        ))
+        ).expect("AppState::new"))
     }
 
     fn auth_test_app(auth: ServeAuthConfig) -> Router {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use roko_core::foundation::{
-    CachePolicy, CallerIdentity, ChatMessage, MessageRole, ModelCallRequest, ModelCaller,
+    CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, caller,
 };
 use roko_learn::episode_logger::Episode;
 use tokio::task;
@@ -111,7 +111,7 @@ impl DistillationBackend for GatewayDistillationBackend {
                 max_tokens: None,
                 temperature: None,
                 role: Some("episode-distiller".to_string()),
-                caller: Some(CallerIdentity::Research.into()),
+                caller: Some(caller::RESEARCH.to_string()),
                 run_id: None,
                 prompt_section_ids: Vec::new(),
                 knowledge_ids: Vec::new(),

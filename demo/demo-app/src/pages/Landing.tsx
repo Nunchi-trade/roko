@@ -229,7 +229,7 @@ export default function Landing() {
 
         {/* CTA buttons */}
         <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-          <Link to="/demo?autoplay=1" className="btn" style={{ textDecoration: 'none' }}>
+          <Link to="/demo" className="btn" style={{ textDecoration: 'none' }}>
             Watch Demo <span className="arr">&rarr;</span>
           </Link>
           <Link to="/dashboard" className="btn bone" style={{ textDecoration: 'none' }}>

@@ -18,7 +18,7 @@ use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protoc
 use roko_agent::{Agent, AgentResult};
 use roko_core::config::schema::RokoConfig;
 use roko_core::foundation::{
-    CachePolicy, CallerIdentity, ChatMessage, MessageRole, ModelCallRequest, ModelCaller,
+    CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, caller,
 };
 use roko_core::{Body, Context as RokoContext, Engram, Kind, Provenance};
 use roko_learn::{episode_logger::EpisodeLogger, playbook::PlaybookStore};
@@ -1318,7 +1318,7 @@ impl Agent for DreamReviewAgent {
                     max_tokens: None,
                     temperature: None,
                     role: Some("dream-review".to_string()),
-                    caller: Some(CallerIdentity::Dreams.into()),
+                    caller: Some(caller::DREAMS.to_string()),
                     run_id: None,
                     prompt_section_ids: Vec::new(),
                     knowledge_ids: Vec::new(),

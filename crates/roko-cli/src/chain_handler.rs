@@ -24,6 +24,9 @@ pub struct ChainToolHandler {
     pub wallet: Option<Arc<dyn ChainWallet>>,
     /// Canonical tool name this handler serves (e.g. `"chain.balance"`).
     pub tool_name: String,
+    /// Mirage JSON-RPC URL for knowledge graph calls (chain.post_insight, etc.).
+    /// Defaults to `http://127.0.0.1:8545` if not set.
+    pub rpc_url: Option<String>,
 }
 
 #[async_trait]
@@ -49,6 +52,9 @@ impl ToolHandler for ChainToolHandler {
             "chain.get_position" => self.handle_get_position(args).await,
             "chain.wallet_create" => self.handle_wallet_create(args).await,
             "chain.wallet_export_address" => self.handle_wallet_export_address(args).await,
+            "chain.post_insight" => self.handle_post_insight(args).await,
+            "chain.search_insights" => self.handle_search_insights(args).await,
+            "chain.confirm_insight" => self.handle_confirm_insight(args).await,
             other => ToolResult::err(ToolError::Other(format!("unknown chain tool: {other}"))),
         }
     }
@@ -865,6 +871,180 @@ impl ChainToolHandler {
             }
             Err(e) => ToolResult::err(ToolError::Other(e.to_string())),
         }
+    }
+
+    // ── chain.post_insight ──────────────────────────────────────────────
+
+    async fn handle_post_insight(&self, args: &serde_json::Value) -> ToolResult {
+        let kind = match args.get("kind").and_then(|v| v.as_str()) {
+            Some(k) => k,
+            None => {
+                return ToolResult::err(ToolError::SchemaInvalid(
+                    "missing required field: kind".into(),
+                ));
+            }
+        };
+
+        let content = match args.get("content").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => {
+                return ToolResult::err(ToolError::SchemaInvalid(
+                    "missing required field: content".into(),
+                ));
+            }
+        };
+
+        let confidence = match args.get("confidence").and_then(|v| v.as_f64()) {
+            Some(c) => c,
+            None => {
+                return ToolResult::err(ToolError::SchemaInvalid(
+                    "missing required field: confidence".into(),
+                ));
+            }
+        };
+
+        let tags = args
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        // Build the content string with tags embedded for HDC projection.
+        let tagged_content = if tags.is_empty() {
+            content.to_string()
+        } else {
+            format!("[{}] {}", tags.join(", "), content)
+        };
+
+        let rpc_params = json!({
+            "author": "roko-agent",
+            "kind": kind,
+            "content": tagged_content,
+            "stakeWei": format!("{}", (confidence * 1_000_000.0) as u64),
+        });
+
+        match self.rpc_call("chain_postInsight", rpc_params).await {
+            Ok(result) => ToolResult::structured(result.to_string()),
+            Err(e) => ToolResult::err(ToolError::Other(e)),
+        }
+    }
+
+    // ── chain.search_insights ───────────────────────────────────────────
+
+    async fn handle_search_insights(&self, args: &serde_json::Value) -> ToolResult {
+        let tags = args
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5);
+
+        // Combine tags and query for HDC-based search.
+        let search_query = if tags.is_empty() {
+            query.to_string()
+        } else if query.is_empty() {
+            tags.join(" ")
+        } else {
+            format!("{} {}", tags.join(" "), query)
+        };
+
+        let rpc_params = json!({
+            "query": search_query,
+            "k": limit,
+        });
+
+        match self.rpc_call("chain_searchInsights", rpc_params).await {
+            Ok(result) => ToolResult::structured(result.to_string()),
+            Err(e) => ToolResult::err(ToolError::Other(e)),
+        }
+    }
+
+    // ── chain.confirm_insight ───────────────────────────────────────────
+
+    async fn handle_confirm_insight(&self, args: &serde_json::Value) -> ToolResult {
+        let id = match args.get("id").and_then(|v| v.as_str()) {
+            Some(i) => i,
+            None => {
+                return ToolResult::err(ToolError::SchemaInvalid(
+                    "missing required field: id".into(),
+                ));
+            }
+        };
+
+        let rpc_params = json!({
+            "id": id,
+            "confirmer": "roko-agent",
+        });
+
+        match self.rpc_call("chain_confirmInsight", rpc_params).await {
+            Ok(result) => ToolResult::structured(result.to_string()),
+            Err(e) => ToolResult::err(ToolError::Other(e)),
+        }
+    }
+
+    // ── JSON-RPC helper ─────────────────────────────────────────────────
+
+    /// Send a JSON-RPC 2.0 call to the mirage endpoint.
+    async fn rpc_call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let url = self
+            .rpc_url
+            .as_deref()
+            .unwrap_or("http://127.0.0.1:8545");
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": [params],
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("RPC request failed: {e}"))?;
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("failed to read RPC response: {e}"))?;
+
+        if !status.is_success() {
+            return Err(format!("RPC returned {status}: {text}"));
+        }
+
+        let rpc_resp: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("invalid RPC JSON: {e}"))?;
+
+        if let Some(error) = rpc_resp.get("error") {
+            let msg = error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown RPC error");
+            return Err(format!("RPC error: {msg}"));
+        }
+
+        Ok(rpc_resp
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 }
 

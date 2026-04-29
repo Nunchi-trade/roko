@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use roko_core::foundation::{
-    CachePolicy, CallerIdentity, ChatMessage, MessageRole, ModelCallRequest, ModelCaller,
+    CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, caller,
 };
 use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolHandler,
@@ -194,7 +194,7 @@ async fn call_gateway(model_caller: Arc<dyn ModelCaller>, query: &str) -> ToolRe
             max_tokens: None,
             temperature: None,
             role: Some("web-search".to_string()),
-            caller: Some(CallerIdentity::Cli.into()),
+            caller: Some(caller::CLI.to_string()),
             run_id: None,
             prompt_section_ids: Vec::new(),
             knowledge_ids: Vec::new(),

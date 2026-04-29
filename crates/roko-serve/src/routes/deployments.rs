@@ -689,7 +689,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
             backend,
-        ));
+        ).expect("AppState::new"));
         Ok((dir, state))
     }
 

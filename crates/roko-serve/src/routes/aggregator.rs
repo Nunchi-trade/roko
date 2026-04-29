@@ -1292,7 +1292,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             RokoConfig::default(),
             Arc::new(ManualBackend::default()),
-        ))
+        ).expect("AppState::new"))
     }
 
     async fn call_json(router: &Router, uri: &str) -> Value {

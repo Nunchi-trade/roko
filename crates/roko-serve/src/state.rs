@@ -441,12 +441,17 @@ pub struct BenchRunHandle {
 
 impl AppState {
     /// Construct a new `AppState` from the working directory and loaded configs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the shared service bundle cannot be constructed (e.g.
+    /// because the model configuration is missing or invalid).
     pub fn new(
         workdir: PathBuf,
         runtime: Arc<dyn CliRuntime>,
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         Self::new_with_daimon_strategy(
             workdir,
             runtime,
@@ -458,16 +463,17 @@ impl AppState {
 
     /// Construct a new `AppState` with an explicit Daimon strategy-space definition.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the shared service bundle cannot be constructed.
+    /// Returns an error if the shared service bundle cannot be constructed (e.g.
+    /// because the model configuration is missing or invalid).
     pub fn new_with_daimon_strategy(
         workdir: PathBuf,
         runtime: Arc<dyn CliRuntime>,
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
         strategy_space: StrategySpaceDefinition,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let layout = RokoLayout::for_project(&workdir);
         let layout_root = layout.root().to_path_buf();
         let signal_root = layout_root.clone();
@@ -496,10 +502,10 @@ impl AppState {
             workdir.clone(),
             roko_config.clone(),
         ))
-        .expect("build shared service bundle");
+        .map_err(|e| anyhow::anyhow!("build shared service bundle: {e}"))?;
         let model_call_service = service_bundle.model_call_service;
 
-        Self {
+        Ok(Self {
             workdir,
             layout,
             signal_store: SignalStore::new(signal_root),
@@ -543,7 +549,7 @@ impl AppState {
             batch_progress: RwLock::new(HashMap::new()),
             terminal_sessions: crate::terminal::SessionManager::new(layout_root),
             active_bench_runs: RwLock::new(HashMap::new()),
-        }
+        })
     }
 
     /// Build chain client + wallet from the `[chain]` config section.
@@ -970,12 +976,15 @@ mod tests {
         let mut initial = RokoConfig::default();
         initial.server.port = 4000;
 
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            initial,
-            Arc::new(ManualBackend::default()),
-        ));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                initial,
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         let mut readers = JoinSet::new();
         for _ in 0..8 {

@@ -8,6 +8,8 @@ import type {
   PipelineTask,
   PipelineTaskStatus,
 } from '../lib/prd-pipeline-types';
+import type { ServerStatus } from '../hooks/useServerHealth';
+import WorkflowConstellation from './WorkflowConstellation';
 import './PrdPipelinePanel.css';
 
 const PHASES: { id: PipelinePhase; label: string }[] = [
@@ -110,6 +112,20 @@ function gateSummary(plans: PipelinePlan[]) {
     .sort((a, b) => b.count - a.count || a.phase.localeCompare(b.phase));
 }
 
+function gateOutcomeStats(plans: PipelinePlan[]): { total: number; passed: number; failed: number; pending: number } {
+  let total = 0;
+  let passed = 0;
+  let failed = 0;
+  for (const task of allTasks(plans)) {
+    for (const verify of task.verify) {
+      total += 1;
+      if (verify.status === 'passed') passed += 1;
+      if (verify.status === 'failed') failed += 1;
+    }
+  }
+  return { total, passed, failed, pending: Math.max(total - passed - failed, 0) };
+}
+
 function routeLabel(tier: PipelineRouteTier): string {
   if (tier === 'T1') return 'T1 fast';
   if (tier === 'T2') return 'T2 build';
@@ -118,6 +134,13 @@ function routeLabel(tier: PipelineRouteTier): string {
 
 function connectionClass(status?: string): string {
   return `pipeline-stream-${status ?? 'idle'}`;
+}
+
+function runLabel(status: ServerStatus, isRunning: boolean): string {
+  if (isRunning) return 'Running live';
+  if (status === 'checking') return 'Checking serve';
+  if (status === 'disconnected') return 'Serve offline';
+  return 'Start live run';
 }
 
 function EmptyState() {
@@ -138,18 +161,25 @@ export default function PrdPipelinePanel({
   selectedExampleId,
   onSelectExample,
   selectorDisabled,
+  onRun,
+  isRunning = false,
+  serverHealth = 'checking',
 }: {
   state: PipelineDemoState;
   examples?: PipelineScenarioExample[];
   selectedExampleId?: string;
   onSelectExample?: (id: string) => void;
   selectorDisabled?: boolean;
+  onRun?: () => void;
+  isRunning?: boolean;
+  serverHealth?: ServerStatus;
 }) {
   const progress = totalProgress(state.plans);
   const currentPhase = phaseIndex(state.phase);
   const tasks = allTasks(state.plans);
   const routes = routeSummary(state.plans);
   const gates = gateSummary(state.plans);
+  const gateOutcomes = gateOutcomeStats(state.plans);
 
   return (
     <div className="pipeline-panel">
@@ -170,19 +200,42 @@ export default function PrdPipelinePanel({
       )}
 
       <div className="pipeline-hero">
-        <div>
+        <div className="pipeline-hero-copy">
           <div className="pipeline-eyebrow">
             {state.source === 'live' ? 'live artifacts' : state.source === 'sample' ? 'sample fallback' : 'awaiting run'}
             {state.example ? ` / ${state.example.complexity}` : ''}
           </div>
           <h2>{state.headline}</h2>
-          {state.currentCommand && <div className="pipeline-command">{state.currentCommand}</div>}
+          <p>
+            Watch the job become a PRD, then a plan, then routed tasks with verification gates and live execution state.
+          </p>
+          <div className="pipeline-hero-actions">
+            {onRun && (
+              <button
+                type="button"
+                className="pipeline-primary-action"
+                onClick={onRun}
+                disabled={isRunning || serverHealth !== 'connected'}
+              >
+                {runLabel(serverHealth, isRunning)}
+              </button>
+            )}
+            {state.currentCommand && <div className="pipeline-command">{state.currentCommand}</div>}
+          </div>
           {state.stream && <StreamStatus stream={state.stream} />}
         </div>
-        <div className="pipeline-score">
-          <span>{progress.done}</span>
-          <b>/ {progress.total || '--'}</b>
-          <em>{progress.active > 0 ? `${progress.active} working` : 'tasks'}</em>
+        <div className="pipeline-hero-visual">
+          <WorkflowConstellation
+            phase={state.phase}
+            plans={state.plans}
+            gateTotal={gateOutcomes.total}
+            gatePassed={gateOutcomes.passed}
+          />
+          <div className="pipeline-score">
+            <span>{progress.done}</span>
+            <b>/ {progress.total || '--'}</b>
+            <em>{progress.active > 0 ? `${progress.active} working` : 'tasks'}</em>
+          </div>
         </div>
       </div>
 
@@ -215,88 +268,94 @@ export default function PrdPipelinePanel({
 
       {state.prd || state.plans.length > 0 ? (
         <>
-          {state.prd && (
-            <section className="pipeline-prd">
-              <div className="pipeline-section-head">
-                <span>Generated PRD</span>
-                <b>{state.prd.status}</b>
-              </div>
-              <h3>{state.prd.title}</h3>
-              <p>{state.prd.excerpt}</p>
-              <div className="pipeline-prd-grid">
-                <Metric label="requirements" value={String(state.prd.requirements.length)} />
-                <Metric label="acceptance" value={String(state.prd.acceptance.length)} />
-                <Metric label="slug" value={state.prd.slug} mono />
-              </div>
-            </section>
-          )}
+          <div className="pipeline-artifact-grid">
+            <div className="pipeline-artifact-col">
+              {state.prd && (
+                <section className="pipeline-prd">
+                  <div className="pipeline-section-head">
+                    <span>Generated PRD</span>
+                    <b>{state.prd.status}</b>
+                  </div>
+                  <h3>{state.prd.title}</h3>
+                  <p>{state.prd.excerpt}</p>
+                  <div className="pipeline-prd-grid">
+                    <Metric label="requirements" value={String(state.prd.requirements.length)} />
+                    <Metric label="acceptance" value={String(state.prd.acceptance.length)} />
+                    <Metric label="slug" value={state.prd.slug} mono />
+                  </div>
+                </section>
+              )}
 
-          <section className="pipeline-plans">
-            <div className="pipeline-section-head">
-              <span>Generated Plans</span>
-              <b>{state.plans.length}</b>
-            </div>
-            {state.plans.length === 0 ? (
-              <div className="pipeline-muted">Waiting for plan generation.</div>
-            ) : (
-              <div className="pipeline-plan-list">
-                {state.plans.map((plan) => (
-                  <PlanCard key={plan.id} plan={plan} />
-                ))}
-              </div>
-            )}
-          </section>
-
-          {tasks.length > 0 && (
-            <section className="pipeline-insights">
-              <div className="pipeline-section-head">
-                <span>Routing and Gates</span>
-                <b>{tasks.length} tasks</b>
-              </div>
-              <div className="pipeline-route-grid">
-                {(['T1', 'T2', 'T3'] as PipelineRouteTier[]).map((tier) => {
-                  const data = routes[tier];
-                  return (
-                    <div key={tier} className={`pipeline-route-card pipeline-route-${tier.toLowerCase()}`}>
-                      <span>{routeLabel(tier)}</span>
-                      <b>{data.count}</b>
-                      <em>{data.active > 0 ? `${data.active} working` : shortList(Array.from(data.models), 1)}</em>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="pipeline-gate-list">
-                {gates.length === 0 ? (
-                  <span className="pipeline-gate-empty">waiting for verify gates</span>
+              <section className="pipeline-plans">
+                <div className="pipeline-section-head">
+                  <span>Generated Plans</span>
+                  <b>{state.plans.length}</b>
+                </div>
+                {state.plans.length === 0 ? (
+                  <div className="pipeline-muted">Waiting for plan generation.</div>
                 ) : (
-                  gates.slice(0, 7).map((gate) => (
-                    <span key={gate.phase} title={gate.command}>
-                      <b>{gate.phase}</b>
-                      {gate.count}
-                    </span>
-                  ))
+                  <div className="pipeline-plan-list">
+                    {state.plans.map((plan) => (
+                      <PlanCard key={plan.id} plan={plan} />
+                    ))}
+                  </div>
                 )}
-              </div>
-            </section>
-          )}
-
-          <section className="pipeline-tasks">
-            <div className="pipeline-section-head">
-              <span>Task State Board</span>
-              <b>{progress.done}/{progress.total}</b>
+              </section>
             </div>
-            {state.plans.flatMap((plan) => plan.tasks).length === 0 ? (
-              <div className="pipeline-muted">Waiting for tasks.toml.</div>
-            ) : (
-              <div className="pipeline-task-list">
-                {state.plans.map((plan) =>
-                  plan.tasks.map((task) => (
-                    <TaskRow key={`${plan.id}:${task.id}`} planId={plan.id} task={task} />
-                  )),
+
+            <div className="pipeline-artifact-col">
+              {tasks.length > 0 && (
+                <section className="pipeline-insights">
+                  <div className="pipeline-section-head">
+                    <span>Routing & Gates</span>
+                    <b>{tasks.length} tasks</b>
+                  </div>
+                  <div className="pipeline-route-grid">
+                    {(['T1', 'T2', 'T3'] as PipelineRouteTier[]).map((tier) => {
+                      const data = routes[tier];
+                      return (
+                        <div key={tier} className={`pipeline-route-card pipeline-route-${tier.toLowerCase()}`}>
+                          <span>{routeLabel(tier)}</span>
+                          <b>{data.count}</b>
+                          <em>{data.active > 0 ? `${data.active} working` : shortList(Array.from(data.models), 1)}</em>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="pipeline-gate-list">
+                    {gates.length === 0 ? (
+                      <span className="pipeline-gate-empty">waiting for verify gates</span>
+                    ) : (
+                      gates.slice(0, 7).map((gate) => (
+                        <span key={gate.phase} title={gate.command}>
+                          <b>{gate.phase}</b>
+                          {gate.count}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </section>
+              )}
+
+              <section className="pipeline-tasks">
+                <div className="pipeline-section-head">
+                  <span>Task Board</span>
+                  <b>{progress.done}/{progress.total}</b>
+                </div>
+                {state.plans.flatMap((plan) => plan.tasks).length === 0 ? (
+                  <div className="pipeline-muted">Waiting for tasks.toml.</div>
+                ) : (
+                  <div className="pipeline-task-list">
+                    {state.plans.map((plan) =>
+                      plan.tasks.map((task) => (
+                        <TaskRow key={`${plan.id}:${task.id}`} planId={plan.id} task={task} />
+                      )),
+                    )}
+                  </div>
                 )}
-              </div>
-            )}
-          </section>
+              </section>
+            </div>
+          </div>
         </>
       ) : (
         <EmptyState />

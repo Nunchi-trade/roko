@@ -77,7 +77,7 @@ fn test_app_state() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
         Arc::new(TestRuntime),
         config,
         deploy,
-    ));
+    ).expect("AppState::new"));
     let auth = ServeAuthConfig::default();
     let router = build_router(Arc::clone(&state), &[], auth);
     (dir, state, router)

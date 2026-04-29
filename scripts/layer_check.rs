@@ -141,24 +141,37 @@ fn check_duplicate_foundation_traits(
     root: &Path,
     findings: &mut Vec<ArchitectureFinding>,
 ) -> Result<()> {
-    let traits = [
+    let patterns = [
         "pub trait AffectPolicy",
         "pub trait DispatchModulation",
+        "pub struct DispatchModulation",
         "pub trait AffectContext",
     ];
-    for rel in ["crates/roko-runtime/src", "crates/roko-cli/src"] {
-        for path in rust_files_under(&root.join(rel))? {
+    let crates_dir = root.join("crates");
+    let entries =
+        fs::read_dir(&crates_dir).with_context(|| format!("read {}", crates_dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let crate_path = entry.path();
+        if !crate_path.is_dir() {
+            continue;
+        }
+        // Skip roko-core — it is the canonical source for these definitions.
+        if crate_path.file_name().is_some_and(|n| n == "roko-core") {
+            continue;
+        }
+        for path in rust_files_under(&crate_path.join("src"))? {
             let contents =
                 fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
             for (idx, line) in contents.lines().enumerate() {
-                for needle in traits {
+                for needle in patterns {
                     if line.contains(needle) {
                         push_finding(
                             findings,
                             &path,
                             Some(idx + 1),
                             format!(
-                                "duplicate foundation trait `{needle}` found outside roko-core; import the canonical type from `roko_core::foundation` instead"
+                                "duplicate foundation type `{needle}` found outside roko-core; import the canonical type from `roko_core::foundation` instead"
                             ),
                         );
                     }
@@ -199,6 +212,22 @@ fn is_legacy_cfg_line(line: &str) -> bool {
 
 fn legacy_gated_lines(contents: &str) -> HashSet<usize> {
     let mut gated = HashSet::new();
+
+    // Detect a file-level `#![cfg(feature = "legacy-orchestrate")]` attribute in the
+    // first 10 lines.  When present the entire file is conditionally compiled as a
+    // unit, so every line counts as gated.
+    let is_file_level_gated = contents
+        .lines()
+        .take(10)
+        .any(|l| l.trim().starts_with("#![cfg(") && is_legacy_cfg_line(l));
+
+    if is_file_level_gated {
+        for line_no in 1..=contents.lines().count() {
+            gated.insert(line_no);
+        }
+        return gated;
+    }
+
     let mut pending = false;
     let mut active = false;
     let mut depth: i32 = 0;

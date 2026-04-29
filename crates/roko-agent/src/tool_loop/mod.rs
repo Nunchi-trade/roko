@@ -198,6 +198,9 @@ pub struct ToolLoop {
     budget: Option<SharedBudgetTracker>,
     /// Optional callback fired after each tool-dispatch iteration.
     on_turn: Option<OnTurnCallback>,
+    /// Few-shot example messages inserted between system and user prompt.
+    /// Dramatically improves tool-call reliability for small models.
+    few_shot_messages: Vec<Value>,
 }
 
 impl ToolLoop {
@@ -220,6 +223,7 @@ impl ToolLoop {
             monitor: None,
             budget: None,
             on_turn: None,
+            few_shot_messages: Vec::new(),
         }
     }
 
@@ -293,6 +297,16 @@ impl ToolLoop {
         self
     }
 
+    /// Inject few-shot example messages between system and user prompts.
+    ///
+    /// These messages demonstrate correct tool-call behavior and
+    /// dramatically improve reliability for small models (8B and below).
+    #[must_use]
+    pub fn with_few_shot_messages(mut self, messages: Vec<Value>) -> Self {
+        self.few_shot_messages = messages;
+        self
+    }
+
     /// Run a fresh tool loop from an initial system + user prompt.
     pub async fn run(
         &self,
@@ -320,7 +334,11 @@ impl ToolLoop {
             }
         }
 
-        let messages = result_msg::initial_messages(system, user);
+        let messages = if self.few_shot_messages.is_empty() {
+            result_msg::initial_messages(system, user)
+        } else {
+            result_msg::initial_messages_with_few_shot(system, user, &self.few_shot_messages)
+        };
         self.run_inner(
             messages,
             0,
@@ -343,7 +361,11 @@ impl ToolLoop {
         ctx: &ToolContext,
         event_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> ToolLoopOutput {
-        let messages = result_msg::initial_messages(system, user);
+        let messages = if self.few_shot_messages.is_empty() {
+            result_msg::initial_messages(system, user)
+        } else {
+            result_msg::initial_messages_with_few_shot(system, user, &self.few_shot_messages)
+        };
         self.run_inner(
             messages,
             0,

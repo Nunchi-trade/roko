@@ -91,7 +91,7 @@ fn test_state() -> (
         runtime,
         config,
         deploy_backend,
-    ));
+    ).expect("AppState::new"));
     (dir, state, call_count, notify)
 }
 

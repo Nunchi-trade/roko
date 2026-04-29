@@ -539,7 +539,7 @@ mod tests {
             runtime,
             roko_core::config::schema::RokoConfig::default(),
             Arc::new(ManualBackend::default()),
-        ))
+        ).expect("AppState::new"))
     }
 
     fn test_router(state: Arc<AppState>) -> Router {

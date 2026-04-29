@@ -72,6 +72,16 @@ export function getPipelineExample(id?: string): PipelineScenarioExample {
 }
 
 export function createPipelineIntroState(example: PipelineScenarioExample): PipelineDemoState {
+  // Show rich sample state by default so the investor sees the full pipeline immediately
+  const sampleState = PIPELINE_SAMPLE_STATES[example.id];
+  if (sampleState) {
+    return {
+      ...sampleState,
+      source: 'sample',
+      headline: `Ready to generate: ${example.label}`,
+      example,
+    };
+  }
   return {
     source: 'empty',
     phase: 'idle',

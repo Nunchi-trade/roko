@@ -48,6 +48,18 @@ pub struct OpenAiCompatLlmBackend {
     extra_body_params: Map<String, Value>,
     rate_limiter: Arc<ProviderRateLimiter>,
     poster: Box<dyn HttpPoster>,
+    /// When true, omit `session_id`, `thread_id`, and `conversation_id` from
+    /// request bodies. Strict OpenAI-compatible providers (e.g. Cerebras)
+    /// reject unknown top-level fields.
+    skip_session_fields: bool,
+    /// When true, include `"parallel_tool_calls": false` in request bodies.
+    /// Small models (e.g. Llama 3.1 8B via Cerebras) cannot reliably handle
+    /// multiple tool calls in a single turn.
+    disable_parallel_tool_calls: bool,
+    /// When true, normalize `content: ""` to `content: null` on assistant
+    /// messages that carry `tool_calls`. Strict providers (e.g. Cerebras)
+    /// reject empty-string content alongside tool calls.
+    normalize_tool_call_content: bool,
 }
 
 impl OpenAiCompatLlmBackend {
@@ -66,6 +78,9 @@ impl OpenAiCompatLlmBackend {
             extra_body_params: Map::new(),
             rate_limiter: shared_rate_limiter(),
             poster: Box::new(ReqwestPoster::new()),
+            skip_session_fields: false,
+            disable_parallel_tool_calls: false,
+            normalize_tool_call_content: false,
         }
     }
 
@@ -127,6 +142,37 @@ impl OpenAiCompatLlmBackend {
         self
     }
 
+    /// Skip `session_id`, `thread_id`, and `conversation_id` in request bodies.
+    ///
+    /// Strict OpenAI-compatible providers (e.g. Cerebras) reject unknown
+    /// top-level fields. Enable this for providers that only accept the
+    /// standard OpenAI Chat Completions schema.
+    #[must_use]
+    pub const fn with_skip_session_fields(mut self, skip: bool) -> Self {
+        self.skip_session_fields = skip;
+        self
+    }
+
+    /// Include `"parallel_tool_calls": false` in request bodies.
+    ///
+    /// Small models that cannot reliably handle multiple tool calls in a
+    /// single turn should have this enabled to constrain the backend to
+    /// emitting at most one tool call per response.
+    #[must_use]
+    pub const fn with_disable_parallel_tool_calls(mut self, disable: bool) -> Self {
+        self.disable_parallel_tool_calls = disable;
+        self
+    }
+
+    /// Normalize `content: ""` to `content: null` on assistant messages
+    /// that carry `tool_calls`. Strict providers (e.g. Cerebras) reject
+    /// empty-string content alongside tool calls.
+    #[must_use]
+    pub const fn with_normalize_tool_call_content(mut self, normalize: bool) -> Self {
+        self.normalize_tool_call_content = normalize;
+        self
+    }
+
     fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
@@ -153,10 +199,30 @@ impl OpenAiCompatLlmBackend {
         let RenderedTools::JsonArray(tools) = tools else {
             return Err(LlmError::Backend("expected json tool array".into()));
         };
+        // Optionally normalize assistant messages for strict providers.
+        let messages = if self.normalize_tool_call_content {
+            let mut msgs = messages.to_vec();
+            for msg in &mut msgs {
+                if msg.get("role").and_then(Value::as_str) == Some("assistant")
+                    && msg.get("tool_calls").is_some_and(Value::is_array)
+                {
+                    if let Some(content) = msg.get("content") {
+                        if content.as_str().is_some_and(str::is_empty) || content.is_null() {
+                            if let Some(obj) = msg.as_object_mut() {
+                                obj.insert("content".to_string(), Value::Null);
+                            }
+                        }
+                    }
+                }
+            }
+            std::borrow::Cow::Owned(msgs)
+        } else {
+            std::borrow::Cow::Borrowed(messages)
+        };
 
         let mut body = serde_json::json!({
             "model": self.model,
-            "messages": messages,
+            "messages": *messages,
             "tools": tools,
         });
 
@@ -164,17 +230,22 @@ impl OpenAiCompatLlmBackend {
             if let Some(max_tokens) = self.max_tokens {
                 body_obj.insert("max_tokens".to_string(), Value::from(max_tokens));
             }
-            if let Some(session_id) = &session.session_id {
-                body_obj.insert("session_id".to_string(), Value::String(session_id.clone()));
+            if !self.skip_session_fields {
+                if let Some(session_id) = &session.session_id {
+                    body_obj.insert("session_id".to_string(), Value::String(session_id.clone()));
+                }
+                if let Some(thread_id) = &session.thread_id {
+                    body_obj.insert("thread_id".to_string(), Value::String(thread_id.clone()));
+                }
+                if let Some(conversation_id) = &session.conversation_id {
+                    body_obj.insert(
+                        "conversation_id".to_string(),
+                        Value::String(conversation_id.clone()),
+                    );
+                }
             }
-            if let Some(thread_id) = &session.thread_id {
-                body_obj.insert("thread_id".to_string(), Value::String(thread_id.clone()));
-            }
-            if let Some(conversation_id) = &session.conversation_id {
-                body_obj.insert(
-                    "conversation_id".to_string(),
-                    Value::String(conversation_id.clone()),
-                );
+            if self.disable_parallel_tool_calls {
+                body_obj.insert("parallel_tool_calls".to_string(), Value::Bool(false));
             }
             if stream {
                 body_obj.insert("stream".to_string(), Value::Bool(true));

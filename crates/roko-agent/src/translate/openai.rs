@@ -34,6 +34,13 @@ use super::{BackendResponse, RenderedResults, RenderedTools, Translator, Transla
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpenAiTranslator;
 
+/// Like [`OpenAiTranslator`] but emits `strict: true` and
+/// `additionalProperties: false` on every tool schema. Providers that
+/// support constrained decoding (e.g. Cerebras) use this to guarantee
+/// well-formed tool-call JSON from small models.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StrictOpenAiTranslator;
+
 /// Build a continuation message for Kimi's partial mode.
 #[must_use]
 pub fn build_partial_continuation(truncated_content: &str) -> serde_json::Value {
@@ -118,6 +125,98 @@ impl Translator for OpenAiTranslator {
     }
 }
 
+impl Translator for StrictOpenAiTranslator {
+    fn format(&self) -> ToolFormat {
+        ToolFormat::OpenAiJson
+    }
+
+    fn render_tools(&self, tools: &[ToolDef]) -> RenderedTools {
+        let arr: Vec<serde_json::Value> = tools.iter().map(render_strict_tool).collect();
+        RenderedTools::JsonArray(serde_json::Value::Array(arr))
+    }
+
+    fn parse_calls(&self, response: &BackendResponse) -> Result<Vec<ToolCall>, TranslatorError> {
+        // Parsing is identical to the non-strict translator.
+        OpenAiTranslator.parse_calls(response)
+    }
+
+    fn render_results(&self, results: &[(ToolCall, ToolResult)]) -> RenderedResults {
+        OpenAiTranslator.render_results(results)
+    }
+
+    fn render_assistant_message(&self, response: &BackendResponse) -> Option<serde_json::Value> {
+        OpenAiTranslator.render_assistant_message(response)
+    }
+}
+
+fn render_strict_tool(t: &ToolDef) -> serde_json::Value {
+    match &t.source {
+        ToolSource::Builtin | ToolSource::Mcp { .. } | ToolSource::Plugin { .. } => {
+            let mut params = t.parameters.as_value().clone();
+            // Strict mode requires additionalProperties: false on every
+            // object schema — top level and all nested properties.
+            enforce_additional_properties_false(&mut params);
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "strict": true,
+                    "parameters": params,
+                }
+            })
+        }
+        other => render_tool_with_source(other, t),
+    }
+}
+
+/// Recursively set `additionalProperties: false` on every JSON Schema
+/// object node. Cerebras requires this on all levels for strict mode.
+fn enforce_additional_properties_false(schema: &mut serde_json::Value) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    // If this node is (or looks like) an object schema, force the flag
+    // to false. We use insert (not or_insert) because the source schema
+    // may already have `additionalProperties: true` (e.g. any_object()).
+    let is_object = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| t == "object");
+    if is_object || obj.contains_key("properties") {
+        obj.insert(
+            "additionalProperties".to_string(),
+            serde_json::Value::Bool(false),
+        );
+    }
+
+    // Recurse into properties.
+    if let Some(props) = obj.get_mut("properties") {
+        if let Some(props_obj) = props.as_object_mut() {
+            for (_key, prop_schema) in props_obj.iter_mut() {
+                enforce_additional_properties_false(prop_schema);
+            }
+        }
+    }
+
+    // Recurse into array items.
+    if let Some(items) = obj.get_mut("items") {
+        enforce_additional_properties_false(items);
+    }
+
+    // Recurse into anyOf / oneOf / allOf variants.
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        if let Some(variants) = obj.get_mut(keyword) {
+            if let Some(arr) = variants.as_array_mut() {
+                for variant in arr.iter_mut() {
+                    enforce_additional_properties_false(variant);
+                }
+            }
+        }
+    }
+}
+
 fn render_tool(t: &ToolDef) -> serde_json::Value {
     match &t.source {
         ToolSource::Builtin | ToolSource::Mcp { .. } | ToolSource::Plugin { .. } => {
@@ -130,6 +229,12 @@ fn render_tool(t: &ToolDef) -> serde_json::Value {
                 }
             })
         }
+        other => render_tool_with_source(other, t),
+    }
+}
+
+fn render_tool_with_source(source: &ToolSource, _t: &ToolDef) -> serde_json::Value {
+    match source {
         ToolSource::WebSearch { config, .. } => serde_json::json!({
             "type": "web_search",
             "web_search": config,
@@ -140,6 +245,8 @@ fn render_tool(t: &ToolDef) -> serde_json::Value {
                 "knowledge_id": knowledge_id,
             },
         }),
+        // Builtin/Mcp/Plugin handled by callers; this is unreachable for them.
+        _ => serde_json::json!({ "type": "function", "function": { "name": _t.name } }),
     }
 }
 

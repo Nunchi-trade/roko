@@ -206,8 +206,12 @@ impl EffectDriver {
                         knowledge_ids,
                         model: Some(response.model.clone()),
                         provider: None,
-                        token_usage: None,
-                        cost: None,
+                        // token_usage is total_tokens from the response. The field exists on
+                        // ModelCallResponse.usage; if the provider doesn't report usage the value
+                        // will be 0. A future improvement would be to use None when total_tokens
+                        // is 0 and the provider is known not to report usage.
+                        token_usage: Some(response.usage.total_tokens),
+                        cost: Some(response.usage.cost_usd),
                         role: role.to_string(),
                         input_tokens: response.usage.input_tokens,
                         output_tokens: response.usage.output_tokens,
@@ -296,7 +300,19 @@ impl EffectDriver {
                 if let Some(ref affect) = self.services.affect_policy {
                     let mut policy = affect.lock().await;
                     for verdict in &report.verdicts {
-                        policy.on_gate_result(&verdict.gate_name, verdict.passed, 0, 0.0);
+                        // Derive the rung from the gate name using the same mapping as
+                        // GateService::rung_for_name. GateVerdict does not carry rung/confidence
+                        // fields today; if those are added to GateVerdict, replace this with
+                        // verdict.rung and verdict.confidence directly.
+                        // TODO: add `rung: u8` and `confidence: f64` to GateVerdict in
+                        // roko-core/src/foundation.rs so callers don't need to re-derive them.
+                        let rung = rung_for_gate_name(&verdict.gate_name);
+                        // Deterministic gates (compile/clippy/test/fmt/diff) produce binary
+                        // pass/fail with no ambiguity → confidence 1.0.
+                        // Heuristic gates (custom shells, llm-judge) have uncertain confidence
+                        // → 0.5 as a neutral default.
+                        let confidence = if rung <= 4 { 1.0_f64 } else { 0.5_f64 };
+                        policy.on_gate_result(&verdict.gate_name, verdict.passed, rung, confidence);
                     }
                 }
 
@@ -616,6 +632,26 @@ async fn count_changed_files(workdir: &std::path::Path) -> u32 {
                 .unwrap_or(u32::MAX)
         }
         _ => 0,
+    }
+}
+
+/// Map a gate name to its rung index, mirroring GateService::rung_for_name in roko-gate.
+///
+/// Rungs 0-4 are deterministic (compile, clippy, test, diff, fmt).
+/// Rung 5 is heuristic (custom/shell). Rung 6 is judge (LLM-based).
+/// Returns u8::MAX for unknown gate names so they sort last and get heuristic confidence.
+///
+/// TODO: expose this mapping from roko-gate as a public function so this duplicate is not needed.
+fn rung_for_gate_name(name: &str) -> u8 {
+    match name {
+        "compile" | "compile:cargo" => 0,
+        "clippy" | "clippy:cargo" => 1,
+        "test" | "test:cargo" => 2,
+        "diff" | "diff:git" => 3,
+        "fmt" | "fmt:cargo" | "format" => 4,
+        "custom" | "custom:shell" | "shell" => 5,
+        "judge" | "llm-judge" => 6,
+        _ => u8::MAX,
     }
 }
 

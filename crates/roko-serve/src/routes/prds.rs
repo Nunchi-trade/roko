@@ -1025,7 +1025,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             roko_config,
             Arc::new(ManualBackend::default()),
-        ));
+        ).expect("AppState::new"));
         (dir, state)
     }
 
@@ -1039,7 +1039,7 @@ mod tests {
             runtime,
             roko_config,
             Arc::new(ManualBackend::default()),
-        ));
+        ).expect("AppState::new"));
         (dir, state)
     }
 

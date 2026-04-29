@@ -53,7 +53,7 @@ pub use capability::{
 pub use claude::ClaudeTranslator;
 pub use gemini::GeminiTranslator;
 pub use ollama::OllamaTranslator;
-pub use openai::OpenAiTranslator;
+pub use openai::{OpenAiTranslator, StrictOpenAiTranslator};
 pub use react::ReActTranslator;
 
 /// Normalize provider-specific finish reasons into canonical [`FinishReason`] values.

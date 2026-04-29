@@ -55,7 +55,7 @@ pub async fn dispatch_via_model_call_service(prompt: &str) -> AnyhowResult<Dispa
     use roko_core::agent::resolve_model;
     use roko_core::config::schema::RokoConfig;
     use roko_core::foundation::{
-        CallerIdentity, ChatMessage, FeedbackSink, MessageRole, ModelCallRequest, ModelCaller,
+        ChatMessage, FeedbackSink, MessageRole, ModelCallRequest, ModelCaller, caller,
     };
     use roko_learn::feedback_service::FeedbackService;
 
@@ -102,7 +102,7 @@ pub async fn dispatch_via_model_call_service(prompt: &str) -> AnyhowResult<Dispa
             content: prompt.to_string(),
         }],
         max_tokens: None,
-        caller: Some(CallerIdentity::Cli.into()),
+        caller: Some(caller::CLI.to_string()),
         ..Default::default()
     };
 

@@ -20102,7 +20102,7 @@ depends_on = []
             Arc::new(TestServeRuntime),
             roko_core::config::schema::RokoConfig::default(),
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
         // state.state_hub is roko_serve::StateHub (via #[path] include), but
         // set_state_hub expects roko_cli::state_hub::StateHubSender. Both are the
         // same source file but distinct types. Create a local hub for the test.

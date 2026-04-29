@@ -244,7 +244,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
         (dir, state)
     }
 

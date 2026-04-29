@@ -103,6 +103,55 @@
   align-items: center;
 }
 
+.demo-serve-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-ghost);
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.demo-serve-status span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+}
+
+.demo-serve-connected {
+  color: var(--success);
+}
+
+.demo-serve-connected span {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(138, 156, 134, 0.5);
+}
+
+.demo-serve-checking {
+  color: var(--warning);
+}
+
+.demo-serve-checking span {
+  background: var(--warning);
+}
+
+.demo-serve-disconnected {
+  color: var(--rose-bright);
+}
+
+.demo-serve-disconnected span {
+  background: var(--rose-bright);
+}
+
 .demo-speed {
   font-size: 0.58rem;
   color: var(--text-dim);
@@ -270,17 +319,60 @@
   background: var(--bg-deeper, var(--bg-void));
 }
 
-.demo-main-pipeline .demo-terminals {
-  flex: 34;
+.demo-main-pipeline {
+  flex-direction: column;
 }
 
 .demo-main-pipeline .demo-sidebar {
-  flex: 66;
+  order: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  border-left: none;
+  border-bottom: 1px solid var(--glass-border);
+  padding: 12px 14px;
+  background:
+    linear-gradient(180deg, rgba(18, 16, 25, 0.92), rgba(8, 8, 12, 0.98)),
+    var(--bg-void);
+}
+
+.demo-main-pipeline .demo-terminals {
+  order: 2;
+  flex: 0 0 176px;
+  min-height: 132px;
+  max-height: 196px;
+  border-top: 1px solid rgba(216, 154, 178, 0.18);
+  background: rgba(6, 6, 9, 0.94);
+}
+
+.demo-main-pipeline .demo-terminals::before {
+  opacity: 0.62;
 }
 
 .demo-main-pipeline .demo-terminal-grid.demo-cols-2 {
   grid-template-columns: 1fr;
   grid-template-rows: 1fr 1fr;
+}
+
+.demo-main-pipeline .demo-term-head {
+  min-height: 28px;
+  padding: 5px 12px;
+}
+
+.demo-main-pipeline .demo-term-body {
+  padding: 2px;
+}
+
+@media (max-width: 760px) {
+  .demo-main-pipeline .demo-terminals {
+    flex-basis: 118px;
+    min-height: 96px;
+    max-height: 128px;
+  }
+
+  .demo-main-pipeline .demo-term-head {
+    min-height: 24px;
+    padding: 4px 10px;
+  }
 }
 
 /* Remove default pane margins inside sidebar */

@@ -1786,7 +1786,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             RokoConfig::default(),
             Arc::new(ManualBackend::default()),
-        ));
+        ).expect("AppState::new"));
 
         let response = send_message(
             State(Arc::clone(&state)),
@@ -1837,7 +1837,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             RokoConfig::default(),
             Arc::new(ManualBackend::default()),
-        ));
+        ).expect("AppState::new"));
 
         let _ = register_agent(
             State(Arc::clone(&state)),
@@ -1882,7 +1882,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config,
             Arc::new(ManualBackend::default()),
-        ));
+        ).expect("AppState::new"));
 
         state
             .upsert_discovered_agent(AgentRegistrationRecord {
@@ -1950,7 +1950,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             RokoConfig::default(),
             Arc::new(ManualBackend::default()),
-        ));
+        ).expect("AppState::new"));
         let (logs_url, logs_state, _handle) = spawn_mock_logs_server(
             StatusCode::OK,
             json!({
@@ -2007,7 +2007,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             RokoConfig::default(),
             Arc::new(ManualBackend::default()),
-        ));
+        ).expect("AppState::new"));
 
         let response = router(state)
             .oneshot(
@@ -2037,7 +2037,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             RokoConfig::default(),
             Arc::new(ManualBackend::default()),
-        ));
+        ).expect("AppState::new"));
         let (logs_url, logs_state, _handle) = spawn_mock_logs_server(
             StatusCode::NOT_FOUND,
             json!({ "error": "log file missing" }),

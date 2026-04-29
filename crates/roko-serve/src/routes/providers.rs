@@ -759,7 +759,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config,
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
         state.provider_health.record_failure("zai");
 
         let app = routes().with_state(Arc::clone(&state));
@@ -844,7 +844,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config,
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
 
         let app = routes().with_state(Arc::clone(&state));
         let response = app
@@ -1008,7 +1008,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config,
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
         state.provider_health.record_failure("zai");
         state.provider_health.record_failure("zai");
         state.provider_health.record_failure("zai");
@@ -1090,7 +1090,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config,
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
         state.provider_health.record_success("zai");
         state.provider_health.record_failure("zai");
         state.provider_health.record_failure("zai");
@@ -1216,7 +1216,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config,
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
 
         let app = routes().with_state(Arc::clone(&state));
         let response = app
@@ -1306,7 +1306,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config,
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
 
         let app = routes().with_state(Arc::clone(&state));
         let response = app

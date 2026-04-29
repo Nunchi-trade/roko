@@ -696,12 +696,12 @@ fn read_workflow_snapshots(root: &Path, state: &AppState) -> Vec<WorkflowSnapsho
     for plan in plans {
         let id = plan.id.clone();
         let prd = find_prd_for_plan(&prds, &id);
-        let title = if !plan.title.trim().is_empty() {
-            plan.title.clone()
-        } else {
+        let title = if plan.title.trim().is_empty() {
             prd.as_ref()
                 .map(|prd| prd.title.clone())
                 .unwrap_or_else(|| title_from_slug(&id))
+        } else {
+            plan.title.clone()
         };
         let updated_at_millis = prd
             .as_ref()
@@ -1127,7 +1127,6 @@ fn normalize_plan_status(status: &str) -> &str {
         "done" | "complete" | "completed" | "passed" | "success" => "complete",
         "active" | "running" | "in_progress" | "implementing" | "working" => "active",
         "failed" | "fail" | "error" => "failed",
-        "ready" | "pending" | "planned" | "new" => "pending",
         _ => "pending",
     }
 }
@@ -1220,7 +1219,7 @@ fn merge_live_state(workflow: &mut WorkflowSnapshot, dashboard: &DashboardSnapsh
         }
     }
 
-    for entry in dashboard.event_log.iter() {
+    for entry in &dashboard.event_log {
         if plan_ids.contains(&entry.plan_id) || entry.plan_id == workflow_id {
             live.events.push(LiveEvent {
                 timestamp_ms: entry.timestamp_ms,

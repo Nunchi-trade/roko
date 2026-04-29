@@ -1,0 +1,30 @@
+/* ── EfficiencyBar ─────────────────────────────────────── */
+
+.efficiency-bar {
+  border-top: 1px solid var(--border);
+  background: var(--bg-deeper);
+}
+
+.efficiency-bar .mosaic {
+  background: var(--border-soft);
+}
+
+.efficiency-bar .mosaic .cell {
+  background: var(--bg-deeper);
+  padding: 16px 20px;
+}
+
+.efficiency-bar .mosaic .cell .k {
+  margin-bottom: 6px;
+  font-size: 8px;
+  letter-spacing: .32em;
+}
+
+.efficiency-bar .mosaic .cell .v {
+  font-size: 22px;
+  margin-bottom: 0;
+}
+
+.efficiency-bar .mosaic .cell .v.mono {
+  font-size: 18px;
+}

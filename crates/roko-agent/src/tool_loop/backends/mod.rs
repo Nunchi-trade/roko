@@ -88,11 +88,17 @@ pub fn create_openai_compat_backend(
         }
         ProviderKind::CerebrasApi => {
             // Cerebras exposes an OpenAI-compatible chat completions surface.
+            // Small models need: temperature 0 for determinism, no parallel
+            // tool calls, and content normalization (empty string → null).
             let api_key = resolve_api_key(provider)?;
             let base_url = provider
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.cerebras.ai/v1".to_string());
+            let mut extra = build_extra_body_params(provider, model);
+            extra
+                .entry("temperature")
+                .or_insert(serde_json::Value::from(0));
             Ok(Arc::new(
                 OpenAiCompatBackend::new(api_key, model.slug.clone())
                     .with_provider_id(model.provider.clone())
@@ -100,7 +106,10 @@ pub fn create_openai_compat_backend(
                     .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
                     .with_max_tokens(max_tokens_for_model(model))
                     .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
-                    .with_extra_body_params(build_extra_body_params(provider, model))
+                    .with_extra_body_params(extra)
+                    .with_skip_session_fields(true)
+                    .with_disable_parallel_tool_calls(true)
+                    .with_normalize_tool_call_content(true)
                     .with_poster(Box::new(SharedHttpPoster { inner: poster })),
             ))
         }

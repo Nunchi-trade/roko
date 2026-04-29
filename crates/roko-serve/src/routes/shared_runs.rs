@@ -183,6 +183,8 @@ fn transcript_from_runtime_events(
     let mut gates = Vec::new();
     let mut cost_usd = 0.0;
     let mut saw_cost = false;
+    let mut total_tokens: u64 = 0;
+    let mut saw_tokens = false;
     let mut first_ts = None;
     let mut last_ts = None;
     let mut transcript = Vec::new();
@@ -229,6 +231,7 @@ fn transcript_from_runtime_events(
                 agent_id,
                 output: event_output,
                 cost_usd: event_cost,
+                tokens_used: event_tokens,
                 ..
             } => {
                 if agent.is_none() {
@@ -239,6 +242,8 @@ fn transcript_from_runtime_events(
                 }
                 cost_usd += event_cost;
                 saw_cost = true;
+                total_tokens += event_tokens;
+                saw_tokens = true;
             }
             RuntimeEvent::AgentFailed {
                 agent_id, error, ..
@@ -287,7 +292,9 @@ fn transcript_from_runtime_events(
         gates,
         output,
         cost_usd: saw_cost.then_some(cost_usd),
-        input_tokens: None,
+        // TODO: RuntimeEvent::AgentCompleted only carries `tokens_used` (total);
+        // split into input/output tokens when the event gains that breakdown.
+        input_tokens: saw_tokens.then_some(total_tokens),
         output_tokens: None,
         model,
         duration_s: Some(duration_s),
@@ -345,6 +352,30 @@ fn workflow_config_for_name(name: &str) -> WorkflowConfig {
 
 fn transcript_from_report(token: String, report: &WorkflowRunReport) -> RunTranscript {
     let (agent, role) = report_agent_role(report);
+
+    // Aggregate tokens_used from all AgentCompleted events. Fall back to the
+    // report-level token_usage total if no per-agent events are present.
+    // TODO: RuntimeEvent::AgentCompleted only carries `tokens_used` (total);
+    // split into input/output tokens when the event gains that breakdown.
+    let aggregated_tokens: u64 = report
+        .events
+        .iter()
+        .filter_map(|envelope| {
+            if let RuntimeEvent::AgentCompleted { tokens_used, .. } = &envelope.payload {
+                Some(*tokens_used)
+            } else {
+                None
+            }
+        })
+        .sum();
+    let input_tokens = if aggregated_tokens > 0 {
+        Some(aggregated_tokens)
+    } else if report.token_usage > 0 {
+        Some(report.token_usage)
+    } else {
+        None
+    };
+
     RunTranscript {
         id: token,
         agent,
@@ -358,7 +389,7 @@ fn transcript_from_report(token: String, report: &WorkflowRunReport) -> RunTrans
             .collect(),
         output: non_empty(&report.output).map(ToOwned::to_owned),
         cost_usd: report.cost,
-        input_tokens: None,
+        input_tokens,
         output_tokens: None,
         model: Some(report.model.clone()),
         duration_s: Some(report.duration_secs),

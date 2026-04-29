@@ -88,6 +88,9 @@ pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow
         gates: report.gate_verdicts.clone(),
         output: report.output_text.clone(),
         cost_usd: None,
+        // GAP: RunReport only carries total gate verdicts and the episode id; per-token
+        // input/output breakdown is not available in this legacy path. To populate these
+        // fields, RunReport would need to carry an AgentResult or Usage struct.
         input_tokens: None,
         output_tokens: None,
         model: None,
@@ -127,6 +130,10 @@ pub fn write_shared_workflow_run(
             .collect(),
         output: non_empty(&report.output).map(ToOwned::to_owned),
         cost_usd: report.cost,
+        // GAP: WorkflowRunReport exposes only a combined `token_usage: u64` total; the
+        // workflow engine does not track input vs. output token counts separately. To
+        // populate these fields the engine would need to accumulate per-turn TokenUsage
+        // breakdowns and surface them on WorkflowRunReport.
         input_tokens: None,
         output_tokens: None,
         model: non_empty(&report.model).map(ToOwned::to_owned),
@@ -256,10 +263,6 @@ fn truncate(text: &str, max_chars: usize) -> &str {
 fn non_empty(text: &str) -> Option<&str> {
     let trimmed = text.trim();
     (!trimmed.is_empty()).then_some(trimmed)
-}
-
-fn non_empty_or(text: &str, fallback: &str) -> String {
-    non_empty(text).unwrap_or(fallback).to_string()
 }
 
 fn workflow_report_agent_role(report: &WorkflowRunReport) -> (Option<String>, Option<String>) {
@@ -529,72 +532,21 @@ pub async fn run_plan_with_workflow_engine(
     enabled_gates: Vec<String>,
     shell_gates: Vec<CoreShellGateCommand>,
 ) -> anyhow::Result<PlanWorkflowReport> {
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut outcomes = Vec::with_capacity(tasks.len());
-    let mut task_reports = Vec::new();
-    let mut task_errors = Vec::new();
-
-    for (task_id, prompt) in tasks {
-        match execute_plan_prompt_with_workflow_engine(
-            prompt,
-            workdir,
-            workflow_template,
-            enabled_gates.clone(),
-            shell_gates.clone(),
-        )
-        .await
-        {
-            Ok(result) => {
-                let success = result.success;
-                let message = format!(
-                    "{} in {} agent turn{}",
-                    if success { "success" } else { "failed" },
-                    result.agent_turns,
-                    if result.agent_turns == 1 { "" } else { "s" },
-                );
-                println!("[{task_id}] {message}");
-                tracing::info!(
-                    task_id,
-                    success = result.success,
-                    agent_turns = result.agent_turns,
-                    "v2 workflow task complete"
-                );
-                if success {
-                    passed += 1;
-                } else {
-                    failed += 1;
-                }
-                task_reports.push(PlanTaskWorkflowReport {
-                    plan_id: "plan".to_string(),
-                    task_id: task_id.clone(),
-                    report: result,
-                });
-                outcomes.push((task_id.clone(), success, message));
-            }
-            Err(error) => {
-                let message = error.to_string();
-                println!("[{task_id}] failed: {message}");
-                tracing::warn!(task_id, error = %message, "v2 workflow task failed");
-                failed += 1;
-                task_errors.push(PlanTaskWorkflowError {
-                    plan_id: "plan".to_string(),
-                    task_id: task_id.clone(),
-                    error: message.clone(),
-                });
-                outcomes.push((task_id.clone(), false, message));
-            }
-        }
-    }
-
-    Ok(PlanWorkflowReport {
-        total: tasks.len(),
-        passed,
-        failed,
-        outcomes,
-        task_reports,
-        task_errors,
-    })
+    // Convert (task_id, prompt) pairs into (plan_id, task_id, prompt) triples.
+    // Derive plan_id from the task_id prefix (e.g. "my-plan:task-1" → "my-plan");
+    // falls back to the full task_id when no colon separator is present.
+    let triples: Vec<(String, String, String)> = tasks
+        .iter()
+        .map(|(task_id, prompt)| {
+            let plan_id = task_id
+                .split(':')
+                .next()
+                .unwrap_or(task_id)
+                .to_string();
+            (plan_id, task_id.clone(), prompt.clone())
+        })
+        .collect();
+    run_plan_prompts_core(triples, workdir, workflow_template, enabled_gates, shell_gates).await
 }
 
 pub async fn run_plan_tasks_with_workflow_engine(
@@ -604,16 +556,38 @@ pub async fn run_plan_tasks_with_workflow_engine(
     enabled_gates: Vec<String>,
     shell_gates: Vec<CoreShellGateCommand>,
 ) -> anyhow::Result<PlanWorkflowReport> {
+    // Build prompts up front so the shared core loop only handles (plan_id, task_id, prompt).
+    let triples: Vec<(String, String, String)> = tasks
+        .iter()
+        .map(|pt| {
+            let prompt = pt.task.build_prompt(&pt.plan_id, workdir);
+            (pt.plan_id.clone(), pt.task.id.clone(), prompt)
+        })
+        .collect();
+    run_plan_prompts_core(triples, workdir, workflow_template, enabled_gates, shell_gates).await
+}
+
+/// Shared accumulator loop for both plan-running entry points.
+///
+/// Runs each `(plan_id, task_id, prompt)` triple sequentially through the
+/// WorkflowEngine and collects per-task outcomes into a [`PlanWorkflowReport`].
+async fn run_plan_prompts_core(
+    triples: Vec<(String, String, String)>,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+) -> anyhow::Result<PlanWorkflowReport> {
+    let total = triples.len();
     let mut passed = 0;
     let mut failed = 0;
-    let mut outcomes = Vec::with_capacity(tasks.len());
+    let mut outcomes = Vec::with_capacity(total);
     let mut task_reports = Vec::new();
     let mut task_errors = Vec::new();
 
-    for plan_task in tasks {
-        match execute_plan_task_with_workflow_engine(
-            &plan_task.plan_id,
-            &plan_task.task,
+    for (plan_id, task_id, prompt) in triples {
+        match execute_plan_prompt_with_workflow_engine(
+            &prompt,
             workdir,
             workflow_template,
             enabled_gates.clone(),
@@ -629,10 +603,10 @@ pub async fn run_plan_tasks_with_workflow_engine(
                     result.agent_turns,
                     if result.agent_turns == 1 { "" } else { "s" },
                 );
-                println!("[{}:{}] {message}", plan_task.plan_id, plan_task.task.id);
+                println!("[{plan_id}:{task_id}] {message}");
                 tracing::info!(
-                    plan_id = %plan_task.plan_id,
-                    task_id = %plan_task.task.id,
+                    plan_id = %plan_id,
+                    task_id = %task_id,
                     success = result.success,
                     agent_turns = result.agent_turns,
                     "v2 workflow task complete"
@@ -642,30 +616,27 @@ pub async fn run_plan_tasks_with_workflow_engine(
                 } else {
                     failed += 1;
                 }
-                outcomes.push((plan_task.task.id.clone(), success, message));
+                outcomes.push((task_id.clone(), success, message));
                 task_reports.push(PlanTaskWorkflowReport {
-                    plan_id: plan_task.plan_id.clone(),
-                    task_id: plan_task.task.id.clone(),
+                    plan_id,
+                    task_id,
                     report: result,
                 });
             }
             Err(error) => {
                 let message = error.to_string();
-                println!(
-                    "[{}:{}] failed: {message}",
-                    plan_task.plan_id, plan_task.task.id
-                );
+                println!("[{plan_id}:{task_id}] failed: {message}");
                 tracing::warn!(
-                    plan_id = %plan_task.plan_id,
-                    task_id = %plan_task.task.id,
+                    plan_id = %plan_id,
+                    task_id = %task_id,
                     error = %message,
                     "v2 workflow task failed"
                 );
                 failed += 1;
-                outcomes.push((plan_task.task.id.clone(), false, message.clone()));
+                outcomes.push((task_id.clone(), false, message.clone()));
                 task_errors.push(PlanTaskWorkflowError {
-                    plan_id: plan_task.plan_id.clone(),
-                    task_id: plan_task.task.id.clone(),
+                    plan_id,
+                    task_id,
                     error: message,
                 });
             }
@@ -673,7 +644,7 @@ pub async fn run_plan_tasks_with_workflow_engine(
     }
 
     Ok(PlanWorkflowReport {
-        total: tasks.len(),
+        total,
         passed,
         failed,
         outcomes,
@@ -1805,6 +1776,7 @@ fn truncate_json_args(args: &serde_json::Value, max_len: usize) -> String {
     }
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 async fn append_episode_log(
     workdir: &Path,
     config: &Config,
@@ -1932,6 +1904,7 @@ async fn append_episode_log(
     Ok(())
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn build_task_metric(
     config: &Config,
     prompt: &Engram,
@@ -1966,6 +1939,7 @@ fn build_task_metric(
     metric
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn final_output_run_id(prompt: &Engram, agent_result: &AgentResult) -> String {
     agent_result
         .output
@@ -2124,6 +2098,7 @@ fn load_file_section(workdir: &Path, spec: &PromptFile) -> Result<Engram> {
 /// Post-process the agent output to strip ANSI escapes + thinking traces.
 /// Persists both the raw output (as an `AgentMessage` trace) and the cleaned
 /// version (as the canonical `AgentOutput`). Returns the cleaned signal.
+#[cfg(feature = "legacy-orchestrate")]
 async fn maybe_clean_output(
     prompt: &Engram,
     agent_result: &AgentResult,
@@ -2173,6 +2148,7 @@ async fn maybe_clean_output(
     Ok(clean_sig)
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn build_gate_input(workdir: &Path, parent_id: roko_core::ContentHash) -> Result<Engram> {
     let working_dir: PathBuf = workdir
         .canonicalize()
@@ -2186,6 +2162,7 @@ fn build_gate_input(workdir: &Path, parent_id: roko_core::ContentHash) -> Result
         .build())
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 async fn run_gate(cfg: &GateConfig, input: &Engram, ctx: &Context) -> Verdict {
     match cfg {
         GateConfig::Shell {

@@ -1361,7 +1361,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             RokoConfig::default(),
             Arc::new(ManualBackend::default()),
-        ));
+        ).expect("AppState::new"));
         (dir, state)
     }
 

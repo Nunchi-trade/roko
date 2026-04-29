@@ -9,8 +9,13 @@ import Mosaic, { MosaicCell } from '../components/Mosaic';
 import Timeline from '../components/Timeline';
 import CommandLog from '../components/CommandLog';
 import GateBar from '../components/GateBar';
-import ConnectScreen from '../components/ConnectScreen';
 import PrdPipelinePanel from '../components/PrdPipelinePanel';
+import KnowledgeFlowPanel, { type InsightEvent, type AgentInfo } from '../components/KnowledgeFlowPanel';
+import EfficiencyBar, { type EfficiencyMetric } from '../components/EfficiencyBar';
+import ChainIntelPanel from '../components/ChainIntelPanel';
+import { useChainWs, type InsightEvent as ChainInsightEvent } from '../hooks/useChain';
+import type { BlockData } from '../components/ChainActivityPanel';
+import type { AgentPosition } from '../components/LivePositionsPanel';
 import {
   EMPTY_PIPELINE_STATE,
   type PipelineDemoState,
@@ -24,6 +29,7 @@ import {
   getPipelineExample,
   PIPELINE_EXAMPLES,
 } from '../lib/prd-pipeline-sample';
+import { SERVE_URL } from '../lib/serve-url';
 import '@xterm/xterm/css/xterm.css';
 import '../components/Terminal/TerminalPane.css';
 import './Demo.css';
@@ -47,7 +53,7 @@ export default function Demo() {
   // Sidebar state
   const [stats, setStats] = useState({ model: '--', cost: '--', tokens: '--', time: '--' });
   const [gates, setGates] = useState<{ name: string; status: 'pass' | 'fail' | 'pending' }[]>([]);
-  const [logEntries, setLogEntries] = useState<{ ts: string; text: string; type?: 'info' | 'success' }[]>([]);
+  const [logEntries, setLogEntries] = useState<{ ts: string; text: string; type?: 'info' | 'success' | 'error' }[]>([]);
   const [timelineSteps, setTimelineSteps] = useState<TimelineStepState[]>([]);
   const [progressText, setProgressText] = useState('press Play to begin');
   const [progressLabel, setProgressLabel] = useState('--');
@@ -55,6 +61,101 @@ export default function Demo() {
   const selectedPipelineExample = getPipelineExample(pipelineExampleId);
   const [pipeline, setPipeline] = useState<PipelineDemoState>(
     createPipelineIntroState(selectedPipelineExample),
+  );
+
+  // Knowledge Transfer panel state
+  const [kfInsights, setKfInsights] = useState<InsightEvent[]>([]);
+  const [kfLeftAgent, setKfLeftAgent] = useState<AgentInfo>({ name: 'Alpha', color: '#e5918e', posts: 0, confirms: 0 });
+  const [kfRightAgent, setKfRightAgent] = useState<AgentInfo>({ name: 'Beta', color: '#8eb5e5', posts: 0, confirms: 0 });
+  const [kfMetrics, setKfMetrics] = useState<EfficiencyMetric[]>([
+    { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
+    { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
+    { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
+  ]);
+
+  // Chain Intelligence panel state
+  const chainWs = useChainWs();
+  const [ciBlocks] = useState<BlockData[]>([]);
+  const [ciPositions] = useState<AgentPosition[]>([
+    {
+      name: 'Yield Scout',
+      address: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      color: 'rose',
+      balances: [
+        { token: 'ETH', amount: 10, decimals: 4 },
+        { token: 'USDC', amount: 500000, decimals: 2 },
+      ],
+      keyMetric: { label: 'APR', value: '--' },
+    },
+    {
+      name: 'Risk Hedger',
+      address: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+      color: 'sage',
+      balances: [
+        { token: 'ETH', amount: 110, decimals: 4 },
+        { token: 'USDC', amount: 0, decimals: 2 },
+      ],
+      keyMetric: { label: 'HF', value: '--' },
+    },
+  ]);
+
+  // Map chain WS insights to KnowledgeFlowPanel InsightEvent format
+  const ciInsights: InsightEvent[] = useMemo(
+    () =>
+      chainWs.insights.map((ev: ChainInsightEvent) => ({
+        id: ev.id,
+        type: ev.type === 'stateTransition' ? 'posted' as const : ev.type,
+        agent: ev.author ?? ev.by ?? 'unknown',
+        kind: (ev.kind ?? 'heuristic') as InsightEvent['kind'],
+        content: ev.content ?? `${ev.from} -> ${ev.to}`,
+        timestamp: ev.createdAt ?? ev.at ?? Date.now(),
+      })),
+    [chainWs.insights],
+  );
+
+  const ciMetrics: EfficiencyMetric[] = useMemo(
+    () => [
+      { label: 'INSIGHTS', value: chainWs.stats.insights, color: 'bone' as const },
+      { label: 'CONFIRMS', value: chainWs.stats.confirms, color: 'success' as const },
+      {
+        label: 'REUSE',
+        value: chainWs.stats.insights > 0
+          ? Math.round((chainWs.stats.confirms / chainWs.stats.insights) * 100)
+          : 0,
+        format: (n: number) => `${n}%`,
+        color: 'dream' as const,
+      },
+      {
+        label: 'CALLS SAVED',
+        value: chainWs.stats.confirms * 3,
+        color: 'rose' as const,
+      },
+    ],
+    [chainWs.stats],
+  );
+
+  const ciLeftAgent: AgentInfo = useMemo(
+    () => ({
+      name: 'Alpha',
+      color: '#e5918e',
+      posts: ciInsights.filter((i) => i.agent === 'yield-scout' || i.agent === 'agent-alpha').length,
+      confirms: ciInsights.filter(
+        (i) => i.type === 'confirmed' && (i.agent === 'yield-scout' || i.agent === 'agent-alpha'),
+      ).length,
+    }),
+    [ciInsights],
+  );
+
+  const ciRightAgent: AgentInfo = useMemo(
+    () => ({
+      name: 'Beta',
+      color: '#8eb5e5',
+      posts: ciInsights.filter((i) => i.agent === 'risk-hedger' || i.agent === 'agent-beta').length,
+      confirms: ciInsights.filter(
+        (i) => i.type === 'confirmed' && (i.agent === 'risk-hedger' || i.agent === 'agent-beta'),
+      ).length,
+    }),
+    [ciInsights],
   );
 
   const pausedRef = useRef(false);
@@ -178,6 +279,14 @@ export default function Demo() {
     setProgressText('press Play to begin');
     setProgressLabel('--');
     setPipeline(SCENARIOS[idx]?.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
+    setKfInsights([]);
+    setKfLeftAgent({ name: 'Alpha', color: '#e5918e', posts: 0, confirms: 0 });
+    setKfRightAgent({ name: 'Beta', color: '#8eb5e5', posts: 0, confirms: 0 });
+    setKfMetrics([
+      { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
+      { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
+      { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
+    ]);
   }, [selectedPipelineExample]);
 
   const handlePipelineExampleSelect = useCallback((id: string) => {
@@ -195,7 +304,21 @@ export default function Demo() {
 
   const handlePlay = useCallback(async () => {
     if (runningRef.current) return;
-    if (serverHealth !== 'connected') return;
+    if (serverHealth !== 'connected') {
+      const now = new Date();
+      const ts = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+      setProgressLabel('Serve');
+      setProgressText(`roko serve is ${serverHealth}; waiting for ${SERVE_URL}/health`);
+      setLogEntries((prev) => [
+        ...prev,
+        {
+          ts,
+          text: `Cannot start the demo until roko serve is reachable at ${SERVE_URL}.`,
+          type: 'error' as const,
+        },
+      ]);
+      return;
+    }
 
     runningRef.current = true;
     pausedRef.current = false;
@@ -206,6 +329,14 @@ export default function Demo() {
     setStats({ model: '--', cost: '--', tokens: '--', time: '--' });
     setGates([]);
     setPipeline(scenario.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
+    setKfInsights([]);
+    setKfLeftAgent({ name: 'Alpha', color: '#e5918e', posts: 0, confirms: 0 });
+    setKfRightAgent({ name: 'Beta', color: '#8eb5e5', posts: 0, confirms: 0 });
+    setKfMetrics([
+      { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
+      { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
+      { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
+    ]);
 
     const ctx = buildContext();
     try {
@@ -269,15 +400,17 @@ export default function Demo() {
     return () => document.removeEventListener('keydown', handler);
   }, [isRunning, handlePauseResume, handlePlay, handleStep, handleReset, selectScenario]);
 
-  // ── Autoplay ────────────────────────────────────────────────
+  // ── URL hygiene ─────────────────────────────────────────────
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('autoplay') === '1' && serverHealth === 'connected') {
-      const t = setTimeout(() => handlePlay(), 1000);
-      return () => clearTimeout(t);
+    if (params.has('autoplay')) {
+      params.delete('autoplay');
+      const query = params.toString();
+      const next = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`;
+      window.history.replaceState(null, '', next);
     }
-  }, [serverHealth]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Session IDs (regenerated on scenario switch) ────────────
 
@@ -312,9 +445,6 @@ export default function Demo() {
 
   return (
     <div className="demo-page">
-      {/* ── Connect screen overlay ── */}
-      {serverHealth !== 'connected' && <ConnectScreen />}
-
       {/* ── Top bar ── */}
       <div className="demo-tabs-bar">
         <div className="demo-tab-list">
@@ -330,6 +460,10 @@ export default function Demo() {
           ))}
         </div>
         <div className="demo-controls">
+          <div className={`demo-serve-status demo-serve-${serverHealth}`}>
+            <span />
+            {serverHealth === 'connected' ? 'serve live' : serverHealth === 'checking' ? 'checking serve' : 'serve offline'}
+          </div>
           <button className="demo-speed" onClick={cycleSpeed}>
             {SPEEDS[speedIdx]}x
           </button>
@@ -349,7 +483,7 @@ export default function Demo() {
       <div className={`demo-main${scenario.id === 'prd-pipeline' ? ' demo-main-pipeline' : ''}`}>
         {/* Terminal zone */}
         <div className="demo-terminals">
-          {showIntro && (
+          {showIntro && scenario.id !== 'prd-pipeline' && (
             <div className="demo-intro-overlay" onClick={handlePlay}>
               <div className="demo-intro-title">{scenario.title}</div>
               <div className="demo-intro-sub">{scenario.subtitle}</div>
@@ -387,7 +521,57 @@ export default function Demo() {
                 selectedExampleId={pipelineExampleId}
                 onSelectExample={handlePipelineExampleSelect}
                 selectorDisabled={isRunning}
+                onRun={handlePlay}
+                isRunning={isRunning}
+                serverHealth={serverHealth}
               />
+            ) : scenario.id === 'knowledge-transfer' ? (
+              <>
+                <Pane title="TIMELINE" flat>
+                  <Timeline steps={timelineDisplay} />
+                </Pane>
+
+                <KnowledgeFlowPanel
+                  leftAgent={kfLeftAgent}
+                  rightAgent={kfRightAgent}
+                  insights={kfInsights}
+                  mode="local"
+                />
+
+                <EfficiencyBar metrics={kfMetrics} />
+
+                {gates.length > 0 && (
+                  <Pane title="GATES" flat>
+                    <div style={{ padding: '12px 16px' }}>
+                      <GateBar gates={gates} />
+                    </div>
+                  </Pane>
+                )}
+
+                <Pane title="LOG" flat>
+                  <CommandLog entries={logEntries} maxHeight="180px" />
+                </Pane>
+              </>
+            ) : scenario.id === 'chain-intelligence' ? (
+              <>
+                <Pane title="TIMELINE" flat>
+                  <Timeline steps={timelineDisplay} />
+                </Pane>
+
+                <ChainIntelPanel
+                  leftAgent={ciLeftAgent}
+                  rightAgent={ciRightAgent}
+                  insights={ciInsights}
+                  blocks={ciBlocks}
+                  positions={ciPositions}
+                  metrics={ciMetrics}
+                  mirageConnected={chainWs.connected}
+                />
+
+                <Pane title="LOG" flat>
+                  <CommandLog entries={logEntries} maxHeight="140px" />
+                </Pane>
+              </>
             ) : (
               <>
                 <Pane title="TIMELINE" flat>

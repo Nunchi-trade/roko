@@ -21,7 +21,7 @@ use validator::Validate;
 use roko_agent::GatewayEventWriter;
 use roko_core::agent::{AgentRole, resolve_model};
 use roko_core::foundation::{
-    CachePolicy, CallerIdentity, ChatMessage as CoreChatMessage, MessageRole as CoreMessageRole,
+    CachePolicy, ChatMessage as CoreChatMessage, MessageRole as CoreMessageRole, caller,
     ModelCallRequest as CoreModelCallRequest, ModelCallResponse as CoreModelCallResponse,
     ModelCaller,
 };
@@ -711,7 +711,7 @@ fn model_call_request(
         max_tokens,
         temperature: temperature.map(|t| t as f32),
         role,
-        caller: Some(CallerIdentity::Serve.into()),
+        caller: Some(caller::SERVE.to_string()),
         run_id: None,
         prompt_section_ids: Vec::new(),
         knowledge_ids: Vec::new(),
@@ -961,7 +961,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
         (dir, state)
     }
 
@@ -1091,7 +1091,7 @@ mod tests {
         assert_eq!(request.role.as_deref(), Some("agent-1"));
         assert_eq!(
             request.caller.as_deref(),
-            Some(CallerIdentity::Serve.as_str())
+            Some(caller::SERVE)
         );
         assert_eq!(request.cache_policy, CachePolicy::Default);
         assert_eq!(request.messages[0].role, CoreMessageRole::System);
@@ -1261,7 +1261,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config.clone(),
             deploy_backend,
-        );
+        ).expect("AppState::new");
         state.model_call_service = Arc::new(
             ModelCallService::new(model.to_string())
                 .with_config(config)
@@ -1471,7 +1471,7 @@ mod tests {
             Arc::new(NoOpRuntime),
             config,
             deploy_backend,
-        ));
+        ).expect("AppState::new"));
         let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
 
         let response = app
