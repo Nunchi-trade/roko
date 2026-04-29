@@ -3,20 +3,25 @@
 //! `GET /api/runs/{id}` — JSON transcript.
 //! `GET /runs/{id}` — Self-contained HTML page.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{Html, IntoResponse, Json, Response},
 };
+use regex::Regex;
 use roko_core::runtime_event::{RuntimeEvent, RuntimeEventEnvelope, WorkflowOutcome};
+use roko_core::{
+    config::schema::RokoConfig,
+    obs::LogScrubber,
+};
 use roko_orchestrator::{ServiceConfig, ServiceFactory};
 use roko_runtime::{
     JsonlLogger, WorkflowConfig, WorkflowEngine, WorkflowRunConfig, WorkflowRunReport,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::state::AppState;
 
@@ -64,12 +69,45 @@ pub struct CreateShareRequest {
     workflow: Option<String>,
     #[serde(default)]
     enabled_gates: Option<Vec<String>>,
+    /// Request a public base URL instead of the default local-only path.
+    #[serde(default)]
+    public: bool,
+}
+
+/// Metadata stored alongside a shared transcript.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ShareMetadata {
+    /// Whether the transcript was scrubbed before persistence.
+    pub scrubbed: bool,
+    /// Whether the share should resolve through the configured public URL.
+    pub public: bool,
+}
+
+/// On-disk representation for newly shared transcripts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SharedTranscriptRecord {
+    #[serde(default)]
+    metadata: ShareMetadata,
+    transcript: RunTranscript,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredTranscript {
+    Wrapped(SharedTranscriptRecord),
+    Bare(RunTranscript),
+}
+
+#[derive(Debug, Clone)]
+struct LoadedTranscript {
+    metadata: ShareMetadata,
+    transcript: RunTranscript,
 }
 
 /// `GET /api/runs/{id}` — JSON transcript.
 pub async fn get_run_json(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match load_transcript(&state, &id) {
-        Some(transcript) => Json(json!(transcript)).into_response(),
+        Some(loaded) => Json(json!(loaded.transcript)).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -80,7 +118,7 @@ pub async fn get_shared_run(
     Path(token): Path<String>,
 ) -> Response {
     match load_transcript(&state, &token) {
-        Some(t) => Json(json!(t)).into_response(),
+        Some(loaded) => Json(json!(loaded.transcript)).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -92,15 +130,9 @@ pub async fn create_share(
     payload: Option<Json<CreateShareRequest>>,
 ) -> Response {
     let token = format!("{}-{:04x}", id, std::process::id() as u16);
+    let requested_public = payload.as_ref().map(|Json(request)| request.public).unwrap_or(false);
+    let workspace_config = state.load_roko_config();
     let shared_dir = state.workdir.join(".roko").join("shared");
-    if let Some(existing) = load_transcript(&state, &token) {
-        return Json(json!({
-            "token": token,
-            "url": format!("/runs/{}", token),
-            "transcript": existing
-        }))
-        .into_response();
-    }
     if let Err(e) = std::fs::create_dir_all(&shared_dir) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -108,23 +140,64 @@ pub async fn create_share(
         )
             .into_response();
     }
-    let transcript = match transcript_from_runtime_events(&state, &id, &token) {
-        Some(transcript) => transcript,
-        None => {
-            let Some(Json(request)) = payload else {
-                return StatusCode::NOT_FOUND.into_response();
-            };
-            match run_shared_workflow(&state, &token, request).await {
-                Ok(transcript) => transcript,
-                Err(e) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e})))
-                        .into_response();
+    let loaded = load_transcript(&state, &token);
+    let existing_public = loaded
+        .as_ref()
+        .map(|loaded| loaded.metadata.public)
+        .unwrap_or(false);
+    let transcript = match loaded {
+        Some(loaded) => loaded.transcript,
+        None => match transcript_from_runtime_events(&state, &id, &token) {
+            Some(transcript) => transcript,
+            None => {
+                let Some(Json(request)) = payload else {
+                    return StatusCode::NOT_FOUND.into_response();
+                };
+                match run_shared_workflow(&state, &token, request, Arc::clone(&workspace_config)).await {
+                    Ok(transcript) => transcript,
+                    Err(e) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e})))
+                            .into_response();
+                    }
                 }
             }
+        },
+    };
+    let public = requested_public || existing_public;
+    let metadata = ShareMetadata {
+        scrubbed: true,
+        public,
+    };
+    let transcript = match scrub_run_transcript(transcript, state.scrubber.as_ref()) {
+        Some(transcript) => transcript,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "failed to scrub share transcript"})),
+            )
+                .into_response();
         }
     };
     let path = shared_dir.join(format!("{token}.json"));
-    match serde_json::to_string_pretty(&transcript) {
+    let stored = SharedTranscriptRecord {
+        metadata,
+        transcript: transcript.clone(),
+    };
+    let share_url = match share_url_for(
+        workspace_config.relay.public_url.as_deref(),
+        &token,
+        public,
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": error})),
+            )
+                .into_response();
+        }
+    };
+    match serde_json::to_string_pretty(&stored) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&path, json) {
                 return (
@@ -142,28 +215,56 @@ pub async fn create_share(
                 .into_response();
         }
     }
-    Json(json!({"token": token, "url": format!("/runs/{}", token)})).into_response()
+    Json(json!({
+        "token": token,
+        "url": share_url,
+        "metadata": metadata,
+        "transcript": transcript,
+    }))
+    .into_response()
 }
 
 /// `GET /runs/{id}` — Self-contained HTML page.
 pub async fn get_run_html(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match load_transcript(&state, &id) {
-        Some(transcript) => {
-            let html = render_html(&transcript);
+        Some(loaded) => {
+            let html = render_html(&loaded.transcript);
             Html(html).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-fn load_transcript(state: &AppState, id: &str) -> Option<RunTranscript> {
+fn load_transcript(state: &AppState, id: &str) -> Option<LoadedTranscript> {
     let path = state
         .workdir
         .join(".roko")
         .join("shared")
         .join(format!("{id}.json"));
     let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+    let stored: StoredTranscript = serde_json::from_str(&data).ok()?;
+    let (metadata, transcript) = match stored {
+        StoredTranscript::Wrapped(record) => (
+            ShareMetadata {
+                scrubbed: true,
+                public: record.metadata.public,
+            },
+            record.transcript,
+        ),
+        StoredTranscript::Bare(transcript) => (
+            ShareMetadata {
+                scrubbed: true,
+                public: false,
+            },
+            transcript,
+        ),
+    };
+    let transcript = scrub_run_transcript(transcript, state.scrubber.as_ref())?;
+
+    Some(LoadedTranscript {
+        metadata,
+        transcript,
+    })
 }
 
 fn transcript_from_runtime_events(
@@ -308,6 +409,7 @@ async fn run_shared_workflow(
     state: &AppState,
     token: &str,
     request: CreateShareRequest,
+    workspace_config: Arc<RokoConfig>,
 ) -> Result<RunTranscript, String> {
     let prompt = request
         .prompt
@@ -315,10 +417,9 @@ async fn run_shared_workflow(
         .and_then(non_empty)
         .map(ToOwned::to_owned)
         .ok_or_else(|| "share request requires a non-empty prompt".to_string())?;
-    let workspace_config = state.load_roko_config().as_ref().clone();
     let service_bundle = ServiceFactory::build(ServiceConfig::production(
         state.workdir.clone(),
-        workspace_config,
+        workspace_config.as_ref().clone(),
     ))
     .map_err(|error| format!("build workflow services: {error}"))?;
 
@@ -340,6 +441,74 @@ async fn run_shared_workflow(
         .map_err(|error| format!("workflow engine failed: {error}"))?;
 
     Ok(transcript_from_report(token.to_string(), &report))
+}
+
+fn scrub_run_transcript(transcript: RunTranscript, scrubber: &LogScrubber) -> Option<RunTranscript> {
+    let mut value = serde_json::to_value(transcript).ok()?;
+    scrub_json_value(&mut value, scrubber);
+    serde_json::from_value(value).ok()
+}
+
+fn scrub_json_value(value: &mut Value, scrubber: &LogScrubber) {
+    match value {
+        Value::String(text) => {
+            *text = scrub_share_text(text.as_str(), scrubber);
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_json_value(item, scrubber);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                scrub_json_value(item, scrubber);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scrub_share_text(text: &str, scrubber: &LogScrubber) -> String {
+    let redacted = scrubber.scrub(text);
+    scrub_long_secret_like_strings(&redacted)
+}
+
+fn scrub_long_secret_like_strings(text: &str) -> String {
+    let redacted = long_hex_secret_regex().replace_all(text, "$1[REDACTED]$3");
+    long_base64_secret_regex()
+        .replace_all(redacted.as_ref(), "$1[REDACTED]$3")
+        .into_owned()
+}
+
+fn long_hex_secret_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"(^|[^0-9A-Fa-f])([0-9A-Fa-f]{32,})([^0-9A-Fa-f]|$)")
+            .expect("valid hex secret regex")
+    })
+}
+
+fn long_base64_secret_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"(^|[^A-Za-z0-9+/=])([A-Za-z0-9+/=]{32,})([^A-Za-z0-9+/=]|$)")
+            .expect("valid base64 secret regex")
+    })
+}
+
+fn share_url_for(
+    public_base_url: Option<&str>,
+    token: &str,
+    public: bool,
+) -> Result<String, String> {
+    if !public {
+        return Ok(format!("/runs/{token}"));
+    }
+
+    let base_url = public_base_url
+        .and_then(non_empty)
+        .ok_or_else(|| "public sharing requires [relay].public_url in roko.toml".to_string())?;
+    Ok(format!("{}/runs/{token}", base_url.trim_end_matches('/')))
 }
 
 fn workflow_config_for_name(name: &str) -> WorkflowConfig {
@@ -689,6 +858,93 @@ mod tests {
         assert!(html.contains("clippy"));
         assert!(html.contains("Found 3 lint warnings."));
         assert!(html.contains("failed"));
+    }
+
+    fn sample_share_transcript() -> RunTranscript {
+        RunTranscript {
+            id: "shared-1".into(),
+            agent: "researcher".into(),
+            role: "analyst".into(),
+            prompt: "ANTHROPIC_API_KEY=sk-ant-abc123".into(),
+            success: true,
+            gates: vec![("compile".into(), true)],
+            output: Some(
+                "Bearer abcdefghijklmnopqrstuvwxyz1234 0123456789abcdef0123456789ABCDEF QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="
+                    .into(),
+            ),
+            cost_usd: Some(0.0),
+            input_tokens: Some(1),
+            output_tokens: None,
+            model: Some("claude-sonnet-4-20250514".into()),
+            duration_s: Some(1.0),
+            episode_id: Some("ep".into()),
+            transcript: vec![RuntimeEventEnvelope::new(
+                "ep",
+                1,
+                "workflow",
+                RuntimeEvent::WorkflowStarted {
+                    run_id: "ep".into(),
+                    template: "express".into(),
+                    prompt: "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz".into(),
+                },
+            )],
+            timestamp: "2026-04-28T12:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn scrub_run_transcript_redacts_secret_patterns() {
+        let transcript = sample_share_transcript();
+        let scrubbed = scrub_run_transcript(transcript, &LogScrubber::new())
+            .expect("transcript scrubs successfully");
+        let json = serde_json::to_string(&scrubbed).unwrap();
+        assert!(!json.contains("sk-ant-abc123"));
+        assert!(!json.contains("sk-proj-abcdefghijklmnopqrstuvwxyz"));
+        assert!(!json.contains("abcdefghijklmnopqrstuvwxyz1234"));
+        assert!(!json.contains("0123456789abcdef0123456789ABCDEF"));
+        assert!(!json.contains("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="));
+        assert!(json.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn stored_transcript_supports_wrapped_and_bare_formats() {
+        let transcript = sample_share_transcript();
+        let wrapped_json = serde_json::to_string(&SharedTranscriptRecord {
+            metadata: ShareMetadata {
+                scrubbed: true,
+                public: true,
+            },
+            transcript: transcript.clone(),
+        })
+        .unwrap();
+        match serde_json::from_str::<StoredTranscript>(&wrapped_json).unwrap() {
+            StoredTranscript::Wrapped(record) => {
+                assert!(record.metadata.scrubbed);
+                assert!(record.metadata.public);
+                assert_eq!(record.transcript.id, transcript.id);
+            }
+            StoredTranscript::Bare(_) => panic!("wrapped share should deserialize as wrapped"),
+        }
+
+        let bare_json = serde_json::to_string(&transcript).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<StoredTranscript>(&bare_json).unwrap(),
+            StoredTranscript::Bare(_)
+        ));
+    }
+
+    #[test]
+    fn share_url_supports_local_and_public_scopes() {
+        assert_eq!(
+            share_url_for(None, "abc123", false).expect("local url"),
+            "/runs/abc123"
+        );
+        assert_eq!(
+            share_url_for(Some("https://share.example.com/"), "abc123", true)
+                .expect("public url"),
+            "https://share.example.com/runs/abc123"
+        );
+        assert!(share_url_for(None, "abc123", true).is_err());
     }
 
     #[test]
