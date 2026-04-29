@@ -294,7 +294,18 @@ pub async fn run_direct_provider_chat(
             .body(Body::text(&prompt_text))
             .build();
         let ctx = Context::now();
+
+        let indicator = if agent.supports_streaming() {
+            "[streaming...]"
+        } else {
+            "[waiting...]"
+        };
+        print!("{indicator} ");
+        std::io::stdout().flush().context("flush indicator")?;
+
         let result = agent.run(&engram, &ctx).await;
+
+        print!("\r\x1b[K");
 
         print!("\x1b[33m{agent_id}>\x1b[0m ");
         std::io::stdout().flush().context("flush agent prompt")?;
