@@ -21,10 +21,13 @@ pub struct WorkflowRun {
     pub started_at: DateTime<Utc>,
     /// When the run completed (if terminal).
     pub completed_at: Option<DateTime<Utc>>,
-    /// Accumulated cost in USD.
-    pub total_cost_usd: f64,
-    /// Total tokens consumed.
-    pub total_tokens: u64,
+    /// Accumulated cost in USD. `None` means the provider did not report
+    /// usable pricing for this run yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cost_usd: Option<f64>,
+    /// Total tokens consumed. `None` means usage was not reported yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
     /// Number of agents spawned during this run.
     pub agents_spawned: u32,
 }
@@ -37,8 +40,8 @@ impl WorkflowRun {
             pipeline: PipelineState::new(template, prompt, max_iterations),
             started_at: Utc::now(),
             completed_at: None,
-            total_cost_usd: 0.0,
-            total_tokens: 0,
+            total_cost_usd: None,
+            total_tokens: None,
             agents_spawned: 0,
         }
     }
@@ -81,15 +84,23 @@ impl WorkflowRun {
         let template = self.template_name();
         let iteration = self.pipeline.iteration;
         let max_iter = self.pipeline.max_iterations;
+        let cost = self
+            .total_cost_usd
+            .map(|value| format!("${:.4}", value))
+            .unwrap_or_else(|| "unknown".to_string());
+        let tokens = self
+            .total_tokens
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
 
         format!(
             "Active Workflow: {template}\n\
              Phase: {phase_label} (iteration {iteration}/{max_iter})\n\
              Duration: {secs}s\n\
-             Cost: ${:.4}\n\
-             Tokens: {}\n\
+             Cost: {cost}\n\
+             Tokens: {tokens}\n\
              Agents spawned: {}",
-            self.total_cost_usd, self.total_tokens, self.agents_spawned,
+            self.agents_spawned,
         )
     }
 }
@@ -131,6 +142,8 @@ mod tests {
         let run = WorkflowRun::new(WorkflowTemplate::Standard, "test".into(), 2);
         assert!(run.run_id.starts_with("run_"));
         assert!(!run.is_done());
+        assert_eq!(run.total_cost_usd, None);
+        assert_eq!(run.total_tokens, None);
     }
 
     #[test]
@@ -139,5 +152,7 @@ mod tests {
         let summary = run.status_summary();
         assert!(summary.contains("Express"));
         assert!(summary.contains("Pending"));
+        assert!(summary.contains("Cost: unknown"));
+        assert!(summary.contains("Tokens: unknown"));
     }
 }

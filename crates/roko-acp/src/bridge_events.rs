@@ -6,6 +6,7 @@
 //! [`crate::runner::run_with_workflow_engine`], which uses `ModelCallService`
 //! for provider-agnostic model calls.
 
+use std::sync::OnceLock;
 use std::time::Instant;
 use std::{
     collections::HashSet,
@@ -16,9 +17,10 @@ use roko_agent::StreamChunk;
 use roko_agent::streaming::parse_sse_line;
 use roko_core::ContentHash;
 use roko_core::agent::{ProviderKind, resolve_model};
-use roko_core::config::schema::RokoConfig;
+use roko_core::config::schema::{ModelProfile, RokoConfig};
 use roko_dreams::{load_dream_routing_advice, relevant_pattern_summaries};
 use roko_learn::{
+    cost_table::CostTable,
     episode_logger::{Episode, EpisodeLogger, Usage as EpUsage},
     playbook::Playbook,
 };
@@ -38,7 +40,7 @@ use crate::{
     session::{AcpSession, CancelToken},
     transport::{StdioTransport, TransportError, TransportResult},
     types::{
-        ContentBlock, JsonRpcMessage, PlanEntry, SESSION_BUSY, SessionCancelParams,
+        ContentBlock, CostInfo, JsonRpcMessage, PlanEntry, SESSION_BUSY, SessionCancelParams,
         SessionPromptParams, SessionPromptResult, SessionUpdate, StopReason, ToolCallKind,
         ToolCallStatus, UsageInfo,
     },
@@ -201,11 +203,54 @@ pub enum CognitiveEvent {
 
 // ── Stream events → editor ───────────────────────────────────────────
 
-/// Result of streaming events: the prompt result plus accumulated assistant text.
+/// Result of streaming events: the prompt result, accumulated assistant text,
+/// and any provider-reported usage.
 pub struct StreamResult {
     pub prompt_result: SessionPromptResult,
     /// Accumulated assistant text from TokenChunk events.
     pub assistant_text: String,
+    /// Usage reported by the provider, if any.
+    pub usage: Option<UsageInfo>,
+}
+
+fn pricing_table() -> &'static CostTable {
+    static TABLE: OnceLock<CostTable> = OnceLock::new();
+    TABLE.get_or_init(|| CostTable {
+        models: std::collections::HashMap::new(),
+    }
+    .with_defaults())
+}
+
+/// Calculate model cost from token counts.
+///
+/// Returns `None` when the model slug has no pricing row. Unknown pricing
+/// stays unknown instead of collapsing to zero.
+pub fn calculate_cost_for_model_slug(
+    model_slug: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+) -> Option<f64> {
+    let pricing = pricing_table().models.get(model_slug)?;
+    Some(
+        (input_tokens as f64 * pricing.input_per_m / 1_000_000.0)
+            + (output_tokens as f64 * pricing.output_per_m / 1_000_000.0)
+            + (cache_read_tokens as f64 * pricing.cache_read_per_m / 1_000_000.0),
+    )
+}
+
+fn calculate_cost_without_cache_for_model_slug(
+    model_slug: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+) -> Option<f64> {
+    let pricing = pricing_table().models.get(model_slug)?;
+    Some(
+        (input_tokens as f64 * pricing.input_per_m / 1_000_000.0)
+            + (output_tokens as f64 * pricing.output_per_m / 1_000_000.0)
+            + (cache_read_tokens as f64 * pricing.input_per_m / 1_000_000.0),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,10 +298,36 @@ async fn append_acp_episode(
     episode.output_signal_hash = output_hash;
     episode.episode_id = episode.id.clone();
     episode.duration_secs = elapsed.as_secs_f64();
-    episode.usage = EpUsage {
+    let stream_usage = stream_result.and_then(|sr| sr.usage.as_ref());
+    let mut usage = EpUsage {
         wall_ms: elapsed.as_millis() as u64,
         ..EpUsage::default()
     };
+    if let Some(provider_usage) = stream_usage {
+        let input_tokens = provider_usage.input_tokens;
+        let output_tokens = provider_usage.output_tokens;
+        let cached_read_tokens = provider_usage.cached_read_tokens.unwrap_or(0);
+        usage.input_tokens = input_tokens;
+        usage.output_tokens = output_tokens;
+        usage.cache_read_tokens = cached_read_tokens;
+        usage.cache_write_tokens = provider_usage.cached_write_tokens.unwrap_or(0);
+        usage.cost_usd = calculate_cost_for_model_slug(
+            &resolved.slug,
+            input_tokens,
+            output_tokens,
+            cached_read_tokens,
+        )
+        .unwrap_or(0.0);
+        usage.cost_usd_without_cache = calculate_cost_without_cache_for_model_slug(
+            &resolved.slug,
+            input_tokens,
+            output_tokens,
+            cached_read_tokens,
+        )
+        .unwrap_or(usage.cost_usd);
+    }
+    episode.usage = usage;
+    episode.tokens_used = stream_usage.map(|usage| usage.total_tokens).unwrap_or(0);
     episode
         .extra
         .insert("entry_point".to_string(), serde_json::json!("acp"));
@@ -372,6 +443,7 @@ where
                         stop_reason: StopReason::Cancelled,
                     },
                     assistant_text,
+                    usage: None,
                 });
             }
             StreamAction::Event(maybe_event) => {
@@ -388,14 +460,16 @@ where
                     return Ok(StreamResult {
                         prompt_result: SessionPromptResult { stop_reason },
                         assistant_text,
+                        usage: None,
                     });
                 };
 
                 match event {
-                    CognitiveEvent::Complete { stop_reason, .. } => {
+                    CognitiveEvent::Complete { stop_reason, usage } => {
                         return Ok(StreamResult {
                             prompt_result: SessionPromptResult { stop_reason },
                             assistant_text,
+                            usage,
                         });
                     }
                     CognitiveEvent::MaxTokens => {
@@ -404,6 +478,7 @@ where
                                 stop_reason: StopReason::MaxTokens,
                             },
                             assistant_text,
+                            usage: None,
                         });
                     }
                     CognitiveEvent::TokenChunk(ref text) => {
@@ -464,6 +539,7 @@ where
                             stop_reason: StopReason::Cancelled,
                         },
                         assistant_text,
+                        usage: None,
                     });
                 }
             },
@@ -773,6 +849,34 @@ where
         &session.cancel_token,
     )
     .await;
+
+    if !is_slash_command {
+        if let Ok(ref sr) = stream_result {
+            if let Some(usage) = sr.usage.as_ref() {
+                let resolved = resolve_model(&roko_config_for_logging, &model_key_for_logging);
+                let size = resolved
+                    .profile
+                    .as_ref()
+                    .map(|profile| profile.context_window)
+                    .unwrap_or_else(|| ModelProfile::default().context_window);
+                let update = SessionUpdate::UsageUpdate {
+                    used: usage.total_tokens,
+                    size,
+                    cost: calculate_cost_for_model_slug(
+                        &resolved.slug,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cached_read_tokens.unwrap_or(0),
+                    )
+                    .map(|amount| CostInfo {
+                        amount,
+                        currency: "USD".to_string(),
+                    }),
+                };
+                let _ = send_session_update(transport, &session.session_id, update).await;
+            }
+        }
+    }
 
     let task_result = cognitive_task.await;
     let (task_error, task_join_error) = match task_result {
@@ -2534,6 +2638,9 @@ mod tests {
         let result = result.expect("stream should succeed");
 
         assert_eq!(result.prompt_result.stop_reason, StopReason::EndTurn);
+        assert_eq!(result.usage.as_ref().map(|usage| usage.total_tokens), Some(12));
+        assert_eq!(result.usage.as_ref().map(|usage| usage.input_tokens), Some(5));
+        assert_eq!(result.usage.as_ref().map(|usage| usage.output_tokens), Some(7));
 
         let mut line = String::new();
         reader
@@ -2624,6 +2731,14 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
             },
             assistant_text: "hello from acp".to_string(),
+            usage: Some(UsageInfo {
+                total_tokens: 12,
+                input_tokens: 5,
+                output_tokens: 7,
+                thought_tokens: None,
+                cached_read_tokens: Some(2),
+                cached_write_tokens: Some(1),
+            }),
         };
         let dispatch_started = Instant::now();
 
@@ -2664,6 +2779,13 @@ mod tests {
             Some(&json!("auto_override"))
         );
         assert!(episode.usage.wall_ms > 0);
+        assert_eq!(episode.tokens_used, 12);
+        assert_eq!(episode.usage.input_tokens, 5);
+        assert_eq!(episode.usage.output_tokens, 7);
+        assert_eq!(episode.usage.cache_read_tokens, 2);
+        assert_eq!(episode.usage.cache_write_tokens, 1);
+        assert!(episode.usage.cost_usd > 0.0);
+        assert!(episode.usage.cost_usd_without_cache >= episode.usage.cost_usd);
         assert!(episode.success);
         assert_eq!(episode.failure_reason, None);
     }
@@ -2679,6 +2801,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
             },
             assistant_text: "pipeline complete".to_string(),
+            usage: None,
         };
         let dispatch_started = Instant::now();
 
@@ -2709,6 +2832,18 @@ mod tests {
         assert_eq!(episode.kind, "acp-pipeline-express");
         assert_eq!(episode.extra.get("workflow"), Some(&json!("express")));
         assert!(episode.success);
+    }
+
+    #[test]
+    fn calculate_cost_for_model_slug_handles_known_and_unknown_models() {
+        let known = calculate_cost_for_model_slug("claude-sonnet-4-6", 1_000, 500, 250)
+            .expect("known pricing should exist");
+        assert!(known > 0.0);
+
+        assert_eq!(
+            calculate_cost_for_model_slug("definitely-not-a-real-model", 1_000, 500, 250),
+            None
+        );
     }
 
     #[test]
