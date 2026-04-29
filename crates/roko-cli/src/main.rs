@@ -303,7 +303,8 @@ Examples:
   roko init                         Initialize in the current directory
   roko init /path/to/project        Initialize in a specific directory
   roko init --cloud                 Initialize with cloud-ready defaults
-  roko init --profile rust          Initialize with Rust project profile")]
+  roko init --profile rust          Initialize with Rust project profile
+  roko init --demo                  Initialize and seed demo data")]
     Init {
         /// Directory to initialize (default: current dir).
         path: Option<PathBuf>,
@@ -313,6 +314,9 @@ Examples:
         /// Project profile to use (e.g. rust, typescript, go, python, general).
         #[arg(long)]
         profile: Option<String>,
+        /// Seed realistic demo data after initialization.
+        #[arg(long)]
+        demo: bool,
     },
     /// Seed a prompt and run the universal loop (compose -> agent -> gate -> persist).
     #[command(after_help = "\
@@ -1986,8 +1990,9 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             path,
             cloud,
             profile,
+            demo,
         } => {
-            commands::util::cmd_init(path, cloud, profile).await?;
+            commands::util::cmd_init(path, cloud, profile, demo).await?;
             Ok(EXIT_SUCCESS)
         }
         Command::Run {
@@ -2764,10 +2769,12 @@ mod tests {
                 path,
                 cloud,
                 profile,
+                demo,
             }) => {
                 assert_eq!(path, Some(PathBuf::from("/tmp/project")));
                 assert!(!cloud);
                 assert!(profile.is_none());
+                assert!(!demo);
             }
             other => panic!("expected init command, got {other:?}"),
         }
@@ -2779,6 +2786,15 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Init { cloud: true, .. })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_init_demo_flag() {
+        let cli = Cli::try_parse_from(["roko", "init", "--demo"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Init { demo: true, .. })
         ));
     }
 

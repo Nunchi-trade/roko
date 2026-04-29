@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
+use roko_core::config::schema::RokoConfig;
 
 pub(crate) fn cmd_explain(topic: &str, depth: u8) {
     use roko_cli::explain;
@@ -99,6 +100,7 @@ pub(crate) async fn cmd_init(
     path: Option<PathBuf>,
     cloud: bool,
     profile: Option<String>,
+    demo: bool,
 ) -> Result<()> {
     let target = path.unwrap_or_else(|| PathBuf::from("."));
     tokio::fs::create_dir_all(&target)
@@ -159,18 +161,23 @@ pub(crate) async fn cmd_init(
     };
 
     let config_path = target.join("roko.toml");
-    if config_path.exists() {
+    let demo_config = if config_path.exists() {
         println!(
             "{} already exists; leaving untouched.",
             config_path.display()
         );
+        match tokio::fs::read_to_string(&config_path).await {
+            Ok(text) => RokoConfig::from_toml(&text).ok(),
+            Err(_) => None,
+        }
     } else {
         let default = Config::default_toml_template(cloud)?;
-        tokio::fs::write(&config_path, default)
+        tokio::fs::write(&config_path, &default)
             .await
             .with_context(|| format!("write {}", config_path.display()))?;
         println!("wrote {}", config_path.display());
-    }
+        RokoConfig::from_toml(&default).ok()
+    };
 
     println!("initialized roko workspace at {}", target.display());
     println!("detected project domain: {domain}");
@@ -182,6 +189,15 @@ pub(crate) async fn cmd_init(
         "default provider command set to \"claude\". \
          Edit roko.toml [providers.claude_cli] to use a different command."
     );
+
+    if demo {
+        let report = roko_cli::demo_seed::seed_demo_workspace(&target, demo_config.as_ref())?;
+        if report.any_seeded() {
+            println!("{}", report.summary());
+        } else {
+            println!("demo data already present; leaving existing files untouched.");
+        }
+    }
 
     // Check for interrupted session from a previous run.
     let snapshot = roko_dir.join("state").join("executor.json");
