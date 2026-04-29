@@ -117,45 +117,7 @@ impl Config {
 
     /// Render the default `roko.toml` template used by `roko init`.
     pub fn default_toml_template(cloud: bool) -> Result<String> {
-        let mut config = Self::default();
-        // Use "claude" as the default agent command for init — not the struct
-        // default ("cat") which is a safe no-op for tests.  Users running
-        // `roko init` expect a working config out of the box.
-        config.agent.command = "claude".into();
-        if cloud {
-            config.log_format = Some("json".to_string());
-            config.bind = Some("0.0.0.0".to_string());
-            config.data_dir = Some(PathBuf::from("/data/.roko"));
-        }
-        let rendered = config.to_toml()?;
-        let cloud_deploy = if cloud {
-            "\n# Auto-register webhooks after deploy\n\
-             [[serve.deploy.webhooks]]\n\
-             provider = \"github\"\n\
-             owner = \"nunchi\"\n\
-             repo = \"roko\"\n\
-             \n\
-             [[serve.deploy.webhooks]]\n\
-             provider = \"github\"\n\
-             owner = \"nunchi\"\n\
-             repo = \"collaboration\"\n"
-        } else {
-            ""
-        };
-        Ok(format!(
-            "# REQUIRED_ENV\n\
-             # Required environment variables (set in .env or shell):\n\
-             # GITHUB_TOKEN       — GitHub personal access token (for MCP GitHub server)\n\
-             # GITHUB_WEBHOOK_SECRET — GitHub webhook secret for deploy registration\n\
-             # SLACK_BOT_TOKEN    — Slack bot token (for MCP Slack server)\n\
-             # SLACK_SIGNING_SECRET — Slack webhook signing secret\n\
-             # ANTHROPIC_API_KEY  — Claude API key (for direct API agents, not needed for CLI agents)\n\
-             \n\
-             {rendered}{cloud_deploy}\n\
-             # PRD settings (parsed by `RokoConfig`)\n\
-             [prd]\n\
-             auto_plan = false\n"
-        ))
+        crate::init::render_init_template(cloud)
     }
 }
 
@@ -3782,20 +3744,30 @@ program = "echo"
         assert!(rendered.contains("SLACK_BOT_TOKEN"));
         assert!(rendered.contains("SLACK_SIGNING_SECRET"));
         assert!(rendered.contains("ANTHROPIC_API_KEY"));
-        assert!(rendered.contains("[serve.deploy]"));
+        assert!(rendered.contains("config_version = 2"));
+        assert!(rendered.contains("schema_version = 2"));
+        assert!(rendered.contains("default_backend = \"claude\""));
+        assert!(rendered.contains("default_model = \"claude-sonnet-4-6\""));
+        assert!(rendered.contains("[providers.claude_cli]") || rendered.contains("# [providers.claude_cli]"));
+        assert!(rendered.contains("kind = \"claude_cli\""));
+        assert!(rendered.contains("command = \"claude\""));
+        assert!(rendered.contains("[models.claude-sonnet-4-6]"));
+        assert!(rendered.contains("provider = \"claude_cli\""));
+        assert!(rendered.contains("slug = \"claude-sonnet-4-6\""));
+        assert!(rendered.contains("context_window = 200000"));
+        assert!(rendered.contains("tool_format = \"anthropic_blocks\""));
+        assert!(rendered.contains("max_tools = 32"));
         assert!(rendered.contains("[prd]"));
         assert!(rendered.contains("auto_plan = false"));
-        assert!(rendered.contains("[dreams]"));
-        assert!(rendered.contains("auto_dream = true"));
     }
 
     #[test]
     fn cloud_default_toml_template_includes_cloud_settings() {
         let rendered = Config::default_toml_template(true).unwrap();
-        assert!(rendered.contains(r#"log_format = "json""#));
+        assert!(rendered.contains("schema_version = 2"));
         assert!(rendered.contains(r#"bind = "0.0.0.0""#));
-        assert!(rendered.contains(r#"data_dir = "/data/.roko""#));
         assert!(rendered.contains(r#"provider = "railway""#));
+        assert!(rendered.contains("[models.claude-sonnet-4-6]"));
         assert!(rendered.contains("GITHUB_WEBHOOK_SECRET"));
         assert!(rendered.contains("Auto-register webhooks after deploy"));
         assert!(rendered.contains("[[serve.deploy.webhooks]]"));
