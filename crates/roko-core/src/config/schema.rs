@@ -1437,18 +1437,17 @@ impl fmt::Display for ChainMode {
     }
 }
 
-/// Subprocess settings for `mode = "light" | "follower"` (`alto-follower`).
+/// Configuration for `mode = "light" | "follower"` — `alto-follower` runs
+/// as an in-process library, not a subprocess.
 ///
-/// Mirrors the upstream `alto-follower` YAML config. Shape is stable across
-/// `light` and `follower` modes — the difference between them is purely
-/// `pruning_depth` (and the QMDB variant the follower uses internally).
+/// Mirrors the inputs alto-follower's actor constructors take. Shape is
+/// stable across `light` and `follower` modes — the difference between them
+/// is purely `pruning_depth` (and the QMDB variant alto-follower picks
+/// internally).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FollowerConfig {
-    /// Path to the `alto-follower` (or `follower`) binary. If `None`, looked
-    /// up on `$PATH`.
-    #[serde(default)]
-    pub binary_path: Option<PathBuf>,
-    /// Indexer / exoware relay URL (e.g. `https://usa.alto.exoware.xyz`).
+    /// Validator HTTP endpoint that serves finalization certificates and
+    /// blocks. Single source — no separate indexer service needed.
     #[serde(default)]
     pub source_url: Option<String>,
     /// Hex-encoded BLS12-381 threshold public key. Verifies finalization
@@ -1463,16 +1462,15 @@ pub struct FollowerConfig {
     /// `None` = retain all (full follower).
     #[serde(default)]
     pub pruning_depth: Option<u64>,
-    /// Prometheus metrics port for the subprocess.
-    #[serde(default)]
-    pub metrics_port: Option<u16>,
     /// `true` = start from chain tip; `false` = backfill from genesis.
     #[serde(default = "default_follower_tip")]
     pub tip: bool,
-    /// Worker thread count for the subprocess.
+    /// Worker thread count for alto-follower's internal actor pool. `None` =
+    /// share the main tokio runtime.
     #[serde(default)]
     pub worker_threads: Option<u32>,
-    /// Threshold-signature verification thread count.
+    /// Threshold-signature verification thread count. `None` = share the
+    /// main runtime.
     #[serde(default)]
     pub signature_threads: Option<u32>,
 }
@@ -6173,10 +6171,9 @@ threshold = "BLOCK_LOW_AND_ABOVE"
             chain_id = 1337
 
             [follower]
-            source_url = "https://indexer.example/"
+            source_url = "https://validator.example/"
             identity_pubkey = "0xdeadbeef"
             pruning_depth = 0
-            metrics_port = 9091
         "#;
         let config: ChainConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.mode, ChainMode::Follower);
@@ -6184,10 +6181,9 @@ threshold = "BLOCK_LOW_AND_ABOVE"
         let follower = config.follower.expect("follower section parses");
         assert_eq!(
             follower.source_url.as_deref(),
-            Some("https://indexer.example/")
+            Some("https://validator.example/")
         );
         assert_eq!(follower.pruning_depth, Some(0));
-        assert_eq!(follower.metrics_port, Some(9091));
         // tip defaults to true.
         assert!(follower.tip);
     }
