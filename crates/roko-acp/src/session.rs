@@ -558,6 +558,11 @@ impl SessionError {
 }
 
 /// In-memory store for ACP sessions.
+///
+/// The ACP stdio handler currently owns this manager on a single request
+/// loop. If ACP gains concurrent transports, wrap it at the call site in
+/// `Arc<tokio::sync::RwLock<SessionManager>>` instead of splitting session
+/// state across tasks here.
 #[derive(Debug, Clone)]
 pub struct SessionManager {
     sessions: HashMap<String, AcpSession>,
@@ -1344,6 +1349,13 @@ mod tests {
         let uuid_part = &result.session_id["sess_".len()..];
         let parsed = Uuid::parse_str(uuid_part).expect("session id should contain a valid UUID");
         assert_eq!(parsed.to_string(), uuid_part);
+    }
+
+    #[test]
+    fn session_manager_remains_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<SessionManager>();
     }
 
     #[test]
