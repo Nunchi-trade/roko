@@ -64,7 +64,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "show available commands"),
     ("/version", "show version info"),
     ("/stats", "detailed session statistics"),
-    ("/context", "show token/context usage"),
+    ("/context", "show session context"),
     ("/history", "show input history"),
     ("/copy", "copy last response to clipboard"),
     ("/compact", "toggle compact output mode"),
@@ -2144,7 +2144,7 @@ fn handle_slash_command(
                 styled::continuation(theme, "/provider", "show auth/provider info", None),
                 styled::continuation(theme, "/cost", "session cost summary", None),
                 styled::continuation(theme, "/stats", "detailed session statistics", None),
-                styled::continuation(theme, "/context", "token/context usage", None),
+                styled::continuation(theme, "/context", "session context (model, tools, mcp)", None),
                 styled::continuation(theme, "/tools", "list available tools", None),
                 styled::continuation(theme, "/mcp", "MCP config status", None),
                 styled::continuation(theme, "/version", "version info", None),
@@ -2268,17 +2268,67 @@ fn handle_slash_command(
             ])?;
         }
         "/context" => {
-            let total = session.cost.input_tokens + session.cost.output_tokens;
-            let limit: u64 = 200_000; // from roko.toml context_limit_k
-            let pct = (total as f64 / limit as f64 * 100.0).min(100.0);
-            let bar_width = 20;
-            let filled = ((pct / 100.0) * bar_width as f64) as usize;
-            let bar: String = format!("{}{}", "━".repeat(filled), "░".repeat(bar_width - filled));
+            let model = current_model_name(session);
+            let provider: String = match &session.dispatch {
+                DispatchMode::Direct { auth } => match auth {
+                    AuthMethod::AnthropicApi { .. } => "anthropic-api".to_string(),
+                    AuthMethod::ClaudeCli => "claude-cli".to_string(),
+                    AuthMethod::OpenAiCompat { .. } => "openai-compat".to_string(),
+                    AuthMethod::NeedsSetup => "not configured".to_string(),
+                },
+                DispatchMode::Http { is_sidecar, .. } => {
+                    if *is_sidecar {
+                        "agent-sidecar".to_string()
+                    } else {
+                        "roko-serve".to_string()
+                    }
+                }
+            };
+            let workdir = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| ".".to_string());
+            let mcp_status: String = if std::path::Path::new(".roko/mcp.json").exists() {
+                ".roko/mcp.json".to_string()
+            } else if std::path::Path::new(".roko/mcp.toml").exists() {
+                ".roko/mcp.toml".to_string()
+            } else {
+                "none".to_string()
+            };
+            let system_preview: String = match &session.system_message {
+                Some(s) if !s.is_empty() => {
+                    if s.len() > 200 {
+                        format!("{}... [{} chars]", &s[..200], s.len())
+                    } else {
+                        s.clone()
+                    }
+                }
+                _ => "(none)".to_string(),
+            };
+            let total_tokens = session.cost.input_tokens + session.cost.output_tokens;
+            use roko_std::tool::builtin::BUILTIN_TOOL_NAMES;
+            let tool_count = BUILTIN_TOOL_NAMES.len();
             term.push_lines(&[
-                styled::section_start(theme, "context", "", None),
-                styled::continuation(theme, "used", &format!("{total} / {limit} tokens"), None),
-                styled::continuation(theme, "usage", &format!("{bar}  {pct:.0}%"), None),
-                styled::section_end(theme, "turns", &session.turn_count.to_string()),
+                styled::section_start(theme, "context", "session", None),
+                styled::continuation(theme, "workdir", &workdir, None),
+                styled::continuation(theme, "model", &model, None),
+                styled::continuation(theme, "provider", &provider, None),
+                styled::continuation(theme, "agent", &session.agent_id, None),
+                styled::continuation(theme, "turns", &session.turn_count.to_string(), None),
+                styled::continuation(
+                    theme,
+                    "history",
+                    &format!("{} entries", session.input.history.len()),
+                    None,
+                ),
+                styled::continuation(theme, "tools", &format!("{tool_count} available"), None),
+                styled::continuation(theme, "mcp", &mcp_status, None),
+                styled::continuation(theme, "tokens", &total_tokens.to_string(), None),
+                styled::continuation(theme, "system", &system_preview, None),
+                styled::section_end(
+                    theme,
+                    "cost",
+                    &format!("${:.4}", session.cost.total_cost),
+                ),
             ])?;
         }
         "/history" => {
