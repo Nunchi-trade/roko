@@ -549,6 +549,7 @@ pub fn estimate_cost_usd(model: Option<&str>, input_tokens: u64, output_tokens: 
         m if m.contains("gpt-4o") => (0.005, 0.015),
         m if m.contains("o3-mini") => (0.0011, 0.0044),
         m if m.contains("gemini") => (0.00125, 0.01),
+        m if m.contains("llama") || m.contains("cerebras") => (0.0001, 0.0001),
         _ => (0.003, 0.015),
     };
     (input_tokens as f64 * input_rate / 1000.0) + (output_tokens as f64 * output_rate / 1000.0)
