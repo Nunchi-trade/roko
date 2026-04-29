@@ -41,6 +41,19 @@ const SKIP_DIR_NAMES: [&str; 12] = [
     "venv",
 ];
 
+/// Update the stored session id and emit a debug trace when one is captured.
+///
+/// Called by the future streaming turn path when it can read the raw Claude
+/// CLI event stream. The non-streaming `send_turn` path cannot capture a
+/// session id because `ClaudeCliAgent::run` does not expose it through
+/// `AgentResult`.
+fn apply_session_id(session_id: &mut Option<String>, new_id: Option<String>) {
+    if let Some(ref sid) = new_id {
+        tracing::debug!(session_id = %sid, "captured session_id for resume");
+        *session_id = new_id;
+    }
+}
+
 /// Result of processing a potential slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashResult {
@@ -295,17 +308,49 @@ impl ChatAgentSession {
             .map(str::to_string)
             .unwrap_or_default();
 
+        // Session_id is NOT available from the non-streaming path.
+        //
+        // ClaudeCliAgent::run buffers all stdout internally and only returns
+        // an AgentResult with output: Engram (tagged "agent" and "model" only),
+        // trace: Vec<Engram>, usage: Usage, and success: bool.
+        //
+        // The session_id is emitted by Claude CLI in two places:
+        //   1. {"type":"system","session_id":"..."} - the init handshake
+        //   2. {"type":"result","session_id":"..."} - the terminal event
+        //
+        // Both are only accessible through the raw stdout stream (R3_C01-C03).
+        // For the non-streaming path, TurnResult.session_id is always None.
+        let new_session_id: Option<String> = None;
+
         Ok(TurnResult {
             text,
             model: self.model.clone(),
             input_tokens: u64::from(result.usage.input_tokens),
             output_tokens: u64::from(result.usage.output_tokens),
             tool_calls: Vec::new(),
-            // `ClaudeCliAgent::run` does not expose session ids in its result.
-            session_id: None,
+            session_id: new_session_id,
             duration: started.elapsed(),
             cancelled: false,
         })
+    }
+
+    /// Send a single turn in one-shot mode.
+    ///
+    /// One-shot mode explicitly suppresses `--resume` so each call starts
+    /// a fresh conversation regardless of any stored session_id.
+    /// The session_id is NOT updated after this call - one-shot turns
+    /// are completely isolated from each other.
+    pub async fn send_turn_oneshot(&mut self, prompt: &str) -> Result<TurnResult> {
+        // Temporarily clear session_id so build_agent() omits --resume.
+        let saved_session_id = self.session_id.take();
+
+        let result = self.send_turn(prompt).await;
+
+        // Restore the previous session_id (one-shot does not accumulate state).
+        // If the caller wants to discard state permanently, use /reset instead.
+        self.session_id = saved_session_id;
+
+        result
     }
 
     #[cfg(test)]
