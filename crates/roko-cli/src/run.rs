@@ -1324,8 +1324,11 @@ async fn augment_system_prompt_for_strategy(
     current_model: &str,
     strategy: Option<BenchStrategy>,
 ) -> String {
+    if skip_bench_enrichment(strategy) {
+        return base_system_prompt;
+    }
+
     let overlay = match strategy {
-        Some(BenchStrategy::Minimal) => String::new(),
         Some(BenchStrategy::ContextEnriched) => {
             // Context-enriched is the first step above minimal: add learned
             // playbooks + skills, but skip neuro knowledge and retry guidance.
@@ -1354,6 +1357,11 @@ async fn augment_system_prompt_for_strategy(
         prompt.push_str(&overlay);
         prompt
     }
+}
+
+#[cfg(feature = "legacy-orchestrate")]
+fn skip_bench_enrichment(strategy: Option<BenchStrategy>) -> bool {
+    matches!(strategy, Some(BenchStrategy::Minimal))
 }
 
 #[cfg(feature = "legacy-orchestrate")]
@@ -2995,6 +3003,30 @@ mod tests {
             );
             assert_eq!(workflow.max_iterations, 2);
         }
+    }
+
+    #[cfg(feature = "legacy-orchestrate")]
+    #[tokio::test]
+    async fn minimal_strategy_leaves_system_prompt_unmodified() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut config = Config::default();
+        config.prompt.role = "implementer".to_string();
+
+        let base_prompt = build_system_prompt(&config, "Implement the feature.", "Read,Edit");
+        let augmented = augment_system_prompt_for_strategy(
+            base_prompt.clone(),
+            tempdir.path(),
+            &config.prompt.role,
+            "Implement the feature.",
+            "mock-model",
+            Some(BenchStrategy::Minimal),
+        )
+        .await;
+
+        assert_eq!(augmented, base_prompt);
+        assert!(skip_bench_enrichment(Some(BenchStrategy::Minimal)));
+        assert!(!skip_bench_enrichment(None));
+        assert!(!skip_bench_enrichment(Some(BenchStrategy::ContextEnriched)));
     }
 
     #[tokio::test]
