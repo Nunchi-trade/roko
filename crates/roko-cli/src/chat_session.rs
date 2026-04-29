@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use roko_agent::agent::{Agent, AgentResult};
 use roko_agent::claude_cli_agent::ClaudeCliAgent;
-use roko_agent::AgentRuntimeEvent;
 use roko_agent::safety::contract::AgentContract;
+use roko_agent::AgentRuntimeEvent;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
-use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
+use roko_compose::{detect_conventions, ProjectConventions, TokenCounter};
 use roko_core::foundation::ChatMessage;
 use roko_core::{Body, Context, Engram, Kind};
 use tokio::signal;
@@ -102,7 +102,10 @@ pub fn accumulate_tool_event(
             pending_ids.push((id.clone(), idx));
         }
         AgentRuntimeEvent::ToolOutput { id, output } => {
-            if let Some(pos) = pending_ids.iter().position(|(tool_use_id, _)| tool_use_id == id) {
+            if let Some(pos) = pending_ids
+                .iter()
+                .position(|(tool_use_id, _)| tool_use_id == id)
+            {
                 let (_, idx) = pending_ids.remove(pos);
                 if let Some(tool_call) = tool_calls.get_mut(idx) {
                     tool_call.input_abbrev = preview_text(output, 200);
@@ -852,7 +855,7 @@ mod tests {
         }
     }
 
-    /// Construct a minimal session for testing slash commands.
+    /// Construct a minimal session for testing `build_agent()` and slash commands.
     fn test_session() -> ChatAgentSession {
         let model_selection = test_model_selection();
         let model = model_selection.effective_model_key.clone();
@@ -861,15 +864,51 @@ mod tests {
             model,
             model_selection,
             effort: "medium".to_string(),
-            system_prompt: String::new(),
+            system_prompt: "Test system prompt".to_string(),
             allowed_tools_csv: DEFAULT_CHAT_TOOLS.to_string(),
             mcp_config: None,
             session_id: None,
             api_history: Vec::new(),
             http_client: reqwest::Client::new(),
             settings_json: None,
-            timeout: None,
+            timeout: Some(Duration::from_secs(30)),
         }
+    }
+
+    fn agent_debug(session: &ChatAgentSession) -> String {
+        format!("{:?}", session.build_agent().expect("build agent"))
+    }
+
+    #[test]
+    fn first_turn_build_agent_has_no_resume() {
+        let session = test_session();
+        assert!(session.session_id.is_none());
+
+        let debug = agent_debug(&session);
+        assert!(debug.contains("model: \"claude-sonnet-4-6\""), "{debug}");
+        assert!(debug.contains("effort: \"medium\""), "{debug}");
+        assert!(
+            debug.contains("system_prompt: Some(\"Test system prompt\")"),
+            "{debug}"
+        );
+        assert!(
+            debug.contains("allowed_tools: Some(\"Read,Glob,Grep,Bash,Edit,Write,NotebookEdit\")"),
+            "{debug}"
+        );
+        assert!(debug.contains("resume: None"), "{debug}");
+        assert!(debug.contains("timeout_ms: 30000"), "{debug}");
+    }
+
+    #[test]
+    fn second_turn_build_agent_uses_resume() {
+        let mut session = test_session();
+        apply_session_id(&mut session.session_id, Some("sess-abc-123".to_string()));
+
+        assert_eq!(session.session_id.as_deref(), Some("sess-abc-123"));
+
+        let debug = agent_debug(&session);
+        assert!(debug.contains("resume: Some(\"sess-abc-123\")"), "{debug}");
+        assert_eq!(session.session_id.as_deref(), Some("sess-abc-123"));
     }
 
     #[test]
@@ -905,6 +944,12 @@ mod tests {
             other => panic!("expected Updated, got {other:?}"),
         }
         assert_eq!(s.system_prompt, "You are a Rust expert");
+
+        let debug = agent_debug(&s);
+        assert!(
+            debug.contains("system_prompt: Some(\"You are a Rust expert\")"),
+            "{debug}"
+        );
     }
 
     #[test]
@@ -937,6 +982,13 @@ mod tests {
             other => panic!("expected Updated, got {other:?}"),
         }
         assert_eq!(s.model, "claude-opus-4-5");
+
+        let debug = agent_debug(&s);
+        assert!(debug.contains("model: \"claude-opus-4-5\""), "{debug}");
+        assert!(
+            debug.contains("name: \"claude-cli:claude-opus-4-5\""),
+            "{debug}"
+        );
     }
 
     #[test]
@@ -957,6 +1009,9 @@ mod tests {
             SlashResult::Updated(_)
         ));
         assert_eq!(s.effort, "high");
+
+        let debug = agent_debug(&s);
+        assert!(debug.contains("effort: \"high\""), "{debug}");
     }
 
     #[test]
@@ -1002,6 +1057,9 @@ mod tests {
         }
         assert!(s.session_id.is_none());
         assert!(s.api_history.is_empty());
+
+        let debug = agent_debug(&s);
+        assert!(debug.contains("resume: None"), "{debug}");
     }
 
     #[test]
@@ -1021,6 +1079,12 @@ mod tests {
             other => panic!("expected Updated, got {other:?}"),
         }
         assert_eq!(s.allowed_tools_csv, "Read,Edit");
+
+        let debug = agent_debug(&s);
+        assert!(
+            debug.contains("allowed_tools: Some(\"Read,Edit\")"),
+            "{debug}"
+        );
     }
 
     #[test]
@@ -1044,6 +1108,10 @@ mod tests {
             other => panic!("expected Updated, got {other:?}"),
         }
         assert_eq!(s.mcp_config.as_deref(), Some(path.as_path()));
+
+        let debug = agent_debug(&s);
+        assert!(debug.contains("mcp_config: Some("), "{debug}");
+        assert!(debug.contains("mcp.json"), "{debug}");
     }
 
     #[test]
