@@ -630,6 +630,26 @@ pub struct CostInfo {
     pub currency: String,
 }
 
+/// A single file change notification emitted after a pipeline commit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChangeNotification {
+    /// Relative file path from the workdir root.
+    pub path: String,
+    /// How the file changed.
+    pub change_type: FileChangeType,
+}
+
+/// How a file changed in the most recent commit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileChangeType {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+}
+
 /// Parameters for `session/config/update`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

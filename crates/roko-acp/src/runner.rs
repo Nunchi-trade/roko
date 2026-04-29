@@ -32,7 +32,8 @@ use crate::bridge_events::CognitiveEvent;
 use crate::pipeline::{PipelineAction, PipelineEvent, PipelinePhase, WorkflowTemplate};
 use crate::session::{CancelToken, SharedWorkflowRun};
 use crate::types::{
-    ContentBlock, PlanEntry, PlanStatus, Priority, StopReason, ToolCallKind, ToolCallStatus,
+    ContentBlock, FileChangeNotification, FileChangeType, PlanEntry, PlanStatus, Priority,
+    StopReason, ToolCallKind, ToolCallStatus,
 };
 use crate::workflow::WorkflowRun;
 
@@ -48,6 +49,65 @@ pub struct PipelineConfig {
 }
 
 const CLAUDE_CLI_BIN: &str = "claude";
+const NO_CHANGES_TO_COMMIT_MESSAGE: &str = "(no changes to commit)";
+
+/// Detect files changed in the most recent commit via `git diff --name-status HEAD~1 HEAD`.
+/// Returns an empty vec if git is unavailable or the repo has no prior commits.
+fn detect_file_changes(workdir: &Path) -> Vec<FileChangeNotification> {
+    let output = match std::process::Command::new("git")
+        .args(["diff", "--name-status", "HEAD~1", "HEAD"])
+        .current_dir(workdir)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut changes = Vec::new();
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let fields: Vec<&str> = line.split('\t').collect();
+        let status = match fields.first() {
+            Some(status) => status.trim(),
+            None => continue,
+        };
+        let status_code = status.chars().next();
+        let path = match status_code {
+            Some('R') | Some('C') if fields.len() >= 3 => fields[2].trim().to_string(),
+            _ => match fields.get(1) {
+                Some(path) => path.trim().to_string(),
+                None => continue,
+            },
+        };
+
+        if path.ends_with(".lock")
+            || path.ends_with(".png")
+            || path.ends_with(".jpg")
+            || path.ends_with(".jpeg")
+            || path.ends_with(".gif")
+            || path.ends_with(".ico")
+        {
+            continue;
+        }
+
+        let change_type = match status_code {
+            Some('A') | Some('C') => FileChangeType::Added,
+            Some('M') => FileChangeType::Modified,
+            Some('D') => FileChangeType::Deleted,
+            Some('R') => FileChangeType::Renamed,
+            _ => FileChangeType::Modified,
+        };
+
+        changes.push(FileChangeNotification { path, change_type });
+    }
+
+    changes
+}
 
 /// Execute a prompt via WorkflowEngine, bridging events to ACP protocol.
 ///
@@ -492,12 +552,9 @@ pub async fn run_workflow_pipeline(
                 .await;
                 action = match result {
                     Ok(output) => {
-                        // Estimate files changed from output length (rough heuristic).
-                        let files_changed = output.matches("Edit:").count() as u32
-                            + output.matches("Create:").count() as u32;
                         run.pipeline.step(PipelineEvent::AgentCompleted {
                             output,
-                            files_changed: files_changed.max(1),
+                            files_changed: 0,
                         })
                     }
                     Err(e) => run.pipeline.step(PipelineEvent::AgentFailed {
@@ -521,10 +578,9 @@ pub async fn run_workflow_pipeline(
                 .await;
                 action = match result {
                     Ok(output) => {
-                        let files_changed = output.matches("Edit:").count() as u32;
                         run.pipeline.step(PipelineEvent::AgentCompleted {
                             output,
-                            files_changed: files_changed.max(1),
+                            files_changed: 0,
                         })
                     }
                     Err(e) => run.pipeline.step(PipelineEvent::AgentFailed {
@@ -593,9 +649,45 @@ pub async fn run_workflow_pipeline(
                 )
                 .await;
                 action = match commit_result {
-                    Ok(msg) => run
-                        .pipeline
-                        .step(PipelineEvent::CommitDone { message: msg }),
+                    Ok(msg) => {
+                        let real_count = if msg != NO_CHANGES_TO_COMMIT_MESSAGE {
+                            let changes = detect_file_changes(workdir);
+
+                            for (index, change) in changes.iter().enumerate() {
+                                let tool_call_id = format!("file-change-{}", index + 1);
+                                let (title_prefix, kind) = match change.change_type {
+                                    FileChangeType::Added => ("+", ToolCallKind::Create),
+                                    FileChangeType::Modified => ("~", ToolCallKind::Edit),
+                                    FileChangeType::Deleted => ("-", ToolCallKind::Delete),
+                                    FileChangeType::Renamed => (">", ToolCallKind::Edit),
+                                };
+                                let _ = event_sender
+                                    .send(CognitiveEvent::ToolCallStart {
+                                        tool_call_id: tool_call_id.clone(),
+                                        title: format!("{title_prefix} {}", change.path),
+                                        kind,
+                                    })
+                                    .await;
+                                let _ = event_sender
+                                    .send(CognitiveEvent::ToolCallComplete {
+                                        tool_call_id,
+                                        status: ToolCallStatus::Completed,
+                                        content: vec![text_block(format!(
+                                            "{title_prefix} {}",
+                                            change.path
+                                        ))],
+                                    })
+                                    .await;
+                            }
+
+                            changes.len() as u32
+                        } else {
+                            0
+                        };
+
+                        run.pipeline.files_changed = real_count;
+                        run.pipeline.step(PipelineEvent::CommitDone { message: msg })
+                    }
                     Err(e) => {
                         error!(error = %e, "commit failed");
                         // Still mark as done — user can commit manually.
@@ -1344,7 +1436,7 @@ async fn run_commit(
                     }],
                 })
                 .await;
-            Ok("(no changes to commit)".into())
+            Ok(NO_CHANGES_TO_COMMIT_MESSAGE.into())
         } else {
             let _ = event_sender
                 .send(CognitiveEvent::ToolCallComplete {
