@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Link } from 'react-router';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { useApi } from '../hooks/useApi';
+import { useServerHealth } from '../hooks/useServerHealth';
 import './TopNav.css';
 
 const NAV_LINKS = [
@@ -27,8 +28,8 @@ function fmtUptime(secs: number): string {
 }
 
 export default function TopNav() {
-  const { get } = useApiWithFallback();
-  const [online, setOnline] = useState<boolean>(false);
+  const { get } = useApi();
+  const serverHealth = useServerHealth();
   const [uptime, setUptime] = useState<number | null>(null);
 
   useEffect(() => {
@@ -37,11 +38,10 @@ export default function TopNav() {
       try {
         const data = await get<HealthResponse>('/api/health');
         if (!cancelled) {
-          setOnline(data.status === 'ok');
           if (data.uptime_secs != null) setUptime(data.uptime_secs);
         }
       } catch {
-        if (!cancelled) setOnline(false);
+        if (!cancelled) setUptime(null);
       }
     };
     poll();
@@ -67,9 +67,9 @@ export default function TopNav() {
         ))}
       </div>
       <div className="right">
-        <span className={`status-pill ${online ? 'live' : 'demo'}`}>
+        <span className={`status-pill ${serverHealth === 'connected' ? 'live' : 'demo'}`}>
           <span className="status-dot" />
-          {online && uptime != null ? `LIVE ${fmtUptime(uptime)}` : 'DEMO'}
+          {serverHealth === 'connected' && uptime != null ? `LIVE ${fmtUptime(uptime)}` : 'DEMO'}
         </span>
       </div>
     </nav>

@@ -5,8 +5,6 @@ export type ServerStatus = 'connected' | 'disconnected' | 'checking';
 
 /**
  * Poll /health every `intervalMs` and track connection state.
- * For investor demo mode: if server is unreachable, still report 'connected'
- * after initial check so the UI looks alive.
  */
 export function useServerHealth(intervalMs = 5000) {
   const [status, setStatus] = useState<ServerStatus>('checking');

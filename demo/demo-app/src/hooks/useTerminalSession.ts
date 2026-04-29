@@ -8,6 +8,7 @@
  */
 import type { TerminalHandle } from './useTerminal';
 import { lookupCmdDesc } from '../lib/cmd-descriptions';
+import { ABSOLUTE_SERVE_URL } from '../lib/serve-url';
 
 // ── Speed multiplier ─────────────────────────────────────────
 
@@ -94,11 +95,8 @@ export async function setupWorkspace(
 
   // Fetch live config from serve process and write it into the workspace.
   // This gives the ephemeral dir all providers/models from the UI-managed config.
-  const serveUrl = typeof window !== 'undefined'
-    ? `${window.location.protocol}//${window.location.host}`
-    : 'http://localhost:6677';
   await handle.execCmd(
-    `curl -sf ${serveUrl}/api/config/toml -o roko.toml 2>/dev/null || true`,
+    `curl -sf ${ABSOLUTE_SERVE_URL}/api/config/toml -o roko.toml || echo "warning: could not copy live roko config from ${ABSOLUTE_SERVE_URL}/api/config/toml"`,
     10000,
   );
 

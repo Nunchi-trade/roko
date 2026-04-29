@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRokoConfig } from '../hooks/useRokoConfig';
 import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import {
+  flattenProviderModels,
+  providerForModelKey,
+  resolveModelKey,
+} from '../lib/config-models';
 import './Settings.css';
 
 interface GatesConfig {
@@ -60,9 +65,14 @@ export default function Settings() {
     if (defaultBackend && !loaded) setBackend(defaultBackend);
   }, [defaultModel, defaultBackend, loaded]);
 
-  const allModels = providers.flatMap(p =>
-    p.models.map(m => ({ key: m.name, slug: m.slug, provider: p.provider })),
-  );
+  const allModels = flattenProviderModels(providers);
+
+  const handleModelChange = (value: string) => {
+    const modelKey = resolveModelKey(allModels, value);
+    setModel(modelKey);
+    const provider = providerForModelKey(allModels, modelKey);
+    if (provider) setBackend(provider);
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -170,13 +180,13 @@ export default function Settings() {
           <label>Default Model</label>
           <select
             value={model}
-            onChange={e => setModel(e.target.value)}
+            onChange={e => handleModelChange(e.target.value)}
             disabled={!isLive}
           >
             {!allModels.length && <option value="">{model || '--'}</option>}
             {allModels.map(m => (
               <option key={m.key} value={m.key}>
-                {m.key} ({m.slug})
+                {m.slug}
               </option>
             ))}
           </select>

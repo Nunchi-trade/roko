@@ -4,6 +4,7 @@ import { PlaybackController, TimelineStepper, type TimelineStepState } from '../
 import { useTerminal, type TerminalHandle } from '../hooks/useTerminal';
 import { setSpeedMultiplier } from '../hooks/useTerminalSession';
 import { useServerHealth } from '../hooks/useServerHealth';
+import { useRokoConfig } from '../hooks/useRokoConfig';
 import { lookupCmdDesc } from '../lib/cmd-descriptions';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
@@ -51,6 +52,7 @@ export default function Demo() {
   const [playbackMode, setPlaybackMode] = useState<'auto' | 'step'>('auto');
   const scenario = SCENARIOS[activeIdx];
   const serverHealth = useServerHealth();
+  const { defaultModel } = useRokoConfig();
 
   // Sidebar state
   const [stats, setStats] = useState({ model: '--', cost: '--', tokens: '--', time: '--' });

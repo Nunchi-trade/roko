@@ -1,12 +1,18 @@
 import { createContext, createElement, useContext, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useApiWithFallback } from './useApiWithFallback';
+import {
+  providerForModelKey,
+  rawModelsToOptions,
+  resolveModelKey,
+  type RawConfigModels,
+} from '../lib/config-models';
 
 /** A provider→models grouping derived from config.models */
 export interface ProviderGroup {
   provider: string;
   kind: string;
-  models: { name: string; slug: string }[];
+  models: { key: string; name: string; slug: string }[];
 }
 
 export interface RokoConfigState {
@@ -35,12 +41,12 @@ export function useRokoConfig() {
 
 /** Derive provider→model groups from the config.models map */
 function deriveProviders(
-  models: Record<string, { provider: string; slug: string }> | undefined,
+  models: RawConfigModels | undefined,
   providers: Record<string, { kind: string }> | undefined,
 ): ProviderGroup[] {
   if (!models) return [];
   const grouped = new Map<string, ProviderGroup>();
-  for (const [name, m] of Object.entries(models)) {
+  for (const [key, m] of Object.entries(models)) {
     let group = grouped.get(m.provider);
     if (!group) {
       group = {
@@ -50,7 +56,7 @@ function deriveProviders(
       };
       grouped.set(m.provider, group);
     }
-    group.models.push({ name, slug: m.slug });
+    group.models.push({ key, name: key, slug: m.slug });
   }
   return Array.from(grouped.values());
 }
@@ -68,14 +74,17 @@ export function useRokoConfigState(): RokoConfigState {
     try {
       const cfg = await get<Record<string, unknown>>('/api/config');
       const agent = cfg?.agent as Record<string, string> | undefined;
-      if (agent?.default_model) setDefaultModel(agent.default_model);
-      if (agent?.default_backend) setDefaultBackend(agent.default_backend);
-      setProviders(
-        deriveProviders(
-          cfg?.models as Record<string, { provider: string; slug: string }>,
-          cfg?.providers as Record<string, { kind: string }>,
-        ),
-      );
+      const rawModels = cfg?.models as RawConfigModels | undefined;
+      const modelOptions = rawModelsToOptions(rawModels);
+      const modelKey = agent?.default_model
+        ? resolveModelKey(modelOptions, agent.default_model)
+        : '';
+      if (modelKey) setDefaultModel(modelKey);
+      const modelProvider = providerForModelKey(modelOptions, modelKey);
+      if (modelProvider || agent?.default_backend) {
+        setDefaultBackend(modelProvider ?? agent?.default_backend ?? '');
+      }
+      setProviders(deriveProviders(rawModels, cfg?.providers as Record<string, { kind: string }>));
     } catch {
       // swallow — fallback data will be used
     }
@@ -92,20 +101,30 @@ export function useRokoConfigState(): RokoConfigState {
     async (model: string, backend: string): Promise<boolean> => {
       if (!isLive) return false;
       try {
+        const allModels = providers.flatMap((provider) =>
+          provider.models.map((providerModel) => ({
+            key: providerModel.key,
+            name: providerModel.name,
+            slug: providerModel.slug,
+            provider: provider.provider,
+          })),
+        );
+        const modelKey = resolveModelKey(allModels, model);
+        const modelBackend = providerForModelKey(allModels, modelKey) ?? backend;
         const cfg = await put<Record<string, unknown>>('/api/config', {
-          agent: { default_model: model, default_backend: backend },
+          agent: { default_model: modelKey, default_backend: modelBackend },
         });
         // Update from response
         const agent = cfg?.agent as Record<string, string> | undefined;
-        if (agent?.default_model) setDefaultModel(agent.default_model);
-        if (agent?.default_backend) setDefaultBackend(agent.default_backend);
+        if (agent?.default_model) setDefaultModel(resolveModelKey(allModels, agent.default_model));
+        setDefaultBackend(modelBackend || agent?.default_backend || '');
         setLastSaved(Date.now());
         return true;
       } catch {
         return false;
       }
     },
-    [isLive, put],
+    [isLive, providers, put],
   );
 
   return { defaultModel, defaultBackend, providers, isLive, lastSaved, updateModelConfig };

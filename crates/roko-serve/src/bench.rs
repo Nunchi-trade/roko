@@ -1075,6 +1075,283 @@ difficulty = 5
 tags = ["codegen", "async", "runtime"]
 "#;
 
+pub const INTEGRATION_SUITE_TOML: &str = r#"id = "integration"
+name = "Integration"
+description = "Multi-file and cross-module tasks that test the agent's ability to navigate, modify, and connect code across boundaries"
+default_timeout_secs = 600
+
+[[tasks]]
+id = "add-module-reexport"
+name = "Add Module Re-export"
+prompt = "The crate has src/internal.rs with a pub struct Config. Add a re-export in src/lib.rs so users can access it as `crate::Config`. Run cargo check to verify."
+difficulty = 3
+tags = ["integration", "modules"]
+
+[[tasks]]
+id = "wire-error-type"
+name = "Wire Error Type Across Modules"
+prompt = "src/errors.rs defines AppError. src/db.rs and src/api.rs each define their own error types. Add From impls so both module errors convert into AppError. Update callers to use ?. Run cargo check."
+difficulty = 3
+tags = ["integration", "errors", "cross-module"]
+
+[[tasks]]
+id = "add-integration-test"
+name = "Add Integration Test"
+prompt = "Create tests/integration_test.rs that imports the public API from src/lib.rs and tests the full create-read-update-delete cycle using the existing Storage trait. Run cargo test."
+difficulty = 3
+tags = ["integration", "testing"]
+
+[[tasks]]
+id = "extract-shared-types"
+name = "Extract Shared Types"
+prompt = "src/server.rs and src/client.rs both define identical Request and Response structs. Extract them into src/types.rs, update both files to import from there, and ensure cargo check passes."
+difficulty = 3
+tags = ["integration", "refactor", "cross-module"]
+
+[[tasks]]
+id = "api-endpoint-wiring"
+name = "Wire New API Endpoint"
+prompt = "src/handlers.rs has a `health_check` handler function. Wire it into the router in src/routes.rs at GET /health, add it to the OpenAPI spec in src/openapi.rs, and add a test. Run cargo check."
+difficulty = 4
+tags = ["integration", "api", "wiring"]
+
+[[tasks]]
+id = "feature-flag-module"
+name = "Feature Flag Conditional Compilation"
+prompt = "Add a Cargo feature 'metrics' that conditionally compiles src/metrics.rs. Update Cargo.toml, add #[cfg(feature)] guards in src/lib.rs, and ensure the crate builds with and without the feature."
+difficulty = 4
+tags = ["integration", "features", "conditional"]
+
+[[tasks]]
+id = "trait-across-crates"
+name = "Cross-Crate Trait Implementation"
+prompt = "crate-a defines trait Processor. crate-b has struct DataPipeline. Implement Processor for DataPipeline in crate-b, add the dependency in Cargo.toml, and add a test in crate-b. Run cargo check -p crate-b."
+difficulty = 4
+tags = ["integration", "traits", "cross-crate"]
+
+[[tasks]]
+id = "error-propagation-chain"
+name = "Error Propagation Chain"
+prompt = "Trace the error path from src/api.rs -> src/service.rs -> src/repo.rs -> src/db.rs. Each layer wraps errors differently. Fix the chain so errors propagate cleanly with context using anyhow. Run cargo test."
+difficulty = 4
+tags = ["integration", "errors", "deep-chain"]
+
+[[tasks]]
+id = "middleware-integration"
+name = "Middleware Stack Integration"
+prompt = "src/middleware/ has auth.rs, logging.rs, and cors.rs each implementing Middleware trait. Wire all three into the server in src/server.rs in the correct order (cors -> logging -> auth). Add an integration test."
+difficulty = 4
+tags = ["integration", "middleware", "composition"]
+
+[[tasks]]
+id = "config-cascade"
+name = "Configuration Cascade"
+prompt = "Implement config loading that merges: defaults (src/defaults.rs) -> config file (config.toml) -> env vars -> CLI args. Each layer overrides the previous. Add tests for each precedence level."
+difficulty = 4
+tags = ["integration", "config", "multi-source"]
+
+[[tasks]]
+id = "plugin-trait-loader"
+name = "Plugin System with Trait Objects"
+prompt = "Define a Plugin trait with init/execute/cleanup in src/plugin.rs. Create a PluginManager that loads a Vec<Box<dyn Plugin>>, calls them in order, and handles errors. Implement two mock plugins and test the full lifecycle."
+difficulty = 5
+tags = ["integration", "plugins", "trait-objects"]
+
+[[tasks]]
+id = "migration-system"
+name = "Schema Migration System"
+prompt = "Implement a migration runner in src/migrate.rs that reads numbered SQL files from migrations/, tracks applied migrations in a version table, and applies pending ones in order. Handle rollback on failure. Add tests with an in-memory SQLite DB."
+difficulty = 5
+tags = ["integration", "database", "migrations"]
+
+[[tasks]]
+id = "event-driven-pipeline"
+name = "Event-Driven Processing Pipeline"
+prompt = "Wire src/producer.rs, src/processor.rs, and src/sink.rs into a pipeline: producer emits events via a channel, processor transforms them, sink collects results. Use tokio mpsc channels. Add an integration test that sends 100 events and verifies all arrive."
+difficulty = 5
+tags = ["integration", "async", "pipeline"]
+
+[[tasks]]
+id = "workspace-refactor"
+name = "Workspace Member Extraction"
+prompt = "The single-crate project has grown. Extract src/core/ into a new workspace member crate called 'core'. Update the workspace Cargo.toml, fix all imports in the main crate, and ensure cargo build --workspace passes."
+difficulty = 5
+tags = ["integration", "workspace", "refactor"]
+
+[[tasks]]
+id = "end-to-end-flow"
+name = "End-to-End Request Flow"
+prompt = "Trace and fix the full request flow: HTTP handler -> validation -> service logic -> database query -> response serialization. The code compiles but returns wrong results because of a field mapping bug between layers. Write an e2e test that exposes the bug, then fix it."
+difficulty = 5
+tags = ["integration", "e2e", "debugging"]
+"#;
+
+pub const PERFORMANCE_SUITE_TOML: &str = r#"id = "performance"
+name = "Performance"
+description = "Optimization tasks: reduce allocations, batch I/O, parallelize, and measure with benchmarks"
+default_timeout_secs = 300
+
+[[tasks]]
+id = "remove-unnecessary-clones"
+name = "Remove Unnecessary Clones"
+prompt = "src/lib.rs has multiple .clone() calls on String and Vec values that are immediately consumed. Replace clones with moves or borrows where possible. Run cargo clippy to verify no unnecessary_clone warnings remain."
+difficulty = 2
+tags = ["performance", "allocations"]
+
+[[tasks]]
+id = "string-concat-opt"
+name = "Optimize String Concatenation"
+prompt = "src/formatter.rs builds output by repeatedly using format!() and + for string concatenation in a loop. Refactor to use a single String with push_str/write!. Add a benchmark with criterion comparing before and after."
+difficulty = 2
+tags = ["performance", "strings", "allocation"]
+
+[[tasks]]
+id = "vec-preallocate"
+name = "Preallocate Collections"
+prompt = "Find all Vec::new() calls in src/ that are followed by a loop pushing known-count items. Replace with Vec::with_capacity(). Run cargo clippy to check for remaining cases."
+difficulty = 2
+tags = ["performance", "allocations", "collections"]
+
+[[tasks]]
+id = "batch-file-io"
+name = "Batch File I/O"
+prompt = "src/processor.rs reads files one at a time in a loop. Refactor to use BufReader, batch reads, and process in chunks of 64. Preserve the same output. Add a test comparing results before and after."
+difficulty = 3
+tags = ["performance", "io", "batching"]
+
+[[tasks]]
+id = "cow-strings"
+name = "Use Cow for Conditional Allocation"
+prompt = "src/normalizer.rs allocates a new String for every input even when no transformation is needed. Refactor to return Cow<str> and only allocate when the input actually changes. Add tests verifying both borrowed and owned paths."
+difficulty = 3
+tags = ["performance", "cow", "allocations"]
+
+[[tasks]]
+id = "hash-avoid-rehash"
+name = "Avoid Redundant Hashing"
+prompt = "src/cache.rs calls map.contains_key() followed by map.insert() for every operation, hashing the key twice. Use the entry API instead. Apply the same fix to all HashMap usage in the file."
+difficulty = 2
+tags = ["performance", "hashmap", "entry-api"]
+
+[[tasks]]
+id = "parallel-map"
+name = "Parallelize with Rayon"
+prompt = "src/pipeline.rs has a sequential .iter().map().collect() over 10K items where each item does CPU-heavy work. Add rayon as a dependency and convert to .par_iter(). Verify results are identical with a test."
+difficulty = 3
+tags = ["performance", "parallelism", "rayon"]
+
+[[tasks]]
+id = "lazy-init"
+name = "Lazy Static Initialization"
+prompt = "src/config.rs parses a complex regex on every function call. Use std::sync::LazyLock to parse it once. Apply the same pattern to the compiled template in src/render.rs."
+difficulty = 3
+tags = ["performance", "lazy", "initialization"]
+
+[[tasks]]
+id = "smallvec-hot-path"
+name = "SmallVec for Hot Path"
+prompt = "Profiling shows src/tokenizer.rs allocates a Vec<Token> per line, but 95% of lines have fewer than 8 tokens. Add smallvec as a dependency and use SmallVec<[Token; 8]> for the hot path. Add a test."
+difficulty = 3
+tags = ["performance", "smallvec", "hot-path"]
+
+[[tasks]]
+id = "zero-copy-parse"
+name = "Zero-Copy Parsing"
+prompt = "src/parser.rs converts every field to String during parsing. Refactor to use &str references into the input buffer where possible, adding lifetime parameters. Verify with cargo test."
+difficulty = 4
+tags = ["performance", "zero-copy", "lifetimes"]
+
+[[tasks]]
+id = "async-concurrent-io"
+name = "Concurrent Async I/O"
+prompt = "src/fetcher.rs awaits HTTP requests sequentially in a loop. Refactor to use futures::stream::FuturesUnordered to run up to 8 requests concurrently. Preserve ordering of results. Add a test."
+difficulty = 4
+tags = ["performance", "async", "concurrency"]
+
+[[tasks]]
+id = "benchmark-harness"
+name = "Criterion Benchmark Harness"
+prompt = "Create benches/core_bench.rs using criterion that benchmarks the three hottest functions in src/lib.rs. Configure Cargo.toml with [[bench]] entries and harness = false. Run cargo bench and verify output."
+difficulty = 3
+tags = ["performance", "benchmarking", "criterion"]
+"#;
+
+pub const SAFETY_SUITE_TOML: &str = r#"id = "safety"
+name = "Safety"
+description = "Security and safety tasks: input validation, injection resistance, auth, and data handling"
+default_timeout_secs = 300
+
+[[tasks]]
+id = "input-sanitization"
+name = "Input Sanitization"
+prompt = "src/api.rs accepts user input and passes it directly to a shell command via std::process::Command. Fix it to sanitize inputs: reject shell metacharacters, validate against an allowlist, and use proper argument passing instead of string interpolation."
+difficulty = 2
+tags = ["safety", "input-validation", "injection"]
+
+[[tasks]]
+id = "sql-injection-fix"
+name = "Fix SQL Injection"
+prompt = "src/db.rs builds SQL queries with format!() using user input. Refactor all queries to use parameterized statements. Add a test that attempts injection and verifies it fails safely."
+difficulty = 2
+tags = ["safety", "sql-injection", "parameterized"]
+
+[[tasks]]
+id = "prompt-injection-guard"
+name = "Prompt Injection Resistance"
+prompt = "Implement a prompt sanitizer in src/sanitize.rs that detects and strips common prompt injection patterns: 'ignore previous instructions', system prompt overrides, encoded instructions, and role-play attacks. Add tests for 10 injection variants."
+difficulty = 3
+tags = ["safety", "prompt-injection", "llm"]
+
+[[tasks]]
+id = "tool-allowlist"
+name = "Tool Call Allowlist"
+prompt = "src/tools.rs dispatches tool calls by name from a HashMap. Add an allowlist check: only tools in ALLOWED_TOOLS const can execute. Unknown tools return ToolError::Unauthorized. Dangerous tools (rm, exec) are always blocked. Add tests."
+difficulty = 3
+tags = ["safety", "authorization", "tools"]
+
+[[tasks]]
+id = "secret-redaction"
+name = "Secret Redaction in Logs"
+prompt = "Implement a log redactor in src/redact.rs that replaces API keys, tokens, and passwords in log output with '[REDACTED]'. Match patterns: Bearer tokens, AWS keys, GitHub tokens, and generic key=value secrets. Add tests."
+difficulty = 3
+tags = ["safety", "secrets", "logging"]
+
+[[tasks]]
+id = "rate-limit-middleware"
+name = "Rate Limiting Middleware"
+prompt = "Implement IP-based rate limiting in src/ratelimit.rs: max 100 requests per minute per IP using a sliding window. Return 429 Too Many Requests when exceeded. Use a DashMap for thread safety. Add tests."
+difficulty = 3
+tags = ["safety", "rate-limiting", "dos"]
+
+[[tasks]]
+id = "path-traversal-fix"
+name = "Path Traversal Prevention"
+prompt = "src/files.rs serves files from a base directory but doesn't prevent path traversal. Fix it to canonicalize paths and reject any that escape the base directory. Handle symlinks. Add tests with ../../../etc/passwd attempts."
+difficulty = 3
+tags = ["safety", "path-traversal", "filesystem"]
+
+[[tasks]]
+id = "auth-middleware"
+name = "JWT Auth Middleware"
+prompt = "Implement JWT validation middleware in src/auth.rs: verify signature, check expiration, extract claims into a RequestContext. Reject expired/malformed/missing tokens with proper HTTP status codes. Add tests for each rejection case."
+difficulty = 4
+tags = ["safety", "auth", "jwt"]
+
+[[tasks]]
+id = "resource-exhaustion-guard"
+name = "Resource Exhaustion Guard"
+prompt = "src/parser.rs accepts unbounded input that can cause OOM. Add limits: max input size (1MB), max recursion depth (64), max array length (10K), and timeout (5s). Return structured errors for each limit. Add tests."
+difficulty = 4
+tags = ["safety", "resource-limits", "dos"]
+
+[[tasks]]
+id = "supply-chain-audit"
+name = "Dependency Audit Implementation"
+prompt = "Implement a dep auditor in src/audit.rs that parses Cargo.lock, checks each crate version against a known-vulnerable list (embedded as a const), and reports findings as structured JSON. Flag yanked versions. Add tests with mock vulnerable entries."
+difficulty = 5
+tags = ["safety", "supply-chain", "audit"]
+"#;
+
 /// Ensure built-in suites exist on disk. Writes them only if not already present.
 pub async fn ensure_builtin_suites(workdir: &Path) {
     let dir = suites_dir(workdir);
@@ -1083,6 +1360,9 @@ pub async fn ensure_builtin_suites(workdir: &Path) {
     for (filename, content) in [
         ("smoke.toml", SMOKE_SUITE_TOML),
         ("codegen.toml", CODEGEN_SUITE_TOML),
+        ("integration.toml", INTEGRATION_SUITE_TOML),
+        ("performance.toml", PERFORMANCE_SUITE_TOML),
+        ("safety.toml", SAFETY_SUITE_TOML),
     ] {
         let path = dir.join(filename);
         if !path.exists() {

@@ -29,14 +29,24 @@ function getFallback(path: string): unknown {
   return {};
 }
 
-// Probe: is the server reachable at all? That's the only question.
+// Shared server reachability state. It is intentionally re-probed because the
+// demo UI is commonly opened before `roko serve` is ready.
 let _serverLive: boolean | null = null; // null = unknown
-let _probePromise: Promise<void> | null = null;
+let _healthPoll: ReturnType<typeof setInterval> | null = null;
+let _healthProbeInFlight: Promise<void> | null = null;
+const _healthListeners = new Set<() => void>();
 
-// Tally of seed vs non-seed records observed across all API responses.
+// Tally of fallback vs non-fallback records observed across all API responses.
 let _seedCount = 0;
 let _nonSeedCount = 0;
-let _dataModeListeners = new Set<() => void>();
+let _fallbackCount = 0;
+const _dataModeListeners = new Set<() => void>();
+
+function notifyHealthListeners(): void {
+  for (const listener of _healthListeners) {
+    listener();
+  }
+}
 
 function notifyDataModeListeners(): void {
   for (const listener of _dataModeListeners) {
@@ -62,20 +72,49 @@ function tallySourceField(data: unknown): void {
 function deriveDataMode(): 'seed' | 'live' | 'unknown' {
   if (_nonSeedCount === 0 && _seedCount > 0) return 'seed';
   if (_nonSeedCount > 0) return 'live';
+  if (_fallbackCount > 0) return 'seed';
   return 'unknown';
 }
 
+function recordLiveData(data: unknown): void {
+  tallySourceField(data);
+  notifyDataModeListeners();
+}
+
+function recordFallbackData(data: unknown): void {
+  _fallbackCount += 1;
+  tallySourceField(data);
+  notifyDataModeListeners();
+}
+
 function probeServer(): Promise<void> {
-  if (_probePromise) return _probePromise;
-  _probePromise = (async () => {
+  if (_healthProbeInFlight) return _healthProbeInFlight;
+  _healthProbeInFlight = (async () => {
+    let nextLive = false;
     try {
       const res = await fetch(`${SERVE_URL}/health`, { signal: AbortSignal.timeout(2000) });
-      _serverLive = res.ok;
+      nextLive = res.ok;
     } catch {
-      _serverLive = false;
+      nextLive = false;
+    } finally {
+      if (_serverLive !== nextLive) {
+        _serverLive = nextLive;
+        notifyHealthListeners();
+      } else {
+        _serverLive = nextLive;
+      }
+      _healthProbeInFlight = null;
     }
   })();
-  return _probePromise;
+  return _healthProbeInFlight;
+}
+
+function ensureHealthPolling(): void {
+  void probeServer();
+  if (_healthPoll) return;
+  _healthPoll = setInterval(() => {
+    void probeServer();
+  }, 5_000);
 }
 
 export function useApiWithFallback() {
@@ -84,9 +123,17 @@ export function useApiWithFallback() {
   const [dataMode, setDataMode] = useState<'seed' | 'live' | 'unknown'>('unknown');
 
   useEffect(() => {
-    probeServer().then(() => {
+    const listener = () => {
       setIsLive(_serverLive === true);
-    });
+    };
+
+    _healthListeners.add(listener);
+    ensureHealthPolling();
+    listener();
+
+    return () => {
+      _healthListeners.delete(listener);
+    };
   }, []);
 
   useEffect(() => {
@@ -106,45 +153,39 @@ export function useApiWithFallback() {
     // Offline → straight to fallback
     if (_serverLive === false) {
       const result = getFallback(path) as T;
-      tallySourceField(result);
+      recordFallbackData(result);
       setDataMode(deriveDataMode());
-      notifyDataModeListeners();
       return result;
     }
 
     // Server is live (or probe hasn't finished) — always try the real API
     try {
       const data = await api.get<T>(path);
-      tallySourceField(data);
+      recordLiveData(data);
       setDataMode(deriveDataMode());
-      notifyDataModeListeners();
       return data;
     } catch {
       // Network error or 4xx/5xx → fallback for this endpoint
+      void probeServer();
       const result = getFallback(path) as T;
-      tallySourceField(result);
+      recordFallbackData(result);
       setDataMode(deriveDataMode());
-      notifyDataModeListeners();
       return result;
     }
   }, [api]);
 
   const post = useCallback(async <T = unknown>(path: string, body?: unknown): Promise<T> => {
-    if (_serverLive === false) return {} as T;
-    try {
-      return await api.post<T>(path, body);
-    } catch {
-      return {} as T;
+    if (_serverLive === false) {
+      throw new Error('roko serve is offline');
     }
+    return api.post<T>(path, body);
   }, [api]);
 
   const put = useCallback(async <T = unknown>(path: string, body?: unknown): Promise<T> => {
-    if (_serverLive === false) return {} as T;
-    try {
-      return await api.put<T>(path, body);
-    } catch {
-      return {} as T;
+    if (_serverLive === false) {
+      throw new Error('roko serve is offline');
     }
+    return api.put<T>(path, body);
   }, [api]);
 
   return useMemo(

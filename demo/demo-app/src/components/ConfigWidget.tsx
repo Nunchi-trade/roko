@@ -1,5 +1,11 @@
 import { useState, useMemo } from 'react';
 import { useRokoConfig } from '../hooks/useRokoConfig';
+import {
+  flattenProviderModels,
+  modelLabel,
+  providerForModelKey,
+  resolveModelKey,
+} from '../lib/config-models';
 import './ConfigWidget.css';
 
 /** Floating config pill / panel — shows active model + provider, allows live changes. */
@@ -13,12 +19,11 @@ export default function ConfigWidget() {
 
   // All models flattened for the model selector
   const allModels = useMemo(
-    () => providers.flatMap((p) => p.models.map((m) => ({ ...m, provider: p.provider }))),
+    () => flattenProviderModels(providers),
     [providers],
   );
 
-  // Short display label — last segment of slug or name
-  const displayModel = defaultModel.split('/').pop()?.replace(/-\d{8}$/, '') ?? defaultModel;
+  const displayModel = modelLabel(allModels, defaultModel) || '—';
   const displayBackend = defaultBackend || '—';
 
   // Show "saved" flash for 2s after lastSaved
@@ -39,10 +44,11 @@ export default function ConfigWidget() {
   };
 
   // Derive backend from model selection (find its provider)
-  const handleModelChange = (slug: string) => {
-    setSelModel(slug);
-    const match = allModels.find((m) => m.slug === slug);
-    if (match) setSelBackend(match.provider);
+  const handleModelChange = (modelKey: string) => {
+    const resolvedKey = resolveModelKey(allModels, modelKey);
+    setSelModel(resolvedKey);
+    const provider = providerForModelKey(allModels, resolvedKey);
+    if (provider) setSelBackend(provider);
   };
 
   const dirty = selModel !== defaultModel || selBackend !== defaultBackend;
@@ -74,8 +80,8 @@ export default function ConfigWidget() {
             {providers.map((p) => (
               <optgroup key={p.provider} label={p.provider}>
                 {p.models.map((m) => (
-                  <option key={m.slug} value={m.slug}>
-                    {m.name}
+                  <option key={m.key} value={m.key}>
+                    {m.slug}
                   </option>
                 ))}
               </optgroup>
