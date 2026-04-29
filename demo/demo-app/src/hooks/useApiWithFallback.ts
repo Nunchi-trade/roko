@@ -27,6 +27,7 @@ function getFallback(path: string): unknown {
   if (path.includes('/bench/suites')) return BenchDemo.DEMO_BENCH_SUITES;
   if (path.includes('/bench/models')) return BenchDemo.DEMO_BENCH_MODELS;
   if (path.includes('/bench/runs')) return BenchDemo.DEMO_BENCH_RUNS;
+  if (path.includes('/dream/journal')) return Demo.DEMO_DREAM_JOURNAL;
   if (path.includes('/share/')) return null;
   return {};
 }
