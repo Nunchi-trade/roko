@@ -633,6 +633,14 @@ impl AppState {
     /// Initiate graceful shutdown: cancel all work and stop supervised processes.
     pub async fn shutdown(&self) {
         tracing::info!("server shutdown initiated");
+        let router_path = self.layout.cascade_router_path();
+        if let Some(ref router) = *self.cascade_router.read().await {
+            if let Err(err) = router.save(&router_path) {
+                tracing::warn!(error = %err, "failed to save CascadeRouter on shutdown");
+            } else {
+                tracing::info!(path = %router_path.display(), "CascadeRouter saved on shutdown");
+            }
+        }
         if let Err(err) = self.save_snapshot().await {
             tracing::warn!(error = %err, "failed to save server state on shutdown");
         }

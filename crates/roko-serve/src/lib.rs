@@ -717,7 +717,59 @@ fn build_app_state(
     }
     let deploy_backend = create_deploy_backend(&roko_config);
     let state = AppState::new(workdir, runtime, roko_config, deploy_backend)?;
+
+    // Warm the cached cascade router once so gateway selection reuses the
+    // persisted bandit state instead of rebuilding it on the first request.
+    {
+        let config = state.load_roko_config();
+        let mut model_slugs: Vec<String> = config
+            .effective_models()
+            .values()
+            .filter(|profile| !profile.is_embedding_model)
+            .map(|profile| profile.slug.clone())
+            .collect();
+        model_slugs.sort();
+
+        if !model_slugs.is_empty() {
+            let router_path = state.layout.cascade_router_path();
+            if !router_path.exists() {
+                warn!(
+                    path = %router_path.display(),
+                    "persisted CascadeRouter not found; using fresh router"
+                );
+            }
+            let router =
+                roko_learn::cascade_router::CascadeRouter::load_or_new(&router_path, model_slugs);
+            let observations = router.total_observations();
+
+            tokio::task::block_in_place(|| {
+                *state.cascade_router.blocking_write() = Some(router);
+            });
+
+            if observations > 0 {
+                info!(
+                    observations = observations,
+                    path = %router_path.display(),
+                    "loaded persisted CascadeRouter"
+                );
+            } else {
+                debug!(path = %router_path.display(), "initialized fresh CascadeRouter");
+            }
+        }
+    }
+
     let _ = state.state_hub.bootstrap_from_workdir(&state.workdir);
+    if let Some(snapshot_json) = tokio::task::block_in_place(|| {
+        state
+            .cascade_router
+            .blocking_read()
+            .as_ref()
+            .map(|router| router.snapshot_json())
+    }) {
+        let mut snapshot = state.state_hub.current_snapshot();
+        snapshot.cascade_router_json = snapshot_json;
+        state.state_hub.apply_snapshot(snapshot);
+    }
     // Seed StateHub with persisted marketplace jobs so the TUI sees them on connect.
     let jobs = scan_marketplace_jobs(&state.workdir);
     if !jobs.is_empty() {
@@ -1561,11 +1613,18 @@ async fn shutdown_signal(state: Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::serve_api_or_spa_fallback;
+    use super::{build_app_state, serve_api_or_spa_fallback};
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header::CONTENT_TYPE};
+    use roko_gate::AdaptiveThresholds;
+    use roko_learn::cascade_router::CascadeRouter;
+    use roko_learn::model_router::CONTEXT_DIM;
     use serde_json::Value;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    use crate::runtime::NoOpRuntime;
 
     async fn fallback_response(path: &str) -> axum::response::Response {
         let request = Request::builder()
@@ -1622,5 +1681,78 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("content type");
         assert!(content_type.starts_with("text/html"));
+    }
+
+    #[tokio::test]
+    async fn build_app_state_loads_persisted_learning_state_and_falls_back_cleanly() {
+        let persisted_dir = tempdir().expect("tempdir");
+        let persisted_workdir = persisted_dir.path().to_path_buf();
+        let persisted_learn_dir = persisted_workdir.join(".roko").join("learn");
+        std::fs::create_dir_all(&persisted_learn_dir).expect("create learn dir");
+
+        let thresholds_path = persisted_learn_dir.join("gate-thresholds.json");
+        let mut thresholds = AdaptiveThresholds::new();
+        thresholds.update(1, true);
+        thresholds.save(&thresholds_path).expect("seed thresholds");
+
+        let router_path = persisted_learn_dir.join("cascade-router.json");
+        let router = CascadeRouter::new(vec!["claude-sonnet-4-6".to_string()]);
+        router.observe(vec![0.0; CONTEXT_DIM], 0, 1.0);
+        router.save(&router_path).expect("seed router");
+
+        let persisted_state = build_app_state(
+            persisted_workdir.clone(),
+            Arc::new(NoOpRuntime),
+            roko_core::config::schema::RokoConfig::default(),
+        )
+        .expect("build_app_state");
+
+        let persisted_router = persisted_state.cascade_router.read().await;
+        let persisted_router = persisted_router.as_ref().expect("router loaded");
+        assert_eq!(persisted_router.total_observations(), 1);
+
+        let thresholds_snapshot = persisted_state.state_hub.current_snapshot();
+        let expected_thresholds =
+            std::fs::read_to_string(&thresholds_path).expect("read seeded thresholds");
+        assert_eq!(thresholds_snapshot.gate_thresholds_json, expected_thresholds);
+
+        let fresh_dir = tempdir().expect("tempdir");
+        let fresh_state = build_app_state(
+            fresh_dir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            roko_core::config::schema::RokoConfig::default(),
+        )
+        .expect("build_app_state");
+
+        let fresh_router = fresh_state.cascade_router.read().await;
+        let fresh_router = fresh_router.as_ref().expect("fresh router initialized");
+        assert_eq!(fresh_router.total_observations(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_persists_cascade_router_state() {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let state = build_app_state(
+            workdir.clone(),
+            Arc::new(NoOpRuntime),
+            roko_core::config::schema::RokoConfig::default(),
+        )
+        .expect("build_app_state");
+
+        let router = CascadeRouter::new(vec!["claude-sonnet-4-6".to_string()]);
+        router.observe(vec![0.0; CONTEXT_DIM], 0, 1.0);
+        {
+            let mut guard = state.cascade_router.write().await;
+            *guard = Some(router);
+        }
+
+        state.shutdown().await;
+
+        let reloaded = CascadeRouter::load_or_new(
+            &state.layout.cascade_router_path(),
+            vec!["claude-sonnet-4-6".to_string()],
+        );
+        assert_eq!(reloaded.total_observations(), 1);
     }
 }
