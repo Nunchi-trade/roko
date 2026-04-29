@@ -16,10 +16,10 @@ use std::{
 use roko_agent::StreamChunk;
 use roko_agent::streaming::parse_sse_line;
 use roko_core::ContentHash;
-use roko_core::agent::{resolve_model, AgentRole, ProviderKind};
+use roko_core::DaimonPolicy;
+use roko_core::agent::{AgentRole, ProviderKind, resolve_model};
 use roko_core::config::schema::{ModelProfile, RokoConfig};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::DaimonPolicy;
 use roko_dreams::{load_dream_routing_advice, relevant_pattern_summaries};
 use roko_learn::{
     cascade_router::CascadeRouter,
@@ -221,10 +221,12 @@ pub struct StreamResult {
 
 fn pricing_table() -> &'static CostTable {
     static TABLE: OnceLock<CostTable> = OnceLock::new();
-    TABLE.get_or_init(|| CostTable {
-        models: std::collections::HashMap::new(),
-    }
-    .with_defaults())
+    TABLE.get_or_init(|| {
+        CostTable {
+            models: std::collections::HashMap::new(),
+        }
+        .with_defaults()
+    })
 }
 
 /// Calculate model cost from token counts.
@@ -713,6 +715,8 @@ where
     let prompt_text = extract_prompt_text(&params.prompt);
     let model_key = session.config_state.model.clone();
     let is_slash_command = prompt_text.trim_start().starts_with('/');
+    let resolved = resolve_model(roko_config, &model_key);
+    let resolved_for_logging = resolved.clone();
 
     debug!(
         session_id = %session.session_id,
@@ -832,6 +836,7 @@ where
                 &session_id,
                 prompt_text.trim(),
                 &workdir,
+                resolved.slug.clone(),
                 cancel_token,
                 event_sender,
                 shared_run,
@@ -854,6 +859,7 @@ where
                         clippy_enabled,
                         tests_enabled,
                         review_strictness,
+                        model_slug: resolved.slug.clone(),
                     },
                     cancel_token,
                     event_sender,
@@ -918,8 +924,6 @@ where
         }
 
         // Default: single-agent dispatch (workflow = "none").
-        // Resolve the model to determine which provider to use.
-        let resolved = resolve_model(&roko_config, &model_key);
         let provider_kind = resolved.provider_kind;
 
         info!(
@@ -990,31 +994,31 @@ where
     )
     .await;
 
-    if !is_slash_command
-        && let Ok(ref sr) = stream_result
-        && let Some(usage) = sr.usage.as_ref()
-    {
-        let resolved = resolve_model(&roko_config_for_logging, &model_key_for_logging);
-        let size = resolved
-            .profile
-            .as_ref()
-            .map(|profile| profile.context_window)
-            .unwrap_or_else(|| ModelProfile::default().context_window);
-        let update = SessionUpdate::UsageUpdate {
-            used: usage.total_tokens,
-            size,
-            cost: calculate_cost_for_model_slug(
-                &resolved.slug,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cached_read_tokens.unwrap_or(0),
-            )
-            .map(|amount| CostInfo {
-                amount,
-                currency: "USD".to_string(),
-            }),
-        };
-        let _ = send_session_update(transport, &session.session_id, update).await;
+    if !is_slash_command {
+        if let Ok(ref sr) = stream_result {
+            if let Some(usage) = sr.usage.as_ref() {
+                let size = resolved_for_logging
+                    .profile
+                    .as_ref()
+                    .map(|profile| profile.context_window)
+                    .unwrap_or_else(|| ModelProfile::default().context_window);
+                let update = SessionUpdate::UsageUpdate {
+                    used: usage.total_tokens,
+                    size,
+                    cost: calculate_cost_for_model_slug(
+                        &resolved_for_logging.slug,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cached_read_tokens.unwrap_or(0),
+                    )
+                    .map(|amount| CostInfo {
+                        amount,
+                        currency: "USD".to_string(),
+                    }),
+                };
+                let _ = send_session_update(transport, &session.session_id, update).await;
+            }
+        }
     }
 
     let task_result = cognitive_task.await;
@@ -1063,19 +1067,18 @@ where
             task_error.as_deref(),
             stream_error.as_deref(),
         );
-        let resolved = resolve_model(&roko_config_for_logging, &model_key_for_logging);
         let model_slugs =
-            cascade_router_model_slugs(&roko_config_for_logging, &resolved.slug);
+            cascade_router_model_slugs(&roko_config_for_logging, &resolved_for_logging.slug);
         let routing_ctx =
             acp_routing_context(&session.config_state.agent_mode, &prompt_text_for_logging);
-        let output_tokens = stream_result_ref
-            .and_then(|sr| sr.usage.as_ref().map(|usage| usage.output_tokens));
+        let output_tokens =
+            stream_result_ref.and_then(|sr| sr.usage.as_ref().map(|usage| usage.output_tokens));
         record_cascade_observation(
             workdir_for_logging
                 .join(".roko")
                 .join("learn")
                 .join("cascade-router.json"),
-            resolved.slug,
+            resolved_for_logging.slug,
             routing_ctx,
             dispatch_succeeded,
             dispatch_started.elapsed().as_millis() as u64,
@@ -1716,6 +1719,7 @@ async fn run_slash_command(
     session_id: &str,
     raw_input: &str,
     workdir: &Path,
+    model_slug: String,
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
     shared_run: crate::session::SharedWorkflowRun,
@@ -2021,6 +2025,7 @@ Use the Workflow dropdown in the status bar to select, or:
                         clippy_enabled: true,
                         tests_enabled: true,
                         review_strictness: "standard".to_string(),
+                        model_slug: model_slug.clone(),
                     },
                     cancel_token,
                     event_sender,
@@ -2063,6 +2068,7 @@ Use the Workflow dropdown in the status bar to select, or:
                         clippy_enabled: true,
                         tests_enabled: true,
                         review_strictness: "standard".to_string(),
+                        model_slug: model_slug.clone(),
                     },
                     cancel_token,
                     event_sender,
@@ -2808,9 +2814,18 @@ mod tests {
         let result = result.expect("stream should succeed");
 
         assert_eq!(result.prompt_result.stop_reason, StopReason::EndTurn);
-        assert_eq!(result.usage.as_ref().map(|usage| usage.total_tokens), Some(12));
-        assert_eq!(result.usage.as_ref().map(|usage| usage.input_tokens), Some(5));
-        assert_eq!(result.usage.as_ref().map(|usage| usage.output_tokens), Some(7));
+        assert_eq!(
+            result.usage.as_ref().map(|usage| usage.total_tokens),
+            Some(12)
+        );
+        assert_eq!(
+            result.usage.as_ref().map(|usage| usage.input_tokens),
+            Some(5)
+        );
+        assert_eq!(
+            result.usage.as_ref().map(|usage| usage.output_tokens),
+            Some(7)
+        );
 
         let mut line = String::new();
         reader

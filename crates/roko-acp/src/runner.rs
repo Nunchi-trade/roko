@@ -10,6 +10,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use roko_agent::claude_cli_agent::build_settings_json;
+use roko_agent::{Agent as RokoAgent, ClaudeCliAgent};
 use roko_core::foundation::EventConsumer as CoreEventConsumer;
 use roko_core::{
     Body, Context, Engram, Kind, RuntimeEvent as CoreRuntimeEvent, Verify,
@@ -48,6 +50,8 @@ pub struct PipelineConfig {
     pub tests_enabled: bool,
     /// Review strictness: "none", "quick", "standard", "thorough".
     pub review_strictness: String,
+    /// Resolved model slug used for agent phases.
+    pub model_slug: String,
 }
 
 const CLAUDE_CLI_BIN: &str = "claude";
@@ -892,6 +896,7 @@ pub async fn run_workflow_pipeline(
                     "Strategist",
                     &full_prompt,
                     workdir,
+                    &config.model_slug,
                     &cancel_token,
                     &event_sender,
                 )
@@ -925,6 +930,7 @@ pub async fn run_workflow_pipeline(
                     "Implementer",
                     &full_prompt,
                     workdir,
+                    &config.model_slug,
                     &cancel_token,
                     &event_sender,
                 )
@@ -951,6 +957,7 @@ pub async fn run_workflow_pipeline(
                     "AutoFixer",
                     &fix_prompt,
                     workdir,
+                    &config.model_slug,
                     &cancel_token,
                     &event_sender,
                 )
@@ -1484,6 +1491,7 @@ async fn run_single_review(
         "Reviewer",
         &review_prompt,
         workdir,
+        &config.model_slug,
         cancel_token,
         event_sender,
     )
@@ -1517,7 +1525,7 @@ async fn run_multi_role_review(
     session_id: &str,
     run: &mut WorkflowRun,
     workdir: &Path,
-    _config: &PipelineConfig,
+    config: &PipelineConfig,
     knowledge_context: &str,
     cancel_token: &CancelToken,
     event_sender: &mpsc::Sender<CognitiveEvent>,
@@ -1554,6 +1562,7 @@ async fn run_multi_role_review(
         "Architect",
         &architect_prompt,
         workdir,
+        &config.model_slug,
         cancel_token,
         event_sender,
     )
@@ -1578,6 +1587,7 @@ async fn run_multi_role_review(
         "Auditor",
         &auditor_prompt,
         workdir,
+        &config.model_slug,
         cancel_token,
         event_sender,
     )
@@ -1606,12 +1616,13 @@ async fn run_multi_role_review(
     }
 }
 
-/// Run a single agent phase using claude CLI and stream output.
+/// Run a single agent phase using ClaudeCliAgent and stream output.
 async fn run_agent_phase(
     _session_id: &str,
     role: &str,
     prompt: &str,
     workdir: &Path,
+    model_slug: &str,
     cancel_token: &CancelToken,
     event_sender: &mpsc::Sender<CognitiveEvent>,
 ) -> anyhow::Result<String> {
@@ -1625,8 +1636,8 @@ async fn run_agent_phase(
         })
         .await;
 
-    // Run claude CLI.
-    let output = run_claude_cli(prompt, workdir, cancel_token).await;
+    // Run through the shared Claude CLI agent adapter.
+    let output = run_claude_cli_via_agent(prompt, workdir, model_slug, cancel_token).await;
 
     match &output {
         Ok(text) => {
@@ -1845,36 +1856,40 @@ async fn run_verify_gate(
     }
 }
 
-/// Run claude CLI as a subprocess and capture output.
-async fn run_claude_cli(
+/// Run Claude CLI through the shared agent adapter and capture output.
+async fn run_claude_cli_via_agent(
     prompt: &str,
     workdir: &Path,
+    model_slug: &str,
     cancel_token: &CancelToken,
 ) -> anyhow::Result<String> {
     if cancel_token.is_cancelled() {
         return Err(anyhow::anyhow!("cancelled"));
     }
 
-    let output = Command::new(CLAUDE_CLI_BIN)
-        .arg("--print")
-        .arg("--dangerously-skip-permissions")
-        .arg(prompt)
-        .current_dir(workdir)
-        .output()
-        .await?;
+    let agent = ClaudeCliAgent::new(CLAUDE_CLI_BIN, workdir, model_slug)
+        .with_settings_json(build_settings_json());
+    let input = Engram::builder(Kind::Task).body(Body::text(prompt)).build();
+    let ctx = Context::now();
 
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let result = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            return Err(anyhow::anyhow!("cancelled"));
+        }
+        result = agent.run(&input, &ctx) => result,
+    };
+
+    let text = result.output.body.as_text().unwrap_or("").to_string();
+    if result.success {
         Ok(text)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let error = if stderr.is_empty() {
-            stdout.to_string()
+        let error_text = if text.is_empty() {
+            "agent failed".to_string()
         } else {
-            stderr.to_string()
+            text
         };
-        Err(anyhow::anyhow!("claude CLI failed: {error}"))
+        Err(anyhow::anyhow!("agent failed: {error_text}"))
     }
 }
 
