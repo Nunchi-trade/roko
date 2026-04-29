@@ -21,6 +21,7 @@ export const DEMO_BENCH_MODELS: BenchModel[] = [
   { id: 'gpt-4o-mini', name: 'GPT-4o Mini', provider: 'OpenAI', cost_per_1k_input: 0.00015, cost_per_1k_output: 0.0006, max_tokens: 4096, context_window: 128000 },
   { id: 'o3-mini', name: 'o3-mini', provider: 'OpenAI', cost_per_1k_input: 0.0011, cost_per_1k_output: 0.0044, max_tokens: 16384, context_window: 200000 },
   { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'Google', cost_per_1k_input: 0.00125, cost_per_1k_output: 0.01, max_tokens: 8192, context_window: 1000000 },
+  { id: 'llama3.1-8b', name: 'Llama 3.1 8B (Cerebras)', provider: 'Cerebras', cost_per_1k_input: 0.0001, cost_per_1k_output: 0.0001, max_tokens: 8192, context_window: 128000 },
 ];
 
 // ── Suites ──
@@ -38,6 +39,21 @@ export const DEMO_BENCH_SUITES: BenchSuite[] = [
       { id: 'smoke-3', name: 'File reader', prompt: 'Read a file and count lines', difficulty: 1, tags: ['rust', 'io'] },
       { id: 'smoke-4', name: 'JSON parse', prompt: 'Parse a JSON config file into a struct', difficulty: 2, tags: ['rust', 'serde'] },
       { id: 'smoke-5', name: 'HTTP health check', prompt: 'Create a health endpoint returning JSON', difficulty: 2, tags: ['rust', 'http'] },
+    ],
+  },
+  {
+    id: 'learnable-rust',
+    name: 'Learnable Rust',
+    description: 'Offline self-learning demo suite tuned for Cerebras',
+    estimated_cost_usd: 0.08,
+    difficulty_range: [2, 4],
+    tasks: [
+      { id: 'lr-1', name: 'Model catalog', prompt: 'Add a new selectable model to a Rust bench catalog and keep the fallback data in sync.', difficulty: 2, tags: ['rust', 'catalog'] },
+      { id: 'lr-2', name: 'Cost estimator', prompt: 'Extend a Rust cost estimator with a new low-cost provider branch.', difficulty: 3, tags: ['rust', 'pricing'] },
+      { id: 'lr-3', name: 'Demo history', prompt: 'Seed offline benchmark history with a Cerebras-backed run.', difficulty: 2, tags: ['rust', 'demo'] },
+      { id: 'lr-4', name: 'Resolver wiring', prompt: 'Resolve a model slug into the right backend and provider metadata.', difficulty: 3, tags: ['rust', 'routing'] },
+      { id: 'lr-5', name: 'Truthful fallback', prompt: 'Keep offline fallback data labeled as demo data instead of live data.', difficulty: 2, tags: ['rust', 'truth'] },
+      { id: 'lr-6', name: 'Run summary', prompt: 'Summarize pass rate, cost, and duration for a completed benchmark run.', difficulty: 4, tags: ['rust', 'metrics'] },
     ],
   },
   {
@@ -85,7 +101,15 @@ function makeResults(suiteId: string, model: string, passRate: number): BenchTas
   if (!suite) return [];
   return suite.tasks.map((task, i) => {
     const passed = i / suite.tasks.length < passRate;
-    const baseCost = model.includes('haiku') ? 0.003 : model.includes('sonnet') ? 0.012 : model.includes('opus') ? 0.04 : 0.01;
+    const baseCost = model.includes('haiku')
+      ? 0.003
+      : model.includes('sonnet')
+        ? 0.012
+        : model.includes('opus')
+          ? 0.04
+          : model.includes('llama') || model.includes('cerebras')
+            ? 0.0001
+            : 0.01;
     const cost = baseCost * (0.8 + Math.random() * 0.4) * task.difficulty;
     const tokens = Math.round(800 + task.difficulty * 600 + Math.random() * 400);
     return {
@@ -129,10 +153,31 @@ function summarize(results: BenchTaskResult[]): BenchRunSummary {
   };
 }
 
+const run3Results = makeResults('learnable-rust', 'llama3.1-8b', 0.875);
 const run1Results = makeResults('roko-bench', 'claude-sonnet-4-20250514', 0.875);
 const run2Results = makeResults('smoke', 'claude-haiku-3-20250414', 1.0);
 
 export const DEMO_BENCH_RUNS: BenchRun[] = [
+  {
+    id: 'br-003',
+    kind: 'suite',
+    config: {
+      model: 'llama3.1-8b',
+      provider: 'Cerebras',
+      temperature: 0.0,
+      timeout_secs: 90,
+      strategy: 'full_cascade',
+      retries: 1,
+      gates: { compile: true, test: true, clippy: true, diff: false },
+    },
+    suite_id: 'learnable-rust',
+    suite_name: 'Learnable Rust',
+    status: 'completed',
+    results: run3Results,
+    summary: summarize(run3Results),
+    started_at: '2026-04-27T13:00:00Z',
+    finished_at: '2026-04-27T13:09:42Z',
+  },
   {
     id: 'br-001',
     kind: 'suite',
