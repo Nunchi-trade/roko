@@ -5,8 +5,11 @@ import HeroParticleField from './HeroParticleField';
 import Curtain from './Curtain';
 import ScrollTrack from './ScrollTrack';
 import TopNav from './TopNav';
+import { useApiWithFallback } from '../hooks/useApiWithFallback';
 
 export default function AppShell() {
+  const { dataMode } = useApiWithFallback();
+
   useEffect(() => {
     const io = new IntersectionObserver(
       (entries) => {
@@ -30,6 +33,28 @@ export default function AppShell() {
       <Curtain />
       <ScrollTrack />
       <TopNav />
+      {dataMode === 'seed' && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 52,
+            right: 12,
+            zIndex: 9000,
+            background: 'rgba(255, 200, 0, 0.15)',
+            border: '1px solid rgba(255, 200, 0, 0.4)',
+            borderRadius: 4,
+            padding: '2px 8px',
+            fontSize: 11,
+            fontFamily: 'monospace',
+            color: 'rgba(255, 200, 0, 0.9)',
+            letterSpacing: '0.08em',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          SEED DATA
+        </div>
+      )}
       <div className="app-frame" style={{ paddingTop: 48, position: 'relative', zIndex: 1, minHeight: '100vh' }}>
         <Outlet />
       </div>

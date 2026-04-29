@@ -36,6 +36,38 @@ function getFallback(path: string): unknown {
 let _serverLive: boolean | null = null; // null = unknown
 let _probePromise: Promise<void> | null = null;
 
+// Tally of seed vs non-seed records observed across all API responses.
+let _seedCount = 0;
+let _nonSeedCount = 0;
+let _dataModeListeners = new Set<() => void>();
+
+function notifyDataModeListeners(): void {
+  for (const listener of _dataModeListeners) {
+    listener();
+  }
+}
+
+function tallySourceField(data: unknown): void {
+  if (!Array.isArray(data)) return;
+  for (const item of data) {
+    if (item && typeof item === 'object') {
+      if ((item as Record<string, unknown>).source === 'seed') {
+        _seedCount += 1;
+      } else {
+        _nonSeedCount += 1;
+      }
+    } else {
+      _nonSeedCount += 1;
+    }
+  }
+}
+
+function deriveDataMode(): 'seed' | 'live' | 'unknown' {
+  if (_nonSeedCount === 0 && _seedCount > 0) return 'seed';
+  if (_nonSeedCount > 0) return 'live';
+  return 'unknown';
+}
+
 function probeServer(): Promise<void> {
   if (_probePromise) return _probePromise;
   _probePromise = (async () => {
@@ -52,6 +84,7 @@ function probeServer(): Promise<void> {
 export function useApiWithFallback() {
   const api = useApi();
   const [isLive, setIsLive] = useState(_serverLive === true);
+  const [dataMode, setDataMode] = useState<'seed' | 'live' | 'unknown'>('unknown');
 
   useEffect(() => {
     probeServer().then(() => {
@@ -59,19 +92,43 @@ export function useApiWithFallback() {
     });
   }, []);
 
+  useEffect(() => {
+    const listener = () => {
+      setDataMode(deriveDataMode());
+    };
+
+    _dataModeListeners.add(listener);
+    listener();
+
+    return () => {
+      _dataModeListeners.delete(listener);
+    };
+  }, []);
+
   const get = useCallback(async <T = unknown>(path: string): Promise<T> => {
     // Offline → straight to fallback
     if (_serverLive === false) {
-      return getFallback(path) as T;
+      const result = getFallback(path) as T;
+      tallySourceField(result);
+      setDataMode(deriveDataMode());
+      notifyDataModeListeners();
+      return result;
     }
 
     // Server is live (or probe hasn't finished) — always try the real API
     try {
       const data = await api.get<T>(path);
+      tallySourceField(data);
+      setDataMode(deriveDataMode());
+      notifyDataModeListeners();
       return data;
     } catch {
       // Network error or 4xx/5xx → fallback for this endpoint
-      return getFallback(path) as T;
+      const result = getFallback(path) as T;
+      tallySourceField(result);
+      setDataMode(deriveDataMode());
+      notifyDataModeListeners();
+      return result;
     }
   }, [api]);
 
@@ -84,5 +141,8 @@ export function useApiWithFallback() {
     }
   }, [api]);
 
-  return useMemo(() => ({ get, post, baseUrl: api.baseUrl, isLive }), [get, post, api.baseUrl, isLive]);
+  return useMemo(
+    () => ({ get, post, baseUrl: api.baseUrl, isLive, dataMode }),
+    [get, post, api.baseUrl, isLive, dataMode],
+  );
 }

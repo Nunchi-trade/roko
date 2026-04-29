@@ -97,7 +97,9 @@ function buildCostSegments(results: BenchTaskResult[], groupBy: CostGroupBy): Co
     if (segment) addCost(segment, result);
   });
 
-  return (['Easy', 'Medium', 'Hard'] as const).map((label) => buckets.get(label)).filter((segment): segment is CostSegment => Boolean(segment));
+  return (['Easy', 'Medium', 'Hard'] as const)
+    .map((label) => buckets.get(label))
+    .filter((segment): segment is CostSegment => Boolean(segment));
 }
 
 function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResult[]; height?: number }) {
