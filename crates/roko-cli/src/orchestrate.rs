@@ -2625,6 +2625,8 @@ struct TaskTracker {
     last_dispatch_role_label: Option<String>,
     /// Output hash from the most recent implementation dispatch.
     last_impl_output_hash: Option<ContentHash>,
+    /// Artifact validity for the most recent artifact-producing task, if known.
+    artifact_valid: Option<bool>,
     /// Knowledge entry ids surfaced in the most recent task context.
     last_context_knowledge_ids: Vec<String>,
     /// Last detailed gate verdicts emitted for this plan.
@@ -3123,6 +3125,76 @@ fn cascade_context_vec(
     cascade_routing_context(runner, plan_id, task_id, role, task_def).to_features()
 }
 
+/// Returns true for tasks whose primary output is a document or plan that
+/// requires grounding validation (R4). For these tasks, the cascade router
+/// positive observation is gated on `artifact_valid` in addition to
+/// `result.success`.
+fn is_artifact_producing_task(task_def: Option<&crate::task_parser::TaskDef>) -> bool {
+    let Some(td) = task_def else {
+        return false;
+    };
+    matches!(
+        td.role.as_deref(),
+        Some("planner") | Some("architect") | Some("strategist")
+    ) || td.id.starts_with("prd:")
+        || td.id.starts_with("plan:")
+}
+
+fn parse_artifact_valid_flag(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("true")
+        || value == "1"
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("y")
+    {
+        return Some(true);
+    }
+    if value.eq_ignore_ascii_case("false")
+        || value == "0"
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("n")
+    {
+        return Some(false);
+    }
+    None
+}
+
+fn artifact_valid_from_output(output: &Engram) -> Option<bool> {
+    output
+        .tags
+        .get("artifact_valid")
+        .and_then(|value| parse_artifact_valid_flag(value))
+        .or_else(|| match &output.body {
+            Body::Json(value) => value
+                .get("artifact_valid")
+                .and_then(|artifact_valid| {
+                    artifact_valid
+                        .as_bool()
+                        .or_else(|| artifact_valid.as_str().and_then(parse_artifact_valid_flag))
+                })
+                .or_else(|| {
+                    value
+                        .as_bool()
+                        .or_else(|| value.as_str().and_then(parse_artifact_valid_flag))
+                }),
+            _ => None,
+        })
+}
+
+fn artifact_validation_allows_reward(
+    task_def: Option<&crate::task_parser::TaskDef>,
+    tracker_artifact_valid: Option<bool>,
+    output: &Engram,
+) -> bool {
+    if !is_artifact_producing_task(task_def) {
+        return true;
+    }
+
+    tracker_artifact_valid
+        .or_else(|| artifact_valid_from_output(output))
+        .unwrap_or(true)
+}
+
 impl TaskTracker {
     fn new(tasks_file: TasksFile, plan_dir: PathBuf) -> Self {
         let skipped = tasks_file
@@ -3146,6 +3218,7 @@ impl TaskTracker {
             last_impl_model_slug: None,
             last_dispatch_role_label: None,
             last_impl_output_hash: None,
+            artifact_valid: None,
             last_context_knowledge_ids: Vec::new(),
             last_gate_verdicts: Vec::new(),
             last_gate_verdict_summaries: Vec::new(),
@@ -3183,6 +3256,7 @@ impl TaskTracker {
             .collect();
         self.ready_since_ms
             .retain(|task_id, _| task_ids.contains(task_id));
+        self.artifact_valid = None;
         self.last_review_verdict = None;
         self.current_group_index = 0;
         self.advance_group_index();
@@ -3323,6 +3397,7 @@ impl TaskTracker {
         self.completed.retain(|task_id| task_ids.contains(task_id));
         self.current_group_index = 0;
         self.ready_since_ms.clear();
+        self.artifact_valid = None;
         self.last_gate_verdict_summaries.clear();
         self.last_review_verdict = None;
         self.impl_round += 1;
@@ -3372,6 +3447,7 @@ impl TaskTracker {
         self.skipped.clear();
         self.current_group_index = 0;
         self.ready_since_ms.clear();
+        self.artifact_valid = None;
         self.last_gate_verdict_summaries.clear();
         self.last_review_verdict = None;
         self.impl_round += 1;
@@ -10607,9 +10683,22 @@ impl PlanRunner {
         }
 
         let mut cascade_router_observed = false;
+        let artifact_task = is_artifact_producing_task(task_def.as_ref());
+        let tracker_artifact_valid = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|tracker| tracker.artifact_valid);
+        let artifact_valid = artifact_validation_allows_reward(
+            task_def.as_ref(),
+            tracker_artifact_valid,
+            &result.output,
+        );
+        if artifact_task && let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.artifact_valid = None;
+        }
 
         // ── Observe cascade router for bandit learning (§9) ─────────
-        if result.success {
+        if result.success && artifact_valid {
             use roko_core::TaskComplexityBand;
             use roko_core::config::schema::RewardWeights;
             use roko_learn::model_router::CONTEXT_DIM;
@@ -10697,6 +10786,16 @@ impl PlanRunner {
                     "skipping cascade observation: model not found in router arms"
                 );
             }
+        } else if result.success {
+            tracing::info!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                artifact_valid = artifact_valid,
+                "withholding cascade router reward for artifact-producing task"
+            );
+            // Mark the episode so learning runtime does not apply a fallback
+            // router observation for the same successful turn.
+            cascade_router_observed = true;
         }
 
         // ── Feed outcome into lookahead router calibration ────────
@@ -10725,7 +10824,7 @@ impl PlanRunner {
                 .task_trackers
                 .get(plan_id)
                 .and_then(|t| t.last_routing_reason.clone());
-            if routing_reason.as_deref() == Some("role_force_backend") {
+            if artifact_valid && routing_reason.as_deref() == Some("role_force_backend") {
                 let model = self.effective_model();
                 let ctx = cascade_routing_context(
                     self,
@@ -10778,6 +10877,12 @@ impl PlanRunner {
         let mut ep = Episode::new("Implementer", task_id).succeeded();
         if ep.episode_id.is_empty() {
             ep.episode_id = ep.id.clone();
+        }
+        if artifact_task {
+            ep.extra.insert(
+                "artifact_valid".to_string(),
+                serde_json::json!(artifact_valid),
+            );
         }
         let success_episode_id = ep.episode_id.clone();
         let task_strategy =
@@ -19874,6 +19979,88 @@ acceptance = []
         assert!(!is_plan_enrichment_artifact(
             "plan-1",
             "plans/plan-1/custom.md"
+        ));
+    }
+
+    fn test_task_def(role: Option<&str>, id: &str) -> crate::task_parser::TaskDef {
+        let role_line = role
+            .map(|role| format!("role = \"{role}\"\n"))
+            .unwrap_or_default();
+        let tasks = format!(
+            r#"[meta]
+plan = "demo"
+
+[[task]]
+id = "{id}"
+title = "Test task"
+{role_line}"#
+        );
+        TasksFile::parse_str(&tasks)
+            .expect("parse test task")
+            .tasks
+            .into_iter()
+            .next()
+            .expect("task present")
+    }
+
+    #[test]
+    fn artifact_task_classifier_matches_roles_and_ids() {
+        for role in ["planner", "architect", "strategist"] {
+            let task = test_task_def(Some(role), "T1");
+            assert!(is_artifact_producing_task(Some(&task)));
+        }
+
+        assert!(is_artifact_producing_task(Some(&test_task_def(
+            None,
+            "prd:generate"
+        ))));
+        assert!(is_artifact_producing_task(Some(&test_task_def(
+            None,
+            "plan:generate"
+        ))));
+        assert!(!is_artifact_producing_task(Some(&test_task_def(
+            Some("implementer"),
+            "T2"
+        ))));
+        assert!(!is_artifact_producing_task(None));
+    }
+
+    #[test]
+    fn artifact_reward_gate_uses_tracker_and_output_metadata() {
+        let artifact_task = test_task_def(Some("planner"), "plan:generate");
+        let regular_task = test_task_def(Some("implementer"), "T2");
+        let tag_output = Engram::builder(Kind::AgentOutput)
+            .body(Body::text("plan output"))
+            .tag("artifact_valid", "false")
+            .build();
+        let json_output = Engram::builder(Kind::AgentOutput)
+            .body(Body::Json(serde_json::json!({"artifact_valid": false})))
+            .build();
+
+        assert!(!artifact_validation_allows_reward(
+            Some(&artifact_task),
+            Some(false),
+            &tag_output,
+        ));
+        assert!(!artifact_validation_allows_reward(
+            Some(&artifact_task),
+            None,
+            &tag_output,
+        ));
+        assert!(!artifact_validation_allows_reward(
+            Some(&artifact_task),
+            None,
+            &json_output,
+        ));
+        assert!(artifact_validation_allows_reward(
+            Some(&regular_task),
+            Some(false),
+            &tag_output,
+        ));
+        assert!(artifact_validation_allows_reward(
+            None,
+            Some(false),
+            &tag_output
         ));
     }
 
