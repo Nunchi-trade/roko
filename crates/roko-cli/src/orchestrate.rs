@@ -231,9 +231,9 @@ pub fn effective_chain_mode_for_doctor(config_mode: ChainMode) -> ChainMode {
 /// then disabled cleanly without aborting startup.
 ///
 /// Phase A: `Light` and `Follower` modes return a stub `FollowerChainClient`
-/// that surfaces `Unsupported` for every read; Phase B wires a real
-/// `alto-follower` subprocess. See plan
-/// `~/.claude/plans/greedy-moseying-cerf.md`.
+/// that surfaces `Unsupported` for every read; Phase B adds `alto-follower`
+/// as a Cargo dep and replaces the stubs with calls into its in-process
+/// actor handles. See plan `~/.claude/plans/greedy-moseying-cerf.md`.
 fn init_chain_client(chain: &ChainConfig) -> Option<Arc<dyn ChainClient>> {
     let mode = effective_chain_mode(chain.mode);
     match mode {
@@ -259,14 +259,14 @@ fn init_chain_client(chain: &ChainConfig) -> Option<Arc<dyn ChainClient>> {
         ChainMode::Light => {
             tracing::info!(
                 mode = %mode,
-                "chain client initialized (light-client stub; Phase B will wire alto-follower)"
+                "chain client initialized (light-client stub; Phase B will embed alto-follower as a library)"
             );
             Some(Arc::new(FollowerChainClient::stub(FollowerFlavor::Light)))
         }
         ChainMode::Follower => {
             tracing::info!(
                 mode = %mode,
-                "chain client initialized (follower stub; Phase B will wire alto-follower)"
+                "chain client initialized (follower stub; Phase B will embed alto-follower as a library)"
             );
             Some(Arc::new(FollowerChainClient::stub(
                 FollowerFlavor::Follower,

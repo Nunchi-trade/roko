@@ -1,20 +1,24 @@
-//! [`FollowerChainClient`] — read-only [`ChainClient`] backed by a Commonware
-//! `alto-follower` subprocess.
+//! [`FollowerChainClient`] — read-only [`ChainClient`] backed by Commonware
+//! `alto-follower`'s actor stack, embedded in-process as a library.
 //!
 //! The same backend serves both `chain.mode = "light"` and `chain.mode =
-//! "follower"`. The only difference between the two modes is the follower's
-//! `pruning_depth` config — `0` keeps no history (light client), `None` keeps
-//! everything (full follower). The Roko trait surface is identical either way,
-//! so callers don't need to know which mode is active.
+//! "follower"`. The only difference between the two modes is `pruning_depth`
+//! — `0` keeps no history (light client), `None` keeps everything (full
+//! follower). The Roko trait surface is identical either way, so callers
+//! don't need to know which mode is active.
 //!
 //! ## Phase A status
 //!
 //! This crate currently ships the **skeleton**: the type implements
 //! [`ChainClient`] but every method returns
 //! [`ChainError::Unsupported`](crate::ChainError::Unsupported). Phase B (when
-//! Jacob's indexer URL + threshold pubkey land for Daeji) wires the actual
-//! subprocess + state-read logic. Until then `roko run --chain-mode light` is
-//! safe to invoke — it just won't satisfy `chain.*` tool calls.
+//! Jacob's validator endpoint + BLS12-381 threshold pubkey land for Daeji)
+//! adds `alto-follower` + `commonware-*` as Cargo deps and replaces these
+//! stubs with calls into the in-process actor handles. **No subprocess, no
+//! separate indexer service** — alto-follower's `Feeder` talks to Jacob's
+//! validator HTTP endpoint directly and runs alongside the rest of Roko on
+//! the same tokio runtime. Until then `roko run --chain-mode light` is safe
+//! to invoke — it just won't satisfy `chain.*` tool calls.
 //!
 //! See `~/.claude/plans/greedy-moseying-cerf.md` for the full plan.
 
@@ -26,7 +30,7 @@ use crate::types::{
 use async_trait::async_trait;
 
 /// Active follower flavor — selects the human-readable `name()` and (in Phase
-/// B) the `pruning_depth` passed to the subprocess.
+/// B) the `pruning_depth` passed to alto-follower's actors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FollowerFlavor {
     /// Light client (no history; `pruning_depth = 0`).
@@ -44,9 +48,10 @@ impl FollowerFlavor {
     }
 }
 
-/// Read-only chain client backed by an `alto-follower` subprocess.
+/// Read-only chain client backed by an in-process `alto-follower` actor
+/// stack.
 ///
-/// Cheap to clone — actual state lives behind the subprocess handle (Phase B).
+/// Cheap to clone — actual state lives behind the actor handles (Phase B).
 #[derive(Clone, Debug)]
 pub struct FollowerChainClient {
     flavor: FollowerFlavor,
@@ -54,7 +59,7 @@ pub struct FollowerChainClient {
 
 impl FollowerChainClient {
     /// Construct a stub client. Phase A only — Phase B replaces with a
-    /// constructor that takes a `FollowerSupervisor::Handle`.
+    /// constructor that takes a `FollowerRuntime::Handle`.
     pub fn stub(flavor: FollowerFlavor) -> Self {
         Self { flavor }
     }

@@ -439,10 +439,11 @@ fn check_chain_mode(workdir: &Path) -> DoctorCheck {
     let (status, message, detail) = match active {
         ChainMode::Light | ChainMode::Follower => (
             DoctorStatus::Warn,
-            format!("chain.mode = {active} (Phase A stub: subprocess not yet wired)"),
+            format!("chain.mode = {active} (Phase A stub: alto-follower not yet imported)"),
             Some(format!(
                 "Reads via this backend currently return Unsupported until Phase B \
-                 (alto-follower wiring). See ~/.claude/plans/greedy-moseying-cerf.md.{}",
+                 (embeds alto-follower as a library). See \
+                 ~/.claude/plans/greedy-moseying-cerf.md.{}",
                 if overridden {
                     format!(" Override active: --chain-mode={active} (config = {configured}).")
                 } else {
