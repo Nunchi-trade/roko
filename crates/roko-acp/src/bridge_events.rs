@@ -45,7 +45,8 @@ use crate::{
     session::{AcpSession, CancelToken},
     transport::{StdioTransport, TransportError, TransportResult},
     types::{
-        ContentBlock, CostInfo, JsonRpcMessage, PlanEntry, SESSION_BUSY, SessionCancelParams,
+        ContentBlock, CostInfo, JsonRpcMessage, PermissionAction, PermissionDecision,
+        PermissionResponse, PlanEntry, RequestPermissionParams, SESSION_BUSY, SessionCancelParams,
         SessionPromptParams, SessionPromptResult, SessionUpdate, StopReason, ToolCallKind,
         ToolCallStatus, UsageInfo,
     },
@@ -536,6 +537,188 @@ fn truncate_assistant_history(text: &str) -> String {
     truncated
 }
 
+/// Sends a `session/request_permission` request to the editor and waits for the decision.
+///
+/// Returns `PermissionDecision::Allow` if the action is already pre-granted.
+/// Returns `PermissionDecision::Reject` on timeout or error, which is the safe default.
+///
+/// If the user chooses `AlwaysAllow`, the decision is remembered on the session and persisted
+/// to `.roko/trust/permissions.json`.
+pub async fn request_permission<R, W>(
+    transport: &mut StdioTransport<R, W>,
+    session: &mut AcpSession,
+    workdir: &Path,
+    action: PermissionAction,
+    title: &str,
+    detail: &str,
+) -> PermissionDecision
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    if session.is_pre_granted(&action) {
+        debug!(
+            session_id = %session.session_id,
+            action = ?action,
+            "permission pre-granted (always-allow)"
+        );
+        return PermissionDecision::Allow;
+    }
+
+    debug!(
+        session_id = %session.session_id,
+        action = ?action,
+        title = %title,
+        detail = %detail,
+        "requesting permission from editor"
+    );
+
+    let params = serde_json::to_value(RequestPermissionParams {
+        session_id: session.session_id.clone(),
+        title: title.to_string(),
+        detail: detail.to_string(),
+        action: action.clone(),
+    })
+    .unwrap_or_else(|error| {
+        warn!(
+            session_id = %session.session_id,
+            action = ?action,
+            error = %error,
+            "failed to serialize permission request; sending null payload"
+        );
+        serde_json::Value::Null
+    });
+
+    let mut request_transport = transport.clone();
+    let request_future = request_transport.send_request("session/request_permission", params);
+    tokio::pin!(request_future);
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(300));
+    tokio::pin!(timeout);
+
+    loop {
+        tokio::select! {
+            biased;
+            response = &mut request_future => {
+                match response {
+                    Ok(json_response) => {
+                        if let Some(error) = json_response.error.as_ref() {
+                            warn!(
+                                session_id = %session.session_id,
+                                action = ?action,
+                                code = error.code,
+                                message = %error.message,
+                                "permission request returned an error; defaulting to Reject"
+                            );
+                            return PermissionDecision::Reject;
+                        }
+
+                        let decision = json_response
+                            .result
+                            .as_ref()
+                            .and_then(|value| serde_json::from_value::<PermissionResponse>(value.clone()).ok())
+                            .map(|response| response.decision)
+                            .unwrap_or_else(|| {
+                                warn!(
+                                    session_id = %session.session_id,
+                                    action = ?action,
+                                    "permission response could not be parsed; defaulting to Reject"
+                                );
+                                PermissionDecision::Reject
+                            });
+
+                        if matches!(decision, PermissionDecision::AlwaysAllow) {
+                            session.grant_always_allow(action.clone());
+                            AcpSession::save_workspace_trust(workdir, &session.always_allowed);
+                            info!(
+                                session_id = %session.session_id,
+                                action = ?action,
+                                "permission permanently granted (always-allow persisted)"
+                            );
+                        }
+
+                        return decision;
+                    }
+                    Err(error) => {
+                        warn!(
+                            session_id = %session.session_id,
+                            action = ?action,
+                            error = %error,
+                            "permission request transport error; defaulting to Reject"
+                        );
+                        return PermissionDecision::Reject;
+                    }
+                }
+            }
+            inbound = transport.read_message() => {
+                match inbound {
+                    Ok(Some(JsonRpcMessage::Response(response))) => {
+                        transport.handle_incoming_response(response);
+                    }
+                    Ok(Some(JsonRpcMessage::Notification(notification))) => {
+                        if notification.method == "session/cancel" {
+                            match serde_json::from_value::<SessionCancelParams>(
+                                notification.params.unwrap_or(serde_json::Value::Null),
+                            ) {
+                                Ok(params) if params.session_id == session.session_id => {
+                                    warn!(
+                                        session_id = %session.session_id,
+                                        "permission request cancelled by client; defaulting to Reject"
+                                    );
+                                    return PermissionDecision::Reject;
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    warn!(
+                                        session_id = %session.session_id,
+                                        error = %error,
+                                        "received malformed session/cancel while waiting for permission"
+                                    );
+                                }
+                            }
+                        } else {
+                            debug!(
+                                session_id = %session.session_id,
+                                method = %notification.method,
+                                "ignoring notification while waiting for permission"
+                            );
+                        }
+                    }
+                    Ok(Some(JsonRpcMessage::Request(request))) => {
+                        warn!(
+                            session_id = %session.session_id,
+                            method = %request.method,
+                            "ignoring inbound request while waiting for permission"
+                        );
+                    }
+                    Ok(None) => {
+                        warn!(
+                            session_id = %session.session_id,
+                            "ACP client disconnected while waiting for permission"
+                        );
+                        return PermissionDecision::Reject;
+                    }
+                    Err(error) => {
+                        warn!(
+                            session_id = %session.session_id,
+                            error = %error,
+                            "failed to read inbound message while waiting for permission; defaulting to Reject"
+                        );
+                        return PermissionDecision::Reject;
+                    }
+                }
+            }
+            _ = &mut timeout => {
+                warn!(
+                    session_id = %session.session_id,
+                    action = ?action,
+                    "permission request timed out after 5 minutes; defaulting to Reject"
+                );
+                return PermissionDecision::Reject;
+            }
+        }
+    }
+}
+
 /// Maps cognitive events to ACP `session/update` notifications and streams them to the editor.
 /// Returns both the prompt result and the accumulated assistant response text.
 pub async fn stream_events_to_editor<R, W>(
@@ -738,6 +921,57 @@ where
     } else {
         crate::pipeline::WorkflowTemplate::from_config(&workflow_config)
     };
+
+    if !is_slash_command {
+        session.push_user_turn(prompt_text.clone());
+    }
+
+    let agent_mode = session.config_state.agent_mode.clone();
+    if !is_slash_command && pipeline_template.is_none() && agent_mode == "code" {
+        let permission_detail = format!(
+            "The {} agent may read and modify files in {}.",
+            agent_mode,
+            workdir.display()
+        );
+        let decision = request_permission(
+            transport,
+            session,
+            workdir,
+            PermissionAction::FileEdit,
+            "Allow code agent to edit files?",
+            &permission_detail,
+        )
+        .await;
+
+        if matches!(decision, PermissionDecision::Reject) {
+            info!(
+                session_id = %session.session_id,
+                "user rejected permission for code agent dispatch"
+            );
+            let (reject_sender, reject_receiver) = mpsc::channel(4);
+            let _ = reject_sender
+                .send(CognitiveEvent::TokenChunk(
+                    "Permission denied. The agent cannot proceed without file access.".to_string(),
+                ))
+                .await;
+            let _ = reject_sender
+                .send(CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                })
+                .await;
+            drop(reject_sender);
+            return stream_events_to_editor(
+                transport,
+                &session.session_id,
+                reject_receiver,
+                &session.cancel_token,
+            )
+            .await
+            .map(|sr| sr.prompt_result);
+        }
+    }
+
     let should_resolve_context = !is_slash_command && pipeline_template.is_none();
 
     let knowledge = if is_slash_command {
@@ -785,11 +1019,6 @@ where
     } else {
         Vec::new()
     };
-
-    // Push user turn before dispatch (skip slash commands).
-    if !is_slash_command {
-        session.push_user_turn(prompt_text.clone());
-    }
 
     let (event_sender, event_receiver) = mpsc::channel(64);
     if !is_slash_command {
@@ -2847,13 +3076,13 @@ fn text_block(text: String) -> ContentBlock {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tokio::io::{AsyncBufReadExt, BufReader, duplex, empty};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, empty};
 
     use super::*;
     use crate::{
         session::AcpSession,
         transport::StdioTransport,
-        types::{JsonRpcNotification, SessionNewParams},
+        types::{JsonRpcNotification, PermissionDecision, SessionNewParams},
     };
 
     fn test_session(model: &str, workflow: &str) -> AcpSession {
@@ -2865,6 +3094,33 @@ mod tests {
         session.config_state.model = model.to_string();
         session.config_state.workflow = workflow.to_string();
         session
+    }
+
+    async fn reply_to_permission_request<C>(client: C, result: serde_json::Value)
+    where
+        C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read permission request");
+        let request: serde_json::Value = serde_json::from_str(&line).expect("parse request");
+        let request_id = request["id"].clone();
+        let mut client = reader.into_inner();
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result,
+        });
+        let payload = serde_json::to_vec(&response).expect("serialize response");
+        client
+            .write_all(&payload)
+            .await
+            .expect("write response bytes");
+        client.write_all(b"\n").await.expect("write newline");
+        client.flush().await.expect("flush response");
     }
 
     #[tokio::test]
@@ -2989,6 +3245,92 @@ mod tests {
                 format!("session '{session_id}' already has an active prompt")
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn request_permission_returns_allow_for_pregranted_action() {
+        let mut transport = StdioTransport::from_io(empty(), tokio::io::sink());
+        let mut session = AcpSession::new(SessionNewParams {
+            session_name: Some("perm-test".to_string()),
+            client_capabilities: None,
+            mcp_servers: Vec::new(),
+        });
+        let action = crate::types::PermissionAction::FileEdit;
+        session.grant_always_allow(action.clone());
+
+        let decision = request_permission(
+            &mut transport,
+            &mut session,
+            Path::new("."),
+            action,
+            "Allow code agent to edit files?",
+            "The code agent may read and modify files.",
+        )
+        .await;
+
+        assert_eq!(decision, PermissionDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn request_permission_persists_always_allow_decision() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path().to_path_buf();
+        let mut session = AcpSession::new(SessionNewParams {
+            session_name: Some("perm-test".to_string()),
+            client_capabilities: None,
+            mcp_servers: Vec::new(),
+        });
+        let action = crate::types::PermissionAction::FileEdit;
+
+        let (client, server) = duplex(4096);
+        let (server_reader, server_writer) = tokio::io::split(server);
+        let mut transport = StdioTransport::from_io(server_reader, server_writer);
+        let ((), decision) = tokio::join!(
+            reply_to_permission_request(client, json!({ "decision": "always_allow" })),
+            request_permission(
+                &mut transport,
+                &mut session,
+                &workdir,
+                action.clone(),
+                "Allow code agent to edit files?",
+                "The code agent may read and modify files.",
+            ),
+        );
+
+        assert_eq!(decision, PermissionDecision::AlwaysAllow);
+        assert!(session.always_allowed.contains(&action));
+        assert!(AcpSession::load_workspace_trust(&workdir).contains(&action));
+    }
+
+    #[tokio::test]
+    async fn request_permission_defaults_to_reject_on_malformed_response() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path().to_path_buf();
+        let mut session = AcpSession::new(SessionNewParams {
+            session_name: Some("perm-test".to_string()),
+            client_capabilities: None,
+            mcp_servers: Vec::new(),
+        });
+        let action = crate::types::PermissionAction::FileEdit;
+
+        let (client, server) = duplex(4096);
+        let (server_reader, server_writer) = tokio::io::split(server);
+        let mut transport = StdioTransport::from_io(server_reader, server_writer);
+        let ((), decision) = tokio::join!(
+            reply_to_permission_request(client, json!({ "decision": "maybe" })),
+            request_permission(
+                &mut transport,
+                &mut session,
+                &workdir,
+                action.clone(),
+                "Allow code agent to edit files?",
+                "The code agent may read and modify files.",
+            ),
+        );
+
+        assert_eq!(decision, PermissionDecision::Reject);
+        assert!(!session.always_allowed.contains(&action));
+        assert!(AcpSession::load_workspace_trust(&workdir).is_empty());
     }
 
     #[tokio::test]

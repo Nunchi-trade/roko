@@ -717,6 +717,58 @@ pub struct SessionSetModeParams {
     pub mode_id: String,
 }
 
+/// Action types that require user permission before proceeding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionAction {
+    /// Writing or editing a file.
+    FileEdit,
+    /// Creating a new file.
+    FileCreate,
+    /// Deleting a file.
+    FileDelete,
+    /// Running a terminal command.
+    TerminalCommand,
+    /// Making a network request.
+    NetworkRequest,
+    /// Running a git operation.
+    GitOperation,
+}
+
+/// User decision in response to a permission request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecision {
+    /// Allow this single occurrence.
+    Allow,
+    /// Allow this and all future occurrences in this session/workspace.
+    AlwaysAllow,
+    /// Reject - do not perform the action.
+    Reject,
+}
+
+/// Parameters for the `session/request_permission` server-to-client request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestPermissionParams {
+    /// The session this request is for.
+    pub session_id: String,
+    /// Human-readable title for the permission dialog.
+    pub title: String,
+    /// Detailed description of the action being requested.
+    pub detail: String,
+    /// The action type being requested.
+    pub action: PermissionAction,
+}
+
+/// Response from the editor to a `session/request_permission` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionResponse {
+    /// The user's decision.
+    pub decision: PermissionDecision,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,5 +818,34 @@ mod tests {
         let deserialized: SessionUpdate =
             serde_json::from_value(serialized).expect("deserialize session update");
         assert_eq!(deserialized, update);
+    }
+
+    #[test]
+    fn permission_request_round_trip() {
+        let params = RequestPermissionParams {
+            session_id: "sess-1".to_string(),
+            title: "Allow editing?".to_string(),
+            detail: "The agent wants to edit src/lib.rs".to_string(),
+            action: PermissionAction::FileEdit,
+        };
+
+        let serialized = serde_json::to_value(&params).expect("serialize permission params");
+        let deserialized: RequestPermissionParams =
+            serde_json::from_value(serialized).expect("deserialize permission params");
+        assert_eq!(deserialized.session_id, params.session_id);
+        assert_eq!(deserialized.title, params.title);
+        assert_eq!(deserialized.detail, params.detail);
+        assert_eq!(deserialized.action, params.action);
+
+        let response = PermissionResponse {
+            decision: PermissionDecision::AlwaysAllow,
+        };
+        let serialized = serde_json::to_value(&response).expect("serialize permission response");
+        let deserialized: PermissionResponse =
+            serde_json::from_value(serialized).expect("deserialize permission response");
+        assert!(matches!(
+            deserialized.decision,
+            PermissionDecision::AlwaysAllow
+        ));
     }
 }

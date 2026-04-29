@@ -1,7 +1,7 @@
 //! ACP session state management.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -238,6 +238,10 @@ pub struct AcpSession {
     /// Workspace CLAUDE.md content loaded once per session.
     #[serde(skip)]
     pub cached_conventions: Option<String>,
+    /// Actions pre-granted via "always allow" for this session.
+    /// Loaded from workspace trust at session creation; updated on "always allow" decisions.
+    #[serde(skip, default)]
+    pub always_allowed: HashSet<crate::types::PermissionAction>,
 }
 
 impl AcpSession {
@@ -260,6 +264,7 @@ impl AcpSession {
             active_run: None,
             shared_run: new_shared_run(),
             cached_conventions: None,
+            always_allowed: HashSet::new(),
         }
     }
 
@@ -285,6 +290,7 @@ impl AcpSession {
             active_run: None,
             shared_run: new_shared_run(),
             cached_conventions: None,
+            always_allowed: HashSet::new(),
         }
     }
 
@@ -297,6 +303,43 @@ impl AcpSession {
         std::fs::read_to_string(&claude_md)
             .ok()
             .map(|content| content.chars().take(4096).collect())
+    }
+
+    /// Check if an action has already been pre-granted for this session.
+    #[must_use]
+    pub fn is_pre_granted(&self, action: &crate::types::PermissionAction) -> bool {
+        self.always_allowed.contains(action)
+    }
+
+    /// Record an "always allow" decision for this session.
+    pub fn grant_always_allow(&mut self, action: crate::types::PermissionAction) {
+        self.always_allowed.insert(action);
+    }
+
+    /// Load workspace-level trust from `.roko/trust/permissions.json`.
+    #[must_use]
+    pub fn load_workspace_trust(
+        workdir: &std::path::Path,
+    ) -> HashSet<crate::types::PermissionAction> {
+        let path = workdir.join(".roko/trust/permissions.json");
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|data| serde_json::from_str(&data).ok())
+            .unwrap_or_default()
+    }
+
+    /// Persist workspace-level trust to `.roko/trust/permissions.json`.
+    pub fn save_workspace_trust(
+        workdir: &std::path::Path,
+        trust: &HashSet<crate::types::PermissionAction>,
+    ) {
+        let path = workdir.join(".roko/trust/permissions.json");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(data) = serde_json::to_string_pretty(trust) {
+            let _ = std::fs::write(&path, data);
+        }
     }
 
     /// Returns the session metadata used by `session/list`.
@@ -608,6 +651,7 @@ impl SessionManager {
     pub fn create_session(&mut self, params: SessionNewParams) -> SessionNewResult {
         let mut session = AcpSession::new_with_config(params, &self.roko_config);
         session.cached_conventions = AcpSession::load_conventions(&self.workdir);
+        session.always_allowed = AcpSession::load_workspace_trust(&self.workdir);
         let result = session.new_result();
         self.sessions.insert(session.session_id.clone(), session);
         result
@@ -687,6 +731,7 @@ impl SessionManager {
         let data = std::fs::read_to_string(&path).ok()?;
         let mut session: AcpSession = serde_json::from_str(&data).ok()?;
         session.cached_conventions = AcpSession::load_conventions(&self.workdir);
+        session.always_allowed = AcpSession::load_workspace_trust(&self.workdir);
         Some(session)
     }
 
@@ -1530,6 +1575,38 @@ mod tests {
             session.cached_conventions.as_deref(),
             Some("Use snake_case.")
         );
+    }
+
+    #[test]
+    fn create_session_loads_workspace_trust() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path().to_path_buf();
+        let mut trust = HashSet::new();
+        trust.insert(crate::types::PermissionAction::FileEdit);
+        trust.insert(crate::types::PermissionAction::GitOperation);
+
+        AcpSession::save_workspace_trust(&workdir, &trust);
+        assert!(workdir.join(".roko/trust/permissions.json").exists());
+
+        let mut manager = SessionManager::new(workdir, Default::default());
+        let result = manager.create_session(session_params("workspace-trust"));
+        let session = manager
+            .get_session(&result.session_id)
+            .expect("session should exist");
+
+        assert!(session
+            .always_allowed
+            .contains(&crate::types::PermissionAction::FileEdit));
+        assert!(session
+            .always_allowed
+            .contains(&crate::types::PermissionAction::GitOperation));
+    }
+
+    #[test]
+    fn load_workspace_trust_defaults_to_empty_when_missing() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let trust = AcpSession::load_workspace_trust(tmp.path());
+        assert!(trust.is_empty());
     }
 
     #[test]
