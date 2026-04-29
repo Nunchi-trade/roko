@@ -408,6 +408,67 @@ impl KnowledgeStore {
         self.ingest(vec![entry])
     }
 
+    /// Record a failed gate turn as AntiKnowledge.
+    ///
+    /// Similar failures are searched for in the existing store first. If a
+    /// matching anti-pattern is found, its confidence is reinforced instead of
+    /// creating a duplicate record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn record_anti_pattern_from_failure(
+        &self,
+        task_id: &str,
+        task_prompt: &str,
+        gate_name: &str,
+        gate_error: &str,
+        agent_output: Option<&str>,
+    ) -> Result<()> {
+        let candidate = extract_anti_pattern_from_failure(
+            task_id,
+            task_prompt,
+            gate_name,
+            gate_error,
+            agent_output,
+        );
+
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+
+        if let Some(index) = entries.iter().position(|entry| entry.id == candidate.id) {
+            let updated = {
+                let existing = &mut entries[index];
+                reinforce_anti_pattern(existing, &candidate);
+                existing.clone()
+            };
+            self.rewrite_all(&entries)?;
+            tracing::debug!(
+                knowledge_id = %updated.id,
+                "reinforced existing AntiKnowledge from gate failure"
+            );
+            return Ok(());
+        }
+
+        if let Some(index) = find_similar_anti_pattern_index(&entries, &candidate) {
+            let updated = {
+                let existing = &mut entries[index];
+                reinforce_anti_pattern(existing, &candidate);
+                existing.clone()
+            };
+            self.rewrite_all(&entries)?;
+            tracing::debug!(
+                knowledge_id = %updated.id,
+                "reinforced similar AntiKnowledge from gate failure"
+            );
+            return Ok(());
+        }
+
+        entries.push(candidate);
+        self.rewrite_all(&entries)?;
+        Ok(())
+    }
+
     /// NEURO-07: Append entries with source-channel confidence discounting.
     ///
     /// Each entry's confidence is multiplied by the channel's trust discount
@@ -2286,6 +2347,266 @@ fn check_against_anti_knowledge(
     result
 }
 
+/// Create an AntiKnowledge entry from a failed gate result.
+///
+/// The entry captures the task context, gate name, failure text, and agent
+/// output snippet so future runs can avoid repeating the same mistake.
+#[must_use]
+pub fn extract_anti_pattern_from_failure(
+    task_id: &str,
+    task_prompt: &str,
+    gate_name: &str,
+    gate_error: &str,
+    agent_output: Option<&str>,
+) -> KnowledgeEntry {
+    let created_at = Utc::now();
+    let task_id = if task_id.trim().is_empty() {
+        "unknown-task"
+    } else {
+        task_id.trim()
+    };
+    let gate_name = if gate_name.trim().is_empty() {
+        "unknown-gate"
+    } else {
+        gate_name.trim()
+    };
+    let gate_name_norm = gate_name.to_ascii_lowercase();
+    let task_prompt_text = task_prompt.trim();
+    let gate_error_text = gate_error.trim();
+    let agent_output_text = agent_output.map(|output| output.trim()).unwrap_or("");
+
+    let task_prompt_snippet = if task_prompt_text.is_empty() {
+        "unknown task prompt".to_string()
+    } else {
+        truncate_snippet(task_prompt_text, 100)
+    };
+    let gate_error_snippet = if gate_error_text.is_empty() {
+        "unknown error".to_string()
+    } else {
+        truncate_snippet(gate_error_text, 240)
+    };
+    let agent_output_snippet = if agent_output_text.is_empty() {
+        None
+    } else {
+        Some(truncate_snippet(agent_output_text, 200))
+    };
+
+    let mut content = format!(
+        "Anti-pattern for task type '{task_prompt_snippet}': Gate '{gate_name}' failed with: {gate_error_snippet}."
+    );
+    if let Some(snippet) = &agent_output_snippet {
+        content.push_str(" Agent output snippet: ");
+        content.push_str(snippet);
+    }
+
+    let mut tags = vec![
+        "bench".to_string(),
+        format!("gate:{gate_name_norm}"),
+        format!("task:{task_id}"),
+    ];
+    tags.extend(classify_compilation_error(gate_error_text));
+    tags.extend(compilation_error_code_tags(gate_error_text));
+    tags.sort();
+    tags.dedup();
+
+    let mut refutation_evidence = format!(
+        "Gate '{gate_name}' failed with: {gate_error_snippet}"
+    );
+    if let Some(snippet) = &agent_output_snippet {
+        refutation_evidence.push_str(" Agent output snippet: ");
+        refutation_evidence.push_str(snippet);
+    }
+
+    let id_payload = format!(
+        "{task_id}\x1f{task_prompt_text}\x1f{gate_name}\x1f{gate_error_text}\x1f{agent_output_text}"
+    );
+
+    KnowledgeEntry {
+        id: format!(
+            "anti-{task_id}-{:016x}",
+            stable_hash(id_payload.as_bytes())
+        ),
+        kind: KnowledgeKind::AntiKnowledge,
+        source: Some("bench-gate-failure".to_string()),
+        content,
+        confidence: 0.6,
+        confidence_weight: -0.6,
+        refuted_insight_id: None,
+        refutation_evidence: Some(refutation_evidence),
+        source_episodes: Vec::new(),
+        tags,
+        source_model: None,
+        model_generality: 1.0,
+        created_at,
+        half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+        tier: KnowledgeTier::Transient,
+        emotional_tag: None,
+        emotional_provenance: None,
+        hdc_vector: None,
+        confirmation_count: 0,
+        distinct_contexts: Vec::new(),
+        deprecated: false,
+        balance: 1.0,
+        frozen: false,
+        catalytic_score: 0,
+    }
+}
+
+/// Classify common rustc failure codes into semantic AntiKnowledge tags.
+///
+/// The returned tags are intentionally human-readable so future retrieval can
+/// cluster related failures even when the exact compiler wording changes.
+#[must_use]
+pub fn classify_compilation_error(error: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    if error.contains("E0425") {
+        tags.push("error:unresolved-name".to_string());
+    }
+    if error.contains("E0308") {
+        tags.push("error:type-mismatch".to_string());
+    }
+    if error.contains("E0433") {
+        tags.push("error:unresolved-import".to_string());
+    }
+    if error.contains("E0277") {
+        tags.push("error:trait-not-satisfied".to_string());
+    }
+    tags
+}
+
+const ANTI_PATTERN_DUPLICATE_SIMILARITY_THRESHOLD: f64 = 0.45;
+
+fn compilation_error_code_tags(error: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    if error.contains("E0425") {
+        tags.push("error-code:E0425".to_string());
+    }
+    if error.contains("E0308") {
+        tags.push("error-code:E0308".to_string());
+    }
+    if error.contains("E0433") {
+        tags.push("error-code:E0433".to_string());
+    }
+    if error.contains("E0277") {
+        tags.push("error-code:E0277".to_string());
+    }
+    tags
+}
+
+fn find_similar_anti_pattern_index(
+    entries: &[KnowledgeEntry],
+    candidate: &KnowledgeEntry,
+) -> Option<usize> {
+    let mut best_index: Option<usize> = None;
+    let mut best_similarity = 0.0_f64;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let similarity = anti_pattern_similarity(entry, candidate);
+        if similarity >= ANTI_PATTERN_DUPLICATE_SIMILARITY_THRESHOLD && similarity > best_similarity
+        {
+            best_index = Some(index);
+            best_similarity = similarity;
+        }
+    }
+
+    best_index
+}
+
+fn anti_pattern_similarity(existing: &KnowledgeEntry, candidate: &KnowledgeEntry) -> f64 {
+    if existing.kind != KnowledgeKind::AntiKnowledge || candidate.kind != KnowledgeKind::AntiKnowledge
+    {
+        return 0.0;
+    }
+
+    let Some(gate_tag) = candidate.tags.iter().find(|tag| tag.starts_with("gate:")) else {
+        return 0.0;
+    };
+    if !entry_has_normalized_tag(existing, gate_tag) {
+        return 0.0;
+    }
+
+    entry_similarity(existing, candidate)
+}
+
+fn entry_has_normalized_tag(entry: &KnowledgeEntry, tag: &str) -> bool {
+    let normalized = normalize(tag);
+    entry.tags.iter().any(|entry_tag| normalize(entry_tag) == normalized)
+}
+
+fn reinforce_anti_pattern(existing: &mut KnowledgeEntry, candidate: &KnowledgeEntry) {
+    existing.confidence = (existing.confidence + 0.1).clamp(0.6, 1.0);
+    existing.confidence_weight = -existing.confidence;
+    existing.confirmation_count = existing.confirmation_count.saturating_add(1);
+    existing.half_life_days = KnowledgeKind::AntiKnowledge.default_half_life_days();
+
+    if existing.source.as_deref().is_none_or(|source| source.trim().is_empty()) {
+        existing.source = candidate.source.clone();
+    }
+    if existing
+        .refutation_evidence
+        .as_deref()
+        .is_none_or(|evidence| evidence.trim().is_empty())
+    {
+        existing.refutation_evidence = candidate.refutation_evidence.clone();
+    }
+
+    if let Some(task_tag) = candidate.tags.iter().find_map(|tag| tag.strip_prefix("task:")) {
+        let task_tag = task_tag.trim();
+        if !task_tag.is_empty()
+            && !existing
+                .distinct_contexts
+                .iter()
+                .any(|context| context.eq_ignore_ascii_case(task_tag))
+        {
+            existing.distinct_contexts.push(task_tag.to_string());
+        }
+    }
+
+    if !candidate.source_episodes.is_empty() {
+        let mut seen: HashSet<String> = existing.source_episodes.iter().cloned().collect();
+        for source_episode in &candidate.source_episodes {
+            if seen.insert(source_episode.clone()) {
+                existing.source_episodes.push(source_episode.clone());
+            }
+        }
+    }
+
+    merge_tags(&mut existing.tags, &candidate.tags);
+    KnowledgeStore::maybe_adjust_tier(existing);
+}
+
+fn merge_tags(existing: &mut Vec<String>, additional: &[String]) {
+    let mut seen: HashSet<String> = existing.iter().cloned().collect();
+    for tag in additional {
+        if seen.insert(tag.clone()) {
+            existing.push(tag.clone());
+        }
+    }
+    existing.sort();
+    existing.dedup();
+}
+
+fn truncate_snippet(content: &str, max_chars: usize) -> String {
+    let mut chars = content.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_none() {
+        content.to_string()
+    } else {
+        format!("{truncated}...")
+    }
+}
+
+fn stable_hash(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2335,6 +2656,83 @@ mod tests {
             frozen: false,
             catalytic_score: 0,
         }
+    }
+
+    #[test]
+    fn extract_anti_pattern_from_failure_builds_anti_knowledge_entry() {
+        let entry = extract_anti_pattern_from_failure(
+            "task-42",
+            "repair the compile failure in the Rust workspace",
+            "compile",
+            "error[E0425]: cannot find value `foo` in this scope\nerror[E0308]: mismatched types",
+            Some("let bar = foo();"),
+        );
+
+        assert_eq!(entry.kind, KnowledgeKind::AntiKnowledge);
+        assert_eq!(entry.tier, KnowledgeTier::Transient);
+        assert!((entry.confidence - 0.6).abs() < f64::EPSILON);
+        assert!((entry.confidence_weight + 0.6).abs() < f64::EPSILON);
+        assert_eq!(entry.source.as_deref(), Some("bench-gate-failure"));
+        assert!(entry.content.contains("Anti-pattern for task type"));
+        assert!(entry.content.contains("Gate 'compile' failed with:"));
+        assert!(entry.content.contains("Agent output snippet:"));
+        assert!(entry.tags.contains(&"bench".to_string()));
+        assert!(entry.tags.contains(&"gate:compile".to_string()));
+        assert!(entry.tags.contains(&"task:task-42".to_string()));
+        assert!(entry.tags.contains(&"error:unresolved-name".to_string()));
+        assert!(entry.tags.contains(&"error:type-mismatch".to_string()));
+        assert!(entry.tags.contains(&"error-code:E0425".to_string()));
+        assert!(entry.tags.contains(&"error-code:E0308".to_string()));
+    }
+
+    #[test]
+    fn classify_compilation_error_labels_common_codes() {
+        let tags = classify_compilation_error(
+            "error[E0425]: cannot find value `foo` in this scope\nerror[E0277]: trait bound not satisfied",
+        );
+
+        assert!(tags.contains(&"error:unresolved-name".to_string()));
+        assert!(tags.contains(&"error:trait-not-satisfied".to_string()));
+    }
+
+    #[test]
+    fn record_anti_pattern_from_failure_reinforces_existing_entry() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::for_roko_dir(tmp.path());
+        let task_id = "task-42";
+        let task_prompt = "repair the compile failure in the Rust workspace";
+        let gate_name = "compile";
+        let gate_error = "error[E0425]: cannot find value `foo` in this scope";
+        let agent_output = Some("let bar = foo();");
+
+        let initial = extract_anti_pattern_from_failure(
+            task_id,
+            task_prompt,
+            gate_name,
+            gate_error,
+            agent_output,
+        );
+
+        store.add(initial.clone()).expect("seed anti knowledge");
+        store
+            .record_anti_pattern_from_failure(
+                task_id,
+                task_prompt,
+                gate_name,
+                gate_error,
+                agent_output,
+            )
+            .expect("record repeated failure");
+
+        let entries = store.read_all().expect("read entries");
+        assert_eq!(entries.len(), 1);
+        let updated = &entries[0];
+        assert_eq!(updated.kind, KnowledgeKind::AntiKnowledge);
+        assert!(updated.confidence > initial.confidence);
+        assert!(updated.confidence_weight.is_sign_negative());
+        assert_eq!(updated.confirmation_count, 1);
+        assert!(updated.tags.contains(&"gate:compile".to_string()));
+        assert!(updated.tags.contains(&"task:task-42".to_string()));
     }
 
     #[test]
