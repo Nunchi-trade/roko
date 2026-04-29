@@ -112,6 +112,10 @@ node_modules/
 
 # demo-app build output (embedded by rust-embed at compile time)
 demo/demo-app/dist/
+
+# Local-only visual iteration prompts and Playwright audit helpers.
+# Keep these out of GitHub; they are tailored to the current machine/demo pass.
+demo/demo-app/tools/
 .roko-local-target/
 .codex-target/
 .cargo-target/
