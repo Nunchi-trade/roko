@@ -786,6 +786,100 @@ use ./module-c
         assert!(members.is_empty());
         assert!(do_not_create.is_empty());
     }
+
+    #[test]
+    fn find_related_prds_returns_empty_when_dir_missing() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+
+        let results = find_related_prds(tmp.path(), &["usage"], 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_related_prds_matches_by_filename_and_caps_results() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let drafts = tmp.path().join(".roko").join("prd").join("drafts");
+        fs::create_dir_all(&drafts).expect("create drafts dir");
+        fs::write(drafts.join("usage-tracking.md"), "# Usage Tracking PRD\n").expect("write prd");
+        fs::write(drafts.join("usage-metering.md"), "# Usage Metering PRD\n").expect("write prd");
+        fs::write(drafts.join("unrelated.md"), "# Something Else\n").expect("write prd");
+
+        let results = find_related_prds(tmp.path(), &["usage"], 1);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].to_string_lossy().contains("usage-"));
+        assert!(results.iter().all(|path| !path.is_absolute()));
+    }
+
+    #[test]
+    fn find_related_prds_matches_by_content_preview() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let drafts = tmp.path().join(".roko").join("prd").join("drafts");
+        fs::create_dir_all(&drafts).expect("create drafts dir");
+        fs::write(
+            drafts.join("neutral.md"),
+            "# Scope\nThis PRD covers usage tracking for the workspace.\n",
+        )
+        .expect("write prd");
+
+        let results = find_related_prds(tmp.path(), &["usage"], 5);
+        assert!(!results.is_empty());
+        assert!(results
+            .iter()
+            .any(|path| path.to_string_lossy().contains("neutral.md")));
+        assert!(results.iter().all(|path| !path.is_absolute()));
+    }
+
+    #[test]
+    fn find_related_prds_ignores_keywords_past_preview_limit() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let drafts = tmp.path().join(".roko").join("prd").join("drafts");
+        fs::create_dir_all(&drafts).expect("create drafts dir");
+        let contents = format!("{}usage\n", "a".repeat(500));
+        fs::write(drafts.join("post-limit.md"), contents).expect("write prd");
+
+        let results = find_related_prds(tmp.path(), &["usage"], 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_related_plans_returns_empty_when_dirs_missing() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+
+        let results = find_related_plans(tmp.path(), &["router"], 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_related_plans_matches_by_directory_name() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let plans = tmp.path().join("plans");
+        fs::create_dir_all(plans.join("cascade-router")).expect("create plan dir");
+        fs::create_dir_all(plans.join("unrelated-feature")).expect("create plan dir");
+
+        let results = find_related_plans(tmp.path(), &["router"], 1);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].to_string_lossy().contains("cascade-router"));
+        assert!(results.iter().all(|path| !path.is_absolute()));
+    }
+
+    #[test]
+    fn find_related_plans_matches_by_tasks_preview_in_roko_plans() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let plans = tmp.path().join(".roko").join("plans");
+        fs::create_dir_all(plans.join("unrelated-feature")).expect("create plan dir");
+        fs::write(
+            plans.join("unrelated-feature").join("tasks.toml"),
+            "# Plan tasks\nrouter integration\n",
+        )
+        .expect("write tasks.toml");
+
+        let results = find_related_plans(tmp.path(), &["router"], 5);
+        assert!(!results.is_empty());
+        assert!(results
+            .iter()
+            .any(|path| path.to_string_lossy().contains("unrelated-feature")));
+        assert!(results.iter().all(|path| !path.is_absolute()));
+    }
 }
 
 /// Directories to exclude from file and symbol search.
@@ -987,6 +1081,170 @@ fn is_binary_path(path: &Path) -> bool {
     };
 
     buffer[..bytes_read].contains(&0)
+}
+
+/// Find related PRDs by scanning `.roko/prd/drafts/` for keyword matches.
+///
+/// Matches by:
+/// - Filename stem contains any keyword (score 2)
+/// - First 500 bytes of file content contains any keyword (score 1)
+///
+/// Returns up to `max_results` paths, relative to `root`. Returns an empty
+/// vec (no error) when `.roko/prd/drafts/` does not exist.
+#[must_use]
+pub fn find_related_prds(root: &Path, keywords: &[&str], max_results: usize) -> Vec<PathBuf> {
+    if max_results == 0 {
+        return Vec::new();
+    }
+
+    let keywords = normalize_keywords(keywords);
+    if keywords.is_empty() {
+        return Vec::new();
+    }
+
+    let prd_dir = root.join(".roko").join("prd").join("drafts");
+    if !prd_dir.exists() {
+        return Vec::new();
+    }
+
+    let Ok(entries) = std::fs::read_dir(&prd_dir) else {
+        return Vec::new();
+    };
+
+    let mut scored: Vec<(u8, PathBuf)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let abs = entry.path();
+        if !abs.is_file() {
+            continue;
+        }
+
+        let Some(extension) = abs.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if !extension.eq_ignore_ascii_case("md") {
+            continue;
+        }
+
+        let rel = match abs.strip_prefix(root) {
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => continue,
+        };
+
+        let stem = abs
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let mut score: u8 = if keywords.iter().any(|keyword| stem.contains(keyword)) {
+            2
+        } else {
+            0
+        };
+
+        if score == 0 {
+            let Ok(mut file) = std::fs::File::open(&abs) else {
+                continue;
+            };
+
+            let mut buffer = [0_u8; 500];
+            let Ok(bytes_read) = std::io::Read::read(&mut file, &mut buffer) else {
+                continue;
+            };
+
+            let preview = String::from_utf8_lossy(&buffer[..bytes_read]).to_lowercase();
+            if keywords.iter().any(|keyword| preview.contains(keyword)) {
+                score = 1;
+            }
+        }
+
+        if score > 0 {
+            scored.push((score, rel));
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.truncate(max_results);
+    scored.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Find related plans by scanning plan directories for keyword matches.
+///
+/// Searches both `.roko/plans/` and `plans/` (whichever exists). For each
+/// subdirectory, matches by:
+/// - Directory name contains any keyword (score 2)
+/// - First 500 bytes of `tasks.toml` in that directory contains any keyword (score 1)
+///
+/// Returns up to `max_results` paths (relative to `root`). Returns empty
+/// vec when neither plan directory exists.
+#[must_use]
+pub fn find_related_plans(root: &Path, keywords: &[&str], max_results: usize) -> Vec<PathBuf> {
+    if max_results == 0 {
+        return Vec::new();
+    }
+
+    let keywords = normalize_keywords(keywords);
+    if keywords.is_empty() {
+        return Vec::new();
+    }
+
+    let plan_dirs = [root.join(".roko").join("plans"), root.join("plans")];
+    let mut scored: Vec<(u8, PathBuf)> = Vec::new();
+
+    for plan_dir in &plan_dirs {
+        if !plan_dir.exists() {
+            continue;
+        }
+
+        let Ok(entries) = std::fs::read_dir(plan_dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let abs = entry.path();
+            if !abs.is_dir() {
+                continue;
+            }
+
+            let rel = match abs.strip_prefix(root) {
+                Ok(rel) => rel.to_path_buf(),
+                Err(_) => continue,
+            };
+
+            let dir_name = entry.file_name().to_string_lossy().to_lowercase();
+            let mut score: u8 = if keywords.iter().any(|keyword| dir_name.contains(keyword)) {
+                2
+            } else {
+                0
+            };
+
+            if score == 0 {
+                let tasks_toml = abs.join("tasks.toml");
+                let Ok(mut file) = std::fs::File::open(&tasks_toml) else {
+                    continue;
+                };
+
+                let mut buffer = [0_u8; 500];
+                let Ok(bytes_read) = std::io::Read::read(&mut file, &mut buffer) else {
+                    continue;
+                };
+
+                let preview = String::from_utf8_lossy(&buffer[..bytes_read]).to_lowercase();
+                if keywords.iter().any(|keyword| preview.contains(keyword)) {
+                    score = 1;
+                }
+            }
+
+            if score > 0 {
+                scored.push((score, rel));
+            }
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.truncate(max_results);
+    scored.into_iter().map(|(_, path)| path).collect()
 }
 
 fn normalize_keywords(keywords: &[&str]) -> Vec<String> {
