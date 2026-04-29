@@ -4,9 +4,11 @@
 //! benchmark runs that exercise roko's `run_once()` pipeline.
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -176,6 +178,44 @@ async fn execute_bench_run(
     let mut results = Vec::new();
     let mut passed_count = 0usize;
     let mut failed_count = 0usize;
+
+    let bench_workdir = match scaffold_bench_workdir(&suite.id, &run_id).await {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                run_id = %run_id,
+                suite_id = %suite.id,
+                "failed to scaffold bench workdir"
+            );
+
+            let finished_at = now_secs();
+            if let Ok(Some(mut run)) = bench::load_bench_run(&state.workdir, &run_id).await {
+                run.status = BenchRunStatus::Failed;
+                run.finished_at = Some(finished_at);
+                let _ = bench::save_bench_run(&state.workdir, &run).await;
+            }
+
+            let failed_index_entry = BenchRunIndexEntry {
+                id: run_id.clone(),
+                suite_id: suite.id.clone(),
+                suite_name: suite.name.clone(),
+                status: BenchRunStatus::Failed,
+                started_at,
+                finished_at: Some(finished_at),
+                label: label.clone(),
+                model: overrides.model.clone(),
+                pass_rate: None,
+                total_cost_usd: None,
+            };
+            let _ = bench::update_index_entry(&state.workdir, &failed_index_entry).await;
+
+            state.active_bench_runs.write().await.remove(&run_id);
+            return;
+        }
+    };
+    let _bench_workdir_cleanup = BenchWorkdirCleanup::new(bench_workdir.clone());
+
     let learning_stores = if matches!(overrides.strategy, BenchStrategy::Minimal) {
         None
     } else {
@@ -203,7 +243,7 @@ async fn execute_bench_run(
         let start = std::time::Instant::now();
         let result = state
             .runtime
-            .run_once_with_config(state.workdir.as_path(), &task.prompt, &overrides)
+            .run_once_with_config(bench_workdir.as_path(), &task.prompt, &overrides)
             .await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -636,4 +676,183 @@ async fn current_learning_totals(
         playbooks_total,
         anti_patterns_total,
     })
+}
+
+struct BenchWorkdirCleanup {
+    path: PathBuf,
+}
+
+impl BenchWorkdirCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for BenchWorkdirCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+async fn scaffold_bench_workdir(suite_id: &str, run_id: &str) -> anyhow::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("roko-bench-{run_id}"));
+
+    if tokio::fs::try_exists(&dir)
+        .await
+        .context("check whether bench workdir already exists")?
+    {
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .with_context(|| format!("remove stale bench workdir {}", dir.display()))?;
+    }
+
+    if let Err(err) = async {
+        let cargo_toml_path = dir.join("Cargo.toml");
+        let main_rs_path = dir.join("src").join("main.rs");
+        let lib_rs_path = dir.join("src").join("lib.rs");
+        let cargo_toml = bench_cargo_toml(suite_id, run_id);
+
+        write_scaffold_file(&cargo_toml_path, &cargo_toml).await?;
+        write_scaffold_file(&main_rs_path, bench_main_contents()).await?;
+
+        if suite_id == "learnable-rust" {
+            let helpers_rs_path = dir.join("src").join("helpers.rs");
+            write_scaffold_file(&helpers_rs_path, learnable_helpers_contents()).await?;
+            write_scaffold_file(&lib_rs_path, learnable_rust_lib_contents()).await?;
+        } else {
+            write_scaffold_file(&lib_rs_path, generic_lib_contents()).await?;
+        }
+
+        Ok::<(), anyhow::Error>(())
+    }
+    .await
+    {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        return Err(err);
+    }
+
+    Ok(dir)
+}
+
+async fn write_scaffold_file(path: &std::path::Path, contents: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+
+    tokio::fs::write(path, contents)
+        .await
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn bench_cargo_toml(suite_id: &str, run_id: &str) -> String {
+    format!(
+        r#"[package]
+name = "roko-bench-scaffold"
+version = "0.1.0"
+edition = "2024"
+
+# suite_id = "{suite_id}"
+# run_id = "{run_id}"
+
+[dependencies]
+"#,
+    )
+}
+
+fn bench_main_contents() -> &'static str {
+    r#"fn main() {}
+"#
+}
+
+fn generic_lib_contents() -> &'static str {
+    r#"/// Minimal scaffold for non-learnable bench suites.
+pub fn scaffold_marker() -> &'static str {
+    "roko-bench"
+}
+
+#[cfg(test)]
+mod tests {}
+"#
+}
+
+fn learnable_helpers_contents() -> &'static str {
+    r#"/// Type referenced by the broken import in `src/lib.rs`.
+pub struct MissingType;
+"#
+}
+
+fn learnable_rust_lib_contents() -> &'static str {
+    r#"pub mod helpers;
+
+/// Starter stub for task 1.
+pub fn format_greeting(name: &str) -> String {
+    // TODO: implement
+    let _ = name;
+    todo!("format the greeting")
+}
+
+/// Task 2 starter: the same loop appears twice so it can be extracted later.
+pub fn total_message_bytes(messages: &[&str]) -> usize {
+    let mut total = 0;
+    for message in messages {
+        if !message.trim().is_empty() {
+            total += message.len();
+        }
+    }
+    total
+}
+
+pub fn total_message_bytes_again(messages: &[&str]) -> usize {
+    let mut total = 0;
+    for message in messages {
+        if !message.trim().is_empty() {
+            total += message.len();
+        }
+    }
+    total
+}
+
+/// Task 4 starter: keep the helper generic and preserve the incoming result.
+pub fn wrap_result<T, E>(value: Result<T, E>) -> Result<T, E> {
+    let _ = value;
+    unimplemented!("wrap_result should return the input Result unchanged")
+}
+
+/// Task 5 starter: implement `Iterator` for this counter.
+/// `CountUp` should yield numbers from 1 through `limit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CountUp {
+    /// Last yielded value.
+    current: u64,
+    /// Inclusive upper bound.
+    limit: u64,
+}
+
+impl CountUp {
+    pub fn new(limit: u64) -> Self {
+        Self { current: 0, limit }
+    }
+
+    pub fn limit(&self) -> u64 {
+        self.limit
+    }
+}
+
+#[cfg(test)]
+mod tests {}
+
+#[cfg(test)]
+mod import_checks {
+    // Intentional wrong path for task 3: fix `helper` -> `helpers`.
+    use crate::helper::MissingType;
+
+    #[allow(dead_code)]
+    fn _touch_missing_type() -> &'static str {
+        core::any::type_name::<MissingType>()
+    }
+}
+"#
 }
