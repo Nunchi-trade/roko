@@ -230,10 +230,13 @@ pub fn effective_chain_mode_for_doctor(config_mode: ChainMode) -> ChainMode {
 /// with no `rpc_url`, or `AlloyChainClient::http` failing); chain tools are
 /// then disabled cleanly without aborting startup.
 ///
-/// Phase A: `Light` and `Follower` modes return a stub `FollowerChainClient`
-/// that surfaces `Unsupported` for every read; Phase B adds `alto-follower`
-/// as a Cargo dep and replaces the stubs with calls into its in-process
-/// actor handles. See plan `~/.claude/plans/greedy-moseying-cerf.md`.
+/// `Light` and `Follower` are RPC-backed against Daeji (Kora):
+/// state reads route through `AlloyChainClient`; consensus liveness is
+/// surfaced via `kora_nodeStatus` on the same socket. The two flavors differ
+/// only in `name()` today — pruning depth becomes meaningful once Daeji's
+/// secondary-peer protocol streams blocks. Threshold-cert verification is a
+/// follow-up: `kora_nodeStatus` is liveness telemetry, not a finalization
+/// receipt.
 fn init_chain_client(chain: &ChainConfig) -> Option<Arc<dyn ChainClient>> {
     let mode = effective_chain_mode(chain.mode);
     match mode {
@@ -256,25 +259,52 @@ fn init_chain_client(chain: &ChainConfig) -> Option<Arc<dyn ChainClient>> {
                 None
             }
         },
-        ChainMode::Light => {
-            tracing::info!(
-                mode = %mode,
-                "chain client initialized (light-client stub; Phase B will embed alto-follower as a library)"
-            );
-            Some(Arc::new(FollowerChainClient::stub(FollowerFlavor::Light)))
-        }
-        ChainMode::Follower => {
-            tracing::info!(
-                mode = %mode,
-                "chain client initialized (follower stub; Phase B will embed alto-follower as a library)"
-            );
-            Some(Arc::new(FollowerChainClient::stub(
-                FollowerFlavor::Follower,
-            )))
-        }
+        ChainMode::Light => Some(init_follower_client(chain, FollowerFlavor::Light, mode)),
+        ChainMode::Follower => Some(init_follower_client(chain, FollowerFlavor::Follower, mode)),
         ChainMode::Mock => {
             tracing::info!(mode = %mode, "chain client initialized (mock backend)");
             Some(Arc::new(MockChainClient::default()))
+        }
+    }
+}
+
+/// Build a `FollowerChainClient` for `mode = light|follower`. Falls back to
+/// the stub backend if `rpc_url` is missing or the alloy client fails to
+/// construct — chain tools then surface a clear "configure chain.rpc_url"
+/// error rather than crashing.
+fn init_follower_client(
+    chain: &ChainConfig,
+    flavor: FollowerFlavor,
+    mode: ChainMode,
+) -> Arc<dyn ChainClient> {
+    match chain.rpc_url.as_deref() {
+        Some(url) => match FollowerChainClient::rpc(flavor, url) {
+            Ok(c) => {
+                tracing::info!(
+                    rpc_url = url,
+                    mode = %mode,
+                    flavor = ?flavor,
+                    "chain client initialized (follower rpc backend; threshold-cert verification deferred)"
+                );
+                Arc::new(c)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    rpc_url = url,
+                    mode = %mode,
+                    "follower rpc init failed; falling back to stub (chain tools will return Unsupported)"
+                );
+                Arc::new(FollowerChainClient::stub(flavor))
+            }
+        },
+        None => {
+            tracing::warn!(
+                mode = %mode,
+                "chain.mode = {} but no rpc_url configured; chain tools will return Unsupported",
+                mode
+            );
+            Arc::new(FollowerChainClient::stub(flavor))
         }
     }
 }
@@ -21541,5 +21571,39 @@ command = "cargo check -p roko-cli"
             ..Default::default()
         };
         assert!(init_chain_client(&chain).is_none());
+    }
+
+    #[tokio::test]
+    async fn init_chain_client_light_with_rpc_url_uses_rpc_backend() {
+        let chain = ChainConfig {
+            mode: ChainMode::Light,
+            rpc_url: Some("http://127.0.0.1:1".into()),
+            ..Default::default()
+        };
+        let client = init_chain_client(&chain).expect("light rpc backend initializes");
+        assert_eq!(client.name(), "light");
+        // RPC backend dials out and fails with Rpc error, not Unsupported —
+        // this is how we distinguish the live backend from the stub.
+        let err = client.block_number().await;
+        assert!(
+            matches!(err, Err(roko_chain::ChainError::Rpc(_))),
+            "expected Rpc error from live backend, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_chain_client_follower_with_rpc_url_uses_rpc_backend() {
+        let chain = ChainConfig {
+            mode: ChainMode::Follower,
+            rpc_url: Some("http://127.0.0.1:1".into()),
+            ..Default::default()
+        };
+        let client = init_chain_client(&chain).expect("follower rpc backend initializes");
+        assert_eq!(client.name(), "follower");
+        let err = client.block_number().await;
+        assert!(
+            matches!(err, Err(roko_chain::ChainError::Rpc(_))),
+            "expected Rpc error from live backend, got {err:?}"
+        );
     }
 }

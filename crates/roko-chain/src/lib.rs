@@ -49,7 +49,10 @@ pub mod alloy_impl;
 pub mod client;
 /// Collusion ring detection via assignment graph clique analysis (P2-11).
 pub mod collusion;
-/// `alto-follower` subprocess-backed [`ChainClient`] for `mode = "light" | "follower"`.
+/// [`ChainClient`] for `chain.mode = "light" | "follower"`.
+///
+/// Routes state reads through Ethereum JSON-RPC and surfaces consensus
+/// liveness via `kora_nodeStatus` on the same socket.
 pub mod follower;
 pub mod futures_market;
 pub mod gate;
@@ -80,7 +83,7 @@ pub mod witness;
 
 pub use agent_registry::AgentRegistry;
 pub use client::ChainClient;
-pub use follower::{FollowerChainClient, FollowerFlavor};
+pub use follower::{ChainStatus, FollowerChainClient, FollowerFlavor, NodeStatus};
 pub use futures_market::{FuturesMarket, FuturesMarketConfig};
 pub use gate::{
     MempoolTx, MevAlert, MevAnalysisInput, MevDetector, MevDetectorConfig, MevGate, MevPattern,
