@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { useLiveApi } from '../hooks/useLiveApi';
 import type { BenchRun, BenchTaskResult } from '../lib/bench-types';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
@@ -425,14 +425,14 @@ function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
               cursor: 'pointer',
               textAlign: 'left',
               fontFamily: 'var(--mono)',
-              fontSize: 11,
+              fontSize: 14,
               color: 'var(--text-primary)',
             }}
           >
-            <span style={{ color: 'var(--text-dim)', fontSize: 9, width: 12 }}>
+            <span style={{ color: 'var(--text-dim)', fontSize: 15, width: 12 }}>
               {expandedIds.has(r.task_id) ? '\u25BC' : '\u25B6'}
             </span>
-            <span className={`status-badge status-${r.status}`} style={{ fontSize: 8 }}>
+            <span className={`status-badge status-${r.status}`} style={{ fontSize: 15 }}>
               {r.status.toUpperCase()}
             </span>
             <span style={{ flex: 1, color: 'var(--text-strong)' }}>{r.task_name}</span>
@@ -448,7 +448,7 @@ function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
                   padding: 10,
                   background: 'rgba(0,0,0,0.3)',
                   borderRadius: 4,
-                  fontSize: 10,
+                  fontSize: 13,
                   color: 'var(--text-primary)',
                   overflow: 'auto',
                   maxHeight: 200,
@@ -472,7 +472,7 @@ function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
 
 export default function BenchRunDetail() {
   const { id } = useParams<{ id: string }>();
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [run, setRun] = useState<BenchRun | null>(null);
 
   useEffect(() => {
@@ -484,7 +484,7 @@ export default function BenchRunDetail() {
           setRun(data);
           return;
         }
-      } catch { /* no fallback -- show not-found */ }
+      } catch { /* show not-found */ }
     })();
   }, [id, get]);
 

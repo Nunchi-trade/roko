@@ -1,7 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
-import { useApiWithFallback } from '../../hooks/useApiWithFallback';
+import { useLiveApi } from '../../hooks/useLiveApi';
 
 interface KnowledgeEntry {
   id: string;
@@ -257,7 +257,7 @@ const tdStyle: CSSProperties = {
 /* ── Component ───────────────────────────────────────────── */
 
 export default function KnowledgeEntries() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastLoaded, setLastLoaded] = useState<string>('—');
@@ -269,7 +269,7 @@ export default function KnowledgeEntries() {
       try {
         const data = await get<KnowledgeEntry[]>('/api/knowledge/entries');
         if (cancelled) return;
-        setEntries(Array.isArray(data) ? data : []);
+        setEntries(Array.isArray(data) ? data : ((data as { items?: KnowledgeEntry[] }).items ?? []));
         setLastLoaded(new Date().toLocaleTimeString());
       } catch {
         /* keep previous data */
@@ -320,14 +320,14 @@ export default function KnowledgeEntries() {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
         <Pane
           title="DOMAIN DISTRIBUTION"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{stats.domains || 5} domains</span>}
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{stats.domains || 5} domains</span>}
         >
           <DomainChart entries={entries} height={110} />
         </Pane>
 
         <Pane
           title="CONFIDENCE DISTRIBUTION"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>histogram</span>}
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>histogram</span>}
         >
           <ConfidenceHistogram entries={entries} height={110} />
         </Pane>
@@ -336,7 +336,7 @@ export default function KnowledgeEntries() {
       {/* ═══ ENTRIES TABLE ═══ */}
       <Pane
         title="ALL ENTRIES"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{entries.length} rows</span>}
+        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{entries.length} rows</span>}
         flat
       >
         <div style={{ maxHeight: 280, overflow: 'auto' }}>

@@ -1,6 +1,11 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { ClipboardAddon } from '@xterm/addon-clipboard';
+import { ImageAddon } from '@xterm/addon-image';
 import { rosedustTheme } from '../lib/rosedust-theme';
 import { WS_BASE } from '../lib/serve-url';
 
@@ -68,16 +73,41 @@ export function useTerminal(sessionId?: string) {
     const id = sessionId ?? `t${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
     const term = new Terminal({
       theme: rosedustTheme,
-      fontFamily: "'JetBrains Mono', 'SF Mono', monospace",
+      fontFamily: "'JetBrainsMono Nerd Font Mono', 'JetBrains Mono', 'SF Mono', monospace",
       fontSize: 13,
       cursorBlink: true,
       allowProposedApi: true,
     });
+
+    // Core addons
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+    term.loadAddon(new WebLinksAddon());
+    term.loadAddon(new ClipboardAddon());
+
+    // Unicode 11 for better character width handling
+    const unicode11 = new Unicode11Addon();
+    term.loadAddon(unicode11);
+    term.unicode.activeVersion = '11';
+
+    // Inline image support (Sixel + iTerm2 protocol)
+    term.loadAddon(new ImageAddon());
+
     term.open(el);
 
-    requestAnimationFrame(() => fitAddon.fit());
+    // Track disposal state for async callbacks.
+    let disposed = false;
+
+    // GPU-accelerated WebGL renderer with DOM fallback
+    try {
+      const webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => webglAddon.dispose());
+      term.loadAddon(webglAddon);
+    } catch {
+      // DOM renderer fallback — fine for low-end GPUs
+    }
+
+    requestAnimationFrame(() => { if (!disposed) fitAddon.fit(); });
 
     // Internal output buffer, capped high enough for artifact scraping.
     let outBuf = '';
@@ -177,7 +207,7 @@ export function useTerminal(sessionId?: string) {
     });
 
     term.onResize(({ cols, rows }) => {
-      if (handle.ws && handle.ws.readyState === WebSocket.OPEN) {
+      if (!disposed && handle.ws && handle.ws.readyState === WebSocket.OPEN) {
         handle.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
       }
     });
@@ -187,12 +217,17 @@ export function useTerminal(sessionId?: string) {
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
+        if (disposed) { ws.close(); return; }
         handle.ws = ws;
         handle.status = 'connected';
         setStatus('connected');
-        const dims = fitAddon.proposeDimensions();
-        if (dims) {
-          ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+        try {
+          const dims = fitAddon.proposeDimensions();
+          if (dims) {
+            ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+          }
+        } catch {
+          // Terminal may have been disposed between open and this callback
         }
       };
 
@@ -224,10 +259,11 @@ export function useTerminal(sessionId?: string) {
 
     connectWs();
 
-    const ro = new ResizeObserver(() => fitAddon.fit());
+    const ro = new ResizeObserver(() => { if (!disposed) { try { fitAddon.fit(); } catch { /* disposed */ } } });
     ro.observe(el);
 
     return () => {
+      disposed = true;
       mountedRef.current = false;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       ro.disconnect();

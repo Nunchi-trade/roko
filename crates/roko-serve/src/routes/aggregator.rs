@@ -446,9 +446,7 @@ async fn list_knowledge_entries(
         return Ok(Json(cached));
     }
     let store = roko_neuro::knowledge_store::KnowledgeStore::for_layout(&state.layout);
-    let all = store
-        .read_all()
-        .unwrap_or_default();
+    let all = store.read_all().unwrap_or_default();
     let items: Vec<Value> = all
         .iter()
         .map(|e| {
@@ -481,9 +479,7 @@ async fn list_knowledge_edges(State(state): State<Arc<AppState>>) -> Result<Json
         return Ok(Json(cached));
     }
     let store = roko_neuro::knowledge_store::KnowledgeStore::for_layout(&state.layout);
-    let all = store
-        .read_all()
-        .unwrap_or_default();
+    let all = store.read_all().unwrap_or_default();
     let mut edges: Vec<Value> = Vec::new();
     // Build edges from refutation links (anti-knowledge → refuted entry).
     for entry in &all {
@@ -507,10 +503,7 @@ async fn list_knowledge_edges(State(state): State<Arc<AppState>>) -> Result<Json
                 .push(&entry.id);
         }
         for tag in &entry.tags {
-            if tag.starts_with("plan:")
-                || tag.starts_with("agent:")
-                || tag.starts_with("model:")
-            {
+            if tag.starts_with("plan:") || tag.starts_with("agent:") || tag.starts_with("model:") {
                 group_to_entries
                     .entry(tag.clone())
                     .or_default()

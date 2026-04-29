@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useApiWithFallback } from '../../hooks/useApiWithFallback';
+import { useLiveApi } from '../../hooks/useLiveApi';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 
@@ -427,7 +427,7 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
 /* ── Component ───────────────────────────────────────────── */
 
 export default function AgentFleet() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [topology, setTopology] = useState<TopoData>(EMPTY_TOPOLOGY);
 
@@ -469,7 +469,7 @@ export default function AgentFleet() {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, flex: 1, minHeight: 0 }}>
         <Pane
           title="AGENT TOPOLOGY"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>force-directed</span>}
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>force-directed</span>}
         >
           <TopologyGraph data={topology} height={240} />
         </Pane>
@@ -498,7 +498,7 @@ export default function AgentFleet() {
                 <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{
                     fontFamily: 'var(--mono)',
-                    fontSize: 9,
+                    fontSize: 15,
                     color: 'var(--text-dim)',
                     letterSpacing: '.06em',
                   }}>
@@ -525,7 +525,7 @@ export default function AgentFleet() {
               foot={
                 <span style={{
                   fontFamily: 'var(--mono)',
-                  fontSize: 9,
+                  fontSize: 15,
                   color: 'var(--text-ghost)',
                   letterSpacing: '.06em',
                 }}>
@@ -539,7 +539,7 @@ export default function AgentFleet() {
                   {(agent.capabilities ?? []).map((cap) => (
                     <span key={cap} style={{
                       fontFamily: 'var(--mono)',
-                      fontSize: 9,
+                      fontSize: 15,
                       letterSpacing: '.06em',
                       padding: '3px 8px',
                       borderRadius: 4,
@@ -553,7 +553,7 @@ export default function AgentFleet() {
                   {(agent.domain_tags ?? []).map((tag) => (
                     <span key={tag} style={{
                       fontFamily: 'var(--mono)',
-                      fontSize: 9,
+                      fontSize: 15,
                       letterSpacing: '.06em',
                       padding: '3px 8px',
                       borderRadius: 4,

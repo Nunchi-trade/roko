@@ -5,13 +5,13 @@ import { useServerHealth } from '../hooks/useServerHealth';
 import './TopNav.css';
 
 const NAV_LINKS = [
-  { to: '/demo', label: 'DEMO' },
-  { to: '/dashboard', label: 'DASHBOARD' },
-  { to: '/bench', label: 'BENCH' },
-  { to: '/explorer', label: 'EXPLORER' },
-  { to: '/builder', label: 'BUILDER' },
-  { to: '/terminal', label: 'TERMINAL' },
-  { to: '/settings', label: 'SETTINGS' },
+  { to: '/demo', label: 'Demo' },
+  { to: '/dashboard', label: 'Dashboard' },
+  { to: '/bench', label: 'Bench' },
+  { to: '/explorer', label: 'Explorer' },
+  { to: '/builder', label: 'Builder' },
+  { to: '/terminal', label: 'Terminal' },
+  { to: '/settings', label: 'Settings' },
 ];
 
 interface HealthResponse {
@@ -53,7 +53,7 @@ export default function TopNav() {
     <nav className="topnav">
       <Link to="/" className="brand" style={{ textDecoration: 'none' }}>
         <span className="mark" aria-hidden="true" />
-        <b>ROKO</b>
+        <b>nunchi</b>
       </Link>
       <div className="links">
         {NAV_LINKS.map((l) => (
@@ -69,7 +69,7 @@ export default function TopNav() {
       <div className="right">
         <span className={`status-pill ${serverHealth === 'connected' ? 'live' : 'demo'}`}>
           <span className="status-dot" />
-          {serverHealth === 'connected' && uptime != null ? `LIVE ${fmtUptime(uptime)}` : 'DEMO'}
+          {serverHealth === 'connected' && uptime != null ? `Live ${fmtUptime(uptime)}` : 'Demo'}
         </span>
       </div>
     </nav>

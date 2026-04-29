@@ -139,23 +139,73 @@ pub fn create_agent_for_model(
     // When the command is a known protocol CLI (claude, codex, etc.) but no
     // explicit provider/model config exists, synthesize sensible defaults so
     // `roko init` + `roko prd draft new` works out of the box.
+    //
+    // IMPORTANT: only use the command-based provider kind when the model
+    // actually belongs to that provider family.  If the model resolves to a
+    // different kind (e.g. "glm-5v-turbo" → OpenAiCompat while command is
+    // "claude" → ClaudeCli), prefer the model's kind so the right adapter is
+    // chosen.  This prevents every non-Claude model from being force-routed
+    // through the Claude CLI just because `agent.command = "claude"`.
     let (provider_config, profile) = match (provider_config, profile) {
         (Some(pc), Some(mp)) => (pc, mp),
         (pc, mp) if legacy_command.is_some_and(is_known_protocol_command) => {
             let cmd = legacy_command.unwrap(); // safe: is_some_and passed
-            let kind =
-                provider_kind_for_known_protocol_command(cmd).unwrap_or(resolved.provider_kind);
-            let pc = pc.unwrap_or_else(|| ProviderConfig {
-                kind,
-                command: Some(cmd.to_string()),
-                timeout_ms: options.timeout_ms.or(Some(120_000)),
-                base_url: None,
-                api_key_env: None,
-                args: None,
-                ttft_timeout_ms: None,
-                connect_timeout_ms: None,
-                extra_headers: None,
-                max_concurrent: None,
+            let cmd_kind = provider_kind_for_known_protocol_command(cmd);
+
+            // Use the command's kind only when the model's resolved kind
+            // matches (or is the generic default).  Otherwise the model's
+            // own kind wins so that e.g. OpenAI-compat models aren't routed
+            // through Claude CLI.
+            let kind = match cmd_kind {
+                Some(ck) if ck == resolved.provider_kind => ck,
+                Some(ck) if mp.is_none() && resolved.provider_kind == ProviderKind::OpenAiCompat => {
+                    // Model slug wasn't recognised by from_model() — the
+                    // OpenAiCompat kind is just the catch-all default.
+                    // Check if an explicit provider for the model's kind
+                    // exists in the config; if so, use the model's kind.
+                    let providers = config.effective_providers();
+                    if provider_for_kind(&providers, resolved.provider_kind).is_some() {
+                        resolved.provider_kind
+                    } else {
+                        ck
+                    }
+                }
+                Some(_) => resolved.provider_kind,
+                None => resolved.provider_kind,
+            };
+            let pc = pc.unwrap_or_else(|| {
+                // When using the model's kind (not the command's), don't
+                // attach the CLI command — it belongs to a different
+                // provider.
+                let use_cmd = cmd_kind == Some(kind);
+                let mut synth = ProviderConfig {
+                    kind,
+                    command: if use_cmd { Some(cmd.to_string()) } else { None },
+                    timeout_ms: options.timeout_ms.or(Some(120_000)),
+                    base_url: None,
+                    api_key_env: None,
+                    args: None,
+                    ttft_timeout_ms: None,
+                    connect_timeout_ms: None,
+                    extra_headers: None,
+                    max_concurrent: None,
+                };
+                // For OpenAI-compat models without explicit config, try to
+                // inherit base_url / api_key_env from a configured provider
+                // of the same kind so the adapter can actually reach the API.
+                if !use_cmd {
+                    let providers = config.effective_providers();
+                    if let Some((_, existing)) = provider_for_kind(&providers, kind) {
+                        synth.base_url = existing.base_url.clone();
+                        synth.api_key_env = existing.api_key_env.clone();
+                        synth.timeout_ms = existing.timeout_ms.or(synth.timeout_ms);
+                        synth.ttft_timeout_ms = existing.ttft_timeout_ms;
+                        synth.connect_timeout_ms = existing.connect_timeout_ms;
+                        synth.extra_headers = existing.extra_headers.clone();
+                        synth.max_concurrent = existing.max_concurrent;
+                    }
+                }
+                synth
             });
             let mp = mp.unwrap_or_else(|| ModelProfile {
                 provider: format!("{kind}"),
@@ -165,8 +215,9 @@ pub fn create_agent_for_model(
             tracing::info!(
                 model_key = model_key,
                 slug = %resolved.slug,
+                provider_kind = %kind,
                 command = cmd,
-                "no explicit provider config — using defaults for known CLI"
+                "no explicit provider config — synthesized defaults"
             );
             (pc, mp)
         }
@@ -366,6 +417,23 @@ fn provider_kind_for_known_protocol_command(command: &str) -> Option<ProviderKin
         "cursor-agent" | "cursor_agent" => Some(ProviderKind::CursorAcp),
         _ => None,
     }
+}
+
+/// Find the first configured provider matching a given kind.
+fn provider_for_kind<'a>(
+    providers: &'a HashMap<String, ProviderConfig>,
+    kind: ProviderKind,
+) -> Option<(String, &'a ProviderConfig)> {
+    let exact_key = kind.label();
+    if let Some(provider) = providers.get(exact_key) {
+        if provider.kind == kind {
+            return Some((exact_key.to_string(), provider));
+        }
+    }
+    providers
+        .iter()
+        .find(|(_, p)| p.kind == kind)
+        .map(|(k, p)| (k.clone(), p))
 }
 
 /// Shared semaphores that cap in-flight requests per provider.

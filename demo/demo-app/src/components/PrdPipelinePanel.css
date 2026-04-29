@@ -1,14 +1,14 @@
 .pipeline-panel {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
   color: var(--text-primary);
 }
 
 .pipeline-example-switcher {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
+  gap: 8px;
 }
 
 .pipeline-example-switcher button {
@@ -18,7 +18,7 @@
   border-radius: 4px;
   background: rgba(10, 10, 13, 0.58);
   color: var(--text-dim);
-  padding: 5px 8px;
+  padding: 7px 10px;
   cursor: pointer;
 }
 
@@ -36,7 +36,7 @@
   display: block;
   color: var(--text-ghost);
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: 11px;
   text-transform: uppercase;
   margin-bottom: 3px;
 }
@@ -44,7 +44,7 @@
 .pipeline-example-switcher b {
   display: block;
   color: var(--text-strong);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.2;
 }
 
@@ -53,7 +53,7 @@
   grid-template-columns: minmax(0, 1fr) auto;
   min-height: 0;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 10px 14px;
   border: 1px solid var(--glass-border);
   background:
     radial-gradient(circle at 20% 10%, rgba(184, 122, 148, 0.18), transparent 42%),
@@ -61,6 +61,7 @@
   border-radius: 6px;
   overflow: hidden;
   position: relative;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
 }
 
 .pipeline-hero::after {
@@ -88,7 +89,7 @@
   max-width: 680px;
   margin: 4px 0 0;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.35;
 }
 
@@ -102,13 +103,13 @@
 
 .pipeline-primary-action {
   flex: 0 0 auto;
-  min-height: 28px;
-  padding: 0 10px;
+  min-height: 30px;
+  padding: 0 14px;
   border: 1px solid var(--rose-dim);
   border-radius: 4px;
   background: rgba(184, 122, 148, 0.16);
   color: var(--text-strong);
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
   box-shadow: 0 0 24px rgba(184, 122, 148, 0.12);
 }
@@ -143,14 +144,14 @@
   height: 100%;
 }
 
-.pipeline-constellation-fallback {
+.pipeline-constellation-static {
   min-height: 100px;
   display: flex;
   align-items: center;
   justify-content: space-around;
 }
 
-.pipeline-constellation-fallback span {
+.pipeline-constellation-static span {
   width: 9px;
   height: 9px;
   border-radius: 999px;
@@ -175,7 +176,7 @@
 
 .pipeline-eyebrow {
   color: var(--bone-dim);
-  font-size: 9px;
+  font-size: 11px;
   text-transform: uppercase;
   margin-bottom: 3px;
 }
@@ -197,7 +198,7 @@
   background: rgba(96, 112, 132, 0.14);
   border: 1px solid rgba(96, 112, 132, 0.28);
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -209,7 +210,7 @@
   align-items: center;
   gap: 4px;
   margin-top: 5px;
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-ghost);
 }
 
@@ -279,7 +280,7 @@
 .pipeline-score em {
   font-family: var(--mono);
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 11px;
   font-style: normal;
 }
 
@@ -290,11 +291,12 @@
   border-radius: 6px;
   overflow: hidden;
   background: var(--bg-void);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
 }
 
 .pipeline-phase {
   min-width: 0;
-  padding: 6px 8px;
+  padding: 8px 12px;
   border-right: 1px solid var(--glass-border);
   display: flex;
   align-items: center;
@@ -306,8 +308,8 @@
 }
 
 .pipeline-phase span {
-  width: 7px;
-  height: 7px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: var(--text-ghost);
   flex-shrink: 0;
@@ -316,7 +318,7 @@
 .pipeline-phase b {
   font-family: var(--mono);
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
   text-transform: uppercase;
   overflow: hidden;
@@ -345,13 +347,13 @@
 .pipeline-artifact-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  gap: 10px;
 }
 
 .pipeline-artifact-col {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -372,11 +374,12 @@
   border-radius: 6px;
   background: rgba(10, 10, 13, 0.58);
   overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
 }
 
 .pipeline-prd,
 .pipeline-example-brief {
-  padding: 6px 8px;
+  padding: 8px 12px;
 }
 
 .pipeline-example-brief blockquote {
@@ -393,7 +396,7 @@
   align-items: center;
   justify-content: space-between;
   color: var(--text-ghost);
-  font-size: 9px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.1em;
   margin-bottom: 5px;
@@ -423,7 +426,7 @@
 .pipeline-example-brief p {
   color: var(--text-dim);
   line-height: 1.35;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .pipeline-prd p,
@@ -448,7 +451,7 @@
 .pipeline-why-list span {
   display: inline-block;
   color: var(--text-soft);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.25;
   padding: 3px 6px;
   border: 1px solid var(--glass-border);
@@ -474,7 +477,7 @@
 .pipeline-metric span {
   display: block;
   color: var(--text-ghost);
-  font-size: 8px;
+  font-size: 11px;
   text-transform: uppercase;
   margin-bottom: 4px;
 }
@@ -490,7 +493,7 @@
 
 .pipeline-metric b.mono {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--dream-bright);
 }
 
@@ -498,7 +501,7 @@
 .pipeline-tasks,
 .pipeline-events,
 .pipeline-insights {
-  padding: 4px 6px;
+  padding: 8px 10px;
 }
 
 .pipeline-plan-list,
@@ -506,7 +509,7 @@
 .pipeline-event-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .pipeline-plan-card,
@@ -514,10 +517,11 @@
   border: 1px solid var(--glass-border);
   border-radius: 6px;
   background: rgba(16, 14, 20, 0.64);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
 }
 
 .pipeline-plan-card {
-  padding: 7px 8px;
+  padding: 8px 12px;
 }
 
 .pipeline-plan-top {
@@ -535,7 +539,7 @@
   display: block;
   color: var(--text-ghost);
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   margin-top: 2px;
 }
 
@@ -578,7 +582,7 @@
   border: 1px solid var(--glass-border);
   border-radius: 3px;
   padding: 3px 5px;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .pipeline-route-grid {
@@ -589,10 +593,11 @@
 
 .pipeline-route-card {
   min-width: 0;
-  padding: 6px 7px;
+  padding: 8px 10px;
   border: 1px solid var(--glass-border);
   border-radius: 4px;
   background: rgba(16, 14, 20, 0.64);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
 }
 
 .pipeline-route-card span,
@@ -605,7 +610,7 @@
 
 .pipeline-route-card span {
   color: var(--text-ghost);
-  font-size: 8px;
+  font-size: 11px;
   text-transform: uppercase;
 }
 
@@ -621,7 +626,7 @@
 .pipeline-route-card em {
   margin-top: 5px;
   color: var(--text-dim);
-  font-size: 9px;
+  font-size: 11px;
   font-style: normal;
 }
 
@@ -643,7 +648,7 @@
 .pipeline-gate-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 6px;
   margin-top: 6px;
 }
 
@@ -654,7 +659,7 @@
   border: 1px solid rgba(96, 112, 132, 0.22);
   border-radius: 4px;
   padding: 4px 6px;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .pipeline-gate-list b {
@@ -666,20 +671,20 @@
 
 .pipeline-task-row {
   display: grid;
-  grid-template-columns: 60px minmax(0, 1fr);
+  grid-template-columns: 72px minmax(0, 1fr);
   overflow: hidden;
 }
 
 .pipeline-task-status {
-  padding: 7px 6px;
+  padding: 8px 8px;
   border-right: 1px solid var(--glass-border);
   background: rgba(0, 0, 0, 0.12);
 }
 
 .pipeline-task-status span {
   display: block;
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   margin-bottom: 8px;
   background: var(--text-ghost);
@@ -688,7 +693,7 @@
 .pipeline-task-status b {
   color: var(--text-dim);
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   text-transform: uppercase;
 }
 
@@ -722,7 +727,7 @@
 }
 
 .pipeline-task-main {
-  padding: 7px 8px;
+  padding: 8px 12px;
   min-width: 0;
 }
 
@@ -743,7 +748,7 @@
   min-width: 32px;
   text-align: center;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   border: 1px solid var(--glass-border);
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.04);
@@ -769,7 +774,7 @@
   background: rgba(96, 112, 132, 0.12);
   color: var(--dream-bright);
   border: 1px solid rgba(96, 112, 132, 0.24);
-  font-size: 10px;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -793,7 +798,7 @@
 
 .pipeline-task-verify em {
   color: var(--text-ghost);
-  font-size: 9px;
+  font-size: 11px;
   font-style: normal;
 }
 
@@ -803,7 +808,7 @@
   gap: 6px;
   align-items: baseline;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .pipeline-event span {
@@ -835,7 +840,7 @@
 
 .pipeline-muted {
   color: var(--text-ghost);
-  font-size: 11px;
+  font-size: 12px;
   padding: 6px;
 }
 
@@ -846,7 +851,7 @@
 .pipeline-empty-kicker {
   color: var(--rose-bright);
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   text-transform: uppercase;
   margin-bottom: 5px;
 }

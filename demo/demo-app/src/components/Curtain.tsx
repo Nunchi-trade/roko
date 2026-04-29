@@ -63,7 +63,7 @@ export default function Curtain() {
         style={{
           marginTop: 24,
           fontFamily: 'var(--mono)',
-          fontSize: 11,
+          fontSize: 14,
           letterSpacing: '.22em',
           textTransform: 'uppercase',
           color: 'var(--text-dim)',

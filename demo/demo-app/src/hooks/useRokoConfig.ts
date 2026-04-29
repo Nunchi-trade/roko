@@ -1,6 +1,6 @@
 import { createContext, createElement, useContext, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { useApiWithFallback } from './useApiWithFallback';
+import { useLiveApi } from './useLiveApi';
 import {
   providerForModelKey,
   rawModelsToOptions,
@@ -16,24 +16,30 @@ export interface ProviderGroup {
 }
 
 export interface RokoConfigState {
+  fullConfig: Record<string, unknown>;
   defaultModel: string;
   defaultBackend: string;
   providers: ProviderGroup[];
   isLive: boolean;
   lastSaved: number | null;
   updateModelConfig: (model: string, backend: string) => Promise<boolean>;
+  updateConfig: (partial: Record<string, unknown>) => Promise<boolean>;
+  refreshConfig: () => Promise<void>;
 }
 
-const FALLBACK: RokoConfigState = {
+const DEFAULT_CONFIG_STATE: RokoConfigState = {
+  fullConfig: {},
   defaultModel: '',
   defaultBackend: '',
   providers: [],
   isLive: false,
   lastSaved: null,
   updateModelConfig: async () => false,
+  updateConfig: async () => false,
+  refreshConfig: async () => {},
 };
 
-export const RokoConfigContext = createContext<RokoConfigState>(FALLBACK);
+export const RokoConfigContext = createContext<RokoConfigState>(DEFAULT_CONFIG_STATE);
 
 export function useRokoConfig() {
   return useContext(RokoConfigContext);
@@ -61,9 +67,33 @@ function deriveProviders(
   return Array.from(grouped.values());
 }
 
+/** Apply a config blob to local state (model, backend, providers, fullConfig). */
+function applyConfig(
+  cfg: Record<string, unknown>,
+  setFullConfig: (c: Record<string, unknown>) => void,
+  setDefaultModel: (m: string) => void,
+  setDefaultBackend: (b: string) => void,
+  setProviders: (p: ProviderGroup[]) => void,
+) {
+  setFullConfig(cfg);
+  const agent = cfg?.agent as Record<string, string> | undefined;
+  const rawModels = cfg?.models as RawConfigModels | undefined;
+  const modelOptions = rawModelsToOptions(rawModels);
+  const modelKey = agent?.default_model
+    ? resolveModelKey(modelOptions, agent.default_model)
+    : '';
+  if (modelKey) setDefaultModel(modelKey);
+  const modelProvider = providerForModelKey(modelOptions, modelKey);
+  if (modelProvider || agent?.default_backend) {
+    setDefaultBackend(modelProvider ?? agent?.default_backend ?? '');
+  }
+  setProviders(deriveProviders(rawModels, cfg?.providers as Record<string, { kind: string }>));
+}
+
 /** Hook that manages fetching + polling + writing config. Used inside RokoConfigProvider. */
 export function useRokoConfigState(): RokoConfigState {
-  const { get, put, isLive } = useApiWithFallback();
+  const { get, put, isLive } = useLiveApi();
+  const [fullConfig, setFullConfig] = useState<Record<string, unknown>>({});
   const [defaultModel, setDefaultModel] = useState('');
   const [defaultBackend, setDefaultBackend] = useState('');
   const [providers, setProviders] = useState<ProviderGroup[]>([]);
@@ -73,20 +103,9 @@ export function useRokoConfigState(): RokoConfigState {
   const fetchConfig = useCallback(async () => {
     try {
       const cfg = await get<Record<string, unknown>>('/api/config');
-      const agent = cfg?.agent as Record<string, string> | undefined;
-      const rawModels = cfg?.models as RawConfigModels | undefined;
-      const modelOptions = rawModelsToOptions(rawModels);
-      const modelKey = agent?.default_model
-        ? resolveModelKey(modelOptions, agent.default_model)
-        : '';
-      if (modelKey) setDefaultModel(modelKey);
-      const modelProvider = providerForModelKey(modelOptions, modelKey);
-      if (modelProvider || agent?.default_backend) {
-        setDefaultBackend(modelProvider ?? agent?.default_backend ?? '');
-      }
-      setProviders(deriveProviders(rawModels, cfg?.providers as Record<string, { kind: string }>));
+      if (cfg) applyConfig(cfg, setFullConfig, setDefaultModel, setDefaultBackend, setProviders);
     } catch {
-      // swallow — fallback data will be used
+      // Leave config empty until the live server responds.
     }
   }, [get]);
 
@@ -114,10 +133,7 @@ export function useRokoConfigState(): RokoConfigState {
         const cfg = await put<Record<string, unknown>>('/api/config', {
           agent: { default_model: modelKey, default_backend: modelBackend },
         });
-        // Update from response
-        const agent = cfg?.agent as Record<string, string> | undefined;
-        if (agent?.default_model) setDefaultModel(resolveModelKey(allModels, agent.default_model));
-        setDefaultBackend(modelBackend || agent?.default_backend || '');
+        if (cfg) applyConfig(cfg, setFullConfig, setDefaultModel, setDefaultBackend, setProviders);
         setLastSaved(Date.now());
         return true;
       } catch {
@@ -127,7 +143,29 @@ export function useRokoConfigState(): RokoConfigState {
     [isLive, providers, put],
   );
 
-  return { defaultModel, defaultBackend, providers, isLive, lastSaved, updateModelConfig };
+  const updateConfig = useCallback(
+    async (partial: Record<string, unknown>): Promise<boolean> => {
+      if (!isLive) return false;
+      try {
+        const cfg = await put<Record<string, unknown>>('/api/config', partial);
+        if (cfg) applyConfig(cfg, setFullConfig, setDefaultModel, setDefaultBackend, setProviders);
+        setLastSaved(Date.now());
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [isLive, put],
+  );
+
+  const refreshConfig = useCallback(async () => {
+    await fetchConfig();
+  }, [fetchConfig]);
+
+  return {
+    fullConfig, defaultModel, defaultBackend, providers, isLive, lastSaved,
+    updateModelConfig, updateConfig, refreshConfig,
+  };
 }
 
 /** Context provider — wrap in AppShell so all pages can access config */

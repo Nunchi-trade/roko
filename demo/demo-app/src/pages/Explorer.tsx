@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { useLiveApi } from '../hooks/useLiveApi';
 import './Explorer.css';
 
 /* ═══════════════════════════════════════════════════════════
@@ -202,7 +202,7 @@ export default function Explorer() {
   // Keep a ref for episode rects so hover detection works outside draw
   const epRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number; ep: Episode }>>([]);
 
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
 
   /* ── data fetch ── */
   const refresh = useCallback(async () => {

@@ -85,7 +85,7 @@ export async function setupWorkspace(
 ): Promise<string> {
   // Wait for WS connection + initial prompt
   const wsOk = await waitForOpen(handle);
-  if (!wsOk) return '/tmp/roko-fallback';
+  if (!wsOk) return '/tmp/roko-unavailable';
   await handle.waitForPrompt(10000);
   await resolveRoko(handle);
 

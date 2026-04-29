@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useApiWithFallback } from '../../hooks/useApiWithFallback';
+import { useLiveApi } from '../../hooks/useLiveApi';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import GateWaterfall, { type GateRun } from '../../components/GateWaterfall';
@@ -21,9 +21,13 @@ interface HealthResponse {
   };
 }
 
-/* ── Fake SHA-256 hash for demo ──────────────────────────── */
-
-const DEMO_HASH = 'a3f8c2d1e4b5976801234abcdef56789012345678abcdef0123456789abcdef0';
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
 
 /* ── Features list ───────────────────────────────────────── */
 
@@ -38,7 +42,15 @@ const FEATURES = [
 
 /* ── Hash chain visualization ────────────────────────────── */
 
-function HashChainViz({ episodes, height = 160 }: { episodes: number; height?: number }) {
+function HashChainViz({
+  episodes,
+  hash,
+  height = 160,
+}: {
+  episodes: number;
+  hash: string;
+  height?: number;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef(0);
 
@@ -66,6 +78,15 @@ function HashChainViz({ episodes, height = 160 }: { episodes: number; height?: n
     bg.addColorStop(1, 'rgba(138,156,134,0.04)');
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, w, h);
+
+    if (!hash) {
+      ctx.fillStyle = 'rgba(138,122,136,0.8)';
+      ctx.font = '10px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('waiting for live episode hash', w / 2, h / 2);
+      return;
+    }
 
     // Draw chain of blocks
     const blockCount = Math.min(12, Math.max(6, Math.floor(w / 90)));
@@ -115,8 +136,8 @@ function HashChainViz({ episodes, height = 160 }: { episodes: number; height?: n
       ctx.stroke();
 
       // Block hash snippet
-      const hashStart = (i * 5) % (DEMO_HASH.length - 8);
-      const snippet = DEMO_HASH.slice(hashStart, hashStart + 8);
+      const hashStart = (i * 5) % Math.max(hash.length - 8, 1);
+      const snippet = hash.slice(hashStart, hashStart + 8);
       ctx.fillStyle = blockColor;
       ctx.font = '8px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
@@ -139,7 +160,7 @@ function HashChainViz({ episodes, height = 160 }: { episodes: number; height?: n
     if (frameRef.current < 200) {
       requestAnimationFrame(draw);
     }
-  }, [episodes]);
+  }, [episodes, hash]);
 
   useEffect(() => {
     frameRef.current = 0;
@@ -156,11 +177,12 @@ function HashChainViz({ episodes, height = 160 }: { episodes: number; height?: n
 /* ── Component ───────────────────────────────────────────── */
 
 export default function IntegrityView() {
-  const { get } = useApiWithFallback();
-  const [episodes, setEpisodes] = useState(847);
-  const [gatesPassed, setGatesPassed] = useState(791);
-  const [gatesFailed, setGatesFailed] = useState(56);
+  const { get } = useLiveApi();
+  const [episodes, setEpisodes] = useState(0);
+  const [gatesPassed, setGatesPassed] = useState(0);
+  const [gatesFailed, setGatesFailed] = useState(0);
   const [gateHistory, setGateHistory] = useState<GateRun[]>([]);
+  const [latestHash, setLatestHash] = useState('');
   const [typedHash, setTypedHash] = useState('');
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -169,32 +191,47 @@ export default function IntegrityView() {
     get<HealthResponse>('/api/health').then((h) => {
       const snap = h?.statehub?.snapshot;
       if (snap) {
-        setEpisodes(snap.episodes_total ?? 847);
-        setGatesPassed(snap.gates_passed ?? 791);
-        setGatesFailed(snap.gates_failed ?? 56);
+        setEpisodes(snap.episodes_total ?? 0);
+        setGatesPassed(snap.gates_passed ?? 0);
+        setGatesFailed(snap.gates_failed ?? 0);
       }
     }).catch(() => {});
 
     get<GateRun[]>('/api/gates/history?limit=20&format=waterfall').then((data) => {
       if (Array.isArray(data)) setGateHistory(data);
     }).catch(() => {});
+
+    get<unknown[]>('/api/episodes?limit=1').then(async (data) => {
+      const latest = Array.isArray(data) ? data[0] : null;
+      if (!latest) {
+        setLatestHash('');
+        return;
+      }
+      setLatestHash(await sha256Hex(JSON.stringify(latest)));
+    }).catch(() => {
+      setLatestHash('');
+    });
   }, [get]);
 
   /* Typewriter effect for hash */
   useEffect(() => {
+    if (!latestHash) {
+      setTypedHash('');
+      return undefined;
+    }
     let idx = 0;
     intervalRef.current = setInterval(() => {
       idx++;
-      setTypedHash(DEMO_HASH.slice(0, idx));
-      if (idx >= DEMO_HASH.length) {
+      setTypedHash(latestHash.slice(0, idx));
+      if (idx >= latestHash.length) {
         if (intervalRef.current) clearInterval(intervalRef.current);
         timeoutRef.current = setTimeout(() => {
           idx = 0;
           setTypedHash('');
           intervalRef.current = setInterval(() => {
             idx++;
-            setTypedHash(DEMO_HASH.slice(0, idx));
-            if (idx >= DEMO_HASH.length && intervalRef.current) {
+            setTypedHash(latestHash.slice(0, idx));
+            if (idx >= latestHash.length && intervalRef.current) {
               clearInterval(intervalRef.current);
             }
           }, 35);
@@ -206,10 +243,10 @@ export default function IntegrityView() {
       if (intervalRef.current) clearInterval(intervalRef.current);
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
-  }, []);
+  }, [latestHash]);
 
   const gateTotal = gatesPassed + gatesFailed;
-  const passRate = gateTotal > 0 ? (gatesPassed / gateTotal) * 100 : 93.4;
+  const passRate = gateTotal > 0 ? (gatesPassed / gateTotal) * 100 : 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -222,7 +259,7 @@ export default function IntegrityView() {
 
       {/* ═══ TOP MOSAIC ═══ */}
       <Mosaic columns={5}>
-        <MosaicCell label="STATUS" value="Active" color="success" />
+        <MosaicCell label="STATUS" value={latestHash ? 'Live' : 'No data'} color={latestHash ? 'success' : 'warning'} />
         <MosaicCell label="EPISODES" value={episodes.toLocaleString()} color="rose" mono sub="hashed" />
         <MosaicCell label="GATES PASSED" value={gatesPassed.toLocaleString()} color="success" mono />
         <MosaicCell label="GATES FAILED" value={gatesFailed.toLocaleString()} color="warning" mono />
@@ -233,13 +270,13 @@ export default function IntegrityView() {
       <Pane
         title="HASH TRAIL"
         badge={
-          <code style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text-dim)', letterSpacing: '.02em' }}>
+          <code style={{ fontFamily: 'var(--mono)', fontSize: 15, color: 'var(--text-dim)', letterSpacing: '.02em' }}>
             {typedHash.slice(0, 24)}...
             <span style={{ display: 'inline-block', width: 1, height: '1em', background: 'var(--rose-dim)', marginLeft: 1, verticalAlign: 'text-bottom', animation: 'blink-cursor .8s step-end infinite' }} />
           </code>
         }
       >
-        <HashChainViz episodes={episodes} height={90} />
+        <HashChainViz episodes={episodes} hash={latestHash} height={90} />
       </Pane>
 
       {/* ═══ MIDDLE ROW: Features + Gate Waterfall ═══ */}
@@ -248,14 +285,14 @@ export default function IntegrityView() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <p style={{
               fontFamily: 'var(--display)',
-              fontSize: 12,
+              fontSize: 15,
               fontWeight: 300,
               color: 'var(--text-soft)',
               lineHeight: 1.7,
               margin: '0 0 4px',
             }}>
-              Every agent action is logged with cryptographic hashes. When a witness
-              backend is connected, actions become tamper-proof records with verifiable integrity.
+              Agent episode rows are hashed from live runtime data. When a witness
+              backend is connected, these records can be anchored for external verification.
             </p>
             {FEATURES.map((f) => (
               <div key={f.label} style={{
@@ -265,12 +302,12 @@ export default function IntegrityView() {
                 padding: '6px 0',
                 borderBottom: '1px solid rgba(255,255,255,.03)',
               }}>
-                <span style={{ color: 'var(--success)', fontSize: 11, marginTop: 1, flexShrink: 0 }}>&#x2713;</span>
+                <span style={{ color: 'var(--success)', fontSize: 14, marginTop: 1, flexShrink: 0 }}>&#x2713;</span>
                 <div>
-                  <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-primary)' }}>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text-primary)' }}>
                     {f.label}
                   </div>
-                  <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text-ghost)', letterSpacing: '.02em', marginTop: 2 }}>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 15, color: 'var(--text-ghost)', letterSpacing: '.02em', marginTop: 2 }}>
                     {f.desc}
                   </div>
                 </div>
@@ -279,7 +316,7 @@ export default function IntegrityView() {
           </div>
         </Pane>
 
-        <Pane title="GATE PIPELINE WATERFALL" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>7-rung</span>}>
+        <Pane title="GATE PIPELINE WATERFALL" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>7-rung</span>}>
           <GateWaterfall runs={gateHistory} height={200} />
         </Pane>
       </div>

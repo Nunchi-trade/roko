@@ -13,7 +13,7 @@ export default function CrushedBar({ naiveLabel, naiveValue, actualLabel, actual
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
       <div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-soft)', marginBottom: 4 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text-soft)', marginBottom: 4 }}>
           <span>{naiveLabel}</span>
           <span style={{ color: 'var(--bone-bright)' }}>{fmt(naiveValue)}</span>
         </div>
@@ -27,7 +27,7 @@ export default function CrushedBar({ naiveLabel, naiveValue, actualLabel, actual
         </div>
       </div>
       <div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-soft)', marginBottom: 4 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text-soft)', marginBottom: 4 }}>
           <span>{actualLabel}</span>
           <span style={{ color: 'var(--rose-glow)' }}>{fmt(actualValue)}</span>
         </div>

@@ -1,7 +1,7 @@
 .command-log {
   overflow-y: auto;
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: 1.05rem;
   padding: 10px 16px;
 }
 .log-entry {

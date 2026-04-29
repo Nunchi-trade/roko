@@ -99,7 +99,7 @@
 
 .expl-title {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 16px;
   letter-spacing: 0.22em;
   text-transform: uppercase;
   color: var(--text-strong);
@@ -111,7 +111,7 @@
   align-items: center;
   gap: 6px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 15px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--success);
@@ -152,7 +152,7 @@
 
 .expl-pill-label {
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: 16px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -160,7 +160,7 @@
 
 .expl-pill-value {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 16px;
   color: var(--text-primary);
   font-weight: 400;
 }
@@ -235,7 +235,7 @@
 
 .expl-stat-label {
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: 16px;
   letter-spacing: 0.22em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -275,7 +275,7 @@
 
 .expl-section-label {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 15px;
   letter-spacing: 0.22em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -309,7 +309,7 @@
   left: 50%;
   transform: translateX(-50%);
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: 16px;
   color: var(--text-dim);
   pointer-events: none;
 }
@@ -320,7 +320,7 @@
 
 .expl-cards-section {
   flex: 1;
-  padding: 16px 20px;
+  padding: 10px 16px;
   min-height: 0;
 }
 
@@ -369,7 +369,7 @@
 
 .expl-card-kind {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 15px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   padding: 2px 8px;
@@ -380,7 +380,7 @@
 
 .expl-card-model {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 15px;
   color: var(--text-dim);
   background: rgba(255, 255, 255, 0.04);
   padding: 2px 6px;
@@ -390,7 +390,7 @@
 
 .expl-card-time {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 15px;
   color: var(--text-dim);
   margin-left: auto;
 }
@@ -399,7 +399,7 @@
 .expl-card-agent {
   font-family: var(--display);
   font-weight: 300;
-  font-size: 14px;
+  font-size: 16px;
   color: var(--text-strong);
   letter-spacing: -0.01em;
   line-height: 1.2;
@@ -412,19 +412,19 @@
 /* Task ID (mono, dim, truncated) */
 .expl-card-task {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 15px;
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
 
 /* Gate verdict dots */
 .expl-card-gates {
   display: flex;
-  gap: 4px;
-  margin-bottom: 8px;
+  gap: 3px;
+  margin-bottom: 4px;
   flex-wrap: wrap;
 }
 
@@ -454,14 +454,14 @@
 /* Meta chips */
 .expl-card-meta {
   display: flex;
-  gap: 6px;
-  margin-bottom: 8px;
+  gap: 4px;
+  margin-bottom: 4px;
   flex-wrap: wrap;
 }
 
 .expl-chip {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 15px;
   padding: 2px 8px;
   border-radius: 3px;
   font-weight: 400;
@@ -514,7 +514,7 @@
 .expl-card-field {
   display: flex;
   gap: 6px;
-  font-size: 10px;
+  font-size: 15px;
   line-height: 1.4;
   min-width: 0;
 }
@@ -589,7 +589,7 @@
 
 .expl-drawer-hint {
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: 16px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -638,7 +638,7 @@
   align-items: center;
   gap: 10px;
   padding: 5px 10px;
-  font-size: 11px;
+  font-size: 16px;
   font-family: var(--mono);
   background: rgba(255, 255, 255, 0.02);
   border-radius: 3px;
@@ -647,14 +647,14 @@
 
 .expl-event-ts {
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 15px;
   white-space: nowrap;
   flex-shrink: 0;
   min-width: 65px;
 }
 
 .expl-event-badge {
-  font-size: 8px;
+  font-size: 16px;
   padding: 2px 7px;
   border-radius: 3px;
   background: var(--rose-deep);
@@ -668,7 +668,7 @@
 
 .expl-event-payload {
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 15px;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -687,7 +687,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 15px;
   transition: border-color 200ms var(--ease);
 }
 
@@ -733,12 +733,12 @@
 .provider-name {
   color: var(--text-primary);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 15px;
   font-weight: 400;
 }
 
 .provider-badge {
-  font-size: 9px;
+  font-size: 15px;
   padding: 1px 8px;
   border-radius: 3px;
   text-transform: uppercase;
@@ -765,7 +765,7 @@
 .expl-empty {
   color: var(--text-dim);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 15px;
   padding: 24px;
   text-align: center;
   font-style: italic;
@@ -789,7 +789,7 @@
   }
 
   .expl-card-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   }
 
   .expl-drawer-body {

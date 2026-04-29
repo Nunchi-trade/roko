@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { useLiveApi } from '../hooks/useLiveApi';
 import { useBenchSSE } from '../hooks/useBenchSSE';
-import * as Demo from '../lib/demo-data';
 
 export interface CostRaceModel {
   model: string;
@@ -12,7 +11,7 @@ export interface CostRaceModel {
 }
 
 export interface CostRaceProps {
-  /** Static data to display. If omitted, the component bootstraps from the API or demo fallback. */
+  /** Live data provided by a parent view. If omitted, the component fetches from the API. */
   models?: CostRaceModel[];
   /** Subscribe to live bench SSE updates. */
   live?: boolean;
@@ -30,8 +29,6 @@ const MODEL_COLORS: Record<string, string> = {
   'gpt-4o': '#D8A878',
   'gemini-2.5-pro': '#9A8AB8',
 };
-
-const FALLBACK_ROWS = Demo.DEMO_COST_RACE.models;
 
 function isCostRaceModel(value: unknown): value is CostRaceModel {
   if (!value || typeof value !== 'object') return false;
@@ -148,10 +145,10 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
   const rafRef = useRef<number | null>(null);
   const valuesRef = useRef<Map<string, number>>(new Map());
   const [rows, setRows] = useState<CostRaceModel[]>([]);
-  const { get, isLive } = useApiWithFallback();
+  const { get, isLive } = useLiveApi();
   const { connected, lastEvent } = useBenchSSE({ enabled: live && isLive });
 
-  const liveStatus = !live ? 'DEMO' : isLive ? (connected ? 'LIVE' : 'CONNECTING') : 'DEMO';
+  const liveStatus = !live ? 'API' : isLive ? (connected ? 'LIVE' : 'CONNECTING') : 'OFFLINE';
 
   useEffect(() => {
     if (models == null) return;
@@ -175,11 +172,10 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
         if (cancelled) return;
 
         const incoming = normalizeRows(payload);
-        const next = incoming.length > 0 ? incoming : normalizeRows(FALLBACK_ROWS);
-        setRows((prev) => mergeRows(prev, next));
+        setRows((prev) => mergeRows(prev, incoming));
       } catch {
         if (cancelled) return;
-        setRows((prev) => mergeRows(prev, normalizeRows(FALLBACK_ROWS)));
+        setRows([]);
       }
     })();
 
@@ -416,7 +412,7 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
           background: 'rgba(16, 16, 18, 0.55)',
           color: liveStatus === 'LIVE' ? 'var(--success)' : 'var(--text-soft)',
           fontFamily: 'var(--mono)',
-          fontSize: 10,
+          fontSize: 13,
           letterSpacing: '0.08em',
           pointerEvents: 'none',
           textTransform: 'uppercase',

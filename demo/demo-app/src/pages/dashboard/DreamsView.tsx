@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import DreamPhaseViz from '../../components/DreamPhaseViz';
-import { useApiWithFallback } from '../../hooks/useApiWithFallback';
+import { useLiveApi } from '../../hooks/useLiveApi';
 
 /* ── Types ────────────────────────────────────────────────── */
 
@@ -33,7 +33,7 @@ interface KnowledgeEntry {
 /* ── Component ───────────────────────────────────────────── */
 
 export default function DreamsView() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [journal, setJournal] = useState<DreamJournal | null>(null);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
 
@@ -47,7 +47,7 @@ export default function DreamsView() {
       ]);
       if (cancelled) return;
       setJournal(j);
-      setEntries(Array.isArray(e) ? e : []);
+      setEntries(Array.isArray(e) ? e : ((e as { items?: KnowledgeEntry[] }).items ?? []));
     };
 
     poll();
@@ -81,7 +81,7 @@ export default function DreamsView() {
       {/* ═══ PHASE VISUALIZATION ═══ */}
       <Pane
         title="DREAM PHASE PIPELINE"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>
+        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>
           {totalDuration > 0 ? `${totalDuration}s total` : 'consolidation cycle'}
         </span>}
       >
@@ -93,7 +93,7 @@ export default function DreamsView() {
         {/* Consolidation Summary */}
         <Pane
           title="CONSOLIDATION SUMMARY"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>per-phase</span>}
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>per-phase</span>}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
             {(journal?.phases ?? []).map((phase, i, arr) => {
@@ -128,7 +128,7 @@ export default function DreamsView() {
                     }} />
                     <span style={{
                       fontFamily: 'var(--display)',
-                      fontSize: 12,
+                      fontSize: 15,
                       fontWeight: 500,
                       color,
                       letterSpacing: '.02em',
@@ -153,7 +153,7 @@ export default function DreamsView() {
 
                   <span style={{
                     fontFamily: 'var(--mono)',
-                    fontSize: 9,
+                    fontSize: 15,
                     padding: '2px 8px',
                     borderRadius: 3,
                     background: isComplete ? `${color}15` : 'rgba(255,255,255,.04)',
@@ -172,7 +172,7 @@ export default function DreamsView() {
         {/* Recent Knowledge Artifacts */}
         <Pane
           title="RECENT DREAM ARTIFACTS"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>knowledge entries</span>}
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>knowledge entries</span>}
         >
           {recentEntries.length === 0 ? (
             <div style={{
@@ -216,7 +216,7 @@ export default function DreamsView() {
                     }} />
                     <span style={{
                       fontFamily: 'var(--mono)',
-                      fontSize: 11,
+                      fontSize: 14,
                       color: 'var(--text-primary)',
                       flex: 1,
                       overflow: 'hidden',
@@ -227,7 +227,7 @@ export default function DreamsView() {
                     </span>
                     <span style={{
                       fontFamily: 'var(--mono)',
-                      fontSize: 9,
+                      fontSize: 15,
                       color: 'var(--text-ghost)',
                       letterSpacing: '.06em',
                       flexShrink: 0,
@@ -237,7 +237,7 @@ export default function DreamsView() {
                     {entry.citations != null && (
                       <span style={{
                         fontFamily: 'var(--mono)',
-                        fontSize: 9,
+                        fontSize: 15,
                         color: 'var(--bone-bright)',
                         flexShrink: 0,
                       }}>

@@ -2,11 +2,20 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useTerminal } from '../hooks/useTerminal';
 import { setupWorkspace, showCmd, getRoko } from '../hooks/useTerminalSession';
 import { useRokoConfig } from '../hooks/useRokoConfig';
-import { MODEL_CATALOG, ALL_MODELS } from '../lib/model-catalog';
-import type { ProviderGroup as CatalogGroup } from '../lib/model-catalog';
 import GateBar from '../components/GateBar';
 import Pane from '../components/Pane';
 import './Builder.css';
+
+interface BuilderModelOption {
+  id: string;
+  label: string;
+  provider: string;
+}
+
+interface BuilderProviderGroup {
+  name: string;
+  models: BuilderModelOption[];
+}
 
 const PRESETS = [
   { label: 'calculator', prompt: 'Build a CLI calculator in Rust' },
@@ -41,14 +50,11 @@ export default function Builder() {
   const [statusText, setStatusText] = useState('idle');
   const [showModelDropdown, setShowModelDropdown] = useState(false);
 
-  // Use live config for model list, fall back to static catalog when offline
+  // Use only live config for model list.
   const { providers: liveProviders, isLive, defaultModel } = useRokoConfig();
 
   const { liveModelCatalog, liveAllModels } = useMemo(() => {
-    if (!isLive || liveProviders.length === 0) {
-      return { liveModelCatalog: MODEL_CATALOG, liveAllModels: ALL_MODELS };
-    }
-    const catalog: CatalogGroup[] = liveProviders.map(p => ({
+    const catalog: BuilderProviderGroup[] = liveProviders.map(p => ({
       name: p.provider,
       models: p.models.map(m => ({
         id: m.name,       // config key — what --model accepts
@@ -58,25 +64,17 @@ export default function Builder() {
     }));
     const all = catalog.flatMap(g => g.models);
     return { liveModelCatalog: catalog, liveAllModels: all };
-  }, [isLive, liveProviders]);
+  }, [liveProviders]);
 
-  const [selectedModel, setSelectedModel] = useState(() => {
-    // Initial: first model from static catalog
-    return ALL_MODELS[0]?.id ?? '';
-  });
+  const [selectedModel, setSelectedModel] = useState('');
   const [autocompleteItems, setAutocompleteItems] = useState<string[]>([]);
 
   // Sync selected model when live config loads
   useEffect(() => {
-    if (!selectedModel || selectedModel === ALL_MODELS[0]?.id) {
-      // Pick the config's default or the first live model
-      const initial = defaultModel
-        || liveAllModels[0]?.id
-        || ALL_MODELS[0]?.id
-        || '';
-      if (initial) setSelectedModel(initial);
-    }
-  }, [defaultModel, liveAllModels]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (selectedModel && liveAllModels.some((model) => model.id === selectedModel)) return;
+    const initial = defaultModel || liveAllModels[0]?.id || '';
+    setSelectedModel(initial);
+  }, [defaultModel, liveAllModels, selectedModel]);
   const [showAutocomplete, setShowAutocomplete] = useState(false);
   const [autocompleteIdx, setAutocompleteIdx] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -126,7 +124,7 @@ export default function Builder() {
 
   const submitTask = useCallback(async (text: string) => {
     const h = handle.current;
-    if (running || !text.trim() || !h) return;
+    if (running || !text.trim() || !h || !selectedModel) return;
     setRunning(true);
     setStatusText('building...');
     setShowAutocomplete(false);
@@ -214,8 +212,9 @@ export default function Builder() {
           <button
             className="model-select-btn"
             onClick={() => setShowModelDropdown(v => !v)}
+            disabled={!isLive || liveAllModels.length === 0}
           >
-            {currentModelLabel}
+            {currentModelLabel || 'No live models'}
           </button>
           {showModelDropdown && (
             <div className="model-dropdown">

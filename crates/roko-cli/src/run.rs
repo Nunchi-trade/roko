@@ -1845,7 +1845,6 @@ async fn dispatch_agent(
     routing_config.apply_process_env();
     crate::config::merge_global_providers(&mut routing_config);
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
-    let use_provider_routing = has_routing && config.agent.command == "claude";
     let (cli_model_override, _) = workflow_cli_overrides();
     let resolved_cli_model = if let Some(requested_model) = cli_model_override.clone() {
         Some(
@@ -1873,6 +1872,27 @@ async fn dispatch_agent(
             "[run] resolved model selection"
         );
     }
+
+    // Use provider routing when:
+    // 1. Explicit providers/models are configured (original gate), OR
+    // 2. The effective model is not a Claude model — so the Claude CLI
+    //    branches below would be wrong.
+    // This prevents non-Claude models (glm, llama, gemini, etc.) from being
+    // force-routed through the Claude CLI just because agent.command = "claude".
+    let effective_model_slug = resolved_cli_model
+        .as_ref()
+        .map(|s| s.backend_slug.as_str())
+        .or_else(|| {
+            let m = routing_config.agent.default_model.trim();
+            if m.is_empty() { None } else { Some(m) }
+        })
+        .unwrap_or("");
+    let model_is_non_claude = !effective_model_slug.is_empty()
+        && !effective_model_slug.starts_with("claude")
+        && roko_core::agent::AgentBackend::from_model(effective_model_slug)
+            != roko_core::agent::AgentBackend::Claude;
+    let use_provider_routing =
+        (has_routing && config.agent.command == "claude") || model_is_non_claude;
 
     if use_provider_routing {
         let tools_csv = claude_tool_allowlist(&config.prompt.role);

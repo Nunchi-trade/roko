@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useApiWithFallback } from '../../hooks/useApiWithFallback';
+import { useLiveApi } from '../../hooks/useLiveApi';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import CostChart from '../../components/Charts/CostChart';
@@ -121,7 +121,7 @@ const METRICS: { key: string; label: string; color: string }[] = [
 /* ── Component ───────────────────────────────────────────── */
 
 export default function CostDashboard() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [efficiency, setEfficiency] = useState<EfficiencyResponse | null>(null);
   const [cfactor, setCfactor] = useState<CFactorResponse | null>(null);
@@ -332,7 +332,7 @@ export default function CostDashboard() {
 
         {/* Right: Model Routing */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <Pane title="MODEL ROUTING" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{currentModel}</span>}>
+          <Pane title="MODEL ROUTING" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{currentModel}</span>}>
             <BarChart data={routerBars} height={140} />
           </Pane>
         </div>
@@ -342,14 +342,14 @@ export default function CostDashboard() {
       <div style={{ display: 'flex', gap: 10 }}>
         {/* Left: Cost Over Time */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <Pane title="COST OVER TIME" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>${totalCost.toFixed(2)} total</span>}>
+          <Pane title="COST OVER TIME" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>${totalCost.toFixed(2)} total</span>}>
             <CostChart data={costPoints} height={130} color="var(--bone)" />
           </Pane>
         </div>
 
         {/* Right: Activity mini stats */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <Pane title="ACTIVITY" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>realtime</span>}>
+          <Pane title="ACTIVITY" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>realtime</span>}>
             <div style={{
               display: 'grid',
               gridTemplateColumns: '1fr 1fr',
@@ -383,7 +383,7 @@ export default function CostDashboard() {
       {/* ═══ C-FACTOR TREND ═══ */}
       <Pane
         title="C-FACTOR TREND"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>24h window</span>}
+        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>24h window</span>}
       >
         <CFactorSparkline
           trend={cfactorTrend?.trend ?? []}
@@ -396,7 +396,7 @@ export default function CostDashboard() {
       <Pane
         title="PROVIDER HEALTH"
         badge={
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>
             {providerHealth ? `${healthyProviders}/${providers.length} healthy` : 'loading'}
           </span>
         }
@@ -415,7 +415,7 @@ export default function CostDashboard() {
       {/* ═══ ADAPTIVE THRESHOLDS ═══ */}
       <Pane
         title="ADAPTIVE GATE THRESHOLDS"
-        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>7-rung EMA</span>}
+        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>7-rung EMA</span>}
       >
         <ThresholdGaugeRow thresholds={thresholds?.thresholds ?? {}} />
       </Pane>
@@ -539,7 +539,7 @@ function ProviderCell({ provider }: { provider: Provider }) {
         {provider.models.map((m) => (
           <span key={m} style={{
             fontFamily: 'var(--mono)',
-            fontSize: 8,
+            fontSize: 15,
             letterSpacing: '.04em',
             padding: '2px 6px',
             borderRadius: 3,

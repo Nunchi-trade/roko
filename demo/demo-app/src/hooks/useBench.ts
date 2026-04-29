@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useApiWithFallback } from './useApiWithFallback';
+import { useLiveApi } from './useLiveApi';
 import { useBenchSSE } from './useBenchSSE';
 import type {
   AgentStrategy,
@@ -55,7 +55,7 @@ const DEFAULT_CONFIG: BenchConfig = {
 };
 
 export function useBench() {
-  const { get, post, isLive } = useApiWithFallback();
+  const { get, post, isLive } = useLiveApi();
 
   // Config
   const [config, setConfig] = useState<BenchConfig>(DEFAULT_CONFIG);
@@ -287,7 +287,7 @@ export function useBench() {
         startedAt: Date.now(),
       });
 
-      // Poll for status as fallback to SSE
+      // Poll for status in addition to SSE so a missed event does not strand the run.
       pollRef.current = setInterval(async () => {
         try {
           const run = await get<BenchRun>(`/api/bench/runs/${runId}`);
@@ -382,10 +382,8 @@ export function useBench() {
 
   const selectedSuite = suites.find((s) => s.id === selectedSuiteId);
 
-  // Last completed run for results tab
-  const lastCompletedRun = activeRun?.status === 'completed'
-    ? activeRun
-    : history.find((r) => r.status === 'completed');
+  // Last completed persisted run for results tab when no run is active.
+  const lastCompletedRun = history.find((r) => r.status === 'completed');
 
   // Build summary from active run results
   const activeRunSummary: BenchRunSummary | undefined = activeRun ? (() => {

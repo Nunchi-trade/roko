@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { useLiveApi } from '../hooks/useLiveApi';
 
 interface DreamPhase {
   name: string;
@@ -218,7 +218,7 @@ function PhaseArrow({ color }: { color: string }) {
         color,
         opacity: 0.55,
         fontFamily: 'var(--mono)',
-        fontSize: 11,
+        fontSize: 14,
         letterSpacing: '0.08em',
       }}
     >
@@ -228,7 +228,7 @@ function PhaseArrow({ color }: { color: string }) {
 }
 
 export default function DreamPhaseViz() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [journal, setJournal] = useState<DreamJournal | null>(null);
 
   useEffect(() => {

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useApiWithFallback } from './useApiWithFallback';
+import { useLiveApi } from './useLiveApi';
 
 interface KnowledgeEntry {
   id: string;
@@ -15,7 +15,7 @@ interface KnowledgeEdge {
 }
 
 export function useKnowledge() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [edges, setEdges] = useState<KnowledgeEdge[]>([]);
   const [loading, setLoading] = useState(true);

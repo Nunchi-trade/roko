@@ -49,7 +49,7 @@
 .timeline-pending .timeline-marker { background: transparent; border-color: var(--text-dim); }
 
 .timeline-label {
-  font-size: 0.78rem;
+  font-size: 0.95rem;
   color: var(--text-primary);
   font-family: var(--sans);
   line-height: 1.4;
@@ -59,7 +59,7 @@
 .timeline-pending .timeline-label { color: var(--text-dim); }
 
 .timeline-detail {
-  font-size: 0.65rem;
+  font-size: 0.82rem;
   color: var(--text-dim);
   margin-top: 2px;
   font-family: var(--mono);

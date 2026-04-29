@@ -10,7 +10,7 @@
   gap: 6px;
   padding: 5px 12px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 16px;
   letter-spacing: 0.04em;
   color: var(--text-soft);
   background: var(--glass-bg);
@@ -47,13 +47,15 @@
   bottom: 16px;
   right: 16px;
   z-index: 9500;
-  width: 280px;
+  width: 400px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
   background: var(--bg-raised);
   border: 1px solid var(--rose-dim);
   border-radius: 10px;
   backdrop-filter: blur(16px);
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-  overflow: hidden;
   animation: cw-slide-up 0.2s var(--ease);
 }
 
@@ -74,14 +76,21 @@
   justify-content: space-between;
   padding: 8px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
 }
 
 .cw-header-label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 15px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-dim);
+}
+
+.cw-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .cw-close {
@@ -89,7 +98,7 @@
   border: none;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 16px;
   padding: 0 2px;
   line-height: 1;
 }
@@ -99,76 +108,146 @@
 }
 
 .cw-body {
-  padding: 10px 12px 12px;
+  padding: 6px 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Sections (collapsible) ── */
+
+.cw-section {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.cw-section:last-child {
+  border-bottom: none;
+}
+
+.cw-section-header {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 8px;
-}
-
-.cw-field {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.cw-field label {
+  padding: 6px 12px;
   font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  color: var(--text-dim);
-  text-transform: uppercase;
+  font-size: 16px;
+  letter-spacing: 0.06em;
+  color: var(--text-soft);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
 }
 
-.cw-field select {
+.cw-section-header::-webkit-details-marker {
+  display: none;
+}
+
+.cw-section-header::before {
+  content: '\25B8';
+  font-size: 15px;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+}
+
+.cw-section[open] > .cw-section-header::before {
+  transform: rotate(90deg);
+}
+
+.cw-section-note {
+  font-size: 15px;
+  color: var(--text-dim);
+  opacity: 0.7;
+  margin-left: auto;
+}
+
+/* ── Fields ── */
+
+.cw-section-fields {
+  padding: 4px 12px 8px;
+}
+
+.cw-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.cw-field-label {
+  font-family: var(--mono);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  min-width: 100px;
+}
+
+.cw-field-input {
+  flex: 1;
+  min-width: 0;
   appearance: none;
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   border-radius: 4px;
   color: var(--text-primary);
   font-family: var(--mono);
-  font-size: 12px;
-  padding: 5px 8px;
-  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 6px;
   transition: border-color 0.15s;
 }
 
-.cw-field select:hover:not(:disabled) {
+.cw-field-input:hover:not(:disabled) {
   border-color: var(--rose-dim);
 }
 
-.cw-field select:disabled {
+.cw-field-input:focus {
+  outline: none;
+  border-color: var(--rose);
+}
+
+.cw-field-input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.cw-backend-display {
+.cw-field-ro {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 16px;
   color: var(--text-soft);
-  padding: 5px 8px;
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
-  border-radius: 4px;
   opacity: 0.7;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
 }
 
-.cw-actions {
+.cw-field-toggle {
+  cursor: pointer;
+}
+
+.cw-field-toggle input[type="checkbox"] {
+  accent-color: var(--rose-bright);
+}
+
+/* ── Section actions ── */
+
+.cw-section-actions {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
+  justify-content: flex-end;
+  padding-top: 6px;
 }
 
 .cw-apply {
-  flex: 1;
   background: var(--rose-deep);
   border: 1px solid var(--rose-dim);
   border-radius: 4px;
   color: var(--rose-bright);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 15px;
   letter-spacing: 0.06em;
-  padding: 5px 0;
+  padding: 4px 12px;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
 }
@@ -183,9 +262,11 @@
   cursor: not-allowed;
 }
 
+/* ── Badges / status ── */
+
 .cw-badge {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 15px;
   letter-spacing: 0.1em;
   padding: 2px 6px;
   border-radius: 3px;
@@ -200,7 +281,7 @@
 
 .cw-saved {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 15px;
   color: var(--success);
   animation: cw-flash 1.5s ease-out forwards;
 }

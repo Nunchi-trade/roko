@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useApiWithFallback } from './useApiWithFallback';
+import { useLiveApi } from './useLiveApi';
 
 interface Agent {
   id: string;
@@ -17,7 +17,7 @@ interface Agent {
 }
 
 export function useAgents() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

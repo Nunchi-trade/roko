@@ -17,7 +17,7 @@ export default function ConnectScreen({ onRetry }: ConnectScreenProps) {
       }} />
       <div style={{
         marginTop: 20,
-        fontFamily: 'var(--mono)', fontSize: 11,
+        fontFamily: 'var(--mono)', fontSize: 14,
         letterSpacing: '.22em', textTransform: 'uppercase',
         color: 'var(--text-dim)',
       }}>
@@ -28,7 +28,7 @@ export default function ConnectScreen({ onRetry }: ConnectScreenProps) {
           onClick={onRetry}
           style={{
             marginTop: 24, padding: '8px 20px',
-            fontFamily: 'var(--mono)', fontSize: 10,
+            fontFamily: 'var(--mono)', fontSize: 13,
             letterSpacing: '.2em', textTransform: 'uppercase',
             color: 'var(--rose-glow)', background: 'transparent',
             border: '1px solid var(--rose-dim)', cursor: 'pointer',

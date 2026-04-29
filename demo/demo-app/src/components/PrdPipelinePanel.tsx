@@ -186,7 +186,7 @@ export default function PrdPipelinePanel({
       <div className="pipeline-hero">
         <div className="pipeline-hero-copy">
           <div className="pipeline-eyebrow">
-            {state.source === 'live' ? 'live artifacts' : state.source === 'sample' ? 'sample fallback' : 'awaiting run'}
+            {state.source === 'live' ? 'live artifacts' : 'awaiting live run'}
             {state.example ? ` / ${state.example.complexity}` : ''}
           </div>
           <h2>{state.headline}</h2>

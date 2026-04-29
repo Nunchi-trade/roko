@@ -84,8 +84,12 @@ async fn provider_outcomes(
         .project("provider_state", &query)
         .unwrap_or(json!({}));
 
-    // If the projection already returns the shape we need, pass it through.
-    if raw.get("providers").and_then(Value::as_array).is_some() {
+    // If the projection already returns a non-empty providers list, pass it through.
+    if raw
+        .get("providers")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+    {
         return Ok(Json(raw));
     }
 

@@ -51,6 +51,13 @@
   --mono: "JetBrains Mono", ui-monospace, monospace;
   --display: "Fraunces", "Times New Roman", serif;
 
+  /* ── readable type scale ── */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-md: 16px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+
   /* ── aliases (match inline usage) ── */
   --font-serif: var(--serif);
   --font-sans: var(--sans);
@@ -91,7 +98,7 @@ html {
 body {
   font-family: var(--sans);
   font-weight: 400;
-  font-size: 16px;
+  font-size: var(--text-lg);
   line-height: 1.6;
   color: var(--text-primary);
   background: var(--bg-void);
@@ -117,7 +124,7 @@ em { font-style: italic; color: var(--rose-glow) }
 
 code {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--bone);
 }
 
@@ -217,8 +224,8 @@ h3 {
 
 h4, .mono-label {
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: .28em;
+  font-size: var(--text-sm);
+  letter-spacing: .14em;
   text-transform: uppercase;
   color: var(--text-dim);
   font-weight: 400;
@@ -227,7 +234,7 @@ h4, .mono-label {
 .lead {
   font-family: var(--display);
   font-weight: 300;
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1.65;
   color: var(--text-soft);
   max-width: 900px;
@@ -275,16 +282,16 @@ section + section::before {
 
 .stag .num {
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: .22em;
+  font-size: var(--text-sm);
+  letter-spacing: .12em;
   color: var(--rose-glow);
   font-weight: 400;
 }
 
 .stag .label {
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: .28em;
+  font-size: var(--text-sm);
+  letter-spacing: .14em;
   text-transform: uppercase;
   color: var(--text-dim);
   font-weight: 400;
@@ -303,42 +310,43 @@ section + section::before {
   overflow: hidden;
   margin-top: 0;
   transition: border-color .3s, box-shadow .3s;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
 }
 
 .pane:hover {
   border-left-color: rgba(204, 144, 168, .5);
-  box-shadow: 0 0 30px rgba(204, 144, 168, .06);
+  box-shadow: 0 0 30px rgba(204, 144, 168, .06), inset 0 1px 0 rgba(255,255,255,0.06);
 }
 
 .pane .head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 14px;
+  padding: 11px 16px;
   border-bottom: 1px solid var(--border);
   font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: .20em;
+  font-size: var(--text-sm);
+  letter-spacing: .10em;
   text-transform: uppercase;
   color: var(--text-dim);
 }
 
 .pane .head .l { display: flex; align-items: center; gap: 10px }
 .pane .head .r { display: flex; align-items: center; gap: 10px }
-.pane .head b { color: var(--text-strong); font-weight: 400; letter-spacing: .14em }
-.pane .head em { color: var(--text-soft); font-style: normal; letter-spacing: .08em; font-weight: 400 }
+.pane .head b { color: var(--text-strong); font-weight: 500; letter-spacing: .06em }
+.pane .head em { color: var(--text-soft); font-style: normal; letter-spacing: .03em; font-weight: 400 }
 .pane .head .r { color: var(--rose-glow) }
 .pane .head .b { color: var(--bone-bright) }
 
-.pane .body { padding: 12px 14px }
+.pane .body { padding: 16px }
 .pane .body.flat { padding: 0 }
 
 .pane .foot {
-  padding: 6px 14px;
+  padding: 9px 16px;
   border-top: 1px solid var(--border);
   font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: .18em;
+  font-size: var(--text-xs);
+  letter-spacing: .09em;
   text-transform: uppercase;
   color: var(--text-dim);
   font-weight: 400;
@@ -389,7 +397,7 @@ section + section::before {
 
 .mosaic .cell {
   background: var(--bg-void);
-  padding: 14px 16px;
+  padding: 18px 20px;
   transition: background .35s;
 }
 
@@ -399,8 +407,8 @@ section + section::before {
 
 .mosaic .cell .k {
   font-family: var(--mono);
-  font-size: 8px;
-  letter-spacing: .28em;
+  font-size: var(--text-xs);
+  letter-spacing: .12em;
   text-transform: uppercase;
   color: var(--text-dim);
   margin-bottom: 4px;
@@ -411,7 +419,7 @@ section + section::before {
   font-family: var(--display);
   font-style: italic;
   font-weight: 300;
-  font-size: 22px;
+  font-size: 28px;
   color: var(--rose-glow);
   letter-spacing: -.01em;
   line-height: 1.1;
@@ -422,14 +430,14 @@ section + section::before {
 .mosaic .cell .v.mono {
   font-family: var(--mono);
   font-style: normal;
-  font-size: 20px;
+  font-size: 24px;
   letter-spacing: -.02em;
 }
 
 .mosaic .cell .sub {
   font-family: var(--sans);
   font-weight: 400;
-  font-size: 10px;
+  font-size: var(--text-sm);
   line-height: 1.3;
   color: var(--text-soft);
   letter-spacing: .02em;
@@ -455,8 +463,8 @@ section + section::before {
 
 .axiom .lab {
   font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: .28em;
+  font-size: var(--text-sm);
+  letter-spacing: .12em;
   text-transform: uppercase;
   color: var(--text-dim);
   margin-bottom: 18px;
@@ -467,7 +475,7 @@ section + section::before {
   font-family: var(--display);
   font-weight: 300;
   font-style: italic;
-  font-size: 24px;
+  font-size: 28px;
   line-height: 1.45;
   color: var(--text-strong);
 }
@@ -481,7 +489,7 @@ section + section::before {
   margin-top: 22px;
   font-family: var(--display);
   font-weight: 300;
-  font-size: 15px;
+  font-size: 18px;
   line-height: 1.6;
   color: var(--text-soft);
 }
@@ -496,8 +504,8 @@ section + section::before {
   gap: 10px;
   padding: 14px 32px;
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: .22em;
+  font-size: var(--text-sm);
+  letter-spacing: .12em;
   text-transform: uppercase;
   color: var(--rose-glow);
   border: 1px solid var(--rose-dim);
@@ -527,7 +535,7 @@ section + section::before {
 }
 
 .btn .arr {
-  font-size: 14px;
+  font-size: 16px;
   transition: transform .2s;
 }
 
@@ -559,8 +567,8 @@ section + section::before {
   backdrop-filter: blur(4px);
   border-radius: 1px;
   font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: .14em;
+  font-size: var(--text-sm);
+  letter-spacing: .08em;
   text-transform: uppercase;
   color: var(--text-dim);
   z-index: 2;
@@ -570,14 +578,14 @@ section + section::before {
   margin-top: 6px;
   font-family: var(--display);
   font-style: italic;
-  font-size: 18px;
+  font-size: 22px;
   color: var(--rose-glow);
   letter-spacing: -.005em;
   text-transform: none;
 }
 
 .hud .v.small {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-family: var(--mono);
   font-style: normal;
   color: var(--text-soft);
@@ -616,7 +624,7 @@ section + section::before {
   border-left: 3px solid var(--rose-glow);
   font-family: var(--display);
   font-weight: 300;
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.6;
   color: var(--text-soft);
   z-index: 100;

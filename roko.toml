@@ -10,8 +10,8 @@ fresh_base_branch = "main"
 auto_plan = false
 
 [agent]
-default_model = "cerebras-70b"
-default_backend = "cerebras"
+default_model = "glm-5-1"
+default_backend = "zai"
 default_effort = "medium"
 temperament = "balanced"
 context_limit_k = 200
@@ -21,51 +21,6 @@ mode = "ephemeral"
 
 [agent.roles]
 
-[providers.ollama]
-kind = "openai_compat"
-base_url = "http://localhost:11434/v1"
-api_key_env = ""
-timeout_ms = 120000
-ttft_timeout_ms = 15000
-connect_timeout_ms = 5000
-
-[providers.zhipu]
-kind = "openai_compat"
-base_url = "https://open.bigmodel.cn/api/paas/v4"
-api_key_env = "ZAI_API_KEY"
-timeout_ms = 120000
-ttft_timeout_ms = 15000
-connect_timeout_ms = 5000
-
-[providers.cerebras]
-kind = "cerebras_api"
-base_url = "https://api.cerebras.ai/v1"
-api_key_env = "CEREBRAS_API_KEY"
-timeout_ms = 120000
-ttft_timeout_ms = 15000
-connect_timeout_ms = 5000
-
-[providers.anthropic]
-kind = "claude_cli"
-command = "claude"
-timeout_ms = 120000
-ttft_timeout_ms = 15000
-connect_timeout_ms = 5000
-
-[providers.claude_cli]
-kind = "claude_cli"
-timeout_ms = 120000
-ttft_timeout_ms = 15000
-connect_timeout_ms = 5000
-
-[providers.gemini]
-kind = "openai_compat"
-base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-api_key_env = "GEMINI_API_KEY"
-timeout_ms = 120000
-ttft_timeout_ms = 15000
-connect_timeout_ms = 5000
-
 [providers.moonshot]
 kind = "openai_compat"
 base_url = "https://api.moonshot.ai/v1"
@@ -74,9 +29,9 @@ timeout_ms = 120000
 ttft_timeout_ms = 15000
 connect_timeout_ms = 5000
 
-[providers.perplexity]
-kind = "perplexity_api"
-api_key_env = "PERPLEXITY_API_KEY"
+[providers.anthropic]
+kind = "claude_cli"
+command = "claude"
 timeout_ms = 120000
 ttft_timeout_ms = 15000
 connect_timeout_ms = 5000
@@ -97,6 +52,30 @@ timeout_ms = 180000
 ttft_timeout_ms = 15000
 connect_timeout_ms = 5000
 
+[providers.zhipu]
+kind = "openai_compat"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.ollama]
+kind = "openai_compat"
+base_url = "http://localhost:11434/v1"
+api_key_env = ""
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.cerebras]
+kind = "cerebras_api"
+base_url = "https://api.cerebras.ai/v1"
+api_key_env = "CEREBRAS_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
 [providers.openai]
 kind = "openai_compat"
 base_url = "https://api.openai.com/v1"
@@ -105,276 +84,31 @@ timeout_ms = 120000
 ttft_timeout_ms = 15000
 connect_timeout_ms = 5000
 
-[models.gpt41-nano]
-provider = "openai"
-slug = "gpt-4.1-nano"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
+[providers.claude_cli]
+kind = "claude_cli"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
 
-[models.glm5-turbo]
-provider = "zhipu"
-slug = "glm-5-turbo"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
+[providers.gemini]
+kind = "openai_compat"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key_env = "GEMINI_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
 
-[models.gemini-pro]
-provider = "gemini"
-slug = "gemini-2.5-pro"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
+[providers.perplexity]
+kind = "perplexity_api"
+api_key_env = "PERPLEXITY_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
 
-[models.glm-5-1]
+[models.glm-5v-turbo]
 provider = "zai"
-slug = "glm-5.1"
+slug = "glm-5v-turbo"
 context_window = 131072
-supports_tools = true
-supports_thinking = true
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.glm45-flash]
-provider = "zhipu"
-slug = "glm-4.5-flash"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.claude-sonnet]
-provider = "anthropic"
-slug = "claude-sonnet-4-6"
-context_window = 200000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.codex-mini]
-provider = "openai"
-slug = "codex-mini-latest"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.sonar]
-provider = "perplexity"
-slug = "sonar-pro"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.kimi-k2-6]
-provider = "moonshot"
-slug = "kimi-k2.6"
-context_window = 262144
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.o3]
-provider = "openai"
-slug = "o3"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.haiku]
-provider = "anthropic"
-slug = "claude-haiku-4-5"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.sonar-pro]
-provider = "perplexity"
-slug = "sonar-pro"
-context_window = 127000
-supports_tools = false
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.gemini-2-5-pro]
-provider = "gemini"
-slug = "gemini-2.5-pro"
-context_window = 1048576
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.gpt41-mini]
-provider = "openai"
-slug = "gpt-4.1-mini"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.sonar-reasoning]
-provider = "perplexity"
-slug = "sonar-reasoning-pro"
-context_window = 128000
 supports_tools = true
 supports_thinking = false
 supports_vision = false
@@ -393,158 +127,6 @@ is_embedding_model = false
 [models.cerebras-scout]
 provider = "cerebras"
 slug = "llama-4-scout-17b-16e"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.claude-opus]
-provider = "anthropic"
-slug = "claude-opus-4-6"
-context_window = 200000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.gemini-2-5-flash]
-provider = "gemini"
-slug = "gemini-2.5-flash"
-context_window = 1048576
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.glm4]
-provider = "zhipu"
-slug = "glm-4-plus"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.cerebras-70b]
-provider = "cerebras"
-slug = "llama-3.3-70b"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.cerebras-8b]
-provider = "cerebras"
-slug = "llama-3.1-8b"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.gpt-4o]
-provider = "openai"
-slug = "gpt-4o"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.gemma4]
-provider = "ollama"
-slug = "gemma4:26b-a4b-it-q8_0"
-context_window = 8192
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.glm51]
-provider = "zhipu"
-slug = "glm-5.1"
 context_window = 128000
 supports_tools = true
 supports_thinking = false
@@ -580,9 +162,28 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.sonnet]
-provider = "anthropic"
-slug = "claude-sonnet-4-6"
+[models.gemini-pro]
+provider = "gemini"
+slug = "gemini-2.5-pro"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.cerebras-70b]
+provider = "cerebras"
+slug = "llama-3.3-70b"
 context_window = 128000
 supports_tools = true
 supports_thinking = false
@@ -618,9 +219,9 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.gpt41]
-provider = "openai"
-slug = "gpt-4.1"
+[models.glm51]
+provider = "zhipu"
+slug = "glm-5.1"
 context_window = 128000
 supports_tools = true
 supports_thinking = false
@@ -637,85 +238,218 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.glm-5v-turbo]
-provider = "zai"
-slug = "glm-5v-turbo"
-context_window = 131072
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.o3-mini]
-provider = "openai"
-slug = "o3-mini"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.llama32]
-provider = "ollama"
-slug = "llama3.2:latest"
-context_window = 8192
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.o4-mini]
-provider = "openai"
-slug = "o4-mini"
-context_window = 128000
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-
-[models.kimi-k25]
+[models.kimi-k2-6]
 provider = "moonshot"
-slug = "kimi-k2.5"
+slug = "kimi-k2.6"
+context_window = 262144
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.opus]
+provider = "anthropic"
+slug = "claude-opus-4-6"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.sonar]
+provider = "perplexity"
+slug = "sonar-pro"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.gpt-4o]
+provider = "openai"
+slug = "gpt-4o"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.codex-mini]
+provider = "openai"
+slug = "codex-mini-latest"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.gemini-2-5-pro]
+provider = "gemini"
+slug = "gemini-2.5-pro"
+context_window = 1048576
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.glm45-flash]
+provider = "zhipu"
+slug = "glm-4.5-flash"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.glm5-turbo]
+provider = "zhipu"
+slug = "glm-5-turbo"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.claude-sonnet]
+provider = "anthropic"
+slug = "claude-sonnet-4-6"
+context_window = 200000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.gemini-flash]
+provider = "gemini"
+slug = "gemini-2.5-flash"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.gemini-2-5-flash]
+provider = "gemini"
+slug = "gemini-2.5-flash"
+context_window = 1048576
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.gpt41-mini]
+provider = "openai"
+slug = "gpt-4.1-mini"
 context_window = 128000
 supports_tools = true
 supports_thinking = false
@@ -751,9 +485,9 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.gemini-flash]
-provider = "gemini"
-slug = "gemini-2.5-flash"
+[models.o4-mini]
+provider = "openai"
+slug = "o4-mini"
 context_window = 128000
 supports_tools = true
 supports_thinking = false
@@ -770,9 +504,275 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 
-[models.opus]
+[models.sonar-pro]
+provider = "perplexity"
+slug = "sonar-pro"
+context_window = 127000
+supports_tools = false
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.gemma4]
+provider = "ollama"
+slug = "gemma4:26b-a4b-it-q8_0"
+context_window = 8192
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+context_window = 131072
+supports_tools = true
+supports_thinking = true
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.gpt41-nano]
+provider = "openai"
+slug = "gpt-4.1-nano"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.haiku]
+provider = "anthropic"
+slug = "claude-haiku-4-5"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.llama32]
+provider = "ollama"
+slug = "llama3.2:latest"
+context_window = 8192
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.gpt41]
+provider = "openai"
+slug = "gpt-4.1"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.sonnet]
+provider = "anthropic"
+slug = "claude-sonnet-4-6"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.o3]
+provider = "openai"
+slug = "o3"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.glm4]
+provider = "zhipu"
+slug = "glm-4-plus"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.sonar-reasoning]
+provider = "perplexity"
+slug = "sonar-reasoning-pro"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.o3-mini]
+provider = "openai"
+slug = "o3-mini"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.claude-opus]
 provider = "anthropic"
 slug = "claude-opus-4-6"
+context_window = 200000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.cerebras-8b]
+provider = "cerebras"
+slug = "llama-3.1-8b"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+
+[models.kimi-k25]
+provider = "moonshot"
+slug = "kimi-k2.5"
 context_window = 128000
 supports_tools = true
 supports_thinking = false

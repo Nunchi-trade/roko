@@ -98,11 +98,7 @@ impl BenchSuite {
     pub fn fill_computed(&mut self) {
         if self.estimated_cost_usd == 0.0 && !self.tasks.is_empty() {
             // Rough estimate: ~$0.01 per easy task, ~$0.05 per hard task.
-            self.estimated_cost_usd = self
-                .tasks
-                .iter()
-                .map(|t| t.difficulty as f64 * 0.01)
-                .sum();
+            self.estimated_cost_usd = self.tasks.iter().map(|t| t.difficulty as f64 * 0.01).sum();
         }
         if self.difficulty_range == (0, 0) && !self.tasks.is_empty() {
             let min = self.tasks.iter().map(|t| t.difficulty).min().unwrap_or(1);

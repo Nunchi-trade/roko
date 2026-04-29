@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useApiWithFallback } from '../../hooks/useApiWithFallback';
+import { useLiveApi } from '../../hooks/useLiveApi';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 
@@ -127,7 +127,7 @@ function tick(nodes: SimNode[], links: { source: SimNode; target: SimNode; freq:
 /* ── Component ───────────────────────────────────────────── */
 
 export default function KnowledgeGraph() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [edges, setEdges] = useState<KnowledgeEdge[]>([]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -263,7 +263,7 @@ export default function KnowledgeGraph() {
 
       {/* ═══ GRAPH + DOMAIN BREAKDOWN ═══ */}
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
-        <Pane title="KNOWLEDGE GRAPH" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>force-directed</span>}>
+        <Pane title="KNOWLEDGE GRAPH" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>force-directed</span>}>
           <div style={{ position: 'relative', height: 260 }}>
             <canvas
               ref={canvasRef}
@@ -272,7 +272,7 @@ export default function KnowledgeGraph() {
             {/* HUD overlays */}
             <div style={{
               position: 'absolute', top: 8, left: 12,
-              fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
+              fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text-dim)',
               letterSpacing: '.08em',
             }}>
               {entries.length} NODES / {edges.length} EDGES
@@ -284,7 +284,7 @@ export default function KnowledgeGraph() {
               {Object.entries(DOMAIN_COLORS).map(([d, c]) => (
                 <span key={d} style={{
                   display: 'flex', alignItems: 'center', gap: 4,
-                  fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
+                  fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text-dim)',
                   letterSpacing: '.06em',
                 }}>
                   <span style={{
@@ -298,7 +298,7 @@ export default function KnowledgeGraph() {
             </div>
             <div style={{
               position: 'absolute', bottom: 8, left: 12,
-              fontFamily: 'var(--mono)', fontSize: 8, color: 'var(--text-dim)',
+              fontFamily: 'var(--mono)', fontSize: 15, color: 'var(--text-dim)',
               letterSpacing: '.06em',
             }}>
               FORCE-DIRECTED / 2D
@@ -307,7 +307,7 @@ export default function KnowledgeGraph() {
         </Pane>
 
         {/* Domain Breakdown */}
-        <Pane title="DOMAIN BREAKDOWN" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{sortedDomains.length} domains</span>}>
+        <Pane title="DOMAIN BREAKDOWN" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{sortedDomains.length} domains</span>}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
             {sortedDomains.map(([domain, count], i) => {
               const total = entries.length || 1;
@@ -335,7 +335,7 @@ export default function KnowledgeGraph() {
                       }} />
                       <span style={{
                         fontFamily: 'var(--display)',
-                        fontSize: 12,
+                        fontSize: 15,
                         fontWeight: 500,
                         color,
                         letterSpacing: '.02em',
@@ -383,13 +383,13 @@ export default function KnowledgeGraph() {
       </div>
 
       {/* ═══ ENTRIES TABLE ═══ */}
-      <Pane title="ALL ENTRIES" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{entries.length} nodes</span>} flat>
+      <Pane title="ALL ENTRIES" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{entries.length} nodes</span>} flat>
         <div style={{ maxHeight: 200, overflow: 'auto' }}>
           <table style={{
             width: '100%',
             borderCollapse: 'collapse',
             fontFamily: 'var(--mono)',
-            fontSize: 11,
+            fontSize: 14,
           }}>
             <thead>
               <tr style={{ borderBottom: '1px solid rgba(255,255,255,.06)' }}>
@@ -400,7 +400,7 @@ export default function KnowledgeGraph() {
                     fontWeight: 600,
                     letterSpacing: '.1em',
                     color: 'var(--text-dim)',
-                    fontSize: 10,
+                    fontSize: 13,
                     textTransform: 'uppercase',
                   }}>
                     {h}

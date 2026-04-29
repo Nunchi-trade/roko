@@ -10,7 +10,7 @@ export type PipelinePhase =
   | 'complete'
   | 'failed';
 
-export type PipelineSource = 'empty' | 'live' | 'sample';
+export type PipelineSource = 'empty' | 'live';
 
 export type PipelineTaskStatus = 'pending' | 'active' | 'done' | 'failed' | 'blocked';
 

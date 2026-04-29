@@ -26,7 +26,7 @@
 }
 
 .settings-subtitle {
-  font-size: 0.85rem;
+  font-size: 1rem;
   color: var(--text-dim);
 }
 
@@ -35,7 +35,7 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  font-size: 0.8rem;
+  font-size: 0.96rem;
   color: var(--text-dim);
 }
 
@@ -70,7 +70,7 @@
 }
 
 .settings-section h2 .badge {
-  font-size: 0.65rem;
+  font-size: 0.82rem;
   font-weight: 500;
   padding: 2px 6px;
   border-radius: 4px;
@@ -83,7 +83,7 @@
 .settings-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.85rem;
+  font-size: 1rem;
 }
 
 .settings-table th {
@@ -106,7 +106,7 @@
 
 .settings-table .mono {
   font-family: var(--font-mono, monospace);
-  font-size: 0.8rem;
+  font-size: 0.96rem;
 }
 
 /* ── Form fields ── */
@@ -124,7 +124,7 @@
 
 .settings-field label {
   min-width: 120px;
-  font-size: 0.85rem;
+  font-size: 1rem;
   color: var(--text-dim);
 }
 
@@ -136,7 +136,7 @@
   border: 1px solid var(--border, #2a2a3e);
   border-radius: 4px;
   color: var(--text);
-  font-size: 0.85rem;
+  font-size: 1rem;
   font-family: inherit;
 }
 
@@ -161,7 +161,7 @@
 .settings-actions button {
   padding: 0.5rem 1rem;
   border-radius: 4px;
-  font-size: 0.85rem;
+  font-size: 1rem;
   cursor: pointer;
   border: 1px solid var(--border, #2a2a3e);
   background: var(--surface-1, #1a1a2e);
@@ -189,7 +189,7 @@
 }
 
 .settings-saved {
-  font-size: 0.8rem;
+  font-size: 0.96rem;
   color: var(--success, #4caf50);
   align-self: center;
 }
@@ -198,7 +198,7 @@
 
 .settings-empty {
   color: var(--text-dim);
-  font-size: 0.85rem;
+  font-size: 1rem;
   font-style: italic;
   padding: 0.5rem 0;
 }

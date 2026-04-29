@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useApiWithFallback } from './useApiWithFallback';
+import { useLiveApi } from './useLiveApi';
 
 interface DashboardData {
   total_cost?: number;
@@ -9,7 +9,7 @@ interface DashboardData {
 }
 
 export function useDashboard() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

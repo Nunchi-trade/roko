@@ -1451,7 +1451,7 @@ const chat: Scenario = {
     timeline.setActive(0);
     logCommand(
       ROKO,
-      'Starts the unified chat TUI — auto-detects auth (API keys first, CLI fallback), auto-creates .roko/ if missing, starts serve in-process, drops into interactive chat.',
+      'Starts the unified chat TUI — auto-detects auth, auto-creates .roko/ if missing, starts serve in-process, drops into interactive chat.',
     );
 
     e.outputBuffer = '';

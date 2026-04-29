@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { useLiveApi } from '../hooks/useLiveApi';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
 import GateBar from '../components/GateBar';
@@ -16,7 +16,7 @@ interface Receipt {
 
 export default function SharePage() {
   const { token } = useParams<{ token: string }>();
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [error, setError] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -38,7 +38,7 @@ export default function SharePage() {
   if (!loaded) {
     return (
       <div style={{ padding: '120px 40px', textAlign: 'center' }}>
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-dim)' }}>
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 15, color: 'var(--text-dim)' }}>
           Loading receipt...
         </div>
       </div>
@@ -60,7 +60,7 @@ export default function SharePage() {
         </div>
         <div style={{
           fontFamily: 'var(--mono)',
-          fontSize: 11,
+          fontSize: 14,
           color: 'var(--text-dim)',
           letterSpacing: '.04em',
         }}>
@@ -85,7 +85,7 @@ export default function SharePage() {
           <div style={{ marginBottom: 24 }}>
             <div style={{
               fontFamily: 'var(--mono)',
-              fontSize: 10,
+              fontSize: 13,
               letterSpacing: '.18em',
               textTransform: 'uppercase' as const,
               color: 'var(--text-dim)',
@@ -95,7 +95,7 @@ export default function SharePage() {
             </div>
             <div style={{
               fontFamily: 'var(--mono)',
-              fontSize: 12,
+              fontSize: 15,
               color: 'var(--text-primary)',
               lineHeight: 1.5,
             }}>

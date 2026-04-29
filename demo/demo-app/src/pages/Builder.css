@@ -20,7 +20,7 @@
 }
 .builder-title {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 16px;
   letter-spacing: .22em;
   text-transform: uppercase;
   color: var(--text-strong);
@@ -28,7 +28,7 @@
 }
 .builder-info {
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: 16px;
   font-family: var(--sans);
 }
 .builder-presets {
@@ -45,7 +45,7 @@
   padding: 4px 12px;
   border-radius: 12px;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 15px;
   letter-spacing: .04em;
   cursor: pointer;
   transition: all 200ms var(--ease);
@@ -114,13 +114,13 @@
 }
 .file-placeholder {
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 16px;
   font-family: var(--mono);
   padding: 4px 0;
 }
 .file-entry {
   padding: 3px 4px;
-  font-size: 11px;
+  font-size: 16px;
   font-family: var(--mono);
   color: var(--text-soft);
   border-radius: 2px;
@@ -167,7 +167,7 @@
   padding: 4px 12px;
   border-radius: 4px;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 15px;
   letter-spacing: .04em;
   cursor: pointer;
   transition: all 200ms var(--ease);
@@ -196,7 +196,7 @@
 .model-group-label {
   padding: 4px 12px 2px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 15px;
   letter-spacing: .12em;
   text-transform: uppercase;
   color: var(--text-ghost);
@@ -209,7 +209,7 @@
   border: none;
   padding: 5px 12px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 16px;
   color: var(--text-soft);
   cursor: pointer;
   transition: all 150ms var(--ease);
@@ -271,7 +271,7 @@
 .prompt-marker {
   color: var(--rose-bright);
   font-weight: 600;
-  font-size: 14px;
+  font-size: 16px;
 }
 .builder-input-wrap input {
   width: 100%;
@@ -281,7 +281,7 @@
   padding: 8px 12px;
   color: var(--bone);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 15px;
   outline: none;
   transition: border-color 200ms var(--ease);
 }
@@ -299,7 +299,7 @@
   padding: 8px 20px;
   border-radius: 4px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 16px;
   letter-spacing: .12em;
   text-transform: uppercase;
   cursor: pointer;
@@ -340,7 +340,7 @@
   border-top: 1px solid var(--glass-border);
   display: flex;
   justify-content: space-between;
-  font-size: 10px;
+  font-size: 15px;
   font-family: var(--mono);
   color: var(--text-dim);
   letter-spacing: .04em;
@@ -390,7 +390,7 @@
   border: none;
   padding: 6px 12px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 16px;
   color: var(--text-soft);
   cursor: pointer;
   transition: all 150ms var(--ease);

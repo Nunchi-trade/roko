@@ -1,6 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRokoConfig } from '../hooks/useRokoConfig';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
 import {
   flattenProviderModels,
   providerForModelKey,
@@ -8,62 +7,50 @@ import {
 } from '../lib/config-models';
 import './Settings.css';
 
-interface GatesConfig {
-  clippy_enabled?: boolean;
-  skip_tests?: boolean;
-  max_iterations?: number;
-}
-
 export default function Settings() {
-  const { defaultModel, defaultBackend, providers, isLive, updateModelConfig } =
+  const { fullConfig, defaultModel, defaultBackend, providers, isLive, updateConfig } =
     useRokoConfig();
-  const { get, put } = useApiWithFallback();
 
-  // Agent defaults
+  // Local editing state — initialized from fullConfig, only pushed on save
   const [model, setModel] = useState('');
   const [backend, setBackend] = useState('');
   const [bareMode, setBareMode] = useState(true);
   const [effort, setEffort] = useState('medium');
-
-  // Gates
   const [clippyEnabled, setClippyEnabled] = useState(true);
   const [skipTests, setSkipTests] = useState(false);
   const [gateMaxIter, setGateMaxIter] = useState(3);
 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const [initialized, setInitialized] = useState(false);
 
-  // Fetch full config on mount
-  const fetchConfig = useCallback(async () => {
-    try {
-      const cfg = await get<Record<string, unknown>>('/api/config');
-      const agent = cfg?.agent as Record<string, unknown> | undefined;
-      if (agent) {
-        if (typeof agent.default_model === 'string') setModel(agent.default_model);
-        if (typeof agent.default_backend === 'string') setBackend(agent.default_backend);
-        if (typeof agent.bare_mode === 'boolean') setBareMode(agent.bare_mode);
-        if (typeof agent.default_effort === 'string') setEffort(agent.default_effort);
-      }
-      const gates = cfg?.gates as GatesConfig | undefined;
-      if (gates) {
-        if (typeof gates.clippy_enabled === 'boolean') setClippyEnabled(gates.clippy_enabled);
-        if (typeof gates.skip_tests === 'boolean') setSkipTests(gates.skip_tests);
-        if (typeof gates.max_iterations === 'number') setGateMaxIter(gates.max_iterations);
-      }
-      setLoaded(true);
-    } catch {
-      // offline — use defaults
-    }
-  }, [get]);
-
-  useEffect(() => { fetchConfig(); }, [fetchConfig]);
-
-  // Sync from context when it changes
+  // Sync local state from fullConfig context (once populated)
   useEffect(() => {
-    if (defaultModel && !loaded) setModel(defaultModel);
-    if (defaultBackend && !loaded) setBackend(defaultBackend);
-  }, [defaultModel, defaultBackend, loaded]);
+    if (initialized || !fullConfig || Object.keys(fullConfig).length === 0) return;
+
+    const agent = fullConfig.agent as Record<string, unknown> | undefined;
+    if (agent) {
+      if (typeof agent.default_model === 'string') setModel(agent.default_model);
+      if (typeof agent.default_backend === 'string') setBackend(agent.default_backend);
+      if (typeof agent.bare_mode === 'boolean') setBareMode(agent.bare_mode);
+      if (typeof agent.default_effort === 'string') setEffort(agent.default_effort);
+    }
+    const gates = fullConfig.gates as Record<string, unknown> | undefined;
+    if (gates) {
+      if (typeof gates.clippy_enabled === 'boolean') setClippyEnabled(gates.clippy_enabled);
+      if (typeof gates.skip_tests === 'boolean') setSkipTests(gates.skip_tests);
+      if (typeof gates.max_iterations === 'number') setGateMaxIter(gates.max_iterations);
+    }
+    setInitialized(true);
+  }, [fullConfig, initialized]);
+
+  // Fallback: sync model/backend from derived context if fullConfig not yet available
+  useEffect(() => {
+    if (!initialized) {
+      if (defaultModel) setModel(defaultModel);
+      if (defaultBackend) setBackend(defaultBackend);
+    }
+  }, [defaultModel, defaultBackend, initialized]);
 
   const allModels = useMemo(() => flattenProviderModels(providers), [providers]);
 
@@ -85,27 +72,22 @@ export default function Settings() {
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
-    try {
-      // Save agent + gates sections
-      await put('/api/config', {
-        agent: {
-          default_model: model,
-          default_backend: backend,
-          bare_mode: bareMode,
-          default_effort: effort,
-        },
-        gates: {
-          clippy_enabled: clippyEnabled,
-          skip_tests: skipTests,
-          max_iterations: gateMaxIter,
-        },
-      });
-      // Also update the config context so other pages pick it up
-      await updateModelConfig(model, backend);
+    const ok = await updateConfig({
+      agent: {
+        default_model: model,
+        default_backend: backend,
+        bare_mode: bareMode,
+        default_effort: effort,
+      },
+      gates: {
+        clippy_enabled: clippyEnabled,
+        skip_tests: skipTests,
+        max_iterations: gateMaxIter,
+      },
+    });
+    if (ok) {
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
-    } catch {
-      // swallow
     }
     setSaving(false);
   };

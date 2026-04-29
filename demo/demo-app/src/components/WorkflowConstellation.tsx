@@ -274,7 +274,7 @@ export default function WorkflowConstellation({
 
   if (!webglAvailable) {
     return (
-      <div className="pipeline-constellation-fallback" aria-hidden="true">
+      <div className="pipeline-constellation-static" aria-hidden="true">
         <span />
         <span />
         <span />

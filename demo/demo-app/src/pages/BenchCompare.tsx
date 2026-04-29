@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, Fragment } from 'react';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { useLiveApi } from '../hooks/useLiveApi';
 import type { BenchRun } from '../lib/bench-types';
 import Pane from '../components/Pane';
 import ConfigDiff from '../components/ConfigDiff';
@@ -46,7 +46,7 @@ function setIdsInUrl(ids: string[]) {
 }
 
 export default function BenchCompare() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [allRuns, setAllRuns] = useState<BenchRun[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>(getIdsFromUrl);
   const [fullRuns, setFullRuns] = useState<BenchRun[]>([]);
@@ -60,7 +60,7 @@ export default function BenchCompare() {
           setAllRuns(data);
           return;
         }
-      } catch { /* no fallback */ }
+      } catch { /* show empty state */ }
       setAllRuns([]);
     })();
   }, [get]);
@@ -99,7 +99,7 @@ export default function BenchCompare() {
           setFullRuns(ordered);
           return;
         }
-      } catch { /* fallback */ }
+      } catch { /* use already-loaded live run summaries */ }
 
       if (cancelled) return;
       const found = selectedIds

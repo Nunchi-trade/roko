@@ -1,7 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
-import { useApiWithFallback } from '../../hooks/useApiWithFallback';
+import { useLiveApi } from '../../hooks/useLiveApi';
 
 /* ── Types ────────────────────────────────────────────────── */
 
@@ -162,7 +162,7 @@ const tdStyle: CSSProperties = {
 /* ── Component ───────────────────────────────────────────── */
 
 export default function CascadeRouter() {
-  const { get } = useApiWithFallback();
+  const { get } = useLiveApi();
   const [state, setState] = useState<CascadeState>({});
   const [loading, setLoading] = useState(true);
 
@@ -242,7 +242,7 @@ export default function CascadeRouter() {
         {/* Model Confidence Chart */}
         <Pane
           title="MODEL CONFIDENCE"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>success rate</span>}
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>success rate</span>}
         >
           <ModelConfidenceChart rows={rows} height={Math.max(80, rows.length * 30 + 16)} />
         </Pane>
@@ -250,7 +250,7 @@ export default function CascadeRouter() {
         {/* Model Statistics Table */}
         <Pane
           title="MODEL STATISTICS"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>detailed breakdown</span>}
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>detailed breakdown</span>}
           flat
         >
           <div style={{ overflow: 'auto', flex: 1 }}>
@@ -332,7 +332,7 @@ export default function CascadeRouter() {
         {/* Role Assignments */}
         <Pane
           title="ROLE ASSIGNMENTS"
-          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{roleEntries.length} roles</span>}
+          badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{roleEntries.length} roles</span>}
         >
           {loading ? (
             <div style={{
@@ -378,7 +378,7 @@ export default function CascadeRouter() {
                     }} />
                     <span style={{
                       fontFamily: 'var(--display)',
-                      fontSize: 11,
+                      fontSize: 14,
                       fontWeight: 500,
                       color: 'var(--text-primary)',
                       letterSpacing: '.01em',
@@ -388,7 +388,7 @@ export default function CascadeRouter() {
                   </span>
                   <span style={{
                     fontFamily: 'var(--mono)',
-                    fontSize: 9,
+                    fontSize: 15,
                     padding: '2px 6px',
                     borderRadius: 3,
                     background: 'var(--glass-bg)',

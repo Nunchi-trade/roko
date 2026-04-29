@@ -3,6 +3,7 @@
 //! Provides routes for starting, tracking, comparing, and analyzing
 //! benchmark runs that exercise roko's `run_once()` pipeline.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,6 +50,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/bench/suites/{id}", get(get_suite))
         .route("/bench/suites", post(upload_suite))
         .route("/bench/models", get(list_models))
+        .route("/bench/cost-summary", get(bench_cost_summary))
         .route("/bench/pareto", get(pareto_frontier))
         .route("/bench/export/{id}", get(export_bench_run))
         .route("/bench/events", get(bench_events_sse))
@@ -293,7 +295,10 @@ async fn execute_bench_run(
                     task_name: task.name.clone(),
                     status: if passed { "pass" } else { "fail" }.to_string(),
                     duration_ms,
-                    model: overrides.model.clone().unwrap_or_else(|| "unknown".to_string()),
+                    model: overrides
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
                     tokens_in: input_tokens,
                     tokens_out: output_tokens,
                     cost_usd,
@@ -308,7 +313,10 @@ async fn execute_bench_run(
                 task_name: task.name.clone(),
                 status: "fail".to_string(),
                 duration_ms,
-                model: overrides.model.clone().unwrap_or_else(|| "unknown".to_string()),
+                model: overrides
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
                 tokens_in: 0,
                 tokens_out: 0,
                 cost_usd: bench::estimate_cost_usd(overrides.model.as_deref(), 0, 0),
@@ -474,8 +482,6 @@ async fn delete_bench_run(
 /// `GET /api/bench/runs` -- list bench runs.
 ///
 /// Returns `BenchRun[]` (flat array) to match the frontend expectation.
-/// Falls back to index entries (promoted to lightweight BenchRun shapes)
-/// when full run files are unavailable.
 async fn list_bench_runs(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListRunsQuery>,
@@ -604,6 +610,65 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<Value> {
         .collect();
 
     Json(json!(models))
+}
+
+#[derive(Default)]
+struct CostSummaryModel {
+    cost_usd: f64,
+    tokens: u64,
+    tasks: u64,
+}
+
+/// `GET /api/bench/cost-summary` -- aggregate real bench result costs by model.
+async fn bench_cost_summary(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let entries = bench::load_index_entries(&state.workdir).await;
+    let mut by_model: HashMap<String, CostSummaryModel> = HashMap::new();
+
+    for entry in entries {
+        let Some(run) = bench::load_bench_run(&state.workdir, &entry.id)
+            .await
+            .map_err(|e| {
+                ApiError::internal(format!("failed to load bench run {}: {e}", entry.id))
+            })?
+        else {
+            continue;
+        };
+
+        for result in run.results {
+            let model = if result.model.trim().is_empty() || result.model == "unknown" {
+                run.overrides
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
+            } else {
+                result.model
+            };
+            let summary = by_model.entry(model).or_default();
+            summary.cost_usd += result.cost_usd;
+            summary.tokens += result.tokens_in + result.tokens_out;
+            summary.tasks += 1;
+        }
+    }
+
+    let mut models: Vec<Value> = by_model
+        .into_iter()
+        .map(|(model, summary)| {
+            json!({
+                "model": model,
+                "cost_usd": summary.cost_usd,
+                "tokens": summary.tokens,
+                "tasks": summary.tasks,
+            })
+        })
+        .collect();
+
+    models.sort_by(|a, b| {
+        let a_cost = a.get("cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
+        let b_cost = b.get("cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
+        b_cost.total_cmp(&a_cost)
+    });
+
+    Ok(Json(json!({ "models": models })))
 }
 
 /// Return (input_cost_per_1k, output_cost_per_1k) for a model slug.

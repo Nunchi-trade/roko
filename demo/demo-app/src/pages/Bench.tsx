@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router';
 import { useBench } from '../hooks/useBench';
+import { useRokoConfig } from '../hooks/useRokoConfig';
 import type { AgentStrategy, BenchRun } from '../lib/bench-types';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
@@ -10,10 +11,10 @@ import TimelineChart from '../components/Charts/TimelineChart';
 import HeatmapChart from '../components/Charts/HeatmapChart';
 import RadarChart from '../components/Charts/RadarChart';
 import ScatterChart from '../components/Charts/ScatterChart';
-import ModelPicker from '../components/ModelPicker';
 import SuiteSelector from '../components/SuiteSelector';
 import TaskTable from '../components/TaskTable';
 import ConfigDiff from '../components/ConfigDiff';
+import CostRace from '../components/CostRace';
 import './Bench.css';
 
 type Tab = 'configure' | 'live' | 'results' | 'history' | 'compare' | 'analysis';
@@ -48,18 +49,16 @@ function formatEta(ms: number | null): string {
 
 export default function Bench() {
   const [tab, setTab] = useState<Tab>('configure');
-  const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-20250514');
-  const [selectedProvider, setSelectedProvider] = useState('anthropic');
+  const { defaultModel, defaultBackend } = useRokoConfig();
 
   const bench = useBench();
   const {
     config, setConfig,
     selectedSuiteId, setSelectedSuiteId, selectedSuite,
     suites, models, history,
-    suitesLoading, modelsLoading, historyLoading, connectionState,
+    suitesLoading, historyLoading, connectionState,
     activeRun, activeRunSummary, feed, eta,
     startRun, cancelRun, exportRun, importRun,
-    lastCompletedRun,
     compareIds, setCompareIds,
     pareto, fetchPareto,
   } = bench;
@@ -76,9 +75,10 @@ export default function Bench() {
     : 0;
   const totalCost = history.reduce((s, r) => s + (r.summary?.total_cost_usd ?? 0), 0);
 
-  // Results display
-  const displayResults = activeRun?.results ?? (lastCompletedRun && 'results' in lastCompletedRun ? (lastCompletedRun as { results: typeof activeRun extends null ? never : NonNullable<typeof activeRun>['results'] }).results : []);
-  const displaySummary = activeRunSummary ?? (lastCompletedRun && 'summary' in lastCompletedRun ? (lastCompletedRun as { summary?: NonNullable<typeof activeRunSummary> }).summary : undefined);
+  // Results display: prefer active run, fall back to last completed from history
+  const lastHistoryRun = history.find((r) => r.status === 'completed');
+  const displayResults = activeRun?.results ?? lastHistoryRun?.results ?? [];
+  const displaySummary = activeRunSummary ?? lastHistoryRun?.summary;
 
   // Compare tab: selected runs
   const compareRuns = history.filter((r) => compareIds.includes(r.id));
@@ -104,7 +104,7 @@ export default function Bench() {
   });
 
   // Cost estimate
-  const selectedModelInfo = models.find((m) => m.id === selectedModel);
+  const selectedModelInfo = models.find((m) => m.id === defaultModel);
   const estimatedCost = selectedSuite && selectedModelInfo
     ? ((selectedModelInfo.cost_per_1k_input * 2 + selectedModelInfo.cost_per_1k_output * 3) * selectedSuite.tasks.length * 0.8)
     : null;
@@ -162,11 +162,17 @@ export default function Bench() {
               </Pane>
 
               <Pane title="MODEL">
-                {modelsLoading ? <div className="bench-skeleton" style={{ height: 80 }} />
-                  : models.length === 0 ? <p className="bench-empty-text">No models. Start roko serve.</p>
-                  : <ModelPicker models={models} value={selectedModel}
-                      onChange={(m, p) => { setSelectedModel(m); setSelectedProvider(p); }}
-                      estimatedTasks={selectedSuite?.tasks.length} />}
+                <div className="bench-model-display">
+                  <div className="param-row">
+                    <span className="param-label">Model</span>
+                    <span className="param-value mono">{defaultModel || '--'}</span>
+                  </div>
+                  <div className="param-row">
+                    <span className="param-label">Backend</span>
+                    <span className="param-value mono">{defaultBackend || '--'}</span>
+                  </div>
+                  <p className="bench-model-hint">Change via config pill</p>
+                </div>
               </Pane>
             </div>
 
@@ -225,7 +231,7 @@ export default function Bench() {
 
               <div className="bench-run-btn">
                 <button className="btn"
-                  onClick={() => { startRun(selectedModel, selectedProvider); setTab('live'); }}
+                  onClick={() => { startRun(defaultModel, defaultBackend); setTab('live'); }}
                   disabled={activeRun?.status === 'running' || connectionState === 'offline'}>
                   {activeRun?.status === 'running' ? 'Running...' : 'Run Benchmark'}
                 </button>
@@ -298,6 +304,10 @@ export default function Bench() {
                     </div>
                   </Pane>
                 </div>
+
+                <Pane title="COST RACE (LIVE)">
+                  <CostRace live height={260} />
+                </Pane>
               </>
             )}
           </div>
@@ -401,8 +411,8 @@ export default function Bench() {
                             <td className="mono">{run.summary ? `${(run.summary.total_duration_ms / 1000).toFixed(1)}s` : '-'}</td>
                             <td><span className={`status-badge status-${run.status === 'completed' ? 'pass' : run.status}`}>{run.status.toUpperCase()}</span></td>
                             <td style={{ display: 'flex', gap: 4 }}>
-                              <Link to={`/bench/run/${run.id}`} className="btn btn-sm" style={{ textDecoration: 'none', fontSize: 10, padding: '2px 6px' }}>View</Link>
-                              <button className="btn btn-sm" onClick={() => exportRun(run.id)} style={{ fontSize: 10, padding: '2px 6px' }}>Export</button>
+                              <Link to={`/bench/run/${run.id}`} className="btn btn-sm" style={{ textDecoration: 'none', fontSize: 13, padding: '2px 6px' }}>View</Link>
+                              <button className="btn btn-sm" onClick={() => exportRun(run.id)} style={{ fontSize: 13, padding: '2px 6px' }}>Export</button>
                             </td>
                           </tr>
                         ))}
@@ -534,6 +544,10 @@ export default function Bench() {
                 </Pane>
               </>
             )}
+
+            <Pane title="MODEL COST RACE">
+              <CostRace height={300} />
+            </Pane>
           </div>
         )}
       </div>

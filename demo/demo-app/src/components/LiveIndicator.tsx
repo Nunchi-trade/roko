@@ -12,7 +12,7 @@ export default function LiveIndicator({ active = true }: LiveIndicatorProps) {
         animation: active ? 'livepulse 2s ease-in-out infinite' : 'none',
       }} />
       <span style={{
-        fontFamily: 'var(--mono)', fontSize: 9,
+        fontFamily: 'var(--mono)', fontSize: 15,
         letterSpacing: '.22em', textTransform: 'uppercase',
         color: active ? 'var(--success, #7d9e8c)' : 'var(--text-dim)',
       }}>

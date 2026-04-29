@@ -13,7 +13,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.7rem;
+  font-size: 0.88rem;
   color: var(--text-dim);
   flex-shrink: 0;
 }
@@ -23,7 +23,7 @@
 }
 .pane-status {
   margin-left: auto;
-  font-size: 0.62rem;
+  font-size: 0.96rem;
 }
 .pane-dot {
   width: 6px;
@@ -49,7 +49,7 @@
 .pane-body:empty::after {
   content: "\2588";
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: 16px;
   color: var(--rose-dim);
   animation: cursorBlink 1.2s step-end infinite;
   margin-left: 4px;

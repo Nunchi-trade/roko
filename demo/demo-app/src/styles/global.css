@@ -9,8 +9,20 @@ html, body, #root {
   background: var(--bg-void);
   color: var(--text-primary);
   font-family: var(--sans);
+  font-size: 18px;
   height: 100vh;
   overflow: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+small {
+  font-size: 0.82rem;
 }
 
 :focus-visible {

@@ -6,8 +6,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 32px;
-  height: 48px;
+  padding: 0 28px;
+  height: 64px;
   background: rgba(8, 8, 12, .78);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(16px);
@@ -31,13 +31,13 @@
 .topnav .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-shrink: 0;
 }
 
 .topnav .brand .mark {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--rose-glow);
   box-shadow: 0 0 10px var(--rose-glow), 0 0 22px rgba(232, 181, 206, .5), 0 0 40px rgba(232, 181, 206, .2);
@@ -50,26 +50,29 @@
 }
 
 .topnav .brand b {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: .32em;
-  color: var(--text-strong);
-  font-weight: 500;
+  font-family: var(--display);
+  font-size: 23px;
+  font-style: italic;
+  letter-spacing: .01em;
+  color: var(--rose-glow);
+  font-weight: 400;
+  line-height: 1;
+  text-shadow: 0 0 18px rgba(232, 181, 206, .22);
 }
 
 .topnav .links {
   display: flex;
-  gap: 2px;
+  gap: 4px;
 }
 
 .topnav .links a {
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: .20em;
-  text-transform: uppercase;
+  font-family: var(--sans);
+  font-size: 15px;
+  letter-spacing: .03em;
+  text-transform: none;
   color: var(--text-soft);
-  padding: 6px 12px;
-  border-radius: 2px;
+  padding: 8px 12px;
+  border-radius: 6px;
   transition: color .2s, background .2s;
   position: relative;
   overflow: hidden;
@@ -123,13 +126,13 @@
 .topnav .status-pill {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: .18em;
-  text-transform: uppercase;
-  padding: 4px 12px;
-  border-radius: 2px;
+  gap: 7px;
+  font-family: var(--sans);
+  font-size: 15px;
+  letter-spacing: .04em;
+  text-transform: none;
+  padding: 6px 12px;
+  border-radius: 6px;
   border: 1px solid var(--border-soft);
 }
 
@@ -145,8 +148,8 @@
 }
 
 .topnav .status-pill.live .status-dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--success);
   box-shadow: 0 0 6px rgba(122, 138, 120, .6);
@@ -159,8 +162,8 @@
 }
 
 .topnav .status-pill.demo .status-dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--warning);
   box-shadow: 0 0 6px rgba(200, 154, 104, .4);

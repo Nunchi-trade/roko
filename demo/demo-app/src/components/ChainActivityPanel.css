@@ -35,7 +35,7 @@
 
 .ca-block-num {
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: 1.05rem;
   color: var(--text-strong);
   letter-spacing: 0.02em;
 }
@@ -48,21 +48,21 @@
 
 .ca-block-ago {
   font-family: var(--mono);
-  font-size: 0.65rem;
+  font-size: 0.82rem;
   color: var(--text-dim);
   letter-spacing: 0.04em;
 }
 
 .ca-block-count {
   font-family: var(--mono);
-  font-size: 0.6rem;
+  font-size: 0.95rem;
   color: var(--text-ghost);
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .ca-block-chevron {
-  font-size: 0.55rem;
+  font-size: 0.92rem;
   color: var(--text-dim);
   transition: transform 0.2s var(--ease);
   margin-left: 4px;
@@ -122,7 +122,7 @@
 
 .ca-tx-hash {
   font-family: var(--mono);
-  font-size: 0.65rem;
+  font-size: 0.82rem;
   color: var(--text-primary);
   opacity: 0.5;
   flex-shrink: 0;
@@ -131,7 +131,7 @@
 
 .ca-tx-desc {
   font-family: var(--mono);
-  font-size: 0.68rem;
+  font-size: 1rem;
   color: var(--text-soft);
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -144,7 +144,7 @@
   padding: 32px 16px;
   text-align: center;
   font-family: var(--mono);
-  font-size: 0.68rem;
+  font-size: 1rem;
   color: var(--text-dim);
   letter-spacing: 0.1em;
   text-transform: uppercase;
