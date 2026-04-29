@@ -11,6 +11,11 @@ export const mirage: Scenario = {
   panel: false,
   promptBar: false,
   mirageBar: true,
+  category: 'chain',
+  features: ['EVM fork', 'Real-time blocks', 'Configurable block times'],
+  durationHint: '~30s',
+  accent: 'amber',
+  icon: 'evm',
   steps: [],
   async run({ entries }) {
     const e = entries[0];

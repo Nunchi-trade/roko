@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { useContextEventSubscription } from '../../contexts/EventStreamContext';
+import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import GateWaterfall, { type GateRun } from '../../components/GateWaterfall';
@@ -188,31 +190,40 @@ export default function IntegrityView() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    get<HealthResponse>('/api/health').then((h) => {
+  const fetchAll = useCallback(async () => {
+    try {
+      const [h, gates, eps] = await Promise.all([
+        get<HealthResponse>('/api/health').catch(() => null),
+        get<GateRun[]>('/api/gates/history?limit=20&format=waterfall').catch(() => []),
+        get<unknown[]>('/api/episodes?limit=1').catch(() => []),
+      ]);
       const snap = h?.statehub?.snapshot;
       if (snap) {
         setEpisodes(snap.episodes_total ?? 0);
         setGatesPassed(snap.gates_passed ?? 0);
         setGatesFailed(snap.gates_failed ?? 0);
       }
-    }).catch(() => {});
-
-    get<GateRun[]>('/api/gates/history?limit=20&format=waterfall').then((data) => {
-      if (Array.isArray(data)) setGateHistory(data);
-    }).catch(() => {});
-
-    get<unknown[]>('/api/episodes?limit=1').then(async (data) => {
-      const latest = Array.isArray(data) ? data[0] : null;
-      if (!latest) {
-        setLatestHash('');
-        return;
-      }
-      setLatestHash(await sha256Hex(JSON.stringify(latest)));
-    }).catch(() => {
-      setLatestHash('');
-    });
+      if (Array.isArray(gates)) setGateHistory(gates);
+      const latest = Array.isArray(eps) ? eps[0] : null;
+      setLatestHash(latest ? await sha256Hex(JSON.stringify(latest)) : '');
+    } catch {
+      /* keep previous */
+    }
   }, [get]);
+
+  // Initial fetch + 30s fallback poll
+  useEffect(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, 30_000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
+
+  // SSE-triggered refetch
+  const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
+  useContextEventSubscription(
+    ['gate_result', 'episode'],
+    debouncedRefetch,
+  );
 
   /* Typewriter effect for hash */
   useEffect(() => {
@@ -259,50 +270,84 @@ export default function IntegrityView() {
       `}</style>
 
       {/* TOP MOSAIC */}
-      <Mosaic columns={5}>
-        <MosaicCell label="STATUS" value={latestHash ? 'Live' : 'No data'} color={latestHash ? 'success' : 'warning'} />
-        <MosaicCell label="EPISODES" value={episodes.toLocaleString()} color="rose" mono sub="hashed" />
-        <MosaicCell label="GATES PASSED" value={gatesPassed.toLocaleString()} color="success" mono />
-        <MosaicCell label="GATES FAILED" value={gatesFailed.toLocaleString()} color="warning" mono />
-        <MosaicCell label="PASS RATE" value={`${passRate.toFixed(1)}%`} color="bone" mono />
-      </Mosaic>
+      <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
+        <Mosaic columns={5}>
+          <MosaicCell label="STATUS" value={latestHash ? 'Live' : 'No data'} color={latestHash ? 'success' : 'warning'} />
+          <MosaicCell label="EPISODES" value={episodes.toLocaleString()} color="rose" mono sub="hashed" />
+          <MosaicCell label="GATES PASSED" value={gatesPassed.toLocaleString()} color="success" mono />
+          <MosaicCell label="GATES FAILED" value={gatesFailed.toLocaleString()} color="warning" mono />
+          <MosaicCell
+            label="PASS RATE"
+            value={
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                {`${passRate.toFixed(1)}%`}
+                <span
+                  className="dash-bar-track"
+                  style={{ width: 48, display: 'inline-block' }}
+                >
+                  <span
+                    className="dash-bar-fill dash-bar-fill--rose dash-gauge-fill"
+                    style={{ width: `${passRate}%` }}
+                  />
+                </span>
+              </span>
+            }
+            color="bone"
+            mono
+          />
+        </Mosaic>
+      </div>
 
       {/* HASH CHAIN VIZ */}
-      <Pane
-        title="HASH TRAIL"
-        badge={
-          <code className="dash-hash-code">
-            {typedHash.slice(0, 24)}...
-            <span className="dash-blink-cursor" />
-          </code>
-        }
-      >
-        <HashChainViz episodes={episodes} hash={latestHash} height={90} />
-      </Pane>
+      <div className="dash-stagger" style={{ '--stagger-i': 1 } as React.CSSProperties}>
+        <Pane
+          title="HASH TRAIL"
+          badge={
+            <code className="dash-hash-code">
+              {typedHash.slice(0, 24)}...
+              <span className="dash-blink-cursor" />
+            </code>
+          }
+        >
+          <div className="dash-chart-enter">
+            <HashChainViz episodes={episodes} hash={latestHash} height={90} />
+          </div>
+        </Pane>
+      </div>
 
       {/* MIDDLE ROW: Features + Gate Waterfall */}
       <div className="dash-grid-2--gap12">
-        <Pane title="CRYPTOGRAPHIC AGENT TRAIL">
-          <div className="dash-flex-col--gap2">
-            <p className="dash-feature-desc-block">
-              Agent episode rows are hashed from live runtime data. When a witness
-              backend is connected, these records can be anchored for external verification.
-            </p>
-            {FEATURES.map((f) => (
-              <div key={f.label} className="dash-row-item--start dash-row-sep--light">
-                <span className="dash-feature-check">&#x2713;</span>
-                <div>
-                  <div className="dash-feature-label">{f.label}</div>
-                  <div className="dash-feature-desc">{f.desc}</div>
+        <div className="dash-stagger" style={{ '--stagger-i': 2 } as React.CSSProperties}>
+          <Pane title="CRYPTOGRAPHIC AGENT TRAIL">
+            <div className="dash-flex-col--gap2">
+              <p className="dash-feature-desc-block">
+                Agent episode rows are hashed from live runtime data. When a witness
+                backend is connected, these records can be anchored for external verification.
+              </p>
+              {FEATURES.map((f, i) => (
+                <div
+                  key={f.label}
+                  className="dash-row-item--start dash-row-sep--light dash-stagger"
+                  style={{ '--stagger-i': i + 3 } as React.CSSProperties}
+                >
+                  <span className="dash-feature-check">&#x2713;</span>
+                  <div>
+                    <div className="dash-feature-label">{f.label}</div>
+                    <div className="dash-feature-desc">{f.desc}</div>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        </Pane>
+              ))}
+            </div>
+          </Pane>
+        </div>
 
-        <Pane title="GATE PIPELINE WATERFALL" badge={<span className="dash-badge">7-rung</span>}>
-          <GateWaterfall runs={gateHistory} height={200} />
-        </Pane>
+        <div className="dash-stagger" style={{ '--stagger-i': 3 } as React.CSSProperties}>
+          <Pane title="GATE PIPELINE WATERFALL" badge={<span className="dash-badge">7-rung</span>}>
+            <div className="dash-chart-enter">
+              <GateWaterfall runs={gateHistory} height={200} />
+            </div>
+          </Pane>
+        </div>
       </div>
     </div>
   );

@@ -11,12 +11,16 @@
   --bg-deeper: #0c0a12;
   --surface: #1e1826;
   --glass-bg: rgba(255,255,255,0.05);
+  --bg-glass: rgba(255,255,255,0.05);
+  --bg-glass-hover: rgba(255,255,255,0.06);
+  --bg-glass-active: rgba(255,255,255,0.08);
   --glass-border: rgba(255,255,255,0.10);
 
   /* ── borders ── */
   --border: rgba(255,255,255,0.10);
   --border-soft: rgba(255,255,255,0.07);
   --border-strong: rgba(255,255,255,0.14);
+  --border-active: rgba(204,144,168,0.3);
 
   /* ── rose spectrum ── */
   --rose: #b87a94;
@@ -126,8 +130,47 @@
   --fail: var(--rose-bright);
   --danger: #cc5555;
 
-  /* ── motion ── */
+  /* ── status (idle) ── */
+  --status-idle: rgba(194,184,201,0.5);
+
+  /* ── motion easing ── */
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-snappy: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+
+  /* ── motion durations ── */
+  --duration-instant: 80ms;
+  --duration-fast: 150ms;
+  --duration-normal: 220ms;
+  --duration-slow: 350ms;
+
+  /* ── glow (status) ── */
+  --glow-active: 0 0 8px rgba(184,122,148,0.4);
+  --glow-success: 0 0 6px rgba(122,138,120,0.6);
+  --glow-warning: 0 0 6px rgba(216,168,120,.6);
+  --glow-error: 0 0 6px rgba(204,120,120,0.6);
+  --glow-ambient: 0 0 12px rgba(184,122,148,0.08);
+  --glow-rose: 0 0 10px rgba(220,165,189,0.5);
+
+  /* ── shadows ── */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.25);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.3);
+  --shadow-glow-rose: 0 8px 32px rgba(220,165,189,0.12);
+
+  /* ── focus ring ── */
+  --focus-ring: 0 0 0 2px var(--rose-bright), 0 0 0 4px rgba(220,165,189,0.2);
+
+  /* ── cell tokens ── */
+  --cell-radius: 6px;
+  --cell-padding: 12px;
+  --cell-gap: 8px;
+  --cell-border: 1px solid var(--glass-border);
+
+  /* ── glass variants ── */
+  --glass-bg-hover: rgba(255,255,255,0.07);
+  --glass-bg-active: rgba(255,255,255,0.09);
 
   /* ── layout ── */
   --nav-h: 48px;
@@ -141,6 +184,12 @@
    ═══════════════════════════════════════════════════════════ */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
+
+:focus-visible {
+  outline: 2px solid var(--rose-bright);
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
+}
 
 html {
   height: 100%;
@@ -199,10 +248,7 @@ code {
   color: var(--text-strong);
 }
 
-/* scrollbar */
-::-webkit-scrollbar { width: 4px; height: 4px }
-::-webkit-scrollbar-track { background: transparent }
-::-webkit-scrollbar-thumb { background: var(--rose-dim); border-radius: 2px }
+/* scrollbar → moved to scrollbar.css */
 
 /* ═══════════════════════════════════════════════════════════
    ATMOSPHERIC LAYERS
@@ -375,13 +421,21 @@ section + section::before {
   border-radius: var(--radius-lg);
   overflow: hidden;
   margin-top: 0;
-  transition: border-color var(--duration-smooth), box-shadow var(--duration-smooth);
+  backdrop-filter: blur(12px) saturate(180%);
+  transition:
+    border-color var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease),
+    transform var(--duration-smooth) var(--ease);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
 }
 
 .pane:hover {
   border-left-color: rgba(204, 144, 168, .5);
-  box-shadow: var(--glow-rose-soft), inset 0 1px 0 rgba(255,255,255,0.06);
+  box-shadow:
+    var(--glow-rose-soft),
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    0 6px 20px rgba(0, 0, 0, 0.12);
+  transform: translateY(-1px);
 }
 
 .pane .head {
@@ -422,6 +476,42 @@ section + section::before {
   color: var(--text-dim);
   font-weight: 400;
 }
+
+/* Pane variants — colored left-border accent + subtle header tint */
+.pane.pane--accent  { border-left: 2px solid var(--rose-bright) }
+.pane.pane--accent  .head { background: rgba(216, 154, 178, .06) }
+.pane.pane--success { border-left: 2px solid var(--success) }
+.pane.pane--success .head { background: rgba(138, 156, 134, .08) }
+.pane.pane--warning { border-left: 2px solid var(--warning) }
+.pane.pane--warning .head { background: rgba(216, 168, 120, .08) }
+.pane.pane--error   { border-left: 2px solid var(--fail) }
+.pane.pane--error   .head { background: rgba(216, 154, 178, .10) }
+
+/* Pane compact mode */
+.pane.pane--compact .head { padding: 4px 8px }
+.pane.pane--compact .body { padding: 8px }
+.pane.pane--compact .body.flat { padding: 0 }
+.pane.pane--compact .foot { padding: 4px 8px }
+
+/* Pane collapsible chevron */
+.pane-chevron {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform var(--duration-snap) var(--ease);
+  margin-left: 2px;
+}
+.pane-chevron--open { transform: rotate(90deg) }
+
+/* Pane entrance animations */
+.pane.pane-enter-fade      { opacity: 0; transition: opacity var(--duration-reveal) var(--ease) }
+.pane.pane-enter-fade.pane-entered { opacity: 1 }
+
+.pane.pane-enter-slide-up  { opacity: 0; transform: translateY(12px); transition: opacity var(--duration-reveal) var(--ease), transform var(--duration-reveal) var(--ease) }
+.pane.pane-enter-slide-up.pane-entered { opacity: 1; transform: translateY(0) }
+
+.pane.pane-enter-scale     { opacity: 0; transform: scale(.96); transition: opacity var(--duration-reveal) var(--ease), transform var(--duration-reveal) var(--ease) }
+.pane.pane-enter-scale.pane-entered { opacity: 1; transform: scale(1) }
 
 /* LED indicator */
 .led {
@@ -469,11 +559,54 @@ section + section::before {
 .mosaic .cell {
   background: var(--bg-void);
   padding: 10px 12px;
-  transition: background var(--duration-smooth);
+  transition:
+    background var(--duration-smooth),
+    transform var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease);
+  position: relative;
+  z-index: 0;
 }
 
-.mosaic .cell:hover {
-  background: linear-gradient(135deg, rgba(204,144,168,.03), transparent);
+/* mount animation */
+.mosaic .cell {
+  animation: mosaic-cell-enter var(--duration-reveal) var(--ease) both;
+}
+.mosaic .cell:nth-child(1) { animation-delay: 0ms; }
+.mosaic .cell:nth-child(2) { animation-delay: 60ms; }
+.mosaic .cell:nth-child(3) { animation-delay: 120ms; }
+.mosaic .cell:nth-child(4) { animation-delay: 180ms; }
+.mosaic .cell:nth-child(5) { animation-delay: 240ms; }
+.mosaic .cell:nth-child(6) { animation-delay: 300ms; }
+
+@keyframes mosaic-cell-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Hover depth: subtle raise with expand */
+.mosaic .cell:hover,
+.mosaic .cell.cell-hovered {
+  background: linear-gradient(135deg, rgba(204,144,168,.04), transparent);
+  transform: scale(1.02) translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15), 0 0 12px rgba(204, 144, 168, 0.06);
+  z-index: 2;
+}
+
+/* Value change flash */
+.mosaic .cell.cell-flash {
+  animation: mosaic-value-flash 400ms var(--ease) both;
+}
+
+@keyframes mosaic-value-flash {
+  0%   { box-shadow: 0 0 0 rgba(204,144,168,0); }
+  30%  { box-shadow: 0 0 20px rgba(204,144,168,0.18); transform: scale(1.03); }
+  100% { box-shadow: 0 0 0 rgba(204,144,168,0); transform: scale(1); }
 }
 
 .mosaic .cell .k {
@@ -493,6 +626,79 @@ section + section::before {
   width: 20px;
   height: 20px;
   border-radius: 5px;
+  transition: transform var(--duration-smooth) var(--ease);
+}
+
+/* Icon bounce on mount */
+.mosaic .cell .k .mosaic-icon.mosaic-icon-bounce {
+  animation: mosaic-icon-bounce var(--duration-reveal) var(--ease) both;
+}
+
+@keyframes mosaic-icon-bounce {
+  0%   { transform: scale(0.6) translateY(4px); opacity: 0; }
+  50%  { transform: scale(1.12) translateY(-2px); opacity: 1; }
+  75%  { transform: scale(0.95) translateY(1px); }
+  100% { transform: scale(1) translateY(0); }
+}
+
+/* Label stagger fade-slide */
+.mosaic .cell .k.mosaic-label-stagger span {
+  animation: mosaic-label-slide var(--duration-reveal) var(--ease) both;
+  animation-delay: 100ms;
+}
+
+@keyframes mosaic-label-slide {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Trend indicator */
+.mosaic .cell .k .mosaic-trend {
+  font-size: 8px;
+  margin-left: auto;
+  opacity: 0.7;
+  transition: opacity var(--duration-smooth);
+}
+.mosaic .cell:hover .k .mosaic-trend {
+  opacity: 1;
+}
+
+.mosaic .cell:hover .k .mosaic-icon {
+  transform: scale(1.1);
+}
+
+/* Sparkline */
+.mosaic .cell .mosaic-sparkline {
+  opacity: 0.7;
+  transition: opacity var(--duration-smooth);
+}
+.mosaic .cell:hover .mosaic-sparkline {
+  opacity: 1;
+}
+
+/* Hover tooltip */
+.mosaic .cell .mosaic-tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  background: var(--glass-bg, rgba(10,10,16,0.92));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-soft);
+  white-space: nowrap;
+  z-index: 10;
+  pointer-events: none;
+  animation: mosaic-tooltip-in 200ms var(--ease) both;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+@keyframes mosaic-tooltip-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
 .mosaic .cell .v {
@@ -505,6 +711,11 @@ section + section::before {
   line-height: 1.1;
   margin-bottom: 4px;
   text-shadow: 0 0 24px currentColor;
+  transition: text-shadow var(--duration-smooth);
+}
+
+.mosaic .cell:hover .v {
+  text-shadow: 0 0 32px currentColor, 0 0 8px currentColor;
 }
 
 .mosaic .cell .v.mono {
@@ -528,6 +739,75 @@ section + section::before {
 @media (max-width: 880px) {
   .mosaic-3 { grid-template-columns: 1fr }
   .mosaic-4 { grid-template-columns: repeat(2, 1fr) }
+}
+
+/* Value slide transition */
+.mosaic .cell .v.v-transition {
+  animation: mosaic-value-slide 350ms var(--ease) both;
+}
+
+@keyframes mosaic-value-slide {
+  0%   { opacity: 0.3; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* Hover detail panel */
+.mosaic .cell .mosaic-detail {
+  margin-top: 6px;
+  padding: 6px 0 2px;
+  border-top: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-soft);
+  line-height: 1.5;
+  animation: mosaic-detail-in 200ms var(--ease) both;
+}
+
+@keyframes mosaic-detail-in {
+  from { opacity: 0; max-height: 0; }
+  to   { opacity: 1; max-height: 60px; }
+}
+
+/* Empty state overlay */
+.mosaic.mosaic-empty {
+  position: relative;
+}
+
+.mosaic-empty-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.mosaic-empty-text {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: .10em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+  animation: mosaic-empty-pulse 3s ease-in-out infinite;
+}
+
+@keyframes mosaic-empty-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.9; }
+}
+
+/* Extended stagger for grids with >6 cells */
+.mosaic .cell:nth-child(7)  { animation-delay: 360ms; }
+.mosaic .cell:nth-child(8)  { animation-delay: 420ms; }
+.mosaic .cell:nth-child(9)  { animation-delay: 480ms; }
+.mosaic .cell:nth-child(10) { animation-delay: 540ms; }
+.mosaic .cell:nth-child(11) { animation-delay: 600ms; }
+.mosaic .cell:nth-child(12) { animation-delay: 660ms; }
+
+/* Column count transitions — animate grid-template-columns via flex fallback */
+.mosaic {
+  transition: grid-template-columns var(--duration-smooth) var(--ease);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -591,7 +871,7 @@ section + section::before {
   border: 1px solid var(--rose-dim);
   background: rgba(220, 165, 189, .04);
   cursor: pointer;
-  transition: all .3s var(--ease);
+  transition: background .3s var(--ease), border-color .3s var(--ease), box-shadow .3s var(--ease), transform .3s var(--ease), color .3s var(--ease);
   font-weight: 400;
   backdrop-filter: blur(4px);
 }
@@ -720,6 +1000,7 @@ section + section::before {
 .dim { color: var(--text-dim) }
 .rose { color: var(--rose-glow) }
 .mono { font-family: var(--mono) }
+.label-caps { letter-spacing: 0.08em; text-transform: uppercase; font-size: 11px; }
 
 .glass-card {
   background: var(--glass-bg);
@@ -787,6 +1068,20 @@ section + section::before {
 }
 
 /* ═══════════════════════════════════════════════════════════
+   PHOSPHOR DECAY (value flash on metric update)
+   ═══════════════════════════════════════════════════════════ */
+
+@keyframes value-flash {
+  0%   { text-shadow: 0 0 18px currentColor; opacity: 1; }
+  40%  { text-shadow: 0 0 24px currentColor, 0 0 48px currentColor; opacity: 1; }
+  100% { text-shadow: 0 0 0 transparent; opacity: 1; }
+}
+
+.phosphor-flash {
+  animation: value-flash 300ms var(--ease) both;
+}
+
+/* ═══════════════════════════════════════════════════════════
    ENTRANCE ANIMATIONS
    ═══════════════════════════════════════════════════════════ */
 
@@ -842,18 +1137,7 @@ section + section::before {
   .axiom { padding: 28px 24px }
 }
 
-/* ═══════════════════════════════════════════════════════════
-   FOCUS RINGS — keyboard navigation
-   ═══════════════════════════════════════════════════════════ */
-
-[tabIndex="0"]:focus-visible,
-[role="button"]:focus-visible,
-[role="row"]:focus-visible,
-[role="columnheader"]:focus-visible {
-  outline: 1px solid var(--rose-dim);
-  outline-offset: -1px;
-  box-shadow: 0 0 0 2px rgba(184, 122, 148, 0.2);
-}
+/* Focus rings moved to focus.css */
 
 /* ═══════════════════════════════════════════════════════════
    REDUCED MOTION — global override

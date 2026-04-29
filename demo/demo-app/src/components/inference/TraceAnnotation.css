@@ -1,7 +1,7 @@
 /* TraceAnnotation -- horizontal inline trace/log annotation strip */
 
 .trace-ann {
-  --tier-t0: #8ac4a0;
+  --tier-t0: var(--success);
   --tier-t1: var(--bone);
   --tier-t2: var(--rose-bright);
 

@@ -34,22 +34,11 @@
   gap: 8px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-soft);
-  animation: af-slide-up var(--duration-reveal) var(--ease) both;
+  animation: fadeInUp var(--duration-reveal) var(--ease) both;
 }
 
 .agent-feed__event:last-child {
   border-bottom: none;
-}
-
-@keyframes af-slide-up {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 /* ── Timestamp ── */
@@ -71,7 +60,7 @@
   display: inline-flex;
   align-items: center;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   line-height: 1;

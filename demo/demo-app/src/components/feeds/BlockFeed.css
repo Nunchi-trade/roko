@@ -82,23 +82,12 @@
   align-items: center;
   gap: 8px;
   padding: 4px 0;
-  animation: bf-slide-in 0.25s var(--ease) both;
-}
-
-@keyframes bf-slide-in {
-  from {
-    opacity: 0;
-    transform: translateX(-12px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+  animation: slideIn 0.25s var(--ease) both;
 }
 
 /* Brief highlight on new block */
 .block-feed__row--new {
-  animation: bf-slide-in 0.25s var(--ease) both,
+  animation: slideIn 0.25s var(--ease) both,
              bf-flash 0.6s var(--ease) both;
 }
 

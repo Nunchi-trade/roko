@@ -1,0 +1,38 @@
+/* Page transition animations for route changes */
+
+.page-transition {
+  will-change: opacity, transform;
+}
+
+.page-enter {
+  opacity: 0;
+  transform: translateY(12px);
+}
+
+.page-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 200ms ease-out 50ms, transform 200ms ease-out 50ms;
+}
+
+.page-exit {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.page-exit-active {
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 100ms ease-in, transform 100ms ease-in;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-enter,
+  .page-enter-active,
+  .page-exit,
+  .page-exit-active {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+}

@@ -12,18 +12,7 @@
     border-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 150ms cubic-bezier(0.22, 1, 0.36, 1),
     transform 150ms cubic-bezier(0.22, 1, 0.36, 1);
-  animation: cellFadeIn 200ms ease-out both;
-}
-
-@keyframes cellFadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  animation: fadeInUp 200ms ease-out both;
 }
 
 /* ── Clickable ── */

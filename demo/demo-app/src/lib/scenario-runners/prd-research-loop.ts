@@ -10,6 +10,11 @@ export const prdResearchLoop: Scenario = {
   labels: ['full pipeline'],
   panel: true,
   promptBar: false,
+  category: 'pipeline',
+  features: ['Full PRD lifecycle', 'Research enhancement', '7 gates'],
+  durationHint: '~90s',
+  accent: 'rose',
+  icon: 'pipeline',
   steps: [
     { label: 'Capture idea', sublabel: 'prd idea' },
     { label: 'Draft PRD', sublabel: 'prd draft new' },

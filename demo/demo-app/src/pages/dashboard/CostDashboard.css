@@ -1,0 +1,24 @@
+/* ── CostDashboard-specific styles ──────────────────────────── */
+
+/* Loading skeleton layout */
+.cd-skeleton-layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.cd-skeleton-hero {
+  height: 80px;
+  border-radius: var(--radius-lg);
+}
+
+.cd-skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-3);
+}
+
+/* Bar track flex-2 variant */
+.cd-bar-track-wide {
+  flex: 2;
+}

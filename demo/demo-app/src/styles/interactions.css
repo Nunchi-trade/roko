@@ -1,0 +1,211 @@
+/* ═══════════════════════════════════════════════════════════
+   INTERACTIONS · Micro-interaction system for controls
+   Uses rosedust tokens. Respects prefers-reduced-motion.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── .btn-interactive: universal button hover/active/focus ── */
+
+.btn-interactive {
+  transition:
+    transform var(--duration-snap) var(--ease),
+    box-shadow var(--duration-snap) var(--ease),
+    background var(--duration-snap) var(--ease),
+    border-color var(--duration-snap) var(--ease);
+  will-change: transform;
+}
+
+.btn-interactive:hover {
+  transform: scale(1.03);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--rose) 20%, transparent);
+}
+
+.btn-interactive:active {
+  transform: scale(0.97);
+  box-shadow: inset 0 1px 4px color-mix(in srgb, #000 30%, transparent);
+}
+
+.btn-interactive:focus-visible {
+  outline: 2px solid var(--rose-dim);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--rose) 15%, transparent);
+}
+
+/* ── .btn-primary-glow: rose glow that intensifies on hover ── */
+
+.btn-primary-glow {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 15%, transparent);
+  transition:
+    transform var(--duration-snap) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease),
+    background var(--duration-snap) var(--ease);
+  will-change: transform, box-shadow;
+}
+
+.btn-primary-glow:hover {
+  transform: scale(1.03);
+  box-shadow:
+    0 0 14px color-mix(in srgb, var(--rose-bright) 35%, transparent),
+    0 0 32px color-mix(in srgb, var(--rose-bright) 15%, transparent);
+}
+
+.btn-primary-glow:active {
+  transform: scale(0.97);
+  box-shadow: inset 0 1px 3px color-mix(in srgb, #000 25%, transparent);
+}
+
+.btn-primary-glow:focus-visible {
+  outline: 2px solid var(--rose-bright);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--rose-bright) 20%, transparent);
+}
+
+/* ── .btn-ghost-reveal: transparent bg fades in on hover ── */
+
+.btn-ghost-reveal {
+  background: transparent;
+  transition:
+    background var(--duration-smooth) var(--ease),
+    color var(--duration-snap) var(--ease),
+    transform var(--duration-snap) var(--ease);
+  will-change: background;
+}
+
+.btn-ghost-reveal:hover {
+  background: var(--glass-bg);
+  color: var(--text-primary);
+}
+
+.btn-ghost-reveal:active {
+  background: var(--bg-glass-active);
+  transform: scale(0.97);
+}
+
+.btn-ghost-reveal:focus-visible {
+  outline: 1px solid var(--rose-dim);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rose) 12%, transparent);
+}
+
+/* ── .chip-interactive: clickable chips/tags with press feedback ── */
+
+.chip-interactive {
+  cursor: pointer;
+  transition:
+    transform var(--duration-snap) var(--ease),
+    background var(--duration-snap) var(--ease),
+    border-color var(--duration-snap) var(--ease),
+    box-shadow var(--duration-snap) var(--ease);
+  will-change: transform;
+}
+
+.chip-interactive:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--rose) 15%, transparent);
+  border-color: var(--rose-dim);
+}
+
+.chip-interactive:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow: none;
+}
+
+/* ── .input-focus-glow: inputs get rose glow on focus ── */
+
+.input-focus-glow {
+  transition:
+    border-color var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease);
+}
+
+.input-focus-glow:focus {
+  border-color: var(--rose-dim);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rose) 12%, transparent), 0 0 12px color-mix(in srgb, var(--rose) 8%, transparent);
+  outline: none;
+}
+
+/* ── .select-animate: smooth dropdown transition ── */
+
+.select-animate {
+  transition:
+    border-color var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease),
+    transform var(--duration-snap) var(--ease);
+}
+
+.select-animate:focus {
+  border-color: var(--rose-dim);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rose) 12%, transparent);
+  outline: none;
+}
+
+/* ── .toggle-smooth: smooth toggle switches ── */
+
+.toggle-smooth {
+  transition:
+    background var(--duration-smooth) var(--ease),
+    border-color var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease);
+}
+
+.toggle-smooth:checked {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 20%, transparent);
+}
+
+.toggle-smooth:focus-visible {
+  outline: 2px solid var(--rose-dim);
+  outline-offset: 2px;
+}
+
+/* ── .link-underline-grow: underline grows from center on hover ── */
+
+.link-underline-grow {
+  position: relative;
+  text-decoration: none;
+}
+
+.link-underline-grow::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 50%;
+  width: 0;
+  height: 1px;
+  background: var(--rose-glow);
+  transition: width var(--duration-smooth) var(--ease), left var(--duration-smooth) var(--ease);
+}
+
+.link-underline-grow:hover::after {
+  width: 100%;
+  left: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   REDUCED MOTION
+   ═══════════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-interactive,
+  .btn-primary-glow,
+  .btn-ghost-reveal,
+  .chip-interactive,
+  .input-focus-glow,
+  .select-animate,
+  .toggle-smooth,
+  .link-underline-grow,
+  .link-underline-grow::after {
+    transition-duration: 0.01ms !important;
+  }
+
+  .btn-interactive:hover,
+  .btn-primary-glow:hover,
+  .chip-interactive:hover {
+    transform: none;
+  }
+
+  .btn-interactive:active,
+  .btn-primary-glow:active,
+  .btn-ghost-reveal:active,
+  .chip-interactive:active {
+    transform: none;
+  }
+}

@@ -104,7 +104,7 @@ export function RunListTab({
       </div>
 
       {historyLoading ? (
-        <div className="bench-skeleton" style={{ height: 200 }} />
+        <div className="bench-skeleton skeleton" style={{ height: 200 }} />
       ) : filtered.length === 0 ? (
         <div className="bench-empty--no-runs">
           <p className="bench-empty-text">No runs recorded yet.</p>

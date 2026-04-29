@@ -1,11 +1,18 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
+import {
+  AnimatedRow,
+  AnimatedHeaderCell,
+  TableEmptyState,
+} from '../../components/AnimatedTable';
 import { useLiveApi } from '../../hooks/useLiveApi';
 import { getCssVar } from '../../lib/color';
 import { roleColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
+import '../../styles/table.css';
+import './CascadeRouter.css';
 import './dashboard.css';
 
 /* ── Types ────────────────────────────────────────────────── */
@@ -118,36 +125,22 @@ function ModelConfidenceChart({ rows, height = 200 }: { rows: [string, Confidenc
   );
 }
 
-/* ── Table styles ────────────────────────────────────────── */
-
-const thStyle: CSSProperties = {
-  padding: '6px 10px',
-  color: 'var(--text-dim)',
-  borderBottom: '1px solid var(--glass-2-border)',
-  background: 'var(--raised)',
-  fontWeight: 600,
-  textAlign: 'left',
-  fontFamily: 'var(--mono)',
-  fontSize: '0.6rem',
-  letterSpacing: '.08em',
-  textTransform: 'uppercase',
-};
-
-const tdStyle: CSSProperties = {
-  padding: '5px 10px',
-  color: 'var(--text)',
-  borderBottom: '1px solid var(--glass-border)',
-  verticalAlign: 'middle',
-  fontFamily: 'var(--mono)',
-  fontSize: '0.7rem',
-};
-
 /* ── Component ───────────────────────────────────────────── */
+
+type CRSortKey = 'model' | 'confidence' | 'successes' | 'trials' | 'cost';
 
 export default function CascadeRouter() {
   const { get } = useLiveApi();
   const [state, setState] = useState<CascadeState>({});
   const [loading, setLoading] = useState(true);
+  const [sortKey, setSortKey] = useState<CRSortKey>('model');
+  const [sortAsc, setSortAsc] = useState(true);
+
+  function handleSort(key: string) {
+    const k = key as CRSortKey;
+    if (sortKey === k) setSortAsc(!sortAsc);
+    else { setSortKey(k); setSortAsc(true); }
+  }
 
   const fetchState = useCallback(async () => {
     try {
@@ -160,8 +153,12 @@ export default function CascadeRouter() {
     }
   }, [get]);
 
-  // Initial fetch on mount
-  useEffect(() => { fetchState(); }, [fetchState]);
+  // Initial fetch + 30s fallback poll
+  useEffect(() => {
+    fetchState();
+    const id = setInterval(fetchState, 30_000);
+    return () => clearInterval(id);
+  }, [fetchState]);
 
   // SSE-triggered refetch
   const debouncedRefetch = useDebouncedRefetch(fetchState, 2000);
@@ -170,10 +167,25 @@ export default function CascadeRouter() {
     debouncedRefetch,
   );
 
-  const rows = useMemo(
-    () => Object.entries(state.confidence_stats ?? {}).sort(([a], [b]) => a.localeCompare(b)),
-    [state.confidence_stats],
-  );
+  const rows = useMemo(() => {
+    const entries = Object.entries(state.confidence_stats ?? {});
+    return entries.sort(([aModel, aStat], [bModel, bStat]) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case 'model': cmp = aModel.localeCompare(bModel); break;
+        case 'confidence': {
+          const ac = aStat.trials > 0 ? aStat.successes / aStat.trials : 0;
+          const bc = bStat.trials > 0 ? bStat.successes / bStat.trials : 0;
+          cmp = ac - bc;
+          break;
+        }
+        case 'successes': cmp = aStat.successes - bStat.successes; break;
+        case 'trials': cmp = aStat.trials - bStat.trials; break;
+        case 'cost': cmp = (aStat.total_cost_usd ?? 0) - (bStat.total_cost_usd ?? 0); break;
+      }
+      return sortAsc ? cmp : -cmp;
+    });
+  }, [state.confidence_stats, sortKey, sortAsc]);
 
   const roleEntries = useMemo(
     () => Object.entries(state.role_table ?? {}).sort(([a], [b]) => a.localeCompare(b)),
@@ -203,115 +215,130 @@ export default function CascadeRouter() {
   return (
     <div className="dash-page--full">
       {/* TOP MOSAIC */}
-      <Mosaic columns={5}>
-        <MosaicCell label="MODELS" value={rows.length} color="rose" mono />
-        <MosaicCell label="OBSERVATIONS" value={state.total_observations ?? stats.totalTrials} color="bone" mono />
-        <MosaicCell label="AVG CONFIDENCE" value={`${(stats.avgConfidence * 100).toFixed(1)}%`} color="success" mono />
-        <MosaicCell label="BEST MODEL" value={stats.bestModel} color="dream" />
-        <MosaicCell label="ROLES ASSIGNED" value={roleEntries.length} color="warning" mono />
-      </Mosaic>
+      <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
+        <Mosaic columns={5}>
+          <MosaicCell label="MODELS" value={rows.length} color="rose" mono />
+          <MosaicCell label="OBSERVATIONS" value={state.total_observations ?? stats.totalTrials} color="bone" mono />
+          <MosaicCell label="AVG CONFIDENCE" value={`${(stats.avgConfidence * 100).toFixed(1)}%`} color="success" mono />
+          <MosaicCell label="BEST MODEL" value={stats.bestModel} color="dream" />
+          <MosaicCell label="ROLES ASSIGNED" value={roleEntries.length} color="warning" mono />
+        </Mosaic>
+      </div>
 
       {/* MAIN CONTENT: 3-column layout */}
       <div className="dash-grid-3col">
         {/* Model Confidence Chart */}
-        <Pane
-          title="MODEL CONFIDENCE"
-          badge={<span className="dash-badge">success rate</span>}
-        >
-          <ModelConfidenceChart rows={rows} height={Math.max(80, rows.length * 30 + 16)} />
-        </Pane>
+        <div className="dash-stagger" style={{ '--stagger-i': 1 } as React.CSSProperties}>
+          <Pane
+            title="MODEL CONFIDENCE"
+            badge={<span className="dash-badge">success rate</span>}
+          >
+            <div className="dash-chart-enter">
+              <ModelConfidenceChart rows={rows} height={Math.max(80, rows.length * 30 + 16)} />
+            </div>
+          </Pane>
+        </div>
 
         {/* Model Statistics Table */}
-        <Pane
-          title="MODEL STATISTICS"
-          badge={<span className="dash-badge">detailed breakdown</span>}
-          flat
-        >
-          <div className="dash-scroll">
-            {loading ? (
-              <div className="dash-placeholder">Loading cascade router...</div>
-            ) : rows.length === 0 ? (
-              <div className="dash-placeholder">No model stats found</div>
-            ) : (
-              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr>
-                    <th style={thStyle}>Model</th>
-                    <th style={thStyle}>Confidence</th>
-                    <th style={thStyle}>Successes</th>
-                    <th style={thStyle}>Trials</th>
-                    <th style={thStyle}>Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map(([model, stat]) => {
-                    const conf = stat.trials > 0 ? stat.successes / stat.trials : 0;
-                    return (
-                      <tr
-                        key={model}
-                        className="dash-table-row"
-                      >
-                        <td style={tdStyle}>{model}</td>
-                        <td style={tdStyle}>
-                          <span className="dash-inline--8">
-                            <span className="dash-minibar">
-                              <span
-                                className="dash-minibar__fill"
-                                style={{
-                                  width: `${conf * 100}%`,
-                                  background: conf >= 0.9 ? 'var(--success)' : conf >= 0.7 ? 'var(--warning)' : 'var(--rose-bright)',
-                                }}
-                              />
-                            </span>
-                            {`${(conf * 100).toFixed(1)}%`}
-                          </span>
-                        </td>
-                        <td style={tdStyle}>{stat.successes}</td>
-                        <td style={tdStyle}>{stat.trials}</td>
-                        <td style={tdStyle}>{stat.total_cost_usd != null ? `$${stat.total_cost_usd.toFixed(3)}` : '—'}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </Pane>
+        <div className="dash-stagger" style={{ '--stagger-i': 2 } as React.CSSProperties}>
+          <Pane
+            title="MODEL STATISTICS"
+            badge={<span className="dash-badge">detailed breakdown</span>}
+            flat
+          >
+            <div className="dash-scroll dash-crossfade-enter">
+              {loading ? (
+                <div className="dash-placeholder">Loading cascade router...</div>
+              ) : (
+                <table className="tbl-container">
+                  <thead>
+                    <tr>
+                      <AnimatedHeaderCell sortKey="model" currentSort={sortKey} ascending={sortAsc} onSort={handleSort} className="tbl-header">Model</AnimatedHeaderCell>
+                      <AnimatedHeaderCell sortKey="confidence" currentSort={sortKey} ascending={sortAsc} onSort={handleSort} className="tbl-header">Confidence</AnimatedHeaderCell>
+                      <AnimatedHeaderCell sortKey="successes" currentSort={sortKey} ascending={sortAsc} onSort={handleSort} className="tbl-header">Successes</AnimatedHeaderCell>
+                      <AnimatedHeaderCell sortKey="trials" currentSort={sortKey} ascending={sortAsc} onSort={handleSort} className="tbl-header">Trials</AnimatedHeaderCell>
+                      <AnimatedHeaderCell sortKey="cost" currentSort={sortKey} ascending={sortAsc} onSort={handleSort} className="tbl-header">Cost</AnimatedHeaderCell>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.length === 0 ? (
+                      <TableEmptyState colSpan={5} message="No model stats found" />
+                    ) : (
+                      rows.map(([model, stat], rowIdx) => {
+                        const conf = stat.trials > 0 ? stat.successes / stat.trials : 0;
+                        return (
+                          <AnimatedRow key={model} index={rowIdx}>
+                            <td className="tbl-cell">{model}</td>
+                            <td className="tbl-cell">
+                              <span className="dash-inline--8">
+                                <span className="dash-minibar">
+                                  <span
+                                    className="dash-minibar__fill dash-bar-animate"
+                                    style={{
+                                      width: `${conf * 100}%`,
+                                      background: conf >= 0.9 ? 'var(--success)' : conf >= 0.7 ? 'var(--warning)' : 'var(--rose-bright)',
+                                      animationDelay: `${rowIdx * 60 + 200}ms`,
+                                    }}
+                                  />
+                                </span>
+                                {`${(conf * 100).toFixed(1)}%`}
+                              </span>
+                            </td>
+                            <td className="tbl-cell">{stat.successes}</td>
+                            <td className="tbl-cell">{stat.trials}</td>
+                            <td className="tbl-cell">{stat.total_cost_usd != null ? `$${stat.total_cost_usd.toFixed(3)}` : '---'}</td>
+                          </AnimatedRow>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </Pane>
+        </div>
 
         {/* Role Assignments */}
-        <Pane
-          title="ROLE ASSIGNMENTS"
-          badge={<span className="dash-badge">{roleEntries.length} roles</span>}
-        >
-          {loading ? (
-            <div className="dash-placeholder">Loading...</div>
-          ) : roleEntries.length === 0 ? (
-            <div className="dash-placeholder">No role assignments</div>
-          ) : (
-            <div className="dash-flex-col dash-scroll">
-              {roleEntries.map(([role, model], i) => (
-                <div
-                  key={role}
-                  className={`dash-role-row${i < roleEntries.length - 1 ? ' dash-row-sep' : ''}`}
-                >
-                  <span className="dash-inline">
-                    <span
-                      className="dash-dot--5"
-                      style={{
-                        background: roleColor(role),
-                        boxShadow: `0 0 6px ${roleColor(role)}60`,
-                      }}
-                    />
-                    <span className="dash-display-sm">{role}</span>
-                  </span>
-                  <span className="dash-tag--sm" style={{ flexShrink: 0 }}>
-                    {model.replace(/^claude-/, '')}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </Pane>
+        <div className="dash-stagger" style={{ '--stagger-i': 3 } as React.CSSProperties}>
+          <Pane
+            title="ROLE ASSIGNMENTS"
+            badge={<span className="dash-badge">{roleEntries.length} roles</span>}
+          >
+            {loading ? (
+              <div className="dash-placeholder">Loading...</div>
+            ) : roleEntries.length === 0 ? (
+              <div className="dash-empty">
+                <span className="dash-empty__label">No role assignments</span>
+                <code className="dash-empty__cmd">roko plan run plans/</code>
+              </div>
+            ) : (
+              <div className="dash-flex-col dash-scroll">
+                {roleEntries.map(([role, model], i) => (
+                  <div
+                    key={role}
+                    className={`dash-role-row dash-stagger${i < roleEntries.length - 1 ? ' dash-row-sep' : ''}`}
+                    style={{ '--stagger-i': i } as React.CSSProperties}
+                  >
+                    <span className="dash-inline">
+                      <span
+                        className="dash-dot--5 dash-status-breathe"
+                        style={{
+                          background: roleColor(role),
+                          color: roleColor(role),
+                          boxShadow: `0 0 6px ${roleColor(role)}60`,
+                        }}
+                      />
+                      <span className="dash-display-sm">{role}</span>
+                    </span>
+                    <span className="dash-tag--sm cr-role-model">
+                      {model.replace(/^claude-/, '')}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Pane>
+        </div>
       </div>
     </div>
   );

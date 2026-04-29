@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useRokoConfig } from '../hooks/useRokoConfig';
+import { useToast } from '../components/Toast';
 import {
   flattenProviderModels,
   providerForModelKey,
@@ -7,11 +8,98 @@ import {
 } from '../lib/config-models';
 import './Settings.css';
 
-export default function Settings() {
-  const { fullConfig, defaultModel, defaultBackend, providers, isLive, updateConfig } =
-    useRokoConfig();
+/* ── Toggle switch ── */
+function Toggle({
+  checked,
+  onChange,
+  disabled,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <label className="toggle-wrap">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={e => onChange(e.target.checked)}
+        disabled={disabled}
+      />
+      <span className="toggle-track" />
+    </label>
+  );
+}
 
-  // Local editing state — initialized from fullConfig, only pushed on save
+/* ── Collapsible section wrapper ── */
+function Section({
+  title,
+  badge,
+  children,
+  defaultOpen = true,
+}: {
+  title: string;
+  badge?: number;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="settings-section">
+      <div
+        className="settings-section-toggle"
+        onClick={() => setOpen(o => !o)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}
+      >
+        <h2>
+          {title}
+          {badge != null && <span className="badge">{badge}</span>}
+        </h2>
+        <span className={`settings-section-chevron${open ? '' : ' collapsed'}`}>&#9662;</span>
+      </div>
+      <div className={`settings-section-body${open ? '' : ' collapsed'}`}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ── Save toast ── */
+function SaveToast({ visible, onDone }: { visible: boolean; onDone: () => void }) {
+  const [exiting, setExiting] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => {
+    if (!visible) return;
+    setExiting(false);
+    timer.current = setTimeout(() => {
+      setExiting(true);
+      setTimeout(onDone, 300);
+    }, 2000);
+    return () => clearTimeout(timer.current);
+  }, [visible, onDone]);
+
+  if (!visible && !exiting) return null;
+  return (
+    <div className={`settings-toast${exiting ? ' exiting' : ''}`}>
+      <span className="toast-check">&#10003;</span>
+      Configuration saved
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Main Settings page
+   ══════════════════════════════════════════════════════════════ */
+
+export default function Settings() {
+  const { fullConfig, providers, isLive, updateConfig } =
+    useRokoConfig();
+  const { toast } = useToast();
+
+  // Local editing state
   const [model, setModel] = useState('');
   const [backend, setBackend] = useState('');
   const [bareMode, setBareMode] = useState(true);
@@ -21,48 +109,59 @@ export default function Settings() {
   const [gateMaxIter, setGateMaxIter] = useState(3);
 
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [initialized, setInitialized] = useState(false);
+  const [toastVisible, setToastVisible] = useState(false);
+  const [resetShaking, setResetShaking] = useState(false);
+  const [btnFlash, setBtnFlash] = useState(false);
+  // Track whether user is actively editing (don't overwrite during edits)
+  const [dirty, setDirty] = useState(false);
 
-  // Sync local state from fullConfig context (once populated)
+  // Track initial values for reset
+  const initialRef = useRef({ model: '', backend: '', bareMode: true, effort: 'medium', clippyEnabled: true, skipTests: false, gateMaxIter: 3 });
+  // Track which config snapshot we last synced from
+  const lastSyncedRef = useRef('');
+
+  // Sync local state from fullConfig (runs on initial load and after save)
   useEffect(() => {
-    if (initialized || !fullConfig || Object.keys(fullConfig).length === 0) return;
+    if (!fullConfig || Object.keys(fullConfig).length === 0) return;
 
+    // Build a fingerprint to detect actual config changes
     const agent = fullConfig.agent as Record<string, unknown> | undefined;
+    const gates = fullConfig.gates as Record<string, unknown> | undefined;
+    const fingerprint = JSON.stringify([
+      agent?.default_model, agent?.default_backend, agent?.bare_mode, agent?.default_effort,
+      gates?.clippy_enabled, gates?.skip_tests, gates?.max_iterations,
+    ]);
+
+    // Skip if config hasn't changed or user is actively editing
+    if (fingerprint === lastSyncedRef.current || dirty) return;
+    lastSyncedRef.current = fingerprint;
+
     if (agent) {
       if (typeof agent.default_model === 'string') setModel(agent.default_model);
       if (typeof agent.default_backend === 'string') setBackend(agent.default_backend);
       if (typeof agent.bare_mode === 'boolean') setBareMode(agent.bare_mode);
       if (typeof agent.default_effort === 'string') setEffort(agent.default_effort);
     }
-    const gates = fullConfig.gates as Record<string, unknown> | undefined;
     if (gates) {
       if (typeof gates.clippy_enabled === 'boolean') setClippyEnabled(gates.clippy_enabled);
       if (typeof gates.skip_tests === 'boolean') setSkipTests(gates.skip_tests);
       if (typeof gates.max_iterations === 'number') setGateMaxIter(gates.max_iterations);
     }
-    setInitialized(true);
-  }, [fullConfig, initialized]);
-
-  // Fallback: sync model/backend from derived context if fullConfig not yet available
-  useEffect(() => {
-    if (!initialized) {
-      if (defaultModel) setModel(defaultModel);
-      if (defaultBackend) setBackend(defaultBackend);
-    }
-  }, [defaultModel, defaultBackend, initialized]);
+    initialRef.current = {
+      model: (agent?.default_model as string) ?? '',
+      backend: (agent?.default_backend as string) ?? '',
+      bareMode: (agent?.bare_mode as boolean) ?? true,
+      effort: (agent?.default_effort as string) ?? 'medium',
+      clippyEnabled: (gates?.clippy_enabled as boolean) ?? true,
+      skipTests: (gates?.skip_tests as boolean) ?? false,
+      gateMaxIter: (gates?.max_iterations as number) ?? 3,
+    };
+  }, [fullConfig, dirty]);
 
   const allModels = useMemo(() => flattenProviderModels(providers), [providers]);
 
-  useEffect(() => {
-    if (!model || allModels.length === 0) return;
-    const modelKey = resolveModelKey(allModels, model);
-    if (modelKey !== model) setModel(modelKey);
-    const provider = providerForModelKey(allModels, modelKey);
-    if (provider && backend !== provider) setBackend(provider);
-  }, [allModels, backend, model]);
-
   const handleModelChange = (value: string) => {
+    setDirty(true);
     const modelKey = resolveModelKey(allModels, value);
     setModel(modelKey);
     const provider = providerForModelKey(allModels, modelKey);
@@ -71,7 +170,7 @@ export default function Settings() {
 
   const handleSave = async () => {
     setSaving(true);
-    setSaved(false);
+    setToastVisible(false);
     const ok = await updateConfig({
       agent: {
         default_model: model,
@@ -86,11 +185,40 @@ export default function Settings() {
       },
     });
     if (ok) {
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
+      setBtnFlash(true);
+      setTimeout(() => setBtnFlash(false), 600);
+      setToastVisible(true);
+      toast('Configuration saved', { type: 'success' });
+      initialRef.current = { model, backend, bareMode, effort, clippyEnabled, skipTests, gateMaxIter };
+      // Allow re-sync from server response
+      setDirty(false);
+      lastSyncedRef.current = '';
+    } else {
+      toast('Failed to save configuration', { type: 'error' });
     }
     setSaving(false);
   };
+
+  const handleReset = useCallback(() => {
+    if (resetShaking) {
+      // Second click — actually reset
+      const i = initialRef.current;
+      setModel(i.model);
+      setBackend(i.backend);
+      setBareMode(i.bareMode);
+      setEffort(i.effort);
+      setClippyEnabled(i.clippyEnabled);
+      setSkipTests(i.skipTests);
+      setGateMaxIter(i.gateMaxIter);
+      setResetShaking(false);
+    } else {
+      // First click — warning shake
+      setResetShaking(true);
+      setTimeout(() => setResetShaking(false), 2000);
+    }
+  }, [resetShaking]);
+
+  const hideToast = useCallback(() => setToastVisible(false), []);
 
   return (
     <div className={`settings-page${isLive ? '' : ' settings-offline'}`}>
@@ -110,11 +238,7 @@ export default function Settings() {
       )}
 
       {/* ── Providers ── */}
-      <div className="settings-section">
-        <h2>
-          Providers
-          <span className="badge">{providers.length}</span>
-        </h2>
+      <Section title="Providers" badge={providers.length}>
         {providers.length === 0 ? (
           <div className="settings-empty">No providers configured</div>
         ) : (
@@ -137,14 +261,10 @@ export default function Settings() {
             </tbody>
           </table>
         )}
-      </div>
+      </Section>
 
       {/* ── Models ── */}
-      <div className="settings-section">
-        <h2>
-          Models
-          <span className="badge">{allModels.length}</span>
-        </h2>
+      <Section title="Models" badge={allModels.length}>
         {allModels.length === 0 ? (
           <div className="settings-empty">No models configured</div>
         ) : (
@@ -167,14 +287,14 @@ export default function Settings() {
             </tbody>
           </table>
         )}
-      </div>
+      </Section>
 
       {/* ── Agent Defaults ── */}
-      <div className="settings-section">
-        <h2>Agent Defaults</h2>
+      <Section title="Agent Defaults">
         <div className="settings-field">
           <label>Default Model</label>
           <select
+            className="select-animate"
             value={model}
             onChange={e => handleModelChange(e.target.value)}
             disabled={!isLive}
@@ -190,8 +310,9 @@ export default function Settings() {
         <div className="settings-field">
           <label>Default Backend</label>
           <select
+            className="select-animate"
             value={backend}
-            onChange={e => setBackend(e.target.value)}
+            onChange={e => { setDirty(true); setBackend(e.target.value); }}
             disabled={!isLive}
           >
             {!providers.length && <option value="">{backend || '--'}</option>}
@@ -204,7 +325,7 @@ export default function Settings() {
         </div>
         <div className="settings-field">
           <label>Effort</label>
-          <select value={effort} onChange={e => setEffort(e.target.value)} disabled={!isLive}>
+          <select className="select-animate" value={effort} onChange={e => { setDirty(true); setEffort(e.target.value); }} disabled={!isLive}>
             <option value="low">Low</option>
             <option value="medium">Medium</option>
             <option value="high">High</option>
@@ -212,55 +333,51 @@ export default function Settings() {
         </div>
         <div className="settings-field">
           <label>Bare Mode</label>
-          <input
-            type="checkbox"
-            checked={bareMode}
-            onChange={e => setBareMode(e.target.checked)}
-            disabled={!isLive}
-          />
+          <Toggle checked={bareMode} onChange={v => { setDirty(true); setBareMode(v); }} disabled={!isLive} />
         </div>
-      </div>
+      </Section>
 
       {/* ── Gates ── */}
-      <div className="settings-section">
-        <h2>Gates</h2>
+      <Section title="Gates">
         <div className="settings-field">
           <label>Clippy</label>
-          <input
-            type="checkbox"
-            checked={clippyEnabled}
-            onChange={e => setClippyEnabled(e.target.checked)}
-            disabled={!isLive}
-          />
+          <Toggle checked={clippyEnabled} onChange={v => { setDirty(true); setClippyEnabled(v); }} disabled={!isLive} />
         </div>
         <div className="settings-field">
           <label>Skip Tests</label>
-          <input
-            type="checkbox"
-            checked={skipTests}
-            onChange={e => setSkipTests(e.target.checked)}
-            disabled={!isLive}
-          />
+          <Toggle checked={skipTests} onChange={v => { setDirty(true); setSkipTests(v); }} disabled={!isLive} />
         </div>
         <div className="settings-field">
           <label>Max Iterations</label>
           <input
             type="text"
-            className="input-narrow"
+            className="input-narrow input-focus-glow"
             value={gateMaxIter}
-            onChange={e => setGateMaxIter(Number(e.target.value) || 1)}
+            onChange={e => { setDirty(true); setGateMaxIter(Number(e.target.value) || 1); }}
             disabled={!isLive}
           />
         </div>
-      </div>
+      </Section>
 
-      {/* ── Save ── */}
+      {/* ── Actions ── */}
       <div className="settings-actions">
-        <button className="primary" onClick={handleSave} disabled={!isLive || saving}>
+        <button
+          className={`primary btn-primary-glow${saving ? ' saving' : ''}${btnFlash ? ' success-flash' : ''}`}
+          onClick={handleSave}
+          disabled={!isLive || saving}
+        >
           {saving ? 'Saving...' : 'Save'}
         </button>
-        {saved && <span className="settings-saved">Saved</span>}
+        <button
+          className={`reset-btn btn-interactive${resetShaking ? ' shaking' : ''}`}
+          onClick={handleReset}
+          disabled={!isLive}
+        >
+          {resetShaking ? 'Click again to reset' : 'Reset'}
+        </button>
       </div>
+
+      <SaveToast visible={toastVisible} onDone={hideToast} />
     </div>
   );
 }

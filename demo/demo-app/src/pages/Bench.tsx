@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Link } from 'react-router';
 import { useBench } from '../hooks/useBench';
 import { handleRowKeyDown } from '../lib/a11y';
 import { useRokoConfig } from '../hooks/useRokoConfig';
+import { useToast } from '../components/Toast';
 import type { AgentStrategy, BenchRun } from '../lib/bench-types';
 import Pane from '../components/Pane';
+import Tooltip from '../components/Tooltip';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
 import BarChart from '../components/Charts/BarChart';
 import CostChart from '../components/Charts/CostChart';
@@ -24,8 +26,62 @@ import MatrixBuilder from '../components/MatrixBuilder';
 import MatrixRaceTrack from '../components/MatrixRaceTrack';
 import MatrixDetailView from '../components/MatrixDetailView';
 import { ComponentErrorBoundary } from '../components/design';
+import { Sparkle } from '../components/Celebration';
+import { PulseIcon, SpinnerIcon, CheckmarkIcon, CrossIcon } from '../components/icons/AnimatedIcons';
 import { useMatrixBench } from '../hooks/useMatrixBench';
+import { useCountUp, fmtCount, fmtCost } from '../hooks/useCountUp';
 import './Bench.css';
+
+/* ── Animated number counter ── */
+function AnimatedNumber({ value, prefix = '', suffix = '', decimals = 0 }: {
+  value: number; prefix?: string; suffix?: string; decimals?: number;
+}) {
+  const [displayed, setDisplayed] = useState(value);
+  const rafRef = useRef(0);
+  const prevRef = useRef(value);
+  const prefersReducedMotion = useMemo(
+    () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    [],
+  );
+
+  useEffect(() => {
+    if (prefersReducedMotion) { setDisplayed(value); return; }
+    const from = prevRef.current;
+    prevRef.current = value;
+    if (from === value) return;
+    const start = performance.now();
+    const duration = 500;
+    function tick(now: number) {
+      const t = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic
+      setDisplayed(from + (value - from) * eased);
+      if (t < 1) rafRef.current = requestAnimationFrame(tick);
+    }
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [value, prefersReducedMotion]);
+
+  return <>{prefix}{displayed.toFixed(decimals)}{suffix}</>;
+}
+
+/* ── Countdown overlay ── */
+function CountdownOverlay({ onDone }: { onDone: () => void }) {
+  const [count, setCount] = useState(3);
+
+  useEffect(() => {
+    if (count <= 0) { onDone(); return; }
+    const timer = setTimeout(() => setCount(count - 1), 800);
+    return () => clearTimeout(timer);
+  }, [count, onDone]);
+
+  if (count <= 0) return null;
+
+  return (
+    <div className="bench-countdown-overlay">
+      <span key={count} className="bench-countdown-number">{count}</span>
+    </div>
+  );
+}
 
 type Tab = 'configure' | 'live' | 'results' | 'history' | 'compare' | 'analysis' | 'learning';
 
@@ -65,7 +121,11 @@ export default function Bench() {
   const [tab, setTab] = useState<Tab>('configure');
   const [configureMode, setConfigureMode] = useState<ConfigureMode>('single');
   const [liveViewMode, setLiveViewMode] = useState<LiveViewMode>('race');
+  const [showCountdown, setShowCountdown] = useState(false);
+  const [runCompleted, setRunCompleted] = useState(false);
+  const pendingStartRef = useRef<(() => void) | null>(null);
   const { defaultModel, defaultBackend } = useRokoConfig();
+  const { toast } = useToast();
 
   const bench = useBench();
   const {
@@ -83,6 +143,31 @@ export default function Bench() {
   // Matrix mode
   const matrix = useMatrixBench(models);
 
+  // Countdown callback: fire the actual start after countdown finishes
+  const handleCountdownDone = useCallback(() => {
+    setShowCountdown(false);
+    pendingStartRef.current?.();
+    pendingStartRef.current = null;
+  }, []);
+
+  // Detect run completion for burst effect
+  const prevRunStatus = useRef(activeRun?.status);
+  useEffect(() => {
+    if (prevRunStatus.current === 'running' && activeRun?.status === 'completed') {
+      setRunCompleted(true);
+      const passRate = activeRunSummary?.pass_rate;
+      toast(
+        passRate != null
+          ? `Benchmark complete: ${(passRate * 100).toFixed(0)}% pass rate`
+          : 'Benchmark complete',
+        { type: passRate != null && passRate >= 0.5 ? 'success' : 'warning' },
+      );
+      const timer = setTimeout(() => setRunCompleted(false), 1200);
+      return () => clearTimeout(timer);
+    }
+    prevRunStatus.current = activeRun?.status;
+  }, [activeRun?.status, activeRunSummary, toast]);
+
   // Fetch pareto data when analysis tab opens
   useEffect(() => {
     if (tab === 'analysis') fetchPareto();
@@ -94,6 +179,10 @@ export default function Bench() {
     ? history.reduce((s, r) => s + (r.summary?.pass_rate ?? 0), 0) / history.length
     : 0;
   const totalCost = history.reduce((s, r) => s + (r.summary?.total_cost_usd ?? 0), 0);
+
+  const animRuns = useCountUp(totalRuns);
+  const animPassRate = useCountUp(avgPassRate * 100);
+  const animCost = useCountUp(totalCost);
 
   // Results display: prefer active run, fall back to last completed from history
   const lastHistoryRun = history.find((r) => r.status === 'completed');
@@ -131,9 +220,10 @@ export default function Bench() {
 
   return (
     <div className="bench-page">
+      {showCountdown && <CountdownOverlay onDone={handleCountdownDone} />}
       <div className="bench-hero">
         <div className="bench-hero-header">
-          <h1 className="bench-page-title">Benchmark Lab</h1>
+          <h1 className="bench-page-title text-gradient-cool text-glow">Benchmark Lab</h1>
           <p className="bench-page-sub">
             Configure, run, and analyze agent evaluations
             {connectionState === 'offline' && <span className="bench-offline-badge">OFFLINE</span>}
@@ -141,17 +231,17 @@ export default function Bench() {
         </div>
         <div className="bench-hero-stats">
           <Mosaic columns={4}>
-            <MosaicCell label="TOTAL RUNS" value={String(totalRuns || '-')} color="bone" />
-            <MosaicCell label="AVG PASS RATE" value={avgPassRate > 0 ? `${(avgPassRate * 100).toFixed(0)}%` : '-'} color="success" />
-            <MosaicCell label="TOTAL COST" value={totalCost > 0 ? `$${totalCost.toFixed(2)}` : '-'} color="warning" />
-            <MosaicCell label="SUITES" value={suitesLoading ? '...' : String(suites.length)} color="rose" />
+            <Tooltip content="Total benchmark runs executed" placement="bottom"><MosaicCell label="TOTAL RUNS" value={<span className="counter-animate">{totalRuns > 0 ? fmtCount(animRuns) : '-'}</span>} color="bone" /></Tooltip>
+            <Tooltip content="Average task pass rate across all runs" placement="bottom"><MosaicCell label="AVG PASS RATE" value={<span className="counter-animate">{avgPassRate > 0 ? `${fmtCount(animPassRate)}%` : '-'}</span>} color="success" /></Tooltip>
+            <Tooltip content="Cumulative LLM spend across all runs" placement="bottom"><MosaicCell label="TOTAL COST" value={<span className="counter-animate">{totalCost > 0 ? fmtCost(animCost) : '-'}</span>} color="warning" /></Tooltip>
+            <Tooltip content="Available test suites from roko serve" placement="bottom"><MosaicCell label="SUITES" value={suitesLoading ? '...' : String(suites.length)} color="rose" /></Tooltip>
           </Mosaic>
         </div>
       </div>
 
       <div className="bench-tabs">
         {TABS.map((t) => (
-          <button key={t.id} className={`bench-tab${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
+          <button key={t.id} className={`bench-tab btn-ghost-reveal${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}
             {t.id === 'live' && activeRun?.status === 'running' && <span className="bench-tab-dot" />}
             {t.id === 'learning' && activeRun?.status === 'running' && <span className="bench-tab-dot" style={{ background: 'var(--dream-bright)' }} />}
@@ -164,13 +254,13 @@ export default function Bench() {
         {tab === 'configure' && (
           <>
             <div className="bench-mode-toggle">
-              <button className={`bench-mode-btn${configureMode === 'single' ? ' active' : ''}`} onClick={() => setConfigureMode('single')}>Single</button>
-              <button className={`bench-mode-btn${configureMode === 'matrix' ? ' active' : ''}`} onClick={() => setConfigureMode('matrix')}>Matrix</button>
+              <button className={`bench-mode-btn btn-ghost-reveal${configureMode === 'single' ? ' active' : ''}`} onClick={() => setConfigureMode('single')}>Single</button>
+              <button className={`bench-mode-btn btn-ghost-reveal${configureMode === 'matrix' ? ' active' : ''}`} onClick={() => setConfigureMode('matrix')}>Matrix</button>
             </div>
 
             {/* Shared suite selector */}
             <Pane title="TEST SUITE">
-              {suitesLoading ? <div className="bench-skeleton" style={{ height: 120 }} />
+              {suitesLoading ? <div className="bench-skeleton skeleton" style={{ height: 120 }} />
                 : suites.length === 0 ? <p className="bench-empty-text">No suites. Start roko serve.</p>
                 : <SuiteSelector suites={suites} value={selectedSuiteId} onChange={setSelectedSuiteId} />}
             </Pane>
@@ -181,7 +271,7 @@ export default function Bench() {
                   <Pane title="AGENT STRATEGY">
                     <div className="config-cards">
                       {STRATEGIES.map((s) => (
-                        <button key={s.id} className={`config-card${config.strategy === s.id ? ' selected' : ''}`}
+                        <button key={s.id} className={`config-card btn-interactive${config.strategy === s.id ? ' selected' : ''}`}
                           onClick={() => setConfig({ ...config, strategy: s.id })}>
                           <span className="card-label">{s.label}</span>
                           <span className="card-desc">{s.desc}</span>
@@ -217,17 +307,17 @@ export default function Bench() {
                       </label>
                       <label className="param-row">
                         <span className="param-label">Max Tokens</span>
-                        <input type="number" className="config-input" value={config.maxTokens}
+                        <input type="number" className="config-input input-focus-glow" value={config.maxTokens}
                           onChange={(e) => setConfig({ ...config, maxTokens: Number(e.target.value) })} style={{ maxWidth: 120 }} />
                       </label>
                       <label className="param-row">
                         <span className="param-label">Timeout (s)</span>
-                        <input type="number" className="config-input" value={config.timeoutSecs}
+                        <input type="number" className="config-input input-focus-glow" value={config.timeoutSecs}
                           onChange={(e) => setConfig({ ...config, timeoutSecs: Number(e.target.value) })} style={{ maxWidth: 120 }} />
                       </label>
                       <label className="param-row">
                         <span className="param-label">Retries</span>
-                        <input type="number" className="config-input" min="0" max="3" value={config.retries}
+                        <input type="number" className="config-input input-focus-glow" min="0" max="3" value={config.retries}
                           onChange={(e) => setConfig({ ...config, retries: Number(e.target.value) })} style={{ maxWidth: 80 }} />
                       </label>
                       <div className="param-row">
@@ -259,8 +349,12 @@ export default function Bench() {
                   </Pane>
 
                   <div className="bench-run-btn">
-                    <button className="btn"
-                      onClick={() => { startRun(defaultModel, defaultBackend); setTab('live'); }}
+                    <button className="btn btn-primary-glow"
+                      onClick={() => {
+                        pendingStartRef.current = () => { startRun(defaultModel, defaultBackend); };
+                        setShowCountdown(true);
+                        setTab('live');
+                      }}
                       disabled={activeRun?.status === 'running' || connectionState === 'offline'}>
                       {activeRun?.status === 'running' ? 'Running...' : 'Run Benchmark'}
                     </button>
@@ -307,12 +401,14 @@ export default function Bench() {
               /* Matrix live view */
               <>
                 <div className="bench-live-header">
-                  <span className={`benchlive-dot${matrix.status === 'running' ? '' : ' disconnected'}`} />
+                  {matrix.status === 'running'
+                    ? <PulseIcon size={10} color="var(--success)" />
+                    : <span className="benchlive-dot disconnected" />}
                   <span className="bench-live-status">MATRIX {matrix.status.toUpperCase()}</span>
                   <span className="bench-live-progress">{matrix.totalLanes} lanes</span>
                   <div className="bench-mode-toggle" style={{ marginLeft: 'auto', marginBottom: 0 }}>
-                    <button className={`bench-mode-btn${liveViewMode === 'race' ? ' active' : ''}`} onClick={() => setLiveViewMode('race')}>Race</button>
-                    <button className={`bench-mode-btn${liveViewMode === 'detail' ? ' active' : ''}`} onClick={() => setLiveViewMode('detail')}>Detail</button>
+                    <button className={`bench-mode-btn btn-ghost-reveal${liveViewMode === 'race' ? ' active' : ''}`} onClick={() => setLiveViewMode('race')}>Race</button>
+                    <button className={`bench-mode-btn btn-ghost-reveal${liveViewMode === 'detail' ? ' active' : ''}`} onClick={() => setLiveViewMode('detail')}>Detail</button>
                   </div>
                 </div>
 
@@ -360,9 +456,16 @@ export default function Bench() {
             ) : (
               /* Single run live view (unchanged) */
               <>
-                <div className="bench-live-header">
-                  <span className={`benchlive-dot${activeRun.status === 'running' ? '' : ' disconnected'}`} />
-                  <span className="bench-live-status">{activeRun.status === 'running' ? 'RUNNING' : activeRun.status.toUpperCase()}</span>
+                <div className={`bench-live-header${activeRun.status === 'running' ? ' gradient-border-active' : ''}`} style={{ position: 'relative' }}>
+                  <Sparkle active={runCompleted} count={7} duration={1000} onDone={() => setRunCompleted(false)} />
+                  {activeRun.status === 'running'
+                    ? <PulseIcon size={10} color="var(--success)" />
+                    : activeRun.status === 'completed'
+                      ? <CheckmarkIcon size={14} color="var(--success)" />
+                      : activeRun.status === 'failed'
+                        ? <CrossIcon size={14} color="var(--rose-bright)" />
+                        : <SpinnerIcon size={10} />}
+                  <span className={`bench-live-status${runCompleted ? ' completed-burst' : ''}`}>{activeRun.status === 'running' ? 'RUNNING' : activeRun.status.toUpperCase()}</span>
                   <span className="bench-live-progress">
                     {activeRun.progress}/{activeRun.total}
                     {activeRun.results.length > 0 && (
@@ -374,7 +477,9 @@ export default function Bench() {
                     )}
                   </span>
                   {eta != null && <span className="bench-live-eta">ETA {formatEta(eta)}</span>}
-                  <span className="bench-live-cost">${activeRun.costSoFar.toFixed(3)}</span>
+                  <span className="bench-live-cost bench-score-counter">
+                    <AnimatedNumber value={activeRun.costSoFar} prefix="$" decimals={3} />
+                  </span>
                   {activeRun.status === 'running' && (
                     <button className="btn btn-sm" onClick={cancelRun} style={{ marginLeft: 'auto' }}>Cancel</button>
                   )}
@@ -531,11 +636,11 @@ export default function Bench() {
           <div className="bench-history">
             <div className="bench-history-toolbar">
               <div className="bench-history-filters">
-                <select className="config-input" style={{ maxWidth: 160 }} value={historyFilter.suite} onChange={(e) => setHistoryFilter({ ...historyFilter, suite: e.target.value })}>
+                <select className="config-input input-focus-glow" style={{ maxWidth: 160 }} value={historyFilter.suite} onChange={(e) => setHistoryFilter({ ...historyFilter, suite: e.target.value })}>
                   <option value="">All suites</option>
                   {[...new Set(history.map((r) => r.suite_id))].map((sid) => <option key={sid} value={sid}>{history.find((r) => r.suite_id === sid)?.suite_name ?? sid}</option>)}
                 </select>
-                <select className="config-input" style={{ maxWidth: 160 }} value={historyFilter.model} onChange={(e) => setHistoryFilter({ ...historyFilter, model: e.target.value })}>
+                <select className="config-input input-focus-glow" style={{ maxWidth: 160 }} value={historyFilter.model} onChange={(e) => setHistoryFilter({ ...historyFilter, model: e.target.value })}>
                   <option value="">All models</option>
                   {[...new Set(history.map((r) => r.config.model))].map((m) => <option key={m} value={m}>{m.split('-').slice(0, 2).join('-')}</option>)}
                 </select>
@@ -548,7 +653,7 @@ export default function Bench() {
               </div>
             </div>
 
-            {historyLoading ? <div className="bench-skeleton" style={{ height: 200 }} />
+            {historyLoading ? <div className="bench-skeleton skeleton" style={{ height: 200 }} />
               : filteredHistory.length === 0 ? <div className="bench-empty--no-runs"><p className="bench-empty-text">No runs recorded yet.</p></div>
               : (
                 <Pane title={`RUN HISTORY (${filteredHistory.length})`}>
@@ -566,7 +671,12 @@ export default function Bench() {
                             <td className="mono">{run.summary ? `${(run.summary.pass_rate * 100).toFixed(0)}%` : '-'}</td>
                             <td className="mono">{run.summary ? `$${run.summary.total_cost_usd.toFixed(3)}` : '-'}</td>
                             <td className="mono">{run.summary ? `${(run.summary.total_duration_ms / 1000).toFixed(1)}s` : '-'}</td>
-                            <td><span className={`status-badge status-${run.status === 'completed' ? 'pass' : run.status}`}>{run.status.toUpperCase()}</span></td>
+                            <td>
+                              <span className={`status-badge status-${run.status === 'completed' ? 'pass' : run.status}`}>
+                                {run.status === 'completed' ? <CheckmarkIcon size={12} color="var(--success)" /> : run.status === 'failed' ? <CrossIcon size={12} color="var(--rose-bright)" /> : run.status === 'running' ? <SpinnerIcon size={12} /> : null}
+                                {' '}{run.status.toUpperCase()}
+                              </span>
+                            </td>
                             <td style={{ display: 'flex', gap: 4 }}>
                               <Link to={`/bench/run/${run.id}`} className="btn btn-sm" style={{ textDecoration: 'none', fontSize: 13, padding: '2px 6px' }}>View</Link>
                               <button className="btn btn-sm" onClick={() => exportRun(run.id)} style={{ fontSize: 13, padding: '2px 6px' }}>Export</button>
@@ -589,14 +699,14 @@ export default function Bench() {
                 {compareIds.map((id) => {
                   const run = history.find((r) => r.id === id);
                   return (
-                    <div key={id} className="bench-chip">
+                    <div key={id} className="bench-chip chip-interactive">
                       <span>{run ? `${run.id.slice(0, 8)} · ${run.suite_name}` : id.slice(0, 8)}</span>
                       <button className="bench-chip-x" onClick={() => setCompareIds(compareIds.filter((x) => x !== id))}>&times;</button>
                     </div>
                   );
                 })}
                 {compareIds.length < 6 && (
-                  <select className="config-input" style={{ maxWidth: 200 }} value="" onChange={(e) => {
+                  <select className="config-input input-focus-glow" style={{ maxWidth: 200 }} value="" onChange={(e) => {
                     if (e.target.value && !compareIds.includes(e.target.value)) setCompareIds([...compareIds, e.target.value]);
                   }}>
                     <option value="">Add run...</option>

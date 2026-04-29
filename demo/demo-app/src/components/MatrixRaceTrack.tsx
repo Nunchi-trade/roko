@@ -30,6 +30,7 @@ export default function MatrixRaceTrack({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
   const displayRef = useRef<Map<string, number>>(new Map());
+  const timeRef = useRef(performance.now());
   const prefersReducedMotion = useMemo(
     () => window.matchMedia('(prefers-reduced-motion: reduce)').matches,
     [],
@@ -99,6 +100,20 @@ export default function MatrixRaceTrack({
       ctx.fillText(`${pct}%`, x, pad.top - 6);
     }
 
+    // Find the leader lane for glow effect
+    const now = performance.now();
+    timeRef.current = now;
+    const shimmerPhase = (now % 3000) / 3000; // 0..1 cycling every 3s
+    let leaderIndex = -1;
+    let leaderFrac = 0;
+    lanes.forEach((lane, index) => {
+      const frac = lane.total > 0 ? lane.completed / lane.total : 0;
+      if (frac > leaderFrac) { leaderFrac = frac; leaderIndex = index; }
+    });
+    // Only highlight leader when there are at least 2 lanes with progress
+    const activeLanes = lanes.filter(l => l.completed > 0).length;
+    const showLeader = activeLanes >= 2 && leaderFrac > 0;
+
     lanes.forEach((lane, index) => {
       const y = pad.top + index * (rowH + rowGap);
       const centerY = y + rowH / 2;
@@ -111,12 +126,28 @@ export default function MatrixRaceTrack({
 
       const color = LANE_COLORS[lane.colorIndex % LANE_COLORS.length];
       const barW = Math.max(next * plotW, next > 0 ? 2 : 0);
+      const isLeader = showLeader && index === leaderIndex;
+
+      // Leader aura glow (pulsing)
+      if (isLeader && barW > 2) {
+        const pulse = 0.5 + 0.5 * Math.sin(now / 600); // pulsing 0..1
+        ctx.save();
+        ctx.shadowColor = hexToRgba(getCssVar('--bone-bright'), 0.25 + pulse * 0.2);
+        ctx.shadowBlur = 12 + pulse * 8;
+        ctx.fillStyle = 'rgba(0,0,0,0)';
+        ctx.beginPath();
+        ctx.roundRect(pad.left, y + 1, barW, barH + 2, 4);
+        ctx.fill();
+        ctx.restore();
+        // Keep animation running for pulse
+        needsNextFrame = true;
+      }
 
       // Label
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
-      ctx.font = '10px "JetBrains Mono", monospace';
-      ctx.fillStyle = index === 0 ? getCssVar('--text-soft') : getCssVar('--text-dim');
+      ctx.font = isLeader ? 'bold 10px "JetBrains Mono", monospace' : '10px "JetBrains Mono", monospace';
+      ctx.fillStyle = isLeader ? getCssVar('--bone-bright') : index === 0 ? getCssVar('--text-soft') : getCssVar('--text-dim');
 
       let label = lane.label;
       while (label.length > 4 && ctx.measureText(label).width > pad.left - 16) {
@@ -141,17 +172,65 @@ export default function MatrixRaceTrack({
         ctx.roundRect(pad.left, y + 2, barW, barH, 4);
         ctx.fill();
 
-        // Glow tip
+        // Shimmer sweep (a moving highlight across the bar)
+        if (!prefersReducedMotion && barW > 10) {
+          const shimmerX = pad.left + shimmerPhase * (barW + 40) - 20;
+          const shimmerGrad = ctx.createLinearGradient(shimmerX - 20, 0, shimmerX + 20, 0);
+          shimmerGrad.addColorStop(0, 'rgba(255,255,255,0)');
+          shimmerGrad.addColorStop(0.5, 'rgba(255,255,255,0.12)');
+          shimmerGrad.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.save();
+          ctx.beginPath();
+          ctx.roundRect(pad.left, y + 2, barW, barH, 4);
+          ctx.clip();
+          ctx.fillStyle = shimmerGrad;
+          ctx.fillRect(shimmerX - 20, y + 2, 40, barH);
+          ctx.restore();
+          needsNextFrame = true;
+        }
+
+        // Glowing leading edge
+        const glowRadius = isLeader ? Math.max(barH * 1.2, 14) : Math.max(barH * 0.8, 10);
         const glow = ctx.createRadialGradient(
           pad.left + barW, centerY, 0,
-          pad.left + barW, centerY, Math.max(barH * 0.8, 10),
+          pad.left + barW, centerY, glowRadius,
         );
-        glow.addColorStop(0, hexToRgba(color, 0.25));
+        glow.addColorStop(0, hexToRgba(color, isLeader ? 0.45 : 0.25));
         glow.addColorStop(1, hexToRgba(color, 0));
         ctx.fillStyle = glow;
         ctx.beginPath();
         ctx.arc(pad.left + barW, centerY, Math.max(barH * 0.6, 6), 0, Math.PI * 2);
         ctx.fill();
+
+        // Particle trail effect (small dots behind the leading edge)
+        if (!prefersReducedMotion && lane.status === 'running' && barW > 20) {
+          for (let p = 0; p < 3; p++) {
+            const px = pad.left + barW - 4 - p * 6 - Math.random() * 4;
+            const py = centerY + (Math.random() - 0.5) * barH * 0.6;
+            const pAlpha = 0.3 - p * 0.1;
+            ctx.beginPath();
+            ctx.arc(px, py, 1.5 - p * 0.3, 0, Math.PI * 2);
+            ctx.fillStyle = hexToRgba(color, pAlpha);
+            ctx.fill();
+          }
+          needsNextFrame = true;
+        }
+      }
+
+      // Completion checkmark
+      if (lane.completed === lane.total && lane.total > 0) {
+        const checkX = pad.left + barW + 6;
+        ctx.save();
+        ctx.strokeStyle = getCssVar('--success');
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(checkX, centerY);
+        ctx.lineTo(checkX + 3, centerY + 3);
+        ctx.lineTo(checkX + 8, centerY - 4);
+        ctx.stroke();
+        ctx.restore();
       }
 
       // Values on right
@@ -160,7 +239,7 @@ export default function MatrixRaceTrack({
       ctx.textBaseline = 'middle';
 
       // Progress
-      ctx.font = '10px "JetBrains Mono", monospace';
+      ctx.font = isLeader ? 'bold 10px "JetBrains Mono", monospace' : '10px "JetBrains Mono", monospace';
       ctx.fillStyle = color;
       ctx.fillText(`${lane.completed}/${lane.total}`, valueX, centerY - 6);
 

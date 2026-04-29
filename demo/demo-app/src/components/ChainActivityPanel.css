@@ -1,29 +1,203 @@
+/* ═══════════════════════════════════════════════════════════
+   ChainActivityPanel — animated blockchain visualization
+   ═══════════════════════════════════════════════════════════ */
+
 .chain-activity {
   overflow-y: auto;
   max-height: 420px;
   padding: 0;
+  position: relative;
+}
+
+/* ── Chain integrity pulse: light travels along the chain ── */
+.ca-integrity-pulse {
+  position: absolute;
+  left: 22px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+  overflow: hidden;
+}
+
+.ca-integrity-pulse::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  width: 2px;
+  height: 40px;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--rose-glow),
+    var(--bone-bright),
+    transparent
+  );
+  border-radius: 1px;
+  box-shadow: 0 0 8px var(--rose-glow), 0 0 16px rgba(232, 181, 206, 0.3);
+  animation: caIntegrityPulse 3s ease-in-out infinite;
+}
+
+@keyframes caIntegrityPulse {
+  0% { top: -40px; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
 }
 
 /* ── Block group ── */
 .ca-block {
+  display: flex;
+  position: relative;
   border-bottom: 1px solid var(--border-soft);
-  animation: caBlockIn 0.3s ease-out both;
 }
 
 .ca-block:last-child {
   border-bottom: none;
 }
 
-@keyframes caBlockIn {
-  from { opacity: 0; transform: translateY(-6px); }
-  to   { opacity: 1; transform: translateY(0); }
+/* ── Chain connector (vertical line + node dot) ── */
+.ca-chain-connector {
+  position: relative;
+  width: 44px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14px;
 }
 
+.ca-chain-line {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  transform: translateX(-50%);
+}
+
+.ca-block:first-child .ca-chain-line {
+  top: 14px;
+}
+
+.ca-block:last-child .ca-chain-line {
+  bottom: 50%;
+}
+
+.ca-chain-node {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rose-dim);
+  border: 1px solid var(--rose);
+  z-index: 2;
+  transition: background var(--duration-smooth) var(--ease), box-shadow var(--duration-smooth) var(--ease), transform var(--duration-smooth) var(--ease);
+}
+
+.ca-block.expanded .ca-chain-node {
+  background: var(--rose-bright);
+  box-shadow: 0 0 8px var(--rose-bright);
+  transform: scale(1.2);
+}
+
+.ca-block-new .ca-chain-node {
+  animation: caNodeAppear 0.6s var(--ease) both;
+}
+
+@keyframes caNodeAppear {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.6);
+    box-shadow: 0 0 16px var(--rose-glow);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Pulse that radiates from the node */
+.ca-chain-pulse {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transform: translate(-50%, 0);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.ca-block.expanded .ca-chain-pulse::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1px solid var(--rose-glow);
+  opacity: 0;
+  animation: caNodePulseRing 2.5s ease-out infinite;
+}
+
+@keyframes caNodePulseRing {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+/* ── Block content area ── */
+.ca-block-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── New block entrance: slide in from right ── */
+.ca-block-new {
+  animation: caBlockSlideIn 0.5s var(--ease) both;
+}
+
+@keyframes caBlockSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Connector line draws in for new blocks */
+.ca-block-new .ca-chain-line {
+  animation: caLineDrawIn 0.4s ease-out 0.2s both;
+}
+
+@keyframes caLineDrawIn {
+  from {
+    clip-path: inset(100% 0 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* ── Block head ── */
 .ca-block-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 16px;
+  padding: 8px 16px 8px 0;
   cursor: pointer;
   user-select: none;
   transition: background 0.2s;
@@ -33,11 +207,36 @@
   background: rgba(255, 255, 255, 0.02);
 }
 
+.ca-block-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ca-block-num {
   font-family: var(--mono);
   font-size: 1.05rem;
   color: var(--text-strong);
   letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* New block indicator dot */
+.ca-block-new-indicator {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--status-active);
+  box-shadow: 0 0 6px var(--status-active);
+  animation: caNewDotPulse 1s ease-in-out 3;
+}
+
+@keyframes caNewDotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.3); }
 }
 
 .ca-block-meta {
@@ -51,6 +250,7 @@
   font-size: 0.82rem;
   color: var(--text-dim);
   letter-spacing: 0.04em;
+  transition: color var(--duration-snap);
 }
 
 .ca-block-count {
@@ -64,12 +264,116 @@
 .ca-block-chevron {
   font-size: 0.92rem;
   color: var(--text-dim);
-  transition: transform 0.2s var(--ease);
+  transition: transform 0.2s var(--ease), color 0.2s;
   margin-left: 4px;
 }
 
 .ca-block.expanded .ca-block-chevron {
   transform: rotate(90deg);
+  color: var(--rose);
+}
+
+/* ── Status badges ── */
+.ca-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid;
+}
+
+.ca-status-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+}
+
+/* Confirmed: green pulse */
+.ca-status-confirmed {
+  color: var(--status-success);
+  border-color: rgba(74, 222, 128, 0.2);
+  background: rgba(74, 222, 128, 0.06);
+}
+
+.ca-status-confirmed .ca-status-dot {
+  background: var(--status-success);
+  box-shadow: 0 0 4px var(--status-success);
+  animation: caStatusGreenPulse 2s ease-in-out infinite;
+}
+
+@keyframes caStatusGreenPulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px var(--status-success); }
+  50% { opacity: 0.6; box-shadow: 0 0 8px var(--status-success); }
+}
+
+/* Pending: amber spin */
+.ca-status-pending {
+  color: var(--status-warning);
+  border-color: rgba(251, 191, 36, 0.2);
+  background: rgba(251, 191, 36, 0.06);
+}
+
+.ca-status-pending .ca-status-dot {
+  background: var(--status-warning);
+  box-shadow: 0 0 4px var(--status-warning);
+  animation: caStatusAmberSpin 1.2s linear infinite;
+}
+
+@keyframes caStatusAmberSpin {
+  0% { box-shadow: 0 0 4px var(--status-warning); }
+  25% { box-shadow: 2px 0 6px var(--status-warning); }
+  50% { box-shadow: 0 0 4px var(--status-warning); }
+  75% { box-shadow: -2px 0 6px var(--status-warning); }
+  100% { box-shadow: 0 0 4px var(--status-warning); }
+}
+
+/* ── Hover expand: block detail panel ── */
+.ca-block-hover-detail {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  padding: 0 16px 0 0;
+  background: rgba(255, 255, 255, 0.015);
+  border-left: 2px solid transparent;
+  transition:
+    max-height 0.35s var(--ease),
+    opacity 0.25s var(--ease),
+    padding 0.35s var(--ease),
+    border-color 0.25s;
+}
+
+.ca-block-hovered .ca-block-hover-detail {
+  max-height: 80px;
+  opacity: 1;
+  padding: 6px 16px 6px 0;
+  border-left-color: var(--rose-dim);
+}
+
+.ca-hover-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1px 0;
+}
+
+.ca-hover-label {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+
+.ca-hover-value {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--text-soft);
 }
 
 /* ── Transaction list ── */
@@ -87,7 +391,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 16px 4px 28px;
+  padding: 4px 16px 4px 0;
   border-left: 2px solid transparent;
   animation: caTxIn 0.2s ease-out both;
 }
@@ -120,6 +424,7 @@
 .ca-tx[data-type="defi"]    .ca-tx-dot { background: var(--rose); box-shadow: 0 0 4px var(--rose); }
 .ca-tx[data-type="other"]   .ca-tx-dot { background: var(--bone-dim); }
 
+/* ── Hash typewriter reveal ── */
 .ca-tx-hash {
   font-family: var(--mono);
   font-size: 0.82rem;
@@ -127,6 +432,43 @@
   opacity: 0.5;
   flex-shrink: 0;
   width: 56px;
+}
+
+.ca-hash-typewriter {
+  display: inline-flex;
+  opacity: 1;
+}
+
+.ca-hash-char {
+  color: var(--text-ghost);
+  transition: color 0.15s;
+}
+
+.ca-hash-char.revealed {
+  color: var(--text-primary);
+  opacity: 0.5;
+}
+
+/* Matrix-rain flash: character flashes bright before settling */
+.ca-hash-char.flash {
+  color: var(--rose-glow);
+  text-shadow: 0 0 6px var(--rose-glow);
+  animation: caHashFlash 0.3s ease-out;
+}
+
+@keyframes caHashFlash {
+  0% {
+    color: var(--bone-bright);
+    text-shadow: 0 0 10px var(--bone-bright);
+  }
+  40% {
+    color: var(--rose-glow);
+    text-shadow: 0 0 8px var(--rose-glow);
+  }
+  100% {
+    color: var(--text-primary);
+    text-shadow: none;
+  }
 }
 
 .ca-tx-desc {
@@ -148,4 +490,38 @@
   color: var(--text-dim);
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.ca-empty-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+  animation: caEmptyPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes caEmptyPulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  .ca-integrity-pulse::after,
+  .ca-chain-pulse::after,
+  .ca-block-new,
+  .ca-block-new .ca-chain-line,
+  .ca-block-new-indicator,
+  .ca-status-confirmed .ca-status-dot,
+  .ca-status-pending .ca-status-dot,
+  .ca-hash-char.flash,
+  .ca-empty-dot,
+  .ca-chain-node {
+    animation: none !important;
+  }
 }

@@ -1,11 +1,18 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
+import {
+  AnimatedRow,
+  AnimatedHeaderCell,
+  TableEmptyState,
+} from '../../components/AnimatedTable';
 import { useLiveApi } from '../../hooks/useLiveApi';
 import { getCssVar } from '../../lib/color';
 import { domainColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
+import '../../styles/table.css';
+import './KnowledgeEntries.css';
 import './dashboard.css';
 
 interface KnowledgeEntry {
@@ -216,37 +223,23 @@ function ConfidenceHistogram({ entries, height = 140 }: { entries: KnowledgeEntr
   );
 }
 
-/* ── Table styles ────────────────────────────────────────── */
-
-const thStyle: CSSProperties = {
-  padding: '6px 10px',
-  color: 'var(--text-dim)',
-  borderBottom: '1px solid var(--glass-2-border)',
-  background: 'var(--raised)',
-  fontWeight: 600,
-  textAlign: 'left',
-  fontFamily: 'var(--mono, var(--font-mono))',
-  fontSize: '0.6rem',
-  letterSpacing: '.08em',
-  textTransform: 'uppercase',
-};
-
-const tdStyle: CSSProperties = {
-  padding: '5px 10px',
-  color: 'var(--text)',
-  borderBottom: '1px solid var(--glass-border)',
-  verticalAlign: 'middle',
-  fontFamily: 'var(--mono, var(--font-mono))',
-  fontSize: '0.72rem',
-};
-
 /* ── Component ───────────────────────────────────────────── */
+
+type KESortKey = 'label' | 'domain' | 'citations' | 'confidence';
 
 export default function KnowledgeEntries() {
   const { get } = useLiveApi();
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastLoaded, setLastLoaded] = useState<string>('—');
+  const [sortKey, setSortKey] = useState<KESortKey>('label');
+  const [sortAsc, setSortAsc] = useState(true);
+
+  function handleSort(key: string) {
+    const k = key as KESortKey;
+    if (sortKey === k) setSortAsc(!sortAsc);
+    else { setSortKey(k); setSortAsc(true); }
+  }
 
   const fetchEntries = useCallback(async () => {
     try {
@@ -274,6 +267,19 @@ export default function KnowledgeEntries() {
     debouncedRefetch,
   );
 
+  const sortedEntries = useMemo(() => {
+    return [...entries].sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case 'label': cmp = (a.label ?? a.id).localeCompare(b.label ?? b.id); break;
+        case 'domain': cmp = (a.domain ?? '').localeCompare(b.domain ?? ''); break;
+        case 'citations': cmp = (a.citations ?? 0) - (b.citations ?? 0); break;
+        case 'confidence': cmp = (a.confidence ?? 0) - (b.confidence ?? 0); break;
+      }
+      return sortAsc ? cmp : -cmp;
+    });
+  }, [entries, sortKey, sortAsc]);
+
   const stats = useMemo(() => {
     const domains = new Set(entries.map((entry) => entry.domain).filter(Boolean));
     const citationTotal = entries.reduce((sum, entry) => sum + (entry.citations ?? 0), 0);
@@ -295,99 +301,114 @@ export default function KnowledgeEntries() {
   return (
     <div className="dash-page--full">
       {/* TOP MOSAIC */}
-      <Mosaic columns={5}>
-        <MosaicCell label="TOTAL ENTRIES" value={entries.length} color="rose" mono sub={loading ? 'loading' : `updated ${lastLoaded}`} />
-        <MosaicCell label="DOMAINS" value={stats.domains} color="bone" mono />
-        <MosaicCell label="TOTAL CITATIONS" value={stats.citationTotal} color="dream" mono />
-        <MosaicCell label="AVG CONFIDENCE" value={percent(stats.avgConfidence)} color="success" mono />
-        <MosaicCell label="HIGH CONFIDENCE" value={stats.highConfidence} color="warning" mono sub=">= 80%" />
-      </Mosaic>
+      <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
+        <Mosaic columns={5}>
+          <MosaicCell label="TOTAL ENTRIES" value={entries.length} color="rose" mono sub={loading ? 'loading' : `updated ${lastLoaded}`} />
+          <MosaicCell label="DOMAINS" value={stats.domains} color="bone" mono />
+          <MosaicCell label="TOTAL CITATIONS" value={stats.citationTotal} color="dream" mono />
+          <MosaicCell label="AVG CONFIDENCE" value={percent(stats.avgConfidence)} color="success" mono />
+          <MosaicCell label="HIGH CONFIDENCE" value={stats.highConfidence} color="warning" mono sub=">= 80%" />
+        </Mosaic>
+      </div>
 
       {/* CHARTS ROW */}
       <div className="dash-grid-2">
-        <Pane
-          title="DOMAIN DISTRIBUTION"
-          badge={<span className="dash-badge">{stats.domains} domains</span>}
-        >
-          <DomainChart entries={entries} height={110} />
-        </Pane>
+        <div className="dash-stagger" style={{ '--stagger-i': 1 } as React.CSSProperties}>
+          <Pane
+            title="DOMAIN DISTRIBUTION"
+            badge={<span className="dash-badge">{stats.domains} domains</span>}
+          >
+            <div className="dash-chart-enter">
+              <DomainChart entries={entries} height={110} />
+            </div>
+          </Pane>
+        </div>
 
-        <Pane
-          title="CONFIDENCE DISTRIBUTION"
-          badge={<span className="dash-badge">histogram</span>}
-        >
-          <ConfidenceHistogram entries={entries} height={110} />
-        </Pane>
+        <div className="dash-stagger" style={{ '--stagger-i': 2 } as React.CSSProperties}>
+          <Pane
+            title="CONFIDENCE DISTRIBUTION"
+            badge={<span className="dash-badge">histogram</span>}
+          >
+            <div className="dash-chart-enter">
+              <ConfidenceHistogram entries={entries} height={110} />
+            </div>
+          </Pane>
+        </div>
       </div>
 
       {/* ENTRIES TABLE */}
-      <Pane
-        title="ALL ENTRIES"
-        badge={<span className="dash-badge">{entries.length} rows</span>}
-        flat
-      >
-        <div className="dash-table-scroll--280">
-          {loading ? (
-            <div className="dash-placeholder--lg">Loading knowledge entries...</div>
-          ) : entries.length === 0 ? (
-            <div className="dash-placeholder--lg">No knowledge entries found</div>
-          ) : (
-            <table className="dash-table--plain">
-              <thead>
-                <tr>
-                  <th style={thStyle}>Label</th>
-                  <th style={thStyle}>Domain</th>
-                  <th style={thStyle}>Citations</th>
-                  <th style={thStyle}>Confidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                {entries.map((entry) => (
-                  <tr
-                    key={entry.id}
-                    tabIndex={0}
-                    role="row"
-                    className="dash-table-row"
-                    onKeyDown={(e) => {
-                      if (e.key === 'ArrowDown') { e.preventDefault(); (e.currentTarget.nextElementSibling as HTMLElement | null)?.focus(); }
-                      if (e.key === 'ArrowUp') { e.preventDefault(); (e.currentTarget.previousElementSibling as HTMLElement | null)?.focus(); }
-                    }}
-                  >
-                    <td style={tdStyle}>{entry.label ?? entry.id}</td>
-                    <td style={tdStyle}>
-                      <span className="dash-inline">
-                        <span
-                          className="dash-dot--5"
-                          style={{
-                            background: domainColor(entry.domain),
-                            boxShadow: `0 0 6px ${domainColor(entry.domain)}80`,
-                          }}
-                        />
-                        <span style={{ color: domainColor(entry.domain) }}>{entry.domain ?? '—'}</span>
-                      </span>
-                    </td>
-                    <td style={tdStyle}>{entry.citations ?? 0}</td>
-                    <td style={tdStyle}>
-                      <span className="dash-inline--8">
-                        <span className="dash-minibar">
-                          <span
-                            className="dash-minibar__fill"
-                            style={{
-                              width: `${((entry.confidence ?? 0) * 100)}%`,
-                              background: (entry.confidence ?? 0) >= 0.8 ? 'var(--success)' : (entry.confidence ?? 0) >= 0.5 ? 'var(--warning)' : 'var(--rose-bright)',
-                            }}
-                          />
-                        </span>
-                        {percent(entry.confidence)}
-                      </span>
-                    </td>
+      <div className="dash-stagger" style={{ '--stagger-i': 3 } as React.CSSProperties}>
+        <Pane
+          title="ALL ENTRIES"
+          badge={<span className="dash-badge">{entries.length} rows</span>}
+          flat
+        >
+          <div className="dash-table-scroll--280 dash-crossfade-enter">
+            {loading ? (
+              <div className="dash-placeholder--lg">Loading knowledge entries...</div>
+            ) : (
+              <table className="dash-table--plain">
+                <thead>
+                  <tr>
+                    <AnimatedHeaderCell sortKey="label" currentSort={sortKey} ascending={sortAsc} onSort={handleSort} className="tbl-header">Label</AnimatedHeaderCell>
+                    <AnimatedHeaderCell sortKey="domain" currentSort={sortKey} ascending={sortAsc} onSort={handleSort} className="tbl-header">Domain</AnimatedHeaderCell>
+                    <AnimatedHeaderCell sortKey="citations" currentSort={sortKey} ascending={sortAsc} onSort={handleSort} className="tbl-header">Citations</AnimatedHeaderCell>
+                    <AnimatedHeaderCell sortKey="confidence" currentSort={sortKey} ascending={sortAsc} onSort={handleSort} className="tbl-header">Confidence</AnimatedHeaderCell>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </Pane>
+                </thead>
+                <tbody>
+                  {sortedEntries.length === 0 ? (
+                    <TableEmptyState colSpan={4} message="No knowledge entries found" />
+                  ) : (
+                    sortedEntries.map((entry, rowIdx) => (
+                      <AnimatedRow
+                        key={entry.id}
+                        index={rowIdx}
+                        tabIndex={0}
+                        role="row"
+                        onKeyDown={(e) => {
+                          if (e.key === 'ArrowDown') { e.preventDefault(); (e.currentTarget.nextElementSibling as HTMLElement | null)?.focus(); }
+                          if (e.key === 'ArrowUp') { e.preventDefault(); (e.currentTarget.previousElementSibling as HTMLElement | null)?.focus(); }
+                        }}
+                      >
+                        <td className="tbl-cell">{entry.label ?? entry.id}</td>
+                        <td className="tbl-cell">
+                          <span className="dash-inline">
+                            <span
+                              className="dash-dot--5"
+                              style={{
+                                background: domainColor(entry.domain),
+                                boxShadow: `0 0 6px ${domainColor(entry.domain)}80`,
+                              }}
+                            />
+                            <span style={{ color: domainColor(entry.domain) }}>{entry.domain ?? '---'}</span>
+                          </span>
+                        </td>
+                        <td className="tbl-cell">{entry.citations ?? 0}</td>
+                        <td className="tbl-cell">
+                          <span className="dash-inline--8">
+                            <span className="dash-minibar">
+                              <span
+                                className="dash-minibar__fill dash-bar-animate"
+                                style={{
+                                  width: `${((entry.confidence ?? 0) * 100)}%`,
+                                  background: (entry.confidence ?? 0) >= 0.8 ? 'var(--success)' : (entry.confidence ?? 0) >= 0.5 ? 'var(--warning)' : 'var(--rose-bright)',
+                                  animationDelay: `${rowIdx * 30 + 200}ms`,
+                                }}
+                              />
+                            </span>
+                            {percent(entry.confidence)}
+                          </span>
+                        </td>
+                      </AnimatedRow>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </Pane>
+      </div>
     </div>
   );
 }

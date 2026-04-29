@@ -46,6 +46,10 @@ export default function ChainIntelPanel({
     return (
       <div className="chain-intel-panel">
         <div className="chain-intel-offline">
+          <div className="chain-intel-offline-icon">
+            <span className="chain-intel-offline-ring" />
+            <span className="chain-intel-offline-ring chain-intel-offline-ring-2" />
+          </div>
           <div className="chain-intel-offline-title">Mirage not connected</div>
           <div className="chain-intel-offline-hint">
             Start mirage-rs with chain features to enable this demo:
@@ -64,7 +68,7 @@ export default function ChainIntelPanel({
   }
 
   return (
-    <div className="chain-intel-panel">
+    <div className="chain-intel-panel chain-intel-connected">
       {/* Top: Knowledge flow visualization */}
       <div className="chain-intel-section chain-intel-knowledge">
         <KnowledgeFlowPanel
@@ -75,6 +79,12 @@ export default function ChainIntelPanel({
         />
       </div>
 
+      {/* Section connector */}
+      <div className="chain-intel-connector">
+        <div className="chain-intel-connector-line" />
+        <div className="chain-intel-connector-energy" />
+      </div>
+
       {/* Middle: Chain activity + Live positions side-by-side */}
       <div className="chain-intel-section chain-intel-middle">
         <div className="chain-intel-col">
@@ -83,6 +93,12 @@ export default function ChainIntelPanel({
         <div className="chain-intel-col">
           <LivePositionsPanel agents={positions} />
         </div>
+      </div>
+
+      {/* Section connector */}
+      <div className="chain-intel-connector">
+        <div className="chain-intel-connector-line" />
+        <div className="chain-intel-connector-energy" />
       </div>
 
       {/* Bottom: Efficiency metrics */}

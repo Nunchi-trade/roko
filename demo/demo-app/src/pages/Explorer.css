@@ -27,6 +27,84 @@
   }
 }
 
+/* fadeSlideUp → shared animations.css (fadeInUp) */
+
+/* ── 3. Heatmap cell diagonal wave reveal ── */
+@keyframes heatCellReveal {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ── 5. Event stream slide-in with glow ── */
+@keyframes eventSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes eventGlow {
+  from {
+    box-shadow: inset 0 0 12px color-mix(in srgb, var(--rose) 25%, transparent);
+  }
+  to {
+    box-shadow: inset 0 0 0 transparent;
+  }
+}
+
+/* ── 6. Status pill breathing glow ── */
+@keyframes statusBreath {
+  0%, 100% {
+    box-shadow: 0 0 4px color-mix(in srgb, var(--success) 20%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 10px color-mix(in srgb, var(--success) 45%, transparent),
+                0 0 20px color-mix(in srgb, var(--success) 15%, transparent);
+  }
+}
+
+/* ── 7. Hero canvas mount transition ── */
+@keyframes heroReveal {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ── 9. Data refresh shimmer wave ── */
+@keyframes refreshShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* ── 10. Active section pulsing border ── */
+@keyframes borderPulse {
+  0%, 100% {
+    border-color: var(--glass-border);
+  }
+  50% {
+    border-color: var(--rose-dim);
+  }
+}
+
 @keyframes spin-once {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
@@ -83,7 +161,7 @@
   align-items: center;
   padding: var(--sp-2) var(--sp-5);
   gap: var(--sp-3);
-  background: rgba(8, 8, 12, 0.82);
+  background: color-mix(in srgb, var(--bg-void) 82%, transparent);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--glass-border);
@@ -111,7 +189,7 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--success);
-  background: rgba(122, 138, 120, 0.12);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
   padding: 3px 10px;
   border-radius: var(--radius-sm);
 }
@@ -129,13 +207,13 @@
   align-items: center;
   gap: 8px;
   padding: 4px 14px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--glass-bg);
   border-radius: 4px;
   transition: background 200ms var(--ease);
 }
 
 .expl-pill:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--glass-bg-hover);
 }
 
 .expl-pill-label {
@@ -155,7 +233,7 @@
 
 .expl-refresh {
   flex-shrink: 0;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   color: var(--text-dim);
   width: 40px;
@@ -165,13 +243,13 @@
   justify-content: center;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all var(--duration-snap) var(--ease);
+  transition: color var(--duration-snap) var(--ease), border-color var(--duration-snap) var(--ease), background var(--duration-snap) var(--ease);
 }
 
 .expl-refresh:hover {
   color: var(--rose-bright);
   border-color: var(--rose-dim);
-  background: rgba(184, 122, 148, 0.08);
+  background: color-mix(in srgb, var(--rose) 8%, transparent);
 }
 
 .expl-refresh:active svg {
@@ -194,10 +272,19 @@
   width: 100%;
   height: 360px;
   cursor: crosshair;
+  /* 7. Fade-in with scale(0.98) -> scale(1) on mount */
+  animation: heroReveal 700ms var(--ease) both;
 }
 
 /* Status pill value conditional colors */
-.expl-pill-value--online { color: var(--success); }
+/* 6. Online status pills have subtle breathing glow */
+.expl-pill-value--online {
+  color: var(--success);
+  animation: statusBreath 3s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+  padding: 0 2px;
+}
+
 .expl-pill-value--error  { color: var(--rose-bright); }
 
 /* ═══════════════════════════════════════════════════════════
@@ -219,12 +306,12 @@
   padding: 10px 12px 6px;
   background: var(--bg-void);
   gap: 2px;
-  transition: background 300ms var(--ease);
+  transition: background var(--duration-smooth) var(--ease);
   position: relative;
 }
 
 .expl-stat-pill:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: color-mix(in srgb, white 2%, var(--bg-void));
 }
 
 .expl-stat-label {
@@ -247,11 +334,12 @@
   line-height: 1.1;
   text-shadow: 0 0 20px currentColor;
   letter-spacing: -0.01em;
-  transition: text-shadow 300ms var(--ease);
+  transition: text-shadow var(--duration-smooth) var(--ease);
 }
 
 .expl-stat-pill:hover .expl-stat-value {
-  text-shadow: 0 0 28px currentColor, 0 0 48px rgba(220, 165, 189, 0.2);
+  text-shadow: 0 0 28px currentColor,
+               0 0 48px color-mix(in srgb, var(--rose-glow) 20%, transparent);
 }
 
 /* Stat value color variants (extracted from inline styles) */
@@ -301,8 +389,11 @@
 .expl-heat-cell {
   position: relative;
   border-radius: var(--radius-sm);
-  transition: background 300ms var(--ease), transform 150ms var(--ease);
+  transition: background var(--duration-smooth) var(--ease),
+              transform var(--duration-snap) var(--ease);
   cursor: default;
+  /* 3. Diagonal wave reveal — delay set via style attr */
+  animation: heatCellReveal 350ms var(--ease) backwards;
 }
 
 .expl-heat-cell:hover {
@@ -343,17 +434,20 @@
   border-radius: var(--radius-lg);
   padding: 10px 12px 6px;
   cursor: pointer;
-  transition: border-color 250ms var(--ease), background 250ms var(--ease), box-shadow 250ms var(--ease), transform 250ms var(--ease);
-  animation: cardStagger 400ms var(--ease) backwards;
+  transition: border-color 200ms var(--ease), background 200ms var(--ease), box-shadow 200ms var(--ease), transform 200ms var(--ease);
+  /* 1. fadeInUp entrance, 60ms stagger set via style attr */
+  animation: fadeInUp 450ms var(--ease) backwards;
   position: relative;
   overflow: hidden;
 }
 
+/* 8. Hover lift: 2px up + enhanced shadow */
 .expl-card:hover {
-  transform: translateY(-1px);
+  transform: translateY(-2px);
   border-color: var(--rose-dim);
-  background: rgba(170, 112, 136, 0.05);
-  box-shadow: 0 4px 24px rgba(184, 122, 148, 0.06);
+  background: color-mix(in srgb, var(--rose-dim) 5%, transparent);
+  box-shadow: 0 6px 28px color-mix(in srgb, var(--rose) 10%, transparent),
+              0 2px 8px var(--shadow-sm);
 }
 
 .expl-card:focus-visible {
@@ -363,7 +457,7 @@
 
 .expl-card--expanded {
   border-color: var(--rose-dim);
-  background: rgba(170, 112, 136, 0.04);
+  background: color-mix(in srgb, var(--rose-dim) 4%, transparent);
 }
 
 /* Card top row */
@@ -395,7 +489,7 @@
   font-family: var(--mono);
   font-size: var(--text-md);
   color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--glass-bg);
   padding: 2px 6px;
   border-radius: var(--radius-sm);
   flex-shrink: 0;
@@ -465,12 +559,12 @@
 
 .expl-gate-dot.pass {
   background: var(--success);
-  box-shadow: 0 0 4px rgba(138, 156, 134, 0.5);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--success) 50%, transparent);
 }
 
 .expl-gate-dot.fail {
   background: var(--rose-bright);
-  box-shadow: 0 0 4px rgba(216, 154, 178, 0.5);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--rose-bright) 50%, transparent);
 }
 
 /* Meta chips */
@@ -493,24 +587,24 @@
 }
 
 .expl-chip.cost {
-  background: rgba(212, 200, 156, 0.10);
+  background: color-mix(in srgb, var(--bone) 10%, transparent);
   color: var(--bone);
 }
 
 .expl-chip.dur {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--glass-bg);
   color: var(--text-dim);
 }
 
 .expl-chip.turns {
-  background: rgba(136, 136, 168, 0.10);
+  background: color-mix(in srgb, var(--dream) 10%, transparent);
   color: var(--dream-bright);
 }
 
 /* Cost bar */
 .expl-card-bar-wrap {
   height: 2px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--glass-bg);
   border-radius: 1px;
   overflow: hidden;
   margin-top: auto;
@@ -573,7 +667,7 @@
   position: sticky;
   bottom: 0;
   z-index: 15;
-  background: rgba(8, 8, 12, 0.92);
+  background: color-mix(in srgb, var(--bg-void) 92%, transparent);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-top: 1px solid var(--glass-border);
@@ -665,9 +759,11 @@
   padding: 5px 10px;
   font-size: var(--text-md);
   font-family: var(--mono);
-  background: rgba(255, 255, 255, 0.02);
+  background: color-mix(in srgb, white 2%, transparent);
   border-radius: var(--radius-sm);
   flex-shrink: 0;
+  /* 5. Slide in from right with glow highlight */
+  animation: eventSlideIn 350ms var(--ease) backwards, eventGlow 800ms var(--ease) 350ms backwards;
 }
 
 .expl-event-ts {
@@ -720,11 +816,11 @@
 }
 
 .provider-card:hover {
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: var(--border-strong);
 }
 
 .provider-card--healthy {
-  border-color: rgba(122, 138, 120, 0.22);
+  border-color: color-mix(in srgb, var(--success) 22%, transparent);
 }
 
 .provider-led {
@@ -737,12 +833,12 @@
 
 .provider-led.healthy {
   background: var(--success);
-  box-shadow: 0 0 6px rgba(122, 138, 120, 0.5);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--success) 50%, transparent);
 }
 
 .provider-led.unhealthy {
-  background: #c36e55;
-  box-shadow: 0 0 6px rgba(195, 110, 85, 0.4);
+  background: var(--status-error);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--status-error) 40%, transparent);
 }
 
 .provider-led-pulse {
@@ -777,13 +873,42 @@
 }
 
 .provider-badge.ok {
-  background: rgba(122, 138, 120, 0.15);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
   color: var(--success);
 }
 
 .provider-badge.down {
-  background: rgba(195, 110, 85, 0.15);
-  color: #c36e55;
+  background: color-mix(in srgb, var(--status-error) 15%, transparent);
+  color: var(--status-error);
+}
+
+/* ── 9. Data refresh shimmer wave ── */
+.expl-refreshing {
+  position: relative;
+  overflow: hidden;
+}
+
+.expl-refreshing::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--rose) 6%, transparent), transparent);
+  animation: refreshShimmer 1s ease-out forwards;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* ── 10. Active section pulsing border accent ── */
+.expl-stat-strip--active {
+  border-top: 1px solid var(--rose-dim);
+  animation: borderPulse 2.5s ease-in-out infinite;
+}
+
+.expl-live-badge {
+  animation: statusBreath 3s ease-in-out infinite;
 }
 
 /* ═══════════════════════════════════════════════════════════

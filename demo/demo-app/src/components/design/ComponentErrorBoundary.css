@@ -1,5 +1,11 @@
-/* ComponentErrorBoundary — inline error catch with retry */
+/* ComponentErrorBoundary — animated error catch with recovery */
 
+/* ── severity accent vars ── */
+.component-error-boundary { --ceb-accent: var(--status-error); --ceb-accent-dim: rgba(251,113,133,.3); }
+.component-error-boundary[data-severity="timeout"] { --ceb-accent: var(--status-warning); --ceb-accent-dim: rgba(251,191,36,.3); }
+.component-error-boundary[data-severity="network"] { --ceb-accent: var(--status-blocked); --ceb-accent-dim: rgba(167,139,250,.3); }
+
+/* ── container ── */
 .component-error-boundary {
   display: flex;
   flex-direction: column;
@@ -9,31 +15,123 @@
   padding: var(--sp-6);
   min-height: 120px;
   background: var(--bg-raised);
-  border: 1px solid var(--border-soft);
+  border: 1px solid var(--ceb-accent-dim);
+  border-left: 2px solid var(--ceb-accent);
   border-radius: var(--radius-md);
   font-family: var(--mono);
   text-align: center;
+  animation: ceb-enter var(--duration-reveal) var(--ease) both;
+  position: relative;
+  overflow: hidden;
 }
 
-.ceb-icon {
-  font-size: 24px;
-  opacity: 0.6;
+/* entry: glitch shake → settle into glow */
+@keyframes ceb-enter {
+  0% {
+    opacity: 0;
+    transform: translateX(-4px) skewX(-1deg);
+    box-shadow: none;
+  }
+  8% {
+    opacity: 1;
+    transform: translateX(6px) skewX(1.5deg);
+  }
+  16% {
+    transform: translateX(-3px) skewX(-0.8deg);
+  }
+  24% {
+    transform: translateX(2px) skewX(0.4deg);
+  }
+  30% {
+    transform: translateX(0) skewX(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) skewX(0);
+    box-shadow: 0 0 20px var(--ceb-accent-dim), inset 0 0 30px rgba(0,0,0,.3);
+  }
 }
 
+/* ── animated warning triangle (SVG path draw) ── */
+.ceb-icon-svg {
+  width: 28px;
+  height: 28px;
+  animation: ceb-icon-fade 0.4s 0.3s var(--ease) both;
+}
+
+.ceb-icon-svg .tri-path {
+  stroke: var(--ceb-accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  stroke-dasharray: 120;
+  stroke-dashoffset: 120;
+  animation: ceb-draw-tri 0.8s 0.35s var(--ease) forwards;
+}
+
+.ceb-icon-svg .tri-excl {
+  stroke: var(--ceb-accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  fill: none;
+  stroke-dasharray: 12;
+  stroke-dashoffset: 12;
+  animation: ceb-draw-excl 0.3s 0.9s var(--ease) forwards;
+}
+
+@keyframes ceb-draw-tri {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes ceb-draw-excl {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes ceb-icon-fade {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ── component name label ── */
 .ceb-name {
   font-size: var(--text-xs);
   color: var(--text-ghost);
   letter-spacing: 0.12em;
   text-transform: uppercase;
+  animation: ceb-fade-up 0.4s 0.4s var(--ease) both;
 }
 
+/* ── typewriter message ── */
 .ceb-msg {
   font-size: var(--text-sm);
   color: var(--text-dim);
   max-width: 300px;
   word-break: break-word;
+  overflow: hidden;
+  white-space: nowrap;
+  border-right: 2px solid var(--ceb-accent);
+  animation:
+    ceb-typewriter 1.2s 0.5s steps(40, end) both,
+    ceb-blink-cursor 0.6s 0.5s step-end 4;
 }
 
+/* fallback for long messages — allow wrapping after animation */
+.ceb-msg.typed {
+  white-space: normal;
+  border-right: none;
+}
+
+@keyframes ceb-typewriter {
+  from { max-width: 0; }
+  to { max-width: 300px; }
+}
+
+@keyframes ceb-blink-cursor {
+  50% { border-right-color: transparent; }
+}
+
+/* ── retry button ── */
 .ceb-retry {
   margin-top: var(--sp-2);
   padding: var(--sp-1) var(--sp-4);
@@ -41,14 +139,145 @@
   font-size: var(--text-xs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
-  color: var(--rose-glow);
+  color: var(--ceb-accent);
   background: transparent;
-  border: 1px solid var(--rose-dim);
+  border: 1px solid var(--ceb-accent-dim);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: border-color var(--duration-snap);
+  transition:
+    border-color var(--duration-snap),
+    box-shadow var(--duration-snap),
+    color var(--duration-snap);
+  animation: ceb-fade-up 0.4s 0.7s var(--ease) both;
+  position: relative;
+  overflow: hidden;
 }
 
 .ceb-retry:hover {
-  border-color: var(--rose-glow);
+  border-color: var(--ceb-accent);
+  box-shadow: 0 0 16px var(--ceb-accent-dim);
+  color: var(--text-strong);
+}
+
+/* pulse ring on click */
+.ceb-retry::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 2px solid var(--ceb-accent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ceb-retry.pulsing::after {
+  animation: ceb-pulse-ring 0.5s var(--ease) forwards;
+}
+
+@keyframes ceb-pulse-ring {
+  0% { transform: scale(1); opacity: 0.8; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+/* ── recovery dissolve (container class) ── */
+.component-error-boundary.recovering {
+  animation: ceb-dissolve 0.4s var(--ease) forwards;
+}
+
+@keyframes ceb-dissolve {
+  to {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+}
+
+/* ── stack trace accordion ── */
+.ceb-stack-toggle {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--sp-1) 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  transition: color var(--duration-snap);
+  animation: ceb-fade-up 0.4s 0.8s var(--ease) both;
+}
+
+.ceb-stack-toggle:hover {
+  color: var(--text-dim);
+}
+
+.ceb-stack-toggle .ceb-chevron {
+  display: inline-block;
+  transition: transform var(--duration-smooth) var(--ease);
+  font-size: 10px;
+}
+
+.ceb-stack-toggle[aria-expanded="true"] .ceb-chevron {
+  transform: rotate(90deg);
+}
+
+.ceb-stack-trace {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--duration-smooth) var(--ease);
+  width: 100%;
+  max-width: 400px;
+}
+
+.ceb-stack-trace[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+
+.ceb-stack-trace-inner {
+  overflow: hidden;
+}
+
+.ceb-stack-trace pre {
+  margin-top: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--bg-deeper);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* syntax coloring for stack frames */
+.ceb-stack-trace .stack-fn { color: var(--rose-bright); }
+.ceb-stack-trace .stack-file { color: var(--bone-dim); }
+.ceb-stack-trace .stack-line { color: var(--dream-bright); }
+
+/* ── shared fade-up ── */
+@keyframes ceb-fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── recovery spinner ── */
+.ceb-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-soft);
+  border-top-color: var(--ceb-accent);
+  border-radius: 50%;
+  animation: ceb-spin 0.6s linear infinite;
+  margin: var(--sp-4) auto;
+}
+
+@keyframes ceb-spin {
+  to { transform: rotate(360deg); }
 }

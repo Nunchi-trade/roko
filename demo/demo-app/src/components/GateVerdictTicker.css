@@ -1,6 +1,106 @@
 /* ═══════════════════════════════════════════════════════════
-   GATE VERDICT TICKER
+   GATE VERDICT TICKER — dramatic reveal animations
    ═══════════════════════════════════════════════════════════ */
+
+/* ── keyframes ── */
+
+@keyframes gate-chip-slide-in {
+  0% {
+    opacity: 0;
+    transform: translateX(24px) scale(0.92);
+  }
+  60% {
+    opacity: 1;
+    transform: translateX(-3px) scale(1.02);
+  }
+  80% {
+    transform: translateX(1px) scale(0.99);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes gate-chip-pass-flash {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 60%, transparent); }
+  30%  { box-shadow: 0 0 16px 4px color-mix(in srgb, var(--success) 40%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 0%, transparent); }
+}
+
+@keyframes gate-chip-pass-bounce {
+  0%   { transform: scale(1); }
+  30%  { transform: scale(1.08); }
+  60%  { transform: scale(0.97); }
+  100% { transform: scale(1); }
+}
+
+@keyframes gate-chip-fail-shake {
+  0%, 100% { transform: translateX(0); }
+  12%  { transform: translateX(-4px); }
+  25%  { transform: translateX(4px); }
+  37%  { transform: translateX(-3px); }
+  50%  { transform: translateX(3px); }
+  62%  { transform: translateX(-2px); }
+  75%  { transform: translateX(2px); }
+  87%  { transform: translateX(-1px); }
+}
+
+@keyframes gate-chip-fail-flash {
+  0%   { box-shadow: inset 0 0 20px color-mix(in srgb, var(--warning) 40%, transparent); }
+  100% { box-shadow: inset 0 0 0 color-mix(in srgb, var(--warning) 0%, transparent); }
+}
+
+@keyframes gate-chip-fail-border-pulse {
+  0%, 100% { border-color: color-mix(in srgb, var(--rose-dim) 20%, transparent); }
+  30%      { border-color: color-mix(in srgb, var(--warning) 70%, transparent); }
+  60%      { border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
+}
+
+@keyframes gate-chip-warning-glow {
+  0%, 100% { box-shadow: 0 0 6px color-mix(in srgb, var(--warning) 15%, transparent); }
+  50%      { box-shadow: 0 0 14px color-mix(in srgb, var(--warning) 35%, transparent); }
+}
+
+@keyframes gate-chip-warning-bounce {
+  0%, 100% { transform: translateY(0); }
+  25%  { transform: translateY(-2px); }
+  50%  { transform: translateY(0); }
+  75%  { transform: translateY(-1px); }
+}
+
+@keyframes gate-checkmark-draw {
+  0%   { stroke-dashoffset: 24; }
+  100% { stroke-dashoffset: 0; }
+}
+
+@keyframes gate-xmark-draw {
+  0%   { stroke-dashoffset: 20; }
+  100% { stroke-dashoffset: 0; }
+}
+
+@keyframes gate-particle-fly {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--px, 10px), var(--py, -10px)) scale(0.3);
+  }
+}
+
+@keyframes gate-score-countup-flash {
+  0%   { color: var(--bone-bright); }
+  100% { color: var(--text-dim); }
+}
+
+@keyframes gate-tooltip-in {
+  0%   { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* ── container ── */
 
 .gate-verdict-ticker {
   display: flex;
@@ -9,7 +109,7 @@
   overflow-x: auto;
   padding: 6px 0;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255,255,255,0.08) transparent;
+  scrollbar-color: color-mix(in srgb, #fff 8%, transparent) transparent;
 }
 
 .gate-verdict-ticker::-webkit-scrollbar {
@@ -19,9 +119,11 @@
   background: transparent;
 }
 .gate-verdict-ticker::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.08);
+  background: color-mix(in srgb, #fff 8%, transparent);
   border-radius: 2px;
 }
+
+/* ── divider ── */
 
 .gate-verdict-divider {
   font-family: var(--mono);
@@ -34,51 +136,155 @@
   flex-shrink: 0;
 }
 
+/* ── chip base ── */
+
 .gate-verdict-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   padding: 3px 8px;
   border-radius: 4px;
   font-family: var(--mono);
   font-size: var(--text-xs);
   white-space: nowrap;
   flex-shrink: 0;
-  animation: gate-chip-in 0.3s var(--ease) both;
   border: 1px solid transparent;
+  position: relative;
+  animation: gate-chip-slide-in 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  cursor: default;
 }
 
-@keyframes gate-chip-in {
-  from {
-    opacity: 0;
-    transform: translateX(-6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
+/* stagger delays for chips */
+.gate-verdict-chip:nth-child(2)  { animation-delay: 40ms; }
+.gate-verdict-chip:nth-child(3)  { animation-delay: 80ms; }
+.gate-verdict-chip:nth-child(4)  { animation-delay: 120ms; }
+.gate-verdict-chip:nth-child(5)  { animation-delay: 160ms; }
+.gate-verdict-chip:nth-child(6)  { animation-delay: 200ms; }
+.gate-verdict-chip:nth-child(7)  { animation-delay: 240ms; }
+.gate-verdict-chip:nth-child(8)  { animation-delay: 280ms; }
+.gate-verdict-chip:nth-child(9)  { animation-delay: 320ms; }
+.gate-verdict-chip:nth-child(10) { animation-delay: 360ms; }
+
+/* ── pass chip ── */
 
 .gate-verdict-chip.pass {
-  background: rgba(122, 138, 120, 0.12);
-  border-color: rgba(122, 138, 120, 0.2);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 25%, transparent);
   color: var(--success);
+  animation:
+    gate-chip-slide-in 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both,
+    gate-chip-pass-flash 0.5s ease-out 0.35s,
+    gate-chip-pass-bounce 0.4s ease-out 0.3s;
 }
 
+/* ── fail chip ── */
+
 .gate-verdict-chip.fail {
-  background: rgba(170, 112, 136, 0.12);
-  border-color: rgba(170, 112, 136, 0.2);
+  background: color-mix(in srgb, var(--rose-dim) 12%, transparent);
+  border-color: color-mix(in srgb, var(--rose-dim) 20%, transparent);
   color: var(--rose-bright);
+  animation:
+    gate-chip-slide-in 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both,
+    gate-chip-fail-shake 0.3s ease-out 0.35s,
+    gate-chip-fail-flash 0.5s ease-out 0.35s,
+    gate-chip-fail-border-pulse 0.8s ease-out 0.35s;
 }
+
+/* ── warning chip ── */
+
+.gate-verdict-chip.warning {
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 25%, transparent);
+  color: var(--warning);
+  animation:
+    gate-chip-slide-in 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both,
+    gate-chip-warning-glow 2s ease-in-out 0.4s infinite,
+    gate-chip-warning-bounce 0.5s ease-out 0.35s;
+}
+
+/* ── dimmed (non-current task) ── */
 
 .gate-verdict-chip.dimmed {
   opacity: 0.5;
 }
 
+/* ── icon container ── */
+
 .gate-verdict-icon {
-  font-weight: 700;
-  font-size: var(--text-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
 }
+
+.gate-verdict-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* SVG path-draw for checkmark */
+.gate-verdict-icon .gate-icon-check {
+  stroke: var(--success);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: gate-checkmark-draw 0.4s ease-out 0.4s forwards;
+}
+
+/* SVG path-draw for X mark */
+.gate-verdict-icon .gate-icon-cross {
+  stroke: var(--rose-bright);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  fill: none;
+  stroke-dasharray: 20;
+  stroke-dashoffset: 20;
+  animation: gate-xmark-draw 0.35s ease-out 0.4s forwards;
+}
+
+/* Warning triangle icon */
+.gate-verdict-icon .gate-icon-warning {
+  stroke: var(--warning);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  stroke-dasharray: 40;
+  stroke-dashoffset: 40;
+  animation: gate-xmark-draw 0.5s ease-out 0.4s forwards;
+}
+
+/* ── success particles ── */
+
+.gate-verdict-particles {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.gate-verdict-particle {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--success);
+  opacity: 0;
+  animation: gate-particle-fly 0.6s ease-out forwards;
+}
+
+.gate-verdict-particle:nth-child(1) { --px: 12px;  --py: -10px; animation-delay: 0.35s; }
+.gate-verdict-particle:nth-child(2) { --px: -10px; --py: -8px;  animation-delay: 0.40s; }
+.gate-verdict-particle:nth-child(3) { --px: 8px;   --py: 10px;  animation-delay: 0.38s; }
+.gate-verdict-particle:nth-child(4) { --px: -12px; --py: 6px;   animation-delay: 0.42s; }
+
+/* ── name + duration ── */
 
 .gate-verdict-name {
   text-transform: uppercase;
@@ -90,6 +296,52 @@
   font-size: var(--text-xs);
 }
 
+/* ── score countup flash ── */
+
+.gate-verdict-score {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  animation: gate-score-countup-flash 0.6s ease-out;
+}
+
+/* ── tooltip on hover ── */
+
+.gate-verdict-chip .gate-verdict-tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--bg-void) 95%, transparent);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-soft);
+  white-space: nowrap;
+  z-index: var(--z-floating);
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+  animation: gate-tooltip-in 0.2s ease-out;
+}
+
+.gate-verdict-chip:hover .gate-verdict-tooltip {
+  display: block;
+}
+
+.gate-verdict-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: color-mix(in srgb, var(--bg-void) 95%, transparent);
+}
+
+/* ── empty state ── */
+
 .gate-verdict-empty {
   font-family: var(--mono);
   font-size: var(--text-xs);
@@ -98,8 +350,28 @@
   letter-spacing: 0.04em;
 }
 
+/* ── reduced motion ── */
+
 @media (prefers-reduced-motion: reduce) {
-  .gate-verdict-chip {
+  .gate-verdict-chip,
+  .gate-verdict-chip.pass,
+  .gate-verdict-chip.fail,
+  .gate-verdict-chip.warning {
+    animation: none;
+  }
+
+  .gate-verdict-icon .gate-icon-check,
+  .gate-verdict-icon .gate-icon-cross,
+  .gate-verdict-icon .gate-icon-warning {
+    stroke-dashoffset: 0;
+    animation: none;
+  }
+
+  .gate-verdict-particle {
+    display: none;
+  }
+
+  .gate-verdict-chip .gate-verdict-tooltip {
     animation: none;
   }
 }

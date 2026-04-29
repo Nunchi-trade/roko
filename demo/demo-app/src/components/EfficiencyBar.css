@@ -28,3 +28,295 @@
 .efficiency-bar .mosaic .cell .v.mono {
   font-size: 18px;
 }
+
+/* ── Fill bars grid (mirrors mosaic columns) ─────────────── */
+
+.ebar-bars {
+  display: grid;
+  gap: 1px;
+  background: var(--border-soft);
+}
+
+/* ── Individual fill bar wrapper ─────────────────────────── */
+
+.ebar-fill-wrap {
+  background: var(--bg-deeper);
+  padding: 6px 20px 10px;
+  position: relative;
+  animation: fadeInUp var(--duration-reveal, 600ms) var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+/* ── Track ────────────────────────────────────────────────── */
+
+.ebar-track {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.04);
+  overflow: visible;
+}
+
+/* ── Main fill ───────────────────────────────────────────── */
+
+.ebar-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 3px;
+  opacity: 0.85;
+  overflow: hidden;
+  will-change: width;
+  transition: background var(--duration-smooth, 300ms) ease;
+}
+
+/* Shimmer sweep across fill */
+.ebar-shimmer {
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.15),
+    transparent
+  );
+  animation: ebarShimmer 4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes ebarShimmer {
+  0% { left: -100%; }
+  60% { left: 200%; }
+  100% { left: 200%; }
+}
+
+/* ── Segments ────────────────────────────────────────────── */
+
+.ebar-segments {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  display: flex;
+  border-radius: 3px;
+  overflow: hidden;
+  will-change: width;
+}
+
+.ebar-segment {
+  height: 100%;
+  opacity: 0.85;
+  animation: ebarSegIn var(--duration-reveal, 600ms) var(--ease) both;
+  transition: opacity var(--duration-smooth, 300ms) ease;
+}
+
+@keyframes ebarSegIn {
+  from {
+    opacity: 0;
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+  to {
+    opacity: 0.85;
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+}
+
+.ebar-segment + .ebar-segment {
+  border-left: 1px solid rgba(0, 0, 0, 0.2);
+}
+
+/* ── Comparison ghost fill ───────────────────────────────── */
+
+.ebar-prev-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  will-change: width;
+}
+
+/* ── Delta highlight region ──────────────────────────────── */
+
+.ebar-delta {
+  position: absolute;
+  top: -2px;
+  height: calc(100% + 4px);
+  border-radius: 2px;
+  will-change: left, width;
+  pointer-events: none;
+}
+
+.ebar-delta-up {
+  background: rgba(74, 222, 128, 0.12);
+  border: 1px solid rgba(74, 222, 128, 0.25);
+}
+
+.ebar-delta-down {
+  background: rgba(251, 113, 133, 0.12);
+  border: 1px solid rgba(251, 113, 133, 0.25);
+}
+
+/* ── Threshold markers ───────────────────────────────────── */
+
+.ebar-threshold {
+  position: absolute;
+  top: -4px;
+  height: calc(100% + 8px);
+  width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.ebar-threshold-tick {
+  width: 1px;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.ebar-threshold-label {
+  position: absolute;
+  top: -16px;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-ghost);
+  text-transform: uppercase;
+  animation: ebarThreshIn 400ms ease both;
+  animation-delay: 300ms;
+}
+
+@keyframes ebarThreshIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Pulse on value change ───────────────────────────────── */
+
+.ebar-pulse .ebar-track {
+  animation: ebarPulseGlow 600ms ease;
+}
+
+@keyframes ebarPulseGlow {
+  0% { box-shadow: 0 0 0 0 rgba(220, 165, 189, 0); }
+  30% { box-shadow: 0 0 8px 2px rgba(220, 165, 189, 0.25); }
+  100% { box-shadow: 0 0 0 0 rgba(220, 165, 189, 0); }
+}
+
+/* ── Hover state ─────────────────────────────────────────── */
+
+.ebar-hovered .ebar-fill {
+  opacity: 1;
+}
+
+.ebar-hovered .ebar-segment {
+  opacity: 1;
+}
+
+.ebar-hovered .ebar-track {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Breakdown sub-bars on hover ─────────────────────────── */
+
+.ebar-breakdown {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  animation: ebarBreakIn 200ms var(--ease) both;
+}
+
+@keyframes ebarBreakIn {
+  from {
+    opacity: 0;
+    max-height: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    max-height: 200px;
+    transform: translateY(0);
+  }
+}
+
+.ebar-breakdown-row {
+  display: grid;
+  grid-template-columns: 8px 1fr auto 60px;
+  gap: 6px;
+  align-items: center;
+  animation: ebarBreakRowIn 200ms var(--ease) both;
+}
+
+@keyframes ebarBreakRowIn {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.ebar-breakdown-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.ebar-breakdown-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ebar-breakdown-value {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-soft);
+  text-align: right;
+}
+
+.ebar-breakdown-bar {
+  height: 3px;
+  border-radius: 1.5px;
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+
+.ebar-breakdown-bar-fill {
+  height: 100%;
+  border-radius: 1.5px;
+  transition: width var(--duration-smooth, 300ms) var(--ease);
+}
+
+/* ── Reduced motion ──────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .ebar-shimmer {
+    animation: none;
+    display: none;
+  }
+
+  .ebar-fill-wrap,
+  .ebar-segment,
+  .ebar-breakdown,
+  .ebar-breakdown-row,
+  .ebar-threshold-label {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  .ebar-pulse .ebar-track {
+    animation: none;
+  }
+}

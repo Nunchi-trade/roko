@@ -10,7 +10,7 @@
   border-radius: 16px;
   font-size: var(--text-xs);
   cursor: pointer;
-  transition: all var(--duration-snap) var(--ease);
+  transition: color var(--duration-snap) var(--ease), background var(--duration-snap) var(--ease), border-color var(--duration-snap) var(--ease);
 }
 .build__model-chip:hover { color: var(--text-soft); }
 .build__model-chip--active {

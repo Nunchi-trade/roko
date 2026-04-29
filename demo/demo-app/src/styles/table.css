@@ -1,0 +1,40 @@
+/* ═══════════════════════════════════════════════════════════
+   SHARED TABLE STYLES
+   Used by dashboard pages: CascadeRouter, KnowledgeEntries
+   ═══════════════════════════════════════════════════════════ */
+
+.tbl-container {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.tbl-header {
+  padding: 6px 10px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--glass-2-border);
+  background: var(--raised);
+  font-weight: 600;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tbl-cell {
+  padding: 5px 10px;
+  color: var(--text);
+  border-bottom: 1px solid var(--glass-border);
+  vertical-align: middle;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+
+.tbl-row:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.tbl-row--selected {
+  background: rgba(204, 144, 168, 0.06);
+  border-left: 2px solid var(--rose-dim);
+}

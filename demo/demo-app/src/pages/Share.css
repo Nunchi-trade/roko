@@ -1,0 +1,416 @@
+/* ═══════════════════════════════════════════════════════════
+   SHARE PAGE — polished social preview card
+   ═══════════════════════════════════════════════════════════ */
+
+/* Breathing radial background */
+.share-page {
+  position: relative;
+  padding: 80px 40px;
+  max-width: 700px;
+  margin: 0 auto;
+  min-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.share-page::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(
+    ellipse 60% 50% at 50% 40%,
+    rgba(184, 122, 148, 0.06) 0%,
+    transparent 70%
+  );
+  animation: shareBreathe 6s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+@keyframes shareBreathe {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+
+/* Gradient border wrapper */
+.share-card-border {
+  position: relative;
+  padding: 2px;
+  border-radius: var(--radius-lg);
+  background: conic-gradient(
+    from var(--share-border-angle, 0deg),
+    var(--rose-deep),
+    var(--rose-dim),
+    var(--rose),
+    var(--rose-bright),
+    var(--rose-glow),
+    var(--rose-bright),
+    var(--rose),
+    var(--rose-dim),
+    var(--rose-deep)
+  );
+  animation:
+    shareCardEnter 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) both,
+    shareRotateBorder 8s linear infinite;
+  z-index: 1;
+}
+
+@keyframes shareCardEnter {
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+    box-shadow: 0 0 0 rgba(184, 122, 148, 0);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.3), 0 0 60px rgba(184, 122, 148, 0.12);
+  }
+}
+
+@property --share-border-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes shareRotateBorder {
+  to { --share-border-angle: 360deg; }
+}
+
+.share-card-inner {
+  background: var(--bg-raised);
+  border-radius: calc(var(--radius-lg) - 1px);
+  overflow: hidden;
+}
+
+/* Staggered content reveal */
+.share-stagger > * {
+  animation: shareStaggerIn 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.share-stagger > *:nth-child(1) { animation-delay: 0.2s; }
+.share-stagger > *:nth-child(2) { animation-delay: 0.35s; }
+.share-stagger > *:nth-child(3) { animation-delay: 0.5s; }
+.share-stagger > *:nth-child(4) { animation-delay: 0.65s; }
+.share-stagger > *:nth-child(5) { animation-delay: 0.8s; }
+
+@keyframes shareStaggerIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Stat gauge bars */
+.share-stat-row {
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.share-stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.share-stat-label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.share-stat-value {
+  font-family: var(--mono);
+  font-size: var(--text-lg);
+  color: var(--rose-glow);
+  text-shadow: 0 0 20px currentColor;
+}
+
+.share-stat-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+  margin-top: var(--sp-1);
+}
+
+.share-stat-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--rose-dim), var(--rose-bright));
+  box-shadow: 0 0 8px rgba(184, 122, 148, 0.4);
+  transform-origin: left;
+  animation: shareFillBar 1s cubic-bezier(0.22, 1, 0.36, 1) 0.6s both;
+}
+
+@keyframes shareFillBar {
+  from { transform: scaleX(0); }
+}
+
+/* Copy button */
+.share-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rose-glow);
+  border: 1px solid var(--rose-dim);
+  background: rgba(220, 165, 189, 0.04);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 0.3s var(--ease), border-color 0.3s var(--ease), color 0.3s var(--ease), box-shadow 0.3s var(--ease), transform 0.3s var(--ease);
+  position: relative;
+  overflow: hidden;
+}
+
+.share-copy-btn:hover {
+  background: rgba(220, 165, 189, 0.10);
+  border-color: var(--rose-glow);
+  box-shadow: 0 0 24px rgba(220, 165, 189, 0.18);
+  transform: translateY(-1px);
+}
+
+.share-copy-btn.copied {
+  border-color: var(--success);
+  color: var(--success);
+  background: rgba(138, 156, 134, 0.08);
+}
+
+.share-copy-btn.copied::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(138, 156, 134, 0.15);
+  animation: shareCopyFlash 0.4s ease-out;
+  pointer-events: none;
+}
+
+@keyframes shareCopyFlash {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.share-copy-tooltip {
+  position: absolute;
+  top: -28px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--success);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  animation: shareTooltipSlide 0.3s var(--ease) both;
+}
+
+@keyframes shareTooltipSlide {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* Action row */
+.share-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+/* Social share buttons */
+.share-social-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: color 0.3s var(--ease), border-color 0.3s var(--ease), box-shadow 0.3s var(--ease), transform 0.3s var(--ease);
+}
+
+.share-social-btn:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-strong);
+}
+
+.share-social-btn.twitter:hover {
+  --brand-twitter: #1da1f2;
+  color: var(--brand-twitter);
+  border-color: color-mix(in srgb, var(--brand-twitter) 40%, transparent);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--brand-twitter) 15%, transparent);
+}
+
+.share-social-btn.github:hover {
+  color: var(--text-strong);
+  border-color: color-mix(in srgb, var(--text-strong) 30%, transparent);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--text-strong) 10%, transparent);
+}
+
+.share-social-btn.link:hover {
+  color: var(--bone-bright);
+  border-color: rgba(228, 216, 176, 0.3);
+  box-shadow: 0 0 16px rgba(228, 216, 176, 0.1);
+}
+
+/* Skeleton loading */
+.share-skeleton {
+  animation: shareCardEnter 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.share-skel-line {
+  height: 14px;
+  border-radius: 3px;
+  background: linear-gradient(
+    90deg,
+    var(--surface) 25%,
+    rgba(184, 122, 148, 0.08) 50%,
+    var(--surface) 75%
+  );
+  background-size: 400% 100%;
+  animation: shareShimmer 2s ease-in-out infinite;
+}
+
+.share-skel-line.title {
+  height: 10px;
+  width: 50%;
+  margin: var(--sp-2) var(--sp-3);
+}
+
+.share-skel-line.prompt {
+  width: 80%;
+  margin: var(--sp-3) var(--sp-4);
+}
+
+.share-skel-line.prompt-2 {
+  width: 60%;
+  margin: var(--sp-2) var(--sp-4) var(--sp-4);
+}
+
+.share-skel-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border);
+}
+
+.share-skel-stat {
+  background: var(--bg-void);
+  padding: var(--sp-3) var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.share-skel-stat .share-skel-line:first-child {
+  width: 40%;
+  height: 10px;
+  margin: 0;
+}
+
+.share-skel-stat .share-skel-line:last-child {
+  width: 60%;
+  height: 18px;
+  margin: 0;
+}
+
+.share-skel-actions {
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+.share-skel-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+}
+
+@keyframes shareShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Error state */
+.share-error {
+  padding: 120px 40px;
+  max-width: 700px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.share-error-title {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 24px;
+  color: var(--text-strong);
+  font-weight: 300;
+  margin-bottom: 12px;
+}
+
+.share-error-sub {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+/* Prompt section inside card */
+.share-prompt-section {
+  padding: var(--sp-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.share-prompt-label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: var(--sp-2);
+}
+
+.share-prompt-text {
+  font-family: var(--mono);
+  font-size: 15px;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+/* Gate section */
+.share-gates {
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+  .share-page { padding: 40px 16px; }
+  .share-stat-row { flex-direction: column; }
+}

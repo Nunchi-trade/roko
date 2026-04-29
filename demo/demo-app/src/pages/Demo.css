@@ -2,6 +2,9 @@
    DEMO PAGE — Bloomberg-density immersive player
    ═══════════════════════════════════════════════════════════ */
 
+
+/* ═══ LAYOUT ═══ */
+
 .demo-page {
   display: flex;
   flex-direction: column;
@@ -10,7 +13,8 @@
   background: var(--bg-void);
 }
 
-/* ── Top bar: scenario tabs + controls ── */
+
+/* ═══ TAB BAR ═══ */
 
 .demo-tabs-bar {
   display: flex;
@@ -25,7 +29,7 @@
 }
 
 .demo-tabs-bar:has(.demo-tab.active) {
-  box-shadow: 0 1px 18px rgba(184, 122, 148, .08);
+  box-shadow: 0 1px 18px color-mix(in srgb, var(--rose) 8%, transparent);
 }
 
 .demo-tab-list {
@@ -33,6 +37,48 @@
   gap: 2px;
   flex-wrap: nowrap;
   overflow-x: auto;
+  position: relative;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.demo-tab-list::-webkit-scrollbar { display: none; }
+
+/* Horizontal scroll fade edges */
+.demo-tab-list-wrapper {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.demo-tab-list-wrapper::before,
+.demo-tab-list-wrapper::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .2s;
+}
+
+.demo-tab-list-wrapper::before {
+  left: 0;
+  background: linear-gradient(90deg, var(--bg-raised) 0%, transparent 100%);
+}
+
+.demo-tab-list-wrapper::after {
+  right: 0;
+  background: linear-gradient(-90deg, var(--bg-raised) 0%, transparent 100%);
+}
+
+.demo-tab-list-wrapper.scroll-left::before,
+.demo-tab-list-wrapper.scroll-right::after {
+  opacity: 1;
 }
 
 .demo-tab {
@@ -44,7 +90,7 @@
   font-family: var(--mono);
   font-size: var(--text-xs);
   cursor: pointer;
-  transition: all var(--duration-snap) var(--ease);
+  transition: color var(--duration-snap) var(--ease), background var(--duration-snap) var(--ease), border-color var(--duration-snap) var(--ease), text-shadow var(--duration-snap) var(--ease);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -63,7 +109,7 @@
   color: var(--rose-bright);
   background: var(--rose-deep);
   border-color: var(--rose-dim);
-  text-shadow: 0 0 8px rgba(216,154,178,.3);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 30%, transparent);
 }
 
 .demo-tab.active::after {
@@ -86,7 +132,7 @@
   border-radius: 2px;
   font-size: var(--text-xs);
   font-weight: 700;
-  background: rgba(255,255,255,0.04);
+  background: color-mix(in srgb, white 4%, transparent);
   color: var(--text-dim);
   font-family: var(--mono);
 }
@@ -94,6 +140,100 @@
 .demo-tab.active .demo-tab-num {
   background: var(--rose-dim);
   color: var(--rose-bright);
+}
+
+/* ── Category accent dot ── */
+
+.demo-tab-accent {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  opacity: 0.6;
+  transition: opacity .2s, box-shadow .2s;
+}
+
+.demo-tab:hover .demo-tab-accent {
+  opacity: 1;
+}
+
+.demo-tab.active .demo-tab-accent {
+  opacity: 1;
+  box-shadow: 0 0 6px currentColor;
+}
+
+/* Category colors */
+.demo-tab-accent.cat-pipeline { color: var(--rose-bright); background: var(--rose-bright); }
+.demo-tab-accent.cat-comparison { color: var(--status-active); background: var(--status-active); }
+.demo-tab-accent.cat-exploration { color: var(--dream-bright); background: var(--dream-bright); }
+.demo-tab-accent.cat-learning { color: var(--status-success); background: var(--status-success); }
+.demo-tab-accent.cat-chain { color: var(--warning); background: var(--warning); }
+
+/* Active tab category theming (color + background merged) */
+.demo-tab.active.cat-pipeline { color: var(--rose-bright); background: var(--rose-deep); border-color: var(--rose-dim); }
+.demo-tab.active.cat-comparison { color: var(--status-active); background: color-mix(in srgb, var(--status-active) 8%, transparent); border-color: color-mix(in srgb, var(--status-active) 25%, transparent); }
+.demo-tab.active.cat-exploration { color: var(--dream-bright); background: var(--dream-deep); border-color: color-mix(in srgb, var(--dream-bright) 25%, transparent); }
+.demo-tab.active.cat-learning { color: var(--status-success); background: color-mix(in srgb, var(--status-success) 6%, transparent); border-color: color-mix(in srgb, var(--status-success) 20%, transparent); }
+.demo-tab.active.cat-chain { color: var(--warning); background: color-mix(in srgb, var(--warning) 8%, transparent); border-color: color-mix(in srgb, var(--warning) 25%, transparent); }
+
+.demo-tab.active.cat-pipeline .demo-tab-num { background: var(--rose-dim); color: var(--rose-bright); }
+.demo-tab.active.cat-comparison .demo-tab-num { background: color-mix(in srgb, var(--status-active) 15%, transparent); color: var(--status-active); }
+.demo-tab.active.cat-exploration .demo-tab-num { background: color-mix(in srgb, var(--dream-bright) 15%, transparent); color: var(--dream-bright); }
+.demo-tab.active.cat-learning .demo-tab-num { background: color-mix(in srgb, var(--status-success) 12%, transparent); color: var(--status-success); }
+.demo-tab.active.cat-chain .demo-tab-num { background: color-mix(in srgb, var(--warning) 12%, transparent); color: var(--warning); }
+
+/* ── Sliding underline indicator ── */
+
+.demo-tab-indicator {
+  position: absolute;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 1px;
+  transition: left 300ms var(--ease-snappy),
+              width 300ms var(--ease-snappy),
+              background-color 200ms;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Remove the old static ::after underline when we have the slider */
+.demo-tab-list:has(.demo-tab-indicator) .demo-tab.active::after {
+  display: none;
+}
+
+/* ── Completion checkmark ── */
+
+.demo-tab-done {
+  width: 10px;
+  height: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--status-success);
+  opacity: 0.7;
+  flex-shrink: 0;
+  animation: tabDoneAppear 300ms var(--ease) both;
+}
+
+@keyframes tabDoneAppear {
+  from { opacity: 0; transform: scale(0); }
+  to { opacity: 0.7; transform: scale(1); }
+}
+
+/* ── Smoother scenario content transition ── */
+
+.demo-content-fade-exit {
+  animation: contentFadeOut 200ms ease-out forwards;
+}
+
+.demo-content-fade-enter {
+  animation: fadeInUp 350ms var(--ease) forwards;
+}
+
+@keyframes contentFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 .demo-controls {
@@ -111,7 +251,7 @@
   padding: 0 8px;
   border: 1px solid var(--glass-border);
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.035);
+  background: color-mix(in srgb, white 3.5%, transparent);
   color: var(--text-ghost);
   font-family: var(--mono);
   font-size: var(--text-xs);
@@ -133,7 +273,7 @@
 
 .demo-serve-connected span {
   background: var(--success);
-  box-shadow: 0 0 8px rgba(138, 156, 134, 0.5);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 50%, transparent);
 }
 
 .demo-serve-checking {
@@ -181,7 +321,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all .2s;
+  transition: color .2s, border-color .2s, background .2s;
 }
 
 .demo-ctrl-btn:hover {
@@ -195,7 +335,7 @@
   border-color: var(--rose-dim);
 }
 
-/* ── Main layout: 60/40 split ── */
+/* ═══ LAYOUT — Main split ═══ */
 
 .demo-main {
   display: flex;
@@ -205,7 +345,8 @@
   overflow: hidden;
 }
 
-/* ── Terminal area (left 60%) ── */
+
+/* ═══ TERMINAL GRID ═══ */
 
 .demo-terminals {
   flex: 60;
@@ -224,8 +365,8 @@
     to bottom,
     transparent 0px,
     transparent 2px,
-    rgba(0,0,0,.055) 2px,
-    rgba(0,0,0,.055) 4px
+    color-mix(in srgb, black 5.5%, transparent) 2px,
+    color-mix(in srgb, black 5.5%, transparent) 4px
   );
   pointer-events: none;
   z-index: 2;
@@ -237,10 +378,13 @@
   flex: 1;
   min-height: 0;
   background: var(--glass-border);
+  /* Smooth morphing between 1-col and 2-col layouts */
+  transition: grid-template-columns 400ms var(--ease-snappy);
 }
 
 .demo-cols-1 { grid-template-columns: 1fr; }
 .demo-cols-2 { grid-template-columns: 1fr 1fr; }
+.demo-cols-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
 
 /* ── Individual terminal pane ── */
 
@@ -250,18 +394,35 @@
   background: var(--bg-void);
   overflow: hidden;
   position: relative;
-  transition: box-shadow .4s var(--ease), border-color .4s var(--ease);
+  transition:
+    box-shadow .4s var(--ease),
+    border-color .4s var(--ease),
+    opacity 300ms var(--ease),
+    transform 300ms var(--ease);
+  /* Mount animation */
+  animation: demo-pane-mount 400ms var(--ease-snappy) both;
+}
+
+@keyframes demo-pane-mount {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 /* Connected: subtle rose glow along top edge */
 .demo-term-pane.demo-term-connected {
-  box-shadow: inset 0 1px 0 0 rgba(122, 138, 120, 0.2);
+  box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--success) 20%, transparent);
 }
 
 /* Focus: rose inner glow */
 .demo-term-pane:focus-within {
-  box-shadow: inset 0 0 0 1px rgba(184, 122, 148, 0.15),
-              0 0 20px rgba(184, 122, 148, 0.06);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--rose) 15%, transparent),
+              0 0 20px color-mix(in srgb, var(--rose) 6%, transparent);
 }
 
 /* ── Terminal header — bracket aesthetic ── */
@@ -273,18 +434,18 @@
   padding: 1px 10px;
   height: 20px;
   border-bottom: 1px solid var(--glass-border);
-  background: rgba(16, 14, 20, 0.7);
+  background: color-mix(in srgb, var(--bg-mid) 70%, transparent);
   flex-shrink: 0;
   transition: border-color .3s, background .3s;
 }
 
 .demo-term-connected .demo-term-head {
-  border-bottom-color: rgba(122, 138, 120, 0.2);
+  border-bottom-color: color-mix(in srgb, var(--success) 20%, transparent);
 }
 
 .demo-term-pane:focus-within .demo-term-head {
-  border-bottom-color: rgba(216, 154, 178, 0.25);
-  background: rgba(20, 16, 26, 0.8);
+  border-bottom-color: color-mix(in srgb, var(--rose-bright) 25%, transparent);
+  background: color-mix(in srgb, var(--bg-mid) 80%, transparent);
 }
 
 /* Status LED */
@@ -299,12 +460,12 @@
 
 .demo-term-dot.connected {
   background: var(--success);
-  box-shadow: 0 0 4px rgba(122, 138, 120, 0.6);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--success) 60%, transparent);
 }
 
 .demo-term-dot.connecting {
   background: var(--warning);
-  box-shadow: 0 0 4px rgba(200, 154, 104, 0.5);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--warning) 50%, transparent);
   animation: termDotPulse 1.2s ease-in-out infinite;
 }
 
@@ -314,8 +475,8 @@
 }
 
 @keyframes termDotPulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 4px rgba(200, 154, 104, 0.5); }
-  50% { opacity: 0.4; box-shadow: 0 0 8px rgba(200, 154, 104, 0.3); }
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px color-mix(in srgb, var(--warning) 50%, transparent); }
+  50% { opacity: 0.4; box-shadow: 0 0 8px color-mix(in srgb, var(--warning) 30%, transparent); }
 }
 
 /* Label with bracket characters — matches TopNav ⌈ NUNCHI ⌋ */
@@ -334,19 +495,19 @@
 
 .demo-term-connected .demo-term-label {
   color: var(--text-strong);
-  text-shadow: 0 0 8px rgba(122, 138, 120, 0.2);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--success) 20%, transparent);
 }
 
 .demo-term-pane:focus-within .demo-term-label {
   color: var(--rose-glow);
-  text-shadow: 0 0 10px rgba(216, 154, 178, 0.2);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--rose-bright) 20%, transparent);
 }
 
 /* Status text — right-aligned */
 .demo-term-status {
   margin-left: auto;
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: .10em;
   text-transform: uppercase;
   color: var(--text-ghost);
@@ -355,10 +516,96 @@
 }
 
 .demo-term-connected .demo-term-status {
-  color: rgba(122, 138, 120, 0.6);
+  color: color-mix(in srgb, var(--success) 60%, transparent);
 }
 
-/* ── Terminal body ── */
+/* ── Terminal pane number badge ── */
+
+.demo-term-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  background: color-mix(in srgb, white 4%, transparent);
+  color: var(--text-ghost);
+  flex-shrink: 0;
+  transition: color .3s, background .3s;
+}
+
+.demo-term-connected .demo-term-num {
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--text-dim);
+}
+
+.demo-term-pane:focus-within .demo-term-num,
+.demo-term-focused .demo-term-num {
+  background: var(--rose-deep);
+  color: var(--rose-bright);
+}
+
+/* ── Waveform activity indicator ── */
+
+.demo-term-waveform {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  opacity: 0.8;
+  animation: waveformFadeIn 200ms ease-out;
+}
+
+@keyframes waveformFadeIn {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 0.8; transform: scale(1); }
+}
+
+/* ── Focus ring: gradient border ── */
+
+.demo-term-focused {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--rose-bright) 20%, transparent),
+    0 0 16px color-mix(in srgb, var(--rose-bright) 8%, transparent) !important;
+}
+
+.demo-term-focused .demo-term-head {
+  border-bottom-color: color-mix(in srgb, var(--rose-bright) 25%, transparent);
+  background: color-mix(in srgb, var(--bg-mid) 85%, transparent);
+}
+
+/* ── Command echo subtitle ── */
+
+.demo-term-cmd-echo {
+  position: absolute;
+  top: 20px;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  padding: 2px 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  color: var(--rose-bright);
+  background: color-mix(in srgb, var(--bg-mid) 85%, transparent);
+  backdrop-filter: blur(4px);
+  border-bottom: 1px solid color-mix(in srgb, var(--rose-bright) 15%, transparent);
+  animation: cmdEchoFade 2s ease-out forwards;
+  pointer-events: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes cmdEchoFade {
+  0% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Terminal body */
 
 .demo-term-body {
   flex: 1;
@@ -376,7 +623,7 @@
   background: radial-gradient(
     ellipse 85% 80% at 50% 50%,
     transparent 60%,
-    rgba(6, 6, 8, 0.3) 100%
+    color-mix(in srgb, var(--bg-void) 30%, transparent) 100%
   );
   opacity: 0.7;
   mix-blend-mode: multiply;
@@ -388,11 +635,7 @@
   transition: opacity .6s;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .demo-term-dot.connecting { animation: none; }
-}
-
-/* ── Sidebar (right 40%) ── */
+/* ═══ SIDEBAR ═══ */
 
 .demo-sidebar {
   flex: 40;
@@ -438,7 +681,7 @@
   min-height: 0;
   min-width: 0;
   background:
-    linear-gradient(180deg, rgba(18, 16, 25, 0.95), rgba(8, 8, 12, 0.98)),
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-raised) 95%, transparent), color-mix(in srgb, var(--bg-void) 98%, transparent)),
     var(--bg-void);
 }
 
@@ -482,6 +725,27 @@
   padding: 6px 12px;
 }
 
+/* ── Sidebar extracted-component helpers ── */
+
+.demo-sidebar-agent-flow {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.demo-sidebar-confidence {
+  padding: 4px 16px;
+}
+
+.demo-sidebar-handoff {
+  padding: 8px 12px;
+}
+
+.demo-sidebar-gates {
+  padding: 12px 16px;
+}
+
 /* Compact mosaic inside sidebar */
 .demo-stats-mosaic .mosaic .cell {
   padding: 10px 12px;
@@ -501,116 +765,7 @@
   font-size: var(--text-sm);
 }
 
-/* ── Intro overlay ── */
-
-.demo-intro-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  background: rgba(6, 6, 8, 0.88);
-  background-image: radial-gradient(ellipse 60% 40% at 50% 45%, rgba(184, 122, 148, .10) 0%, transparent 70%);
-  backdrop-filter: blur(12px);
-  cursor: pointer;
-  animation: demoIntroFade 400ms var(--ease) both;
-}
-
-@keyframes demoIntroFade {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-.demo-intro-title {
-  font-family: var(--display);
-  font-style: italic;
-  font-size: 2.5rem;
-  font-weight: 300;
-  color: var(--rose-glow);
-  text-shadow: 0 0 40px rgba(232,181,206,.5), 0 0 80px rgba(232,181,206,.2);
-  letter-spacing: -0.02em;
-  animation: titleBreath 5s ease-in-out infinite;
-}
-
-@keyframes titleBreath {
-  0%, 100% { text-shadow: 0 0 40px rgba(232,181,206,.5), 0 0 80px rgba(232,181,206,.2); }
-  50% { text-shadow: 0 0 60px rgba(232,181,206,.7), 0 0 120px rgba(232,181,206,.3); }
-}
-
-.demo-intro-sub {
-  font-family: var(--sans);
-  font-size: 0.85rem;
-  color: var(--text-primary);
-  max-width: 400px;
-  text-align: center;
-  line-height: 1.6;
-  letter-spacing: .01em;
-}
-
-/* ── Play button ── */
-
-.demo-play-btn {
-  margin-top: 16px;
-  width: 64px;
-  height: 64px;
-  border-radius: 50%;
-  border: 2px solid var(--rose-dim);
-  background: rgba(58,32,48,.4);
-  color: var(--rose-glow);
-  font-size: 24px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 300ms var(--ease);
-  position: relative;
-}
-
-.demo-play-btn:hover {
-  border-color: var(--rose-bright);
-  background: rgba(58,32,48,.7);
-  box-shadow: 0 0 30px rgba(220,165,189,.25);
-  transform: scale(1.08);
-}
-
-/* Pulse ring — always active, stronger on hover */
-.demo-play-btn::before {
-  content: "";
-  position: absolute;
-  inset: -8px;
-  border: 1px solid var(--rose-dim);
-  border-radius: 50%;
-  animation: demoRingPulse 2.5s ease-in-out infinite;
-}
-
-.demo-play-btn::after {
-  content: "";
-  position: absolute;
-  inset: -18px;
-  border: 1px solid rgba(184, 122, 148, .15);
-  border-radius: 50%;
-  animation: demoRingPulse 2.5s ease-in-out infinite .8s;
-}
-
-.demo-play-btn:hover::before {
-  border-color: var(--rose-bright);
-  animation: demoRingPulseHover 1.2s ease-in-out infinite;
-}
-
-@keyframes demoRingPulse {
-  0%, 100% { transform: scale(1); opacity: 0.5; }
-  50% { transform: scale(1.12); opacity: 0; }
-}
-
-@keyframes demoRingPulseHover {
-  0%, 100% { transform: scale(1); opacity: 0.7; }
-  50% { transform: scale(1.2); opacity: 0; }
-}
-
-/* ── Playback bar (bottom) ── */
+/* ═══ PLAYBACK BAR ═══ */
 
 .demo-playback-bar {
   display: flex;
@@ -618,9 +773,61 @@
   padding: var(--sp-1) var(--sp-4);
   gap: var(--sp-2);
   border-top: 1px solid var(--glass-border);
-  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--bg-raised) 75%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   flex-shrink: 0;
-  height: 34px;
+  height: 38px;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Progress fill bar (full-width behind content) ── */
+.demo-pb-fill {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.demo-pb-fill-inner {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg,
+    var(--pb-accent-deep, color-mix(in srgb, var(--rose-deep) 25%, transparent)) 0%,
+    var(--pb-accent-mid, color-mix(in srgb, var(--rose) 12%, transparent)) 60%,
+    var(--pb-accent-bright, color-mix(in srgb, var(--rose-bright) 18%, transparent)) 100%
+  );
+  transition: width 400ms var(--ease);
+  position: relative;
+}
+
+.demo-pb-fill-inner::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--pb-accent-glow, var(--rose-bright));
+  box-shadow: 0 0 8px var(--pb-accent-glow, var(--rose-bright)),
+              0 0 20px color-mix(in srgb, var(--rose-bright) 30%, transparent);
+  opacity: 0;
+  transition: opacity 300ms;
+}
+
+.demo-playback-bar.running .demo-pb-fill-inner::after {
+  opacity: 1;
+}
+
+/* Ensure bar content sits above the fill */
+.demo-pb-controls,
+.demo-mode-toggle,
+.demo-pb-progress,
+.demo-pb-cmd-preview,
+.demo-pb-speed-pills {
+  position: relative;
+  z-index: 1;
 }
 
 .demo-pb-controls {
@@ -629,24 +836,32 @@
   align-items: center;
 }
 
+/* ── Playback buttons with micro-interactions ── */
 .demo-pb-btn {
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   color: var(--text-dim);
   width: 30px;
   height: 30px;
-  border-radius: 2px;
+  border-radius: 4px;
   font-size: 0.8rem;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all var(--duration-snap) var(--ease);
+  transition: color 150ms var(--ease), border-color 150ms var(--ease), background 150ms var(--ease), box-shadow 150ms var(--ease), transform 150ms var(--ease);
 }
 
-.demo-pb-btn:hover {
+.demo-pb-btn:hover:not(:disabled) {
   color: var(--text-primary);
   border-color: var(--rose-dim);
+  transform: scale(1.1);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rose-bright) 20%, transparent);
+}
+
+.demo-pb-btn:active:not(:disabled) {
+  transform: scale(0.95);
+  transition-duration: 60ms;
 }
 
 .demo-pb-btn.primary {
@@ -655,9 +870,26 @@
   color: var(--rose-bright);
 }
 
+.demo-pb-btn.primary:hover:not(:disabled) {
+  box-shadow: 0 0 14px color-mix(in srgb, var(--rose-bright) 35%, transparent);
+  border-color: var(--rose-bright);
+}
+
 .demo-pb-btn:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+/* Play button idle pulse when server is connected */
+.demo-pb-btn.primary.idle-pulse {
+  animation: pbPlayPulse 2.4s ease-in-out infinite;
+}
+
+@keyframes pbPlayPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--rose-bright) 0%, transparent); }
+  50% { box-shadow: 0 0 12px 3px color-mix(in srgb, var(--rose-bright) 35%, transparent); }
 }
 
 .demo-pb-btn.waiting {
@@ -673,49 +905,103 @@
 }
 
 @keyframes stepPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(216, 154, 178, 0); }
-  50% { box-shadow: 0 0 12px 2px rgba(216, 154, 178, 0.5); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--rose-bright) 0%, transparent); }
+  50% { box-shadow: 0 0 12px 2px color-mix(in srgb, var(--rose-bright) 50%, transparent); }
 }
 
-.demo-mode-toggle {
+/* ── Speed pills ── */
+.demo-pb-speed-pills {
   display: flex;
   gap: 0;
   align-items: center;
+  margin-left: 4px;
+  background: color-mix(in srgb, white 3%, transparent);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  padding: 2px;
+}
+
+.demo-pb-speed-pill {
+  background: transparent;
+  border: none;
+  color: var(--text-ghost);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 3px 7px;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: color 150ms, background 150ms;
+}
+
+.demo-pb-speed-pill:hover {
+  color: var(--text-dim);
+}
+
+.demo-pb-speed-pill.active {
+  color: var(--rose-bright);
+  background: var(--rose-deep);
+}
+
+/* ── Mode toggle — segmented control with sliding pill ── */
+.demo-mode-toggle {
+  display: flex;
+  align-items: center;
   margin-left: 8px;
+  background: color-mix(in srgb, white 3%, transparent);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  padding: 2px;
+  position: relative;
+}
+
+.demo-mode-toggle-track {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc(50% - 2px);
+  background: var(--rose-deep);
+  border-radius: 3px;
+  transition: transform 200ms var(--ease-snappy);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.demo-mode-toggle-track.at-step {
+  transform: translateX(100%);
 }
 
 .demo-mode-btn {
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
-  color: var(--text-dim);
-  padding: 5px 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-ghost);
+  padding: 4px 14px;
   font-family: var(--sans);
   font-size: var(--text-xs);
   cursor: pointer;
-  transition: all var(--duration-snap) var(--ease);
+  transition: color 150ms;
+  position: relative;
+  z-index: 1;
+  border-radius: 3px;
 }
 
-.demo-mode-btn:first-child {
-  border-radius: 2px 0 0 2px;
-}
-
-.demo-mode-btn:last-child {
-  border-radius: 0 2px 2px 0;
-  border-left: none;
+.demo-mode-btn:hover {
+  color: var(--text-dim);
 }
 
 .demo-mode-btn.active {
-  background: var(--rose-deep);
-  border-color: var(--rose-dim);
   color: var(--rose-bright);
 }
 
+/* ── Progress text ── */
 .demo-pb-progress {
   font-family: var(--mono);
   font-size: var(--text-xs);
   color: var(--text-dim);
   margin-left: 12px;
   white-space: nowrap;
+  position: relative;
 }
 
 .demo-pb-step-label {
@@ -732,7 +1018,503 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 4px 10px;
-  background: var(--glass-bg);
-  border-radius: 2px;
+  background: color-mix(in srgb, white 2.5%, transparent);
+  border-radius: 3px;
   border: 1px solid var(--glass-border);
+}
+
+/* Typewriter animation on status text change */
+.demo-pb-cmd-preview.typewriter-enter {
+  animation: pbTypewriter 350ms var(--ease);
+}
+
+@keyframes pbTypewriter {
+  0% {
+    opacity: 0;
+    clip-path: inset(0 100% 0 0);
+  }
+  100% {
+    opacity: 1;
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* ═══ ANIMATIONS ═══ */
+
+/* ── 1. Scenario tab switch: content cross-fade ── */
+
+.demo-terminals.scenario-exit {
+  animation: scenarioExit 250ms var(--ease) forwards;
+}
+
+.demo-terminals.scenario-enter {
+  animation: scenarioEnter 400ms var(--ease) forwards;
+}
+
+@keyframes scenarioExit {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.97); }
+}
+
+@keyframes scenarioEnter {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ── 2. Terminal pane staggered reveal ── */
+
+.demo-term-pane.term-reveal {
+  animation: termReveal 500ms var(--ease) both;
+}
+
+/* Even panes slide from left, odd from right */
+.demo-term-pane.term-reveal.from-left {
+  animation-name: termRevealLeft;
+}
+
+.demo-term-pane.term-reveal.from-right {
+  animation-name: termRevealRight;
+}
+
+@keyframes termRevealLeft {
+  from { opacity: 0; transform: translateX(-30px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes termRevealRight {
+  from { opacity: 0; transform: translateX(30px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ── 4. Progress bar glowing leading edge ── */
+
+.demo-pb-progress.active::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--rose-bright);
+  box-shadow: 0 0 8px var(--rose-bright), 0 0 20px color-mix(in srgb, var(--rose-bright) 40%, transparent);
+  animation: progressGlow 1.5s ease-in-out infinite;
+}
+
+@keyframes progressGlow {
+  0%, 100% { box-shadow: 0 0 8px var(--rose-bright), 0 0 20px color-mix(in srgb, var(--rose-bright) 40%, transparent); opacity: 1; }
+  50% { box-shadow: 0 0 16px var(--rose-bright), 0 0 40px color-mix(in srgb, var(--rose-bright) 60%, transparent); opacity: 0.7; }
+}
+
+/* Trail effect on the playback bar */
+.demo-playback-bar.running::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--rose-dim) 30%,
+    var(--rose-bright) 60%,
+    var(--rose-glow) 80%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: progressTrail 3s linear infinite;
+}
+
+@keyframes progressTrail {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── 5. Command typing flash ── */
+
+.demo-term-pane.cmd-flash::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--rose-bright) 6%, transparent) 0%,
+    transparent 100%
+  );
+  pointer-events: none;
+  z-index: 3;
+  animation: cmdFlash 400ms ease-out forwards;
+}
+
+@keyframes cmdFlash {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ── 6. Intro overlay cinematic dismiss (shared keyframe used by ScenarioPreview) ── */
+
+@keyframes introDismiss {
+  0% { opacity: 1; backdrop-filter: blur(12px); }
+  40% { opacity: 0.8; backdrop-filter: blur(6px); }
+  100% { opacity: 0; backdrop-filter: blur(0px); transform: scale(1.05); pointer-events: none; }
+}
+
+/* ── 7. Phase transition ripple ── */
+
+.demo-terminals.phase-flash::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 60% 40% at 50% 50%,
+    color-mix(in srgb, var(--rose-bright) 12%, transparent) 0%,
+    transparent 70%
+  );
+  pointer-events: none;
+  z-index: 5;
+  animation: phaseRipple 600ms ease-out forwards;
+}
+
+@keyframes phaseRipple {
+  0% { opacity: 0; transform: scale(0.8); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1.2); }
+}
+
+/* ── 8. Completion celebration glow ── */
+
+.demo-terminals.scenario-complete {
+  animation: completeGlow 1.2s ease-out;
+}
+
+@keyframes completeGlow {
+  0% { box-shadow: inset 0 0 0 0 color-mix(in srgb, var(--success) 0%, transparent); }
+  30% { box-shadow: inset 0 0 60px 10px color-mix(in srgb, var(--success) 15%, transparent); }
+  60% { box-shadow: inset 0 0 40px 5px color-mix(in srgb, var(--success) 8%, transparent); }
+  100% { box-shadow: inset 0 0 0 0 color-mix(in srgb, var(--success) 0%, transparent); }
+}
+
+/* Success burst particles */
+.demo-complete-burst {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+  overflow: hidden;
+}
+
+.demo-complete-burst .particle {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  top: 50%;
+  left: 50%;
+  animation: particleBurst 1s ease-out forwards;
+}
+
+.demo-complete-burst .particle:nth-child(1) { --angle: 0deg; --dist: 120px; background: var(--rose-bright); animation-delay: 0ms; }
+.demo-complete-burst .particle:nth-child(2) { --angle: 45deg; --dist: 100px; background: var(--bone-bright); animation-delay: 30ms; }
+.demo-complete-burst .particle:nth-child(3) { --angle: 90deg; --dist: 140px; background: var(--success); animation-delay: 60ms; }
+.demo-complete-burst .particle:nth-child(4) { --angle: 135deg; --dist: 110px; background: var(--dream-bright); animation-delay: 90ms; }
+.demo-complete-burst .particle:nth-child(5) { --angle: 180deg; --dist: 130px; background: var(--rose-glow); animation-delay: 40ms; }
+.demo-complete-burst .particle:nth-child(6) { --angle: 225deg; --dist: 105px; background: var(--bone); animation-delay: 70ms; }
+.demo-complete-burst .particle:nth-child(7) { --angle: 270deg; --dist: 125px; background: var(--success); animation-delay: 20ms; }
+.demo-complete-burst .particle:nth-child(8) { --angle: 315deg; --dist: 115px; background: var(--rose-bright); animation-delay: 50ms; }
+.demo-complete-burst .particle:nth-child(9) { --angle: 22deg; --dist: 95px; background: var(--dream-bright); animation-delay: 80ms; }
+.demo-complete-burst .particle:nth-child(10) { --angle: 200deg; --dist: 135px; background: var(--bone-bright); animation-delay: 45ms; }
+.demo-complete-burst .particle:nth-child(11) { --angle: 160deg; --dist: 100px; background: var(--rose-dim); animation-delay: 65ms; }
+.demo-complete-burst .particle:nth-child(12) { --angle: 300deg; --dist: 120px; background: var(--success); animation-delay: 35ms; }
+
+@keyframes particleBurst {
+  0% {
+    transform: translate(-50%, -50%) rotate(var(--angle)) translateY(0);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -50%) rotate(var(--angle)) translateY(calc(-1 * var(--dist)));
+    opacity: 0;
+  }
+}
+
+/* ═══ COMPLETION OVERLAY ═══ */
+
+.demo-completion-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 32px;
+  background: color-mix(in srgb, var(--bg-void) 55%, transparent);
+  backdrop-filter: blur(4px);
+  cursor: pointer;
+  animation: completionBackdropIn 400ms var(--ease) both;
+}
+
+@keyframes completionBackdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.demo-completion-overlay.dismissing {
+  animation: completionBackdropOut 350ms var(--ease) forwards;
+}
+
+@keyframes completionBackdropOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.demo-completion-card {
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--surface) 92%, transparent), color-mix(in srgb, var(--bg-raised) 95%, transparent)),
+    var(--bg-void);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  padding: 20px 28px;
+  min-width: 340px;
+  max-width: 520px;
+  cursor: default;
+  backdrop-filter: blur(16px);
+  box-shadow:
+    var(--shadow-lg),
+    0 0 1px 0 color-mix(in srgb, var(--rose-bright) 20%, transparent),
+    inset 0 1px 0 color-mix(in srgb, white 4%, transparent);
+  animation: completionCardIn 450ms var(--ease) both;
+  animation-delay: 50ms;
+}
+
+@keyframes completionCardIn {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.demo-completion-overlay.dismissing .demo-completion-card {
+  animation: completionCardOut 300ms var(--ease) forwards;
+}
+
+@keyframes completionCardOut {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(16px); }
+}
+
+.demo-completion-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.demo-completion-title {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 1.15rem;
+  font-weight: 300;
+  color: var(--text-strong);
+  letter-spacing: -0.01em;
+}
+
+.demo-completion-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 25%, transparent);
+  border-radius: 2px;
+  padding: 2px 8px;
+  line-height: 1;
+}
+
+.demo-completion-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin-bottom: 18px;
+  padding: 12px 0;
+  border-top: 1px solid var(--glass-border);
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.demo-completion-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 64px;
+}
+
+.demo-completion-stat-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+
+.demo-completion-stat-value {
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+  color: var(--text-strong);
+}
+
+.demo-completion-stat-value.mono {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+}
+
+.demo-completion-gates {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.demo-completion-gate-pass,
+.demo-completion-gate-fail {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+}
+
+.demo-completion-gate-pass {
+  color: var(--success);
+}
+
+.demo-completion-gate-fail {
+  color: var(--rose-bright);
+}
+
+.demo-completion-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.demo-completion-btn {
+  flex: 1;
+  padding: 8px 16px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 200ms var(--ease), background 200ms var(--ease), border-color 200ms var(--ease), box-shadow 200ms var(--ease);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  color: var(--text-dim);
+}
+
+.demo-completion-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--rose-dim);
+  background: var(--rose-deep);
+}
+
+.demo-completion-btn-next {
+  background: var(--rose-deep);
+  border-color: var(--rose-dim);
+  color: var(--rose-bright);
+}
+
+.demo-completion-btn-next:hover {
+  background: color-mix(in srgb, var(--rose-deep) 70%, var(--bg-void));
+  border-color: var(--rose-bright);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--rose-bright) 15%, transparent);
+}
+
+/* ═══ RESPONSIVE ═══ */
+
+/* Stack terminal/sidebar vertically on medium screens */
+@media (max-width: 1024px) {
+  .demo-main {
+    flex-direction: column;
+  }
+
+  .demo-terminals {
+    flex: 1 1 60%;
+    min-height: 200px;
+  }
+
+  .demo-sidebar {
+    flex: 0 1 auto;
+    max-height: 40%;
+    border-left: none;
+    border-top: 1px solid var(--glass-border);
+  }
+}
+
+/* Compact tab bar on small screens */
+@media (max-width: 768px) {
+  .demo-tabs-bar {
+    height: 32px;
+    padding: 0 var(--sp-2);
+    gap: var(--sp-1);
+  }
+
+  .demo-tab {
+    padding: 3px 8px;
+    font-size: 10px;
+    gap: 4px;
+  }
+
+  .demo-tab-num {
+    width: 14px;
+    height: 14px;
+    font-size: 10px;
+  }
+
+  .demo-tab-accent {
+    display: none;
+  }
+
+  .demo-playback-bar {
+    height: 34px;
+    padding: var(--sp-1) var(--sp-2);
+  }
+
+  .demo-pb-cmd-preview {
+    display: none;
+  }
+
+  .demo-mode-toggle {
+    margin-left: 4px;
+  }
+
+  .demo-pb-speed-pills {
+    display: none;
+  }
+}
+
+/* ═══ REDUCED MOTION ═══ */
+
+@media (prefers-reduced-motion: reduce) {
+  /* Terminal pane animations */
+  .demo-term-dot.connecting,
+  .demo-term-waveform { animation: none; }
+  .demo-term-cmd-echo { animation: none; opacity: 0.8; }
+
+  /* Scenario transitions */
+  .demo-terminals.scenario-exit,
+  .demo-terminals.scenario-enter,
+  .demo-term-pane.term-reveal,
+  .demo-terminals.phase-flash::before,
+  .demo-terminals.scenario-complete { animation: none !important; }
+
+  /* Playback bar */
+  .demo-playback-bar.running::after { animation: none !important; }
+
+  /* Completion overlay */
+  .demo-completion-overlay,
+  .demo-completion-overlay.dismissing,
+  .demo-completion-card,
+  .demo-completion-overlay.dismissing .demo-completion-card,
+  .demo-complete-burst .particle { animation: none !important; }
 }

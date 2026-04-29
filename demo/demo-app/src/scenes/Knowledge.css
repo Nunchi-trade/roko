@@ -11,7 +11,7 @@
   border-radius: 4px;
   font-size: var(--text-xs);
   cursor: pointer;
-  transition: all var(--duration-snap) var(--ease);
+  transition: color var(--duration-snap) var(--ease), border-color var(--duration-snap) var(--ease);
 }
 .knowledge__mode-btn:hover { color: var(--text-soft); }
 .knowledge__mode-btn--active { color: var(--text-primary); border-color: var(--text-primary); }

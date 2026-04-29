@@ -11,6 +11,11 @@ export const explore: Scenario = {
   labels: ['workspace', 'learning', 'config', 'knowledge'],
   panel: true,
   promptBar: false,
+  category: 'exploration',
+  features: ['18 crates', '85 routes', '100+ commands'],
+  durationHint: '~120s',
+  accent: 'violet',
+  icon: 'explore',
   steps: [
     { label: 'status', sublabel: 'workspace' },
     { label: 'doctor', sublabel: 'workspace' },

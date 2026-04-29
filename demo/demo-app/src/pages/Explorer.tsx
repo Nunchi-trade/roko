@@ -127,10 +127,12 @@ function kindCanvasColor(kind: string): string {
    SPARKLINE (tiny inline canvas)
    ═══════════════════════════════════════════════════════════ */
 
+/** 2. Sparkline with animated left-to-right draw reveal. */
 function drawSparkline(
   canvas: HTMLCanvasElement,
   data: number[],
   color: string,
+  animate = true,
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx || data.length < 2) return;
@@ -141,34 +143,86 @@ function drawSparkline(
   canvas.width = w * dpr;
   canvas.height = h * dpr;
   ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, w, h);
 
   const max = Math.max(...data, 1);
   const step = w / (data.length - 1);
 
-  ctx.beginPath();
-  ctx.moveTo(0, h - (data[0] / max) * h * 0.85);
-  for (let i = 1; i < data.length; i++) {
-    ctx.lineTo(i * step, h - (data[i] / max) * h * 0.85);
-  }
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
-  ctx.lineJoin = 'round';
-  ctx.stroke();
-
-  // fill under
-  ctx.lineTo((data.length - 1) * step, h);
-  ctx.lineTo(0, h);
-  ctx.closePath();
-  ctx.fillStyle = color.replace(')', ', 0.08)').replace('rgb', 'rgba');
-  // handle hex colors
+  let fillColor: string;
   if (color.startsWith('#')) {
     const r = parseInt(color.slice(1, 3), 16);
     const g = parseInt(color.slice(3, 5), 16);
     const b = parseInt(color.slice(5, 7), 16);
-    ctx.fillStyle = `rgba(${r},${g},${b},0.10)`;
+    fillColor = `rgba(${r},${g},${b},0.10)`;
+  } else {
+    fillColor = color.replace(')', ', 0.08)').replace('rgb', 'rgba');
   }
-  ctx.fill();
+
+  const drawFrame = (progress: number) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w * progress, h);
+    ctx.clip();
+
+    ctx.beginPath();
+    ctx.moveTo(0, h - (data[0] / max) * h * 0.85);
+    for (let i = 1; i < data.length; i++) {
+      ctx.lineTo(i * step, h - (data[i] / max) * h * 0.85);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    ctx.lineTo((data.length - 1) * step, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+    ctx.restore();
+  };
+
+  if (!animate) {
+    drawFrame(1);
+    return;
+  }
+
+  const duration = 600;
+  const start = performance.now();
+  const tick = (now: number) => {
+    const elapsed = now - start;
+    const t = Math.min(elapsed / duration, 1);
+    const progress = t >= 1 ? 1 : 1 - Math.pow(2, -10 * t);
+    drawFrame(progress);
+    if (t < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+/** 4. Animated counter: counts from 0 to target over 800ms with easeOutExpo. */
+function useAnimatedValue(target: number, duration = 800): number {
+  const [display, setDisplay] = useState(0);
+  const prevTarget = useRef(target);
+  const rafRef = useRef(0);
+
+  useEffect(() => {
+    const from = prevTarget.current;
+    prevTarget.current = target;
+    if (from === target) return;
+
+    const start = performance.now();
+    const tick = (now: number) => {
+      const elapsed = now - start;
+      const t = Math.min(elapsed / duration, 1);
+      const ease = t >= 1 ? 1 : 1 - Math.pow(2, -10 * t);
+      setDisplay(from + (target - from) * ease);
+      if (t < 1) rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [target, duration]);
+
+  return display;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -183,6 +237,8 @@ export default function Explorer() {
   const [expandedEp, setExpandedEp] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [hoveredEp, setHoveredEp] = useState<Episode | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   /* ── refs ── */
   const heroRef = useRef<HTMLCanvasElement>(null);
@@ -199,8 +255,9 @@ export default function Explorer() {
 
   const { get } = useLiveApi();
 
-  /* ── data fetch ── */
+  /* ── data fetch (9. triggers shimmer on refresh) ── */
   const refresh = useCallback(async () => {
+    setRefreshing(true);
     try {
       const [h, eps, evts] = await Promise.allSettled([
         get<HealthData>('/api/health'),
@@ -212,11 +269,13 @@ export default function Explorer() {
       if (evts.status === 'fulfilled') setEvents(Array.isArray(evts.value) ? evts.value : []);
     } catch {
       // API may not be available
+    } finally {
+      setTimeout(() => setRefreshing(false), 1000);
     }
   }, [get]);
 
   useEffect(() => {
-    refresh();
+    refresh().finally(() => setInitialLoading(false));
     pollRef.current = setInterval(refresh, 10_000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [refresh]);
@@ -238,6 +297,13 @@ export default function Explorer() {
       : 0;
     return { totalCost, agentCount: agents.size, gatePass, avgDuration };
   }, [episodes]);
+
+  /* 4. Animated stat counters */
+  const animEpCount = useAnimatedValue(episodes.length);
+  const animCost = useAnimatedValue(stats.totalCost);
+  const animAgents = useAnimatedValue(stats.agentCount);
+  const animGatePass = useAnimatedValue(stats.gatePass);
+  const animDuration = useAnimatedValue(stats.avgDuration);
 
   // Sparkline data: bucket episodes into 10-min intervals
   const sparkData = useMemo(() => {
@@ -604,7 +670,7 @@ export default function Explorer() {
 
       {/* ── 1. Floating header ── */}
       <header className="expl-header">
-        <span className="expl-title">
+        <span className="expl-title text-gradient-warm">
           <FlatIcon name="explorer" size={18} tone="rose" />
           Explorer
         </span>
@@ -643,7 +709,7 @@ export default function Explorer() {
           </span>
         </div>
 
-        <button className="expl-refresh" onClick={refresh} title="Refresh data">
+        <button className="expl-refresh btn-interactive" onClick={refresh} title="Refresh data">
           <FlatIcon name="refresh" size={14} tone="rose" />
         </button>
       </header>
@@ -660,31 +726,31 @@ export default function Explorer() {
         />
       </div>
 
-      {/* ── 3. Stat strip with sparklines ── */}
-      <div className="expl-stat-strip">
+      {/* ── 3. Stat strip with sparklines (4=counters, 9=shimmer, 10=pulse) ── */}
+      <div className={`expl-stat-strip${episodes.length > 0 ? ' expl-stat-strip--active' : ''}${refreshing ? ' expl-refreshing' : ''}`}>
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="database" size={14} tone="rose" />EPISODES</span>
-          <span className="expl-stat-value expl-stat-value--episodes">{episodes.length}</span>
+          <span className="expl-stat-value expl-stat-value--episodes counter-animate">{Math.round(animEpCount)}</span>
           <canvas ref={epSparkRef} className="expl-spark" role="img" aria-label="Episodes sparkline" />
         </div>
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="cost" size={14} tone="bone" />COST</span>
-          <span className="expl-stat-value expl-stat-value--cost">${stats.totalCost.toFixed(3)}</span>
+          <span className="expl-stat-value expl-stat-value--cost counter-animate">${animCost.toFixed(3)}</span>
           <canvas ref={costSparkRef} className="expl-spark" role="img" aria-label="Cost sparkline" />
         </div>
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="agent" size={14} tone="dream" />AGENTS</span>
-          <span className="expl-stat-value expl-stat-value--agents">{stats.agentCount}</span>
+          <span className="expl-stat-value expl-stat-value--agents counter-animate">{Math.round(animAgents)}</span>
           <canvas ref={agentSparkRef} className="expl-spark" role="img" aria-label="Agent activity sparkline" />
         </div>
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="gate" size={14} tone="success" />GATE PASS</span>
-          <span className="expl-stat-value expl-stat-value--gate">{stats.gatePass.toFixed(0)}%</span>
+          <span className="expl-stat-value expl-stat-value--gate counter-animate">{animGatePass.toFixed(0)}%</span>
           <canvas ref={gateSparkRef} className="expl-spark" role="img" aria-label="Gate pass rate sparkline" />
         </div>
         <div className="expl-stat-pill">
           <span className="expl-stat-label"><FlatIcon name="duration" size={14} tone="rose" />AVG DURATION</span>
-          <span className="expl-stat-value expl-stat-value--duration">{stats.avgDuration.toFixed(1)}s</span>
+          <span className="expl-stat-value expl-stat-value--duration counter-animate">{animDuration.toFixed(1)}s</span>
           <canvas ref={durSparkRef} className="expl-spark" role="img" aria-label="Duration sparkline" />
         </div>
       </div>
@@ -697,7 +763,11 @@ export default function Explorer() {
             <div
               key={hour}
               className="expl-heat-cell"
-              style={{ background: heatColor(count) }}
+              style={{
+                background: heatColor(count),
+                /* 3. Diagonal wave: col index drives delay (top-left to bottom-right) */
+                animationDelay: `${hour * 30}ms`,
+              }}
               title={`${hour}:00 - ${count} episode${count !== 1 ? 's' : ''}`}
             >
               {(hour === 0 || hour === 6 || hour === 12 || hour === 18 || hour === 23) && (
@@ -709,8 +779,14 @@ export default function Explorer() {
       </div>
 
       {/* ── 5. Episode card grid ── */}
-      <div className="expl-cards-section">
-        {episodes.length === 0 ? (
+      <div className={`expl-cards-section${refreshing ? ' expl-refreshing' : ''}`}>
+        {initialLoading ? (
+          <div className="expl-card-grid progressive-reveal">
+            {Array.from({ length: 6 }, (_, i) => (
+              <div key={i} className="skeleton-card skeleton" style={{ height: 160 }} />
+            ))}
+          </div>
+        ) : episodes.length === 0 ? (
           <div className="expl-empty">No episodes recorded yet</div>
         ) : (
           <div className="expl-card-grid">
@@ -718,7 +794,7 @@ export default function Explorer() {
               <div
                 key={ep.id}
                 className={`expl-card${expandedEp === ep.id ? ' expl-card--expanded' : ''}`}
-                style={{ animationDelay: `${i * 40}ms` }}
+                style={{ animationDelay: `${i * 60}ms` }}
                 role="button"
                 tabIndex={0}
                 onClick={() => setExpandedEp(expandedEp === ep.id ? null : ep.id)}
@@ -808,7 +884,7 @@ export default function Explorer() {
       {/* ── 6. Bottom drawer (providers + events) ── */}
       <div className={`expl-drawer${drawerOpen ? ' open' : ''}`}>
         <button
-          className="expl-drawer-handle"
+          className="expl-drawer-handle btn-ghost-reveal"
           onClick={() => setDrawerOpen(!drawerOpen)}
           aria-label={drawerOpen ? 'Collapse drawer' : 'Expand drawer'}
         >
@@ -845,7 +921,7 @@ export default function Explorer() {
                 <div className="expl-empty">No events recorded yet</div>
               ) : (
                 events.slice(0, 16).map((evt, i) => (
-                  <div key={`${evt?.type ?? 'evt'}-${i}`} className="expl-event-item">
+                  <div key={`${evt?.type ?? 'evt'}-${i}`} className="expl-event-item" style={{ animationDelay: `${i * 50}ms` }}>
                     <span className="expl-event-ts">{safeTimestamp(evt?.timestamp)}</span>
                     <span className="expl-event-badge"><FlatIcon name={inferIcon(evt?.type ?? 'event')} size={12} tone="muted" />{evt?.type ?? 'unknown'}</span>
                     <span className="expl-event-payload">{safePayload(evt?.payload)}</span>

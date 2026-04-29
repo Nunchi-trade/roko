@@ -11,6 +11,11 @@ export const dreamConsolidation: Scenario = {
   labels: ['dream engine', 'knowledge monitor'],
   panel: true,
   promptBar: false,
+  category: 'learning',
+  features: ['Offline consolidation', 'Episode distillation', 'Durable knowledge'],
+  durationHint: '~60s',
+  accent: 'violet',
+  icon: 'dream',
   steps: [
     { label: 'Trigger check', sublabel: 'dream schedule' },
     { label: 'Seed episodes', sublabel: 'roko run' },

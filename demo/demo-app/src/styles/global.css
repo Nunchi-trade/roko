@@ -6,9 +6,14 @@ html, body, #root {
   color: var(--text-primary);
   font-family: var(--sans);
   font-size: 18px;
-  height: 100vh;
-  overflow: hidden;
+  height: 100%;
+  margin: 0;
+  padding: 0;
 }
+
+/* Prevent horizontal overflow only — vertical scroll is normal */
+html { overflow-x: hidden; }
+body { overflow-x: hidden; }
 
 button,
 input,

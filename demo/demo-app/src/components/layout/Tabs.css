@@ -36,7 +36,7 @@
 
 .tabs__badge {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-ghost);
   margin-left: 2px;
 }

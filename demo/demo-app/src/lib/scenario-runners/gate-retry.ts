@@ -11,6 +11,11 @@ export const gateRetry: Scenario = {
   labels: ['task execution', 'gate status'],
   panel: true,
   promptBar: false,
+  category: 'pipeline',
+  features: ['Gate failure detection', 'Auto-replan', 'Adjusted retry'],
+  durationHint: '~75s',
+  accent: 'amber',
+  icon: 'gate',
   steps: [
     { label: 'First attempt', sublabel: 'roko run' },
     { label: 'Gate failure', sublabel: 'compile/test/clippy' },

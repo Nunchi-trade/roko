@@ -7,25 +7,7 @@ import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import './dashboard.css';
-
-/* ── Keyframes ───────────────────────────────────────────── */
-const FLEET_STYLES = `
-  @keyframes fleet-pulse-green {
-    0%, 100% { box-shadow: 0 0 4px 1px rgba(138,156,134,.6), 0 0 8px 2px rgba(138,156,134,.25); }
-    50%       { box-shadow: 0 0 8px 3px rgba(138,156,134,.9), 0 0 16px 5px rgba(138,156,134,.4); }
-  }
-  @keyframes fleet-pulse-amber {
-    0%, 100% { box-shadow: 0 0 4px 1px rgba(216,168,120,.6), 0 0 8px 2px rgba(216,168,120,.25); }
-    50%       { box-shadow: 0 0 8px 3px rgba(216,168,120,.9), 0 0 16px 5px rgba(216,168,120,.4); }
-  }
-  .agent-card {
-    transition: transform .25s cubic-bezier(.22,1,.36,1), box-shadow .25s cubic-bezier(.22,1,.36,1), border-color .25s ease !important;
-  }
-  .agent-card:hover {
-    transform: translateY(-3px) !important;
-    box-shadow: 0 8px 32px rgba(220,165,189,.12), 0 0 0 1px rgba(220,165,189,.25) !important;
-  }
-`;
+import './AgentFleet.css';
 
 /* ── Types ───────────────────────────────────────────────── */
 
@@ -418,8 +400,12 @@ export default function AgentFleet() {
     setTopology((prev) => (sameTopology(prev, topo) ? prev : topo));
   }, [get]);
 
-  // Initial fetch on mount
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  // Initial fetch + 30s fallback poll
+  useEffect(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, 30_000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
 
   // SSE-triggered refetch
   const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
@@ -437,26 +423,29 @@ export default function AgentFleet() {
 
   return (
     <div className="dash-page">
-      <style>{FLEET_STYLES}</style>
       {/* TOP MOSAIC */}
-      <Mosaic columns={4}>
-        <MosaicCell label="TOTAL" value={agents.length} color="bone" mono />
-        <MosaicCell label="ACTIVE" value={active} color="success" mono />
-        <MosaicCell label="AVG REPUTATION" value={avgRep} color="warning" mono />
-        <MosaicCell label="TASKS DONE" value={totalTasks} color="rose" mono />
-      </Mosaic>
+      <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
+        <Mosaic columns={4}>
+          <MosaicCell label="TOTAL" value={agents.length} color="bone" mono />
+          <MosaicCell label="ACTIVE" value={active} color="success" mono />
+          <MosaicCell label="AVG REPUTATION" value={avgRep} color="warning" mono />
+          <MosaicCell label="TASKS DONE" value={totalTasks} color="rose" mono />
+        </Mosaic>
+      </div>
 
       {/* TOPOLOGY + AGENT CARDS SIDE BY SIDE */}
-      <div className="dash-agent-grid">
+      <div className="dash-agent-grid dash-stagger" style={{ '--stagger-i': 1 } as React.CSSProperties}>
         <Pane
           title="AGENT TOPOLOGY"
           badge={<span className="dash-badge">force-directed</span>}
         >
-          <TopologyGraph data={topology} height={240} />
+          <div className="dash-chart-enter">
+            <TopologyGraph data={topology} height={240} />
+          </div>
         </Pane>
 
         <div className="dash-agent-list">
-        {agents.map((agent) => {
+        {agents.map((agent, agentIdx) => {
           const rep = agent.performance?.reputation ?? agent.reputation ?? 0;
           const active = isAgentActive(agent);
           const isIdle = agent.status === 'idle';
@@ -465,72 +454,64 @@ export default function AgentFleet() {
           const failed = agent.performance?.failed_tasks ?? 0;
 
           return (
-            <Pane
+            <div
               key={agent.id}
-              className="agent-card"
-              title={agentDisplayName(agent).toUpperCase()}
-              badge={
-                <span className="dash-inline">
-                  <span className="dash-model-label">
-                    {agent.model ?? 'unknown'}
-                  </span>
-                  <span
-                    className="dash-dot"
-                    style={{
-                      background: active ? 'var(--success)' : isIdle ? 'var(--warning)' : 'var(--bone)',
-                      animation: active
-                        ? 'fleet-pulse-green 2.4s ease-in-out infinite'
-                        : isIdle
-                          ? 'fleet-pulse-amber 3s ease-in-out infinite'
-                          : 'none',
-                      boxShadow: active
-                        ? '0 0 4px 1px rgba(138,156,134,.6)'
-                        : isIdle
-                          ? '0 0 4px 1px rgba(216,168,120,.6)'
-                          : '0 0 4px rgba(200,184,144,.3)',
-                    }}
-                  />
-                </span>
-              }
-              foot={
-                <span className="dash-ghost">
-                  {active ? 'active now' : `last active ${fmtLastSeen(agent)}`}
-                </span>
-              }
+              className="dash-stagger"
+              style={{ '--stagger-i': agentIdx + 2 } as React.CSSProperties}
             >
-              <div className="dash-flex-col--gap8">
-                {/* Capability tags */}
-                <div className="dash-tags-wrap">
-                  {(agent.capabilities ?? []).map((cap) => (
-                    <span key={cap} className="dash-tag">{cap}</span>
-                  ))}
-                  {(agent.domain_tags ?? []).map((tag) => (
-                    <span key={tag} className="dash-tag--rose">{tag}</span>
-                  ))}
-                </div>
-
-                {/* Reputation bar */}
-                <div className="dash-flex-col--gap4">
-                  <div className="dash-row-item--between">
-                    <span className="dash-label-sans">Reputation</span>
-                    <span className="dash-value--glow">{rep}</span>
-                  </div>
-                  <div className="dash-bar-track">
-                    <div
-                      className="dash-bar-fill dash-bar-fill--rose"
-                      style={{ width: `${rep}%` }}
+              <Pane
+                className="af-agent-card"
+                title={agentDisplayName(agent).toUpperCase()}
+                badge={
+                  <span className="dash-inline">
+                    <span className="dash-model-label">
+                      {agent.model ?? 'unknown'}
+                    </span>
+                    <span
+                      className={`dash-dot ${active ? 'af-dot--active' : isIdle ? 'af-dot--idle' : 'af-dot--inactive'}`}
                     />
+                  </span>
+                }
+                foot={
+                  <span className="dash-ghost">
+                    {active ? 'active now' : `last active ${fmtLastSeen(agent)}`}
+                  </span>
+                }
+              >
+                <div className="dash-flex-col--gap8">
+                  {/* Capability tags */}
+                  <div className="dash-tags-wrap">
+                    {(agent.capabilities ?? []).map((cap) => (
+                      <span key={cap} className="dash-tag">{cap}</span>
+                    ))}
+                    {(agent.domain_tags ?? []).map((tag) => (
+                      <span key={tag} className="dash-tag--rose">{tag}</span>
+                    ))}
+                  </div>
+
+                  {/* Reputation bar */}
+                  <div className="dash-flex-col--gap4">
+                    <div className="dash-row-item--between">
+                      <span className="dash-label-sans">Reputation</span>
+                      <span className="dash-value--glow">{rep}</span>
+                    </div>
+                    <div className="dash-bar-track">
+                      <div
+                        className="dash-bar-fill dash-bar-fill--rose dash-bar-animate"
+                        style={{ width: `${rep}%`, animationDelay: `${agentIdx * 60 + 200}ms` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Stats row */}
+                  <div className="dash-stats-row">
+                    <StatPill label="tasks" value={String(tasks)} />
+                    <StatPill label="cost" value={`$${cost.toFixed(2)}`} />
+                    <StatPill label="failed" value={String(failed)} />
                   </div>
                 </div>
-
-                {/* Stats row */}
-                <div className="dash-stats-row">
-                  <StatPill label="tasks" value={String(tasks)} />
-                  <StatPill label="cost" value={`$${cost.toFixed(2)}`} />
-                  <StatPill label="failed" value={String(failed)} />
-                </div>
-              </div>
-            </Pane>
+              </Pane>
+            </div>
           );
         })}
         </div>

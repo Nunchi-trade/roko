@@ -1,6 +1,12 @@
 import { useState, useMemo, Fragment } from 'react';
 import type { BenchTaskResult, TaskStatus } from '../lib/bench-types';
 import { handleRowKeyDown } from '../lib/a11y';
+import {
+  AnimatedRow,
+  AnimatedHeaderCell,
+  ExpandableDetail,
+  TableEmptyState,
+} from './AnimatedTable';
 
 interface TaskTableProps {
   results: BenchTaskResult[];
@@ -61,7 +67,6 @@ export default function TaskTable({ results, showDifficulty = true, showOutputPr
     else { setSortKey(key); setSortAsc(true); }
   }
 
-  const arrow = (key: SortKey) => sortKey === key ? (sortAsc ? ' \u2191' : ' \u2193') : '';
   const colCount = 7 + (showDifficulty ? 1 : 0);
 
   return (
@@ -91,95 +96,96 @@ export default function TaskTable({ results, showDifficulty = true, showOutputPr
       <table className="task-table" role="table">
         <thead>
           <tr>
-            <th tabIndex={0} role="columnheader" onClick={() => handleSort('task_name')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('task_name'); } }}>Task{arrow('task_name')}</th>
-            {showDifficulty && <th tabIndex={0} role="columnheader" onClick={() => handleSort('difficulty')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('difficulty'); } }}>Diff{arrow('difficulty')}</th>}
-            <th tabIndex={0} role="columnheader" onClick={() => handleSort('status')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('status'); } }}>Status{arrow('status')}</th>
-            <th tabIndex={0} role="columnheader" onClick={() => handleSort('cost_usd')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('cost_usd'); } }}>Cost{arrow('cost_usd')}</th>
-            <th tabIndex={0} role="columnheader" onClick={() => handleSort('tokens')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('tokens'); } }}>Tokens{arrow('tokens')}</th>
-            <th tabIndex={0} role="columnheader" onClick={() => handleSort('duration_ms')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('duration_ms'); } }}>Duration{arrow('duration_ms')}</th>
-            <th tabIndex={0} role="columnheader" onClick={() => handleSort('model')} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSort('model'); } }}>Model{arrow('model')}</th>
+            <AnimatedHeaderCell sortKey="task_name" currentSort={sortKey} ascending={sortAsc} onSort={(k) => handleSort(k as SortKey)}>Task</AnimatedHeaderCell>
+            {showDifficulty && <AnimatedHeaderCell sortKey="difficulty" currentSort={sortKey} ascending={sortAsc} onSort={(k) => handleSort(k as SortKey)}>Diff</AnimatedHeaderCell>}
+            <AnimatedHeaderCell sortKey="status" currentSort={sortKey} ascending={sortAsc} onSort={(k) => handleSort(k as SortKey)}>Status</AnimatedHeaderCell>
+            <AnimatedHeaderCell sortKey="cost_usd" currentSort={sortKey} ascending={sortAsc} onSort={(k) => handleSort(k as SortKey)}>Cost</AnimatedHeaderCell>
+            <AnimatedHeaderCell sortKey="tokens" currentSort={sortKey} ascending={sortAsc} onSort={(k) => handleSort(k as SortKey)}>Tokens</AnimatedHeaderCell>
+            <AnimatedHeaderCell sortKey="duration_ms" currentSort={sortKey} ascending={sortAsc} onSort={(k) => handleSort(k as SortKey)}>Duration</AnimatedHeaderCell>
+            <AnimatedHeaderCell sortKey="model" currentSort={sortKey} ascending={sortAsc} onSort={(k) => handleSort(k as SortKey)}>Model</AnimatedHeaderCell>
             <th>Gates</th>
           </tr>
         </thead>
         <tbody>
-          {sorted.map((r) => (
-            <Fragment key={r.task_id}>
-              <tr
-                className={`task-row task-row-${r.status}`}
-                tabIndex={0}
-                role="row"
-                onClick={() => setExpandedId(expandedId === r.task_id ? null : r.task_id)}
-                onKeyDown={(e) => handleRowKeyDown(e, () => setExpandedId(expandedId === r.task_id ? null : r.task_id))}
-                style={{ cursor: 'pointer' }}
-              >
-                <td className="task-name">{r.task_name}</td>
-                {showDifficulty && (
+          {sorted.length === 0 ? (
+            <TableEmptyState colSpan={colCount} message="No matching tasks" />
+          ) : (
+            sorted.map((r, rowIdx) => (
+              <Fragment key={r.task_id}>
+                <AnimatedRow
+                  index={rowIdx}
+                  className={`task-row task-row-${r.status}`}
+                  onClick={() => setExpandedId(expandedId === r.task_id ? null : r.task_id)}
+                  onKeyDown={(e) => handleRowKeyDown(e, () => setExpandedId(expandedId === r.task_id ? null : r.task_id))}
+                  tabIndex={0}
+                  role="row"
+                  style={{ cursor: 'pointer' }}
+                >
+                  <td className="task-name">{r.task_name}</td>
+                  {showDifficulty && (
+                    <td>
+                      {r.difficulty != null && (
+                        <span className={`diff-badge diff-${r.difficulty}`}>D{r.difficulty}</span>
+                      )}
+                    </td>
+                  )}
                   <td>
-                    {r.difficulty != null && (
-                      <span className={`diff-badge diff-${r.difficulty}`}>D{r.difficulty}</span>
-                    )}
-                  </td>
-                )}
-                <td>
-                  <span className={`status-badge status-${r.status}`}>
-                    {r.status.toUpperCase()}
-                  </span>
-                </td>
-                <td className="mono">${r.cost_usd.toFixed(3)}</td>
-                <td className="mono">{(r.tokens_in + r.tokens_out).toLocaleString()}</td>
-                <td className="mono">{(r.duration_ms / 1000).toFixed(1)}s</td>
-                <td className="mono">{r.model.split('-').slice(0, 2).join('-')}</td>
-                <td>
-                  {r.gate_verdicts.map((g) => (
-                    <span
-                      key={g.gate}
-                      className={`gate-pill gate-${g.passed ? 'pass' : 'fail'}`}
-                      title={`${g.gate}: ${g.passed ? 'passed' : 'failed'}${g.message ? ` — ${g.message}` : ''}`}
-                    >
-                      {g.gate[0].toUpperCase()}
+                    <span className={`status-badge status-${r.status}`}>
+                      {r.status.toUpperCase()}
                     </span>
-                  ))}
-                </td>
-              </tr>
-              {expandedId === r.task_id && (
-                <tr key={`${r.task_id}-detail`} className="task-detail-row">
-                  <td colSpan={colCount}>
-                    <div className="task-detail">
-                      <div className="task-detail-grid">
-                        <div><span className="detail-label">Tokens in:</span> {r.tokens_in.toLocaleString()}</div>
-                        <div><span className="detail-label">Tokens out:</span> {r.tokens_out.toLocaleString()}</div>
-                        <div><span className="detail-label">Retries:</span> {r.retries_used}</div>
-                        <div><span className="detail-label">Model:</span> {r.model}</div>
-                      </div>
-                      {r.gate_verdicts.length > 0 && (
-                        <div className="task-detail-gates">
-                          {r.gate_verdicts.map((g) => (
-                            <div key={g.gate} className={`gate-detail gate-${g.passed ? 'pass' : 'fail'}`}>
-                              <span className="gate-name">{g.gate}</span>
-                              <span className={g.passed ? 'gate-ok' : 'gate-err'}>
-                                {g.passed ? 'PASSED' : 'FAILED'}
-                              </span>
-                              {g.duration_ms != null && (
-                                <span className="gate-time">{g.duration_ms}ms</span>
-                              )}
-                              {g.message && <span className="gate-msg">{g.message}</span>}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {showOutputPreview && r.output_preview && (
-                        <div className="task-output-preview">
-                          <span className="detail-label">Output Preview:</span>
-                          <pre className="task-output-code">{r.output_preview}</pre>
-                        </div>
-                      )}
-                      {r.error && <div className="task-error">{r.error}</div>}
-                    </div>
                   </td>
-                </tr>
-              )}
-            </Fragment>
-          ))}
+                  <td className="mono">${r.cost_usd.toFixed(3)}</td>
+                  <td className="mono">{(r.tokens_in + r.tokens_out).toLocaleString()}</td>
+                  <td className="mono">{(r.duration_ms / 1000).toFixed(1)}s</td>
+                  <td className="mono">{r.model.split('-').slice(0, 2).join('-')}</td>
+                  <td>
+                    {r.gate_verdicts.map((g) => (
+                      <span
+                        key={g.gate}
+                        className={`gate-pill gate-${g.passed ? 'pass' : 'fail'}`}
+                        title={`${g.gate}: ${g.passed ? 'passed' : 'failed'}${g.message ? ` — ${g.message}` : ''}`}
+                      >
+                        {g.gate[0].toUpperCase()}
+                      </span>
+                    ))}
+                  </td>
+                </AnimatedRow>
+                <ExpandableDetail open={expandedId === r.task_id} colSpan={colCount}>
+                  <div className="task-detail" style={{ padding: '12px' }}>
+                    <div className="task-detail-grid">
+                      <div><span className="detail-label">Tokens in:</span> {r.tokens_in.toLocaleString()}</div>
+                      <div><span className="detail-label">Tokens out:</span> {r.tokens_out.toLocaleString()}</div>
+                      <div><span className="detail-label">Retries:</span> {r.retries_used}</div>
+                      <div><span className="detail-label">Model:</span> {r.model}</div>
+                    </div>
+                    {r.gate_verdicts.length > 0 && (
+                      <div className="task-detail-gates">
+                        {r.gate_verdicts.map((g) => (
+                          <div key={g.gate} className={`gate-detail gate-${g.passed ? 'pass' : 'fail'}`}>
+                            <span className="gate-name">{g.gate}</span>
+                            <span className={g.passed ? 'gate-ok' : 'gate-err'}>
+                              {g.passed ? 'PASSED' : 'FAILED'}
+                            </span>
+                            {g.duration_ms != null && (
+                              <span className="gate-time">{g.duration_ms}ms</span>
+                            )}
+                            {g.message && <span className="gate-msg">{g.message}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {showOutputPreview && r.output_preview && (
+                      <div className="task-output-preview">
+                        <span className="detail-label">Output Preview:</span>
+                        <pre className="task-output-code">{r.output_preview}</pre>
+                      </div>
+                    )}
+                    {r.error && <div className="task-error">{r.error}</div>}
+                  </div>
+                </ExpandableDetail>
+              </Fragment>
+            ))
+          )}
         </tbody>
         <tfoot>
           <tr className="task-table-summary">

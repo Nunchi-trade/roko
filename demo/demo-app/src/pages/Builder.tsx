@@ -3,9 +3,12 @@ import { useTerminal } from '../hooks/useTerminal';
 import { enterWorkspace, showCmd, getRoko } from '../lib/terminal-session';
 import { useRokoConfig } from '../hooks/useRokoConfig';
 import { useWorkspace } from '../hooks/useWorkspace';
+import { useToast } from '../components/Toast';
 import GateBar from '../components/GateBar';
 import Pane from '../components/Pane';
 import './Builder.css';
+
+type BuildBtnState = 'idle' | 'running' | 'success' | 'error';
 
 interface BuilderModelOption {
   id: string;
@@ -50,10 +53,16 @@ export default function Builder() {
   ]);
   const [statusText, setStatusText] = useState('idle');
   const [showModelDropdown, setShowModelDropdown] = useState(false);
+  const [btnState, setBtnState] = useState<BuildBtnState>('idle');
+  const [terminalFlash, setTerminalFlash] = useState<'' | 'event-flash' | 'event-flash-pass' | 'event-flash-fail'>('');
+  const [wsLoading, setWsLoading] = useState(true);
+  const [wsPath, setWsPath] = useState<string | null>(null);
+  const terminalFlashTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Use only live config for model list.
   const { providers: liveProviders, isLive, defaultModel } = useRokoConfig();
   const { ensureWorkspace } = useWorkspace();
+  const { toast } = useToast();
 
   const { liveModelCatalog, liveAllModels } = useMemo(() => {
     const catalog: BuilderProviderGroup[] = liveProviders.map(p => ({
@@ -86,14 +95,24 @@ export default function Builder() {
 
   const { attach, status, handle } = useTerminal('builder-pty');
 
+  // Flash the terminal border on key events
+  const flashTerminal = useCallback((type: 'event-flash' | 'event-flash-pass' | 'event-flash-fail') => {
+    clearTimeout(terminalFlashTimer.current);
+    setTerminalFlash(type);
+    terminalFlashTimer.current = setTimeout(() => setTerminalFlash(''), 500);
+  }, []);
+
   // Setup workspace on mount — create server-side, then cd into it
   useEffect(() => {
     if (setupDoneRef.current) return;
     const h = handle.current;
     if (!h) return;
     setupDoneRef.current = true;
+    setWsLoading(true);
     ensureWorkspace('roko-builder').then(ws => {
       workspaceRef.current = ws.path;
+      setWsPath(ws.path);
+      setWsLoading(false);
       enterWorkspace(h, ws.path);
     });
   }, [handle, status, ensureWorkspace]);
@@ -129,6 +148,7 @@ export default function Builder() {
     const h = handle.current;
     if (running || !text.trim() || !h || !selectedModel) return;
     setRunning(true);
+    setBtnState('running');
     setStatusText('building...');
     setShowAutocomplete(false);
     setFiles([]);
@@ -137,12 +157,18 @@ export default function Builder() {
     const escaped = text.trim().replace(/["\\`$]/g, '\\$&');
     const cmd = `${getRoko()} run "${escaped}" --model ${selectedModel}`;
 
+    let hadError = false;
+
     await showCmd(h, cmd, {
       timeout: 120000,
       onGate: (name, gateStatus) => {
         setGates(prev => prev.map(g =>
           g.name === name ? { ...g, status: gateStatus } : g
         ));
+        // Flash terminal border on gate results
+        if (gateStatus === 'pass') flashTerminal('event-flash-pass');
+        else if (gateStatus === 'fail') { flashTerminal('event-flash-fail'); hadError = true; }
+        else flashTerminal('event-flash');
       },
       onCost: (cost) => {
         setStatusText(prev => prev.includes('$') ? prev : `${prev} | ${cost}`);
@@ -152,6 +178,7 @@ export default function Builder() {
       },
       onLog: (_cmd, desc) => {
         setStatusText(desc);
+        flashTerminal('event-flash');
       },
     });
 
@@ -166,9 +193,17 @@ export default function Builder() {
       setFiles(detected);
     }
 
+    // Button flash: success or error
+    setBtnState(hadError ? 'error' : 'success');
     setStatusText('complete');
     setRunning(false);
-  }, [running, handle, selectedModel]);
+    toast(hadError ? 'Build completed with errors' : 'Build complete', {
+      type: hadError ? 'error' : 'success',
+    });
+
+    // Reset button after flash animation
+    setTimeout(() => setBtnState('idle'), 700);
+  }, [running, handle, selectedModel, flashTerminal, toast]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -210,6 +245,15 @@ export default function Builder() {
       <div className="builder-header">
         <span className="builder-title">Builder</span>
         <span className="builder-info">type a request -- roko builds it live</span>
+
+        {/* Workspace badge */}
+        <span className={`builder-workspace-badge${wsLoading ? ' loading' : ''}`}>
+          {wsLoading ? (
+            <span className="ws-spinner" />
+          ) : (
+            <span className="ws-path">{wsPath ? wsPath.split('/').pop() : 'workspace'}</span>
+          )}
+        </span>
 
         {/* Model selector */}
         <div className="builder-model-select" ref={modelRef}>
@@ -267,7 +311,8 @@ export default function Builder() {
             )}
           </Pane>
         </div>
-        <div className="builder-terminal">
+        <div className="builder-divider" />
+        <div className={`builder-terminal${terminalFlash ? ` ${terminalFlash}` : ''}`}>
           <div className="builder-terminal-inner" ref={attach} />
         </div>
       </div>
@@ -300,8 +345,22 @@ export default function Builder() {
           )}
         </div>
         {running && <span className="builder-processing-indicator" aria-hidden="true" />}
-        <button type="submit" className="btn-build" disabled={running || !prompt.trim()}>
-          {running ? 'Building...' : 'Build'}
+        <button
+          type="submit"
+          className={`btn-build${btnState === 'success' ? ' success-flash' : ''}${btnState === 'error' ? ' error-flash' : ''}`}
+          disabled={running || !prompt.trim()}
+        >
+          {running && (
+            <span className="btn-build-progress">
+              <svg viewBox="0 0 100 30" preserveAspectRatio="none">
+                <rect x="1" y="1" width="98" height="28" rx="4" ry="4" />
+              </svg>
+            </span>
+          )}
+          <span className="btn-build-inner">
+            {btnState === 'running' && <span className="btn-build-spinner" />}
+            {btnState === 'success' ? '\u2713 Done' : btnState === 'error' ? '\u2717 Error' : running ? 'Building...' : 'Build'}
+          </span>
         </button>
       </form>
 

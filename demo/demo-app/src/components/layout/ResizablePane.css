@@ -152,10 +152,35 @@
   right: 4px;
   width: 1px;
   background: var(--border);
+  transition:
+    width var(--duration-snap) var(--ease),
+    background var(--duration-snap),
+    box-shadow var(--duration-snap);
+}
+
+/* Grip texture for right handle */
+.resizable-pane__handle--right::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 16px;
+  background-image: radial-gradient(circle, var(--text-ghost) 1px, transparent 1px);
+  background-size: 3px 4px;
+  opacity: 0;
+  transition: opacity var(--duration-snap);
 }
 
 .resizable-pane__handle--right:hover::after {
-  background: var(--border-strong);
+  width: 3px;
+  background: var(--rose-dim);
+  box-shadow: 0 0 8px rgba(204, 144, 168, 0.3);
+}
+
+.resizable-pane__handle--right:hover::before {
+  opacity: 0.6;
 }
 
 /* Bottom handle */
@@ -173,23 +198,47 @@
   bottom: 4px;
   height: 1px;
   background: var(--border);
+  transition:
+    height var(--duration-snap) var(--ease),
+    background var(--duration-snap),
+    box-shadow var(--duration-snap);
+}
+
+/* Grip texture for bottom handle */
+.resizable-pane__handle--bottom::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  transform: translateX(-50%);
+  width: 16px;
+  height: 3px;
+  background-image: radial-gradient(circle, var(--text-ghost) 1px, transparent 1px);
+  background-size: 4px 3px;
+  opacity: 0;
+  transition: opacity var(--duration-snap);
 }
 
 .resizable-pane__handle--bottom:hover::after {
-  background: var(--border-strong);
+  height: 3px;
+  background: var(--rose-dim);
+  box-shadow: 0 0 8px rgba(204, 144, 168, 0.3);
+}
+
+.resizable-pane__handle--bottom:hover::before {
+  opacity: 0.6;
 }
 
 /* Dragging state */
 .resizable-pane__handle--dragging::after {
-  background: var(--rose-dim) !important;
-  width: 2px;
-  height: 2px;
+  background: var(--rose-bright) !important;
+  box-shadow: 0 0 14px rgba(204, 144, 168, 0.5) !important;
 }
 
 .resizable-pane__handle--right.resizable-pane__handle--dragging::after {
-  width: 2px;
+  width: 3px;
 }
 
 .resizable-pane__handle--bottom.resizable-pane__handle--dragging::after {
-  height: 2px;
+  height: 3px;
 }

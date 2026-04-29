@@ -11,6 +11,11 @@ export const chainIntelligence: Scenario = {
   labels: ['Yield Scout (Alpha)', 'Risk Hedger (Beta)'],
   panel: true,
   promptBar: false,
+  category: 'chain',
+  features: ['On-chain knowledge graph', 'DeFi agents', 'Forked Ethereum'],
+  durationHint: '~120s',
+  accent: 'violet',
+  icon: 'chain',
   steps: [
     { label: 'Connect to fork', sublabel: 'mirage-rs mainnet' },
     { label: 'Alpha researches yields', sublabel: 'Aave + Uniswap' },

@@ -7,19 +7,12 @@ import { markStart, markEnd, measure, clearMarks } from '../lib/perf-markers';
 import { useServerHealth } from '../hooks/useServerHealth';
 import { useRokoConfig } from '../hooks/useRokoConfig';
 import { useWorkspace } from '../hooks/useWorkspace';
+import { useToast } from '../components/Toast';
 import { lookupCmdDesc } from '../lib/cmd-descriptions';
-import Pane from '../components/Pane';
-import Mosaic, { MosaicCell } from '../components/Mosaic';
-import Timeline from '../components/Timeline';
-import CommandLog from '../components/CommandLog';
-import GateVerdictCard, { type GateEntry } from '../components/GateVerdictCard';
-import PrdPipelinePanel from '../components/PrdPipelinePanel';
-import KnowledgeFlowPanel, { type InsightEvent, type AgentInfo } from '../components/KnowledgeFlowPanel';
-import EfficiencyBar, { type EfficiencyMetric } from '../components/EfficiencyBar';
-import ChainIntelPanel from '../components/ChainIntelPanel';
-import RevealWhen from '../components/RevealWhen';
-import { ConfidenceMeter, ModelSlot, CrystallizeTransition } from '../components/inference';
-import { AgentHandoff } from '../components/agent';
+import Tooltip from '../components/Tooltip';
+import type { GateEntry } from '../components/GateVerdictCard';
+import type { InsightEvent, AgentInfo } from '../components/KnowledgeFlowPanel';
+import type { EfficiencyMetric } from '../components/EfficiencyBar';
 import { useChainWs, type InsightEvent as ChainInsightEvent } from '../hooks/useChain';
 import { useLearningStats } from '../hooks/useLearningStats';
 import { useAgentHandoffs } from '../hooks/useAgentHandoffs';
@@ -39,15 +32,45 @@ import {
   PIPELINE_EXAMPLES,
 } from '../lib/prd-pipeline-sample';
 import { SERVE_URL } from '../lib/serve-url';
+import { ConfettiBurst, SuccessRing } from '../components/Celebration';
+import ScenarioPreview from '../components/ScenarioPreview';
+import SidebarRenderer from '../components/SidebarRenderer';
+import DemoStatusBar from '../components/DemoStatusBar';
+import { PulseIcon, SpinnerIcon, CrossIcon, CheckmarkIcon, WaveformIcon } from '../components/icons/AnimatedIcons';
 import '@xterm/xterm/css/xterm.css';
 import '../components/Terminal/TerminalPane.css';
 import './Demo.css';
 
-// Singleton controllers for the page lifetime
-const playback = new PlaybackController();
-const timeline = new TimelineStepper();
+// Moved into component as useRef (see playbackRef / timelineRef)
 
 const SPEEDS = [0.5, 1, 2, 4];
+
+/** Category color mapping for tab bar accent dots and active styling */
+const TAB_CATEGORY: Record<string, string> = {
+  'prd-pipeline': 'pipeline',
+  'prd-research-loop': 'pipeline',
+  'race': 'comparison',
+  'gate-retry': 'comparison',
+  'providers': 'comparison',
+  'provider-race': 'comparison',
+  'explore': 'exploration',
+  'knowledge-accumulation': 'learning',
+  'dream-consolidation': 'learning',
+  'chat': 'learning',
+  'knowledge-transfer': 'learning',
+  'chain-intelligence': 'chain',
+  'mirage': 'chain',
+};
+
+/** Color values per category (used for the sliding indicator) */
+const CAT_COLORS: Record<string, string> = {
+  pipeline: 'var(--rose-bright)',
+  comparison: 'var(--status-active)',
+  exploration: 'var(--dream-bright)',
+  learning: 'var(--status-success)',
+  chain: 'var(--warning)',
+};
+
 
 type TerminalPaneState = {
   status: TerminalHandle['status'];
@@ -59,24 +82,56 @@ function sleep(ms: number): Promise<void> {
 }
 
 export default function Demo() {
+  const playbackRef = useRef<PlaybackController | null>(null);
+  if (!playbackRef.current) playbackRef.current = new PlaybackController();
+  const playback = playbackRef.current;
+
+  const timelineRef = useRef<TimelineStepper | null>(null);
+  if (!timelineRef.current) timelineRef.current = new TimelineStepper();
+  const timeline = timelineRef.current;
+
   const [activeIdx, setActiveIdx] = useState(0);
   const [showIntro, setShowIntro] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+
+  // Cinematic animation states
+  const [scenarioAnim, setScenarioAnim] = useState<'idle' | 'exit' | 'enter'>('idle');
+  const [introDismissing, setIntroDismissing] = useState(false);
+  const [termReveal, setTermReveal] = useState(false);
+  const [phaseFlash, setPhaseFlash] = useState(false);
+  const [scenarioComplete, setScenarioComplete] = useState(false);
+  const [showBurst, setShowBurst] = useState(false);
+  const [showCompletionOverlay, setShowCompletionOverlay] = useState(false);
+  const completionOverlayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const completionAutoDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [, setLaunchingBtn] = useState(false);
   const [speedIdx, setSpeedIdx] = useState(1);
   const [playbackMode, setPlaybackMode] = useState<'auto' | 'step'>('auto');
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const runStartRef = useRef<number>(0);
   const scenario = SCENARIOS[activeIdx];
   const serverHealth = useServerHealth();
   const { defaultModel } = useRokoConfig();
   const { ensureWorkspace, createWorkspace: createWs } = useWorkspace();
   const learningStats = useLearningStats();
   const { handoffs, activeHandoff } = useAgentHandoffs();
+  const { toast } = useToast();
 
   // SSE-driven inference state for ModelSlot and CrystallizeTransition
   const [inferenceModel, setInferenceModel] = useState('--');
   const [inferenceTier, setInferenceTier] = useState<'T0' | 'T1' | 'T2'>('T1');
   const [allGatesPass, setAllGatesPass] = useState(false);
   const allGatesPassTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [showGateRing, setShowGateRing] = useState(false);
+
+  // Tab bar state — completed scenarios and sliding indicator
+  const [completedScenarios, setCompletedScenarios] = useState<Set<number>>(() => new Set());
+  const tabListRef = useRef<HTMLDivElement>(null);
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const indicatorRef = useRef<HTMLDivElement>(null);
+  const [tabScrollState, setTabScrollState] = useState({ left: false, right: false });
 
   // Sidebar state
   const [stats, setStats] = useState({ model: '--', cost: '--', tokens: '--', time: '--' });
@@ -86,6 +141,9 @@ export default function Demo() {
   const [progressText, setProgressText] = useState('press Play to begin');
   const [progressLabel, setProgressLabel] = useState('--');
   const [waitingForStep, setWaitingForStep] = useState(false);
+  const [progressStep, setProgressStep] = useState(0);
+  const [progressTotal, setProgressTotal] = useState(0);
+  const [cmdPreviewKey, setCmdPreviewKey] = useState(0);
   const [pipelineExampleId, setPipelineExampleId] = useState(DEFAULT_PIPELINE_EXAMPLE_ID);
   const selectedPipelineExample = getPipelineExample(pipelineExampleId);
   const [pipeline, setPipeline] = useState<PipelineDemoState>(
@@ -204,9 +262,44 @@ export default function Demo() {
     playback.onProgress((step, total, cmd) => {
       setProgressLabel(step <= 0 ? 'Preparing' : `Step ${step}/${total}`);
       setProgressText(cmd);
+      setProgressStep(Math.max(0, step));
+      setProgressTotal(total);
+      setCmdPreviewKey((k) => k + 1);
     });
     playback.onWaitingChange(setWaitingForStep);
   }, []);
+
+  // Elapsed timer for status bar
+  useEffect(() => {
+    if (isRunning && !isPaused) {
+      runStartRef.current = Date.now() - elapsedMs;
+      elapsedRef.current = setInterval(() => {
+        setElapsedMs(Date.now() - runStartRef.current);
+      }, 250);
+    } else if (elapsedRef.current) {
+      clearInterval(elapsedRef.current);
+      elapsedRef.current = null;
+    }
+    if (!isRunning) {
+      setElapsedMs(0);
+    }
+    return () => {
+      if (elapsedRef.current) clearInterval(elapsedRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning, isPaused]);
+
+  // Phase transition ripple when progress label changes during a run
+  const prevLabelRef = useRef(progressLabel);
+  useEffect(() => {
+    if (isRunning && progressLabel !== prevLabelRef.current && prevLabelRef.current !== '--') {
+      setPhaseFlash(true);
+      const timer = setTimeout(() => setPhaseFlash(false), 650);
+      prevLabelRef.current = progressLabel;
+      return () => clearTimeout(timer);
+    }
+    prevLabelRef.current = progressLabel;
+  }, [progressLabel, isRunning]);
 
   // Build scenario context matching ScenarioContext from scenarios.ts
   const patchPipeline = useCallback((patch: Partial<PipelineDemoState>) => {
@@ -278,6 +371,9 @@ export default function Demo() {
         });
       },
       setGate: (name: string, status: 'pass' | 'fail' | 'pending') => {
+        if (status === 'pass') {
+          setShowGateRing(true);
+        }
         setGates((prev) => {
           const existing = prev.findIndex((g) => g.name === name);
           if (existing >= 0) {
@@ -338,30 +434,47 @@ export default function Demo() {
   // ── Scenario lifecycle ──────────────────────────────────────
 
   const selectScenario = useCallback((idx: number) => {
+    if (idx === activeIdx) return;
     if (runningRef.current) {
       runningRef.current = false;
       setIsRunning(false);
     }
-    playback.reset();
-    timeline.reset();
-    setActiveIdx(idx);
-    setShowIntro(true);
-    setStats({ model: '--', cost: '--', tokens: '--', time: '--' });
-    setGates([]);
-    setLogEntries([]);
-    setTimelineSteps([]);
-    setProgressText('press Play to begin');
-    setProgressLabel('--');
-    setPipeline(SCENARIOS[idx]?.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
-    setKfInsights([]);
-    setKfLeftAgent({ name: 'Alpha', color: 'var(--rose-bright)', posts: 0, confirms: 0 });
-    setKfRightAgent({ name: 'Beta', color: 'var(--dream-bright)', posts: 0, confirms: 0 });
-    setKfMetrics([
-      { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
-      { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
-      { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
-    ]);
-  }, [selectedPipelineExample]);
+
+    // Cinematic exit -> enter transition
+    setScenarioAnim('exit');
+    setScenarioComplete(false);
+    setShowBurst(false);
+    setShowCompletionOverlay(false);
+    if (completionOverlayTimer.current) clearTimeout(completionOverlayTimer.current);
+    if (completionAutoDismissTimer.current) clearTimeout(completionAutoDismissTimer.current);
+
+    setTimeout(() => {
+      playback.reset();
+      timeline.reset();
+      setActiveIdx(idx);
+      setShowIntro(true);
+      setIntroDismissing(false);
+      setTermReveal(false);
+      setStats({ model: '--', cost: '--', tokens: '--', time: '--' });
+      setGates([]);
+      setLogEntries([]);
+      setTimelineSteps([]);
+      setProgressText('press Play to begin');
+      setProgressLabel('--');
+      setPipeline(SCENARIOS[idx]?.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
+      setKfInsights([]);
+      setKfLeftAgent({ name: 'Alpha', color: 'var(--rose-bright)', posts: 0, confirms: 0 });
+      setKfRightAgent({ name: 'Beta', color: 'var(--dream-bright)', posts: 0, confirms: 0 });
+      setKfMetrics([
+        { label: 'ALPHA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'rose' },
+        { label: 'BETA COST', value: 0, format: (n) => `$${n.toFixed(2)}`, color: 'dream' },
+        { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
+      ]);
+
+      setScenarioAnim('enter');
+      setTimeout(() => setScenarioAnim('idle'), 450);
+    }, 260);
+  }, [activeIdx, selectedPipelineExample]);
 
   const handlePipelineExampleSelect = useCallback((id: string) => {
     if (runningRef.current) return;
@@ -398,7 +511,24 @@ export default function Demo() {
     pausedRef.current = false;
     setIsRunning(true);
     setIsPaused(false);
-    setShowIntro(false);
+    setScenarioComplete(false);
+    setShowBurst(false);
+    setShowCompletionOverlay(false);
+    if (completionOverlayTimer.current) clearTimeout(completionOverlayTimer.current);
+    if (completionAutoDismissTimer.current) clearTimeout(completionAutoDismissTimer.current);
+
+    // Cinematic intro dismiss with animation
+    setLaunchingBtn(true);
+    setIntroDismissing(true);
+    setTimeout(() => {
+      setShowIntro(false);
+      setIntroDismissing(false);
+      setLaunchingBtn(false);
+      // Trigger terminal pane staggered reveal
+      setTermReveal(true);
+      setTimeout(() => setTermReveal(false), 600);
+    }, 550);
+
     setLogEntries([]);
     setStats({ model: '--', cost: '--', tokens: '--', time: '--' });
     setGates([]);
@@ -459,9 +589,31 @@ export default function Demo() {
       if (scenarioMs !== null) {
         console.debug(`[perf] scenario-run: ${scenarioMs.toFixed(1)}ms`);
       }
+
+      // Completion celebration
+      setCompletedScenarios(prev => new Set(prev).add(activeIdx));
+      setScenarioComplete(true);
+      setShowBurst(true);
+      toast(`Scenario complete: ${scenario.title}`, { type: 'success' });
+      setTimeout(() => {
+        setScenarioComplete(false);
+        setShowBurst(false);
+      }, 1400);
+
+      // Show completion overlay after confetti settles
+      if (completionOverlayTimer.current) clearTimeout(completionOverlayTimer.current);
+      if (completionAutoDismissTimer.current) clearTimeout(completionAutoDismissTimer.current);
+      completionOverlayTimer.current = setTimeout(() => {
+        setShowCompletionOverlay(true);
+        // Auto-dismiss after 8s
+        completionAutoDismissTimer.current = setTimeout(() => {
+          setShowCompletionOverlay(false);
+        }, 8000);
+      }, 1000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('Scenario error:', err);
+      toast(msg, { type: 'error', duration: 5000 });
       const now = new Date();
       const ts = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
       setProgressLabel('Error');
@@ -486,6 +638,23 @@ export default function Demo() {
     playback.advanceStep();
   }, []);
 
+  const dismissCompletionOverlay = useCallback(() => {
+    setShowCompletionOverlay(false);
+    if (completionAutoDismissTimer.current) clearTimeout(completionAutoDismissTimer.current);
+  }, []);
+
+  const handleNextScenario = useCallback(() => {
+    dismissCompletionOverlay();
+    const nextIdx = (activeIdx + 1) % SCENARIOS.length;
+    selectScenario(nextIdx);
+  }, [activeIdx, dismissCompletionOverlay, selectScenario]);
+
+  const handleRunAgain = useCallback(() => {
+    dismissCompletionOverlay();
+    // Small delay so overlay dismisses visually before re-play
+    setTimeout(() => handlePlay(), 150);
+  }, [dismissCompletionOverlay, handlePlay]);
+
   const handleReset = useCallback(() => {
     runningRef.current = false;
     pausedRef.current = false;
@@ -508,6 +677,39 @@ export default function Demo() {
   const toggleMode = useCallback((mode: 'auto' | 'step') => {
     setPlaybackMode(mode);
     playback.setMode(mode);
+  }, []);
+
+  // ── Sliding tab indicator ────────────────────────────────────
+
+  useEffect(() => {
+    const tab = tabRefs.current[activeIdx];
+    const indicator = indicatorRef.current;
+    const list = tabListRef.current;
+    if (!tab || !indicator || !list) return;
+    const listRect = list.getBoundingClientRect();
+    const tabRect = tab.getBoundingClientRect();
+    const cat = TAB_CATEGORY[SCENARIOS[activeIdx]?.id ?? ''] ?? 'pipeline';
+    indicator.style.left = `${tabRect.left - listRect.left + list.scrollLeft}px`;
+    indicator.style.width = `${tabRect.width}px`;
+    indicator.style.background = CAT_COLORS[cat] ?? 'var(--rose-bright)';
+  }, [activeIdx]);
+
+  // ── Tab scroll fade edges ──────────────────────────────────
+
+  useEffect(() => {
+    const list = tabListRef.current;
+    if (!list) return;
+    const check = () => {
+      setTabScrollState({
+        left: list.scrollLeft > 4,
+        right: list.scrollLeft < list.scrollWidth - list.clientWidth - 4,
+      });
+    };
+    check();
+    list.addEventListener('scroll', check, { passive: true });
+    const ro = new ResizeObserver(check);
+    ro.observe(list);
+    return () => { list.removeEventListener('scroll', check); ro.disconnect(); };
   }, []);
 
   // ── Keyboard shortcuts ──────────────────────────────────────
@@ -640,33 +842,51 @@ export default function Demo() {
     <div className="demo-page">
       {/* ── Top bar ── */}
       <div className="demo-tabs-bar">
-        <div className="demo-tab-list">
-          {SCENARIOS.map((s, i) => (
-            <button
-              key={s.id}
-              className={`demo-tab${activeIdx === i ? ' active' : ''}`}
-              onClick={() => selectScenario(i)}
-            >
-              <span className="demo-tab-num">{i + 1}</span>
-              {s.title}
-            </button>
-          ))}
+        <div className={`demo-tab-list-wrapper${tabScrollState.left ? ' scroll-left' : ''}${tabScrollState.right ? ' scroll-right' : ''}`}>
+          <div className="demo-tab-list" ref={tabListRef}>
+            {SCENARIOS.map((s, i) => {
+              const cat = TAB_CATEGORY[s.id] ?? 'pipeline';
+              return (
+                <Tooltip content={s.subtitle} placement="bottom" key={s.id}>
+                  <button
+                    ref={(el) => { tabRefs.current[i] = el; }}
+                    className={[
+                      'demo-tab btn-ghost-reveal',
+                      activeIdx === i ? 'active' : '',
+                      `cat-${cat}`,
+                    ].filter(Boolean).join(' ')}
+                    onClick={() => selectScenario(i)}
+                  >
+                    <span className={`demo-tab-accent cat-${cat}`} />
+                    <span className="demo-tab-num">{i + 1}</span>
+                    {s.title}
+                    {completedScenarios.has(i) && <span className="demo-tab-done">&#10003;</span>}
+                  </button>
+                </Tooltip>
+              );
+            })}
+            <div className="demo-tab-indicator" ref={indicatorRef} />
+          </div>
         </div>
         <div className="demo-controls">
           <div className={`demo-serve-status demo-serve-${serverHealth}`}>
-            <span />
+            {serverHealth === 'connected'
+              ? <PulseIcon size={10} color="var(--success)" />
+              : serverHealth === 'checking'
+                ? <SpinnerIcon size={10} />
+                : <CrossIcon size={10} color="var(--rose-bright)" />}
             {serverHealth === 'connected' ? 'serve live' : serverHealth === 'checking' ? 'checking serve' : 'serve offline'}
           </div>
-          <button className="demo-speed" onClick={cycleSpeed}>
+          <button className="demo-speed btn-interactive" onClick={cycleSpeed}>
             {SPEEDS[speedIdx]}x
           </button>
           {isRunning ? (
-            <button className="demo-ctrl-btn" onClick={handlePauseResume}>
+            <button className="demo-ctrl-btn btn-interactive" onClick={handlePauseResume}>
               {isPaused ? '\u25B6' : '\u275A\u275A'}
             </button>
           ) : (
             <button
-              className="demo-ctrl-btn play"
+              className="demo-ctrl-btn play btn-primary-glow"
               onClick={handlePlay}
               title={`Play (${readyTerminalCount}/${scenario.panes} terminals ready)`}
             >
@@ -676,27 +896,67 @@ export default function Demo() {
         </div>
       </div>
 
+      {/* ── Status bar ── */}
+      <DemoStatusBar
+        serverHealth={{
+          ok: serverHealth === 'connected',
+        }}
+        terminalStates={Array.from({ length: scenario.panes }, (_, i) => ({
+          label: scenario.labels[i] || `pane ${i + 1}`,
+          status: (terminalStates[i]?.status ?? 'disconnected') as 'connected' | 'connecting' | 'disconnected',
+        }))}
+        scenarioId={scenario.id}
+        isRunning={isRunning}
+        elapsedMs={isRunning ? elapsedMs : undefined}
+        speed={SPEEDS[speedIdx]}
+      />
+
       {/* ── Main content ── */}
       <div className={`demo-main${scenario.id === 'prd-pipeline' ? ' demo-main-pipeline' : ''}`}>
         {/* Terminal zone */}
-        <div className="demo-terminals">
-          {showIntro && scenario.id !== 'prd-pipeline' && (
-            <div className="demo-intro-overlay" onClick={handlePlay}>
-              <div className="demo-intro-title">{scenario.title}</div>
-              <div className="demo-intro-sub">{scenario.subtitle}</div>
-              <button
-                className="demo-play-btn"
-                onClick={(e) => { e.stopPropagation(); handlePlay(); }}
-              >
-                {'\u25B6'}
-              </button>
-            </div>
+        <div className={[
+          'demo-terminals',
+          isRunning ? 'gradient-border-active' : 'gradient-border-subtle',
+          scenarioAnim === 'exit' ? 'scenario-exit' : '',
+          scenarioAnim === 'enter' ? 'scenario-enter' : '',
+          phaseFlash ? 'phase-flash' : '',
+          scenarioComplete ? 'scenario-complete' : '',
+        ].filter(Boolean).join(' ')}>
+          <ConfettiBurst
+            active={showBurst}
+            count={40}
+            duration={1200}
+            onDone={() => setShowBurst(false)}
+          />
+          <SuccessRing
+            active={showGateRing}
+            onDone={() => setShowGateRing(false)}
+          />
+
+          {/* ── Completion summary overlay ── */}
+          {showCompletionOverlay && (
+            <DemoCompletionOverlay
+              title={scenario.title}
+              stats={stats}
+              gates={gates}
+              onDismiss={dismissCompletionOverlay}
+              onRunAgain={handleRunAgain}
+              onNextScenario={handleNextScenario}
+              hasNext={SCENARIOS.length > 1}
+            />
           )}
 
-          <div
-            className={`demo-terminal-grid demo-cols-${gridCols}`}
-            style={scenario.panes === 4 ? { gridTemplateRows: '1fr 1fr' } : undefined}
-          >
+          {(showIntro || introDismissing) && scenario.id !== 'prd-pipeline' && (
+            <ScenarioPreview
+              scenario={scenario}
+              onPlay={handlePlay}
+              serverHealth={serverHealth}
+              isRunning={isRunning}
+              dismissing={introDismissing}
+            />
+          )}
+
+          <div className={`demo-terminal-grid demo-cols-${gridCols}`}>
             {Array.from({ length: scenario.panes }).map((_, i) => (
               <TerminalPaneWithHandle
                 key={`${scenario.id}-${i}-${sessionIds[i]}`}
@@ -705,6 +965,10 @@ export default function Demo() {
                 handleRef={handleRefs.current[i]}
                 paneIndex={i}
                 onStatusChange={updateTerminalState}
+                termReveal={termReveal}
+                scenarioId={scenario.id}
+                scenarioCategory={scenario.category}
+                isRunning={isRunning}
               />
             ))}
           </div>
@@ -713,224 +977,85 @@ export default function Demo() {
         {/* Sidebar */}
         {scenario.panel && (
           <div className="demo-sidebar">
-            {scenario.id === 'prd-pipeline' ? (
-              <>
-                <PrdPipelinePanel
-                  state={pipeline}
-                  examples={PIPELINE_EXAMPLES}
-                  selectedExampleId={pipelineExampleId}
-                  onSelectExample={handlePipelineExampleSelect}
-                  selectorDisabled={isRunning}
-                  onRun={handlePlay}
-                  isRunning={isRunning}
-                  serverHealth={serverHealth}
-                  learningStats={learningStats}
-                />
-
-                {/* T7.53: Agent handoff flow for PRD Pipeline */}
-                <RevealWhen visible={handoffs.length > 0}>
-                  <Pane title="AGENT FLOW" flat>
-                    <div style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      {handoffs.slice(-3).map((h) => (
-                        <AgentHandoff
-                          key={h.id}
-                          from={h.from}
-                          to={h.to}
-                          status={h.status}
-                          direction="forward"
-                          label={h.label}
-                          compact
-                        />
-                      ))}
-                    </div>
-                  </Pane>
-                </RevealWhen>
-
-                {/* T7.58: Confidence meter for PRD Pipeline */}
-                <RevealWhen visible={learningStats.totalDecisions > 0}>
-                  <div style={{ padding: '4px 16px' }}>
-                    <ConfidenceMeter
-                      confidence={learningStats.routerConfidence}
-                      trend={learningStats.confidenceTrend}
-                      decisions={learningStats.totalDecisions}
-                      label="ROUTER CONFIDENCE"
-                      compact
-                    />
-                  </div>
-                </RevealWhen>
-              </>
-            ) : scenario.id === 'knowledge-transfer' ? (
-              <>
-                {/* T7.53: Active agent handoff in knowledge-transfer scenario */}
-                <RevealWhen visible={activeHandoff !== null}>
-                  {activeHandoff && (
-                    <Pane title="HANDOFF" flat>
-                      <div style={{ padding: '8px 12px' }}>
-                        <AgentHandoff
-                          from={activeHandoff.from}
-                          to={activeHandoff.to}
-                          status={activeHandoff.status}
-                          direction="forward"
-                          label={activeHandoff.label}
-                          compact
-                        />
-                      </div>
-                    </Pane>
-                  )}
-                </RevealWhen>
-
-                <RevealWhen visible={timelineDisplay.length > 0}>
-                  <Pane title="TIMELINE" flat>
-                    <Timeline steps={timelineDisplay} />
-                  </Pane>
-                </RevealWhen>
-
-                <RevealWhen visible={kfInsights.length > 0}>
-                  <KnowledgeFlowPanel
-                    leftAgent={kfLeftAgent}
-                    rightAgent={kfRightAgent}
-                    insights={kfInsights}
-                    mode="local"
-                  />
-                </RevealWhen>
-
-                <RevealWhen visible={hasKfMetrics}>
-                  <EfficiencyBar metrics={kfMetrics} />
-                </RevealWhen>
-
-                {/* T7.54: Replace GateBar with GateVerdictCard + T7.57: CrystallizeTransition */}
-                <RevealWhen visible={gates.length > 0}>
-                  <CrystallizeTransition active={allGatesPass}>
-                    <Pane title="GATES" flat>
-                      <div style={{ padding: '12px 16px' }}>
-                        <GateVerdictCard gates={gateEntries} compact />
-                      </div>
-                    </Pane>
-                  </CrystallizeTransition>
-                </RevealWhen>
-
-                <RevealWhen visible={logEntries.length > 0}>
-                  <Pane title="LOG" flat>
-                    <CommandLog entries={logEntries} maxHeight="180px" />
-                  </Pane>
-                </RevealWhen>
-              </>
-            ) : scenario.id === 'chain-intelligence' ? (
-              <>
-                <RevealWhen visible={timelineDisplay.length > 0}>
-                  <Pane title="TIMELINE" flat>
-                    <Timeline steps={timelineDisplay} />
-                  </Pane>
-                </RevealWhen>
-
-                <RevealWhen visible={ciInsights.length > 0 || chainWs.connected}>
-                  <ChainIntelPanel
-                    leftAgent={ciLeftAgent}
-                    rightAgent={ciRightAgent}
-                    insights={ciInsights}
-                    blocks={ciBlocks}
-                    positions={ciPositions}
-                    metrics={ciMetrics}
-                    mirageConnected={chainWs.connected}
-                  />
-                </RevealWhen>
-
-                <RevealWhen visible={logEntries.length > 0}>
-                  <Pane title="LOG" flat>
-                    <CommandLog entries={logEntries} maxHeight="140px" />
-                  </Pane>
-                </RevealWhen>
-              </>
-            ) : (
-              <>
-                <RevealWhen visible={timelineDisplay.length > 0}>
-                  <Pane title="TIMELINE" flat>
-                    <Timeline steps={timelineDisplay} />
-                  </Pane>
-                </RevealWhen>
-
-                <RevealWhen visible={hasStats}>
-                  <div className="demo-stats-mosaic">
-                    <Mosaic columns={2}>
-                      {/* T7.59: ModelSlot replaces plain text MODEL cell */}
-                      <MosaicCell
-                        label="MODEL"
-                        mono
-                        color="rose"
-                        value={
-                          inferenceModel !== '--'
-                            ? <ModelSlot model={inferenceModel} tier={inferenceTier} size="sm" />
-                            : '--'
-                        }
-                      />
-                      <MosaicCell label="COST" value={stats.cost} mono color="bone" />
-                      <MosaicCell label="TOKENS" value={stats.tokens} mono color="dream" />
-                      <MosaicCell label="TIME" value={stats.time} mono color="warning" />
-                    </Mosaic>
-                  </div>
-                </RevealWhen>
-
-                {/* T7.58: Confidence meter in default sidebar */}
-                <RevealWhen visible={learningStats.totalDecisions > 0}>
-                  <div style={{ padding: '4px 16px' }}>
-                    <ConfidenceMeter
-                      confidence={learningStats.routerConfidence}
-                      trend={learningStats.confidenceTrend}
-                      decisions={learningStats.totalDecisions}
-                      label="ROUTER CONFIDENCE"
-                      compact
-                    />
-                  </div>
-                </RevealWhen>
-
-                {/* T7.54: GateVerdictCard + T7.57: CrystallizeTransition on all-pass */}
-                <RevealWhen visible={gates.length > 0}>
-                  <CrystallizeTransition active={allGatesPass}>
-                    <Pane title="GATES" flat>
-                      <div style={{ padding: '12px 16px' }}>
-                        <GateVerdictCard gates={gateEntries} compact />
-                      </div>
-                    </Pane>
-                  </CrystallizeTransition>
-                </RevealWhen>
-
-                <RevealWhen visible={logEntries.length > 0}>
-                  <Pane title="LOG" flat>
-                    <CommandLog entries={logEntries} maxHeight="240px" />
-                  </Pane>
-                </RevealWhen>
-              </>
-            )}
+            <SidebarRenderer
+              scenarioId={scenario.id}
+              isRunning={isRunning}
+              scenarioComplete={scenarioComplete}
+              timelineSteps={timelineDisplay}
+              stats={stats}
+              hasStats={hasStats}
+              inferenceModel={inferenceModel}
+              inferenceTier={inferenceTier}
+              gates={gates}
+              gateEntries={gateEntries}
+              allGatesPass={allGatesPass}
+              logEntries={logEntries}
+              pipeline={pipeline}
+              pipelineExamples={PIPELINE_EXAMPLES}
+              pipelineExampleId={pipelineExampleId}
+              onSelectExample={handlePipelineExampleSelect}
+              onRun={handlePlay}
+              serverHealth={serverHealth}
+              learningStats={learningStats}
+              handoffs={handoffs}
+              activeHandoff={activeHandoff}
+              kfInsights={kfInsights}
+              kfLeftAgent={kfLeftAgent}
+              kfRightAgent={kfRightAgent}
+              kfMetrics={kfMetrics}
+              hasKfMetrics={hasKfMetrics}
+              ciInsights={ciInsights}
+              ciBlocks={ciBlocks}
+              ciPositions={ciPositions}
+              ciMetrics={ciMetrics}
+              ciLeftAgent={ciLeftAgent}
+              ciRightAgent={ciRightAgent}
+              chainConnected={chainWs.connected}
+            />
           </div>
         )}
       </div>
 
       {/* ── Playback bar ── */}
-      <div className="demo-playback-bar">
+      <div className={`demo-playback-bar${isRunning ? ' running' : ''}`}>
+        {/* Progress fill */}
+        <div className="demo-pb-fill">
+          <div
+            className="demo-pb-fill-inner"
+            style={{ width: progressTotal > 0 ? `${(progressStep / progressTotal) * 100}%` : '0%' }}
+          />
+        </div>
+
         <div className="demo-pb-controls">
           {isRunning ? (
-            <button className="demo-pb-btn" onClick={handlePauseResume} title="Pause (Space)">
+            <button className="demo-pb-btn btn-interactive" onClick={handlePauseResume} title="Pause (Space)">
               {isPaused ? '\u25B6' : '\u275A\u275A'}
             </button>
           ) : (
-            <button className="demo-pb-btn primary" onClick={handlePlay} title={`Play (Space) - ${readyTerminalCount}/${scenario.panes} terminals ready`}>
+            <button
+              className={`demo-pb-btn primary btn-primary-glow${!isRunning && serverHealth === 'connected' ? ' idle-pulse' : ''}`}
+              onClick={handlePlay}
+              title={`Play (Space) - ${readyTerminalCount}/${scenario.panes} terminals ready`}
+            >
               {'\u25B6'}
             </button>
           )}
           <button
-            className={`demo-pb-btn${playbackMode === 'step' ? ' primary' : ''}${waitingForStep ? ' waiting' : ''}`}
+            className={`demo-pb-btn btn-interactive${playbackMode === 'step' ? ' primary' : ''}${waitingForStep ? ' waiting' : ''}`}
             onClick={handleStep}
             title="Next step (N)"
             disabled={playbackMode !== 'step' && !waitingForStep}
           >
             {waitingForStep ? 'NEXT' : '\u25B6\u2759'}
           </button>
-          <button className="demo-pb-btn" onClick={handleReset} title="Reset (R)">
+          <button className="demo-pb-btn btn-interactive" onClick={handleReset} title="Reset (R)">
             {'\u21BA'}
           </button>
         </div>
 
+        {/* Mode toggle — segmented control */}
         <div className="demo-mode-toggle">
+          <div className={`demo-mode-toggle-track${playbackMode === 'step' ? ' at-step' : ''}`} />
           <button
             className={`demo-mode-btn${playbackMode === 'auto' ? ' active' : ''}`}
             onClick={() => toggleMode('auto')}
@@ -945,13 +1070,156 @@ export default function Demo() {
           </button>
         </div>
 
-        <div className="demo-pb-progress">
+        {/* Speed pills */}
+        <div className="demo-pb-speed-pills">
+          {SPEEDS.map((s, i) => (
+            <button
+              key={s}
+              className={`demo-pb-speed-pill${i === speedIdx ? ' active' : ''}`}
+              onClick={() => setSpeedIdx(i)}
+            >
+              {s}x
+            </button>
+          ))}
+        </div>
+
+        <div className={`demo-pb-progress${isRunning ? ' active' : ''}`}>
           <span className="demo-pb-step-label">{progressLabel}</span>
         </div>
-        <div className="demo-pb-cmd-preview">{progressText}</div>
+        <div
+          key={cmdPreviewKey}
+          className={`demo-pb-cmd-preview${cmdPreviewKey > 0 ? ' typewriter-enter' : ''}`}
+        >
+          {progressText}
+        </div>
       </div>
     </div>
   );
+}
+
+/* ── Completion summary overlay ─────────────────────────────── */
+
+function useCountUp(target: number, duration = 600): number {
+  const [value, setValue] = useState(0);
+  const frameRef = useRef<number>(0);
+  useEffect(() => {
+    const start = performance.now();
+    const tick = (now: number) => {
+      const progress = Math.min((now - start) / duration, 1);
+      const eased = 1 - (1 - progress) * (1 - progress);
+      setValue(Math.round(target * eased));
+      if (progress < 1) frameRef.current = requestAnimationFrame(tick);
+    };
+    frameRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameRef.current);
+  }, [target, duration]);
+  return value;
+}
+
+function DemoCompletionOverlay({
+  title, stats, gates, onDismiss, onRunAgain, onNextScenario, hasNext,
+}: {
+  title: string;
+  stats: { model: string; cost: string; tokens: string; time: string };
+  gates: { name: string; status: 'pass' | 'fail' | 'pending' }[];
+  onDismiss: () => void;
+  onRunAgain: () => void;
+  onNextScenario: () => void;
+  hasNext: boolean;
+}) {
+  const [dismissing, setDismissing] = useState(false);
+  const passCount = gates.filter((g) => g.status === 'pass').length;
+  const failCount = gates.filter((g) => g.status === 'fail').length;
+  const animatedPass = useCountUp(passCount, 500);
+  const animatedFail = useCountUp(failCount, 500);
+  const doDismiss = useCallback(() => { setDismissing(true); setTimeout(() => onDismiss(), 350); }, [onDismiss]);
+
+  return (
+    <div className={`demo-completion-overlay${dismissing ? ' dismissing' : ''}`} onClick={doDismiss}>
+      <div className="demo-completion-card" onClick={(e) => e.stopPropagation()}>
+        <div className="demo-completion-header">
+          <span className="demo-completion-title">{title}</span>
+          <span className="demo-completion-badge">COMPLETE</span>
+        </div>
+        <div className="demo-completion-stats">
+          {stats.model !== '--' && (
+            <div className="demo-completion-stat">
+              <span className="demo-completion-stat-label">MODEL</span>
+              <span className="demo-completion-stat-value mono">{stats.model}</span>
+            </div>
+          )}
+          {stats.cost !== '--' && (
+            <div className="demo-completion-stat">
+              <span className="demo-completion-stat-label">COST</span>
+              <span className="demo-completion-stat-value mono">{stats.cost}</span>
+            </div>
+          )}
+          {stats.time !== '--' && (
+            <div className="demo-completion-stat">
+              <span className="demo-completion-stat-label">DURATION</span>
+              <span className="demo-completion-stat-value mono">{stats.time}</span>
+            </div>
+          )}
+          {gates.length > 0 && (
+            <div className="demo-completion-stat">
+              <span className="demo-completion-stat-label">GATES</span>
+              <span className="demo-completion-stat-value demo-completion-gates">
+                <span className="demo-completion-gate-pass">
+                  <CheckmarkIcon size={12} color="var(--success)" />
+                  {animatedPass}
+                </span>
+                {failCount > 0 && (
+                  <span className="demo-completion-gate-fail">
+                    <CrossIcon size={12} color="var(--rose-bright)" />
+                    {animatedFail}
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="demo-completion-actions">
+          <button className="demo-completion-btn demo-completion-btn-again" onClick={(e) => { e.stopPropagation(); setDismissing(true); setTimeout(() => onRunAgain(), 350); }}>
+            Run Again
+          </button>
+          {hasNext && (
+            <button className="demo-completion-btn demo-completion-btn-next" onClick={(e) => { e.stopPropagation(); setDismissing(true); setTimeout(() => onNextScenario(), 350); }}>
+              Next Scenario {'\u2192'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Map scenario + label to a CSS color for scenario-aware label styling */
+function getLabelColor(scenarioId: string, label: string, category: string): string | undefined {
+  const lower = label.toLowerCase();
+  if (scenarioId === 'race') {
+    if (lower.includes('naive')) return 'var(--warning)';
+    if (lower.includes('cascade')) return '#6bb8a8';
+  }
+  if (scenarioId === 'providers' || scenarioId === 'provider-race') {
+    if (lower.includes('anthropic')) return 'var(--rose-bright)';
+    if (lower.includes('openai')) return '#6bb87a';
+    if (lower.includes('zhipu')) return '#68a8d8';
+    if (lower.includes('gemini')) return '#68a8d8';
+    if (lower.includes('moonshot')) return 'var(--warning)';
+    return 'var(--dream-bright)';
+  }
+  if (scenarioId === 'explore') {
+    if (lower.includes('workspace') || lower.includes('status')) return 'var(--success)';
+    if (lower.includes('learn')) return 'var(--dream-bright)';
+    if (lower.includes('config')) return 'var(--warning)';
+    if (lower.includes('knowledge')) return '#b888d8';
+    return 'var(--rose-glow)';
+  }
+  if (category === 'comparison') return '#6bb8a8';
+  if (category === 'learning') return 'var(--dream-bright)';
+  if (category === 'chain') return 'var(--warning)';
+  if (category === 'exploration') return 'var(--success)';
+  return undefined;
 }
 
 function TerminalPaneWithHandle({
@@ -960,14 +1228,27 @@ function TerminalPaneWithHandle({
   handleRef,
   paneIndex,
   onStatusChange,
+  termReveal,
+  scenarioId,
+  scenarioCategory,
+  isRunning,
 }: {
   sessionId: string;
   label: string;
   handleRef: React.RefObject<TerminalHandle | null> | undefined;
   paneIndex: number;
   onStatusChange?: (index: number, state: TerminalPaneState) => void;
+  termReveal?: boolean;
+  scenarioId: string;
+  scenarioCategory: string;
+  isRunning: boolean;
 }) {
   const { attach, status, handle } = useTerminal(sessionId);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [hasOutput, setHasOutput] = useState(false);
+  const [cmdEcho, setCmdEcho] = useState<string | null>(null);
+  const cmdEchoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [focused, setFocused] = useState(false);
 
   useEffect(() => {
     if (handleRef && 'current' in handleRef) {
@@ -979,14 +1260,93 @@ function TerminalPaneWithHandle({
     });
   }, [handleRef, handle, onStatusChange, paneIndex, status]);
 
+  // Detect output activity via DOM mutations on the terminal body
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    let activityTimeout: ReturnType<typeof setTimeout> | null = null;
+    const observer = new MutationObserver(() => {
+      setHasOutput(true);
+      if (activityTimeout) clearTimeout(activityTimeout);
+      activityTimeout = setTimeout(() => setHasOutput(false), 800);
+    });
+    observer.observe(body, { childList: true, subtree: true, characterData: true });
+    return () => {
+      observer.disconnect();
+      if (activityTimeout) clearTimeout(activityTimeout);
+    };
+  }, []);
+
+  // Command echo: listen for typed commands via custom event
+  useEffect(() => {
+    function onCmdTyped(e: Event) {
+      const detail = (e as CustomEvent<{ sessionId: string; cmd: string }>).detail;
+      if (detail.sessionId !== sessionId) return;
+      setCmdEcho(detail.cmd);
+      if (cmdEchoTimer.current) clearTimeout(cmdEchoTimer.current);
+      cmdEchoTimer.current = setTimeout(() => setCmdEcho(null), 2000);
+    }
+    window.addEventListener('roko-cmd-typed', onCmdTyped);
+    return () => {
+      window.removeEventListener('roko-cmd-typed', onCmdTyped);
+      if (cmdEchoTimer.current) clearTimeout(cmdEchoTimer.current);
+    };
+  }, [sessionId]);
+
+  const revealClass = termReveal
+    ? `term-reveal ${paneIndex % 2 === 0 ? 'from-left' : 'from-right'}`
+    : '';
+  const revealDelay = termReveal ? { animationDelay: `${paneIndex * 80}ms` } : undefined;
+  const labelColor = getLabelColor(scenarioId, label, scenarioCategory);
+  const labelStyle = labelColor
+    ? { color: labelColor, textShadow: `0 0 8px ${labelColor}44` } as const
+    : undefined;
+  const paneClasses = [
+    'demo-term-pane',
+    `demo-term-${status}`,
+    revealClass,
+    focused ? 'demo-term-focused' : '',
+  ].filter(Boolean).join(' ');
+
+  const bodyCallbackRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      (bodyRef as React.MutableRefObject<HTMLDivElement | null>).current = node;
+      attach(node);
+    },
+    [attach],
+  );
+
   return (
-    <div className={`demo-term-pane demo-term-${status}`}>
+    <div
+      className={paneClasses}
+      style={revealDelay}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      tabIndex={-1}
+    >
       <div className="demo-term-head">
-        <span className={`demo-term-dot ${status}`} />
-        <span className="demo-term-label">{'\u2308'} {label} {'\u230B'}</span>
+        <span className="demo-term-num">{paneIndex + 1}</span>
+        <Tooltip content={status === 'connected' ? 'Terminal connected' : status === 'connecting' ? 'Connecting...' : 'Disconnected'} placement="right" variant="code">
+          <span className={`demo-term-dot ${status}`}>
+            {status === 'connected'
+              ? <PulseIcon size={8} color="var(--success)" />
+              : status === 'connecting'
+                ? <SpinnerIcon size={8} />
+                : <CrossIcon size={8} color="var(--rose-dim)" />}
+          </span>
+        </Tooltip>
+        <span className="demo-term-label" style={labelStyle}>{'\u2308'} {label} {'\u230B'}</span>
+        {hasOutput && isRunning && (
+          <span className="demo-term-waveform">
+            <WaveformIcon size={10} color={labelColor ?? 'var(--rose-dim)'} />
+          </span>
+        )}
         <span className="demo-term-status">{status}</span>
       </div>
-      <div className="demo-term-body" ref={attach} />
+      {cmdEcho && (
+        <div className="demo-term-cmd-echo">{cmdEcho}</div>
+      )}
+      <div className="demo-term-body" ref={bodyCallbackRef} />
       <div className="demo-term-vignette" />
     </div>
   );

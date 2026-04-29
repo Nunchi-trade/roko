@@ -78,7 +78,7 @@
   padding: 4px 10px;
   color: var(--text-primary);
   font-size: 12px;
-  border-bottom: 1px solid rgba(255,255,255,0.02);
+  border-bottom: 1px solid color-mix(in srgb, #fff 2%, transparent);
   border-right: 1px solid var(--glass-border);
   white-space: nowrap;
   overflow: hidden;
@@ -89,7 +89,7 @@
 .matrix-detail-cell {
   text-align: center;
   padding: 4px 8px;
-  border-bottom: 1px solid rgba(255,255,255,0.02);
+  border-bottom: 1px solid color-mix(in srgb, #fff 2%, transparent);
 }
 
 /* Task result chips */
@@ -103,11 +103,11 @@
 
 .chip-pass {
   background: var(--success);
-  box-shadow: 0 0 4px rgba(122,138,120,.3);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--success) 30%, transparent);
 }
 .chip-fail {
   background: var(--rose-bright);
-  box-shadow: 0 0 4px rgba(170,112,136,.3);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--rose-dim) 30%, transparent);
 }
 .chip-pending {
   background: var(--bg-raised);

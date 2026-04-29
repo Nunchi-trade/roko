@@ -1,6 +1,7 @@
-import type { CSSProperties } from 'react';
-import { NavLink, Outlet } from 'react-router';
+import React, { type CSSProperties } from 'react';
+import { NavLink, Outlet, useLocation } from 'react-router';
 import FlatIcon, { type FlatIconName } from '../../components/FlatIcon';
+import RevealWhen from '../../components/RevealWhen';
 
 const VIEWS = [
   { to: '/dashboard', label: 'Cost', icon: 'cost', end: true },
@@ -24,8 +25,8 @@ const navStyle: CSSProperties = {
   gap: 4,
   padding: 'var(--sp-1) var(--sp-4)',
   borderBottom: '1px solid var(--glass-2-border)',
-  background: 'rgba(8, 8, 12, 0.7)',
-  backdropFilter: 'blur(8px)',
+  background: 'var(--bg-deeper)',
+  backdropFilter: 'blur(12px) saturate(180%)',
   overflowX: 'auto',
   flexShrink: 0,
 };
@@ -39,17 +40,29 @@ const linkStyle: CSSProperties = {
   gap: 8,
   fontFamily: 'var(--mono, var(--font-mono))',
   fontSize: 'var(--text-sm)',
-  letterSpacing: '.04em',
+  letterSpacing: '.08em',
+  textTransform: 'uppercase' as const,
   padding: 'var(--sp-1) var(--sp-4)',
   textDecoration: 'none',
   whiteSpace: 'nowrap',
-  transition: 'all .2s ease',
+  transition: 'color .2s cubic-bezier(0.22, 1, 0.36, 1), background .2s cubic-bezier(0.22, 1, 0.36, 1), border-color .2s cubic-bezier(0.22, 1, 0.36, 1), transform .2s cubic-bezier(0.22, 1, 0.36, 1), box-shadow .2s cubic-bezier(0.22, 1, 0.36, 1)',
+  transform: 'translateY(0)',
+};
+
+const linkHoverHandlers = {
+  onMouseEnter: (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.currentTarget.style.transform = 'translateY(-1px)';
+  },
+  onMouseLeave: (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.currentTarget.style.transform = 'translateY(0)';
+  },
 };
 
 const activeLinkStyle: CSSProperties = {
   color: 'var(--rose-bright)',
   background: 'var(--rose-deep)',
   borderColor: 'var(--rose-dim)',
+  boxShadow: '0 0 12px rgba(220,165,189,.15)',
 };
 
 const bodyStyle: CSSProperties = {
@@ -60,6 +73,8 @@ const bodyStyle: CSSProperties = {
 };
 
 export default function DashboardLayout() {
+  const { pathname } = useLocation();
+
   return (
     <div style={shellStyle}>
       <nav style={navStyle} aria-label="Dashboard sections">
@@ -72,6 +87,7 @@ export default function DashboardLayout() {
               ...linkStyle,
               ...(isActive ? activeLinkStyle : null),
             })}
+            {...linkHoverHandlers}
           >
             <FlatIcon name={view.icon} size={13} tone="muted" />
             {view.label}
@@ -79,7 +95,9 @@ export default function DashboardLayout() {
         ))}
       </nav>
       <div style={bodyStyle}>
-        <Outlet />
+        <RevealWhen key={pathname} visible mode="slide-up" duration={300}>
+          <Outlet />
+        </RevealWhen>
       </div>
     </div>
   );

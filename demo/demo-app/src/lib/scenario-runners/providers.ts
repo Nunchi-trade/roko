@@ -11,6 +11,11 @@ export const providers: Scenario = {
   labels: ['zhipu (glm-4)', 'openai (gpt-5.4-mini)', 'anthropic (haiku)', 'moonshot (v1)'],
   panel: true,
   promptBar: false,
+  category: 'comparison',
+  features: ['4 providers simultaneously', 'Provider-agnostic', 'Live output'],
+  durationHint: '~45s',
+  accent: 'amber',
+  icon: 'grid',
   steps: [
     { label: 'Zhipu GLM-4', sublabel: 'dispatch' },
     { label: 'OpenAI GPT-5.4-Mini', sublabel: 'dispatch' },

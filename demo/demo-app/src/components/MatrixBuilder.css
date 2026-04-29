@@ -34,7 +34,7 @@
   border-radius: 6px;
   background: var(--glass-bg);
   cursor: pointer;
-  transition: all 200ms var(--ease);
+  transition: border-color 200ms var(--ease), background 200ms var(--ease);
   font-size: 13px;
 }
 .matrix-model-item:hover {
@@ -82,7 +82,7 @@
   font-size: 13px;
   letter-spacing: .04em;
   cursor: pointer;
-  transition: all 200ms var(--ease);
+  transition: border-color 200ms var(--ease), color 200ms var(--ease), background 200ms var(--ease);
 }
 .matrix-preset-chip:hover {
   border-color: var(--rose-dim);
@@ -90,7 +90,7 @@
 }
 .matrix-preset-chip.active {
   border-color: var(--bone-bright);
-  background: rgba(200,184,144,.08);
+  background: color-mix(in srgb, var(--bone) 8%, transparent);
   color: var(--bone-bright);
 }
 
@@ -138,7 +138,7 @@
 .matrix-grid-cell {
   text-align: center;
   padding: 12px 8px;
-  border: 1px solid rgba(255,255,255,0.03);
+  border: 1px solid color-mix(in srgb, #fff 3%, transparent);
   position: relative;
   min-width: 100px;
   transition: background 300ms var(--ease);
@@ -149,16 +149,16 @@
   background: transparent;
 }
 .matrix-cell--running {
-  background: rgba(200,184,144,0.06);
+  background: color-mix(in srgb, var(--bone) 6%, transparent);
 }
 .matrix-cell--pass {
-  background: rgba(122,138,120,0.08);
+  background: color-mix(in srgb, var(--success) 8%, transparent);
 }
 .matrix-cell--fail {
-  background: rgba(170,112,136,0.08);
+  background: color-mix(in srgb, var(--rose-dim) 8%, transparent);
 }
 .matrix-cell--partial {
-  background: rgba(216,168,120,0.08);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
 }
 
 /* Cell indicator dot */
@@ -180,15 +180,15 @@
 }
 .matrix-cell--pass .matrix-cell-indicator {
   background: var(--success);
-  box-shadow: 0 0 6px rgba(122,138,120,.4);
+  box-shadow: var(--glow-success);
 }
 .matrix-cell--fail .matrix-cell-indicator {
   background: var(--rose-bright);
-  box-shadow: 0 0 6px rgba(170,112,136,.4);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rose-dim) 40%, transparent);
 }
 .matrix-cell--partial .matrix-cell-indicator {
   background: var(--warning);
-  box-shadow: 0 0 6px rgba(216,168,120,.3);
+  box-shadow: var(--glow-warning);
 }
 
 /* Cell data */
@@ -273,7 +273,7 @@
   letter-spacing: .06em;
   text-transform: uppercase;
   cursor: pointer;
-  transition: all 200ms var(--ease);
+  transition: color 200ms var(--ease), background 200ms var(--ease), border-color 200ms var(--ease);
 }
 .bench-mode-btn:first-child { border-radius: 6px 0 0 6px; }
 .bench-mode-btn:last-child { border-radius: 0 6px 6px 0; }

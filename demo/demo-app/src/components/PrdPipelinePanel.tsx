@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import type {
   PipelineDemoState,
   PipelineEvent,
@@ -15,14 +15,38 @@ import './PrdPipelinePanel.css';
 
 /* ── Constants ── */
 
-const PHASES: { id: PipelinePhase; label: string }[] = [
-  { id: 'idea', label: 'Idea' },
-  { id: 'draft', label: 'PRD' },
-  { id: 'planning', label: 'Plan' },
-  { id: 'tasks', label: 'Tasks' },
-  { id: 'implementing', label: 'Run' },
-  { id: 'complete', label: 'Done' },
+const PHASES: { id: PipelinePhase; label: string; description: string }[] = [
+  { id: 'idea', label: 'Idea', description: 'Capture a work item from a one-line prompt' },
+  { id: 'draft', label: 'PRD', description: 'Agent drafts a product requirements document' },
+  { id: 'planning', label: 'Plan', description: 'Agent generates implementation plan from PRD' },
+  { id: 'tasks', label: 'Tasks', description: 'Plan is decomposed into routed, gated tasks' },
+  { id: 'implementing', label: 'Run', description: 'Agents execute tasks with verification gates' },
+  { id: 'complete', label: 'Done', description: 'All tasks passed gates; pipeline complete' },
 ];
+
+const EXAMPLE_PREVIEWS: Record<string, string[]> = {
+  'simple-status': [
+    'Add `status` and `status --json` subcommands',
+    'Single file, no network dependencies',
+    'Cargo test verification gate',
+  ],
+  'release-watch': [
+    'HTTP client for GitHub releases API',
+    'Offline fixture tests, version comparison logic',
+    'Mix of T1 verification and T2 implementation',
+  ],
+  'funding-alert': [
+    'Hyperliquid API client for BTC funding rates',
+    'Email notifier with dry-run mode',
+    'T1/T2/T3 routing across 4+ task domains',
+  ],
+};
+
+const COMPLEXITY_COLORS: Record<string, string> = {
+  'Super simple': 'green',
+  'Slightly more complex': 'amber',
+  'Stage job': 'rose',
+};
 
 const PHASE_ORDER: PipelinePhase[] = [
   'idle', 'setup', 'idea', 'draft', 'published',
@@ -112,6 +136,22 @@ function runBtnLabel(status: ServerStatus, running: boolean): string {
   return 'Start live run';
 }
 
+function phaseStatus(
+  phaseId: PipelinePhase,
+  currentPhase: PipelinePhase,
+  currentIndex: number,
+): 'done' | 'active' | 'pending' | 'failed' {
+  const idx = phaseIndex(phaseId);
+  if (currentPhase === 'failed') {
+    if (idx < currentIndex) return 'done';
+    if (idx === currentIndex) return 'failed';
+    return 'pending';
+  }
+  if (idx < currentIndex) return 'done';
+  if (idx === currentIndex) return 'active';
+  return 'pending';
+}
+
 /* ── Main component ── */
 
 export default function PrdPipelinePanel({
@@ -133,11 +173,10 @@ export default function PrdPipelinePanel({
   onRun?: () => void;
   isRunning?: boolean;
   serverHealth?: ServerStatus;
-  /** T6.2 / T7.58: Learning feedback stats for ConfidenceMeter. */
   learningStats?: { routerConfidence: number; confidenceTrend: 'improving' | 'stable' | 'declining'; totalDecisions: number };
 }) {
   const progress = useMemo(() => totalProgress(state.plans), [state.plans]);
-  const currentPhase = phaseIndex(state.phase);
+  const currentPhaseIdx = phaseIndex(state.phase);
   const tasks = useMemo(() => allTasks(state.plans), [state.plans]);
   const routes = useMemo(() => routeSummary(state.plans), [state.plans]);
   const gates = useMemo(() => gateSummary(state.plans), [state.plans]);
@@ -147,9 +186,17 @@ export default function PrdPipelinePanel({
   const hasTasks = tasks.length > 0;
   const hasEvents = state.events.length > 0;
   const pctDone = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  const isActive = progress.active > 0;
 
   return (
     <div className="pp">
+      {/* ── Overall progress bar ── */}
+      {progress.total > 0 && (
+        <div className={`pp-progress-bar${isActive ? ' pp-progress-active' : ''}`}>
+          <div className="pp-progress-fill" style={{ width: `${pctDone}%` }} />
+        </div>
+      )}
+
       {/* ── Top: two columns ── */}
       <div className="pp-top">
         {/* Left: job brief */}
@@ -170,13 +217,19 @@ export default function PrdPipelinePanel({
         {/* Right: controls + progress */}
         <div className="pp-sidebar">
           {onRun && (
-            <button
-              className="pp-run-btn"
-              onClick={onRun}
-              disabled={isRunning || serverHealth !== 'connected'}
-            >
-              {runBtnLabel(serverHealth, isRunning)}
-            </button>
+            <div className="pp-run-group">
+              <button
+                className={`pp-run-btn${serverHealth === 'connected' && !isRunning ? ' pp-run-btn-ready' : ''}`}
+                onClick={onRun}
+                disabled={isRunning || serverHealth !== 'connected'}
+              >
+                {runBtnLabel(serverHealth, isRunning)}
+              </button>
+              <span className={`pp-health-badge pp-health-${serverHealth}`}>
+                <span className="pp-health-dot" />
+                {serverHealth === 'connected' ? 'Server ready' : serverHealth === 'checking' ? 'Connecting\u2026' : 'Offline'}
+              </span>
+            </div>
           )}
 
           <div className="pp-score">
@@ -215,31 +268,69 @@ export default function PrdPipelinePanel({
       {/* ── Example selector ── */}
       {examples.length > 0 && onSelectExample && (
         <div className="pp-examples">
-          {examples.map((ex) => (
-            <button
-              key={ex.id}
-              className={selectedExampleId === ex.id ? 'active' : ''}
-              onClick={() => onSelectExample(ex.id)}
-              disabled={selectorDisabled}
-            >
-              <b>{ex.label}</b>
-              <span>{ex.complexity}</span>
-            </button>
-          ))}
+          {examples.map((ex) => {
+            const bullets = EXAMPLE_PREVIEWS[ex.id] ?? [];
+            const badgeColor = COMPLEXITY_COLORS[ex.complexity] ?? 'amber';
+            return (
+              <button
+                key={ex.id}
+                className={selectedExampleId === ex.id ? 'active' : ''}
+                onClick={() => onSelectExample(ex.id)}
+                disabled={selectorDisabled}
+              >
+                <div className="pp-example-header">
+                  <b>{ex.label}</b>
+                  <span className={`pp-complexity-badge pp-complexity-${badgeColor}`}>{ex.complexity}</span>
+                </div>
+                {bullets.length > 0 && (
+                  <ul className="pp-example-bullets">
+                    {bullets.map((b, i) => <li key={i}>{b}</li>)}
+                  </ul>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Last run stats (idle) ── */}
+      {learningStats && learningStats.totalDecisions > 0 && !hasPlans && (
+        <div className="pp-last-run">
+          <span className="pp-last-run-label">Last run</span>
+          <div className="pp-last-run-stats">
+            <span>{learningStats.totalDecisions} decisions</span>
+            <span>confidence {Math.round(learningStats.routerConfidence * 100)}%</span>
+            <span className={`pp-trend-${learningStats.confidenceTrend}`}>{learningStats.confidenceTrend}</span>
+          </div>
         </div>
       )}
 
       {/* ── Phase rail ── */}
       <div className="pp-rail">
-        {PHASES.map((phase) => {
-          const idx = phaseIndex(phase.id);
-          const s = state.phase === 'failed'
-            ? idx < currentPhase ? 'done' : 'pending'
-            : idx < currentPhase ? 'done' : idx === currentPhase ? 'active' : 'pending';
+        {PHASES.map((phase, i) => {
+          const s = phaseStatus(phase.id, state.phase, currentPhaseIdx);
+          const isLast = i === PHASES.length - 1;
+          const isIdle = state.phase === 'idle';
           return (
-            <div key={phase.id} className={`pp-phase pp-phase-${s}`}>
-              <span />
+            <div
+              key={phase.id}
+              className={`pp-phase pp-phase-${s}${s === 'active' ? ' gradient-border-active' : ''}`}
+              title={phase.description}
+            >
+              {s === 'done' ? (
+                <PhaseCheckIcon />
+              ) : s === 'failed' ? (
+                <PhaseXIcon />
+              ) : s === 'active' ? (
+                <span />
+              ) : (
+                <span />
+              )}
               <b>{phase.label}</b>
+              {/* Connection line between phases — animated dashes in idle */}
+              {!isLast && <div className={`pp-phase-connector${isIdle ? ' pp-phase-connector-idle' : ''}`} />}
+              {/* Hover tooltip */}
+              <div className="pp-phase-tooltip">{phase.description}</div>
             </div>
           );
         })}
@@ -310,9 +401,8 @@ export default function PrdPipelinePanel({
                   ))}
                 </div>
               )}
-              {/* T7.58: Router confidence meter in routing section */}
               {learningStats && learningStats.totalDecisions > 0 && (
-                <div className="pp-router-confidence" style={{ marginTop: 8 }}>
+                <div className="pp-router-confidence">
                   <ConfidenceMeter
                     confidence={learningStats.routerConfidence}
                     trend={learningStats.confidenceTrend}
@@ -362,6 +452,51 @@ export default function PrdPipelinePanel({
   );
 }
 
+/* ── SVG Icons ── */
+
+function PhaseCheckIcon() {
+  return (
+    <svg className="pp-status-icon" viewBox="0 0 16 16">
+      <path className="pp-check-path" d="M3 8.5 L6.5 12 L13 4" />
+    </svg>
+  );
+}
+
+function PhaseXIcon() {
+  return (
+    <svg className="pp-status-icon" viewBox="0 0 16 16">
+      <path className="pp-x-path" d="M4 4 L12 12" />
+      <path className="pp-x-path" d="M12 4 L4 12" style={{ animationDelay: '0.15s' }} />
+    </svg>
+  );
+}
+
+function TaskStatusIndicator({ status }: { status: PipelineTaskStatus }) {
+  if (status === 'done') {
+    return (
+      <svg className="pp-status-icon" viewBox="0 0 16 16">
+        <path className="pp-check-path" d="M3 8.5 L6.5 12 L13 4" />
+      </svg>
+    );
+  }
+  if (status === 'failed') {
+    return (
+      <svg className="pp-status-icon" viewBox="0 0 16 16">
+        <path className="pp-x-path" d="M4 4 L12 12" />
+        <path className="pp-x-path" d="M12 4 L4 12" style={{ animationDelay: '0.15s' }} />
+      </svg>
+    );
+  }
+  if (status === 'active') {
+    return (
+      <svg className="pp-spinner" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="6" />
+      </svg>
+    );
+  }
+  return <div className="pp-task-dot" />;
+}
+
 /* ── Sub-components ── */
 
 function PlanCard({ plan }: { plan: PipelinePlan }) {
@@ -391,9 +526,17 @@ function PlanCard({ plan }: { plan: PipelinePlan }) {
 
 function TaskRow({ planId, task }: { planId: string; task: PipelineTask }) {
   const tier: PipelineRouteTier = task.routeTier ?? 'T1';
+  const [expanded, setExpanded] = useState(false);
+  const toggle = useCallback(() => setExpanded((v) => !v), []);
+
+  const hasDetail = (task.files.length > 0) || task.role || task.modelHint || (task.dependsOn.length > 0);
+
   return (
-    <article className={`pp-task pp-task-${task.status}`}>
-      <div className="pp-task-dot" />
+    <article
+      className={`pp-task pp-task-${task.status}${hasDetail ? ' pp-task-expandable' : ''}`}
+      onClick={hasDetail ? toggle : undefined}
+    >
+      <TaskStatusIndicator status={task.status} />
       <div className="pp-task-body">
         <div className="pp-task-top">
           <h4>{task.title}</h4>
@@ -417,6 +560,37 @@ function TaskRow({ planId, task }: { planId: string; task: PipelineTask }) {
               </code>
             ))}
             {task.verify.length > 3 && <em>+{task.verify.length - 3}</em>}
+          </div>
+        )}
+        {/* Expandable detail panel */}
+        {hasDetail && (
+          <div className={`pp-task-detail${expanded ? ' pp-task-detail-open' : ''}`}>
+            <div className="pp-task-detail-inner">
+              {task.role && (
+                <div className="pp-detail-row">
+                  <span className="pp-detail-label">Role</span>
+                  <span className="pp-detail-value">{task.role}</span>
+                </div>
+              )}
+              {task.modelHint && (
+                <div className="pp-detail-row">
+                  <span className="pp-detail-label">Model</span>
+                  <span className="pp-detail-value">{task.modelHint}</span>
+                </div>
+              )}
+              {task.dependsOn.length > 0 && (
+                <div className="pp-detail-row">
+                  <span className="pp-detail-label">Deps</span>
+                  <span className="pp-detail-value">{task.dependsOn.join(', ')}</span>
+                </div>
+              )}
+              {task.files.length > 0 && (
+                <div className="pp-detail-row">
+                  <span className="pp-detail-label">Files</span>
+                  <span className="pp-detail-value">{task.files.join(', ')}</span>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>

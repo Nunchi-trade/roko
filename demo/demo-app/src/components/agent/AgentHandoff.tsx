@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import AgentAvatar from './AgentAvatar';
 import './AgentHandoff.css';
 
@@ -18,6 +19,8 @@ interface AgentHandoffProps {
   progress?: number;
   compact?: boolean;
   className?: string;
+  /** Stagger index for stack animation (0-based). */
+  index?: number;
 }
 
 /** Number of crystal particles rendered in each direction. */
@@ -44,9 +47,32 @@ export default function AgentHandoff({
   progress,
   compact = false,
   className,
+  index = 0,
 }: AgentHandoffProps) {
   const showForward = direction === 'forward' || direction === 'bidirectional';
   const showReverse = direction === 'reverse' || direction === 'bidirectional';
+
+  /* ── Typewriter label reveal ── */
+  const [revealedLabel, setRevealedLabel] = useState('');
+  const labelRef = useRef(label);
+  useEffect(() => {
+    labelRef.current = label;
+    if (!label || status === 'pending') {
+      setRevealedLabel(label ?? '');
+      return;
+    }
+    setRevealedLabel('');
+    let i = 0;
+    const id = setInterval(() => {
+      i++;
+      if (i > (labelRef.current?.length ?? 0)) {
+        clearInterval(id);
+        return;
+      }
+      setRevealedLabel(labelRef.current?.slice(0, i) ?? '');
+    }, 32);
+    return () => clearInterval(id);
+  }, [label, status]);
 
   const rootClasses = [
     'agent-handoff',
@@ -57,10 +83,14 @@ export default function AgentHandoff({
     .join(' ');
 
   return (
-    <div className={rootClasses} data-status={status}>
-      {/* ── Left agent ── */}
+    <div
+      className={rootClasses}
+      data-status={status}
+      style={{ '--handoff-stagger': `${index * 80}ms` } as React.CSSProperties}
+    >
+      {/* ── Left agent (source) ── */}
       <div
-        className="agent-handoff__card"
+        className="agent-handoff__card agent-handoff__card--source"
         data-agent-status={from.status ?? 'idle'}
       >
         <AgentAvatar
@@ -76,9 +106,10 @@ export default function AgentHandoff({
 
       {/* ── Flow zone ── */}
       <div className="agent-handoff__flow">
-        {/* Connection line + particles */}
+        {/* Connection beam + particles */}
         <div className="agent-handoff__connection">
           <div className="agent-handoff__line" />
+          <div className="agent-handoff__beam-glow" />
           {showForward && (
             <span className="agent-handoff__arrow agent-handoff__arrow--forward" />
           )}
@@ -92,13 +123,16 @@ export default function AgentHandoff({
           <div className="agent-handoff__settled-glow" />
         </div>
 
-        {/* Label */}
+        {/* Label with typewriter */}
         {label && (
           <span className="agent-handoff__label">
             {status === 'done' && (
               <span className="agent-handoff__check">{'\u2713'} </span>
             )}
-            {label}
+            <span className="agent-handoff__label-text">{revealedLabel}</span>
+            {revealedLabel.length < (label?.length ?? 0) && (
+              <span className="agent-handoff__cursor" />
+            )}
           </span>
         )}
 
@@ -127,9 +161,9 @@ export default function AgentHandoff({
         )}
       </div>
 
-      {/* ── Right agent ── */}
+      {/* ── Right agent (target) ── */}
       <div
-        className="agent-handoff__card"
+        className="agent-handoff__card agent-handoff__card--target"
         data-agent-status={to.status ?? 'idle'}
       >
         <AgentAvatar
@@ -140,6 +174,10 @@ export default function AgentHandoff({
         <span className="agent-handoff__name">{to.name}</span>
         {to.role && (
           <span className="agent-handoff__role">{to.role}</span>
+        )}
+        {/* Connected badge on completion */}
+        {status === 'done' && (
+          <span className="agent-handoff__connected-badge">Connected</span>
         )}
       </div>
     </div>

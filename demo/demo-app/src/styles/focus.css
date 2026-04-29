@@ -1,0 +1,163 @@
+/* ═══════════════════════════════════════════════════════════
+   FOCUS · Animated ring system
+   Rose-tinted glow rings for keyboard navigation.
+   Hidden on mouse click, visible on :focus-visible (tab).
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Keyframes ── */
+
+@keyframes focus-ring-in {
+  from {
+    box-shadow: 0 0 0 2px transparent, 0 0 0px color-mix(in srgb, var(--rose) 0%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--rose) 45%, transparent), 0 0 12px color-mix(in srgb, var(--rose) 20%, transparent);
+  }
+}
+
+@keyframes focus-ring-out {
+  from {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--rose) 45%, transparent), 0 0 12px color-mix(in srgb, var(--rose) 20%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 2px transparent, 0 0 0px color-mix(in srgb, var(--rose) 0%, transparent);
+  }
+}
+
+/* ── Base: all interactive elements ── */
+
+button,
+a,
+input,
+select,
+textarea,
+[tabindex] {
+  outline: none;
+}
+
+/* Brief exit animation when focus leaves (the "travel" effect) */
+button:focus,
+a:focus,
+input:focus,
+select:focus,
+textarea:focus,
+[tabindex]:focus {
+  animation: focus-ring-out 150ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+}
+
+/* ── Visible ring on keyboard nav ── */
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  animation: focus-ring-in 200ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+  border-radius: inherit;
+}
+
+/* ── Intensity variants ── */
+
+.focus-subtle:focus-visible {
+  animation: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--rose) 20%, transparent), 0 0 4px color-mix(in srgb, var(--rose) 8%, transparent);
+}
+
+.focus-normal:focus-visible {
+  /* default — same as base rule, explicit for composition */
+  animation: focus-ring-in 200ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+}
+
+.focus-strong:focus-visible {
+  animation: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rose) 60%, transparent), 0 0 20px color-mix(in srgb, var(--rose) 35%, transparent);
+}
+
+/* ── Skip-to-content link ── */
+
+.skip-to-content {
+  position: fixed;
+  top: -100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(0);
+  z-index: 10000;
+  padding: 8px 20px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--text-sm, 14px);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--rose-glow, #e8b5ce);
+  background: var(--bg-raised, #12101a);
+  border: 1px solid var(--rose-dim, #8a5a70);
+  border-radius: 0 0 var(--radius-md, 6px) var(--radius-md, 6px);
+  text-decoration: none;
+  opacity: 0;
+  transition: top 200ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1)),
+              opacity 200ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1));
+  pointer-events: none;
+}
+
+.skip-to-content:focus-visible {
+  top: 0;
+  opacity: 1;
+  pointer-events: auto;
+  animation: none;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--rose) 30%, transparent);
+}
+
+/* ── Performance: will-change only during active focus ── */
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  will-change: box-shadow;
+}
+
+/* Remove will-change when not focused */
+button:not(:focus-visible),
+a:not(:focus-visible),
+input:not(:focus-visible),
+select:not(:focus-visible),
+textarea:not(:focus-visible),
+[tabindex]:not(:focus-visible) {
+  will-change: auto;
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--rose) 45%, transparent);
+    transition: none;
+  }
+
+  button:focus,
+  a:focus,
+  input:focus,
+  select:focus,
+  textarea:focus,
+  [tabindex]:focus {
+    animation: none;
+    transition: none;
+  }
+
+  .skip-to-content {
+    transition: none;
+  }
+
+  .skip-to-content:focus-visible {
+    top: 0;
+    opacity: 1;
+  }
+}

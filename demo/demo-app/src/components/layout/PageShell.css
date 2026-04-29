@@ -1,9 +1,6 @@
 /* PageShell — standard page wrapper with title, subtitle, and actions */
 
-@keyframes pageShellFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
+/* pageShellFadeIn → shared animations.css (fadeIn) */
 
 .page-shell {
   padding: var(--sp-6);
@@ -29,7 +26,7 @@
   color: var(--text-strong);
   letter-spacing: -0.012em;
   line-height: 1.1;
-  animation: pageShellFadeIn 200ms ease-out;
+  animation: fadeIn 200ms ease-out;
 }
 
 .page-shell__subtitle {

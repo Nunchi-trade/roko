@@ -368,6 +368,7 @@ export default function ConfigWidget() {
   const handleSectionApply = useCallback(
     async (sectionKey: string, values: Record<string, unknown>) => {
       await updateConfig({ [sectionKey]: values });
+      setOpen(false);
     },
     [updateConfig],
   );
@@ -375,6 +376,7 @@ export default function ConfigWidget() {
   const handleModelApply = useCallback(
     async (model: string, backend: string) => {
       await updateModelConfig(model, backend);
+      setOpen(false);
     },
     [updateModelConfig],
   );

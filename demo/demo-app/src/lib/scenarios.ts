@@ -73,6 +73,16 @@ export interface Scenario {
   promptBar: boolean;
   mirageBar?: boolean;
   steps: ScenarioStep[];
+  /** Category tag for visual grouping */
+  category: 'pipeline' | 'comparison' | 'exploration' | 'learning' | 'chain';
+  /** Key features to highlight in preview */
+  features: string[];
+  /** Estimated duration hint */
+  durationHint: string;
+  /** Accent color for this scenario's preview */
+  accent: 'rose' | 'teal' | 'amber' | 'violet' | 'emerald';
+  /** Icon identifier for the scenario diagram */
+  icon: 'pipeline' | 'race' | 'gate' | 'grid' | 'explore' | 'knowledge' | 'dream' | 'chat' | 'transfer' | 'chain' | 'evm';
   run(ctx: ScenarioContext): Promise<void>;
 }
 
@@ -205,6 +215,11 @@ const prdPipeline: Scenario = {
   labels: ['roko commands'],
   panel: true,
   promptBar: false,
+  category: 'pipeline',
+  features: ['PRD generation', 'Task planning', 'Gate validation'],
+  durationHint: '~90s',
+  accent: 'rose',
+  icon: 'pipeline',
   steps: [
     { label: 'Capture job', sublabel: 'prd idea' },
     { label: 'Generate PRD', sublabel: 'prd draft new' },
@@ -372,6 +387,11 @@ const prdResearchLoop: Scenario = {
   labels: ['full pipeline'],
   panel: true,
   promptBar: false,
+  category: 'pipeline',
+  features: ['Full PRD lifecycle', 'Research enhancement', '7 gates'],
+  durationHint: '~90s',
+  accent: 'rose',
+  icon: 'pipeline',
   steps: [
     { label: 'Capture idea', sublabel: 'prd idea' },
     { label: 'Draft PRD', sublabel: 'prd draft new' },
@@ -518,6 +538,11 @@ const race: Scenario = {
   labels: ['naive (no replan)', 'cascade (full pipeline)'],
   panel: true,
   promptBar: false,
+  category: 'comparison',
+  features: ['Naive vs cascade routing', 'Cost comparison', 'Side-by-side'],
+  durationHint: '~60s',
+  accent: 'teal',
+  icon: 'race',
   steps: [
     { label: 'Naive run', sublabel: '--no-replan' },
     { label: 'Cascade run', sublabel: 'full pipeline' },
@@ -574,6 +599,11 @@ const gateRetry: Scenario = {
   labels: ['task execution', 'gate status'],
   panel: true,
   promptBar: false,
+  category: 'pipeline',
+  features: ['Gate failure detection', 'Auto-replan', 'Adjusted retry'],
+  durationHint: '~75s',
+  accent: 'amber',
+  icon: 'gate',
   steps: [
     { label: 'First attempt', sublabel: 'roko run' },
     { label: 'Gate failure', sublabel: 'compile/test/clippy' },
@@ -842,6 +872,11 @@ const providers: Scenario = {
   labels: ['zhipu (glm-4)', 'openai (gpt-5.4-mini)', 'anthropic (haiku)', 'moonshot (v1)'],
   panel: true,
   promptBar: false,
+  category: 'comparison',
+  features: ['4 providers simultaneously', 'Provider-agnostic', 'Live output'],
+  durationHint: '~45s',
+  accent: 'amber',
+  icon: 'grid',
   steps: [
     { label: 'Zhipu GLM-4', sublabel: 'dispatch' },
     { label: 'OpenAI GPT-5.4-Mini', sublabel: 'dispatch' },
@@ -891,6 +926,11 @@ const providerRace: Scenario = {
   labels: ['anthropic (haiku)', 'openai (gpt-5.4-mini)', 'gemini (flash)', 'moonshot (v1)'],
   panel: true,
   promptBar: false,
+  category: 'comparison',
+  features: ['4-way provider race', 'Gate-based winner', 'Real-time progress'],
+  durationHint: '~60s',
+  accent: 'teal',
+  icon: 'race',
   steps: [
     { label: 'Setup', sublabel: 'init workspaces' },
     { label: 'Race start', sublabel: 'dispatch all 4' },
@@ -1056,6 +1096,11 @@ const explore: Scenario = {
   labels: ['workspace', 'learning', 'config', 'knowledge'],
   panel: true,
   promptBar: false,
+  category: 'exploration',
+  features: ['18 crates', '85 routes', '100+ commands'],
+  durationHint: '~120s',
+  accent: 'violet',
+  icon: 'explore',
   steps: [
     { label: 'status', sublabel: 'workspace' },
     { label: 'doctor', sublabel: 'workspace' },
@@ -1117,6 +1162,11 @@ const knowledgeAccumulation: Scenario = {
   labels: ['task runner', 'knowledge store'],
   panel: true,
   promptBar: false,
+  category: 'learning',
+  features: ['Knowledge store growth', 'Successive runs', 'Tier progression'],
+  durationHint: '~90s',
+  accent: 'emerald',
+  icon: 'knowledge',
   steps: [
     { label: 'Initial query', sublabel: 'empty store' },
     { label: 'Run 1', sublabel: 'build a CLI tool' },
@@ -1260,6 +1310,11 @@ const dreamConsolidation: Scenario = {
   labels: ['dream engine', 'knowledge monitor'],
   panel: true,
   promptBar: false,
+  category: 'learning',
+  features: ['Offline consolidation', 'Episode distillation', 'Durable knowledge'],
+  durationHint: '~60s',
+  accent: 'violet',
+  icon: 'dream',
   steps: [
     { label: 'Trigger check', sublabel: 'dream schedule' },
     { label: 'Seed episodes', sublabel: 'roko run' },
@@ -1432,6 +1487,11 @@ const chat: Scenario = {
   labels: ['roko chat'],
   panel: true,
   promptBar: false,
+  category: 'exploration',
+  features: ['Auto-detect workspace', 'Auto-init', 'Interactive REPL'],
+  durationHint: '~30s',
+  accent: 'teal',
+  icon: 'chat',
   steps: [
     { label: 'Start TUI', sublabel: 'roko' },
     { label: 'Send message', sublabel: 'explain cascade routing' },
@@ -1517,6 +1577,11 @@ const knowledgeTransfer: Scenario = {
   labels: ['Agent Alpha (cold start)', 'Agent Beta (with knowledge)'],
   panel: true,
   promptBar: false,
+  category: 'learning',
+  features: ['Cross-agent learning', 'Cold vs warm start', 'Knowledge reuse'],
+  durationHint: '~90s',
+  accent: 'emerald',
+  icon: 'transfer',
   steps: [
     { label: 'Setup workspaces', sublabel: 'roko init x2' },
     { label: 'Alpha builds User API', sublabel: 'roko run (cold)' },
@@ -1643,6 +1708,11 @@ const chainIntelligence: Scenario = {
   labels: ['Yield Scout (Alpha)', 'Risk Hedger (Beta)'],
   panel: true,
   promptBar: false,
+  category: 'chain',
+  features: ['On-chain knowledge graph', 'DeFi agents', 'Forked Ethereum'],
+  durationHint: '~120s',
+  accent: 'violet',
+  icon: 'chain',
   steps: [
     { label: 'Connect to fork', sublabel: 'mirage-rs mainnet' },
     { label: 'Alpha researches yields', sublabel: 'Aave + Uniswap' },
@@ -1866,6 +1936,11 @@ const mirage: Scenario = {
   panel: false,
   promptBar: false,
   mirageBar: true,
+  category: 'chain',
+  features: ['EVM fork', 'Real-time blocks', 'Configurable block times'],
+  durationHint: '~30s',
+  accent: 'amber',
+  icon: 'evm',
   steps: [],
   async run({ entries }) {
     const e = entries[0];

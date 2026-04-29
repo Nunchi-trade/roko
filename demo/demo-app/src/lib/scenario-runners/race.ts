@@ -10,6 +10,11 @@ export const race: Scenario = {
   labels: ['naive (no replan)', 'cascade (full pipeline)'],
   panel: true,
   promptBar: false,
+  category: 'comparison',
+  features: ['Naive vs cascade routing', 'Cost comparison', 'Side-by-side'],
+  durationHint: '~60s',
+  accent: 'teal',
+  icon: 'race',
   steps: [
     { label: 'Naive run', sublabel: '--no-replan' },
     { label: 'Cascade run', sublabel: 'full pipeline' },

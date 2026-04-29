@@ -10,6 +10,20 @@
   background: var(--glass-bg);
   font-family: var(--mono);
   position: relative;
+  /* Spring entry animation with stagger */
+  animation: handoff-slide-in 500ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation-delay: var(--handoff-stagger, 0ms);
+}
+
+@keyframes handoff-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 /* ── Compact variant ── */
@@ -52,6 +66,7 @@
   gap: var(--sp-2);
   flex-shrink: 0;
   min-width: 64px;
+  transition: opacity 400ms var(--ease), transform 400ms var(--ease);
 }
 
 .agent-handoff__name {
@@ -73,6 +88,37 @@
   white-space: nowrap;
 }
 
+/* ── Visual weight transfer: source fades/shrinks, target grows/brightens ── */
+
+.agent-handoff[data-status="active"] .agent-handoff__card--source {
+  opacity: 0.7;
+  transform: scale(0.95);
+}
+
+.agent-handoff[data-status="active"] .agent-handoff__card--target {
+  transform: scale(1.05);
+}
+
+.agent-handoff[data-status="active"] .agent-handoff__card--target .agent-avatar {
+  box-shadow: 0 0 14px currentColor, 0 0 28px rgba(216, 154, 178, 0.25);
+}
+
+/* Done: source fully receded, target settled with glow */
+
+.agent-handoff[data-status="done"] .agent-handoff__card--source {
+  opacity: 0.55;
+  transform: scale(0.92);
+}
+
+.agent-handoff[data-status="done"] .agent-handoff__card--target .agent-avatar {
+  animation: target-arrival-glow 600ms ease-out;
+}
+
+@keyframes target-arrival-glow {
+  0%   { box-shadow: 0 0 20px var(--success), 0 0 40px rgba(138, 156, 134, 0.5); }
+  100% { box-shadow: 0 0 8px rgba(138, 156, 134, 0.3); }
+}
+
 /* Agent status indicators */
 
 .agent-handoff__card[data-agent-status="working"] .agent-avatar {
@@ -86,6 +132,33 @@
 @keyframes agent-working-pulse {
   0%, 100% { box-shadow: 0 0 8px currentColor; }
   50% { box-shadow: 0 0 16px currentColor, 0 0 24px currentColor; }
+}
+
+/* ── Connected badge ── */
+
+.agent-handoff__connected-badge {
+  display: inline-block;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--success);
+  border: 1px solid rgba(138, 156, 134, 0.4);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  animation: badge-appear 400ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation-delay: 200ms;
+  text-shadow: 0 0 8px rgba(138, 156, 134, 0.4);
+}
+
+@keyframes badge-appear {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 /* ── Flow zone (middle) ── */
@@ -117,6 +190,52 @@
   top: 50%;
   height: 1px;
   transform: translateY(-50%);
+}
+
+/* ── Animated beam glow (leading edge sweep) ── */
+
+.agent-handoff__beam-glow {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 3px;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  border-radius: 2px;
+}
+
+.agent-handoff[data-status="active"] .agent-handoff__beam-glow {
+  opacity: 1;
+  background:
+    linear-gradient(90deg, transparent 0%, var(--rose-dim) 20%, var(--rose-bright) 50%, var(--rose-dim) 80%, transparent 100%);
+  animation: beam-sweep 2s ease-in-out infinite;
+}
+
+@keyframes beam-sweep {
+  0% {
+    clip-path: inset(0 100% 0 0);
+    filter: drop-shadow(0 0 6px var(--rose-bright));
+  }
+  50% {
+    clip-path: inset(0 0 0 0);
+    filter: drop-shadow(0 0 10px var(--rose-bright));
+  }
+  100% {
+    clip-path: inset(0 0 0 100%);
+    filter: drop-shadow(0 0 6px var(--rose-bright));
+  }
+}
+
+/* Done: beam solidifies as success color */
+
+.agent-handoff[data-status="done"] .agent-handoff__beam-glow {
+  opacity: 0.6;
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(138, 156, 134, 0.3);
+  animation: none;
+  clip-path: none;
 }
 
 /* ── Status-specific connection line ── */
@@ -313,6 +432,28 @@
   text-transform: uppercase;
   color: var(--text-dim);
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+}
+
+.agent-handoff__label-text {
+  display: inline;
+}
+
+/* Typewriter cursor */
+
+.agent-handoff__cursor {
+  display: inline-block;
+  width: 1px;
+  height: 12px;
+  background: var(--rose-bright);
+  margin-left: 1px;
+  animation: cursor-blink 530ms steps(1) infinite;
+}
+
+@keyframes cursor-blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
 }
 
 .agent-handoff[data-status="active"] .agent-handoff__label {
@@ -403,9 +544,21 @@
 /* ── Reduced motion ── */
 
 @media (prefers-reduced-motion: reduce) {
+  .agent-handoff {
+    animation: none;
+  }
+
   .agent-handoff__particle,
-  .agent-handoff__settled-glow {
+  .agent-handoff__settled-glow,
+  .agent-handoff__beam-glow,
+  .agent-handoff__cursor,
+  .agent-handoff__connected-badge {
     animation: none !important;
+  }
+
+  .agent-handoff[data-status="active"] .agent-handoff__beam-glow {
+    opacity: 0.5;
+    clip-path: none;
   }
 
   .agent-handoff[data-status="active"] .agent-handoff__particle--forward,

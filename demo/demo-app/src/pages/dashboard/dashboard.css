@@ -371,6 +371,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  backdrop-filter: blur(12px) saturate(180%);
 }
 
 .dash-card--lg {
@@ -381,6 +382,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  backdrop-filter: blur(12px) saturate(180%);
 }
 
 .dash-card__header {
@@ -434,6 +436,35 @@
   font-family: var(--mono);
   font-size: 0.75rem;
   text-align: center;
+}
+
+/* Compact CLI empty state */
+.dash-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 32px 16px;
+  text-align: center;
+}
+
+.dash-empty__label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+
+.dash-empty__cmd {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--rose-dim);
+  background: rgba(184,122,148,.06);
+  border: 1px solid rgba(184,122,148,.12);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  letter-spacing: 0.02em;
 }
 
 /* Display font for names/labels */
@@ -722,4 +753,152 @@
   font-family: var(--mono);
   font-size: 0.72rem;
   font-weight: 500;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ANIMATIONS — Dashboard cards, data transitions, and effects
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Keyframes ───────────────────────────────────────────────── */
+
+/* fadeInUp, dash-fadeIn, dash-scaleIn → shared animations.css (fadeInUp, fadeIn, scaleIn) */
+
+@keyframes dash-barGrow {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+@keyframes dash-gaugeGrow {
+  from { width: 0%; }
+}
+
+@keyframes dash-headerLine {
+  from { width: 0; }
+  to   { width: 100%; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.7; transform: scale(1.15); }
+}
+
+@keyframes dash-breathe {
+  0%, 100% { box-shadow: 0 0 4px 1px currentColor; opacity: 0.85; }
+  50%      { box-shadow: 0 0 10px 3px currentColor; opacity: 1; }
+}
+
+@keyframes dash-blurReveal {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+/* dash-drawLine → shared animations.css (line-draw) */
+
+@keyframes dash-totalPulse {
+  0%  { text-shadow: 0 0 8px rgba(220,165,189,.3); }
+  50% { text-shadow: 0 0 22px rgba(220,165,189,.7), 0 0 40px rgba(220,165,189,.3); }
+  100%{ text-shadow: 0 0 8px rgba(220,165,189,.3); }
+}
+
+/* ── Card mount stagger ─────────────────────────────────────── */
+
+.dash-card-stagger {
+  opacity: 0;
+  animation: fadeInUp 0.5s var(--ease) forwards;
+}
+
+/* ── Card hover depth ───────────────────────────────────────── */
+
+.dash-card-hover {
+  transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+
+.dash-card-hover:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    0 8px 24px rgba(220,165,189,.08),
+    0 0 0 1px rgba(220,165,189,.15);
+}
+
+/* ── Section header gradient underline ──────────────────────── */
+
+.dash-section-header {
+  position: relative;
+  padding-bottom: 6px;
+}
+
+.dash-section-header::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  width: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(220,165,189,.5) 0%,
+    rgba(200,184,144,.3) 50%,
+    transparent 100%
+  );
+  animation: dash-headerLine 0.6s var(--ease) forwards;
+}
+
+/* ── Cost bar grow from left ────────────────────────────────── */
+
+.dash-bar-animate {
+  transform-origin: left center;
+  animation: dash-barGrow 0.7s var(--ease) forwards;
+}
+
+/* ── Total value pulse on update ────────────────────────────── */
+
+.dash-total-pulse {
+  animation: dash-totalPulse 1.2s ease-in-out;
+}
+
+/* ── Agent breathing status indicator ───────────────────────── */
+
+.dash-status-breathe {
+  animation: dash-breathe 2.5s ease-in-out infinite;
+}
+
+/* ── Dream blur-to-clear effect ─────────────────────────────── */
+
+.dash-dream-reveal {
+  opacity: 0;
+  animation: dash-blurReveal 0.6s var(--ease) forwards;
+}
+
+/* ── Gauge fill animation ───────────────────────────────────── */
+
+.dash-gauge-fill {
+  animation: dash-gaugeGrow 0.8s var(--ease) forwards;
+}
+
+/* ── Crossfade for search results ───────────────────────────── */
+
+.dash-crossfade-enter {
+  animation: fadeIn 0.3s var(--ease);
+}
+
+/* ── Stagger index custom property (set via style) ──────────── */
+
+.dash-stagger {
+  opacity: 0;
+  animation: fadeInUp 0.45s var(--ease) forwards;
+  animation-delay: calc(var(--stagger-i, 0) * 40ms);
+}
+
+/* ── Scale-in for canvas/chart areas ────────────────────────── */
+
+.dash-chart-enter {
+  animation: scaleIn 0.5s var(--ease) forwards;
 }

@@ -10,6 +10,11 @@ export const knowledgeAccumulation: Scenario = {
   labels: ['task runner', 'knowledge store'],
   panel: true,
   promptBar: false,
+  category: 'learning',
+  features: ['Knowledge store growth', 'Successive runs', 'Tier progression'],
+  durationHint: '~90s',
+  accent: 'emerald',
+  icon: 'knowledge',
   steps: [
     { label: 'Initial query', sublabel: 'empty store' },
     { label: 'Run 1', sublabel: 'build a CLI tool' },

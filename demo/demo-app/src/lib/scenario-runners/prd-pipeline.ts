@@ -114,6 +114,11 @@ export const prdPipeline: Scenario = {
   labels: ['roko commands'],
   panel: true,
   promptBar: false,
+  category: 'pipeline',
+  features: ['PRD generation', 'Task planning', 'Gate validation'],
+  durationHint: '~90s',
+  accent: 'rose',
+  icon: 'pipeline',
   steps: [
     { label: 'Capture job', sublabel: 'prd idea' },
     { label: 'Generate PRD', sublabel: 'prd draft new' },

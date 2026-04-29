@@ -56,18 +56,7 @@
   border-radius: 10px;
   backdrop-filter: blur(16px);
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-  animation: cw-slide-up 0.2s var(--ease);
-}
-
-@keyframes cw-slide-up {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  animation: fadeInUp 0.2s var(--ease);
 }
 
 .cw-header {

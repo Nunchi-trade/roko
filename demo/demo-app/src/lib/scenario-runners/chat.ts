@@ -12,6 +12,11 @@ export const chat: Scenario = {
   labels: ['roko chat'],
   panel: true,
   promptBar: false,
+  category: 'exploration',
+  features: ['Auto-detect workspace', 'Auto-init', 'Interactive REPL'],
+  durationHint: '~30s',
+  accent: 'teal',
+  icon: 'chat',
   steps: [
     { label: 'Start TUI', sublabel: 'roko' },
     { label: 'Send message', sublabel: 'explain cascade routing' },

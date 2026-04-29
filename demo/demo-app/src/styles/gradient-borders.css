@@ -1,0 +1,218 @@
+/* ═══════════════════════════════════════════════════════════
+   GRADIENT BORDER SYSTEM
+   Animated gradient borders using background + mask technique.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── @property for smooth hue rotation (progressive enhancement) ── */
+@property --gb-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* ── Keyframes ── */
+
+@keyframes gb-rotate {
+  to { --gb-angle: 360deg; }
+}
+
+@keyframes gb-rotate-fallback {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* ── Base gradient border ── */
+
+.gradient-border {
+  position: relative;
+  isolation: isolate;
+}
+
+.gradient-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--gb-angle, 0deg),
+    var(--rose-dim),
+    var(--rose),
+    var(--rose-bright),
+    var(--dream),
+    var(--rose-dim)
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: gb-rotate 10s linear infinite;
+  opacity: 0.6;
+  transition: opacity var(--duration-smooth) var(--ease);
+  pointer-events: none;
+}
+
+/* ── Active: faster rotation, brighter ── */
+
+.gradient-border-active {
+  position: relative;
+  isolation: isolate;
+}
+
+.gradient-border-active::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--gb-angle, 0deg),
+    var(--rose-bright),
+    var(--rose-glow),
+    var(--bone-bright),
+    var(--dream-bright),
+    var(--rose-bright)
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: gb-rotate 4s linear infinite;
+  opacity: 0.8;
+  transition: opacity var(--duration-smooth) var(--ease);
+  pointer-events: none;
+}
+
+/* ── Success: green-tinted ── */
+
+.gradient-border-success {
+  position: relative;
+  isolation: isolate;
+}
+
+.gradient-border-success::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--gb-angle, 0deg),
+    var(--success),
+    #6bc77a,
+    var(--dream),
+    #5aad66,
+    var(--success)
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: gb-rotate 8s linear infinite;
+  opacity: 0.7;
+  transition: opacity var(--duration-smooth) var(--ease);
+  pointer-events: none;
+}
+
+/* ── Error: red-tinted ── */
+
+.gradient-border-error {
+  position: relative;
+  isolation: isolate;
+}
+
+.gradient-border-error::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--gb-angle, 0deg),
+    var(--status-error),
+    #e05a6d,
+    var(--rose-bright),
+    #d04858,
+    var(--status-error)
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: gb-rotate 6s linear infinite;
+  opacity: 0.7;
+  transition: opacity var(--duration-smooth) var(--ease);
+  pointer-events: none;
+}
+
+/* ── Subtle: very faint, for at-rest containers ── */
+
+.gradient-border-subtle {
+  position: relative;
+  isolation: isolate;
+}
+
+.gradient-border-subtle::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--gb-angle, 0deg),
+    var(--rose-deep),
+    var(--rose-dim),
+    var(--dream-deep),
+    var(--rose-deep)
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: gb-rotate 16s linear infinite;
+  opacity: 0.35;
+  transition: opacity var(--duration-smooth) var(--ease);
+  pointer-events: none;
+}
+
+.gradient-border-subtle:hover::before {
+  opacity: 0.55;
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .gradient-border::before,
+  .gradient-border-active::before,
+  .gradient-border-success::before,
+  .gradient-border-error::before,
+  .gradient-border-subtle::before {
+    animation: none;
+  }
+}

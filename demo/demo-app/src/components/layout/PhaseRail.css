@@ -96,7 +96,7 @@
 /* ── label ── */
 .phase-rail__label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   transition: color 200ms;

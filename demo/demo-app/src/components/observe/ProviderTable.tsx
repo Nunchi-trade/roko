@@ -1,3 +1,4 @@
+import { AnimatedRow, TableEmptyState } from '../AnimatedTable';
 import './ProviderTable.css';
 
 export interface ProviderTableProps {
@@ -5,14 +6,11 @@ export interface ProviderTableProps {
 }
 
 /**
- * Tabular provider health display.
+ * Tabular provider health display with animated rows.
  * Extracted from Explorer.tsx bottom drawer provider section.
  */
 export function ProviderTable({ providers }: ProviderTableProps) {
   const entries = Object.entries(providers);
-  if (entries.length === 0) {
-    return <div className="provider-table__empty">No providers configured</div>;
-  }
 
   return (
     <table className="provider-table">
@@ -24,22 +22,26 @@ export function ProviderTable({ providers }: ProviderTableProps) {
         </tr>
       </thead>
       <tbody>
-        {entries.map(([name, info]) => {
-          const status = info.healthy ? 'healthy' : 'down';
-          return (
-            <tr key={name}>
-              <td className="provider-table__name">{name}</td>
-              <td>
-                <span className={`provider-table__status provider-table__status--${status}`}>
-                  {status}
-                </span>
-              </td>
-              <td className="provider-table__latency">
-                {info.latency_ms != null ? `${info.latency_ms}ms` : '--'}
-              </td>
-            </tr>
-          );
-        })}
+        {entries.length === 0 ? (
+          <TableEmptyState colSpan={3} message="No providers configured" />
+        ) : (
+          entries.map(([name, info], i) => {
+            const status = info.healthy ? 'healthy' : 'down';
+            return (
+              <AnimatedRow key={name} index={i}>
+                <td className="provider-table__name">{name}</td>
+                <td>
+                  <span className={`provider-table__status provider-table__status--${status}`}>
+                    {status}
+                  </span>
+                </td>
+                <td className="provider-table__latency">
+                  {info.latency_ms != null ? `${info.latency_ms}ms` : '--'}
+                </td>
+              </AnimatedRow>
+            );
+          })
+        )}
       </tbody>
     </table>
   );

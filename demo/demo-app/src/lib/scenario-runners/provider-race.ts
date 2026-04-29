@@ -10,6 +10,11 @@ export const providerRace: Scenario = {
   labels: ['anthropic (haiku)', 'openai (gpt-5.4-mini)', 'gemini (flash)', 'moonshot (v1)'],
   panel: true,
   promptBar: false,
+  category: 'comparison',
+  features: ['4-way provider race', 'Gate-based winner', 'Real-time progress'],
+  durationHint: '~60s',
+  accent: 'teal',
+  icon: 'race',
   steps: [
     { label: 'Setup', sublabel: 'init workspaces' },
     { label: 'Race start', sublabel: 'dispatch all 4' },

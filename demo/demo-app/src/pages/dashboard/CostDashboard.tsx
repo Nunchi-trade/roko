@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
 import { fmtUptime } from '../../lib/format';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
@@ -10,37 +10,25 @@ import CFactorSparkline from '../../components/Charts/CFactorSparkline';
 import BarChart from '../../components/Charts/BarChart';
 import { ThresholdGaugeRow } from '../../components/ThresholdGauge';
 import type { AdaptiveThresholdsResponse } from '../../components/ThresholdGauge';
+import { useCountUp } from '../../hooks/useCountUp';
 import './dashboard.css';
+import './CostDashboard.css';
 
-/* ── useCountUp: animates from 0 → target on first mount ─── */
+/* ── Phosphor decay hook ──────────────────────────────────── */
 
-function useCountUp(target: number, duration = 900): number {
-  const [val, setVal] = useState(0);
-  const prevTarget = useRef<number | null>(null);
-  const valRef = useRef(0);
-
+function usePhosphorDecay(value: number): boolean {
+  const prevRef = useRef(value);
+  const [flashing, setFlashing] = useState(false);
   useEffect(() => {
-    if (prevTarget.current === target) return;
-    prevTarget.current = target;
-    const start = performance.now();
-    const from = valRef.current;
-    let frame = 0;
-    const tick = (now: number) => {
-      const t = Math.min((now - start) / duration, 1);
-      const eased = 1 - Math.pow(1 - t, 3);
-      const next = from + (target - from) * eased;
-      valRef.current = next;
-      setVal(next);
-      if (t < 1) frame = requestAnimationFrame(tick);
-      else {
-        valRef.current = target;
-        setVal(target);
-      }
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [target, duration]);
-  return val;
+    if (prevRef.current !== value && value !== 0) {
+      setFlashing(true);
+      const id = setTimeout(() => setFlashing(false), 300);
+      prevRef.current = value;
+      return () => clearTimeout(id);
+    }
+    prevRef.current = value;
+  }, [value]);
+  return flashing;
 }
 
 /* ── API shapes ──────────────────────────────────────────── */
@@ -105,9 +93,9 @@ interface ProviderHealthResponse {
 }
 
 const STATUS_DOT_STYLES: Record<ProviderStatus, { bg: string; glow: string; anim: string }> = {
-  healthy: { bg: 'var(--success)', glow: '0 0 6px rgba(122,138,120,.6)', anim: 'pulse-dot 2s ease-in-out infinite' },
-  degraded: { bg: 'var(--warning)', glow: '0 0 6px rgba(216,168,120,.6)', anim: 'pulse-dot 1.5s ease-in-out infinite' },
-  unhealthy: { bg: 'var(--rose-bright)', glow: '0 0 6px rgba(204,144,168,.6)', anim: 'none' },
+  healthy: { bg: 'var(--success)', glow: 'var(--glow-success)', anim: 'pulse-dot 2s ease-in-out infinite' },
+  degraded: { bg: 'var(--warning)', glow: 'var(--glow-warning)', anim: 'pulse-dot 1.5s ease-in-out infinite' },
+  unhealthy: { bg: 'var(--rose-bright)', glow: 'var(--glow-error)', anim: 'none' },
 };
 
 /* ── Metric bar config ───────────────────────────────────── */
@@ -131,6 +119,7 @@ export default function CostDashboard() {
   const [router, setRouter] = useState<RouterResponse | null>(null);
   const [providerHealth, setProviderHealth] = useState<ProviderHealthResponse | null>(null);
   const [thresholds, setThresholds] = useState<AdaptiveThresholdsResponse | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
 
   const fetchAll = useCallback(async () => {
     const [h, e, c, t, r, ph, th] = await Promise.all([
@@ -151,8 +140,12 @@ export default function CostDashboard() {
     setThresholds(th);
   }, [get]);
 
-  // Initial fetch on mount
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  // Initial fetch + 30s fallback poll
+  useEffect(() => {
+    fetchAll().finally(() => setInitialLoading(false));
+    const id = setInterval(fetchAll, 30_000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
 
   // SSE-triggered refetch
   const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
@@ -173,6 +166,11 @@ export default function CostDashboard() {
   const animComposite = useCountUp(composite, 1100);
   const animCost = useCountUp(totalCost, 900);
   const animEpisodes = useCountUp(episodes, 800);
+
+  /* Phosphor decay */
+  const costFlash = usePhosphorDecay(totalCost);
+  const episodeFlash = usePhosphorDecay(episodes);
+  const compositeFlash = usePhosphorDecay(composite);
 
   /* Cost chart points from tasks */
   const costPoints = (efficiency?.tasks ?? []).map((t, i) => ({
@@ -217,69 +215,85 @@ export default function CostDashboard() {
   const gateTotal = gatesPassed + gatesFailed;
   const gatePassRate = gateTotal > 0 ? `${((gatesPassed / gateTotal) * 100).toFixed(1)}%` : '—';
 
+  if (initialLoading) {
+    return (
+      <div className="dash-page progressive-reveal cd-skeleton-layout">
+        <div className="skeleton cd-skeleton-hero" />
+        <div className="cd-skeleton-grid">
+          <div className="skeleton-card skeleton" />
+          <div className="skeleton-card skeleton" />
+          <div className="skeleton-card skeleton" />
+        </div>
+        <div className="skeleton-chart skeleton" />
+      </div>
+    );
+  }
+
   return (
     <div className="dash-page">
       {/* TOP MOSAIC: 6 stats */}
-      <Mosaic columns={6}>
-        <MosaicCell
-          label="STATUS"
-          value={
-            <span className="dash-inline">
-              <span
-                className="dash-dot"
-                style={{
-                  background: isOnline ? 'var(--success)' : 'var(--rose-bright)',
-                  boxShadow: isOnline ? '0 0 6px rgba(122,138,120,.6)' : '0 0 6px rgba(204,144,168,.5)',
-                  animation: isOnline ? 'pulse-dot 2s ease-in-out infinite' : 'none',
-                }}
-              />
-              <span className="dash-mono-label">{isOnline ? 'Online' : 'Offline'}</span>
-            </span>
-          }
-          color="success"
-          sub={health?.providers ? `${health.providers.healthy}/${health.providers.total} providers` : '0/0 providers'}
-        />
-        <MosaicCell
-          label="UPTIME"
-          value={fmtUptime(health?.uptime_secs ?? 0)}
-          color="bone"
-          mono
-          sub="continuous"
-        />
-        <MosaicCell
-          label="VERSION"
-          value={health?.version ?? '—'}
-          color="bone"
-          mono
-          sub="roko-serve"
-        />
-        <MosaicCell
-          label="C-FACTOR"
-          value={animComposite.toFixed(3)}
-          color="rose"
-          mono
-          sub={`${cfactor?.composite?.episode_count ?? 0} episodes`}
-        />
-        <MosaicCell
-          label="TOTAL COST"
-          value={`$${animCost.toFixed(2)}`}
-          color="warning"
-          mono
-          sub={`$${(efficiency?.cost_per_task ?? 0).toFixed(3)}/task`}
-        />
-        <MosaicCell
-          label="EPISODES"
-          value={Math.round(animEpisodes).toLocaleString()}
-          color="dream"
-          mono
-          sub={`${gatesPassed} gates passed`}
-        />
-      </Mosaic>
+      <div className="dash-stagger gradient-border-subtle" style={{ '--stagger-i': 0 } as React.CSSProperties}>
+        <Mosaic columns={6}>
+          <MosaicCell
+            label="STATUS"
+            value={
+              <span className="dash-inline">
+                <span
+                  className="dash-dot"
+                  style={{
+                    background: isOnline ? 'var(--success)' : 'var(--rose-bright)',
+                    boxShadow: isOnline ? 'var(--glow-success)' : 'var(--glow-error)',
+                    animation: isOnline ? 'pulse-dot 2s ease-in-out infinite' : 'none',
+                  }}
+                />
+                <span className="dash-mono-label">{isOnline ? 'Online' : 'Offline'}</span>
+              </span>
+            }
+            color="success"
+            sub={health?.providers ? `${health.providers.healthy}/${health.providers.total} providers` : '0/0 providers'}
+          />
+          <MosaicCell
+            label="UPTIME"
+            value={fmtUptime(health?.uptime_secs ?? 0)}
+            color="bone"
+            mono
+            sub="continuous"
+          />
+          <MosaicCell
+            label="VERSION"
+            value={health?.version ?? '—'}
+            color="bone"
+            mono
+            sub="roko-serve"
+          />
+          <MosaicCell
+            label="C-FACTOR"
+            value={<span className={compositeFlash ? 'phosphor-flash' : ''}>{animComposite.toFixed(3)}</span>}
+            color="rose"
+            mono
+            sub={`${cfactor?.composite?.episode_count ?? 0} episodes`}
+          />
+          <MosaicCell
+            label="TOTAL COST"
+            value={<span className={`dash-total-pulse${costFlash ? ' phosphor-flash' : ''}`}>${animCost.toFixed(2)}</span>}
+            color="warning"
+            mono
+            sub={`$${(efficiency?.cost_per_task ?? 0).toFixed(3)}/task`}
+          />
+          <MosaicCell
+            label="EPISODES"
+            value={<span className={episodeFlash ? 'phosphor-flash' : ''}>{Math.round(animEpisodes).toLocaleString()}</span>}
+            color="dream"
+            mono
+            sub={`${gatesPassed} gates passed`}
+          />
+        </Mosaic>
+      </div>
 
       {/* MIDDLE ROW: C-Factor + Model Routing */}
       <div className="dash-flex-row">
         {/* Left: C-Factor breakdown */}
-        <div className="dash-flex-1">
+        <div className="dash-flex-1 dash-stagger" style={{ '--stagger-i': 1 } as React.CSSProperties}>
           <Pane
             title="C-FACTOR BREAKDOWN"
             badge={<span className="dash-badge--glow">{animComposite.toFixed(3)}</span>}
@@ -292,11 +306,12 @@ export default function CostDashboard() {
                   <div key={m.key} className={`dash-row-item${i < METRICS.length - 1 ? ' dash-row-sep' : ''}`}>
                     <span className="dash-label-sans-md">{m.label}</span>
                     {/* Bar track */}
-                    <div className="dash-bar-track" style={{ flex: 2 }}>
+                    <div className="dash-bar-track cd-bar-track-wide">
                       <div
-                        className="dash-bar-fill dash-bar-fill--rose"
+                        className="dash-bar-fill dash-bar-fill--rose dash-bar-animate"
                         style={{
                           width: `${pct}%`,
+                          animationDelay: `${i * 80 + 200}ms`,
                           boxShadow: pct > 0 ? '0 0 10px rgba(220,165,189,.45), 0 0 4px rgba(220,165,189,.6)' : 'none',
                         }}
                       />
@@ -317,9 +332,11 @@ export default function CostDashboard() {
         </div>
 
         {/* Right: Model Routing */}
-        <div className="dash-flex-1">
+        <div className="dash-flex-1 dash-stagger" style={{ '--stagger-i': 2 } as React.CSSProperties}>
           <Pane title="MODEL ROUTING" badge={<span className="dash-badge">{currentModel}</span>}>
-            <BarChart data={routerBars} height={140} />
+            <div className="dash-chart-enter">
+              <BarChart data={routerBars} height={140} />
+            </div>
           </Pane>
         </div>
       </div>
@@ -327,35 +344,41 @@ export default function CostDashboard() {
       {/* BOTTOM ROW: Cost Over Time + Activity */}
       <div className="dash-flex-row">
         {/* Left: Cost Over Time */}
-        <div className="dash-flex-1">
+        <div className="dash-flex-1 dash-stagger" style={{ '--stagger-i': 3 } as React.CSSProperties}>
           <Pane title="COST OVER TIME" badge={<span className="dash-badge">${totalCost.toFixed(2)} total</span>}>
-            <CostChart data={costPoints} height={130} color="var(--bone)" />
+            <div className="dash-chart-enter">
+              <CostChart data={costPoints} height={130} color="var(--bone)" />
+            </div>
           </Pane>
         </div>
 
         {/* Right: Activity mini stats */}
-        <div className="dash-flex-1">
+        <div className="dash-flex-1 dash-stagger" style={{ '--stagger-i': 4 } as React.CSSProperties}>
           <Pane title="ACTIVITY" badge={<span className="dash-badge">realtime</span>}>
             <div className="dash-grid-activity">
               <ActivityBlock
                 label="Active Plans"
                 value={String(health?.active_plans ?? 0)}
                 color="var(--bone)"
+                index={0}
               />
               <ActivityBlock
                 label="Active Agents"
                 value={String(health?.active_agents ?? 0)}
                 color="var(--rose-bright)"
+                index={1}
               />
               <ActivityBlock
                 label="Gate Pass Rate"
                 value={gatePassRate}
                 color="var(--success)"
+                index={2}
               />
               <ActivityBlock
                 label="Cost/Task"
                 value={`$${(efficiency?.cost_per_task ?? 0).toFixed(3)}`}
                 color="var(--warning)"
+                index={3}
               />
             </div>
           </Pane>
@@ -363,49 +386,60 @@ export default function CostDashboard() {
       </div>
 
       {/* C-FACTOR TREND */}
-      <Pane
-        title="C-FACTOR TREND"
-        badge={<span className="dash-badge">24h window</span>}
-      >
-        <CFactorSparkline
-          trend={cfactorTrend?.trend ?? []}
-          woolley={cfactorTrend?.woolley}
-          height={180}
-        />
-      </Pane>
+      <div className="dash-stagger" style={{ '--stagger-i': 5 } as React.CSSProperties}>
+        <Pane
+          title="C-FACTOR TREND"
+          badge={<span className="dash-badge">24h window</span>}
+        >
+          <div className="dash-chart-enter">
+            <CFactorSparkline
+              trend={cfactorTrend?.trend ?? []}
+              woolley={cfactorTrend?.woolley}
+              height={180}
+            />
+          </div>
+        </Pane>
+      </div>
 
       {/* PROVIDER HEALTH */}
-      <Pane
-        title="PROVIDER HEALTH"
-        badge={
-          <span className="dash-badge">
-            {providerHealth ? `${healthyProviders}/${providers.length} healthy` : 'loading'}
-          </span>
-        }
-      >
-        <div className="dash-grid-auto">
-          {providers.map((p) => (
-            <ProviderCell key={p.name} provider={p} />
-          ))}
-        </div>
-      </Pane>
+      <div className="dash-stagger" style={{ '--stagger-i': 6 } as React.CSSProperties}>
+        <Pane
+          title="PROVIDER HEALTH"
+          badge={
+            <span className="dash-badge">
+              {providerHealth ? `${healthyProviders}/${providers.length} healthy` : 'loading'}
+            </span>
+          }
+        >
+          <div className="dash-grid-auto">
+            {providers.map((p, i) => (
+              <ProviderCell key={p.name} provider={p} index={i} />
+            ))}
+          </div>
+        </Pane>
+      </div>
 
       {/* ADAPTIVE THRESHOLDS */}
-      <Pane
-        title="ADAPTIVE GATE THRESHOLDS"
-        badge={<span className="dash-badge">7-rung EMA</span>}
-      >
-        <ThresholdGaugeRow thresholds={thresholds?.thresholds ?? {}} />
-      </Pane>
+      <div className="dash-stagger" style={{ '--stagger-i': 7 } as React.CSSProperties}>
+        <Pane
+          title="ADAPTIVE GATE THRESHOLDS"
+          badge={<span className="dash-badge">7-rung EMA</span>}
+        >
+          <ThresholdGaugeRow thresholds={thresholds?.thresholds ?? {}} />
+        </Pane>
+      </div>
     </div>
   );
 }
 
 /* ── Activity block helper ───────────────────────────────── */
 
-function ActivityBlock({ label, value, color }: { label: string; value: string; color: string }) {
+function ActivityBlock({ label, value, color, index = 0 }: { label: string; value: string; color: string; index?: number }) {
   return (
-    <div className="dash-card">
+    <div
+      className="dash-card dash-card-hover dash-stagger"
+      style={{ '--stagger-i': index } as React.CSSProperties}
+    >
       <span className="dash-label-sm">{label}</span>
       <span
         className="dash-value--lg"
@@ -428,7 +462,7 @@ function ProviderStat({ label, value, color }: { label: string; value: string; c
   );
 }
 
-function ProviderCell({ provider }: { provider: Provider }) {
+function ProviderCell({ provider, index = 0 }: { provider: Provider; index?: number }) {
   const dot = STATUS_DOT_STYLES[provider.status] ?? STATUS_DOT_STYLES.unhealthy;
   const successColor = provider.success_rate >= 0.97
     ? 'var(--success)'
@@ -447,7 +481,10 @@ function ProviderCell({ provider }: { provider: Provider }) {
       : 'var(--rose-bright)';
 
   return (
-    <div className="dash-card--lg">
+    <div
+      className="dash-card--lg dash-card-hover dash-stagger"
+      style={{ '--stagger-i': index } as React.CSSProperties}
+    >
       <div className="dash-card__header">
         <span className="dash-display-name">{provider.name}</span>
         <span

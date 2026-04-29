@@ -89,7 +89,7 @@ export function useTerminal(sessionId?: string) {
       fontWeight: '400',
       fontWeightBold: '600',
       minimumContrastRatio: 1,
-      smoothScrollDuration: 80,
+      smoothScrollDuration: 0,
       allowProposedApi: true,
       allowTransparency: true,
       overviewRulerWidth: 8,
@@ -136,16 +136,11 @@ export function useTerminal(sessionId?: string) {
       // DOM renderer fallback — fine for low-end GPUs
     }
 
-    // Push cursor to bottom so text anchors at the bottom, then connect WS
-    // after fit completes so the terminal has correct dimensions.
+    // Fit terminal then connect WS so it has correct dimensions.
     requestAnimationFrame(() => {
       if (disposed) return;
       try {
         fitAddon.fit();
-        const rows = term.rows;
-        if (rows > 1) {
-          term.write('\n'.repeat(rows - 1));
-        }
         // Flush any messages buffered before terminal was ready
         ready = true;
         for (const buf of pendingMessages) {

@@ -10,6 +10,11 @@ export const knowledgeTransfer: Scenario = {
   labels: ['Agent Alpha (cold start)', 'Agent Beta (with knowledge)'],
   panel: true,
   promptBar: false,
+  category: 'learning',
+  features: ['Cross-agent learning', 'Cold vs warm start', 'Knowledge reuse'],
+  durationHint: '~90s',
+  accent: 'emerald',
+  icon: 'transfer',
   steps: [
     { label: 'Setup workspaces', sublabel: 'roko init x2' },
     { label: 'Alpha builds User API', sublabel: 'roko run (cold)' },

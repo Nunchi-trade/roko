@@ -16,7 +16,7 @@
   align-items: center;
   gap: 12px;
   border-bottom: 1px solid var(--glass-border);
-  background: linear-gradient(to bottom, rgba(20, 15, 24, .9) 0%, rgba(12, 10, 18, .7) 100%);
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--bg-mid) 90%, transparent) 0%, color-mix(in srgb, var(--bg-deeper) 70%, transparent) 100%);
   flex-shrink: 0;
   position: relative;
 }
@@ -29,7 +29,7 @@
   left: 0;
   right: 0;
   height: 1px;
-  background: linear-gradient(to right, transparent, rgba(138, 90, 112, .4), transparent);
+  background: linear-gradient(to right, transparent, color-mix(in srgb, var(--rose-dim) 40%, transparent), transparent);
   pointer-events: none;
 }
 .terminal-page-title {
@@ -40,6 +40,79 @@
   color: var(--text-strong);
   font-weight: 500;
 }
+
+/* ── Tab bar ── */
+.term-tab-bar {
+  display: flex;
+  gap: 2px;
+  margin-left: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.term-tab-bar::-webkit-scrollbar { display: none; }
+
+.term-tab {
+  position: relative;
+  background: transparent;
+  border: none;
+  color: var(--text-ghost);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: .04em;
+  padding: 4px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--duration-snap) var(--ease), background var(--duration-snap) var(--ease);
+  animation: termTabSlideIn var(--duration-smooth) var(--ease) both;
+}
+.term-tab:hover {
+  color: var(--text-soft);
+  background: color-mix(in srgb, white 3%, transparent);
+}
+.term-tab-active {
+  color: var(--rose-glow);
+}
+.term-tab-text {
+  position: relative;
+  z-index: 1;
+}
+
+/* Active indicator bar */
+.term-tab-indicator {
+  position: absolute;
+  bottom: 0;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  background: var(--rose-glow);
+  border-radius: 1px;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 40%, transparent);
+  animation: termIndicatorMorph var(--duration-smooth) var(--ease) both;
+}
+
+@keyframes termTabSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes termIndicatorMorph {
+  from {
+    transform: scaleX(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+/* ── Controls ── */
 .terminal-controls {
   display: flex;
   gap: 4px;
@@ -55,11 +128,16 @@
   font-size: 15px;
   letter-spacing: .04em;
   cursor: pointer;
-  transition: all 200ms var(--ease);
+  transition: color 200ms var(--ease), border-color 200ms var(--ease), background 200ms var(--ease), box-shadow 200ms var(--ease), transform 200ms var(--ease);
 }
 .terminal-controls .term-btn:hover {
   color: var(--text-primary);
   border-color: var(--rose-dim);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rose-bright) 10%, transparent);
+}
+.terminal-controls .term-btn:active {
+  transform: scale(0.95);
+  transition-duration: 80ms;
 }
 .terminal-controls .term-btn.active {
   color: var(--rose-bright);
@@ -76,13 +154,18 @@
   font-size: 15px;
   letter-spacing: .08em;
   cursor: pointer;
-  transition: all 200ms var(--ease);
-  box-shadow: 0 0 8px rgba(220, 165, 189, .08), inset 0 0 6px rgba(220, 165, 189, .03);
+  transition: background 200ms var(--ease), border-color 200ms var(--ease), box-shadow 200ms var(--ease), transform 200ms var(--ease);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 8%, transparent), inset 0 0 6px color-mix(in srgb, var(--rose-bright) 3%, transparent);
 }
 .terminal-controls .term-btn-add:hover {
-  background: rgba(220,165,189,.08);
+  background: color-mix(in srgb, var(--rose-bright) 8%, transparent);
   border-color: var(--rose-glow);
-  box-shadow: 0 0 16px rgba(220, 165, 189, .22), inset 0 0 10px rgba(220, 165, 189, .06);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--rose-bright) 22%, transparent), inset 0 0 10px color-mix(in srgb, var(--rose-bright) 6%, transparent);
+  transform: scale(1.05);
+}
+.terminal-controls .term-btn-add:active {
+  transform: scale(0.93);
+  transition-duration: 80ms;
 }
 .terminal-controls .term-btn-clear {
   background: transparent;
@@ -93,11 +176,60 @@
   font-family: var(--mono);
   font-size: 15px;
   cursor: pointer;
-  transition: all 200ms var(--ease);
+  transition: color 200ms var(--ease), border-color 200ms var(--ease), box-shadow 200ms var(--ease), transform 200ms var(--ease);
 }
 .terminal-controls .term-btn-clear:hover {
   color: var(--text-dim);
   border-color: var(--rose-dim);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rose-bright) 10%, transparent);
+}
+.terminal-controls .term-btn-clear:active {
+  transform: scale(0.95);
+  transition-duration: 80ms;
+}
+
+/* ── Init workspace button ── */
+.term-init-workspace-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+  overflow: hidden;
+}
+.term-init-workspace-btn.spinning {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.term-init-workspace-btn.done {
+  border-color: var(--success);
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+}
+
+.term-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-right-color: currentColor;
+  border-radius: 50%;
+  animation: termSpin 600ms linear infinite;
+}
+
+.term-check {
+  display: inline-block;
+  animation: termCheckPop var(--duration-smooth) var(--ease) both;
+  font-weight: 600;
+}
+
+@keyframes termSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes termCheckPop {
+  0% { transform: scale(0); opacity: 0; }
+  60% { transform: scale(1.3); }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 /* ── Terminal grid ── */
@@ -110,21 +242,67 @@
   gap: 1px;
   background: var(--border-soft);
   height: 100%;
+  /* Smooth expansion when panes close */
+  transition: grid-template-columns var(--duration-smooth) var(--ease);
 }
 .term-grid.cols-1 { grid-template-columns: 1fr; }
 .term-grid.cols-2 { grid-template-columns: 1fr 1fr; }
 .term-grid.cols-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
 
+/* ── Cell: spawn animation ── */
 .term-cell {
   background: var(--bg-void);
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* scanline overlay per terminal cell */
   position: relative;
+  /* smooth fill when neighbors close */
+  transition: flex var(--duration-smooth) var(--ease);
 }
 
-/* scanlines layered on each terminal pane */
+.term-cell-spawning {
+  animation: termCellSpawn 450ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes termCellSpawn {
+  0% {
+    opacity: 0;
+    transform: scale(0.85);
+    clip-path: inset(5% 5% 5% 5% round 4px);
+  }
+  40% {
+    opacity: 0.6;
+    transform: scale(0.96);
+    clip-path: inset(1% 1% 1% 1% round 2px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* ── Cell: close animation ── */
+.term-cell-closing {
+  animation: termCellClose 320ms var(--ease) forwards;
+  pointer-events: none;
+}
+
+@keyframes termCellClose {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.88);
+    max-height: 0;
+    padding: 0;
+    margin: 0;
+  }
+}
+
+/* scanlines layered on each terminal cell */
 .term-cell::before {
   content: '';
   position: absolute;
@@ -133,8 +311,8 @@
     to bottom,
     transparent 0px,
     transparent 3px,
-    rgba(0, 0, 0, .09) 3px,
-    rgba(0, 0, 0, .09) 4px
+    color-mix(in srgb, black 9%, transparent) 3px,
+    color-mix(in srgb, black 9%, transparent) 4px
   );
   pointer-events: none;
   z-index: 2;
@@ -145,7 +323,7 @@
   content: '';
   position: absolute;
   inset: 0;
-  box-shadow: inset 0 0 30px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(220, 165, 189, .04);
+  box-shadow: inset 0 0 30px color-mix(in srgb, black 45%, transparent), inset 0 1px 0 color-mix(in srgb, var(--rose-bright) 4%, transparent);
   pointer-events: none;
   z-index: 3;
 }
@@ -158,19 +336,103 @@
   z-index: 1;
 }
 
-/* ── TerminalPaneReal (direct useTerminal) ── */
+/* ── TerminalPaneReal ── */
 .term-pane-real {
   display: flex;
   flex-direction: column;
   height: 100%;
+  border: 1px solid transparent;
+  transition: border-color var(--duration-smooth) var(--ease),
+              box-shadow var(--duration-smooth) var(--ease);
 }
+
+/* Focus glow */
+.term-pane-focused {
+  border-color: color-mix(in srgb, var(--rose-bright) 20%, transparent);
+  box-shadow: inset 0 0 20px color-mix(in srgb, var(--rose-bright) 6%, transparent);
+  animation: termFocusFlash 500ms var(--ease) both;
+}
+
+@keyframes termFocusFlash {
+  0% {
+    border-color: color-mix(in srgb, var(--rose-bright) 50%, transparent);
+    box-shadow: inset 0 0 30px color-mix(in srgb, var(--rose-bright) 12%, transparent);
+  }
+  100% {
+    border-color: color-mix(in srgb, var(--rose-bright) 15%, transparent);
+    box-shadow: inset 0 0 20px color-mix(in srgb, var(--rose-bright) 4%, transparent);
+  }
+}
+
+/* Connected flash */
+.term-pane-connected-flash {
+  animation: termConnectedFlash 600ms var(--ease) both;
+}
+
+@keyframes termConnectedFlash {
+  0% {
+    box-shadow: inset 0 0 40px color-mix(in srgb, var(--success) 25%, transparent), 0 0 20px color-mix(in srgb, var(--success) 15%, transparent);
+  }
+  100% {
+    box-shadow: none;
+  }
+}
+
+/* ── Connection progress line ── */
+.term-conn-progress {
+  height: 2px;
+  flex-shrink: 0;
+  background: transparent;
+  position: relative;
+  overflow: hidden;
+}
+
+.term-conn-progress.connecting {
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
+}
+.term-conn-progress.connecting::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, var(--warning), transparent);
+  animation: termConnScan 1.2s ease-in-out infinite;
+}
+
+.term-conn-progress.connected {
+  background: var(--success);
+  animation: termConnFlashLine 600ms var(--ease) forwards;
+}
+
+.term-conn-progress.disconnected {
+  background: transparent;
+}
+
+@keyframes termConnScan {
+  0% { left: -40%; }
+  100% { left: 100%; }
+}
+@keyframes termConnFlashLine {
+  0% {
+    background: var(--success);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--success) 50%, transparent);
+  }
+  100% {
+    background: transparent;
+    box-shadow: none;
+  }
+}
+
+/* ── Pane header ── */
 .term-pane-header {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
   border-bottom: 1px solid var(--glass-border);
-  background: rgba(16, 12, 20, .6);
+  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
   flex-shrink: 0;
 }
 .term-conn-dot {
@@ -178,23 +440,25 @@
   height: 5px;
   border-radius: 50%;
   flex-shrink: 0;
+  transition: background var(--duration-snap), box-shadow var(--duration-snap);
 }
 .term-conn-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
 .term-conn-dot.connecting { background: var(--warning, #c8a030); animation: status-blink 1s infinite; }
 .term-conn-dot.disconnected { background: var(--text-ghost); }
-/* term-dot-blink → merged into status-blink: src/styles/animations.css */
 .term-pane-label {
   font-family: var(--mono);
   font-size: 15px;
   color: var(--text-soft);
   letter-spacing: .04em;
 }
+
+/* Workspace badge with typewriter */
 .term-ws-badge {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--rose-dim);
   background: var(--rose-deep);
-  border: 1px solid rgba(138, 90, 112, .3);
+  border: 1px solid color-mix(in srgb, var(--rose-dim) 30%, transparent);
   border-radius: 3px;
   padding: 1px 6px;
   letter-spacing: .03em;
@@ -203,6 +467,18 @@
   text-overflow: ellipsis;
   max-width: 180px;
 }
+
+/* Typewriter cursor */
+.tw-cursor {
+  color: var(--rose-glow);
+  animation: twBlink 600ms step-end infinite;
+  font-weight: 300;
+}
+@keyframes twBlink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
 .term-pane-status {
   margin-left: auto;
   font-family: var(--mono);
@@ -210,24 +486,57 @@
   color: var(--text-ghost);
   letter-spacing: .06em;
 }
-.term-close-btn {
+
+/* ── Header buttons ── */
+.term-header-btn {
   background: transparent;
-  border: none;
+  border: 1px solid var(--glass-border);
   color: var(--text-ghost);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: color var(--duration-snap) var(--ease), border-color var(--duration-snap) var(--ease), background var(--duration-snap) var(--ease), box-shadow var(--duration-snap) var(--ease), transform var(--duration-snap) var(--ease);
+}
+.term-header-btn:hover {
+  color: var(--rose-glow);
+  border-color: var(--rose-dim);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 15%, transparent);
+  background: color-mix(in srgb, var(--rose-bright) 4%, transparent);
+}
+.term-header-btn:active {
+  transform: scale(0.92);
+  transition-duration: 60ms;
+}
+
+.term-close-btn {
   font-size: 16px;
   padding: 0 4px;
   margin-left: 6px;
-  cursor: pointer;
   line-height: 1;
-  transition: color 200ms var(--ease);
+  border: none;
 }
 .term-close-btn:hover {
   color: var(--rose-bright);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 20%, transparent);
 }
+
+.term-init-btn {
+  margin-left: 2px;
+}
+
 .term-pane-body {
   flex: 1;
   min-height: 0;
   padding: 2px;
+  /* Content fades in after border draws */
+  animation: termContentFade var(--duration-reveal) var(--ease) 200ms both;
+}
+
+@keyframes termContentFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* ── Empty state ── */
@@ -238,6 +547,7 @@
   justify-content: center;
   height: 100%;
   gap: 16px;
+  animation: fadeUp 600ms var(--ease) both;
 }
 .terminal-empty-title {
   font-family: var(--display);

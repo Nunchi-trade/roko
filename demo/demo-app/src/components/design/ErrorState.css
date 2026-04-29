@@ -49,7 +49,7 @@
 
 .error-state__details-toggle::before {
   content: '\25B6'; /* ▶ */
-  font-size: 8px;
+  font-size: 10px;
   transition: transform 150ms;
 }
 

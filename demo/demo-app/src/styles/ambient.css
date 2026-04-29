@@ -1,0 +1,99 @@
+/* ═══════════════════════════════════════════════════════════
+   AMBIENT BACKGROUND EFFECTS — Aurora + Grain + Vignette
+   Subtle atmospheric layer behind all content.
+   Reads page-specific CSS custom properties for color shifts.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Page-specific aurora color tokens (defaults = rose/purple) ── */
+:root {
+  --aurora-a: color-mix(in srgb, var(--rose) 4%, transparent);       /* rose */
+  --aurora-b: color-mix(in srgb, var(--dream) 3.5%, transparent);    /* dream */
+  --aurora-c: color-mix(in srgb, var(--bone) 2.5%, transparent);     /* bone */
+}
+
+/* Demo page: Rose / purple tones */
+.demo-page {
+  --aurora-a: color-mix(in srgb, var(--rose) 4.5%, transparent);
+  --aurora-b: color-mix(in srgb, #a864b4 3.5%, transparent);
+  --aurora-c: color-mix(in srgb, var(--rose-bright) 2.5%, transparent);
+}
+
+/* Bench page: Blue / cyan tones */
+.bench-page {
+  --aurora-a: color-mix(in srgb, #64a0dc 4%, transparent);
+  --aurora-b: color-mix(in srgb, #2dd4bf 3.5%, transparent);
+  --aurora-c: color-mix(in srgb, #788cc8 2.5%, transparent);
+}
+
+/* Explorer page: Green / teal tones */
+.explorer-page {
+  --aurora-a: color-mix(in srgb, #50b4a0 4%, transparent);
+  --aurora-b: color-mix(in srgb, #7fa8a4 3.5%, transparent);
+  --aurora-c: color-mix(in srgb, var(--success) 2.5%, transparent);
+}
+
+/* Dashboard pages: Neutral warm tones */
+.dash-page,
+.dash-page--wide,
+.dash-page--full {
+  --aurora-a: color-mix(in srgb, var(--bone) 3.5%, transparent);
+  --aurora-b: color-mix(in srgb, var(--rose) 2.5%, transparent);
+  --aurora-c: color-mix(in srgb, var(--bone-dim) 2%, transparent);
+}
+
+/* ── Aurora layer ── */
+.ambient-aurora {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  will-change: transform;
+  background:
+    radial-gradient(ellipse 70% 50% at 25% 20%, var(--aurora-a) 0%, transparent 70%),
+    radial-gradient(ellipse 60% 55% at 75% 70%, var(--aurora-b) 0%, transparent 70%),
+    radial-gradient(ellipse 80% 40% at 50% 90%, var(--aurora-c) 0%, transparent 65%);
+  background-size: 200% 200%;
+  animation: auroraFlow 45s ease-in-out infinite;
+  transition: background 1.5s ease;
+}
+
+@keyframes auroraFlow {
+  0%   { background-position: 30% 20%, 70% 80%, 50% 60%; }
+  25%  { background-position: 60% 40%, 40% 60%, 30% 80%; }
+  50%  { background-position: 40% 70%, 60% 30%, 70% 40%; }
+  75%  { background-position: 70% 30%, 30% 70%, 50% 20%; }
+  100% { background-position: 30% 20%, 70% 80%, 50% 60%; }
+}
+
+/* ── Grain overlay ── */
+.ambient-grain {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.02;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+/* ── Vignette (edge darkening) ── */
+.ambient-vignette {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse 80% 70% at 50% 50%,
+    transparent 50%,
+    color-mix(in srgb, var(--bg-void) 35%, transparent) 100%
+  );
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  .ambient-aurora {
+    animation: none;
+    background-position: 50% 50%, 50% 50%, 50% 50%;
+  }
+}

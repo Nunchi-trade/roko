@@ -1,0 +1,7 @@
+/* ═══════════════════════════════════════════════════════════
+   KnowledgeEntries — page-specific styles
+   ═══════════════════════════════════════════════════════════ */
+
+.ke-domain-label {
+  /* inherits color from inline domainColor() */
+}

@@ -1,0 +1,67 @@
+/* ═══════════════════════════════════════════════════════════
+   TYPOGRAPHY EFFECTS
+   Gradient text, glow, and counter animation utilities.
+   Uses rosedust design tokens from rosedust.css.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Gradient text ── */
+
+.text-gradient-rose {
+  background: linear-gradient(135deg, var(--rose) 0%, var(--rose-glow) 50%, var(--rose-bright) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-cool {
+  background: linear-gradient(135deg, var(--dream) 0%, var(--dream-bright) 50%, var(--status-active) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-warm {
+  background: linear-gradient(135deg, var(--bone) 0%, var(--warning) 50%, var(--rose-bright) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Glow ── */
+
+.text-glow {
+  text-shadow:
+    0 0 12px rgba(204, 144, 168, 0.3),
+    0 0 28px rgba(204, 144, 168, 0.12);
+}
+
+.text-glow-strong {
+  text-shadow:
+    0 0 16px rgba(220, 165, 189, 0.5),
+    0 0 40px rgba(220, 165, 189, 0.25),
+    0 0 72px rgba(220, 165, 189, 0.1);
+}
+
+/* ── Counter animation marker ── */
+
+.counter-animate {
+  font-variant-numeric: tabular-nums;
+  transition: color var(--duration-smooth) ease;
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .text-gradient-rose,
+  .text-gradient-cool,
+  .text-gradient-warm {
+    background: none;
+    -webkit-background-clip: unset;
+    -webkit-text-fill-color: unset;
+    background-clip: unset;
+  }
+
+  .text-gradient-rose { color: var(--rose-glow); }
+  .text-gradient-cool { color: var(--dream-bright); }
+  .text-gradient-warm { color: var(--bone-bright); }
+}

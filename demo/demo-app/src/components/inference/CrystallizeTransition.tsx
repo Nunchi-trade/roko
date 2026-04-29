@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, type ReactNode } from 'react';
+import { useEffect, useRef, useCallback, useState, type ReactNode } from 'react';
 import { getCssVar } from '../../lib/color';
 import './CrystallizeTransition.css';
 
@@ -101,6 +101,7 @@ export default function CrystallizeTransition({
   const prevActiveRef = useRef(false);
   const shimmerRef = useRef<HTMLDivElement>(null);
   const ringRef = useRef<HTMLDivElement>(null);
+  const [contentPhase, setContentPhase] = useState<'idle' | 'entering' | 'exiting'>('idle');
 
   const runEffect = useCallback(() => {
     const wrapper = wrapperRef.current;
@@ -215,12 +216,22 @@ export default function CrystallizeTransition({
     rafRef.current = requestAnimationFrame(tick);
   }, [intensity, duration]);
 
-  // Detect false->true transition
+  // Detect false->true and true->false transitions for content animation
   useEffect(() => {
     const wasActive = prevActiveRef.current;
     prevActiveRef.current = active;
+
     if (active && !wasActive) {
+      // Entering: trigger crystallize-materialize + particle burst
+      setContentPhase('entering');
       runEffect();
+      const timer = setTimeout(() => setContentPhase('idle'), 450);
+      return () => clearTimeout(timer);
+    } else if (!active && wasActive) {
+      // Exiting: trigger crystallize-dissolve (reverse shatter)
+      setContentPhase('exiting');
+      const timer = setTimeout(() => setContentPhase('idle'), 400);
+      return () => clearTimeout(timer);
     }
   }, [active, runEffect]);
 
@@ -236,12 +247,18 @@ export default function CrystallizeTransition({
     };
   }, []);
 
+  const contentClass = contentPhase !== 'idle'
+    ? `crystallize-transition__content crystallize-transition__content--${contentPhase}`
+    : 'crystallize-transition__content';
+
   return (
     <div
       ref={wrapperRef}
       className={`crystallize-transition${className ? ` ${className}` : ''}`}
     >
-      {children}
+      <div className={contentClass}>
+        {children}
+      </div>
       <div ref={shimmerRef} className="crystallize-transition__shimmer" />
       <div ref={ringRef} className="crystallize-transition__ring" />
     </div>

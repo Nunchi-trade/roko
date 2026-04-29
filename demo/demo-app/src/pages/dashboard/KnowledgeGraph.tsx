@@ -6,6 +6,7 @@ import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
 import './dashboard.css';
+import './KnowledgeGraph.css';
 
 /* ── Types ───────────────────────────────────────────────── */
 
@@ -250,130 +251,139 @@ export default function KnowledgeGraph() {
   return (
     <div className="dash-page">
       {/* TOP MOSAIC */}
-      <Mosaic columns={5}>
-        <MosaicCell label="NODES" value={entries.length} color="rose" mono />
-        <MosaicCell label="EDGES" value={edges.length} color="bone" mono />
-        <MosaicCell label="DOMAINS" value={domains.size} color="dream" mono />
-        <MosaicCell label="CITATIONS" value={totalCitations} color="warning" mono />
-        <MosaicCell label="AVG CITATIONS" value={avgCitations.toFixed(1)} color="success" mono />
-      </Mosaic>
+      <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
+        <Mosaic columns={5}>
+          <MosaicCell label="NODES" value={entries.length} color="rose" mono />
+          <MosaicCell label="EDGES" value={edges.length} color="bone" mono />
+          <MosaicCell label="DOMAINS" value={domains.size} color="dream" mono />
+          <MosaicCell label="CITATIONS" value={totalCitations} color="warning" mono />
+          <MosaicCell label="AVG CITATIONS" value={avgCitations.toFixed(1)} color="success" mono />
+        </Mosaic>
+      </div>
 
       {/* GRAPH + DOMAIN BREAKDOWN */}
       <div className="dash-grid-2-1">
-        <Pane title="KNOWLEDGE GRAPH" badge={<span className="dash-badge">force-directed</span>}>
-          <div className="dash-relative" style={{ height: 260 }}>
-            <canvas
-              ref={canvasRef}
-              role="img"
-              aria-label="Knowledge graph network visualization"
-              className="dash-canvas"
-            />
-            {/* HUD overlays */}
-            <div className="dash-hud-tl">
-              {entries.length} NODES / {edges.length} EDGES
+        <div className="dash-stagger" style={{ '--stagger-i': 1 } as React.CSSProperties}>
+          <Pane title="KNOWLEDGE GRAPH" badge={<span className="dash-badge">force-directed</span>}>
+            <div className="dash-relative dash-chart-enter kg-canvas-wrap">
+              <canvas
+                ref={canvasRef}
+                role="img"
+                aria-label="Knowledge graph network visualization"
+                className="dash-canvas"
+              />
+              {/* HUD overlays */}
+              <div className="dash-hud-tl">
+                {entries.length} NODES / {edges.length} EDGES
+              </div>
+              <div className="dash-hud-tr">
+                {Object.entries(DOMAIN_COLORS).map(([d, c]) => (
+                  <span key={d} className="dash-hud-legend">
+                    <span
+                      className="dash-dot--5"
+                      style={{ background: c, boxShadow: `0 0 4px ${c}80` }}
+                    />
+                    {d}
+                  </span>
+                ))}
+              </div>
+              <div className="dash-hud-bl">
+                FORCE-DIRECTED / 2D
+              </div>
             </div>
-            <div className="dash-hud-tr">
-              {Object.entries(DOMAIN_COLORS).map(([d, c]) => (
-                <span key={d} className="dash-hud-legend">
-                  <span
-                    className="dash-dot--5"
-                    style={{ background: c, boxShadow: `0 0 4px ${c}80` }}
-                  />
-                  {d}
-                </span>
-              ))}
-            </div>
-            <div className="dash-hud-bl">
-              FORCE-DIRECTED / 2D
-            </div>
-          </div>
-        </Pane>
+          </Pane>
+        </div>
 
         {/* Domain Breakdown */}
-        <Pane title="DOMAIN BREAKDOWN" badge={<span className="dash-badge">{sortedDomains.length} domains</span>}>
-          <div className="dash-flex-col">
-            {sortedDomains.map(([domain, count], i) => {
-              const total = entries.length || 1;
-              const pct = (count / total) * 100;
-              const color = domainColor(domain);
+        <div className="dash-stagger" style={{ '--stagger-i': 2 } as React.CSSProperties}>
+          <Pane title="DOMAIN BREAKDOWN" badge={<span className="dash-badge">{sortedDomains.length} domains</span>}>
+            <div className="dash-flex-col">
+              {sortedDomains.map(([domain, count], i) => {
+                const total = entries.length || 1;
+                const pct = (count / total) * 100;
+                const color = domainColor(domain);
 
-              return (
-                <div
-                  key={domain}
-                  className={`dash-domain-row${i < sortedDomains.length - 1 ? ' dash-row-sep' : ''}`}
-                >
-                  <div className="dash-row-item--between">
-                    <span className="dash-inline">
-                      <span
-                        className="dash-dot"
-                        style={{ background: color, boxShadow: `0 0 6px ${color}60` }}
-                      />
-                      <span className="dash-display-label" style={{ color }}>
-                        {domain}
+                return (
+                  <div
+                    key={domain}
+                    className={`dash-domain-row${i < sortedDomains.length - 1 ? ' dash-row-sep' : ''} dash-stagger`}
+                    style={{ '--stagger-i': i + 3 } as React.CSSProperties}
+                  >
+                    <div className="dash-row-item--between">
+                      <span className="dash-inline">
+                        <span
+                          className="dash-dot"
+                          style={{ background: color, boxShadow: `0 0 6px ${color}60` }}
+                        />
+                        <span className="dash-display-label" style={{ color }}>
+                          {domain}
+                        </span>
                       </span>
+                      <span className="dash-domain-count">{count}</span>
+                    </div>
+                    <div className="dash-bar-track">
+                      <div
+                        className="dash-bar-fill dash-bar-animate kg-bar-fill"
+                        style={{
+                          width: `${pct}%`,
+                          background: color,
+                          boxShadow: `0 0 8px ${color}40`,
+                          animationDelay: `${i * 80 + 300}ms`,
+                        }}
+                      />
+                    </div>
+                    <span className="dash-domain-pct">
+                      {pct.toFixed(0)}% of graph
                     </span>
-                    <span className="dash-domain-count">{count}</span>
                   </div>
-                  <div className="dash-bar-track">
-                    <div
-                      className="dash-bar-fill"
-                      style={{
-                        width: `${pct}%`,
-                        background: color,
-                        opacity: 0.7,
-                        boxShadow: `0 0 8px ${color}40`,
-                      }}
-                    />
-                  </div>
-                  <span className="dash-domain-pct">
-                    {pct.toFixed(0)}% of graph
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </Pane>
+                );
+              })}
+            </div>
+          </Pane>
+        </div>
       </div>
 
       {/* ENTRIES TABLE */}
-      <Pane title="ALL ENTRIES" badge={<span className="dash-badge">{entries.length} nodes</span>} flat>
-        <div className="dash-table-scroll">
-          <table className="dash-table">
-            <thead>
-              <tr>
-                {['ID', 'DOMAIN', 'LABEL', 'CITATIONS'].map((h) => (
-                  <th key={h}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((e) => (
-                <tr
-                  key={e.id}
-                  className="dash-table-row dash-row-sep--light"
-                  style={{ cursor: 'pointer' }}
-                >
-                  <td style={{ color: 'var(--text-dim)' }}>{e.id}</td>
-                  <td>
-                    <span className="dash-inline" style={{ color: domainColor(e.domain) }}>
-                      <span
-                        className="dash-dot--5"
-                        style={{
-                          background: domainColor(e.domain),
-                          boxShadow: `0 0 4px ${domainColor(e.domain)}60`,
-                        }}
-                      />
-                      {e.domain ?? 'unknown'}
-                    </span>
-                  </td>
-                  <td style={{ color: 'var(--text-primary)' }}>{e.label ?? '-'}</td>
-                  <td style={{ color: 'var(--bone-bright)' }}>{e.citations ?? 0}</td>
+      <div className="dash-stagger" style={{ '--stagger-i': 3 } as React.CSSProperties}>
+        <Pane title="ALL ENTRIES" badge={<span className="dash-badge">{entries.length} nodes</span>} flat>
+          <div className="dash-table-scroll">
+            <table className="dash-table">
+              <thead>
+                <tr>
+                  {['ID', 'DOMAIN', 'LABEL', 'CITATIONS'].map((h) => (
+                    <th key={h}>{h}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Pane>
+              </thead>
+              <tbody>
+                {entries.map((e, rowIdx) => (
+                  <tr
+                    key={e.id}
+                    className="dash-table-row dash-row-sep--light dash-stagger kg-entry-row"
+                    style={{ '--stagger-i': rowIdx } as React.CSSProperties}
+                  >
+                    <td className="kg-cell-id">{e.id}</td>
+                    <td>
+                      <span className="dash-inline" style={{ color: domainColor(e.domain) }}>
+                        <span
+                          className="dash-dot--5"
+                          style={{
+                            background: domainColor(e.domain),
+                            boxShadow: `0 0 4px ${domainColor(e.domain)}60`,
+                          }}
+                        />
+                        {e.domain ?? 'unknown'}
+                      </span>
+                    </td>
+                    <td className="kg-cell-label">{e.label ?? '-'}</td>
+                    <td className="kg-cell-citations">{e.citations ?? 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Pane>
+      </div>
     </div>
   );
 }

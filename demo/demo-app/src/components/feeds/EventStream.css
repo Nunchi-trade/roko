@@ -100,18 +100,7 @@
   gap: 8px;
   padding: 3px 4px;
   border-radius: var(--radius-sm);
-  animation: es-slide-up 0.2s var(--ease) both;
-}
-
-@keyframes es-slide-up {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  animation: fadeInUp 0.2s var(--ease) both;
 }
 
 .event-stream__ts {

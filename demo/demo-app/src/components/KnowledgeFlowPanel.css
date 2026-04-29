@@ -51,6 +51,7 @@
   overflow-x: hidden;
 }
 
+/* ── Feed row: staggered fadeSlideUp entrance ── */
 .kf-feed-row {
   display: flex;
   align-items: center;
@@ -60,21 +61,41 @@
   font-family: var(--mono);
   font-size: 16px;
   color: var(--text-primary);
-  animation: kfSlideIn 0.3s var(--ease) both;
+  animation: fadeInUp 0.4s var(--ease) both;
+  transition: background var(--duration-smooth) ease;
 }
 
-@keyframes kfSlideIn {
-  from {
+.kf-feed-row:hover {
+  background: rgba(184, 122, 148, 0.04);
+}
+
+/* ── New entry celebration flash ── */
+.kf-feed-row.kf-celebrate {
+  animation: kfCelebrate 0.8s var(--ease) both;
+}
+
+@keyframes kfCelebrate {
+  0% {
     opacity: 0;
     transform: translateY(12px);
+    background: rgba(228, 216, 176, 0.12);
+    box-shadow: inset 0 0 20px rgba(228, 216, 176, 0.08);
   }
-  to {
+  30% {
     opacity: 1;
     transform: translateY(0);
+    background: rgba(228, 216, 176, 0.08);
+    box-shadow: inset 0 0 12px rgba(228, 216, 176, 0.05);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    background: transparent;
+    box-shadow: none;
   }
 }
 
-/* Kind badge */
+/* ── Kind badge with category colors ── */
 .kf-badge {
   flex-shrink: 0;
   padding: 2px 7px;
@@ -83,6 +104,7 @@
   font-weight: 400;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+  transition: box-shadow var(--duration-smooth) ease;
 }
 
 .kf-badge.heuristic {
@@ -109,6 +131,20 @@
   border: 1px solid rgba(184, 122, 148, 0.3);
 }
 
+/* Badge glow on celebrate */
+.kf-celebrate .kf-badge.heuristic {
+  box-shadow: 0 0 8px rgba(164, 164, 200, 0.3);
+}
+.kf-celebrate .kf-badge.strategy {
+  box-shadow: 0 0 8px rgba(138, 156, 134, 0.3);
+}
+.kf-celebrate .kf-badge.causal {
+  box-shadow: 0 0 8px rgba(216, 168, 120, 0.3);
+}
+.kf-celebrate .kf-badge.warning {
+  box-shadow: 0 0 8px rgba(184, 122, 148, 0.3);
+}
+
 /* Agent dot */
 .kf-agent-dot {
   flex-shrink: 0;
@@ -131,6 +167,35 @@
   white-space: nowrap;
   color: var(--text-primary);
   font-size: 15px;
+}
+
+/* ── Score arc gauge ── */
+.kf-score {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-family: var(--mono);
+  letter-spacing: 0.05em;
+}
+
+.kf-score.heuristic { color: var(--dream-bright); }
+.kf-score.strategy { color: var(--success); }
+.kf-score.causal { color: var(--warning); }
+.kf-score.warning { color: var(--rose-bright); }
+
+.kf-score svg {
+  flex-shrink: 0;
+}
+
+.kf-score-arc {
+  transition: stroke-dasharray 0.6s var(--ease);
+}
+
+.kf-score-value {
+  min-width: 20px;
+  text-align: right;
 }
 
 /* Tx hash */
@@ -165,5 +230,16 @@
   100% {
     border-color: var(--glass-border);
     box-shadow: none;
+  }
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  .kf-feed-row,
+  .kf-feed-row.kf-celebrate {
+    animation: none;
+  }
+  .kf-score-arc {
+    transition: none;
   }
 }

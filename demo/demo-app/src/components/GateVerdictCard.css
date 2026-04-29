@@ -1,24 +1,75 @@
 /* ═══════════════════════════════════════════════════════════
-   GATE VERDICT CARD — expressive binary pass/fail visualization
+   GATE VERDICT CARD — dramatic binary verdict visualization
    ═══════════════════════════════════════════════════════════ */
 
 /* ── keyframes ── */
 
 @keyframes gate-pass-flash {
-  0%   { background-color: rgba(122, 138, 120, 0.35); }
-  100% { background-color: rgba(122, 138, 120, 0.15); }
+  0%   { background-color: color-mix(in srgb, var(--success) 45%, transparent); box-shadow: 0 0 24px color-mix(in srgb, var(--success) 50%, transparent); }
+  100% { background-color: color-mix(in srgb, var(--success) 15%, transparent); box-shadow: none; }
+}
+
+@keyframes gate-pass-radiate {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 50%, transparent); }
+  50%  { box-shadow: 0 0 0 8px color-mix(in srgb, var(--success) 0%, transparent); }
+  100% { box-shadow: 0 0 0 12px color-mix(in srgb, var(--success) 0%, transparent); }
+}
+
+@keyframes gate-pass-bounce {
+  0%   { transform: scale(1); }
+  25%  { transform: scale(1.08); }
+  50%  { transform: scale(0.97); }
+  75%  { transform: scale(1.02); }
+  100% { transform: scale(1); }
 }
 
 @keyframes gate-fail-pulse {
-  0%   { background-color: rgba(212, 138, 110, 0.12); }
-  20%  { background-color: rgba(212, 138, 110, 0.32); }
-  40%  { background-color: rgba(212, 138, 110, 0.12); }
-  60%  { background-color: rgba(212, 138, 110, 0.28); }
-  100% { background-color: rgba(212, 138, 110, 0.12); }
+  0%   { background-color: color-mix(in srgb, var(--warning) 12%, transparent); }
+  20%  { background-color: color-mix(in srgb, var(--warning) 35%, transparent); }
+  40%  { background-color: color-mix(in srgb, var(--warning) 12%, transparent); }
+  60%  { background-color: color-mix(in srgb, var(--warning) 28%, transparent); }
+  100% { background-color: color-mix(in srgb, var(--warning) 12%, transparent); }
+}
+
+@keyframes gate-fail-shake {
+  0%, 100% { transform: translateX(0); }
+  10%  { transform: translateX(-5px); }
+  20%  { transform: translateX(5px); }
+  30%  { transform: translateX(-4px); }
+  40%  { transform: translateX(4px); }
+  50%  { transform: translateX(-3px); }
+  60%  { transform: translateX(3px); }
+  70%  { transform: translateX(-1px); }
+  80%  { transform: translateX(1px); }
+}
+
+@keyframes gate-fail-border-pulse {
+  0%, 100% { border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
+  25%      { border-color: color-mix(in srgb, var(--warning) 80%, transparent); }
+  50%      { border-color: color-mix(in srgb, var(--warning) 50%, transparent); }
+  75%      { border-color: color-mix(in srgb, var(--warning) 70%, transparent); }
+}
+
+@keyframes gate-fail-flash-bg {
+  0%   { box-shadow: inset 0 0 30px color-mix(in srgb, var(--warning) 40%, transparent); }
+  100% { box-shadow: inset 0 0 0 color-mix(in srgb, var(--warning) 0%, transparent); }
+}
+
+@keyframes gate-warning-glow {
+  0%, 100% { box-shadow: 0 0 6px color-mix(in srgb, var(--warning) 15%, transparent); }
+  50%      { box-shadow: 0 0 18px color-mix(in srgb, var(--warning) 35%, transparent); }
+}
+
+@keyframes gate-warning-bounce {
+  0%, 100% { transform: translateY(0); }
+  20%  { transform: translateY(-3px); }
+  40%  { transform: translateY(0); }
+  60%  { transform: translateY(-2px); }
+  80%  { transform: translateY(0); }
 }
 
 @keyframes gate-running-spin {
-  0%        { content: "\2820\280B"; }  /* braille chars encoded */
+  0%        { content: "\2820\280B"; }
   12.5%     { content: "\2820\2819"; }
   25%       { content: "\2820\2839"; }
   37.5%     { content: "\2820\2838"; }
@@ -40,8 +91,8 @@
 }
 
 @keyframes gate-pass-heartbeat {
-  0%, 100% { box-shadow: 0 0 0 rgba(122, 138, 120, 0); }
-  50%      { box-shadow: 0 0 10px rgba(122, 138, 120, 0.12); }
+  0%, 100% { box-shadow: 0 0 0 color-mix(in srgb, var(--success) 0%, transparent); }
+  50%      { box-shadow: 0 0 10px color-mix(in srgb, var(--success) 12%, transparent); }
 }
 
 @keyframes gate-all-pass-sweep {
@@ -65,8 +116,53 @@
 }
 
 @keyframes gate-running-glow {
-  0%, 100% { box-shadow: 0 0 6px rgba(216, 168, 120, 0.10); }
-  50%      { box-shadow: 0 0 14px rgba(216, 168, 120, 0.25); }
+  0%, 100% { box-shadow: 0 0 6px color-mix(in srgb, var(--warning) 10%, transparent); }
+  50%      { box-shadow: 0 0 14px color-mix(in srgb, var(--warning) 25%, transparent); }
+}
+
+/* SVG path draw animations */
+@keyframes gate-svg-check-draw {
+  0%   { stroke-dashoffset: 30; }
+  100% { stroke-dashoffset: 0; }
+}
+
+@keyframes gate-svg-cross-draw {
+  0%   { stroke-dashoffset: 20; }
+  100% { stroke-dashoffset: 0; }
+}
+
+@keyframes gate-svg-cross-draw-2 {
+  0%   { stroke-dashoffset: 20; }
+  100% { stroke-dashoffset: 0; }
+}
+
+@keyframes gate-svg-warning-draw {
+  0%   { stroke-dashoffset: 50; }
+  100% { stroke-dashoffset: 0; }
+}
+
+/* Particle fly-out */
+@keyframes gate-particle-out {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--dx, 10px), var(--dy, -10px)) scale(0.2);
+  }
+}
+
+/* Score countup flash */
+@keyframes gate-score-flash {
+  0%   { color: var(--bone-bright); text-shadow: 0 0 8px var(--bone-bright); }
+  100% { color: var(--text-dim); text-shadow: none; }
+}
+
+/* Tooltip slide-in from below */
+@keyframes gate-tooltip-reveal {
+  0%   { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  100% { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
 /* ── container ── */
@@ -77,7 +173,7 @@
   gap: 0;
   font-family: var(--mono);
   position: relative;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .gate-verdict-card--horizontal {
@@ -95,10 +191,11 @@
 .gate-verdict-all-pass {
   background: linear-gradient(
     135deg,
-    rgba(122, 138, 120, 0.06) 0%,
-    rgba(122, 138, 120, 0.02) 100%
+    color-mix(in srgb, var(--success) 6%, transparent) 0%,
+    color-mix(in srgb, var(--success) 2%, transparent) 100%
   );
   border-radius: var(--radius-md);
+  overflow: hidden;
 }
 
 .gate-verdict-all-pass::after {
@@ -111,9 +208,9 @@
   background: linear-gradient(
     90deg,
     transparent 0%,
-    rgba(122, 138, 120, 0.12) 40%,
-    rgba(122, 138, 120, 0.20) 50%,
-    rgba(122, 138, 120, 0.12) 60%,
+    color-mix(in srgb, var(--success) 12%, transparent) 40%,
+    color-mix(in srgb, var(--success) 20%, transparent) 50%,
+    color-mix(in srgb, var(--success) 12%, transparent) 60%,
     transparent 100%
   );
   animation: gate-all-pass-sweep 1s var(--ease) forwards;
@@ -147,7 +244,7 @@
 }
 
 .gate-cell--clickable:hover {
-  border-color: rgba(255, 255, 255, 0.18);
+  border-color: color-mix(in srgb, #fff 18%, transparent);
 }
 
 /* ── pseudo box-drawing corners ── */
@@ -164,13 +261,13 @@
 }
 
 .gate-cell::before {
-  content: '\250C';  /* top-left corner */
+  content: '\250C';
   top: 1px;
   left: 3px;
 }
 
 .gate-cell::after {
-  content: '\2518';  /* bottom-right corner */
+  content: '\2518';
   bottom: 1px;
   right: 3px;
 }
@@ -178,31 +275,50 @@
 /* ── gate cell: pass ── */
 
 .gate-cell--pass {
-  background: rgba(122, 138, 120, 0.15);
-  border-color: rgba(122, 138, 120, 0.4);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
   animation: gate-cell-enter 0.35s var(--ease) both,
-             gate-pass-flash 0.4s ease-out,
-             gate-pass-heartbeat 4s ease-in-out 1s infinite;
+             gate-pass-flash 0.5s ease-out 0.3s,
+             gate-pass-radiate 0.6s ease-out 0.3s,
+             gate-pass-bounce 0.45s ease-out 0.3s,
+             gate-pass-heartbeat 4s ease-in-out 1.5s infinite;
 }
 
 .gate-cell--pass::before,
 .gate-cell--pass::after {
-  color: rgba(138, 156, 134, 0.5);
+  color: color-mix(in srgb, var(--success) 50%, transparent);
 }
 
 /* ── gate cell: fail ── */
 
 .gate-cell--fail {
-  background: rgba(212, 138, 110, 0.12);
-  border-color: rgba(212, 138, 110, 0.4);
-  box-shadow: 0 0 12px rgba(212, 138, 110, 0.3);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--warning) 30%, transparent);
   animation: gate-cell-enter 0.35s var(--ease) both,
-             gate-fail-pulse 0.6s ease-out;
+             gate-fail-shake 0.3s ease-out 0.3s,
+             gate-fail-flash-bg 0.5s ease-out 0.3s,
+             gate-fail-border-pulse 0.8s ease-out 0.3s;
 }
 
 .gate-cell--fail::before,
 .gate-cell--fail::after {
-  color: rgba(212, 138, 110, 0.5);
+  color: color-mix(in srgb, var(--warning) 50%, transparent);
+}
+
+/* ── gate cell: warning ── */
+
+.gate-cell--warning {
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+  animation: gate-cell-enter 0.35s var(--ease) both,
+             gate-warning-bounce 0.5s ease-out 0.3s,
+             gate-warning-glow 2.5s ease-in-out 0.8s infinite;
+}
+
+.gate-cell--warning::before,
+.gate-cell--warning::after {
+  color: color-mix(in srgb, var(--warning) 50%, transparent);
 }
 
 /* ── gate cell: running ── */
@@ -213,8 +329,8 @@
     linear-gradient(var(--glass-bg), var(--glass-bg)) padding-box,
     repeating-linear-gradient(
       90deg,
-      rgba(216, 168, 120, 0.4) 0,
-      rgba(216, 168, 120, 0.4) 6px,
+      color-mix(in srgb, var(--warning) 40%, transparent) 0,
+      color-mix(in srgb, var(--warning) 40%, transparent) 6px,
       transparent 6px,
       transparent 12px
     ) border-box;
@@ -233,8 +349,8 @@
   border-radius: var(--radius-md);
   background: repeating-linear-gradient(
     90deg,
-    rgba(216, 168, 120, 0.45) 0,
-    rgba(216, 168, 120, 0.45) 6px,
+    color-mix(in srgb, var(--warning) 45%, transparent) 0,
+    color-mix(in srgb, var(--warning) 45%, transparent) 6px,
     transparent 6px,
     transparent 12px
   );
@@ -253,14 +369,13 @@
 
 .gate-cell--running::after {
   content: '\2518';
-  /* keep the corner character */
 }
 
 /* ── gate cell: pending ── */
 
 .gate-cell--pending {
-  background: rgba(255, 255, 255, 0.02);
-  border-color: rgba(255, 255, 255, 0.06);
+  background: color-mix(in srgb, #fff 2%, transparent);
+  border-color: color-mix(in srgb, #fff 6%, transparent);
   border-style: dashed;
   opacity: 0.55;
 }
@@ -273,36 +388,101 @@
 /* ── gate cell: skip ── */
 
 .gate-cell--skip {
-  background: rgba(255, 255, 255, 0.02);
-  border-color: rgba(255, 255, 255, 0.05);
+  background: color-mix(in srgb, #fff 2%, transparent);
+  border-color: color-mix(in srgb, #fff 5%, transparent);
   opacity: 0.4;
 }
 
-/* ── gate icon ── */
+/* ── SVG icons ── */
 
 .gate-cell__icon {
   font-size: var(--text-lg);
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0.06em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* SVG checkmark path-draw */
+.gate-svg-check {
+  stroke: var(--success);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  stroke-dasharray: 30;
+  stroke-dashoffset: 30;
+  animation: gate-svg-check-draw 0.45s ease-out 0.35s forwards;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--success) 60%, transparent));
+}
+
+/* SVG cross path-draw (two lines staggered) */
+.gate-svg-cross {
+  stroke: var(--rose-bright);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  fill: none;
+  stroke-dasharray: 20;
+  stroke-dashoffset: 20;
+  animation: gate-svg-cross-draw 0.3s ease-out 0.35s forwards;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--warning) 50%, transparent));
+}
+
+.gate-svg-cross--2 {
+  animation: gate-svg-cross-draw-2 0.3s ease-out 0.45s forwards;
+}
+
+/* SVG warning triangle path-draw */
+.gate-svg-warning {
+  stroke: var(--warning);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  stroke-dasharray: 50;
+  stroke-dashoffset: 50;
+  animation: gate-svg-warning-draw 0.5s ease-out 0.35s forwards;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--warning) 50%, transparent));
+}
+
+.gate-svg-warning-bang {
+  stroke: var(--warning);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 6;
+  stroke-dashoffset: 6;
+  animation: gate-svg-cross-draw 0.3s ease-out 0.6s forwards;
+}
+
+.gate-svg-warning-dot {
+  fill: var(--warning);
+  opacity: 0;
+  animation: gate-cell-enter 0.2s ease-out 0.75s forwards;
 }
 
 .gate-cell--pass .gate-cell__icon {
   color: var(--success);
-  text-shadow: 0 0 10px rgba(138, 156, 134, 0.6);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--success) 60%, transparent);
 }
 
 .gate-cell--fail .gate-cell__icon {
   color: var(--rose-bright);
-  text-shadow: 0 0 14px rgba(212, 138, 110, 0.5),
-               0 0 28px rgba(212, 138, 110, 0.2);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--warning) 50%, transparent),
+               0 0 28px color-mix(in srgb, var(--warning) 20%, transparent);
 }
 
 .gate-cell--running .gate-cell__icon {
   color: var(--warning);
 }
 
-/* braille spinner -- implemented with CSS counter + steps */
+.gate-cell--warning .gate-cell__icon {
+  color: var(--warning);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--warning) 50%, transparent);
+}
+
+/* braille spinner */
 .gate-cell--running .gate-cell__spinner {
   display: inline-block;
   font-size: var(--text-lg);
@@ -321,6 +501,33 @@
   text-decoration: line-through;
 }
 
+/* ── success particles ── */
+
+.gate-cell__particles {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.gate-cell__particle {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 4px var(--success);
+  opacity: 0;
+  animation: gate-particle-out 0.65s ease-out forwards;
+}
+
+.gate-cell__particle:nth-child(1) { --dx: 16px;  --dy: -14px; animation-delay: 0.35s; }
+.gate-cell__particle:nth-child(2) { --dx: -14px; --dy: -10px; animation-delay: 0.40s; }
+.gate-cell__particle:nth-child(3) { --dx: 10px;  --dy: 14px;  animation-delay: 0.38s; }
+.gate-cell__particle:nth-child(4) { --dx: -16px; --dy: 8px;   animation-delay: 0.42s; }
+.gate-cell__particle:nth-child(5) { --dx: 6px;   --dy: -16px; animation-delay: 0.36s; }
+
 /* ── gate name ── */
 
 .gate-cell__name {
@@ -331,13 +538,32 @@
   line-height: 1;
 }
 
-.gate-cell--pass .gate-cell__name  { color: var(--success); }
-.gate-cell--fail .gate-cell__name  { color: var(--rose-bright); }
+.gate-cell--pass .gate-cell__name    { color: var(--success); }
+.gate-cell--fail .gate-cell__name    { color: var(--rose-bright); }
 .gate-cell--running .gate-cell__name { color: var(--warning); }
+.gate-cell--warning .gate-cell__name { color: var(--warning); }
 .gate-cell--pending .gate-cell__name { color: var(--text-ghost); }
 .gate-cell--skip .gate-cell__name {
   color: var(--text-ghost);
   text-decoration: line-through;
+}
+
+/* ── gate score (animated counter) ── */
+
+.gate-cell__score {
+  font-family: var(--mono);
+  color: var(--text-dim);
+  line-height: 1;
+  animation: gate-score-flash 0.8s ease-out 0.5s;
+}
+
+.gate-cell__score--md {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.gate-cell__score--sm {
+  font-size: 10px;
 }
 
 /* ── gate duration ── */
@@ -349,7 +575,7 @@
   line-height: 1;
 }
 
-/* ── gate message (tooltip-like) ── */
+/* ── gate message ── */
 
 .gate-cell__message {
   font-size: 10px;
@@ -359,6 +585,75 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.2;
+}
+
+/* ── tooltip (fade-slide from below on hover) ── */
+
+.gate-cell__tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--bg-void) 95%, transparent);
+  border: 1px solid var(--glass-border);
+  border-left: 2px solid var(--rose-dim);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  z-index: var(--z-floating);
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+  white-space: nowrap;
+  flex-direction: column;
+  gap: 3px;
+  animation: gate-tooltip-reveal 0.2s ease-out;
+  min-width: 100px;
+}
+
+.gate-cell:hover .gate-cell__tooltip {
+  display: flex;
+}
+
+.gate-cell__tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: color-mix(in srgb, var(--bg-void) 95%, transparent);
+}
+
+.gate-cell__tooltip-name {
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-strong);
+}
+
+.gate-cell__tooltip-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.gate-cell__tooltip-message {
+  font-size: 10px;
+  color: var(--text-soft);
+  max-width: 200px;
+  white-space: normal;
+}
+
+.gate-cell__tooltip-duration {
+  font-size: 10px;
+  color: var(--text-ghost);
+}
+
+.gate-cell__tooltip-score {
+  font-size: 10px;
+  color: var(--bone-dim);
 }
 
 /* ── connectors ── */
@@ -424,20 +719,25 @@
 }
 
 .gate-connector--pass::after {
-  background: rgba(122, 138, 120, 0.5);
-  box-shadow: 0 0 6px rgba(122, 138, 120, 0.25);
+  background: color-mix(in srgb, var(--success) 50%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--success) 25%, transparent);
 }
 
 .gate-connector--fail::after {
-  background: rgba(212, 138, 110, 0.5);
-  box-shadow: 0 0 6px rgba(212, 138, 110, 0.2);
+  background: color-mix(in srgb, var(--warning) 50%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--warning) 20%, transparent);
+}
+
+.gate-connector--warning::after {
+  background: color-mix(in srgb, var(--warning) 40%, transparent);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--warning) 20%, transparent);
 }
 
 .gate-connector--running::after {
   background: repeating-linear-gradient(
     90deg,
-    rgba(216, 168, 120, 0.5) 0,
-    rgba(216, 168, 120, 0.5) 4px,
+    color-mix(in srgb, var(--warning) 50%, transparent) 0,
+    color-mix(in srgb, var(--warning) 50%, transparent) 4px,
     transparent 4px,
     transparent 8px
   );
@@ -447,8 +747,8 @@
 .gate-verdict-card--vertical .gate-connector--running::after {
   background: repeating-linear-gradient(
     180deg,
-    rgba(216, 168, 120, 0.5) 0,
-    rgba(216, 168, 120, 0.5) 4px,
+    color-mix(in srgb, var(--warning) 50%, transparent) 0,
+    color-mix(in srgb, var(--warning) 50%, transparent) 4px,
     transparent 4px,
     transparent 8px
   );
@@ -472,7 +772,8 @@
 }
 
 .gate-verdict-card--compact .gate-cell__duration,
-.gate-verdict-card--compact .gate-cell__message {
+.gate-verdict-card--compact .gate-cell__message,
+.gate-verdict-card--compact .gate-cell__score {
   display: none;
 }
 
@@ -489,6 +790,161 @@
 .gate-verdict-card--compact .gate-cell::before,
 .gate-verdict-card--compact .gate-cell::after {
   display: none;
+}
+
+/* ── gate type icon (small identifier) ── */
+
+.gate-type-icon {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.gate-cell__type-icon {
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  color: var(--text-ghost);
+  opacity: 0.6;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  z-index: 1;
+}
+
+.gate-cell--pass .gate-cell__type-icon    { color: color-mix(in srgb, var(--success) 60%, transparent); }
+.gate-cell--fail .gate-cell__type-icon    { color: color-mix(in srgb, var(--warning) 60%, transparent); }
+.gate-cell--running .gate-cell__type-icon { color: color-mix(in srgb, var(--warning) 60%, transparent); }
+.gate-cell--warning .gate-cell__type-icon { color: color-mix(in srgb, var(--warning) 60%, transparent); }
+
+.gate-verdict-card--compact .gate-cell__type-icon {
+  display: none;
+}
+
+/* ── score mini bar ── */
+
+.gate-cell__score-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+}
+
+.gate-cell__score-bar {
+  display: inline-block;
+  width: 36px;
+  height: 4px;
+  background: color-mix(in srgb, #fff 6%, transparent);
+  border-radius: 2px;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.gate-cell__score-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.7s var(--ease);
+}
+
+/* ── summary row ── */
+
+.gate-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--glass-border);
+  font-family: var(--mono);
+  font-size: 11px;
+  width: 100%;
+}
+
+.gate-verdict-card--horizontal .gate-summary-row {
+  margin-left: auto;
+  padding-left: var(--sp-4);
+  border-top: none;
+  border-left: 1px solid var(--glass-border);
+  width: auto;
+  flex-shrink: 0;
+}
+
+.gate-summary-row__text {
+  color: var(--text-dim);
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+}
+
+.gate-summary-row__bar {
+  flex: 1;
+  min-width: 40px;
+  max-width: 80px;
+  height: 4px;
+  background: color-mix(in srgb, #fff 6%, transparent);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.gate-summary-row__bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--success, #7a8a78);
+  transition: width 0.5s var(--ease);
+}
+
+.gate-summary-row__pct {
+  color: var(--text-ghost);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  min-width: 28px;
+  text-align: right;
+}
+
+/* ── expanded mode (vertical + non-compact) ── */
+
+.gate-verdict-card--expanded .gate-cell {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-6);
+  min-width: unset;
+  width: 100%;
+}
+
+.gate-verdict-card--expanded .gate-cell__name {
+  min-width: 64px;
+}
+
+.gate-verdict-card--expanded .gate-cell__duration {
+  margin-left: auto;
+}
+
+/* expanded fail detail block */
+.gate-cell__fail-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: var(--sp-2);
+  padding-left: var(--sp-2);
+  border-left: 2px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  max-width: 260px;
+}
+
+.gate-cell__fail-detail-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: color-mix(in srgb, var(--warning) 70%, transparent);
+  font-weight: var(--weight-semibold);
+}
+
+.gate-cell__fail-detail-msg {
+  font-size: 10px;
+  color: var(--text-soft);
+  line-height: 1.3;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* ── stagger animation delays ── */
@@ -510,6 +966,7 @@
   .gate-cell,
   .gate-cell--pass,
   .gate-cell--fail,
+  .gate-cell--warning,
   .gate-cell--running,
   .gate-cell--running::before,
   .gate-connector--running::after,
@@ -529,5 +986,35 @@
 
   .gate-cell--skip {
     opacity: 0.4;
+  }
+
+  .gate-svg-check,
+  .gate-svg-cross,
+  .gate-svg-warning,
+  .gate-svg-warning-bang,
+  .gate-svg-warning-dot {
+    stroke-dashoffset: 0;
+    opacity: 1;
+    animation: none !important;
+  }
+
+  .gate-cell__particle {
+    display: none;
+  }
+
+  .gate-cell__tooltip {
+    animation: none;
+  }
+
+  .gate-cell__score {
+    animation: none;
+  }
+
+  .gate-cell__score-bar-fill {
+    transition: none;
+  }
+
+  .gate-summary-row__bar-fill {
+    transition: none;
   }
 }

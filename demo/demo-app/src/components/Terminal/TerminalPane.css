@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════════════
    TERMINAL PANE — rosedust-integrated xterm container
+   Glass morphism + connection animations
    ═══════════════════════════════════════════════════════════ */
 
 .terminal-pane {
@@ -13,50 +14,108 @@
   transition: border-color .3s var(--ease), box-shadow .4s var(--ease);
 }
 
-/* Active column glow */
+/* ── 4. Focus glow: breathing rose border (2s cycle) ── */
+
 .terminal-pane:focus-within {
-  border-color: rgba(204, 144, 168, .18);
-  box-shadow: 0 0 16px rgba(184, 122, 148, 0.06);
+  border-color: color-mix(in srgb, var(--rose) 22%, transparent);
+  animation: focusBreathe 2s ease-in-out infinite;
 }
 
-/* ── Pane header ── */
+@keyframes focusBreathe {
+  0%, 100% {
+    box-shadow: 0 0 12px color-mix(in srgb, var(--rose) 6%, transparent), 0 0 4px color-mix(in srgb, var(--rose) 3%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 20px color-mix(in srgb, var(--rose) 12%, transparent), 0 0 8px color-mix(in srgb, var(--rose) 6%, transparent);
+  }
+}
+
+/* ── 2. Connection pulse wave on border ── */
+
+.terminal-pane.just-connected {
+  animation: connectPulseWave 600ms ease-out;
+}
+
+@keyframes connectPulseWave {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 50%, transparent);
+    border-color: var(--success);
+  }
+  50% {
+    box-shadow: 0 0 12px 4px color-mix(in srgb, var(--success) 25%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    border-color: var(--glass-border);
+  }
+}
+
+/* ── 3. Disconnect shake (200ms) ── */
+
+.terminal-pane.just-disconnected {
+  animation: disconnectShake 200ms ease-in-out;
+}
+
+@keyframes disconnectShake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(2px); }
+  60% { transform: translateX(-1.5px); }
+  80% { transform: translateX(1px); }
+}
+
+/* ── 1. Glass morphism pane header ── */
 
 .pane-header {
   padding: 1px 10px;
   height: 20px;
-  background: rgba(16, 14, 20, 0.7);
+  background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 4%, transparent), inset 0 -1px 0 color-mix(in srgb, black 10%, transparent);
   display: flex;
   align-items: center;
   gap: 6px;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: .10em;
   text-transform: uppercase;
   color: var(--text-dim);
   flex-shrink: 0;
-  transition: border-color .3s, background .3s;
+  transition: border-color var(--duration-smooth), background var(--duration-smooth);
+}
+
+/* ── 5. Header hover effect ── */
+
+.pane-header:hover {
+  background: color-mix(in srgb, var(--bg-mid) 80%, transparent);
+}
+
+.pane-header:hover .pane-label {
+  text-shadow: 0 0 6px color-mix(in srgb, var(--text-primary) 15%, transparent);
 }
 
 .terminal-pane:focus-within .pane-header {
-  border-bottom-color: rgba(216, 154, 178, 0.2);
-  background: rgba(20, 16, 26, 0.8);
+  border-bottom-color: color-mix(in srgb, var(--rose-bright) 20%, transparent);
+  background: color-mix(in srgb, var(--bg-mid) 80%, transparent);
 }
 
 .pane-label {
   color: var(--text-strong);
   font-weight: 400;
   letter-spacing: .12em;
+  transition: color var(--duration-smooth), text-shadow var(--duration-smooth);
 }
 
 .terminal-pane:focus-within .pane-label {
   color: var(--rose-glow);
-  text-shadow: 0 0 8px rgba(216, 154, 178, 0.2);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 20%, transparent);
 }
 
 .pane-status {
   margin-left: auto;
-  font-size: 8px;
+  font-size: 10px;
   color: var(--text-ghost);
   letter-spacing: .10em;
 }
@@ -66,12 +125,12 @@
   height: 5px;
   border-radius: 50%;
   flex-shrink: 0;
-  transition: background .3s, box-shadow .3s;
+  transition: background var(--duration-smooth), box-shadow var(--duration-smooth);
 }
 
 .pane-dot.connected {
   background: var(--success);
-  box-shadow: 0 0 4px rgba(122, 138, 120, 0.6);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--success) 60%, transparent);
 }
 
 .pane-dot.disconnected {
@@ -81,7 +140,7 @@
 
 .pane-dot.connecting {
   background: var(--warning);
-  box-shadow: 0 0 4px rgba(200, 154, 104, 0.5);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--warning) 50%, transparent);
   animation: pane-dot-pulse 1.2s ease-in-out infinite;
 }
 
@@ -97,6 +156,18 @@
   padding: 0;
   min-height: 0;
   position: relative;
+}
+
+/* ── 7. Output flash (subtle opacity pulse when receiving data) ── */
+
+.pane-body.output-flash {
+  animation: outputFlash 100ms ease-out;
+}
+
+@keyframes outputFlash {
+  0% { opacity: 1; }
+  50% { opacity: 0.95; }
+  100% { opacity: 1; }
 }
 
 /* Blinking cursor for empty state */
@@ -125,12 +196,12 @@
   padding: 2px 0 2px 4px;
 }
 
-/* ── Thin rose-tinted scrollbar ── */
+/* ── 8. Scrollbar enhancement: glow on hover, invisible track ── */
 
 .pane-body .xterm-viewport,
 .demo-term-body .xterm-viewport {
   scrollbar-width: thin;
-  scrollbar-color: rgba(184, 122, 148, 0.15) transparent;
+  scrollbar-color: color-mix(in srgb, var(--rose) 15%, transparent) transparent;
 }
 
 .pane-body .xterm-viewport::-webkit-scrollbar,
@@ -145,21 +216,21 @@
 
 .pane-body .xterm-viewport::-webkit-scrollbar-thumb,
 .demo-term-body .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgba(184, 122, 148, 0.14);
+  background: color-mix(in srgb, var(--rose) 14%, transparent);
   border-radius: 3px;
-  transition: background .2s;
+  transition: background var(--duration-snap), box-shadow var(--duration-snap);
 }
 
 .pane-body .xterm-viewport::-webkit-scrollbar-thumb:hover,
 .demo-term-body .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: rgba(184, 122, 148, 0.32);
+  background: color-mix(in srgb, var(--rose) 40%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rose) 30%, transparent);
 }
 
-/* Hide scrollbar when terminal not hovered — cleaner look */
-.pane-body .xterm-viewport::-webkit-scrollbar-thumb,
-.demo-term-body .xterm-viewport::-webkit-scrollbar-thumb {
+/* Hide scrollbar when terminal not hovered */
+.pane-body .xterm-viewport::-webkit-scrollbar-thumb {
   opacity: 0;
-  transition: opacity .3s;
+  transition: opacity var(--duration-smooth);
 }
 
 .pane-body:hover .xterm-viewport::-webkit-scrollbar-thumb,
@@ -172,7 +243,7 @@
 .pane-body .xterm-overview-ruler,
 .demo-term-body .xterm-overview-ruler {
   opacity: 0.5;
-  transition: opacity .3s;
+  transition: opacity var(--duration-smooth);
 }
 
 .pane-body:hover .xterm-overview-ruler,
@@ -192,12 +263,23 @@
 .pane-body .xterm a,
 .demo-term-body .xterm a {
   text-decoration: underline;
-  text-decoration-color: rgba(184, 122, 148, 0.4);
+  text-decoration-color: color-mix(in srgb, var(--rose) 40%, transparent);
   text-underline-offset: 2px;
+}
+
+/* ── 6. Resize handle glow ── */
+
+.terminal-pane:active {
+  border-color: color-mix(in srgb, var(--rose) 25%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rose) 10%, transparent);
 }
 
 /* ── Reduced motion ── */
 
 @media (prefers-reduced-motion: reduce) {
   .pane-dot.connecting { animation: none; }
+  .terminal-pane:focus-within { animation: none; }
+  .terminal-pane.just-connected { animation: none; }
+  .terminal-pane.just-disconnected { animation: none; }
+  .pane-body.output-flash { animation: none; }
 }

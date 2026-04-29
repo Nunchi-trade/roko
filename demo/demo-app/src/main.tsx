@@ -4,9 +4,19 @@ import { BrowserRouter, Routes, Route } from 'react-router';
 import ErrorBoundary from './components/ErrorBoundary';
 import AppShell from './components/AppShell';
 import { WorkspaceProvider } from './hooks/useWorkspace';
+import { RokoConfigProvider } from './hooks/useRokoConfig';
+import { ToastProvider } from './components/Toast';
 import { bootstrapTransport } from './app/bootstrap';
 import './styles/rosedust.css';
+import './styles/typography.css';
 import './styles/animations.css';
+import './styles/motion.css';
+import './styles/interactions.css';
+import './styles/loading.css';
+import './styles/ambient.css';
+import './styles/scrollbar.css';
+import './styles/focus.css';
+import './styles/gradient-borders.css';
 
 const Landing = lazy(() => import('./pages/Landing'));
 const DashboardLayout = lazy(() => import('./pages/dashboard/Layout'));
@@ -29,19 +39,40 @@ const SharePage = lazy(() => import('./pages/Share'));
 
 function RouteLoading() {
   return (
-    <div
-      style={{
-        minHeight: '50vh',
-        display: 'grid',
-        placeItems: 'center',
-        color: 'var(--text-dim)',
-        fontFamily: 'var(--mono)',
-        fontSize: 14,
-        letterSpacing: '.08em',
-        textTransform: 'uppercase',
-      }}
-    >
-      Loading view
+    <div className="route-loading progressive-reveal">
+      {/* Fake nav row */}
+      <div className="route-loading__nav">
+        <div className="skeleton route-loading__nav-pill" />
+        <div className="skeleton route-loading__nav-pill" style={{ width: 96 }} />
+        <div className="skeleton route-loading__nav-pill" style={{ width: 56 }} />
+      </div>
+
+      {/* Fake header */}
+      <div className="route-loading__header">
+        <div className="skeleton skeleton-circle" />
+        <div className="skeleton skeleton-title" />
+      </div>
+
+      {/* Fake mosaic stats */}
+      <div className="route-loading__mosaic">
+        {Array.from({ length: 4 }, (_, i) => (
+          <div key={i} className="route-loading__mosaic-cell">
+            <div className="skeleton skeleton-text" style={{ width: '50%' }} />
+            <div className="skeleton skeleton-title" style={{ width: '70%' }} />
+          </div>
+        ))}
+      </div>
+
+      {/* Fake body lines */}
+      <div className="route-loading__body">
+        <div className="skeleton-card skeleton" />
+        <div className="route-loading__row">
+          <div className="skeleton skeleton-text" style={{ width: '40%' }} />
+          <div className="skeleton skeleton-text" style={{ width: '25%' }} />
+        </div>
+        <div className="skeleton skeleton-text" style={{ width: '80%' }} />
+        <div className="skeleton skeleton-text" style={{ width: '55%' }} />
+      </div>
     </div>
   );
 }
@@ -55,6 +86,8 @@ createRoot(document.getElementById('root')!).render(
     <BrowserRouter>
       <ErrorBoundary>
         <WorkspaceProvider>
+        <RokoConfigProvider>
+        <ToastProvider>
         <Suspense fallback={<RouteLoading />}>
           <Routes>
             <Route element={<AppShell />}>
@@ -80,6 +113,8 @@ createRoot(document.getElementById('root')!).render(
             </Route>
           </Routes>
         </Suspense>
+        </ToastProvider>
+        </RokoConfigProvider>
         </WorkspaceProvider>
       </ErrorBoundary>
     </BrowserRouter>

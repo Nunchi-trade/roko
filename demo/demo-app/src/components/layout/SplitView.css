@@ -18,45 +18,120 @@
   overflow: auto;
   min-width: 0;
   min-height: 0;
+  transition: flex-basis 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 /* Divider — horizontal (column separator) */
 .split-view--horizontal .split-view__divider {
-  width: 4px;
+  width: 6px;
   cursor: col-resize;
   display: flex;
   align-items: stretch;
   justify-content: center;
   flex-shrink: 0;
+  position: relative;
+  transition: width var(--duration-snap) var(--ease);
+}
+
+.split-view--horizontal .split-view__divider:hover {
+  width: 8px;
 }
 
 .split-view--horizontal .split-view__divider-line {
   width: 1px;
   background: var(--border);
-  transition: background var(--duration-snap);
+  transition:
+    background var(--duration-snap),
+    width var(--duration-snap) var(--ease),
+    box-shadow var(--duration-snap);
+  position: relative;
+}
+
+/* Grip dots (column divider) */
+.split-view--horizontal .split-view__divider-line::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 3px;
+  height: 20px;
+  background-image: radial-gradient(circle, var(--text-ghost) 1px, transparent 1px);
+  background-size: 3px 4px;
+  opacity: 0;
+  transition: opacity var(--duration-snap);
 }
 
 .split-view--horizontal .split-view__divider:hover .split-view__divider-line {
-  background: var(--border-strong);
+  width: 3px;
+  background: var(--rose-dim);
+  box-shadow: 0 0 8px rgba(204, 144, 168, 0.3);
+}
+
+.split-view--horizontal .split-view__divider:hover .split-view__divider-line::before {
+  opacity: 0.7;
+}
+
+.split-view--horizontal .split-view__divider:active .split-view__divider-line {
+  width: 3px;
+  background: var(--rose-bright);
+  box-shadow: 0 0 14px rgba(204, 144, 168, 0.5);
 }
 
 /* Divider — vertical (row separator) */
 .split-view--vertical .split-view__divider {
-  height: 4px;
+  height: 6px;
   cursor: row-resize;
   display: flex;
   align-items: center;
   justify-content: stretch;
   flex-shrink: 0;
+  position: relative;
+  transition: height var(--duration-snap) var(--ease);
+}
+
+.split-view--vertical .split-view__divider:hover {
+  height: 8px;
 }
 
 .split-view--vertical .split-view__divider-line {
   height: 1px;
   width: 100%;
   background: var(--border);
-  transition: background var(--duration-snap);
+  transition:
+    background var(--duration-snap),
+    height var(--duration-snap) var(--ease),
+    box-shadow var(--duration-snap);
+  position: relative;
+}
+
+/* Grip dots (row divider) */
+.split-view--vertical .split-view__divider-line::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 20px;
+  height: 3px;
+  background-image: radial-gradient(circle, var(--text-ghost) 1px, transparent 1px);
+  background-size: 4px 3px;
+  opacity: 0;
+  transition: opacity var(--duration-snap);
 }
 
 .split-view--vertical .split-view__divider:hover .split-view__divider-line {
-  background: var(--border-strong);
+  height: 3px;
+  background: var(--rose-dim);
+  box-shadow: 0 0 8px rgba(204, 144, 168, 0.3);
+}
+
+.split-view--vertical .split-view__divider:hover .split-view__divider-line::before {
+  opacity: 0.7;
+}
+
+.split-view--vertical .split-view__divider:active .split-view__divider-line {
+  height: 3px;
+  background: var(--rose-bright);
+  box-shadow: 0 0 14px rgba(204, 144, 168, 0.5);
 }

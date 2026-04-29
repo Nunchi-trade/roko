@@ -12,6 +12,140 @@ import { ComponentErrorBoundary } from '../components/design';
 import './Bench.css';
 
 /* ═══════════════════════════════════════════════════════════
+   Shared animation helpers
+   ═══════════════════════════════════════════════════════════ */
+
+/** Animate a number counting up from 0 to `target` over `durationMs`. */
+function useCountUp(target: number, durationMs = 900, enabled = true): number {
+  const [value, setValue] = useState(0);
+  const rafRef = useRef(0);
+
+  useEffect(() => {
+    if (!enabled || target === 0) {
+      setValue(target);
+      return;
+    }
+    const start = performance.now();
+    const tick = (now: number) => {
+      const elapsed = now - start;
+      const progress = Math.min(elapsed / durationMs, 1);
+      // ease-out cubic
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setValue(target * eased);
+      if (progress < 1) rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [target, durationMs, enabled]);
+
+  return value;
+}
+
+/** Returns true after `delayMs` to trigger staggered mounts. */
+function useStagger(delayMs: number): boolean {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setReady(true), delayMs);
+    return () => clearTimeout(t);
+  }, [delayMs]);
+  return ready;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Animated Gate Badge (SVG path-draw checkmark / X)
+   ═══════════════════════════════════════════════════════════ */
+
+function GateBadge({ passed, gate, delay = 0 }: { passed: boolean; gate: string; delay?: number }) {
+  const visible = useStagger(delay);
+
+  return (
+    <span
+      className={`gate-pill ${passed ? 'gate-pass' : 'gate-fail'}`}
+      title={`${gate}: ${passed ? 'PASS' : 'FAIL'}`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        opacity: visible ? 1 : 0,
+        transform: visible ? 'scale(1)' : 'scale(0.5)',
+        transition: 'opacity 400ms var(--ease), transform 400ms var(--ease)',
+      }}
+    >
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+        {passed ? (
+          <path
+            d="M2 5.5 L4 7.5 L8 3"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{
+              strokeDasharray: 12,
+              strokeDashoffset: visible ? 0 : 12,
+              transition: `stroke-dashoffset 500ms var(--ease) ${delay + 100}ms`,
+            }}
+          />
+        ) : (
+          <>
+            <path
+              d="M2.5 2.5 L7.5 7.5"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              style={{
+                strokeDasharray: 8,
+                strokeDashoffset: visible ? 0 : 8,
+                transition: `stroke-dashoffset 400ms var(--ease) ${delay + 80}ms`,
+              }}
+            />
+            <path
+              d="M7.5 2.5 L2.5 7.5"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              style={{
+                strokeDasharray: 8,
+                strokeDashoffset: visible ? 0 : 8,
+                transition: `stroke-dashoffset 400ms var(--ease) ${delay + 160}ms`,
+              }}
+            />
+          </>
+        )}
+      </svg>
+    </span>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Animated Stat Cell (count-up values)
+   ═══════════════════════════════════════════════════════════ */
+
+type MosaicColor = 'rose' | 'bone' | 'dream' | 'success' | 'warning';
+
+function AnimatedStatCell({
+  label,
+  rawValue,
+  format,
+  color,
+  sub,
+  mono,
+  delay = 0,
+}: {
+  label: string;
+  rawValue: number;
+  format: (v: number) => string;
+  color: MosaicColor;
+  sub?: string;
+  mono?: boolean;
+  delay?: number;
+}) {
+  const mounted = useStagger(delay);
+  const animated = useCountUp(rawValue, 800, mounted);
+
+  return <MosaicCell label={label} value={format(animated)} color={color} sub={sub} mono={mono} />;
+}
+
+/* ═══════════════════════════════════════════════════════════
    Cost Breakdown Chart (inline — complex canvas component)
    ═══════════════════════════════════════════════════════════ */
 
@@ -113,6 +247,23 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
   const [groupBy, setGroupBy] = useState<CostGroupBy>('task');
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const segments = useMemo(() => buildCostSegments(results, groupBy), [results, groupBy]);
+  const [animProgress, setAnimProgress] = useState(0);
+
+  // Animate bars from 0 to full on mount / groupBy change
+  useEffect(() => {
+    setAnimProgress(0);
+    const start = performance.now();
+    const duration = 700;
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setAnimProgress(eased);
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [segments]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -159,11 +310,15 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
     }
 
     segments.forEach((segment, index) => {
+      // Per-bar stagger: each bar starts slightly later
+      const barDelay = index * 0.04;
+      const barProgress = Math.max(0, Math.min(1, (animProgress - barDelay) / (1 - barDelay)));
+
       const y = pad.top + index * (barHeight + rowGap);
       const centerY = y + barHeight / 2;
       const total = segment.inputCost + segment.outputCost;
-      const inputWidth = (segment.inputCost / maxCost) * plotW;
-      const outputWidth = (segment.outputCost / maxCost) * plotW;
+      const inputWidth = (segment.inputCost / maxCost) * plotW * barProgress;
+      const outputWidth = (segment.outputCost / maxCost) * plotW * barProgress;
       const barEnd = pad.left + inputWidth + outputWidth;
 
       ctx.fillStyle = 'rgba(255,255,255,0.04)';
@@ -183,15 +338,17 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = labelColor;
+      ctx.globalAlpha = barProgress;
       ctx.fillText(fitLabel(ctx, segment.label, pad.left - 12), pad.left - 10, centerY);
 
-      const costText = `$${total.toFixed(3)}`;
+      const costText = `$${(total * barProgress).toFixed(3)}`;
       ctx.font = '11px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillStyle = costColor;
       const costTextWidth = ctx.measureText(costText).width;
       const costX = Math.max(pad.left + 4, Math.min(barEnd + 8, pad.left + plotW - costTextWidth));
       ctx.fillText(costText, costX, centerY);
+      ctx.globalAlpha = 1;
     });
 
     const legendY = h - 9;
@@ -210,7 +367,7 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
       ctx.fillText(item.label, legendX + 14, legendY);
       legendX += ctx.measureText(item.label).width + 34;
     });
-  }, [segments]);
+  }, [segments, animProgress]);
 
   useEffect(() => {
     draw();
@@ -258,6 +415,22 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
 
 function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[]; height?: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [animProgress, setAnimProgress] = useState(0);
+
+  useEffect(() => {
+    setAnimProgress(0);
+    const start = performance.now();
+    const duration = 800;
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setAnimProgress(eased);
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [results]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -301,10 +474,13 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
     }
 
     results.forEach((r, index) => {
+      const barDelay = index * 0.03;
+      const barProgress = Math.max(0, Math.min(1, (animProgress - barDelay) / (1 - barDelay * results.length > 0.5 ? 0.5 : 1)));
+
       const y = pad.top + index * (barHeight + rowGap);
       const centerY = y + barHeight / 2;
-      const inW = (r.tokens_in / maxTokens) * plotW;
-      const outW = (r.tokens_out / maxTokens) * plotW;
+      const inW = (r.tokens_in / maxTokens) * plotW * barProgress;
+      const outW = (r.tokens_out / maxTokens) * plotW * barProgress;
 
       // Background
       ctx.fillStyle = 'rgba(255,255,255,0.03)';
@@ -327,16 +503,18 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = getCssVar('--text-dim');
+      ctx.globalAlpha = barProgress;
       const nameText = r.task_name.length > 12 ? r.task_name.slice(0, 11) + '\u2026' : r.task_name;
       ctx.fillText(nameText, pad.left - 8, centerY);
 
       // Token count
-      const total = r.tokens_in + r.tokens_out;
+      const total = Math.round((r.tokens_in + r.tokens_out) * barProgress);
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillStyle = getCssVar('--text-soft');
       const barEnd = pad.left + inW + outW;
       ctx.fillText(total.toLocaleString(), Math.min(barEnd + 6, pad.left + plotW - 40), centerY);
+      ctx.globalAlpha = 1;
     });
 
     // Legend
@@ -356,7 +534,7 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
       ctx.fillText(item.label, legendX + 14, legendY);
       legendX += ctx.measureText(item.label).width + 34;
     });
-  }, [results]);
+  }, [results, animProgress]);
 
   useEffect(() => {
     draw();
@@ -384,7 +562,7 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
 }
 
 /* ═══════════════════════════════════════════════════════════
-   Output Preview Panel
+   Output Preview Panel (with expand animation + syntax highlight fade)
    ═══════════════════════════════════════════════════════════ */
 
 function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
@@ -392,7 +570,6 @@ function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
   const passedWithOutput = results.filter((r) => r.status === 'pass' && r.output_preview);
 
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => {
-    // Auto-expand failed tasks
     return new Set(failedWithOutput.map((r) => r.task_id));
   });
 
@@ -413,59 +590,147 @@ function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {allTasks.map((r) => (
-        <div key={r.task_id} style={{ borderRadius: 6, border: '1px solid var(--glass-border)', overflow: 'hidden' }}>
-          <button
-            onClick={() => toggle(r.task_id)}
+      {allTasks.map((r, i) => {
+        const isExpanded = expandedIds.has(r.task_id);
+        return (
+          <div
+            key={r.task_id}
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              width: '100%',
-              padding: '8px 12px',
-              background: 'rgba(255,255,255,0.02)',
-              border: 'none',
-              cursor: 'pointer',
-              textAlign: 'left',
-              fontFamily: 'var(--mono)',
-              fontSize: 14,
-              color: 'var(--text-primary)',
+              borderRadius: 6,
+              border: '1px solid var(--glass-border)',
+              overflow: 'hidden',
+              opacity: 1,
+              animation: `fadeUp 400ms var(--ease) ${i * 60}ms both`,
             }}
           >
-            <span style={{ color: 'var(--text-dim)', fontSize: 15, width: 12 }}>
-              {expandedIds.has(r.task_id) ? '\u25BC' : '\u25B6'}
-            </span>
-            <span className={`status-badge status-${r.status}`} style={{ fontSize: 15 }}>
-              {r.status.toUpperCase()}
-            </span>
-            <span style={{ flex: 1, color: 'var(--text-strong)' }}>{r.task_name}</span>
-          </button>
-          {expandedIds.has(r.task_id) && (
-            <div style={{ padding: '0 12px 12px' }}>
-              {r.error && (
-                <div className="task-error" style={{ marginTop: 8 }}>{r.error}</div>
+            <button
+              onClick={() => toggle(r.task_id)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                width: '100%',
+                padding: '8px 12px',
+                background: 'rgba(255,255,255,0.02)',
+                border: 'none',
+                cursor: 'pointer',
+                textAlign: 'left',
+                fontFamily: 'var(--mono)',
+                fontSize: 14,
+                color: 'var(--text-primary)',
+              }}
+            >
+              <span
+                style={{
+                  color: 'var(--text-dim)',
+                  fontSize: 15,
+                  width: 12,
+                  display: 'inline-block',
+                  transition: 'transform 300ms var(--ease)',
+                  transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                }}
+              >
+                {'\u25B6'}
+              </span>
+              <span className={`status-badge status-${r.status}`} style={{ fontSize: 15 }}>
+                {r.status.toUpperCase()}
+              </span>
+              <span style={{ flex: 1, color: 'var(--text-strong)' }}>{r.task_name}</span>
+              {/* Gate verdict badges */}
+              {r.gate_verdicts.length > 0 && (
+                <span style={{ display: 'flex', gap: 2 }}>
+                  {r.gate_verdicts.map((g, gi) => (
+                    <GateBadge
+                      key={g.gate}
+                      gate={g.gate}
+                      passed={g.passed}
+                      delay={isExpanded ? gi * 80 : 0}
+                    />
+                  ))}
+                </span>
               )}
-              {r.output_preview && (
-                <pre className="task-output-code" style={{
-                  marginTop: 8,
-                  padding: 10,
-                  background: 'rgba(0,0,0,0.3)',
-                  borderRadius: 4,
-                  fontSize: 13,
-                  color: 'var(--text-primary)',
-                  overflow: 'auto',
-                  maxHeight: 200,
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                }}>
-                  {r.output_preview}
-                </pre>
-              )}
+            </button>
+            <div
+              style={{
+                maxHeight: isExpanded ? 400 : 0,
+                opacity: isExpanded ? 1 : 0,
+                overflow: 'hidden',
+                transition: 'max-height 400ms var(--ease), opacity 300ms var(--ease)',
+              }}
+            >
+              <div style={{ padding: '0 12px 12px' }}>
+                {r.error && (
+                  <div className="task-error" style={{ marginTop: 8 }}>{r.error}</div>
+                )}
+                {r.output_preview && (
+                  <pre className="task-output-code" style={{
+                    marginTop: 8,
+                    padding: 10,
+                    background: 'rgba(0,0,0,0.3)',
+                    borderRadius: 4,
+                    fontSize: 13,
+                    color: 'var(--text-primary)',
+                    overflow: 'auto',
+                    maxHeight: 200,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    animation: isExpanded ? 'fadeIn 500ms var(--ease) 200ms both' : 'none',
+                  }}>
+                    {r.output_preview}
+                  </pre>
+                )}
+              </div>
             </div>
-          )}
-        </div>
-      ))}
+          </div>
+        );
+      })}
     </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Section wrapper with crossfade mount animation
+   ═══════════════════════════════════════════════════════════ */
+
+function AnimatedSection({ delay, children }: { delay: number; children: React.ReactNode }) {
+  const visible = useStagger(delay);
+  return (
+    <div
+      style={{
+        opacity: visible ? 1 : 0,
+        transform: visible ? 'translateY(0)' : 'translateY(16px)',
+        transition: 'opacity 500ms var(--ease), transform 500ms var(--ease)',
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Model Badge (slide-in)
+   ═══════════════════════════════════════════════════════════ */
+
+function ModelBadge({ model, delay = 0 }: { model: string; delay?: number }) {
+  const visible = useStagger(delay);
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        padding: '2px 8px',
+        borderRadius: 'var(--radius-sm)',
+        background: 'var(--glass-bg)',
+        border: '1px solid var(--glass-border)',
+        fontFamily: 'var(--mono)',
+        fontSize: 'var(--text-sm)',
+        color: 'var(--rose-bright)',
+        opacity: visible ? 1 : 0,
+        transform: visible ? 'translateX(0)' : 'translateX(-12px)',
+        transition: 'opacity 400ms var(--ease), transform 400ms var(--ease)',
+      }}
+    >
+      {model}
+    </span>
   );
 }
 
@@ -534,7 +799,7 @@ export default function BenchRunDetail() {
   // Computed hero metrics
   const totalTokens = run.results.reduce((s, r) => s + r.tokens_in + r.tokens_out, 0);
   const passCount = run.results.filter((r) => r.status === 'pass').length;
-  const tokenEfficiency = totalTokens > 0 ? (passCount / (totalTokens / 1000)).toFixed(2) : '0';
+  const tokenEffRaw = totalTokens > 0 ? passCount / (totalTokens / 1000) : 0;
 
   return (
     <div className="bench-page">
@@ -542,27 +807,78 @@ export default function BenchRunDetail() {
       <div className="bench-hero">
         <div className="bench-hero-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <Link to="/bench" className="bench-back">&larr; Back</Link>
+            <Link
+              to="/bench"
+              className="bench-back"
+              style={{
+                animation: 'scaleIn 400ms var(--ease) both',
+                display: 'inline-block',
+                transition: 'color 200ms var(--ease), transform 200ms var(--ease)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-1px) scale(1.05)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0) scale(1)';
+              }}
+            >
+              &larr; Back
+            </Link>
             <h1 className="bench-page-title">Run {run.id.slice(0, 8)}</h1>
           </div>
-          <p className="bench-page-sub">
-            {run.suite_name} &middot; {run.config.model} &middot; {run.config.strategy.replace(/_/g, ' ')}
+          <p className="bench-page-sub" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {run.suite_name} &middot; <ModelBadge model={run.config.model} delay={200} /> &middot; {run.config.strategy.replace(/_/g, ' ')}
           </p>
         </div>
         {summary && (
           <div className="bench-hero-stats">
             <Mosaic columns={6}>
-              <MosaicCell label="PASS RATE" value={`${(summary.pass_rate * 100).toFixed(0)}%`} color="success" />
-              <MosaicCell label="TOTAL COST" value={`$${summary.total_cost_usd.toFixed(3)}`} color="warning" />
-              <MosaicCell label="USD/SUCCESS" value={`$${summary.cost_per_success_usd.toFixed(3)}`} color="bone" mono />
-              <MosaicCell label="AVG DURATION" value={`${(summary.avg_duration_ms / 1000).toFixed(1)}s`} color="dream" mono />
-              <MosaicCell label="TOTAL TOKENS" value={totalTokens.toLocaleString()} color="rose" mono />
-              <MosaicCell
+              <AnimatedStatCell
+                label="PASS RATE"
+                rawValue={summary.pass_rate * 100}
+                format={(v) => `${v.toFixed(0)}%`}
+                color="success"
+                delay={0}
+              />
+              <AnimatedStatCell
+                label="TOTAL COST"
+                rawValue={summary.total_cost_usd}
+                format={(v) => `$${v.toFixed(3)}`}
+                color="warning"
+                delay={60}
+              />
+              <AnimatedStatCell
+                label="USD/SUCCESS"
+                rawValue={summary.cost_per_success_usd}
+                format={(v) => `$${v.toFixed(3)}`}
+                color="bone"
+                mono
+                delay={120}
+              />
+              <AnimatedStatCell
+                label="AVG DURATION"
+                rawValue={summary.avg_duration_ms / 1000}
+                format={(v) => `${v.toFixed(1)}s`}
+                color="dream"
+                mono
+                delay={180}
+              />
+              <AnimatedStatCell
+                label="TOTAL TOKENS"
+                rawValue={totalTokens}
+                format={(v) => Math.round(v).toLocaleString()}
+                color="rose"
+                mono
+                delay={240}
+              />
+              <AnimatedStatCell
                 label="TOKEN EFF"
-                value={tokenEfficiency}
-                sub="passes/1K tok"
+                rawValue={tokenEffRaw}
+                format={(v) => v.toFixed(2)}
                 color="success"
                 mono
+                sub="passes/1K tok"
+                delay={300}
               />
             </Mosaic>
           </div>
@@ -572,94 +888,110 @@ export default function BenchRunDetail() {
       <div className="bench-body">
         {/* ── Task Timeline Waterfall ── */}
         {timelineTasks.length > 0 && (
-          <ComponentErrorBoundary name="TaskTimeline">
-            <Pane title="TASK TIMELINE">
-              <TimelineChart
-                tasks={timelineTasks}
-                height={Math.max(200, timelineTasks.length * 28 + 48)}
-              />
-            </Pane>
-          </ComponentErrorBoundary>
+          <AnimatedSection delay={100}>
+            <ComponentErrorBoundary name="TaskTimeline">
+              <Pane title="TASK TIMELINE">
+                <TimelineChart
+                  tasks={timelineTasks}
+                  height={Math.max(200, timelineTasks.length * 28 + 48)}
+                />
+              </Pane>
+            </ComponentErrorBoundary>
+          </AnimatedSection>
         )}
 
         {/* ── Task Results Table ── */}
-        <Pane title="TASK RESULTS">
-          <TaskTable results={run.results} showDifficulty showOutputPreview />
-        </Pane>
+        <AnimatedSection delay={200}>
+          <Pane title="TASK RESULTS">
+            <TaskTable results={run.results} showDifficulty showOutputPreview />
+          </Pane>
+        </AnimatedSection>
 
         {/* ── Cost Attribution ── */}
-        <ComponentErrorBoundary name="CostBreakdown">
-          <Pane title="COST ATTRIBUTION">
-            <CostBreakdownChart
-              results={run.results}
-              height={Math.max(280, run.results.length * 28 + 48)}
-            />
-          </Pane>
-        </ComponentErrorBoundary>
-
-        {/* ── Token Flow ── */}
-        <ComponentErrorBoundary name="TokenFlow">
-          <Pane title="TOKEN FLOW">
-            <TokenFlowChart
-              results={run.results}
-              height={Math.max(200, run.results.length * 26 + 40)}
-            />
-          </Pane>
-        </ComponentErrorBoundary>
-
-        {/* ── Gate Heatmap ── */}
-        {gateNames.length > 0 && (
-          <ComponentErrorBoundary name="GateHeatmap">
-            <Pane title="GATE HEATMAP">
-              <HeatmapChart
-                rows={heatRows}
-                columns={gateNames}
-                values={heatValues}
-                height={Math.max(200, heatRows.length * 28 + 48)}
+        <AnimatedSection delay={300}>
+          <ComponentErrorBoundary name="CostBreakdown">
+            <Pane title="COST ATTRIBUTION">
+              <CostBreakdownChart
+                results={run.results}
+                height={Math.max(280, run.results.length * 28 + 48)}
               />
             </Pane>
           </ComponentErrorBoundary>
+        </AnimatedSection>
+
+        {/* ── Token Flow ── */}
+        <AnimatedSection delay={400}>
+          <ComponentErrorBoundary name="TokenFlow">
+            <Pane title="TOKEN FLOW">
+              <TokenFlowChart
+                results={run.results}
+                height={Math.max(200, run.results.length * 26 + 40)}
+              />
+            </Pane>
+          </ComponentErrorBoundary>
+        </AnimatedSection>
+
+        {/* ── Gate Heatmap ── */}
+        {gateNames.length > 0 && (
+          <AnimatedSection delay={500}>
+            <ComponentErrorBoundary name="GateHeatmap">
+              <Pane title="GATE HEATMAP">
+                <HeatmapChart
+                  rows={heatRows}
+                  columns={gateNames}
+                  values={heatValues}
+                  height={Math.max(200, heatRows.length * 28 + 48)}
+                />
+              </Pane>
+            </ComponentErrorBoundary>
+          </AnimatedSection>
         )}
 
         {/* ── Output Previews ── */}
-        <ComponentErrorBoundary name="OutputPreviews">
-          <Pane title="OUTPUT PREVIEWS">
-            <OutputPreviewPanel results={run.results} />
-          </Pane>
-        </ComponentErrorBoundary>
+        <AnimatedSection delay={600}>
+          <ComponentErrorBoundary name="OutputPreviews">
+            <Pane title="OUTPUT PREVIEWS">
+              <OutputPreviewPanel results={run.results} />
+            </Pane>
+          </ComponentErrorBoundary>
+        </AnimatedSection>
 
         {/* ── Compare Button ── */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16, marginBottom: 8 }}>
-          <Link
-            to={`/bench/compare?ids=${run.id}`}
-            className="btn btn-sm"
-            style={{
-              textDecoration: 'none',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
-            }}
-          >
-            Compare with...
-          </Link>
-        </div>
+        <AnimatedSection delay={700}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16, marginBottom: 8 }}>
+            <Link
+              to={`/bench/compare?ids=${run.id}`}
+              className="btn btn-sm"
+              style={{
+                textDecoration: 'none',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              Compare with...
+            </Link>
+          </div>
+        </AnimatedSection>
 
         {/* ── Configuration ── */}
-        <Pane title="CONFIGURATION">
-          <div className="config-detail-grid">
-            <div><span className="detail-label">Model:</span> {run.config.model}</div>
-            <div><span className="detail-label">Provider:</span> {run.config.provider ?? '-'}</div>
-            <div><span className="detail-label">Strategy:</span> {run.config.strategy}</div>
-            <div><span className="detail-label">Temperature:</span> {run.config.temperature ?? '-'}</div>
-            <div><span className="detail-label">Max Tokens:</span> {run.config.max_tokens ?? '-'}</div>
-            <div><span className="detail-label">Timeout:</span> {run.config.timeout_secs}s</div>
-            <div><span className="detail-label">Retries:</span> {run.config.retries}</div>
-            <div><span className="detail-label">Started:</span> {new Date(run.started_at).toLocaleString()}</div>
-            {run.finished_at && (
-              <div><span className="detail-label">Finished:</span> {new Date(run.finished_at).toLocaleString()}</div>
-            )}
-          </div>
-        </Pane>
+        <AnimatedSection delay={800}>
+          <Pane title="CONFIGURATION">
+            <div className="config-detail-grid">
+              <div><span className="detail-label">Model:</span> <ModelBadge model={run.config.model} delay={850} /></div>
+              <div><span className="detail-label">Provider:</span> {run.config.provider ?? '-'}</div>
+              <div><span className="detail-label">Strategy:</span> {run.config.strategy}</div>
+              <div><span className="detail-label">Temperature:</span> {run.config.temperature ?? '-'}</div>
+              <div><span className="detail-label">Max Tokens:</span> {run.config.max_tokens ?? '-'}</div>
+              <div><span className="detail-label">Timeout:</span> {run.config.timeout_secs}s</div>
+              <div><span className="detail-label">Retries:</span> {run.config.retries}</div>
+              <div><span className="detail-label">Started:</span> {new Date(run.started_at).toLocaleString()}</div>
+              {run.finished_at && (
+                <div><span className="detail-label">Finished:</span> {new Date(run.finished_at).toLocaleString()}</div>
+              )}
+            </div>
+          </Pane>
+        </AnimatedSection>
       </div>
     </div>
   );

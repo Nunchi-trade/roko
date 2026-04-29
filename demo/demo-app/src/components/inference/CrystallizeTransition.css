@@ -1,7 +1,88 @@
-/* CrystallizeTransition -- achievement celebration particle overlay */
+/* CrystallizeTransition -- crystallization / materialization overlay */
 
 .crystallize-transition {
   position: relative;
+}
+
+/* ── Content materialization ── */
+
+.crystallize-transition__content {
+  transition: opacity 200ms ease, filter 200ms ease;
+}
+
+.crystallize-transition__content--entering {
+  animation: crystallize-materialize 400ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.crystallize-transition__content--exiting {
+  animation: crystallize-dissolve 350ms cubic-bezier(0.55, 0.06, 0.68, 0.19) forwards;
+}
+
+@keyframes crystallize-materialize {
+  0% {
+    opacity: 0.3;
+    filter: blur(6px) brightness(1.4);
+    clip-path: polygon(
+      0% 0%, 20% 0%, 20% 25%, 0% 25%,
+      0% 35%, 40% 35%, 40% 0%, 60% 0%,
+      60% 50%, 80% 50%, 80% 0%, 100% 0%,
+      100% 30%, 75% 30%, 75% 60%, 100% 60%,
+      100% 100%, 55% 100%, 55% 70%, 0% 70%
+    );
+  }
+  40% {
+    opacity: 0.7;
+    filter: blur(2px) brightness(1.15);
+    clip-path: polygon(
+      0% 0%, 30% 0%, 30% 15%, 0% 15%,
+      0% 20%, 50% 20%, 50% 0%, 70% 0%,
+      70% 40%, 90% 40%, 90% 0%, 100% 0%,
+      100% 45%, 85% 45%, 85% 55%, 100% 55%,
+      100% 100%, 45% 100%, 45% 80%, 0% 80%,
+      0% 65%, 15% 65%, 15% 50%, 0% 50%
+    );
+  }
+  70% {
+    opacity: 0.9;
+    filter: blur(0.5px) brightness(1.05);
+    clip-path: polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0) brightness(1);
+    clip-path: polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%);
+  }
+}
+
+@keyframes crystallize-dissolve {
+  0% {
+    opacity: 1;
+    filter: blur(0) brightness(1);
+    clip-path: polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%);
+  }
+  40% {
+    opacity: 0.8;
+    filter: blur(1px) brightness(1.1);
+    clip-path: polygon(
+      0% 0%, 30% 0%, 30% 15%, 0% 15%,
+      0% 20%, 50% 20%, 50% 0%, 70% 0%,
+      70% 40%, 90% 40%, 90% 0%, 100% 0%,
+      100% 45%, 85% 45%, 85% 55%, 100% 55%,
+      100% 100%, 45% 100%, 45% 80%, 0% 80%,
+      0% 65%, 15% 65%, 15% 50%, 0% 50%
+    );
+  }
+  100% {
+    opacity: 0;
+    filter: blur(8px) brightness(1.4);
+    clip-path: polygon(
+      0% 0%, 15% 0%, 15% 10%, 0% 10%,
+      40% 30%, 55% 30%, 55% 0%, 65% 0%,
+      80% 50%, 95% 50%, 95% 0%, 100% 0%,
+      100% 20%, 70% 20%, 70% 65%, 100% 65%,
+      100% 100%, 50% 100%, 50% 75%, 0% 75%
+    );
+  }
 }
 
 /* ── Canvas overlay ── */
@@ -104,6 +185,21 @@
   .crystallize-transition__ring--active {
     animation: none;
     display: none;
+  }
+
+  .crystallize-transition__content--entering,
+  .crystallize-transition__content--exiting {
+    animation: none !important;
+    clip-path: none !important;
+    filter: none !important;
+  }
+
+  .crystallize-transition__content--entering {
+    opacity: 1;
+  }
+
+  .crystallize-transition__content--exiting {
+    opacity: 0;
   }
 }
 

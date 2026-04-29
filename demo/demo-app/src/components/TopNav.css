@@ -17,6 +17,12 @@
   position: sticky;
   flex-shrink: 0;
   gap: 0;
+  transition: box-shadow var(--duration-smooth) ease;
+}
+
+/* Scroll shadow — fades in when page is scrolled */
+.topnav.scrolled {
+  box-shadow: var(--shadow-md);
 }
 
 /* Gradient accent line along the bottom border */
@@ -46,6 +52,22 @@
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+  transition: transform var(--duration-snap) ease;
+}
+
+.topnav .brand:hover {
+  transform: rotate(-5deg);
+}
+
+.topnav .brand:hover .mark {
+  box-shadow:
+    0 0 14px var(--rose-glow),
+    0 0 32px color-mix(in srgb, var(--rose-glow) 70%, transparent),
+    0 0 52px color-mix(in srgb, var(--rose-glow) 30%, transparent);
+}
+
+.topnav .brand:hover .brand-text {
+  text-shadow: 0 0 20px color-mix(in srgb, var(--rose-glow) 40%, transparent);
 }
 
 .topnav .brand .mark {
@@ -55,23 +77,24 @@
   background: var(--rose-glow);
   box-shadow:
     0 0 8px var(--rose-glow),
-    0 0 18px rgba(232, 181, 206, .5),
-    0 0 36px rgba(232, 181, 206, .2);
+    0 0 18px color-mix(in srgb, var(--rose-glow) 50%, transparent),
+    0 0 36px color-mix(in srgb, var(--rose-glow) 20%, transparent);
   animation: mark-breathe 3s ease-in-out infinite;
+  transition: box-shadow var(--duration-snap) ease;
 }
 
 @keyframes mark-breathe {
   0%, 100% {
     box-shadow:
       0 0 8px var(--rose-glow),
-      0 0 18px rgba(232, 181, 206, .5),
-      0 0 36px rgba(232, 181, 206, .2);
+      0 0 18px color-mix(in srgb, var(--rose-glow) 50%, transparent),
+      0 0 36px color-mix(in srgb, var(--rose-glow) 20%, transparent);
   }
   50% {
     box-shadow:
       0 0 12px var(--rose-glow),
-      0 0 28px rgba(232, 181, 206, .7),
-      0 0 48px rgba(232, 181, 206, .3);
+      0 0 28px color-mix(in srgb, var(--rose-glow) 70%, transparent),
+      0 0 48px color-mix(in srgb, var(--rose-glow) 30%, transparent);
   }
 }
 
@@ -84,7 +107,8 @@
   color: var(--rose-glow);
   text-transform: uppercase;
   line-height: 1;
-  text-shadow: 0 0 14px rgba(232, 181, 206, .2);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--rose-glow) 20%, transparent);
+  transition: text-shadow var(--duration-snap) ease;
 }
 
 /* ── Separator ────────────────────────────────────────── */
@@ -104,6 +128,37 @@
 .topnav .links {
   display: flex;
   gap: 2px;
+  position: relative;
+}
+
+/* Morphing active indicator — slides between tabs */
+.topnav .links .nav-indicator {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: var(--rose-glow);
+  border-radius: 1px;
+  box-shadow:
+    0 0 8px color-mix(in srgb, var(--rose-glow) 50%, transparent),
+    0 0 20px color-mix(in srgb, var(--rose-glow) 25%, transparent);
+  transition:
+    transform var(--duration-smooth) var(--ease),
+    width var(--duration-smooth) var(--ease);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Staggered entrance animation */
+@keyframes navTabEnter {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 .topnav .links .nav-link {
@@ -120,11 +175,14 @@
   border-radius: 2px;
   transition:
     color var(--duration-snap),
-    background var(--duration-snap);
+    background var(--duration-snap),
+    text-shadow var(--duration-snap),
+    transform var(--duration-snap);
   position: relative;
   text-decoration: none;
   min-width: 0;
   white-space: nowrap;
+  animation: navTabEnter var(--duration-reveal) var(--ease) both;
 }
 
 .topnav .links .nav-link .nav-link-inner {
@@ -133,10 +191,12 @@
   text-align: center;
 }
 
-/* Hover: brackets appear, text brightens */
+/* Hover: glow text, background pill, slight scale */
 .topnav .links .nav-link:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, .03);
+  background: var(--bg-glass-active);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--rose-glow) 30%, transparent);
+  transform: scale(1.02);
 }
 
 .topnav .links .nav-link:hover .nav-link-inner::before {
@@ -149,10 +209,21 @@
   color: var(--text-ghost);
 }
 
-/* Active: arrow indicators, rose glow */
+/* Active: arrow indicators, rose glow + pulsing shadow */
 .topnav .links .nav-link.active {
   color: var(--rose-glow);
-  text-shadow: 0 0 12px rgba(232, 181, 206, .25);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--rose-glow) 25%, transparent);
+  animation: navTabEnter var(--duration-reveal) var(--ease) both,
+             activeTabGlow 3s ease-in-out infinite;
+}
+
+@keyframes activeTabGlow {
+  0%, 100% {
+    box-shadow: 0 0 12px color-mix(in srgb, var(--rose) 0%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 20px color-mix(in srgb, var(--rose) 15%, transparent);
+  }
 }
 
 /* Remove hover brackets on active link — the arrows are the indicator */
@@ -161,16 +232,9 @@
   content: none;
 }
 
-/* Active underline glow */
-.topnav .links .nav-link.active::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 20%;
-  right: 20%;
-  height: 1px;
-  background: var(--rose-glow);
-  box-shadow: 0 0 6px rgba(220, 165, 189, .4);
+/* Active tab keeps scale at 1 on hover (already prominent) */
+.topnav .links .nav-link.active:hover {
+  transform: none;
 }
 
 /* ── Status Pill ──────────────────────────────────────── */
@@ -196,44 +260,77 @@
   white-space: nowrap;
 }
 
-.topnav .status-pill .status-char {
-  font-size: 8px;
-  line-height: 1;
+/* Status dot replaces text char for better animation control */
+.topnav .status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+/* Breathing pulse when connected */
+.topnav .status-dot.breathing {
+  animation: dotBreathe 2.4s ease-in-out infinite;
+}
+
+@keyframes dotBreathe {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 4px currentColor;
+  }
+  50% {
+    opacity: .6;
+    box-shadow: 0 0 8px currentColor, 0 0 14px currentColor;
+  }
+}
+
+/* Spin when connecting */
+.topnav .status-dot.spinning {
+  animation: dotSpin 1.2s linear infinite;
+  border-radius: 50%;
+  background: transparent;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  width: 8px;
+  height: 8px;
+}
+
+@keyframes dotSpin {
+  to { transform: rotate(360deg); }
 }
 
 /* Live state */
 .topnav .status-pill.live {
   color: var(--success);
-  border-color: rgba(122, 138, 120, .25);
+  border-color: color-mix(in srgb, var(--success) 25%, transparent);
   animation: pill-glow 2.5s ease-in-out infinite;
-}
-
-.topnav .status-pill.live .status-char {
-  text-shadow: 0 0 4px rgba(138, 156, 134, .8);
-  animation: pulse-dot 2.4s ease-in-out infinite;
 }
 
 @keyframes pill-glow {
   0%, 100% {
-    box-shadow: 0 0 0 rgba(138, 156, 134, 0);
+    box-shadow: 0 0 0 color-mix(in srgb, var(--success) 0%, transparent);
     background: transparent;
   }
   50% {
     box-shadow:
-      0 0 8px rgba(138, 156, 134, .12),
-      inset 0 0 6px rgba(138, 156, 134, .04);
-    background: rgba(138, 156, 134, .03);
+      0 0 8px color-mix(in srgb, var(--success) 12%, transparent),
+      inset 0 0 6px color-mix(in srgb, var(--success) 4%, transparent);
+    background: color-mix(in srgb, var(--success) 3%, transparent);
   }
+}
+
+/* Connecting state */
+.topnav .status-pill.connecting {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 20%, transparent);
 }
 
 /* Demo/seed state */
 .topnav .status-pill.demo {
   color: var(--warning);
-  border-color: rgba(200, 154, 104, .2);
-}
-
-.topnav .status-pill.demo .status-char {
-  text-shadow: 0 0 3px rgba(200, 154, 104, .5);
+  border-color: color-mix(in srgb, var(--warning) 20%, transparent);
 }
 
 /* ── Responsive ───────────────────────────────────────── */

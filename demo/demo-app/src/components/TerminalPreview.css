@@ -1,0 +1,201 @@
+/* ═══════════════════════════════════════════════════════════
+   TERMINAL PREVIEW — miniature terminal layout for ScenarioPreview
+   Glass morphism + staggered reveal + scanline overlay
+   ═══════════════════════════════════════════════════════════ */
+
+.terminal-preview {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 4px;
+  background: var(--bg-deeper);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  position: relative;
+}
+
+/* Grid layouts */
+.terminal-preview[data-panes="1"] {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+.terminal-preview[data-panes="2"] {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr;
+}
+
+.terminal-preview[data-panes="4"] {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+/* Scanline overlay */
+.terminal-preview::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 2px,
+    color-mix(in srgb, black 4%, transparent) 2px,
+    color-mix(in srgb, black 4%, transparent) 4px
+  );
+  pointer-events: none;
+  border-radius: inherit;
+  z-index: 2;
+}
+
+/* ── Mini pane ── */
+
+.terminal-preview-pane {
+  background: var(--bg-void);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  opacity: 0;
+  transform: scale(0.92);
+  animation: tpPaneIn var(--duration-reveal) var(--ease) forwards;
+  transition: transform var(--duration-smooth) var(--ease),
+              box-shadow var(--duration-smooth) var(--ease),
+              border-color var(--duration-smooth) var(--ease);
+}
+
+/* Staggered entrance */
+.terminal-preview-pane:nth-child(1) { animation-delay: 0ms; }
+.terminal-preview-pane:nth-child(2) { animation-delay: 80ms; }
+.terminal-preview-pane:nth-child(3) { animation-delay: 160ms; }
+.terminal-preview-pane:nth-child(4) { animation-delay: 240ms; }
+
+@keyframes tpPaneIn {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Hover lift + glow */
+.terminal-preview-pane:hover {
+  transform: translateY(-1px) scale(1.01);
+  border-color: color-mix(in srgb, var(--rose) 22%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--rose) 12%, transparent),
+              0 0 12px color-mix(in srgb, var(--rose) 6%, transparent);
+}
+
+/* ── Pane header ── */
+
+.terminal-preview-header {
+  padding: 2px 6px;
+  height: 14px;
+  background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--glass-border);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.terminal-preview-header .tp-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 3px color-mix(in srgb, var(--success) 50%, transparent);
+  flex-shrink: 0;
+}
+
+.terminal-preview-header .tp-label {
+  font-family: var(--mono);
+  font-size: 7px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1;
+}
+
+/* ── Pane body ── */
+
+.terminal-preview-body {
+  flex: 1;
+  padding: 3px 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.terminal-preview-body .tp-line {
+  font-family: var(--mono);
+  font-size: 6px;
+  line-height: 1.4;
+  color: var(--text-ghost);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-preview-body .tp-line .tp-prompt {
+  color: var(--rose-dim);
+}
+
+.terminal-preview-body .tp-line .tp-cmd {
+  color: var(--text-dim);
+}
+
+/* ── Blinking cursor ── */
+
+.terminal-preview-cursor {
+  display: inline-block;
+  width: 4px;
+  height: 7px;
+  background: var(--rose-dim);
+  animation: tpCursorBlink 1.2s step-end infinite;
+  vertical-align: middle;
+  margin-left: 1px;
+}
+
+@keyframes tpCursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ── Accent color override via CSS custom property ── */
+
+.terminal-preview-pane[style*="--tp-accent"] .tp-dot {
+  background: var(--tp-accent);
+  box-shadow: 0 0 3px var(--tp-accent);
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-preview-pane {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  .terminal-preview-cursor {
+    animation: none;
+    opacity: 1;
+  }
+
+  .terminal-preview-pane:hover {
+    transform: none;
+  }
+}
