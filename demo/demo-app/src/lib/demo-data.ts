@@ -415,3 +415,51 @@ export const DEMO_COST_RACE = {
     { model: 'gemini-2.5-pro', cost_usd: 0.21, tokens: 38400, tasks: 12, color: '#9A8AB8' },
   ],
 };
+
+// Dream consolidation journal
+export const DEMO_DREAM_JOURNAL = {
+  last_cycle: '2026-04-29T03:00:00Z',
+  cycle_count: 23,
+  phases: [
+    {
+      name: 'Hypnagogia',
+      status: 'completed',
+      episodes_processed: 142,
+      clusters_formed: 18,
+      knowledge_entries_written: 0,
+      playbooks_created: 0,
+      duration_secs: 34,
+      trend: [8, 12, 15, 11, 14, 18, 16, 13, 17, 19, 15, 18],
+    },
+    {
+      name: 'NREM',
+      status: 'completed',
+      episodes_processed: 142,
+      clusters_formed: 18,
+      knowledge_entries_written: 12,
+      playbooks_created: 0,
+      duration_secs: 87,
+      trend: [3, 5, 4, 6, 8, 7, 9, 11, 10, 12, 11, 12],
+    },
+    {
+      name: 'REM',
+      status: 'completed',
+      episodes_processed: 142,
+      clusters_formed: 18,
+      knowledge_entries_written: 12,
+      playbooks_created: 7,
+      duration_secs: 56,
+      trend: [1, 2, 3, 2, 4, 5, 4, 6, 5, 7, 6, 7],
+    },
+    {
+      name: 'Integration',
+      status: 'completed',
+      episodes_processed: 142,
+      clusters_formed: 18,
+      knowledge_entries_written: 12,
+      playbooks_created: 7,
+      duration_secs: 23,
+      trend: [2, 3, 5, 4, 6, 7, 8, 9, 10, 11, 11, 12],
+    },
+  ],
+};
