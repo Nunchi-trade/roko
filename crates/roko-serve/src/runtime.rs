@@ -154,7 +154,8 @@ pub trait CliRuntime: Send + Sync + 'static {
     /// Run a single prompt with bench config overrides.
     ///
     /// The default ignores the overrides and delegates to `run_once`.
-    /// The real CLI runtime applies model/backend overrides.
+    /// The real CLI runtime applies model/backend overrides and can inspect
+    /// the bench strategy hint carried in those overrides.
     async fn run_once_with_config(
         &self,
         workdir: &std::path::Path,

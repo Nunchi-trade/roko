@@ -42,6 +42,7 @@ use roko_orchestrator::{ServiceConfig, ServiceFactory};
 use roko_runtime::effect_driver::EffectServices;
 use roko_runtime::pipeline_state::WorkflowConfig;
 use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig, WorkflowRunReport};
+use roko_serve::bench::BenchStrategy;
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use std::collections::HashMap;
@@ -896,10 +897,12 @@ pub async fn run_once(
     workdir: &Path,
     config: &Config,
     prompt_text: &str,
+    strategy: Option<BenchStrategy>,
     external_hub: Option<&StateHub>,
 ) -> Result<RunReport> {
     // Future `--engine v2` dispatch should call `run_with_workflow_engine`
     // before entering this existing orchestration path.
+    let _ = strategy;
     let substrate_dir = workdir.join(".roko");
     let substrate = FileSubstrate::open(substrate_dir)
         .await
@@ -1144,8 +1147,10 @@ pub async fn run_once(
     _workdir: &Path,
     _config: &Config,
     _prompt_text: &str,
+    strategy: Option<BenchStrategy>,
     _external_hub: Option<&StateHub>,
 ) -> Result<RunReport> {
+    let _ = strategy;
     anyhow::bail!(
         "legacy run_once is disabled; use the WorkflowEngine v2 path or enable legacy-orchestrate"
     )

@@ -33,7 +33,7 @@ pub async fn run_once_inline(
     external_hub: Option<&StateHub>,
 ) -> Result<RunReport> {
     if !should_use_inline() {
-        let report = run_once(workdir, config, prompt_text, external_hub).await?;
+        let report = run_once(workdir, config, prompt_text, None, external_hub).await?;
         print_plain_report(&report, config);
         return Ok(report);
     }
@@ -85,7 +85,7 @@ pub async fn run_once_inline(
     )])?;
 
     // Execute
-    let report = run_once(workdir, config, prompt_text, external_hub).await?;
+    let report = run_once(workdir, config, prompt_text, None, external_hub).await?;
     let elapsed = start.elapsed().as_secs_f64();
 
     // Gate results as a proper GateBlock

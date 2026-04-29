@@ -49,7 +49,7 @@ pub(crate) async fn cmd_oneshot(cli: &Cli, prompt: &str) -> Result<i32> {
     let mut config = resolve_config(cli)?;
     apply_resume_session_override(&mut config, cli.resume.clone());
 
-    let report = run_once(&workdir, &config, &mode.prepare().prompt, None).await?;
+    let report = run_once(&workdir, &config, &mode.prepare().prompt, None, None).await?;
     let result = mode.format_result(
         report.overall_success(),
         &format!(
@@ -357,7 +357,7 @@ pub(crate) async fn cmd_run(
             config.gates.len()
         );
     }
-    let report = run_once(&workdir, &config, &prompt, external_hub).await?;
+    let report = run_once(&workdir, &config, &prompt, None, external_hub).await?;
 
     if cli.json {
         println!(
