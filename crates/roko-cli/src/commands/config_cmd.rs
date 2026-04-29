@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
+use serde::Serialize;
 
 pub(crate) const fn edit_target(global: bool, project: bool) -> EditTarget {
     if global {
@@ -122,9 +123,16 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
             } => {
                 let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
                 if all {
-                    cmd_provider_test_all(&wd).await?;
-                } else if let Some(provider) = provider {
-                    cmd_provider_test(&wd, &provider).await?;
+                    cmd_provider_test_all(&wd, cli.json).await?;
+                } else if provider.is_some() || cli.model.is_some() {
+                    cmd_provider_test(
+                        &wd,
+                        provider.as_deref(),
+                        cli.model.as_deref(),
+                        cli.role.as_deref(),
+                        cli.json,
+                    )
+                    .await?;
                 } else {
                     bail!("provide a provider name or use --all");
                 }
@@ -147,6 +155,7 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
                 let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
                 cmd_model_route(
                     &wd,
+                    cli.model.as_deref(),
                     cli.role.as_deref(),
                     &model,
                     explain,
@@ -316,53 +325,161 @@ pub(crate) fn cmd_provider_health(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn cmd_provider_test(workdir: &Path, provider_name: &str) -> Result<()> {
-    let config = load_roko_config(workdir)?;
-    let providers = configured_providers(&config);
-    let provider = providers
-        .get(provider_name)
-        .ok_or_else(|| anyhow!("provider '{provider_name}' is not configured"))?;
-
-    match provider.kind {
-        ProviderKind::OpenAiCompat => {
-            let model = select_provider_test_model(&config, provider_name)
-                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
-            run_openai_compat_provider_test(provider_name, provider, &model.1).await
-        }
-        ProviderKind::AnthropicApi => {
-            let model = select_provider_test_model(&config, provider_name)
-                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
-            run_anthropic_provider_test(provider_name, provider, &model.1).await
-        }
-        ProviderKind::ClaudeCli => run_claude_cli_provider_test(provider_name, provider).await,
-        ProviderKind::GeminiApi => {
-            let model = select_provider_test_model(&config, provider_name)
-                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
-            run_gemini_provider_test(provider_name, provider, &model.1).await
-        }
-        ProviderKind::PerplexityApi => {
-            let model = select_provider_test_model(&config, provider_name)
-                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
-            run_openai_compat_provider_test(provider_name, provider, &model.1).await
-        }
-        ProviderKind::CursorAcp => run_cursor_provider_test(provider_name, provider).await,
-        ProviderKind::CerebrasApi => {
-            let model = select_provider_test_model(&config, provider_name)
-                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
-            run_openai_compat_provider_test(provider_name, provider, &model.1).await
-        }
-    }
-}
-
-pub(crate) async fn cmd_provider_test_all(workdir: &Path) -> Result<()> {
+pub(crate) async fn cmd_provider_test(
+    workdir: &Path,
+    provider_name: Option<&str>,
+    cli_model: Option<&str>,
+    role_arg: Option<&str>,
+    json: bool,
+) -> Result<ProviderTestReport> {
     let config = load_roko_config(workdir)?;
     let providers = configured_providers(&config);
     if providers.is_empty() {
-        println!("no providers configured");
-        return Ok(());
+        bail!(
+            "no providers configured in {}. add a [providers.*] entry or run `roko init`.",
+            workdir.display()
+        );
     }
 
-    let mut results: Vec<(String, String, String, String)> = Vec::new();
+    let cli_model = cli_model.map(str::trim).filter(|model| !model.is_empty());
+    let role = role_arg.map(str::to_string);
+
+    let (provider_name, provider, model, selection_note) = if let Some(cli_model) = cli_model {
+        let selection = crate::model_selection::resolve_effective_model(
+            Some(cli_model.to_string()),
+            None,
+            role.clone(),
+            None,
+            &config,
+        )
+        .map_err(|err| anyhow!("resolve provider test selection: {err}"))?;
+
+        if let Some(requested_provider) = provider_name.map(str::trim).filter(|s| !s.is_empty())
+            && requested_provider != selection.provider_key
+        {
+            bail!(
+                "--model {cli_model} resolves to provider '{}', but provider '{requested_provider}' was requested",
+                selection.provider_key
+            );
+        }
+
+        let provider_name = selection.provider_key.clone();
+        let provider = providers.get(&provider_name).ok_or_else(|| {
+            anyhow!("provider '{provider_name}' is not configured")
+        })?;
+        let model = model_profile_for_effective_selection(&config, &selection);
+        let note = format!(
+            "Resolved provider test from --model {cli_model}: {} ({})",
+            selection.provider_key, selection.reason
+        );
+        (provider_name, provider, Some(model), Some(note))
+    } else {
+        let provider_name = provider_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("provide a provider name or use --all"))?
+            .to_string();
+        let provider = providers.get(&provider_name).ok_or_else(|| {
+            anyhow!("provider '{provider_name}' is not configured")
+        })?;
+        let runtime_selection = crate::model_selection::resolve_effective_model(
+            None,
+            None,
+            role.clone(),
+            None,
+            &config,
+        )
+        .ok();
+        let model = match provider.kind {
+            ProviderKind::OpenAiCompat
+            | ProviderKind::AnthropicApi
+            | ProviderKind::GeminiApi
+            | ProviderKind::PerplexityApi
+            | ProviderKind::CerebrasApi => Some(
+                if let Some(selection) = runtime_selection.as_ref().filter(|selection| {
+                    selection.provider_key == provider_name.as_str()
+                }) {
+                    model_profile_for_effective_selection(&config, selection)
+                } else {
+                    select_provider_test_model(&config, &provider_name)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "provider '{provider_name}' has no configured models; add a [models.*] entry or use --model"
+                            )
+                        })?
+                        .1
+                },
+            ),
+            ProviderKind::ClaudeCli | ProviderKind::CursorAcp => runtime_selection
+                .as_ref()
+                .filter(|selection| selection.provider_key == provider_name.as_str())
+                .map(|selection| model_profile_for_effective_selection(&config, selection)),
+        };
+        (provider_name, provider, model, None)
+    };
+
+    if let Some(note) = selection_note.as_ref() {
+        println!("{note}");
+        println!();
+    }
+
+    let report = match provider.kind {
+        ProviderKind::OpenAiCompat => {
+            let model = model.as_ref().ok_or_else(|| {
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
+            })?;
+            run_openai_compat_provider_test(&provider_name, provider, model, json).await?
+        }
+        ProviderKind::AnthropicApi => {
+            let model = model.as_ref().ok_or_else(|| {
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
+            })?;
+            run_anthropic_provider_test(&provider_name, provider, model, json).await?
+        }
+        ProviderKind::ClaudeCli => {
+            run_claude_cli_provider_test(&provider_name, provider, model.as_ref(), json).await?
+        }
+        ProviderKind::GeminiApi => {
+            let model = model.as_ref().ok_or_else(|| {
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
+            })?;
+            run_gemini_provider_test(&provider_name, provider, model, json).await?
+        }
+        ProviderKind::PerplexityApi => {
+            let model = model.as_ref().ok_or_else(|| {
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
+            })?;
+            run_openai_compat_provider_test(&provider_name, provider, model, json).await?
+        }
+        ProviderKind::CursorAcp => {
+            run_cursor_provider_test(&provider_name, provider, model.as_ref(), json).await?
+        }
+        ProviderKind::CerebrasApi => {
+            let model = model.as_ref().ok_or_else(|| {
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
+            })?;
+            run_openai_compat_provider_test(&provider_name, provider, model, json).await?
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
+
+    Ok(report)
+}
+
+pub(crate) async fn cmd_provider_test_all(workdir: &Path, json: bool) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let providers = configured_providers(&config);
+    if providers.is_empty() {
+        bail!(
+            "no providers configured in {}. add a [providers.*] entry or run `roko init`.",
+            workdir.display()
+        );
+    }
+
+    let mut results: Vec<ProviderTestAllRow> = Vec::new();
     let mut sorted_names: Vec<_> = providers.keys().cloned().collect();
     sorted_names.sort();
 
@@ -379,32 +496,42 @@ pub(crate) async fn cmd_provider_test_all(workdir: &Path) -> Result<()> {
                 .trim()
                 .is_empty()
             {
-                results.push((
-                    name.clone(),
-                    provider.kind.to_string(),
-                    "SKIPPED (no key)".into(),
-                    "\u{2014}".into(),
-                ));
+                results.push(ProviderTestAllRow {
+                    provider: name.clone(),
+                    kind: provider.kind.to_string(),
+                    status: "SKIPPED (no key)".into(),
+                    duration_ms: None,
+                });
                 continue;
             }
         }
         let started = Instant::now();
-        match cmd_provider_test(workdir, name).await {
-            Ok(()) => {
-                results.push((
-                    name.clone(),
-                    provider.kind.to_string(),
-                    "\u{2713} OK".into(),
-                    format_provider_test_duration(started.elapsed()),
-                ));
+        match cmd_provider_test(workdir, Some(name.as_str()), None, None, false).await {
+            Ok(_) => {
+                results.push(ProviderTestAllRow {
+                    provider: name.clone(),
+                    kind: provider.kind.to_string(),
+                    status: "\u{2713} OK".into(),
+                    duration_ms: Some(
+                        started
+                            .elapsed()
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64,
+                    ),
+                });
             }
             Err(e) => {
-                results.push((
-                    name.clone(),
-                    provider.kind.to_string(),
-                    format!("\u{2717} {e:#}"),
-                    format_provider_test_duration(started.elapsed()),
-                ));
+                results.push(ProviderTestAllRow {
+                    provider: name.clone(),
+                    kind: provider.kind.to_string(),
+                    status: format!("\u{2717} {e:#}"),
+                    duration_ms: Some(
+                        started
+                            .elapsed()
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64,
+                    ),
+                });
             }
         }
     }
@@ -417,10 +544,21 @@ pub(crate) async fn cmd_provider_test_all(workdir: &Path) -> Result<()> {
         "Provider", "Kind", "Status", "Latency"
     );
     println!("{}", "\u{2500}".repeat(72));
-    for (name, kind, status, latency) in &results {
-        println!("{:<16} {:<16} {:<28} {}", name, kind, status, latency);
+    for row in &results {
+        let latency = row
+            .duration_ms
+            .map(|ms| format_provider_test_duration(Duration::from_millis(ms)))
+            .unwrap_or_else(|| "\u{2014}".to_string());
+        println!(
+            "{:<16} {:<16} {:<28} {}",
+            row.provider, row.kind, row.status, latency
+        );
     }
     println!("{}", "\u{2500}".repeat(72));
+    if json {
+        println!();
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    }
     Ok(())
 }
 
@@ -449,8 +587,59 @@ pub(crate) fn cmd_model_list(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn format_effective_model_selection_summary(
+    requested_model: &str,
+    cli_model: Option<&str>,
+    role: AgentRole,
+    selection: &crate::model_selection::EffectiveModelSelection,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Resolved model selection for '{requested_model}':");
+    let _ = writeln!(out, "  Task model: {requested_model}");
+    let _ = writeln!(out, "  CLI override: {}", cli_model.unwrap_or("—"));
+    let _ = writeln!(out, "  Role: {role}");
+    let _ = writeln!(
+        out,
+        "  Requested model: {}",
+        selection.requested_model.as_deref().unwrap_or("—")
+    );
+    let _ = writeln!(out, "  Source: {}", selection.source);
+    let _ = writeln!(out, "  Effective model: {}", selection.effective_model_key);
+    let _ = writeln!(
+        out,
+        "  Provider: {} ({})",
+        selection.provider_key, selection.provider_kind
+    );
+    let _ = writeln!(out, "  Backend slug: {}", selection.backend_slug);
+    let _ = writeln!(out, "  Reason: {}", selection.reason);
+    out
+}
+
+fn model_selection_recommendation(error: &crate::model_selection::Error) -> String {
+    match error {
+        crate::model_selection::Error::EmptyModel { source } => {
+            format!("pass a non-empty model value for {source}")
+        }
+        crate::model_selection::Error::MissingProvider {
+            model,
+            provider_key,
+            ..
+        } => {
+            format!("configure provider '{provider_key}' for model '{model}', or choose a model backed by an installed provider")
+        }
+        crate::model_selection::Error::UnknownModel {
+            model,
+            provider_kind,
+            ..
+        } => {
+            format!("add a model profile for '{model}' backed by provider kind '{provider_kind}', or use a configured model")
+        }
+    }
+}
+
 pub(crate) fn cmd_model_route(
     workdir: &Path,
+    cli_model: Option<&str>,
     role_arg: Option<&str>,
     requested_model: &str,
     explain: bool,
@@ -463,6 +652,15 @@ pub(crate) fn cmd_model_route(
         return Ok(());
     }
 
+    let role = parse_agent_role(role_arg)?;
+    let selection = crate::model_selection::resolve_effective_model(
+        cli_model.map(str::to_string),
+        Some(requested_model.to_string()),
+        Some(role.to_string()),
+        None,
+        &config,
+    );
+
     let mut model_slugs = models
         .values()
         .map(|profile| profile.slug.clone())
@@ -470,7 +668,6 @@ pub(crate) fn cmd_model_route(
     model_slugs.sort();
     model_slugs.dedup();
 
-    let role = parse_agent_role(role_arg)?;
     let complexity = parse_route_complexity(complexity_arg)?;
     let aliases = model_aliases_by_slug(&models);
     let requested_slug = resolve_requested_model_slug(requested_model, &models)
@@ -504,37 +701,82 @@ pub(crate) fn cmd_model_route(
         &provider_health,
         unix_ms_now(),
     );
-    let explanation = router.explain_route(
+    let route_recommendation = router.explain_route(
         &context,
         (!available_candidates.is_empty()).then_some(available_candidates.as_slice()),
     );
-
-    if !explain {
-        let selected_name = display_model_name(&aliases, &explanation.selected_slug);
-        let provider = model_providers
-            .get(&explanation.selected_slug)
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        println!("{selected_name} via {provider}");
-        return Ok(());
-    }
-
     let confidence = router.confidence_snapshot();
     let cost_table = CostTable::from_config(&models).with_defaults();
-    print!(
-        "{}",
-        format_model_route_explanation(
-            requested_model,
-            &requested_slug,
-            &aliases,
-            &explanation,
-            &confidence,
-            &model_providers,
-            &provider_health,
-            &latency_registry,
-            &cost_table,
-        )
-    );
+
+    match selection {
+        Ok(selection) => {
+            if !explain {
+                println!(
+                    "Resolved '{requested_model}': {} via {} ({}, {})",
+                    selection.effective_model_key,
+                    selection.provider_key,
+                    selection.provider_kind,
+                    selection.source
+                );
+                println!("Reason: {}", selection.reason);
+                return Ok(());
+            }
+
+            print!(
+                "{}",
+                format_effective_model_selection_summary(
+                    requested_model,
+                    cli_model,
+                    role,
+                    &selection,
+                )
+            );
+            println!();
+            print!(
+                "{}",
+                format_model_route_explanation(
+                    requested_model,
+                    &requested_slug,
+                    &aliases,
+                    &route_recommendation,
+                    &confidence,
+                    &model_providers,
+                    &provider_health,
+                    &latency_registry,
+                    &cost_table,
+                )
+            );
+        }
+        Err(err) => {
+            println!("Routing failed for '{requested_model}': {err}");
+            println!("Recommendation: {}", model_selection_recommendation(&err));
+            if !explain {
+                let selected_name = display_model_name(&aliases, &route_recommendation.selected_slug);
+                let provider = model_providers
+                    .get(&route_recommendation.selected_slug)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!("Fallback route: {selected_name} via {provider}");
+                return Ok(());
+            }
+
+            println!();
+            print!(
+                "{}",
+                format_model_route_explanation(
+                    requested_model,
+                    &requested_slug,
+                    &aliases,
+                    &route_recommendation,
+                    &confidence,
+                    &model_providers,
+                    &provider_health,
+                    &latency_registry,
+                    &cost_table,
+                )
+            );
+        }
+    }
     Ok(())
 }
 
@@ -817,6 +1059,67 @@ pub(crate) fn select_provider_test_model(
         .collect::<Vec<_>>();
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
     candidates.into_iter().next()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProviderTestReport {
+    pub(crate) provider: String,
+    pub(crate) kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    pub(crate) status: String,
+    pub(crate) duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) content: Option<String>,
+    pub(crate) content_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cost_usd: Option<f64>,
+}
+
+fn model_profile_for_effective_selection(
+    config: &RokoConfig,
+    selection: &crate::model_selection::EffectiveModelSelection,
+) -> ModelProfile {
+    roko_core::agent::resolve_model(config, &selection.effective_model_key)
+        .profile
+        .unwrap_or_else(|| ModelProfile {
+            provider: selection.provider_key.clone(),
+            slug: selection.backend_slug.clone(),
+            ..Default::default()
+        })
+}
+
+fn build_provider_test_report(
+    provider_name: &str,
+    kind: ProviderKind,
+    model: Option<&ModelProfile>,
+    content: Option<String>,
+    usage: Option<&roko_core::Usage>,
+    cost_usd: Option<f64>,
+    duration: Duration,
+) -> ProviderTestReport {
+    let content_state = if content.as_deref().is_some_and(|text| !text.is_empty()) {
+        "content_present"
+    } else {
+        "content_empty"
+    };
+
+    ProviderTestReport {
+        provider: provider_name.to_string(),
+        kind: kind.to_string(),
+        model: model.map(|profile| profile.slug.clone()),
+        status: "ok".to_string(),
+        duration_ms: duration.as_millis().min(u64::MAX as u128) as u64,
+        content: content.filter(|text| !text.is_empty()),
+        content_state: content_state.to_string(),
+        input_tokens: usage.map(|usage| usage.input_tokens as u64),
+        output_tokens: usage.map(|usage| usage.output_tokens as u64),
+        cost_usd,
+    }
 }
 
 pub(crate) async fn inspect_provider(
@@ -1116,7 +1419,8 @@ pub(crate) async fn run_openai_compat_provider_test(
     provider_name: &str,
     provider: &ProviderConfig,
     model: &ModelProfile,
-) -> Result<()> {
+    _json: bool,
+) -> Result<ProviderTestReport> {
     let endpoint = openai_compat_test_endpoint(provider);
     let api_key_env = provider
         .api_key_env
@@ -1136,15 +1440,19 @@ pub(crate) async fn run_openai_compat_provider_test(
     });
     let body_text = serde_json::to_string(&body).context("serialize provider test body")?;
 
+    if let (Some(env_name), None) = (api_key_env, api_key.as_ref()) {
+        println!("Testing provider '{provider_name}' ({})...", provider.kind);
+        println!("  Endpoint: {endpoint}");
+        println!("  API Key:  missing ({env_name})");
+        bail!("missing API key: env var {env_name} not set");
+    }
+
     println!("Testing provider '{provider_name}' ({})...", provider.kind);
     println!("  Endpoint: {endpoint}");
     match (api_key_env, api_key.as_ref()) {
         (Some(env_name), Some(_)) => println!("  API Key:  set ({env_name})"),
-        (Some(env_name), None) => {
-            println!("  API Key:  missing ({env_name})");
-            bail!("missing API key: env var {env_name} not set");
-        }
         (None, _) => println!("  API Key:  not required"),
+        _ => {}
     }
     println!("  Model:    {}", model.slug);
     println!();
@@ -1208,10 +1516,14 @@ pub(crate) async fn run_openai_compat_provider_test(
         status_line,
         format_provider_test_duration(elapsed)
     );
-    println!(
-        "  Content:  {}",
-        serde_json::to_string(&content).context("format provider test content")?
-    );
+    if content.is_empty() {
+        println!("  Content:  content_empty");
+    } else {
+        println!(
+            "  Content:  {}",
+            serde_json::to_string(&content).context("format provider test content")?
+        );
+    }
     println!(
         "  Tokens:   input={}, output={}",
         usage.input_tokens, usage.output_tokens
@@ -1222,7 +1534,16 @@ pub(crate) async fn run_openai_compat_provider_test(
     }
     println!();
     println!("  ✓ Provider '{provider_name}' is working");
-    Ok(())
+
+    Ok(build_provider_test_report(
+        provider_name,
+        provider.kind,
+        Some(model),
+        Some(content),
+        Some(&usage),
+        cost,
+        elapsed,
+    ))
 }
 
 pub(crate) fn openai_compat_test_endpoint(provider: &ProviderConfig) -> String {
@@ -1275,7 +1596,8 @@ pub(crate) async fn run_anthropic_provider_test(
     provider_name: &str,
     provider: &ProviderConfig,
     model: &ModelProfile,
-) -> Result<()> {
+    _json: bool,
+) -> Result<ProviderTestReport> {
     let base = provider
         .base_url
         .as_deref()
@@ -1353,21 +1675,44 @@ pub(crate) async fn run_anthropic_provider_test(
         status,
         format_provider_test_duration(elapsed)
     );
-    println!("  Content:  {content}");
+    if content.is_empty() {
+        println!("  Content:  content_empty");
+    } else {
+        println!("  Content:  {content}");
+    }
     println!("  Tokens:   input={input_tokens}, output={output_tokens}");
     println!();
     println!("  \u{2713} Provider '{provider_name}' is working");
-    Ok(())
+    let usage = roko_core::Usage {
+        input_tokens: input_tokens as u32,
+        output_tokens: output_tokens as u32,
+        ..Default::default()
+    };
+    let cost = estimate_provider_test_cost(model, &usage);
+    Ok(build_provider_test_report(
+        provider_name,
+        provider.kind,
+        Some(model),
+        Some(content),
+        Some(&usage),
+        cost,
+        elapsed,
+    ))
 }
 
 pub(crate) async fn run_claude_cli_provider_test(
     provider_name: &str,
     provider: &ProviderConfig,
-) -> Result<()> {
+    model: Option<&ModelProfile>,
+    _json: bool,
+) -> Result<ProviderTestReport> {
     let cmd = provider.command.as_deref().unwrap_or("claude");
 
     println!("Testing provider '{provider_name}' ({})...", provider.kind);
     println!("  Command: {cmd}");
+    if let Some(model) = model {
+        println!("  Model:    {}", model.slug);
+    }
     println!();
 
     let started = Instant::now();
@@ -1397,14 +1742,24 @@ pub(crate) async fn run_claude_cli_provider_test(
     println!("  Version: {version}");
     println!();
     println!("  \u{2713} Provider '{provider_name}' is working");
-    Ok(())
+
+    Ok(build_provider_test_report(
+        provider_name,
+        provider.kind,
+        model,
+        None,
+        None,
+        None,
+        elapsed,
+    ))
 }
 
 pub(crate) async fn run_gemini_provider_test(
     provider_name: &str,
     provider: &ProviderConfig,
     model: &ModelProfile,
-) -> Result<()> {
+    _json: bool,
+) -> Result<ProviderTestReport> {
     let base = provider
         .base_url
         .as_deref()
@@ -1487,17 +1842,37 @@ pub(crate) async fn run_gemini_provider_test(
         status,
         format_provider_test_duration(elapsed)
     );
-    println!("  Content:  {content}");
+    if content.is_empty() {
+        println!("  Content:  content_empty");
+    } else {
+        println!("  Content:  {content}");
+    }
     println!("  Tokens:   input={prompt_tokens}, output={output_tokens}");
     println!();
     println!("  \u{2713} Provider '{provider_name}' is working");
-    Ok(())
+    let usage = roko_core::Usage {
+        input_tokens: prompt_tokens as u32,
+        output_tokens: output_tokens as u32,
+        ..Default::default()
+    };
+    let cost = estimate_provider_test_cost(model, &usage);
+    Ok(build_provider_test_report(
+        provider_name,
+        provider.kind,
+        Some(model),
+        Some(content),
+        Some(&usage),
+        cost,
+        elapsed,
+    ))
 }
 
 pub(crate) async fn run_cursor_provider_test(
     provider_name: &str,
     provider: &ProviderConfig,
-) -> Result<()> {
+    model: Option<&ModelProfile>,
+    _json: bool,
+) -> Result<ProviderTestReport> {
     let base_url = provider
         .base_url
         .as_deref()
@@ -1505,6 +1880,9 @@ pub(crate) async fn run_cursor_provider_test(
 
     println!("Testing provider '{provider_name}' ({})...", provider.kind);
     println!("  Base URL: {base_url}");
+    if let Some(model) = model {
+        println!("  Model:    {}", model.slug);
+    }
     println!();
 
     let url = reqwest::Url::parse(base_url)
@@ -1530,7 +1908,15 @@ pub(crate) async fn run_cursor_provider_test(
             );
             println!();
             println!("  \u{2713} Provider '{provider_name}' is reachable");
-            Ok(())
+            Ok(build_provider_test_report(
+                provider_name,
+                provider.kind,
+                model,
+                None,
+                None,
+                None,
+                elapsed,
+            ))
         }
         Ok(Err(e)) => {
             let elapsed = started.elapsed();
@@ -2182,6 +2568,15 @@ pub(crate) struct ModelListRow {
 }
 
 pub(crate) const PROVIDER_FAILURE_THRESHOLD: u32 = 3;
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProviderTestAllRow {
+    pub(crate) provider: String,
+    pub(crate) kind: String,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) duration_ms: Option<u64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderHealthRow {
