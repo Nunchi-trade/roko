@@ -23,6 +23,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+use crate::knowledge::{append_context, query_dispatch_knowledge, DispatchKnowledge};
 use crate::runner::run_with_workflow_engine;
 use crate::{
     session::{AcpSession, CancelToken},
@@ -198,6 +199,7 @@ pub struct StreamResult {
     pub assistant_text: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn append_acp_episode(
     roko_config: &RokoConfig,
     workdir: &Path,
@@ -522,6 +524,13 @@ where
     };
     let should_resolve_context = !is_slash_command && pipeline_template.is_none();
 
+    let knowledge = if is_slash_command {
+        DispatchKnowledge::default()
+    } else {
+        query_dispatch_knowledge(workdir, &prompt_text).await
+    };
+    let knowledge_context = knowledge.context_text();
+
     // Resolve context only for the single-agent path.
     // Resource blocks always resolve; @-mentions are only resolved when
     // prompt-time context is enabled.
@@ -553,11 +562,9 @@ where
     };
     let messages = if should_resolve_context {
         // Build combined system prompt with resolved context.
-        let full_system = if file_context.is_empty() {
-            system_prompt.clone()
-        } else {
-            format!("{system_prompt}\n\n{file_context}")
-        };
+        let mut full_system = system_prompt.clone();
+        full_system = append_context(&full_system, &file_context);
+        full_system = append_context(&full_system, &knowledge_context);
         session.build_messages_array(&full_system, &prompt_text)
     } else {
         Vec::new()
@@ -569,6 +576,9 @@ where
     }
 
     let (event_sender, event_receiver) = mpsc::channel(64);
+    if !is_slash_command {
+        emit_knowledge_card(&knowledge, &event_sender).await;
+    }
     let cancel_token = session.cancel_token.clone();
     let session_id = session.session_id.clone();
     let workdir = workdir.to_path_buf();
@@ -600,16 +610,17 @@ where
             .await;
         }
 
-        if let Some(template) = pipeline_template {
-            if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
-                let legacy_run = shared_run.clone();
-                let result = crate::runner::run_workflow_pipeline(
-                    &session_id,
-                    &prompt_text,
-                    &workdir,
-                    crate::runner::PipelineConfig {
-                        template,
-                        max_iterations,
+            if let Some(template) = pipeline_template {
+                if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
+                    let legacy_run = shared_run.clone();
+                    let result = crate::runner::run_workflow_pipeline(
+                        &session_id,
+                        &prompt_text,
+                        knowledge_context.clone(),
+                        &workdir,
+                        crate::runner::PipelineConfig {
+                            template,
+                            max_iterations,
                         clippy_enabled,
                         tests_enabled,
                         review_strictness,
@@ -628,22 +639,24 @@ where
                     .as_ref()
                     .map(|run| run.pipeline.phase.clone());
 
-                return match final_phase {
-                    Some(crate::pipeline::PipelinePhase::Complete) => Ok(()),
-                    Some(crate::pipeline::PipelinePhase::Halted { reason }) => {
-                        Err(anyhow::anyhow!("workflow pipeline halted: {reason}"))
-                    }
-                    Some(crate::pipeline::PipelinePhase::Cancelled) => {
-                        Err(anyhow::anyhow!("workflow pipeline cancelled"))
-                    }
-                    Some(phase) => Err(anyhow::anyhow!(
-                        "workflow pipeline ended in unexpected phase: {phase:?}"
-                    )),
-                    None => Err(anyhow::anyhow!(
-                        "workflow pipeline completed without shared run state"
-                    )),
-                };
-            }
+                    return match final_phase {
+                        Some(crate::pipeline::PipelinePhase::Complete) => Ok(()),
+                        Some(crate::pipeline::PipelinePhase::Halted { reason }) => {
+                            Err(anyhow::anyhow!("workflow pipeline halted: {reason}").into())
+                        }
+                        Some(crate::pipeline::PipelinePhase::Cancelled) => {
+                            Err(anyhow::anyhow!("workflow pipeline cancelled").into())
+                        }
+                        Some(phase) => Err(anyhow::anyhow!(
+                            "workflow pipeline ended in unexpected phase: {phase:?}"
+                        )
+                        .into()),
+                        None => Err(anyhow::anyhow!(
+                            "workflow pipeline completed without shared run state"
+                        )
+                        .into()),
+                    };
+                }
 
             let report = run_with_workflow_engine(
                 &session_id,
@@ -652,13 +665,14 @@ where
                 workflow_template_name(&template),
                 event_sender,
             )
-            .await?;
+                        .await?;
 
             if !report.success {
                 return Err(anyhow::anyhow!(
                     "workflow engine reported unsuccessful run: {}",
                     report.output
-                ));
+                )
+                .into());
             }
 
             return Ok(());
@@ -1035,6 +1049,31 @@ async fn run_openai_compat_cognitive_task(
     }
 }
 
+async fn emit_knowledge_card(
+    knowledge: &DispatchKnowledge,
+    event_sender: &mpsc::Sender<CognitiveEvent>,
+) {
+    let Some(card) = knowledge.card() else {
+        return;
+    };
+
+    let tool_call_id = "knowledge-query".to_string();
+    let _ = event_sender
+        .send(CognitiveEvent::ToolCallStart {
+            tool_call_id: tool_call_id.clone(),
+            title: card.title,
+            kind: ToolCallKind::Other,
+        })
+        .await;
+    let _ = event_sender
+        .send(CognitiveEvent::ToolCallComplete {
+            tool_call_id,
+            status: ToolCallStatus::Completed,
+            content: vec![ContentBlock::Text { text: card.body }],
+        })
+        .await;
+}
+
 // ── Slash command dispatch ───────────────────────────────────────────
 
 /// Runs a roko CLI slash command and streams the output as ACP updates.
@@ -1326,10 +1365,14 @@ Use the Workflow dropdown in the status bar to select, or:
         }
         "express" => {
             require_args!("express", "<prompt>");
+            let knowledge = query_dispatch_knowledge(workdir, args).await;
+            emit_knowledge_card(&knowledge, &event_sender).await;
+            let knowledge_context = knowledge.context_text();
             if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
                 return Ok(crate::runner::run_workflow_pipeline(
                     session_id,
                     args,
+                    knowledge_context,
                     workdir,
                     crate::runner::PipelineConfig {
                         template: crate::pipeline::WorkflowTemplate::Express,
@@ -1350,10 +1393,14 @@ Use the Workflow dropdown in the status bar to select, or:
         }
         "full" => {
             require_args!("full", "<prompt>");
+            let knowledge = query_dispatch_knowledge(workdir, args).await;
+            emit_knowledge_card(&knowledge, &event_sender).await;
+            let knowledge_context = knowledge.context_text();
             if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
                 return Ok(crate::runner::run_workflow_pipeline(
                     session_id,
                     args,
+                    knowledge_context,
                     workdir,
                     crate::runner::PipelineConfig {
                         template: crate::pipeline::WorkflowTemplate::Full,
