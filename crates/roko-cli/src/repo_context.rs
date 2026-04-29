@@ -375,8 +375,12 @@ pub async fn build_repo_context(
 
     let feature_keyword_refs: Vec<&str> =
         feature_keywords_owned.iter().map(String::as_str).collect();
-    let context_root_verified =
-        verify_context_root(&workdir, &feature_keyword_refs, &workspace_members, &key_files);
+    let context_root_verified = verify_context_root(
+        &workdir,
+        &feature_keyword_refs,
+        &workspace_members,
+        &key_files,
+    );
 
     extend_do_not_create(&mut do_not_create, &workdir);
 
@@ -906,6 +910,7 @@ mod repo_context_tests {
 
     use std::fs;
     use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
 
     fn write_file(path: impl AsRef<Path>, contents: &str) {
         let path = path.as_ref();
@@ -913,6 +918,21 @@ mod repo_context_tests {
             fs::create_dir_all(parent).expect("create parent directories");
         }
         fs::write(path, contents).expect("write file");
+    }
+
+    fn create_rust_workspace(dir: &Path, crate_names: &[&str]) {
+        let workspace_toml = "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n";
+        fs::write(dir.join("Cargo.toml"), workspace_toml).expect("write workspace Cargo.toml");
+        fs::create_dir_all(dir.join("crates")).expect("create crates dir");
+
+        for name in crate_names {
+            let crate_dir = dir.join("crates").join(name);
+            fs::create_dir_all(crate_dir.join("src")).expect("create crate src dir");
+            let pkg_toml =
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+            fs::write(crate_dir.join("Cargo.toml"), pkg_toml).expect("write crate Cargo.toml");
+            fs::write(crate_dir.join("src/lib.rs"), "// placeholder\n").expect("write lib.rs");
+        }
     }
 
     fn repo_root() -> PathBuf {
@@ -1075,7 +1095,10 @@ use ./module-c
     #[test]
     fn verify_context_root_returns_true_for_matching_member_with_source() {
         let temp = tempfile::tempdir().expect("temp dir");
-        write_file(temp.path().join("crates/roko-compose/src/lib.rs"), "pub fn build() {}\n");
+        write_file(
+            temp.path().join("crates/roko-compose/src/lib.rs"),
+            "pub fn build() {}\n",
+        );
 
         let keywords = ["compose"];
         let workspace_members = vec![String::from("roko-compose")];
@@ -1092,7 +1115,10 @@ use ./module-c
     #[test]
     fn verify_context_root_returns_false_for_empty_keywords() {
         let temp = tempfile::tempdir().expect("temp dir");
-        write_file(temp.path().join("crates/roko-compose/src/lib.rs"), "pub fn build() {}\n");
+        write_file(
+            temp.path().join("crates/roko-compose/src/lib.rs"),
+            "pub fn build() {}\n",
+        );
 
         let workspace_members = vec![String::from("roko-compose")];
         let key_files = vec![PathBuf::from("crates/roko-compose/src/lib.rs")];
@@ -1108,7 +1134,10 @@ use ./module-c
     #[test]
     fn verify_context_root_returns_false_for_empty_workspace_members() {
         let temp = tempfile::tempdir().expect("temp dir");
-        write_file(temp.path().join("crates/roko-compose/src/lib.rs"), "pub fn build() {}\n");
+        write_file(
+            temp.path().join("crates/roko-compose/src/lib.rs"),
+            "pub fn build() {}\n",
+        );
 
         let keywords = ["compose"];
         let key_files = vec![PathBuf::from("crates/roko-compose/src/lib.rs")];
@@ -1124,7 +1153,10 @@ use ./module-c
     #[test]
     fn verify_context_root_returns_false_when_keywords_do_not_match_member() {
         let temp = tempfile::tempdir().expect("temp dir");
-        write_file(temp.path().join("crates/roko-compose/src/lib.rs"), "pub fn build() {}\n");
+        write_file(
+            temp.path().join("crates/roko-compose/src/lib.rs"),
+            "pub fn build() {}\n",
+        );
 
         let keywords = ["agent"];
         let workspace_members = vec![String::from("roko-compose")];
@@ -1165,7 +1197,10 @@ use ./module-c
             related_prds: Vec::new(),
             related_plans: Vec::new(),
             do_not_create: Vec::new(),
-            keywords: vec![String::from("roko-compose"), String::from("prompt assembly")],
+            keywords: vec![
+                String::from("roko-compose"),
+                String::from("prompt assembly"),
+            ],
             context_root_verified: false,
         };
 
@@ -1213,9 +1248,11 @@ use ./module-c
 
         let results = find_related_prds(tmp.path(), &["usage"], 5);
         assert!(!results.is_empty());
-        assert!(results
-            .iter()
-            .any(|path| path.to_string_lossy().contains("neutral.md")));
+        assert!(
+            results
+                .iter()
+                .any(|path| path.to_string_lossy().contains("neutral.md"))
+        );
         assert!(results.iter().all(|path| !path.is_absolute()));
     }
 
@@ -1265,9 +1302,11 @@ use ./module-c
 
         let results = find_related_plans(tmp.path(), &["router"], 5);
         assert!(!results.is_empty());
-        assert!(results
-            .iter()
-            .any(|path| path.to_string_lossy().contains("unrelated-feature")));
+        assert!(
+            results
+                .iter()
+                .any(|path| path.to_string_lossy().contains("unrelated-feature"))
+        );
         assert!(results.iter().all(|path| !path.is_absolute()));
     }
 
@@ -1320,14 +1359,11 @@ version = "0.1.0"
 
         assert_eq!(pack.project_kind, ProjectKind::Rust);
         assert_eq!(pack.keywords, vec![String::from("compose")]);
-        assert_eq!(
-            pack.workspace_members,
-            vec![String::from("roko-compose")]
-        );
-        assert!(pack
-            .key_files
-            .iter()
-            .any(|path| path.to_string_lossy().ends_with("crates/roko-compose/src/lib.rs")));
+        assert_eq!(pack.workspace_members, vec![String::from("roko-compose")]);
+        assert!(pack.key_files.iter().any(|path| {
+            path.to_string_lossy()
+                .ends_with("crates/roko-compose/src/lib.rs")
+        }));
         assert!(pack.context_root_verified);
         assert_eq!(
             pack.do_not_create,
@@ -1337,6 +1373,192 @@ version = "0.1.0"
                 String::from("sidecar"),
             ]
         );
+    }
+
+    #[test]
+    fn test_5_crate_workspace_members_and_do_not_create() {
+        let tmp = TempDir::new().expect("temp dir");
+        let crates = [
+            "roko-core",
+            "roko-agent",
+            "roko-compose",
+            "roko-gate",
+            "roko-learn",
+        ];
+        create_rust_workspace(tmp.path(), &crates);
+
+        let kind = ProjectKind::detect(tmp.path());
+        assert_eq!(kind, ProjectKind::Rust, "Should detect Rust project kind");
+
+        let (members, do_not_create) = collect_workspace_members(tmp.path(), &kind);
+        let mut expected: Vec<String> = crates.iter().map(|name| (*name).to_string()).collect();
+        expected.sort_unstable();
+
+        assert_eq!(members, expected);
+        assert_eq!(do_not_create, expected);
+    }
+
+    #[test]
+    fn test_prompt_keywords_find_compose() {
+        let tmp = TempDir::new().expect("temp dir");
+        let crates = [
+            "roko-core",
+            "roko-agent",
+            "roko-compose",
+            "roko-gate",
+            "roko-learn",
+        ];
+        create_rust_workspace(tmp.path(), &crates);
+
+        let compose_lib = tmp.path().join("crates/roko-compose/src/lib.rs");
+        fs::write(
+            &compose_lib,
+            "pub struct PromptAssembly;\npub fn build_prompt() {}\n",
+        )
+        .expect("write roko-compose lib.rs");
+
+        let key_files = find_key_files(tmp.path(), &["prompt", "compose"], 20);
+        assert!(
+            key_files
+                .iter()
+                .any(|path| path.to_string_lossy().contains("roko-compose")),
+            "Expected roko-compose in key_files, got: {:?}",
+            key_files
+        );
+
+        let symbols = find_symbol_matches(tmp.path(), &["prompt"], 30);
+        assert!(
+            symbols.iter().any(|hit| {
+                hit.file.to_string_lossy().contains("roko-compose")
+                    && (hit.text.contains("PromptAssembly") || hit.text.contains("build_prompt"))
+            }),
+            "Expected PromptAssembly or build_prompt in symbol matches, got: {:?}",
+            symbols
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_dir_returns_unknown_unverified() {
+        let tmp = TempDir::new().expect("temp dir");
+
+        let pack = build_repo_context(tmp.path(), &["anything"])
+            .await
+            .expect("build repo context");
+
+        assert_eq!(pack.project_kind, ProjectKind::Unknown);
+        assert!(pack.workspace_members.is_empty());
+        assert!(pack.key_files.is_empty());
+        assert!(!pack.context_root_verified);
+    }
+
+    #[test]
+    fn test_to_prompt_section_under_32000_chars() {
+        let tmp = TempDir::new().expect("temp dir");
+        let crate_names: Vec<String> = (0..60).map(|i| format!("crate-{i:03}")).collect();
+        let crate_refs: Vec<&str> = crate_names.iter().map(String::as_str).collect();
+        create_rust_workspace(tmp.path(), &crate_refs);
+
+        let long_path_tail = vec!["segment"; 250].join("/");
+
+        let pack = RepoContextPack {
+            root: tmp.path().to_path_buf(),
+            project_kind: ProjectKind::Rust,
+            workspace_members: crate_names.clone(),
+            key_files: (0..20)
+                .map(|i| {
+                    PathBuf::from(format!("crates/crate-{i:03}/{long_path_tail}/lib.rs"))
+                })
+                .collect(),
+            matching_symbols: (0..30)
+                .map(|i| SymbolHit {
+                    file: PathBuf::from(format!(
+                        "crates/crate-{i:03}/{long_path_tail}/symbol.rs"
+                    )),
+                    line: (i as u32) + 1,
+                    text: format!(
+                        "pub struct LongStructName{i} {{ field_one: String, field_two: u64, field_three: usize }}"
+                    ),
+                })
+                .collect(),
+            related_prds: Vec::new(),
+            related_plans: Vec::new(),
+            do_not_create: crate_names,
+            keywords: vec![String::from("crate"), String::from("workspace")],
+            context_root_verified: true,
+        };
+
+        let section = pack.to_prompt_section();
+        assert!(
+            section.chars().count() <= 32_000,
+            "to_prompt_section() output is {} chars, exceeds 32000 limit",
+            section.chars().count()
+        );
+        assert!(section.contains("Repository Context"));
+        assert!(section.ends_with("[truncated]"));
+    }
+
+    #[tokio::test]
+    async fn test_build_repo_context_integration() {
+        let tmp = TempDir::new().expect("temp dir");
+        let crates = ["roko-core", "roko-compose", "roko-agent"];
+        create_rust_workspace(tmp.path(), &crates);
+
+        let compose_src = tmp.path().join("crates/roko-compose/src/lib.rs");
+        fs::write(&compose_src, "pub fn compose_prompt() {}\n").expect("write compose source");
+
+        let pack = build_repo_context(tmp.path(), &["compose", "prompt"])
+            .await
+            .expect("build repo context");
+
+        let mut expected: Vec<String> = crates.iter().map(|name| (*name).to_string()).collect();
+        expected.sort_unstable();
+
+        assert_eq!(pack.project_kind, ProjectKind::Rust);
+        assert_eq!(
+            pack.keywords,
+            vec![String::from("compose"), String::from("prompt")]
+        );
+        assert_eq!(pack.workspace_members, expected);
+        assert!(pack.key_files.iter().any(|path| {
+            path.to_string_lossy()
+                .ends_with("crates/roko-compose/src/lib.rs")
+        }));
+        assert!(pack.context_root_verified);
+        assert_eq!(pack.do_not_create, pack.workspace_members);
+    }
+
+    #[test]
+    fn test_verify_context_root_no_keyword_match_returns_false() {
+        let tmp = TempDir::new().expect("temp dir");
+        create_rust_workspace(tmp.path(), &["roko-core", "roko-agent"]);
+        let members = vec![String::from("roko-core"), String::from("roko-agent")];
+        let key_files = vec![PathBuf::from("crates/roko-core/src/lib.rs")];
+
+        assert!(!verify_context_root(
+            tmp.path(),
+            &["blockchain", "solidity"],
+            &members,
+            &key_files
+        ));
+    }
+
+    #[test]
+    fn test_verify_context_root_empty_keywords_returns_false() {
+        let tmp = TempDir::new().expect("temp dir");
+        create_rust_workspace(tmp.path(), &["roko-core"]);
+        let members = vec![String::from("roko-core")];
+        let key_files = vec![PathBuf::from("crates/roko-core/src/lib.rs")];
+
+        assert!(!verify_context_root(tmp.path(), &[], &members, &key_files));
+    }
+
+    #[test]
+    fn test_verify_context_root_empty_members_returns_false() {
+        let tmp = TempDir::new().expect("temp dir");
+        create_rust_workspace(tmp.path(), &["roko-core"]);
+        let key_files = vec![PathBuf::from("crates/roko-core/src/lib.rs")];
+
+        assert!(!verify_context_root(tmp.path(), &["core"], &[], &key_files));
     }
 }
 
@@ -1519,7 +1741,9 @@ where
                 continue;
             }
             walk_source_dir(root, &abs, deadline, cb);
-        } else if file_type.is_file() && let Ok(rel) = abs.strip_prefix(root) {
+        } else if file_type.is_file()
+            && let Ok(rel) = abs.strip_prefix(root)
+        {
             cb(rel);
         }
     }
@@ -1747,7 +1971,11 @@ fn has_allowed_extension(path: &Path, extensions: &[&str]) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(extension))
 }
 
-fn file_contains_any_keyword(path: &Path, keywords: &[String], deadline: &std::time::Instant) -> bool {
+fn file_contains_any_keyword(
+    path: &Path,
+    keywords: &[String],
+    deadline: &std::time::Instant,
+) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
