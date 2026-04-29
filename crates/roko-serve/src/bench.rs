@@ -316,16 +316,33 @@ fn run_path(workdir: &Path, run_id: &str) -> PathBuf {
     runs_dir(workdir).join(format!("bench_{run_id}.json"))
 }
 
+async fn write_text_atomically(path: &Path, content: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+
+    let tmp_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}.tmp"))
+        .unwrap_or_else(|| "tmp".to_string());
+    let tmp = path.with_file_name(tmp_name);
+
+    tokio::fs::write(&tmp, content).await?;
+    if let Err(err) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(err.into());
+    }
+    Ok(())
+}
+
 /// Save a bench run to disk.
 pub async fn save_bench_run(workdir: &Path, run: &BenchRun) -> anyhow::Result<()> {
-    let dir = runs_dir(workdir);
-    tokio::fs::create_dir_all(&dir).await?;
     let path = run_path(workdir, &run.id);
     let json = serde_json::to_string_pretty(run)?;
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, json).await?;
-    tokio::fs::rename(&tmp, &path).await?;
-    Ok(())
+    write_text_atomically(&path, &json).await
 }
 
 /// Load a bench run from disk.
@@ -365,7 +382,7 @@ pub async fn append_index_entry(workdir: &Path, entry: &BenchRunIndexEntry) -> a
     Ok(())
 }
 
-/// Update an existing index entry (rewrite the full file).
+/// Update an existing index entry (rewrite the full file atomically).
 pub async fn update_index_entry(workdir: &Path, entry: &BenchRunIndexEntry) -> anyhow::Result<()> {
     let path = index_path(workdir);
     let mut entries = load_index_entries(workdir).await;
@@ -380,8 +397,7 @@ pub async fn update_index_entry(workdir: &Path, entry: &BenchRunIndexEntry) -> a
         content.push_str(&line);
         content.push('\n');
     }
-    tokio::fs::write(&path, content).await?;
-    Ok(())
+    write_text_atomically(&path, &content).await
 }
 
 /// Load all index entries from the JSONL file.
@@ -496,6 +512,24 @@ pub fn list_models_from_config(config: &roko_core::config::schema::RokoConfig) -
         models.push("claude-sonnet-4-6".to_string());
     }
     models
+}
+
+/// Estimate cost in USD from token counts and model slug.
+///
+/// Uses approximate per-1K-token pricing. Falls back to Sonnet pricing
+/// when the model is unknown.
+pub fn estimate_cost_usd(model: Option<&str>, input_tokens: u64, output_tokens: u64) -> f64 {
+    let (input_rate, output_rate) = match model.unwrap_or("") {
+        m if m.contains("haiku") => (0.00025, 0.00125),
+        m if m.contains("sonnet") => (0.003, 0.015),
+        m if m.contains("opus") => (0.015, 0.075),
+        m if m.contains("gpt-4o-mini") => (0.00015, 0.0006),
+        m if m.contains("gpt-4o") => (0.005, 0.015),
+        m if m.contains("o3-mini") => (0.0011, 0.0044),
+        m if m.contains("gemini") => (0.00125, 0.01),
+        _ => (0.003, 0.015),
+    };
+    (input_tokens as f64 * input_rate / 1000.0) + (output_tokens as f64 * output_rate / 1000.0)
 }
 
 use tokio::io::AsyncWriteExt;

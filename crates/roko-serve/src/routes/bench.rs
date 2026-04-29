@@ -92,7 +92,7 @@ async fn start_bench_run(
         .ok_or_else(|| ApiError::not_found("suite not found"))?;
 
     let run_id = uuid::Uuid::new_v4().to_string();
-    let now = now_secs();
+    let started_at = now_secs();
 
     let run = BenchRun {
         id: run_id.clone(),
@@ -102,7 +102,7 @@ async fn start_bench_run(
         overrides: body.overrides.clone(),
         label: body.label.clone(),
         status: BenchRunStatus::Running,
-        started_at: now,
+        started_at,
         finished_at: None,
         results: Vec::new(),
         summary: None,
@@ -121,7 +121,7 @@ async fn start_bench_run(
         suite_id: suite.id.clone(),
         suite_name: suite.name.clone(),
         status: BenchRunStatus::Running,
-        started_at: now,
+        started_at,
         finished_at: None,
         label: body.label.clone(),
         model: body.overrides.model.clone(),
@@ -144,6 +144,7 @@ async fn start_bench_run(
         suite,
         body.overrides,
         body.label,
+        started_at,
     ));
 
     state.active_bench_runs.write().await.insert(
@@ -167,6 +168,7 @@ async fn execute_bench_run(
     suite: BenchSuite,
     overrides: BenchConfigOverrides,
     label: Option<String>,
+    started_at: u64,
 ) {
     let total_tasks = suite.tasks.len();
     let mut results = Vec::new();
@@ -211,6 +213,11 @@ async fn execute_bench_run(
                     .map(|u| (u.input_tokens, u.output_tokens))
                     .unwrap_or((0, 0));
 
+                let cost_usd = bench::estimate_cost_usd(
+                    overrides.model.as_deref(),
+                    input_tokens,
+                    output_tokens,
+                );
                 let output_preview = run_result
                     .output_text
                     .as_ref()
@@ -224,7 +231,7 @@ async fn execute_bench_run(
                     model_used: overrides.model.clone(),
                     input_tokens,
                     output_tokens,
-                    cost_usd: 0.0,
+                    cost_usd,
                     output_preview,
                     error: None,
                 }
@@ -237,7 +244,7 @@ async fn execute_bench_run(
                 model_used: overrides.model.clone(),
                 input_tokens: 0,
                 output_tokens: 0,
-                cost_usd: 0.0,
+                cost_usd: bench::estimate_cost_usd(overrides.model.as_deref(), 0, 0),
                 output_preview: None,
                 error: Some(format!("{e}")),
             },
@@ -279,11 +286,11 @@ async fn execute_bench_run(
 
     // Finalize the run.
     let summary = BenchRunSummary::from_results(&results);
-    let now = now_secs();
+    let finished_at = now_secs();
 
     if let Ok(Some(mut run)) = bench::load_bench_run(&state.workdir, &run_id).await {
         run.status = BenchRunStatus::Completed;
-        run.finished_at = Some(now);
+        run.finished_at = Some(finished_at);
         run.results = results;
         run.summary = Some(summary.clone());
         run.current_task_index = total_tasks;
@@ -296,8 +303,8 @@ async fn execute_bench_run(
         suite_id: suite.id.clone(),
         suite_name: suite.name.clone(),
         status: BenchRunStatus::Completed,
-        started_at: 0, // will be preserved by update
-        finished_at: Some(now),
+        started_at,
+        finished_at: Some(finished_at),
         label,
         model: overrides.model,
         pass_rate: Some(summary.pass_rate),
