@@ -95,6 +95,27 @@ impl RunReport {
     }
 }
 
+struct StrategyPromptAugmentation {
+    system_prompt: String,
+    injected_playbook_ids: Vec<String>,
+}
+
+struct ContextEnrichmentOverlay {
+    text: String,
+    injected_playbook_ids: Vec<String>,
+}
+
+struct PlaybookSection {
+    text: String,
+    injected_playbook_ids: Vec<String>,
+}
+
+struct DispatchOutcome {
+    agent_result: AgentResult,
+    external_actions: Vec<ExternalAction>,
+    injected_playbook_ids: Vec<String>,
+}
+
 /// Write a RunReport to `.roko/shared/{token}.json` and return the token.
 #[cfg(feature = "legacy-orchestrate")]
 pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow::Result<String> {
@@ -1078,8 +1099,11 @@ pub async fn run_once(
         .map_err(|e| anyhow!("persist prompt: {e}"))?;
 
     // Run the configured agent path for this provider/backend mix.
-    let (agent_result, external_actions) =
-        dispatch_agent(workdir, config, &prompt, prompt_text, &ctx, strategy).await?;
+    let DispatchOutcome {
+        agent_result,
+        external_actions,
+        injected_playbook_ids,
+    } = dispatch_agent(workdir, config, &prompt, prompt_text, &ctx, strategy).await?;
 
     // Optionally post-process the agent output to strip ANSI escapes and
     // reasoning-model thinking traces. The raw body is preserved as an
@@ -1200,10 +1224,11 @@ pub async fn run_once(
 
     // Emit completion, episode, and efficiency events for the TUI.
     let all_passed = verdict_summary.iter().all(|(_, p)| *p);
+    let task_passed = agent_result.success && all_passed;
     event_hub.publish(DashboardEvent::TaskCompleted {
         plan_id: run_plan_id.clone(),
         task_id: prompt_text.chars().take(60).collect(),
-        outcome: if agent_result.success && all_passed {
+        outcome: if task_passed {
             "success".into()
         } else {
             "failed".into()
@@ -1211,13 +1236,13 @@ pub async fn run_once(
     });
     event_hub.publish(DashboardEvent::PlanCompleted {
         plan_id: run_plan_id.clone(),
-        success: agent_result.success && all_passed,
+        success: task_passed,
     });
     event_hub.publish(DashboardEvent::EpisodeRecorded {
         agent_id: config.agent.command.clone(),
         role: config.prompt.role.clone(),
         episode_id: episode.id.to_hex(),
-        passed: agent_result.success && all_passed,
+        passed: task_passed,
     });
     event_hub.publish(DashboardEvent::EfficiencyEvent {
         plan_id: run_plan_id.clone(),
@@ -1237,6 +1262,14 @@ pub async fn run_once(
         metric: "cost_usd".into(),
         value: f64::from(agent_result.usage.cost_usd),
     });
+
+    record_injected_playbook_outcomes(
+        workdir,
+        strategy,
+        &injected_playbook_ids,
+        task_passed,
+    )
+    .await;
 
     let total_signals = substrate
         .len()
@@ -1323,9 +1356,12 @@ async fn augment_system_prompt_for_strategy(
     prompt_text: &str,
     current_model: &str,
     strategy: Option<BenchStrategy>,
-) -> String {
+) -> StrategyPromptAugmentation {
     if skip_bench_enrichment(strategy) {
-        return base_system_prompt;
+        return StrategyPromptAugmentation {
+            system_prompt: base_system_prompt,
+            injected_playbook_ids: Vec::new(),
+        };
     }
 
     let overlay = match strategy {
@@ -1340,22 +1376,28 @@ async fn augment_system_prompt_for_strategy(
             let neuro_overlay =
                 build_neuro_augmented_overlay(workdir, role, prompt_text, current_model).await;
             if !neuro_overlay.is_empty() {
-                if !overlay.is_empty() {
-                    overlay.push_str("\n\n");
+                if !overlay.text.is_empty() {
+                    overlay.text.push_str("\n\n");
                 }
-                overlay.push_str(&neuro_overlay);
+                overlay.text.push_str(&neuro_overlay);
             }
             overlay
         }
     };
 
-    if overlay.trim().is_empty() {
-        base_system_prompt
+    if overlay.text.trim().is_empty() {
+        StrategyPromptAugmentation {
+            system_prompt: base_system_prompt,
+            injected_playbook_ids: overlay.injected_playbook_ids,
+        }
     } else {
         let mut prompt = base_system_prompt;
         prompt.push_str("\n\n");
-        prompt.push_str(&overlay);
-        prompt
+        prompt.push_str(&overlay.text);
+        StrategyPromptAugmentation {
+            system_prompt: prompt,
+            injected_playbook_ids: overlay.injected_playbook_ids,
+        }
     }
 }
 
@@ -1365,24 +1407,46 @@ fn skip_bench_enrichment(strategy: Option<BenchStrategy>) -> bool {
 }
 
 #[cfg(feature = "legacy-orchestrate")]
-async fn build_context_enrichment_overlay(workdir: &Path, role: &str, prompt_text: &str) -> String {
+fn bench_strategy_uses_playbooks(strategy: Option<BenchStrategy>) -> bool {
+    matches!(strategy, Some(BenchStrategy::ContextEnriched))
+        || matches!(strategy, Some(BenchStrategy::NeuroAugmented))
+        || matches!(strategy, Some(BenchStrategy::FullCascade))
+}
+
+#[cfg(feature = "legacy-orchestrate")]
+async fn build_context_enrichment_overlay(
+    workdir: &Path,
+    role: &str,
+    prompt_text: &str,
+) -> ContextEnrichmentOverlay {
     let (playbooks, skills) = tokio::join!(
         build_relevant_playbooks_section(workdir, role, "cli-run", prompt_text),
         build_relevant_skills_section(workdir, prompt_text),
     );
 
+    let PlaybookSection {
+        text: playbook_text,
+        injected_playbook_ids,
+    } = playbooks;
+
     let mut sections = Vec::new();
-    if !playbooks.is_empty() {
-        sections.push(playbooks);
+    if !playbook_text.is_empty() {
+        sections.push(playbook_text);
     }
     if !skills.is_empty() {
         sections.push(skills);
     }
 
     if sections.is_empty() {
-        String::new()
+        ContextEnrichmentOverlay {
+            text: String::new(),
+            injected_playbook_ids: Vec::new(),
+        }
     } else {
-        format!("## Relevant Techniques\n\n{}", sections.join("\n\n"))
+        ContextEnrichmentOverlay {
+            text: format!("## Relevant Techniques\n\n{}", sections.join("\n\n")),
+            injected_playbook_ids,
+        }
     }
 }
 
@@ -1392,7 +1456,7 @@ async fn build_relevant_playbooks_section(
     role: &str,
     task: &str,
     task_text: &str,
-) -> String {
+) -> PlaybookSection {
     let parsed_role = parse_agent_role(role).unwrap_or(AgentRole::Implementer);
     let store = match load_or_create_playbook_store(
         &workdir.join(".roko").join("learn").join("playbooks"),
@@ -1402,7 +1466,10 @@ async fn build_relevant_playbooks_section(
         Ok(store) => store,
         Err(err) => {
             tracing::warn!(error = %err, "failed to load playbook store for strategy enrichment");
-            return String::new();
+            return PlaybookSection {
+                text: String::new(),
+                injected_playbook_ids: Vec::new(),
+            };
         }
     };
 
@@ -1411,14 +1478,69 @@ async fn build_relevant_playbooks_section(
         Ok(playbooks) => playbooks,
         Err(err) => {
             tracing::warn!(error = %err, "failed to query playbooks for strategy enrichment");
-            return String::new();
+            return PlaybookSection {
+                text: String::new(),
+                injected_playbook_ids: Vec::new(),
+            };
         }
     };
 
     if playbooks.is_empty() {
-        String::new()
+        PlaybookSection {
+            text: String::new(),
+            injected_playbook_ids: Vec::new(),
+        }
     } else {
-        render_relevant_playbooks(&playbooks)
+        let text = render_relevant_playbooks(&playbooks);
+        let injected_playbook_ids = playbooks.into_iter().map(|playbook| playbook.id).collect();
+        PlaybookSection {
+            text,
+            injected_playbook_ids,
+        }
+    }
+}
+
+#[cfg(feature = "legacy-orchestrate")]
+async fn record_injected_playbook_outcomes(
+    workdir: &Path,
+    strategy: Option<BenchStrategy>,
+    injected_playbook_ids: &[String],
+    task_passed: bool,
+) {
+    if injected_playbook_ids.is_empty() || !bench_strategy_uses_playbooks(strategy) {
+        return;
+    }
+
+    let playbook_root = workdir.join(".roko").join("learn").join("playbooks");
+    let store = match load_or_create_playbook_store(&playbook_root).await {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %playbook_root.display(),
+                "failed to load playbook store for outcome recording"
+            );
+            return;
+        }
+    };
+
+    for pb_id in injected_playbook_ids {
+        match store.record_outcome(pb_id, task_passed).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    playbook_id = %pb_id,
+                    "playbook not found while recording bench outcome"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    playbook_id = %pb_id,
+                    error = %err,
+                    "failed to record playbook outcome"
+                );
+            }
+        }
     }
 }
 
@@ -1637,7 +1759,7 @@ async fn dispatch_agent(
     prompt_text: &str,
     ctx: &Context,
     strategy: Option<BenchStrategy>,
-) -> Result<(AgentResult, Vec<ExternalAction>)> {
+) -> Result<DispatchOutcome> {
     // TODO(gateway): migrate to ModelCallService.
     let mut routing_config = roko_core::config::load_config(workdir)
         .with_context(|| format!("load routing config from {}", workdir.display()))?;
@@ -1653,7 +1775,10 @@ async fn dispatch_agent(
             .model
             .clone()
             .unwrap_or_else(|| routing_config.agent.default_model.clone());
-        let system_prompt = augment_system_prompt_for_strategy(
+        let StrategyPromptAugmentation {
+            system_prompt,
+            injected_playbook_ids,
+        } = augment_system_prompt_for_strategy(
             build_system_prompt(config, prompt_text, &tools_csv),
             workdir,
             &config.prompt.role,
@@ -1686,7 +1811,11 @@ async fn dispatch_agent(
             },
             format!("create agent for model {model}"),
         )?;
-        Ok((agent.run(prompt, ctx).await, Vec::new()))
+        Ok(DispatchOutcome {
+            agent_result: agent.run(prompt, ctx).await,
+            external_actions: Vec::new(),
+            injected_playbook_ids,
+        })
     } else if config.agent.command == "claude" && has_anthropic_api_key(config) {
         // Anthropic API tool loop — direct HTTP calls with full tool visibility.
         return run_anthropic_api_tool_loop(workdir, config, prompt_text, strategy).await;
@@ -1704,7 +1833,10 @@ async fn dispatch_agent(
                 "claude-sonnet-4-6".to_string()
             }
         });
-        let system_prompt = augment_system_prompt_for_strategy(
+        let StrategyPromptAugmentation {
+            system_prompt,
+            injected_playbook_ids,
+        } = augment_system_prompt_for_strategy(
             build_system_prompt(config, prompt_text, &tools_csv),
             workdir,
             &config.prompt.role,
@@ -1748,7 +1880,11 @@ async fn dispatch_agent(
             },
             format!("create synthesized claude agent for model {model}"),
         )?;
-        Ok((agent.run(prompt, ctx).await, Vec::new()))
+        Ok(DispatchOutcome {
+            agent_result: agent.run(prompt, ctx).await,
+            external_actions: Vec::new(),
+            injected_playbook_ids,
+        })
     } else if config.agent.command == "ollama" {
         Ok(run_ollama_agentic_single(workdir, config, prompt_text, strategy).await)
     } else if is_known_protocol_command(&config.agent.command) {
@@ -1783,7 +1919,11 @@ async fn dispatch_agent(
                 config.agent.command
             ),
         )?;
-        Ok((agent.run(prompt, ctx).await, Vec::new()))
+        Ok(DispatchOutcome {
+            agent_result: agent.run(prompt, ctx).await,
+            external_actions: Vec::new(),
+            injected_playbook_ids: Vec::new(),
+        })
     } else {
         let model = config
             .agent
@@ -1815,7 +1955,11 @@ async fn dispatch_agent(
                 config.agent.command
             ),
         )?;
-        Ok((agent.run(prompt, ctx).await, Vec::new()))
+        Ok(DispatchOutcome {
+            agent_result: agent.run(prompt, ctx).await,
+            external_actions: Vec::new(),
+            injected_playbook_ids: Vec::new(),
+        })
     }
 }
 
@@ -1826,7 +1970,7 @@ async fn run_ollama_agentic_single(
     config: &Config,
     prompt_text: &str,
     strategy: Option<BenchStrategy>,
-) -> (AgentResult, Vec<ExternalAction>) {
+) -> DispatchOutcome {
     use parking_lot::RwLock;
     use roko_agent::dispatcher::ToolDispatcher;
     use roko_agent::tool_loop::{StopReason, ToolLoop};
@@ -1867,7 +2011,10 @@ async fn run_ollama_agentic_single(
     );
     let tool_loop = ToolLoop::new(translator, dispatcher, backend);
 
-    let system_prompt = augment_system_prompt_for_strategy(
+    let StrategyPromptAugmentation {
+        system_prompt,
+        injected_playbook_ids,
+    } = augment_system_prompt_for_strategy(
         build_system_prompt(config, prompt_text, ""),
         workdir,
         &config.prompt.role,
@@ -1912,9 +2059,17 @@ async fn run_ollama_agentic_single(
     };
 
     if success {
-        (AgentResult::ok(sig).with_usage(usage), external_actions)
+        DispatchOutcome {
+            agent_result: AgentResult::ok(sig).with_usage(usage),
+            external_actions,
+            injected_playbook_ids,
+        }
     } else {
-        (AgentResult::fail(sig).with_usage(usage), external_actions)
+        DispatchOutcome {
+            agent_result: AgentResult::fail(sig).with_usage(usage),
+            external_actions,
+            injected_playbook_ids,
+        }
     }
 }
 
@@ -1964,7 +2119,7 @@ async fn run_anthropic_api_tool_loop(
     config: &Config,
     prompt_text: &str,
     strategy: Option<BenchStrategy>,
-) -> Result<(AgentResult, Vec<ExternalAction>)> {
+) -> Result<DispatchOutcome> {
     use parking_lot::RwLock;
     use roko_agent::dispatcher::ToolDispatcher;
     use roko_agent::provider::anthropic_api::tool_loop::create_anthropic_backend_simple;
@@ -2033,7 +2188,10 @@ async fn run_anthropic_api_tool_loop(
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend).with_on_turn(on_turn);
 
-    let system_prompt = augment_system_prompt_for_strategy(
+    let StrategyPromptAugmentation {
+        system_prompt,
+        injected_playbook_ids,
+    } = augment_system_prompt_for_strategy(
         build_system_prompt(config, prompt_text, ""),
         workdir,
         &config.prompt.role,
@@ -2085,9 +2243,17 @@ async fn run_anthropic_api_tool_loop(
     };
 
     if success {
-        Ok((AgentResult::ok(sig).with_usage(usage), external_actions))
+        Ok(DispatchOutcome {
+            agent_result: AgentResult::ok(sig).with_usage(usage),
+            external_actions,
+            injected_playbook_ids,
+        })
     } else {
-        Ok((AgentResult::fail(sig).with_usage(usage), external_actions))
+        Ok(DispatchOutcome {
+            agent_result: AgentResult::fail(sig).with_usage(usage),
+            external_actions,
+            injected_playbook_ids,
+        })
     }
 }
 
@@ -3105,10 +3271,74 @@ mod tests {
         )
         .await;
 
-        assert_eq!(augmented, base_prompt);
+        assert_eq!(augmented.system_prompt, base_prompt);
+        assert!(augmented.injected_playbook_ids.is_empty());
         assert!(skip_bench_enrichment(Some(BenchStrategy::Minimal)));
         assert!(!skip_bench_enrichment(None));
         assert!(!skip_bench_enrichment(Some(BenchStrategy::ContextEnriched)));
+    }
+
+    #[cfg(feature = "legacy-orchestrate")]
+    #[tokio::test]
+    async fn record_injected_playbook_outcomes_updates_bench_playbooks_only() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let playbook_root = tempdir.path().join(".roko").join("learn").join("playbooks");
+        let store = load_or_create_playbook_store(&playbook_root)
+            .await
+            .expect("playbook store");
+        let playbook = Playbook::new("pb-1", "Audit dependencies");
+        store.save(&playbook).await.expect("save playbook");
+        let injected_ids = vec!["pb-1".to_string()];
+
+        record_injected_playbook_outcomes(
+            tempdir.path(),
+            Some(BenchStrategy::ContextEnriched),
+            &injected_ids,
+            true,
+        )
+        .await;
+        let loaded = store.load("pb-1").await.expect("load").expect("playbook");
+        assert_eq!(loaded.success_count, 1);
+        assert_eq!(loaded.failure_count, 0);
+
+        record_injected_playbook_outcomes(
+            tempdir.path(),
+            Some(BenchStrategy::NeuroAugmented),
+            &injected_ids,
+            false,
+        )
+        .await;
+        let loaded = store.load("pb-1").await.expect("load").expect("playbook");
+        assert_eq!(loaded.success_count, 1);
+        assert_eq!(loaded.failure_count, 1);
+
+        record_injected_playbook_outcomes(
+            tempdir.path(),
+            Some(BenchStrategy::Minimal),
+            &injected_ids,
+            false,
+        )
+        .await;
+        let loaded = store.load("pb-1").await.expect("load").expect("playbook");
+        assert_eq!(loaded.success_count, 1);
+        assert_eq!(loaded.failure_count, 1);
+
+        record_injected_playbook_outcomes(tempdir.path(), None, &injected_ids, false).await;
+        let loaded = store.load("pb-1").await.expect("load").expect("playbook");
+        assert_eq!(loaded.success_count, 1);
+        assert_eq!(loaded.failure_count, 1);
+
+        let empty_ids: Vec<String> = Vec::new();
+        record_injected_playbook_outcomes(
+            tempdir.path(),
+            Some(BenchStrategy::FullCascade),
+            &empty_ids,
+            false,
+        )
+        .await;
+        let loaded = store.load("pb-1").await.expect("load").expect("playbook");
+        assert_eq!(loaded.success_count, 1);
+        assert_eq!(loaded.failure_count, 1);
     }
 
     #[tokio::test]
@@ -3123,7 +3353,7 @@ mod tests {
             .body(Body::text("plain-exec-ok"))
             .build();
 
-        let (result, external_actions) = dispatch_agent(
+        let result = dispatch_agent(
             tempdir.path(),
             &config,
             &prompt,
@@ -3134,9 +3364,13 @@ mod tests {
         .await
         .expect("dispatch succeeds");
 
-        assert!(result.success);
-        assert_eq!(result.output.body.as_text().unwrap_or(""), "plain-exec-ok");
-        assert!(external_actions.is_empty());
+        assert!(result.agent_result.success);
+        assert_eq!(
+            result.agent_result.output.body.as_text().unwrap_or(""),
+            "plain-exec-ok"
+        );
+        assert!(result.external_actions.is_empty());
+        assert!(result.injected_playbook_ids.is_empty());
     }
 
     fn init_git_workdir(workdir: &std::path::Path) {
