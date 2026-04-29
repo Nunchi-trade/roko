@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::bridge_events::CognitiveEvent;
+use crate::knowledge::prepend_context;
 use crate::pipeline::{PipelineAction, PipelineEvent, PipelinePhase, WorkflowTemplate};
 use crate::session::{CancelToken, SharedWorkflowRun};
 use crate::types::{
@@ -749,9 +750,11 @@ fn core_runtime_event_from_driver(event: RuntimeDriverEvent) -> CoreRuntimeEvent
 ///
 /// This is the main entry point called from `bridge_events.rs` when
 /// the session workflow config is not "none".
+#[allow(clippy::too_many_arguments)]
 pub async fn run_workflow_pipeline(
     session_id: &str,
     prompt: &str,
+    knowledge_context: String,
     workdir: &Path,
     config: PipelineConfig,
     cancel_token: CancelToken,
@@ -800,10 +803,11 @@ pub async fn run_workflow_pipeline(
         match action {
             PipelineAction::SpawnStrategist { ref prompt } => {
                 run.agents_spawned += 1;
+                let full_prompt = prepend_context(prompt, &knowledge_context);
                 let result = run_agent_phase(
                     session_id,
                     "Strategist",
-                    prompt,
+                    &full_prompt,
                     workdir,
                     &cancel_token,
                     &event_sender,
@@ -831,6 +835,7 @@ pub async fn run_workflow_pipeline(
                 } else {
                     format!("{context}\n\n{prompt}")
                 };
+                let full_prompt = prepend_context(&full_prompt, &knowledge_context);
                 let result = run_agent_phase(
                     session_id,
                     "Implementer",
@@ -855,8 +860,10 @@ pub async fn run_workflow_pipeline(
 
             PipelineAction::SpawnAutoFixer { ref error_output } => {
                 run.agents_spawned += 1;
-                let fix_prompt =
-                    format!("Fix the following errors. Make minimal changes:\n\n{error_output}");
+                let fix_prompt = prepend_context(
+                    &format!("Fix the following errors. Make minimal changes:\n\n{error_output}"),
+                    &knowledge_context,
+                );
                 let result = run_agent_phase(
                     session_id,
                     "AutoFixer",
@@ -975,6 +982,7 @@ pub async fn run_workflow_pipeline(
                         &mut run,
                         workdir,
                         &config,
+                        &knowledge_context,
                         &cancel_token,
                         &event_sender,
                     )
@@ -986,6 +994,7 @@ pub async fn run_workflow_pipeline(
                         &mut run,
                         workdir,
                         &config,
+                        &knowledge_context,
                         &cancel_token,
                         &event_sender,
                     )
@@ -1308,7 +1317,11 @@ Respond with a JSON object (no markdown fences needed):
 }"#;
 
 /// Build a review prompt appropriate for the configured strictness level.
-fn build_review_prompt(strictness: &str, original_prompt: &str) -> String {
+fn build_review_prompt(
+    strictness: &str,
+    original_prompt: &str,
+    knowledge_context: &str,
+) -> String {
     let base = match strictness {
         "quick" => format!(
             "Quickly review the recent changes. Only flag blocking issues (bugs, security).\n\n\
@@ -1329,7 +1342,7 @@ fn build_review_prompt(strictness: &str, original_prompt: &str) -> String {
              Original request: {original_prompt}"
         ),
     };
-    format!("{base}\n{REVIEW_JSON_SCHEMA}")
+    prepend_context(&format!("{base}\n{REVIEW_JSON_SCHEMA}"), knowledge_context)
 }
 
 /// Parse a reviewer's output into a pipeline event (approved or revise).
@@ -1379,12 +1392,16 @@ async fn run_single_review(
     run: &mut WorkflowRun,
     workdir: &Path,
     config: &PipelineConfig,
+    knowledge_context: &str,
     cancel_token: &CancelToken,
     event_sender: &mpsc::Sender<CognitiveEvent>,
 ) -> PipelineAction {
     run.agents_spawned += 1;
-    let review_prompt =
-        build_review_prompt(&config.review_strictness, &run.pipeline.original_prompt);
+    let review_prompt = build_review_prompt(
+        &config.review_strictness,
+        &run.pipeline.original_prompt,
+        knowledge_context,
+    );
     let review_result = run_agent_phase(
         session_id,
         "Reviewer",
@@ -1424,6 +1441,7 @@ async fn run_multi_role_review(
     run: &mut WorkflowRun,
     workdir: &Path,
     _config: &PipelineConfig,
+    knowledge_context: &str,
     cancel_token: &CancelToken,
     event_sender: &mpsc::Sender<CognitiveEvent>,
 ) -> PipelineAction {
@@ -1435,8 +1453,9 @@ async fn run_multi_role_review(
          2. API contract correctness\n\
          3. Dependency layering violations\n\
          4. Code organization and modularity\n\n\
-         Original request: {original_prompt}\n{REVIEW_JSON_SCHEMA}"
+        Original request: {original_prompt}\n{REVIEW_JSON_SCHEMA}"
     );
+    let architect_prompt = prepend_context(&architect_prompt, knowledge_context);
 
     let auditor_prompt = format!(
         "You are the **Security & Correctness Auditor**. Focus on:\n\
@@ -1444,8 +1463,9 @@ async fn run_multi_role_review(
          2. Edge cases and error handling\n\
          3. Resource leaks (files, connections, memory)\n\
          4. Test coverage gaps\n\n\
-         Original request: {original_prompt}\n{REVIEW_JSON_SCHEMA}"
+        Original request: {original_prompt}\n{REVIEW_JSON_SCHEMA}"
     );
+    let auditor_prompt = prepend_context(&auditor_prompt, knowledge_context);
 
     let mut all_findings: Vec<String> = Vec::new();
     let mut all_approved = true;
