@@ -6,7 +6,7 @@
 use std::fs;
 use std::io::{self, Read as _, Write as StdWrite};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -14,11 +14,15 @@ use anyhow::Result;
 use roko_agent::AgentRuntimeEvent;
 use roko_agent::agent::{Agent, AgentResult};
 use roko_agent::claude_cli_agent::ClaudeCliAgent;
+use roko_agent::process::{GRACE_STDIN_CLOSE_MS, kill_tree, set_process_group};
+use roko_agent::provider::claude_cli::stream::parse_stream_line;
 use roko_agent::safety::contract::AgentContract;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
 use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
 use roko_core::foundation::ChatMessage;
-use roko_core::{Body, Context, Engram, Kind};
+use roko_core::{Body, Context, Engram, Kind, OperatingFrequency};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command as TokioCommand;
 use tokio::signal;
 
 use crate::config::Config;
@@ -43,16 +47,15 @@ const SKIP_DIR_NAMES: [&str; 12] = [
     "venv",
 ];
 
-/// Update the stored session id and emit a debug trace when one is captured.
+/// Update the stored session id after a turn completes.
 ///
-/// Called by the future streaming turn path when it can read the raw Claude
-/// CLI event stream. The non-streaming `send_turn` path cannot capture a
-/// session id because `ClaudeCliAgent::run` does not expose it through
-/// `AgentResult`.
+/// Empty session ids are ignored so a missing result event does not erase a
+/// previously captured `SystemInit` session.
 fn apply_session_id(session_id: &mut Option<String>, new_id: Option<String>) {
     if let Some(ref sid) = new_id {
-        tracing::debug!(session_id = %sid, "captured session_id for resume");
-        *session_id = new_id;
+        if !sid.is_empty() {
+            *session_id = new_id;
+        }
     }
 }
 
@@ -426,7 +429,7 @@ impl ChatAgentSession {
 
         TurnResult {
             text,
-            model: self.model.clone(),
+            model: self.model_selection.backend_slug.clone(),
             input_tokens,
             output_tokens,
             tool_calls: Vec::new(),
@@ -477,7 +480,7 @@ impl ChatAgentSession {
                 .unwrap_or_else(|| "agent failed".to_string());
             return Ok(TurnResult {
                 text: error_text,
-                model: self.model.clone(),
+                model: self.model_selection.backend_slug.clone(),
                 input_tokens: 0,
                 output_tokens: 0,
                 tool_calls: Vec::new(),
@@ -543,39 +546,301 @@ impl ChatAgentSession {
     }
 }
 
+/// Build the Claude CLI command used by the streaming turn path.
+fn build_streaming_command(session: &ChatAgentSession, program: &Path) -> TokioCommand {
+    let mut cmd = TokioCommand::new(program);
+    cmd.arg("--print")
+        .arg("--verbose")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--model")
+        .arg(&session.model)
+        .arg("--effort")
+        .arg(&session.effort)
+        .arg("--settings")
+        .arg(roko_agent::claude_cli_agent::build_settings_json());
+
+    if session.model != "claude-haiku-4-5" {
+        cmd.arg("--fallback-model").arg("claude-haiku-4-5");
+    }
+    if !session.system_prompt.is_empty() {
+        cmd.arg("--append-system-prompt")
+            .arg(&session.system_prompt);
+    }
+    if !session.allowed_tools_csv.is_empty() {
+        cmd.arg("--tools").arg(&session.allowed_tools_csv);
+    }
+    if let Some(ref mcp_config) = session.mcp_config {
+        cmd.arg("--mcp-config").arg(mcp_config);
+        cmd.arg("--strict-mcp-config");
+    }
+    if let Some(ref resume) = session.session_id
+        && !resume.trim().is_empty()
+    {
+        cmd.arg("--resume").arg(resume);
+    }
+
+    cmd.arg("--dangerously-skip-permissions");
+    cmd.arg("--max-turns")
+        .arg(OperatingFrequency::Theta.turn_limit().to_string());
+
+    cmd.current_dir(&session.workdir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    set_process_group(&mut cmd);
+    cmd.env("CARGO_INCREMENTAL", "0");
+    cmd.env("CARGO_BUILD_JOBS", "2");
+    cmd.env_remove("CLAUDECODE");
+    cmd
+}
+
+async fn send_turn_streaming_with_program(
+    session: &mut ChatAgentSession,
+    prompt: &str,
+    tx: tokio::sync::mpsc::Sender<AgentRuntimeEvent>,
+    program: &Path,
+) -> Result<TurnResult> {
+    let started = Instant::now();
+    let timeout_duration = session.timeout.unwrap_or(Duration::from_secs(300));
+    let mut cmd = build_streaming_command(session, program);
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let message = format!("spawn failed: {error}");
+            let _ = tx
+                .send(AgentRuntimeEvent::Error {
+                    message: message.clone(),
+                })
+                .await;
+            drop(tx);
+            return Err(anyhow::anyhow!(message));
+        }
+    };
+
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let message = "agent stdout not captured".to_string();
+            let _ = tx
+                .send(AgentRuntimeEvent::Error {
+                    message: message.clone(),
+                })
+                .await;
+            let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
+            let _ = stderr_handle.await;
+            drop(tx);
+            return Err(anyhow::anyhow!(message));
+        }
+    };
+    let stderr = child.stderr.take();
+    let stderr_handle = tokio::spawn(async move {
+        let mut stderr_pipe = stderr;
+        read_pipe_to_string(&mut stderr_pipe).await
+    });
+
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(prompt.as_bytes()).await
+    {
+        let message = format!("stdin write failed: {error}");
+        let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
+        let _ = stderr_handle.await;
+        let _ = tx
+            .send(AgentRuntimeEvent::Error {
+                message: message.clone(),
+            })
+            .await;
+        drop(tx);
+        return Err(anyhow::anyhow!(message));
+    }
+
+    let mut stdout_lines = BufReader::new(stdout).lines();
+    let mut accumulated_text = String::new();
+    let mut tool_calls = Vec::new();
+    let mut pending_ids = Vec::new();
+    let mut final_session_id: Option<String> = None;
+    let mut final_input_tokens = 0_u64;
+    let mut final_output_tokens = 0_u64;
+    let mut saw_turn_completed_error = false;
+    let mut timeout_sleep = Box::pin(tokio::time::sleep(timeout_duration));
+    let mut ctrl_c = Box::pin(signal::ctrl_c());
+    let mut cancelled = false;
+
+    loop {
+        tokio::select! {
+            line = stdout_lines.next_line() => {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        let message = format!("stdout read failed: {error}");
+                        let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
+                        let _ = stderr_handle.await;
+                        let _ = tx.send(AgentRuntimeEvent::Error { message: message.clone() }).await;
+                        let _ = tx.send(AgentRuntimeEvent::Exited { exit_code: None }).await;
+                        drop(tx);
+                        return Err(anyhow::anyhow!(message));
+                    }
+                };
+
+                let Some(line) = line else {
+                    break;
+                };
+
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                for event in parse_stream_line(&line) {
+                    accumulate_tool_event(&mut tool_calls, &mut pending_ids, &event);
+
+                    match &event {
+                        AgentRuntimeEvent::MessageDelta { text } => {
+                            accumulated_text.push_str(text);
+                        }
+                        AgentRuntimeEvent::SystemInit { session_id, .. } => {
+                            if !session_id.is_empty() && final_session_id.is_none() {
+                                final_session_id = Some(session_id.clone());
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    "captured session_id from SystemInit"
+                                );
+                            }
+                        }
+                        AgentRuntimeEvent::TurnCompleted {
+                            session_id,
+                            is_error,
+                            ..
+                        } => {
+                            if let Some(sid) = session_id
+                                && !sid.is_empty()
+                            {
+                                final_session_id = Some(sid.clone());
+                                tracing::debug!(
+                                    session_id = %sid,
+                                    "captured session_id from TurnCompleted"
+                                );
+                            }
+                            if *is_error {
+                                saw_turn_completed_error = true;
+                                tracing::warn!(
+                                    "Claude CLI reported is_error=true in result event"
+                                );
+                            }
+                        }
+                        AgentRuntimeEvent::TokenUsage {
+                            input_tokens,
+                            output_tokens,
+                            ..
+                        } => {
+                            final_input_tokens = *input_tokens;
+                            final_output_tokens = *output_tokens;
+                            tracing::debug!(
+                                input_tokens = %input_tokens,
+                                output_tokens = %output_tokens,
+                                "token usage update"
+                            );
+                        }
+                        _ => {}
+                    }
+
+                    let _ = tx.send(event.clone()).await;
+                }
+            }
+            _ = &mut timeout_sleep => {
+                tracing::warn!(
+                    timeout_secs = timeout_duration.as_secs(),
+                    "turn timed out at session level"
+                );
+                cancelled = true;
+                break;
+            }
+            _ = &mut ctrl_c => {
+                tracing::info!("turn cancelled by Ctrl-C");
+                cancelled = true;
+                break;
+            }
+        }
+    }
+
+    if cancelled {
+        let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
+        let _ = stderr_handle.await;
+        let _ = tx.send(AgentRuntimeEvent::Exited { exit_code: None }).await;
+        drop(tx);
+        return Ok(TurnResult::cancelled(started.elapsed()));
+    }
+
+    let status = match child.wait().await {
+        Ok(status) => status,
+        Err(error) => {
+            let message = format!("wait failed: {error}");
+            let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
+            let _ = stderr_handle.await;
+            let _ = tx
+                .send(AgentRuntimeEvent::Error {
+                    message: message.clone(),
+                })
+                .await;
+            let _ = tx.send(AgentRuntimeEvent::Exited { exit_code: None }).await;
+            drop(tx);
+            return Err(anyhow::anyhow!(message));
+        }
+    };
+
+    let stderr = stderr_handle.await.unwrap_or_default();
+
+    if let Some(ref sid) = final_session_id {
+        session.session_id = Some(sid.clone());
+        apply_session_id(&mut session.session_id, Some(sid.clone()));
+    }
+
+    let mut text = accumulated_text;
+    if !status.success() && text.trim().is_empty() {
+        text = stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("agent failed")
+            .to_string();
+    }
+
+    if saw_turn_completed_error || !status.success() {
+        tracing::warn!(
+            exit_code = ?status.code(),
+            "Claude CLI turn completed with a non-success status"
+        );
+    }
+
+    let result = TurnResult {
+        text,
+        model: session.model_selection.backend_slug.clone(),
+        input_tokens: final_input_tokens,
+        output_tokens: final_output_tokens,
+        tool_calls,
+        session_id: final_session_id,
+        duration: started.elapsed(),
+        cancelled: false,
+    };
+
+    let _ = tx
+        .send(AgentRuntimeEvent::Exited {
+            exit_code: status.code(),
+        })
+        .await;
+    drop(tx);
+
+    Ok(result)
+}
+
 /// Send a streaming turn and forward runtime events into `tx`.
-///
-/// The current session adapter only exposes a completed `TurnResult`, so this
-/// projects the final text into the runtime event stream consumed by the
-/// plain-terminal renderer.
 pub async fn send_turn_streaming(
     session: &mut ChatAgentSession,
     prompt: &str,
     tx: tokio::sync::mpsc::Sender<AgentRuntimeEvent>,
 ) -> Result<TurnResult> {
-    let result = session.send_turn(prompt).await;
-
-    match &result {
-        Ok(turn) => {
-            if !turn.cancelled && !turn.text.is_empty() {
-                let _ = tx
-                    .send(AgentRuntimeEvent::MessageDelta {
-                        text: turn.text.clone(),
-                    })
-                    .await;
-            }
-        }
-        Err(error) => {
-            let _ = tx
-                .send(AgentRuntimeEvent::Error {
-                    message: error.to_string(),
-                })
-                .await;
-        }
-    }
-
-    drop(tx);
-    result
+    send_turn_streaming_with_program(session, prompt, tx, Path::new("claude")).await
 }
 
 /// Send a streaming turn, rendering events to stdout/stderr directly.
@@ -809,7 +1074,7 @@ fn read_text_snippet(path: &Path) -> Option<String> {
 }
 
 fn capture_git_branch(workdir: &Path) -> Option<String> {
-    let output = Command::new("git")
+    let output = StdCommand::new("git")
         .args(["branch", "--show-current"])
         .current_dir(workdir)
         .output()
@@ -968,6 +1233,8 @@ mod tests {
     use super::*;
 
     use roko_core::foundation::{ChatMessage, MessageRole};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     fn test_model_selection() -> EffectiveModelSelection {
@@ -1000,6 +1267,37 @@ mod tests {
             settings_json: None,
             timeout: Some(Duration::from_secs(30)),
         }
+    }
+
+    fn streaming_test_session(workdir: PathBuf) -> ChatAgentSession {
+        let model_selection = test_model_selection();
+        let model = model_selection.effective_model_key.clone();
+        ChatAgentSession {
+            workdir,
+            model,
+            model_selection,
+            effort: "medium".to_string(),
+            system_prompt: "Test system prompt".to_string(),
+            allowed_tools_csv: DEFAULT_CHAT_TOOLS.to_string(),
+            mcp_config: None,
+            session_id: None,
+            api_history: Vec::new(),
+            http_client: reqwest::Client::new(),
+            settings_json: None,
+            timeout: Some(Duration::from_secs(5)),
+        }
+    }
+
+    fn write_fake_claude_script(tmp: &tempfile::TempDir, body: &str) -> PathBuf {
+        let script = tmp.path().join("claude-fake.sh");
+        std::fs::write(&script, body).expect("write fake claude script");
+        #[cfg(unix)]
+        {
+            let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).expect("chmod");
+        }
+        script
     }
 
     fn agent_debug(session: &ChatAgentSession) -> String {
@@ -1061,6 +1359,120 @@ mod tests {
         assert_eq!(result.output_tokens, 0);
         assert!(result.tool_calls.is_empty());
         assert!(result.session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_turn_captures_final_session_and_latest_usage() {
+        let tmp = tempdir().expect("tempdir");
+        let script = write_fake_claude_script(
+            &tmp,
+            r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-init","model":"claude-sonnet-4-6","tools":[]}'
+printf '%s\n' '{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"hello "},{"type":"text","text":"world"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"foo"}}],"usage":{"input_tokens":7,"output_tokens":8,"cache_creation_input_tokens":1,"cache_read_input_tokens":2}}}'
+printf '%s\n' '{"type":"tool","subtype":"result","tool_name":"Read","tool_use_id":"tool-1","content":"tool output"}'
+printf '%s\n' '{"type":"result","session_id":"sess-final","model":"claude-sonnet-4-6","total_cost_usd":0.25,"is_error":false,"usage":{"input_tokens":11,"output_tokens":22,"cache_creation_input_tokens":33,"cache_read_input_tokens":44}}'
+"#,
+        );
+
+        let mut session = streaming_test_session(tmp.path().to_path_buf());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let result = send_turn_streaming_with_program(&mut session, "hi", tx, &script)
+            .await
+            .expect("streaming turn");
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert_eq!(session.session_id.as_deref(), Some("sess-final"));
+        assert_eq!(result.session_id.as_deref(), Some("sess-final"));
+        assert_eq!(result.model, "claude-sonnet-4-6");
+        assert_eq!(result.text, "hello world");
+        assert_eq!(result.input_tokens, 11);
+        assert_eq!(result.output_tokens, 22);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "Read");
+        assert_eq!(result.tool_calls[0].input_abbrev, "tool output");
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentRuntimeEvent::SystemInit {
+                session_id,
+                ..
+            } if session_id == "sess-init"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentRuntimeEvent::TurnCompleted {
+                session_id: Some(session_id),
+                ..
+            } if session_id == "sess-final"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentRuntimeEvent::TokenUsage {
+                input_tokens: 11,
+                output_tokens: 22,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn streaming_turn_keeps_system_session_when_result_is_empty() {
+        let tmp = tempdir().expect("tempdir");
+        let script = write_fake_claude_script(
+            &tmp,
+            r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-init-only","model":"claude-sonnet-4-6","tools":[]}'
+printf '%s\n' '{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"partial"}],"usage":{"input_tokens":3,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'
+printf '%s\n' '{"type":"result","session_id":"","model":"claude-sonnet-4-6","total_cost_usd":0.10,"is_error":false,"usage":{"input_tokens":9,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'
+"#,
+        );
+
+        let mut session = streaming_test_session(tmp.path().to_path_buf());
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let result = send_turn_streaming_with_program(&mut session, "hi", tx, &script)
+            .await
+            .expect("streaming turn");
+
+        assert_eq!(session.session_id.as_deref(), Some("sess-init-only"));
+        assert_eq!(result.session_id.as_deref(), Some("sess-init-only"));
+        assert_eq!(result.input_tokens, 9);
+        assert_eq!(result.output_tokens, 10);
+        assert_eq!(result.text, "partial");
+    }
+
+    #[tokio::test]
+    async fn streaming_turn_timeout_returns_cancelled_without_persisting_partial_state() {
+        let tmp = tempdir().expect("tempdir");
+        let script = write_fake_claude_script(
+            &tmp,
+            r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-timeout","model":"claude-sonnet-4-6","tools":[]}'
+sleep 5
+"#,
+        );
+
+        let mut session = streaming_test_session(tmp.path().to_path_buf());
+        session.timeout = Some(Duration::from_millis(250));
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let result = send_turn_streaming_with_program(&mut session, "hi", tx, &script)
+            .await
+            .expect("streaming turn");
+
+        assert!(result.cancelled);
+        assert!(result.session_id.is_none());
+        assert_eq!(result.input_tokens, 0);
+        assert_eq!(result.output_tokens, 0);
+        assert!(session.session_id.is_none());
     }
 
     #[test]
