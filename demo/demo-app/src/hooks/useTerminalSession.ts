@@ -116,8 +116,6 @@ export interface GateResult {
   status: 'pass' | 'fail';
 }
 
-let showCmdSeq = 0;
-
 async function typeVisibleCommandAndWait(
   handle: TerminalHandle,
   cmd: string,
@@ -125,8 +123,6 @@ async function typeVisibleCommandAndWait(
   speed = 1,
 ): Promise<boolean> {
   if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
-
-  const marker = `__RK_SHOW_${(++showCmdSeq).toString(36)}_${Date.now().toString(36)}__`;
   const charDelay = Math.max(3, (10 + Math.random() * 5) / speed);
   for (const ch of cmd) {
     handle.ws.send(ch);
@@ -134,8 +130,7 @@ async function typeVisibleCommandAndWait(
   }
   await rawSleep(Math.max(10, 40 / speed));
   handle.ws.send('\r');
-  handle.sendRaw(`printf '\\n${marker}\\n'\r`);
-  return handle.waitForMarker(marker, timeout);
+  return handle.waitForPrompt(timeout);
 }
 
 /**

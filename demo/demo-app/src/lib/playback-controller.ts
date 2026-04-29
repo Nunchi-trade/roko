@@ -10,13 +10,19 @@ export class PlaybackController {
   private _currentStep = 0;
   private _totalSteps = 0;
   private _onProgress?: (step: number, total: number, cmd: string) => void;
+  private _onWaitingChange?: (waiting: boolean) => void;
 
   onProgress(fn: (step: number, total: number, cmd: string) => void) {
     this._onProgress = fn;
   }
 
+  onWaitingChange(fn: (waiting: boolean) => void) {
+    this._onWaitingChange = fn;
+  }
+
   async waitForStep(): Promise<void> {
     if (this.mode === 'auto') return;
+    this._onWaitingChange?.(true);
     return new Promise(resolve => {
       this._stepResolve = resolve;
     });
@@ -24,6 +30,7 @@ export class PlaybackController {
 
   advanceStep() {
     if (this._stepResolve) {
+      this._onWaitingChange?.(false);
       const r = this._stepResolve;
       this._stepResolve = null;
       r();
@@ -50,6 +57,7 @@ export class PlaybackController {
   }
 
   reset() {
+    this._onWaitingChange?.(false);
     this._stepResolve = null;
     this._currentStep = 0;
     this._totalSteps = 0;

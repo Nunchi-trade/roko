@@ -52,6 +52,7 @@ export default function Demo() {
   const [timelineSteps, setTimelineSteps] = useState<TimelineStepState[]>([]);
   const [progressText, setProgressText] = useState('press Play to begin');
   const [progressLabel, setProgressLabel] = useState('--');
+  const [waitingForStep, setWaitingForStep] = useState(false);
   const [pipelineExampleId, setPipelineExampleId] = useState(DEFAULT_PIPELINE_EXAMPLE_ID);
   const selectedPipelineExample = getPipelineExample(pipelineExampleId);
   const [pipeline, setPipeline] = useState<PipelineDemoState>(
@@ -69,6 +70,7 @@ export default function Demo() {
       setProgressLabel(step <= 0 ? 'Preparing' : `Step ${step}/${total}`);
       setProgressText(cmd);
     });
+    playback.onWaitingChange(setWaitingForStep);
   }, []);
 
   // Build scenario context matching ScenarioContext from scenarios.ts
@@ -459,12 +461,12 @@ export default function Demo() {
             </button>
           )}
           <button
-            className={`demo-pb-btn${playbackMode === 'step' ? ' primary' : ''}`}
+            className={`demo-pb-btn${playbackMode === 'step' ? ' primary' : ''}${waitingForStep ? ' waiting' : ''}`}
             onClick={handleStep}
             title="Next step (N)"
-            disabled={playbackMode !== 'step'}
+            disabled={playbackMode !== 'step' && !waitingForStep}
           >
-            {'\u25B6\u2759'}
+            {waitingForStep ? 'NEXT' : '\u25B6\u2759'}
           </button>
           <button className="demo-pb-btn" onClick={handleReset} title="Reset (R)">
             {'\u21BA'}
