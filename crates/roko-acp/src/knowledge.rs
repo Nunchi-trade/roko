@@ -62,7 +62,10 @@ impl DispatchKnowledge {
 /// Errors are logged and converted into empty result sets so dispatch can
 /// continue normally.
 #[must_use]
-pub(crate) async fn query_dispatch_knowledge(workdir: &Path, prompt: &str) -> DispatchKnowledge {
+pub(crate) async fn query_dispatch_knowledge(
+    workdir: &Path,
+    prompt: &str,
+) -> DispatchKnowledge {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return DispatchKnowledge::default();
@@ -166,10 +169,7 @@ fn render_card_body(hits: &[KnowledgeQueryHit], playbooks: &[Playbook]) -> Optio
         for hit in hits.iter().take(5) {
             let tier_label = tier_label(hit.entry.tier);
             let summary = truncate_summary(hit.entry.content.trim(), 80);
-            lines.push(format!(
-                "  - [{tier_label}] {:.2} - {summary}",
-                hit.total_score
-            ));
+            lines.push(format!("  - [{tier_label}] {:.2} - {summary}", hit.total_score));
         }
     }
 

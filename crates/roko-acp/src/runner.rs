@@ -300,11 +300,7 @@ async fn analyze_gate_failure(error_output: &str, workdir: &Path, _iteration: u3
     }
 
     match &error_type {
-        GateErrorType::CompileError {
-            file,
-            line,
-            message,
-        } => {
+        GateErrorType::CompileError { file, line, message } => {
             if !file.is_empty() {
                 causal_chain.push(format!("Compile error at {file}:{line}"));
             }
@@ -411,7 +407,6 @@ pub async fn run_with_workflow_engine(
     prompt: &str,
     workdir: &Path,
     template: &str,
-    provenance_card: Option<String>,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> anyhow::Result<WorkflowRunReport> {
     let runtime_run_id = Arc::new(Mutex::new(None));
@@ -450,7 +445,6 @@ pub async fn run_with_workflow_engine(
         session_id.to_string(),
         Arc::clone(&runtime_run_id),
         event_sender.clone(),
-        provenance_card,
     )));
 
     let bridge_task = spawn_runtime_event_bridge(
@@ -470,7 +464,6 @@ pub async fn run_with_workflow_engine(
 struct AcpWorkflowEventConsumer {
     run_id: Arc<Mutex<Option<String>>>,
     template: Arc<Mutex<Option<String>>>,
-    provenance_card: Arc<Mutex<Option<String>>>,
     sender: mpsc::Sender<CognitiveEvent>,
 }
 
@@ -479,41 +472,16 @@ impl AcpWorkflowEventConsumer {
         _session_id: String,
         run_id: Arc<Mutex<Option<String>>>,
         sender: mpsc::Sender<CognitiveEvent>,
-        provenance_card: Option<String>,
     ) -> Self {
         Self {
             run_id,
             template: Arc::new(Mutex::new(None)),
-            provenance_card: Arc::new(Mutex::new(provenance_card)),
             sender,
         }
     }
 
     fn publish(&self, event: CognitiveEvent) {
         let _ = self.sender.try_send(event);
-    }
-
-    fn publish_provenance_card(&self, run_id: &str) {
-        let Some(card_text) = self
-            .provenance_card
-            .lock()
-            .ok()
-            .and_then(|mut current| current.take())
-        else {
-            return;
-        };
-
-        let tool_call_id = format!("decision-provenance-{run_id}");
-        self.publish(CognitiveEvent::ToolCallStart {
-            tool_call_id: tool_call_id.clone(),
-            title: "Decision provenance".into(),
-            kind: ToolCallKind::Other,
-        });
-        self.publish(CognitiveEvent::ToolCallComplete {
-            tool_call_id,
-            status: ToolCallStatus::Completed,
-            content: vec![text_block(card_text)],
-        });
     }
 }
 
@@ -544,9 +512,6 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
                     self.publish(CognitiveEvent::PlanUpdate {
                         entries: workflow_plan_entries(&template, to),
                     });
-                    if to == "strategizing" {
-                        self.publish_provenance_card(run_id);
-                    }
                 }
             }
             CoreRuntimeEvent::AgentOutput { run_id, chunk, .. } => {
@@ -665,7 +630,6 @@ fn spawn_runtime_event_bridge(
                         session_id.clone(),
                         Arc::new(Mutex::new(Some(active_run_id))),
                         sender.clone(),
-                        None,
                     );
                     CoreEventConsumer::consume(&consumer, &core_event);
                 }
@@ -791,7 +755,6 @@ pub async fn run_workflow_pipeline(
     session_id: &str,
     prompt: &str,
     knowledge_context: String,
-    mut provenance_card: Option<String>,
     workdir: &Path,
     config: PipelineConfig,
     cancel_token: CancelToken,
@@ -840,23 +803,6 @@ pub async fn run_workflow_pipeline(
         match action {
             PipelineAction::SpawnStrategist { ref prompt } => {
                 run.agents_spawned += 1;
-                if let Some(card_text) = provenance_card.take() {
-                    let tool_call_id = format!("decision-provenance-{}", run.run_id);
-                    let _ = event_sender
-                        .send(CognitiveEvent::ToolCallStart {
-                            tool_call_id: tool_call_id.clone(),
-                            title: "Decision provenance".into(),
-                            kind: ToolCallKind::Other,
-                        })
-                        .await;
-                    let _ = event_sender
-                        .send(CognitiveEvent::ToolCallComplete {
-                            tool_call_id,
-                            status: ToolCallStatus::Completed,
-                            content: vec![text_block(card_text)],
-                        })
-                        .await;
-                }
                 let full_prompt = prepend_context(prompt, &knowledge_context);
                 let result = run_agent_phase(
                     session_id,
@@ -871,8 +817,7 @@ pub async fn run_workflow_pipeline(
                     Ok(output) => {
                         let narrative = narrate_strategy(&output);
                         emit_narrative(&narrative, &event_sender).await;
-                        run.pipeline
-                            .step(PipelineEvent::StrategyComplete { brief: output })
+                        run.pipeline.step(PipelineEvent::StrategyComplete { brief: output })
                     }
                     Err(e) => run.pipeline.step(PipelineEvent::AgentFailed {
                         error: e.to_string(),
@@ -901,10 +846,12 @@ pub async fn run_workflow_pipeline(
                 )
                 .await;
                 action = match result {
-                    Ok(output) => run.pipeline.step(PipelineEvent::AgentCompleted {
-                        output,
-                        files_changed: 0,
-                    }),
+                    Ok(output) => {
+                        run.pipeline.step(PipelineEvent::AgentCompleted {
+                            output,
+                            files_changed: 0,
+                        })
+                    }
                     Err(e) => run.pipeline.step(PipelineEvent::AgentFailed {
                         error: e.to_string(),
                     }),
@@ -927,10 +874,12 @@ pub async fn run_workflow_pipeline(
                 )
                 .await;
                 action = match result {
-                    Ok(output) => run.pipeline.step(PipelineEvent::AgentCompleted {
-                        output,
-                        files_changed: 0,
-                    }),
+                    Ok(output) => {
+                        run.pipeline.step(PipelineEvent::AgentCompleted {
+                            output,
+                            files_changed: 0,
+                        })
+                    }
                     Err(e) => run.pipeline.step(PipelineEvent::AgentFailed {
                         error: e.to_string(),
                     }),
@@ -958,7 +907,8 @@ pub async fn run_workflow_pipeline(
                         let narrative = narrate_gate_failure(&error_str, attempt);
                         emit_narrative(&narrative, &event_sender).await;
                         let autopsy =
-                            analyze_gate_failure(&error_str, workdir, run.pipeline.iteration).await;
+                            analyze_gate_failure(&error_str, workdir, run.pipeline.iteration)
+                                .await;
                         let GateAutopsy {
                             error_type,
                             root_cause,
@@ -1101,8 +1051,7 @@ pub async fn run_workflow_pipeline(
                         run.pipeline.files_changed = real_count;
                         let narrative = narrate_commit(&msg);
                         emit_narrative(&narrative, &event_sender).await;
-                        run.pipeline
-                            .step(PipelineEvent::CommitDone { message: msg })
+                        run.pipeline.step(PipelineEvent::CommitDone { message: msg })
                     }
                     Err(e) => {
                         error!(error = %e, "commit failed");
@@ -1201,7 +1150,8 @@ fn phase_badge(phase: &PipelinePhase, iteration: u32) -> Option<String> {
         && matches!(
             phase,
             PipelinePhase::Implementing | PipelinePhase::AutoFixing | PipelinePhase::Gating
-        ) {
+        )
+    {
         format!("{name} (iter {iteration})")
     } else {
         name.to_string()
@@ -1238,9 +1188,7 @@ fn narrate_gate_failure(error_output: &str, iteration: u32) -> String {
         .count();
     let error_count = error_output
         .lines()
-        .filter(|line| {
-            line.contains("error[E") || (line.starts_with("error:") && line.contains(':'))
-        })
+        .filter(|line| line.contains("error[E") || (line.starts_with("error:") && line.contains(':')))
         .count();
 
     if test_failures > 0 {
@@ -1369,7 +1317,11 @@ Respond with a JSON object (no markdown fences needed):
 }"#;
 
 /// Build a review prompt appropriate for the configured strictness level.
-fn build_review_prompt(strictness: &str, original_prompt: &str, knowledge_context: &str) -> String {
+fn build_review_prompt(
+    strictness: &str,
+    original_prompt: &str,
+    knowledge_context: &str,
+) -> String {
     let base = match strictness {
         "quick" => format!(
             "Quickly review the recent changes. Only flag blocking issues (bugs, security).\n\n\
