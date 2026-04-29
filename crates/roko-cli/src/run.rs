@@ -45,7 +45,7 @@ use roko_core::{
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
-use roko_learn::episode_logger::{Episode, GateVerdict, Usage as EpisodeUsage};
+use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::playbook::Playbook;
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 use roko_learn::skill_library::{Skill, SkillQuery};
@@ -2113,6 +2113,88 @@ fn truncate_json_args(args: &serde_json::Value, max_len: usize) -> String {
     } else {
         s
     }
+}
+
+/// Extract a playbook for a successful bench run, using structured output
+/// when available and otherwise falling back to the latest episode log entry.
+pub(crate) async fn extract_bench_playbook(
+    workdir: &Path,
+    prompt: &str,
+    output_text: Option<&str>,
+) -> Result<Option<Playbook>> {
+    if let Some(playbook) = extract_playbook_from_output_text(prompt, output_text) {
+        return Ok(Some(playbook));
+    }
+
+    let Some(episode) = latest_learning_episode(workdir).await? else {
+        return Ok(None);
+    };
+    let tool_calls = roko_learn::playbook::extract_tool_calls_from_episode(&episode);
+    if tool_calls.is_empty() {
+        return Ok(None);
+    }
+
+    let task_id = non_empty(&episode.task_id).unwrap_or("bench-episode");
+    Ok(roko_learn::playbook::extract_playbook_from_episode(
+        task_id,
+        prompt,
+        &tool_calls,
+    ))
+}
+
+fn extract_playbook_from_output_text(prompt: &str, output_text: Option<&str>) -> Option<Playbook> {
+    let tool_calls = extract_tool_calls_from_output_text(output_text)?;
+    roko_learn::playbook::extract_playbook_from_episode("bench-output", prompt, &tool_calls)
+}
+
+fn extract_tool_calls_from_output_text(
+    output_text: Option<&str>,
+) -> Option<Vec<(String, String)>> {
+    let text = non_empty(output_text?)?;
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    if !value.is_array() && !value.is_object() {
+        return None;
+    }
+
+    let mut episode = Episode::new("bench-output", "bench-output");
+    episode
+        .extra
+        .insert("tool_calls".to_string(), value);
+    let tool_calls = roko_learn::playbook::extract_tool_calls_from_episode(&episode);
+    (!tool_calls.is_empty()).then_some(tool_calls)
+}
+
+async fn latest_learning_episode(workdir: &Path) -> Result<Option<Episode>> {
+    let mut last_error: Option<anyhow::Error> = None;
+    for path in learning_episode_paths(workdir) {
+        match EpisodeLogger::read_all_lossy(&path).await {
+            Ok(episodes) => {
+                if let Some(episode) = episodes.last().cloned() {
+                    return Ok(Some(episode));
+                }
+            }
+            Err(err) => {
+                last_error = Some(anyhow!("read {}: {err}", path.display()));
+            }
+        }
+    }
+
+    if let Some(err) = last_error {
+        Err(err)
+    } else {
+        Ok(None)
+    }
+}
+
+fn learning_episode_paths(workdir: &Path) -> Vec<PathBuf> {
+    let roko = workdir.join(".roko");
+    // Prefer the learn-root log because the legacy `run_once` path appends
+    // there today; keep the root/memory locations as compatibility fallbacks.
+    vec![
+        roko.join("learn").join("episodes.jsonl"),
+        roko.join("episodes.jsonl"),
+        roko.join("memory").join("episodes.jsonl"),
+    ]
 }
 
 #[cfg(feature = "legacy-orchestrate")]
