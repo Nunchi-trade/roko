@@ -84,7 +84,7 @@ impl ServiceBundle {
     pub fn effect_services(&self) -> EffectServices {
         let model_caller: Arc<dyn ModelCaller> = self.model_call_service.clone();
         EffectServices {
-            model: self.model.clone(),
+            default_model: self.model.clone(),
             model_caller,
             prompt_assembler: Arc::clone(&self.prompt_assembler),
             feedback_sink: Arc::clone(&self.feedback_sink),

@@ -35,8 +35,8 @@ const CACHE_BYPASS_EXPLORATION_THRESHOLD: f32 = 0.5;
 
 /// Services required by the `EffectDriver`.
 pub struct EffectServices {
-    /// Default model used for runtime-dispatched model calls.
-    pub model: String,
+    /// Resolved model used for runtime-dispatched model calls.
+    pub default_model: String,
     /// Model call service.
     pub model_caller: Arc<dyn ModelCaller>,
     /// Prompt assembly service.
@@ -112,7 +112,7 @@ impl EffectDriver {
                 reason: format!("affect policy deferred {role} dispatch"),
             };
         }
-        if self.services.model.trim().is_empty() {
+        if self.services.default_model.trim().is_empty() {
             return PipelineInput::AgentFailed {
                 error: format!("model is not configured for {role} dispatch"),
             };
@@ -146,7 +146,7 @@ impl EffectDriver {
         );
 
         let request = model_call_request(ModelCallRequestParts {
-            model: &self.services.model,
+            model: &self.services.default_model,
             role,
             run_id: &self.run_id,
             system_prompt,
@@ -175,7 +175,7 @@ impl EffectDriver {
             run_id: self.run_id.clone(),
             agent_id: agent_id.clone(),
             role: role.to_string(),
-            model: request.model.clone(),
+            model: self.services.default_model.clone(),
         });
 
         let start = Instant::now();
@@ -250,7 +250,7 @@ impl EffectDriver {
                         request_id: None,
                         prompt_section_ids,
                         knowledge_ids,
-                        model: None,
+                        model: Some(self.services.default_model.clone()),
                         provider: None,
                         token_usage: None,
                         cost: None,
@@ -820,7 +820,7 @@ mod tests {
     async fn spawn_agent_applies_affect_modulation_to_model_request() {
         let captured = Arc::new(Mutex::new(None));
         let services = EffectServices {
-            model: "mock-model".to_string(),
+            default_model: "mock-model".to_string(),
             model_caller: Arc::new(RecordingModelCaller {
                 captured: Arc::clone(&captured),
             }),

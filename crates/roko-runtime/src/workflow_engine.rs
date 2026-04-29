@@ -157,7 +157,7 @@ impl WorkflowEngine {
 
         let driver = EffectDriver::new(
             EffectServices {
-                model: self.services.model.clone(),
+                default_model: self.services.default_model.clone(),
                 model_caller: Arc::clone(&self.services.model_caller),
                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
                 feedback_sink: Arc::clone(&self.services.feedback_sink),
@@ -360,7 +360,7 @@ impl WorkflowEngine {
 
         let driver = EffectDriver::new(
             EffectServices {
-                model: self.services.model.clone(),
+                default_model: self.services.default_model.clone(),
                 model_caller: Arc::clone(&self.services.model_caller),
                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
                 feedback_sink: Arc::clone(&self.services.feedback_sink),
@@ -507,7 +507,7 @@ impl WorkflowEngine {
         report_from_events(
             run_id,
             matches!(outcome, WorkflowOutcome::Success { .. }),
-            &self.services.model,
+            &self.services.default_model,
             &config.prompt,
             started_at.elapsed().as_secs_f64(),
             events,
@@ -1165,7 +1165,7 @@ mod tests {
         let feedback_log = roko_dir.join("learn").join("efficiency.jsonl");
 
         let services = EffectServices {
-            model: "mock".to_string(),
+            default_model: "mock".to_string(),
             model_caller: Arc::new(RecordingModelCaller {
                 roles: Arc::new(Mutex::new(Vec::new())),
             }),
@@ -1504,7 +1504,7 @@ mod tests {
 
     fn mock_services() -> EffectServices {
         EffectServices {
-            model: "mock".to_string(),
+            default_model: "mock".to_string(),
             model_caller: Arc::new(MockModelCaller),
             prompt_assembler: Arc::new(MockPromptAssembler),
             feedback_sink: Arc::new(MockFeedbackSink),
@@ -1515,7 +1515,7 @@ mod tests {
 
     fn recording_services(roles: Arc<Mutex<Vec<String>>>) -> EffectServices {
         EffectServices {
-            model: "mock".to_string(),
+            default_model: "mock".to_string(),
             model_caller: Arc::new(RecordingModelCaller { roles }),
             prompt_assembler: Arc::new(MockPromptAssembler),
             feedback_sink: Arc::new(MockFeedbackSink),
