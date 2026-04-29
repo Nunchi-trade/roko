@@ -117,6 +117,18 @@ Every PRD MUST have these sections:
 10. **Acceptance criteria** — Machine-verifiable checkboxes
 11. **Cross-references** — Links to related documents
 12. **References** — Full academic citations, 10-30 per document
+13. **Repository Grounding** — Required section (see §7 below)
+
+### 7. Repository Grounding (REQUIRED)
+
+Every PRD MUST include a `## Repository Grounding` section with these four subsections:
+
+- **Existing crates**: Which workspace crates this feature touches. Use exact crate names from the repository, such as `roko-core`, `roko-agent`, or `roko-compose`. If no existing crates are relevant, state "None — this is a new subsystem."
+- **Source files**: Key source files that will be modified or read. Use relative paths, such as `crates/roko-cli/src/prd.rs`. If no existing files are modified, state "None — all files are new."
+- **New crates**: Any new crates to create. For each, justify why existing crates are insufficient. If no new crates are needed, state "None."
+- **Non-goals**: What this PRD explicitly does NOT change. Be specific, such as "Does not modify the gate pipeline" or "Does not change the TOML schema."
+
+If Repository Context is provided in the prompt below, use it. If not available, state "No repository context available." and use your knowledge of the workspace.
 
 ### 5. Writing style
 

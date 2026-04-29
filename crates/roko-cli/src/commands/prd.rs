@@ -19,6 +19,25 @@ fn extract_keywords_from_slug_and_description(slug: &str, description: &str) -> 
     words
 }
 
+/// Check that a generated PRD contains the required Repository Grounding section.
+/// Warns to stderr if missing. Returns true if found, false if missing.
+fn check_grounding_section(prd_content: &str, slug: &str) -> bool {
+    let has_section = prd_content.lines().any(|line| {
+        let trimmed = line.trim().to_lowercase();
+        trimmed.starts_with("## repository grounding")
+    });
+
+    if !has_section {
+        eprintln!(
+            "WARNING: PRD '{}' is missing '## Repository Grounding' section. \
+             The PRD may not be grounded in the actual repository.",
+            slug
+        );
+    }
+
+    has_section
+}
+
 pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
     use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
@@ -195,6 +214,12 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         "Agent returned empty output. Scaffold preserved at {}",
                         target.display()
                     );
+                }
+                // Post-generation grounding check: warn if the section is missing.
+                if exit_code == 0
+                    && let Ok(written_content) = std::fs::read_to_string(&target)
+                {
+                    check_grounding_section(&written_content, &slug);
                 }
                 let _ = crate::commands::util::persist_capture_episode(
                     &workdir,
