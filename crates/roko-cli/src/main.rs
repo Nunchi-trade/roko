@@ -2310,7 +2310,18 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             }
 
             // Delegate to plan run with resume
-            let plan_dir = workdir.join("plans");
+            // Use canonical `.roko/plans/` first, fall back to `./plans/` with a note.
+            let plan_dir = resolve_plans_dir(&workdir, None);
+            if !plan_dir.exists() {
+                let canonical = workdir.join(".roko").join("plans");
+                let fallback = workdir.join("plans");
+                eprintln!(
+                    "error: no plans directory found. Checked:\n  canonical: {}\n  fallback: {}",
+                    canonical.display(),
+                    fallback.display(),
+                );
+                return Ok(1);
+            }
             let plan_cmd = PlanCmd::Run {
                 plans_dir: plan_dir,
                 resume_plan: Some(snapshot),
@@ -2477,6 +2488,32 @@ fn resolve_workdir(cli: &Cli) -> PathBuf {
     }
 
     dir
+}
+
+/// Resolve the plans directory, preferring `.roko/plans/` and falling back to `./plans/`.
+///
+/// Explicit paths always win. When falling back to `./plans/`, a note is printed to stderr.
+fn resolve_plans_dir(workdir: &Path, explicit: Option<&Path>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path.to_path_buf();
+    }
+
+    let canonical = workdir.join(".roko").join("plans");
+    if canonical.exists() {
+        return canonical;
+    }
+
+    let fallback = workdir.join("plans");
+    if fallback.exists() {
+        eprintln!(
+            "note: using {} (not found in {})",
+            fallback.display(),
+            canonical.display()
+        );
+        return fallback;
+    }
+
+    canonical
 }
 
 /// Apply environment variable fallbacks to CLI flags.
@@ -3298,6 +3335,46 @@ mod tests {
             .and_then(Path::parent)
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         assert_eq!(resolve_workdir(&cli), expected);
+    }
+
+    #[test]
+    fn resolve_plans_dir_prefers_canonical_dot_roko_plans() {
+        let tmp = tempdir().unwrap();
+        let workdir = tmp.path();
+        let canonical = workdir.join(".roko").join("plans");
+        let fallback = workdir.join("plans");
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::create_dir_all(&fallback).unwrap();
+
+        assert_eq!(resolve_plans_dir(workdir, None), canonical);
+    }
+
+    #[test]
+    fn resolve_plans_dir_falls_back_to_top_level_plans() {
+        let tmp = tempdir().unwrap();
+        let workdir = tmp.path();
+        let fallback = workdir.join("plans");
+        std::fs::create_dir_all(&fallback).unwrap();
+
+        assert_eq!(resolve_plans_dir(workdir, None), fallback);
+    }
+
+    #[test]
+    fn resolve_plans_dir_returns_canonical_when_neither_directory_exists() {
+        let tmp = tempdir().unwrap();
+        let workdir = tmp.path();
+        let canonical = workdir.join(".roko").join("plans");
+
+        assert_eq!(resolve_plans_dir(workdir, None), canonical);
+    }
+
+    #[test]
+    fn resolve_plans_dir_honors_explicit_path() {
+        let tmp = tempdir().unwrap();
+        let workdir = tmp.path();
+        let explicit = workdir.join("custom-plans");
+
+        assert_eq!(resolve_plans_dir(workdir, Some(&explicit)), explicit);
     }
 
     #[tokio::test]
