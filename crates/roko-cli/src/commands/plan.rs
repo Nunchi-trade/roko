@@ -9,81 +9,11 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let summaries =
                 roko_cli::plan::summarize_discovered_plans(&wd).map_err(|e| anyhow!("{e}"))?;
-            let executor_state = read_executor_state(&wd);
-            let has_run_state = executor_state.is_some();
-            let state_entries = executor_state.clone().unwrap_or_default();
-            let state_map: std::collections::HashMap<String, (usize, usize)> = state_entries
-                .iter()
-                .cloned()
-                .map(|(id, done, total)| (id, (done, total)))
-                .collect();
-
-            let mut summaries = summaries;
-            for summary in &mut summaries {
-                if let Some((tasks_done, tasks_total)) = state_map.get(&summary.id).copied() {
-                    summary.tasks_done = tasks_done;
-                    summary.task_count = tasks_total;
-                    summary.completed = tasks_total > 0 && tasks_done == tasks_total;
-                }
-            }
 
             if cli.json {
-                let entries: Vec<serde_json::Value> = summaries
-                    .iter()
-                    .map(|summary| {
-                        serde_json::json!({
-                            "id": summary.id.as_str(),
-                            "title": summary.title.as_str(),
-                            "task_count": summary.task_count,
-                            "tasks_done": summary.tasks_done,
-                            "tasks_failed": summary.tasks_failed,
-                            "completed": summary.completed,
-                            "has_run_state": has_run_state,
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&entries)?);
+                println!("{}", roko_cli::plan::format_plan_list_json(&summaries));
             } else {
-                if summaries.is_empty() {
-                    if has_run_state {
-                        println!("no plans found in discovery path");
-                    } else {
-                        println!("no run state found");
-                    }
-                } else {
-                    println!(
-                        "{:<16} {:<40} {:<12} {}",
-                        "ID", "TITLE", "PROGRESS", "STATUS"
-                    );
-                    for summary in &summaries {
-                        let status =
-                            if summary.task_count > 0 && summary.tasks_done == summary.task_count {
-                                "done"
-                            } else if summary.tasks_done > 0 {
-                                "in-progress"
-                            } else {
-                                "pending"
-                            };
-                        println!(
-                            "{:<16} {:<40} {:<12} {}",
-                            summary.id.as_str(),
-                            summary.title.as_str(),
-                            format!("{}/{}", summary.tasks_done, summary.task_count),
-                            status
-                        );
-                    }
-                    if !has_run_state {
-                        println!("(no run state found — counts from tasks.toml files)");
-                    }
-                }
-
-                for (plan_id, _, _) in &state_entries {
-                    if !plan_path_exists(&wd, plan_id) {
-                        println!(
-                            "warning: state references missing plan: {plan_id} (not found in plans/ or .roko/plans/)"
-                        );
-                    }
-                }
+                println!("{}", roko_cli::plan::format_plan_list(&summaries));
             }
             Ok(EXIT_SUCCESS)
         }
@@ -207,47 +137,13 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             approval,
             max_retries,
             dry_run,
-            fresh,
         } => {
-            // ── Mandatory validation: reject malformed plans before execution ──
-            // Runs in both normal and `--dry-run` mode.
-            if let Some(exit_code) = validate_before_run(&plans_dir) {
-                return Ok(exit_code);
-            }
-
             // ── Dry-run mode: parse plans + show summary without executing ──
             if dry_run {
                 return cmd_plan_dry_run(&plans_dir, cli).await;
             }
 
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            if fresh {
-                let state_path = wd.join(".roko").join("state").join("executor.json");
-                if state_path.exists() {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis();
-                    let backup_path = state_path.with_extension(format!("json.bak.{ts}"));
-                    match std::fs::rename(&state_path, &backup_path) {
-                        Ok(()) => {
-                            if !cli.quiet {
-                                eprintln!(
-                                    "▸ --fresh: archived old state to {}",
-                                    backup_path.display()
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            eprintln!(
-                                "warning: --fresh: could not archive {}: {err}",
-                                state_path.display()
-                            );
-                        }
-                    }
-                }
-            }
-
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
             let task_timeout_secs = config.executor.task_timeout_secs;
@@ -255,18 +151,16 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             // Runner v2 auto-resumes from .roko/state/executor.json if it exists.
             // Explicit --resume-plan paths are honored by copying to the standard location.
-            if !fresh {
-                if let Some(ref snap_path) = resume_plan {
-                    let snap_path = if snap_path.is_relative() {
-                        wd.join(snap_path)
-                    } else {
-                        snap_path.clone()
-                    };
-                    let standard = wd.join(".roko").join("state").join("executor.json");
-                    if snap_path != standard && snap_path.exists() {
-                        let _ = std::fs::create_dir_all(standard.parent().unwrap());
-                        let _ = std::fs::copy(&snap_path, &standard);
-                    }
+            if let Some(ref snap_path) = resume_plan {
+                let snap_path = if snap_path.is_relative() {
+                    wd.join(snap_path)
+                } else {
+                    snap_path.clone()
+                };
+                let standard = wd.join(".roko").join("state").join("executor.json");
+                if snap_path != standard && snap_path.exists() {
+                    let _ = std::fs::create_dir_all(standard.parent().unwrap());
+                    let _ = std::fs::copy(&snap_path, &standard);
                 }
             }
 
@@ -505,16 +399,6 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 }
             }
 
-            if v2_report.tasks_failed > 0 {
-                let state_path = wd.join(".roko").join("state").join("executor.json");
-                if state_path.exists() {
-                    eprintln!(
-                        "hint: if tasks appear stuck or state looks wrong, try: roko plan run {} --fresh",
-                        plans_dir.display()
-                    );
-                }
-            }
-
             Ok(if v2_report.all_succeeded() {
                 EXIT_SUCCESS
             } else {
@@ -548,28 +432,23 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             } else {
                 "prompt"
             };
-            let config = crate::load_roko_config(&workdir)?;
             let task_id = from_file
                 .as_ref()
                 .and_then(|path| path.file_stem())
                 .and_then(|stem| stem.to_str())
                 .map(|stem| format!("plan:generate:{stem}"))
                 .unwrap_or_else(|| "plan:generate:prompt".to_string());
-            let model_key = resolve_effective_model_key_from_config(
-                &config,
+            let system = roko_cli::plan_generate::build_generation_prompt(
+                &workdir,
+                &source_text,
+                source_type,
+            );
+            let model_key = resolve_effective_model_key(
+                &workdir,
                 cli.model.clone(),
                 Some("strategist"),
                 "plan generate",
             )?;
-            let repo_keywords = extract_keywords_from_text(&source_text);
-            let repo_context =
-                build_plan_repo_context(&workdir, &repo_keywords, "plan generate").await;
-            let system = roko_cli::plan_generate::build_generation_prompt_with_context(
-                &workdir,
-                &source_text,
-                source_type,
-                repo_context.as_ref(),
-            );
 
             let task_prompt = format!(
                 "Read the source below and generate implementation plan directories under .roko/plans/. \
@@ -613,47 +492,29 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let source_path = find_plan_source_document(&plan_dir)?;
             let source_content = std::fs::read_to_string(&source_path)
                 .with_context(|| format!("read {}", source_path.display()))?;
-            let config = crate::load_roko_config(&workdir)?;
-            let model_profiles = config.effective_models();
-            let model_key = resolve_effective_model_key_from_config(
-                &config,
+            let model_key = resolve_effective_model_key(
+                &workdir,
                 cli.model.clone(),
                 Some("strategist"),
                 "plan regenerate",
             )?;
-            let pre_validation_issues = validate_plan_grounding(
-                &tasks_path,
-                existing_tasks.as_ref(),
-                &plan_dir,
-                &workdir,
-                Some(&model_profiles),
-            );
-            let repo_keywords = existing_tasks
-                .as_ref()
-                .map(|tasks| extract_keywords_from_plan(&tasks.tasks))
-                .filter(|keywords| !keywords.is_empty())
-                .unwrap_or_else(|| extract_keywords_from_text(&source_content));
-            let repo_context =
-                build_plan_repo_context(&workdir, &repo_keywords, "plan regenerate").await;
-            let validation_context = if pre_validation_issues.is_empty() {
-                None
-            } else {
-                Some(format_validation_issues(&pre_validation_issues))
-            };
-            let system = roko_cli::plan_generate::build_generation_prompt_with_context(
-                &workdir,
-                &source_content,
-                "prd",
-                repo_context.as_ref(),
-            );
-            let task_prompt = roko_cli::plan_generate::build_regeneration_prompt_with_context(
-                &workdir,
-                &existing,
-                validation_context.as_deref(),
-                repo_context.as_ref(),
-            );
 
             if dry_run {
+                let system = roko_cli::plan_generate::build_generation_prompt(
+                    &workdir,
+                    &source_content,
+                    "prd",
+                );
+                let task_prompt = format!(
+                    "Regenerate the plan at {} from the source PRD above. \
+                     Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
+                     max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
+                     [task.context], and [[task.verify]]. Preserve the status of any task that \
+                     is already marked done in the existing file. Do not create new plan \
+                     directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
+                    tasks_path.display(),
+                    existing = existing,
+                );
                 eprintln!(
                     "\n[dry-run] Would regenerate {} from {}",
                     tasks_path.display(),
@@ -664,6 +525,19 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
 
             let gw = load_gateway_env(&workdir);
+
+            let system =
+                roko_cli::plan_generate::build_generation_prompt(&workdir, &source_content, "prd");
+            let task_prompt = format!(
+                "Regenerate the plan at {} from the source PRD above. \
+                 Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
+                 max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
+                 [task.context], and [[task.verify]]. Preserve the status of any task that \
+                 is already marked done in the existing file. Do not create new plan \
+                 directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
+                tasks_path.display(),
+                existing = existing,
+            );
             let plan_name = plan_dir
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -696,46 +570,13 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 }
             };
 
-            let regenerated_parse = roko_cli::task_parser::TasksFile::parse(&tasks_path);
-            let post_validation_issues = validate_plan_grounding(
-                &tasks_path,
-                regenerated_parse.as_ref().ok(),
-                &plan_dir,
-                &workdir,
-                Some(&model_profiles),
-            );
-            let pre_error_count = pre_validation_issues
-                .iter()
-                .filter(|issue| issue.severity == Severity::Error)
-                .count();
-            let pre_warning_count = pre_validation_issues
-                .iter()
-                .filter(|issue| issue.severity == Severity::Warning)
-                .count();
-            let post_error_count = post_validation_issues
-                .iter()
-                .filter(|issue| issue.severity == Severity::Error)
-                .count();
-            let post_warning_count = post_validation_issues
-                .iter()
-                .filter(|issue| issue.severity == Severity::Warning)
-                .count();
-            println!(
-                "Pre-regeneration: {} errors, {} warnings",
-                pre_error_count, pre_warning_count
-            );
-            println!(
-                "Post-regeneration: {} errors, {} warnings",
-                post_error_count, post_warning_count
-            );
-
             if exit_code != 0 {
                 std::fs::write(&tasks_path, &existing)
                     .with_context(|| format!("restore {}", tasks_path.display()))?;
                 anyhow::bail!("plan regeneration agent failed with exit code {exit_code}");
             }
 
-            let regenerated = match regenerated_parse {
+            let regenerated = match roko_cli::task_parser::TasksFile::parse(&tasks_path) {
                 Ok(tasks) => tasks,
                 Err(err) => {
                     std::fs::write(&tasks_path, &existing)
@@ -780,251 +621,18 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     }
 }
 
-fn resolve_effective_model_key_from_config(
-    config: &roko_core::config::schema::RokoConfig,
+fn resolve_effective_model_key(
+    workdir: &Path,
     cli_model: Option<String>,
     role: Option<&str>,
     context: &str,
 ) -> Result<String> {
+    let config = crate::load_roko_config(workdir)?;
     let selection =
-        roko_cli::model_selection::resolve_effective_model(cli_model, None, role.map(str::to_string), None, config)
+        roko_cli::model_selection::resolve_effective_model(cli_model, None, role, None, &config)
             .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
-    eprintln!("[model] {} via {} ({})", selection.effective_model_key, selection.provider_key, selection.reason);
+    eprintln!("[{context}] effective selection: {}", selection.reason);
     Ok(selection.effective_model_key)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Severity {
-    Error,
-    Warning,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ValidationIssue {
-    severity: Severity,
-    category: String,
-    message: String,
-    location: Option<String>,
-}
-
-fn extract_keywords_from_text(text: &str) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut keywords = Vec::new();
-    collect_keywords_from_value(text, &mut seen, &mut keywords);
-    keywords
-}
-
-fn extract_keywords_from_plan(tasks: &[roko_cli::task_parser::TaskDef]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut keywords = Vec::new();
-
-    for task in tasks {
-        collect_keywords_from_value(&task.title, &mut seen, &mut keywords);
-        if let Some(description) = task.description.as_deref() {
-            collect_keywords_from_value(description, &mut seen, &mut keywords);
-        }
-        if keywords.len() >= 10 {
-            break;
-        }
-    }
-
-    keywords.truncate(10);
-    keywords
-}
-
-async fn build_plan_repo_context(
-    workdir: &Path,
-    keywords: &[String],
-    warning_label: &str,
-) -> Option<roko_cli::repo_context::RepoContextPack> {
-    let keyword_refs: Vec<&str> = keywords.iter().map(String::as_str).collect();
-    match roko_cli::repo_context::build_repo_context(workdir, &keyword_refs).await {
-        Ok(repo_context) => {
-            if !repo_context.context_root_verified {
-                eprintln!(
-                    "WARNING: Repository context not verified for {warning_label} keywords {:?}. Generated plan may reference nonexistent code.",
-                    keywords
-                );
-            }
-            Some(repo_context)
-        }
-        Err(err) => {
-            eprintln!(
-                "WARNING: Repository context unavailable for {warning_label} keywords {:?}: {err}",
-                keywords
-            );
-            None
-        }
-    }
-}
-
-fn validate_plan_grounding(
-    tasks_path: &Path,
-    tasks: Option<&roko_cli::task_parser::TasksFile>,
-    plan_dir: &Path,
-    workdir: &Path,
-    models: Option<&std::collections::HashMap<String, roko_core::config::schema::ModelProfile>>,
-) -> Vec<ValidationIssue> {
-    let mut issues = Vec::new();
-
-    if let Some(tasks) = tasks {
-        issues.extend(validation_issues_from_structure(tasks.validate_structure()));
-
-        if let Ok(modern_issues) =
-            roko_cli::task_parser::TasksFile::validate_modern_fields(tasks_path)
-        {
-            issues.extend(validation_issues_from_modern_fields(modern_issues));
-        }
-    } else if let Ok(modern_issues) =
-        roko_cli::task_parser::TasksFile::validate_modern_fields(tasks_path)
-    {
-        issues.extend(validation_issues_from_modern_fields(modern_issues));
-    }
-
-    match crate::plan_validate::validate_plans_dir_with_workdir(plan_dir, models, Some(workdir)) {
-        Ok(report) => {
-            for plan in report.plans {
-                if plan.path != tasks_path.display().to_string() {
-                    continue;
-                }
-
-                for diagnostic in plan.diagnostics {
-                    if !should_keep_plan_diagnostic(&diagnostic) {
-                        continue;
-                    }
-
-                    issues.push(validation_issue_from_diagnostic(&diagnostic));
-                }
-            }
-        }
-        Err(err) => {
-            issues.push(ValidationIssue {
-                severity: Severity::Error,
-                category: "plan_validation".to_string(),
-                message: err.to_string(),
-                location: Some(tasks_path.display().to_string()),
-            });
-        }
-    }
-
-    issues.sort();
-    issues.dedup();
-    issues
-}
-
-fn should_keep_plan_diagnostic(diagnostic: &crate::plan_validate::Diagnostic) -> bool {
-    match diagnostic.rule_id.as_str() {
-        "PLAN_003" => diagnostic.message.contains("role"),
-        "PLAN_005" | "PLAN_006" => false,
-        _ => true,
-    }
-}
-
-fn validation_issue_from_diagnostic(
-    diagnostic: &crate::plan_validate::Diagnostic,
-) -> ValidationIssue {
-    ValidationIssue {
-        severity: match diagnostic.severity {
-            crate::plan_validate::Severity::Error => Severity::Error,
-            crate::plan_validate::Severity::Warning => Severity::Warning,
-        },
-        category: diagnostic.rule_id.clone(),
-        message: diagnostic.message.clone(),
-        location: diagnostic
-            .task_id
-            .clone()
-            .or_else(|| diagnostic.plan_id.clone()),
-    }
-}
-
-fn split_validation_location(message: &str) -> (Option<String>, String) {
-    if let Some((location, rest)) = message.split_once(':') {
-        let location = location.trim();
-        if !location.is_empty() {
-            return (Some(location.to_string()), rest.trim_start().to_string());
-        }
-    }
-
-    (None, message.to_string())
-}
-
-fn format_validation_issues(issues: &[ValidationIssue]) -> String {
-    issues
-        .iter()
-        .map(|issue| {
-            let severity = match issue.severity {
-                Severity::Error => "ERROR",
-                Severity::Warning => "WARNING",
-            };
-            let location = issue
-                .location
-                .as_ref()
-                .map(|location| format!(" (in {location})"))
-                .unwrap_or_default();
-            format!(
-                "- **{severity}** [{}]: {}{}",
-                issue.category, issue.message, location
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn collect_keywords_from_value(
-    value: &str,
-    seen: &mut std::collections::HashSet<String>,
-    keywords: &mut Vec<String>,
-) {
-    for token in value.split(|c: char| c.is_whitespace() || c == '-' || c == '_') {
-        let keyword = token
-            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
-            .to_ascii_lowercase();
-        if keyword.len() < 3 {
-            continue;
-        }
-        if seen.insert(keyword.clone()) {
-            keywords.push(keyword);
-        }
-        if keywords.len() >= 10 {
-            break;
-        }
-    }
-}
-
-fn validation_issues_from_structure(
-    issues: Vec<roko_cli::task_parser::TaskValidationIssue>,
-) -> Vec<ValidationIssue> {
-    issues
-        .into_iter()
-        .map(|issue| {
-            let message = issue.to_string();
-            let (location, message) = split_validation_location(&message);
-            ValidationIssue {
-                severity: Severity::Error,
-                category: "task_structure".to_string(),
-                message,
-                location,
-            }
-        })
-        .collect()
-}
-
-fn validation_issues_from_modern_fields(
-    issues: Vec<roko_cli::task_parser::ModernFieldIssue>,
-) -> Vec<ValidationIssue> {
-    issues
-        .into_iter()
-        .map(|issue| {
-            let message = issue.to_string();
-            let (location, message) = split_validation_location(&message);
-            ValidationIssue {
-                severity: Severity::Error,
-                category: "modern_fields".to_string(),
-                message,
-                location,
-            }
-        })
-        .collect()
 }
 
 /// Parse and display a plan directory without executing anything.
@@ -1200,47 +808,6 @@ pub(crate) async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32>
     Ok(EXIT_SUCCESS)
 }
 
-/// Run plan validation before `plan run` starts any agents.
-///
-/// Returns `Some(exit_code)` when validation fails, or `None` when the plan
-/// set is valid enough to continue.
-fn validate_before_run(plans_dir: &Path) -> Option<i32> {
-    let current_dir = match std::env::current_dir() {
-        Ok(dir) => dir,
-        Err(error) => {
-            eprintln!("error: cannot resolve cwd for validation: {error}");
-            return Some(1);
-        }
-    };
-
-    let config_path = current_dir.join("roko.toml");
-    let models = if config_path.is_file() {
-        std::fs::read_to_string(&config_path)
-            .ok()
-            .and_then(|text| toml::from_str::<roko_core::config::schema::RokoConfig>(&text).ok())
-            .map(|config| crate::commands::config_cmd::configured_models(&config))
-    } else {
-        None
-    };
-
-    let report = match plan_validate::validate_plans_dir(plans_dir, models.as_ref()) {
-        Ok(report) => report,
-        Err(error) => {
-            eprintln!("error: plan validation failed: {error:#}");
-            return Some(1);
-        }
-    };
-
-    let code = report.exit_code(false);
-    if code != 0 {
-        eprintln!("{}", plan_validate::render_text(&report));
-        eprintln!("error: plan validation failed — fix the errors above before running");
-        Some(1)
-    } else {
-        None
-    }
-}
-
 pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> Result<i32> {
     let current_dir =
         std::env::current_dir().context("resolve current directory for plan validation")?;
@@ -1256,11 +823,7 @@ pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> 
         None
     };
 
-    let report = plan_validate::validate_plans_dir_with_workdir(
-        dir,
-        models.as_ref(),
-        Some(current_dir.as_path()),
-    )?;
+    let report = plan_validate::validate_plans_dir(dir, models.as_ref())?;
     if json_output {
         println!("{}", plan_validate::render_json(&report)?);
     } else {
@@ -1345,308 +908,4 @@ pub(crate) fn preserve_completed_task_status(
         };
 
     regenerated
-}
-
-pub(crate) fn read_executor_state(
-    workdir: &std::path::Path,
-) -> Option<Vec<(String, usize, usize)>> {
-    let executor_path = workdir.join(".roko").join("state").join("executor.json");
-    if !executor_path.is_file() {
-        return None;
-    }
-
-    let contents = std::fs::read_to_string(&executor_path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
-
-    if let Some(plans) = value.get("plans").and_then(serde_json::Value::as_array) {
-        let mut entries = Vec::with_capacity(plans.len());
-        for plan in plans {
-            let id = json_str_field(plan, &["plan_id", "id"]).unwrap_or("unknown");
-            let tasks_done =
-                json_usize_field(plan, &["tasks_completed", "completed_tasks"]).unwrap_or(0);
-            let tasks_total =
-                json_usize_field(plan, &["tasks_total", "total_tasks", "task_count"]).unwrap_or(0);
-            entries.push((id.to_string(), tasks_done, tasks_total));
-        }
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        return Some(entries);
-    }
-
-    if let Some(plan_states) = value
-        .get("plan_states")
-        .and_then(serde_json::Value::as_object)
-    {
-        let completed_counts = read_run_state_completed_counts(workdir);
-        let discovered_totals = discovered_plan_totals(workdir);
-        let mut entries = Vec::with_capacity(plan_states.len());
-
-        for (plan_id, plan_state) in plan_states {
-            let tasks_total = discovered_totals.get(plan_id).copied().unwrap_or_else(|| {
-                json_usize_field(plan_state, &["tasks_total", "total_tasks", "task_count"])
-                    .unwrap_or(0)
-            });
-            let mut tasks_done = completed_counts.get(plan_id).copied().unwrap_or(0);
-            if tasks_done == 0
-                && tasks_total > 0
-                && json_str_field(
-                    plan_state
-                        .get("current_phase")
-                        .unwrap_or(&serde_json::Value::Null),
-                    &["kind"],
-                )
-                .is_some_and(|kind| {
-                    kind.eq_ignore_ascii_case("complete") || kind.eq_ignore_ascii_case("completed")
-                })
-            {
-                tasks_done = tasks_total;
-            }
-            entries.push((plan_id.clone(), tasks_done, tasks_total));
-        }
-
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        return Some(entries);
-    }
-
-    if let Some(tasks) = value.get("tasks").and_then(serde_json::Value::as_array) {
-        let mut progress: std::collections::BTreeMap<String, (usize, usize)> =
-            std::collections::BTreeMap::new();
-        for task in tasks {
-            let Some(plan_id) = json_str_field(task, &["plan", "plan_id"]) else {
-                continue;
-            };
-            let entry = progress.entry(plan_id.to_string()).or_insert((0, 0));
-            entry.0 += 1;
-
-            let status = task
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if matches!(
-                status.as_str(),
-                "done" | "complete" | "completed" | "passed" | "skipped"
-            ) {
-                entry.1 += 1;
-            }
-        }
-
-        return Some(
-            progress
-                .into_iter()
-                .map(|(plan_id, (tasks_total, tasks_done))| (plan_id, tasks_done, tasks_total))
-                .collect(),
-        );
-    }
-
-    Some(Vec::new())
-}
-
-fn discovered_plan_totals(workdir: &std::path::Path) -> std::collections::HashMap<String, usize> {
-    roko_cli::plan::summarize_discovered_plans(workdir)
-        .ok()
-        .map(|summaries| {
-            summaries
-                .into_iter()
-                .map(|summary| (summary.id, summary.task_count))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn read_run_state_completed_counts(
-    workdir: &std::path::Path,
-) -> std::collections::HashMap<String, usize> {
-    let run_state_path = workdir.join(".roko").join("state").join("run-state.json");
-    let Ok(contents) = std::fs::read_to_string(&run_state_path) else {
-        return std::collections::HashMap::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return std::collections::HashMap::new();
-    };
-    let Some(completed_tasks) = value
-        .get("completed_tasks")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return std::collections::HashMap::new();
-    };
-
-    completed_tasks
-        .iter()
-        .map(|(plan_id, tasks)| {
-            (
-                plan_id.clone(),
-                tasks.as_array().map_or(0, std::vec::Vec::len),
-            )
-        })
-        .collect()
-}
-
-fn json_str_field<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
-}
-
-fn json_usize_field(value: &serde_json::Value, keys: &[&str]) -> Option<usize> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_u64))
-        .map(|count| count as usize)
-}
-
-pub(crate) fn plan_path_exists(workdir: &std::path::Path, plan_id: &str) -> bool {
-    let plan_dir = workdir.join("plans").join(plan_id);
-    let roko_plan_dir = workdir.join(".roko").join("plans").join(plan_id);
-    plan_dir.exists() || roko_plan_dir.exists()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    fn read_executor_state_returns_none_without_snapshot() {
-        let dir = tempdir().expect("tempdir");
-        assert!(read_executor_state(dir.path()).is_none());
-    }
-
-    #[test]
-    fn read_executor_state_parses_plans_array() {
-        let dir = tempdir().expect("tempdir");
-        let state_dir = dir.path().join(".roko").join("state");
-        std::fs::create_dir_all(&state_dir).expect("state dir");
-        std::fs::write(
-            state_dir.join("executor.json"),
-            r#"{"plans":[{"plan_id":"plan-a","tasks_completed":1,"tasks_total":3}]}"#,
-        )
-        .expect("write executor state");
-
-        let state = read_executor_state(dir.path()).expect("state");
-        assert_eq!(state, vec![("plan-a".to_string(), 1, 3)]);
-    }
-
-    #[test]
-    fn extract_keywords_from_plan_deduplicates_and_limits_keywords() {
-        let parsed: roko_cli::task_parser::TasksFile = toml::from_str(
-            r#"
-[meta]
-plan = "demo"
-
-[[task]]
-id = "T1"
-title = "Build Compose Pipeline"
-description = "Compose the pipeline for the workspace"
-role = "implementer"
-tier = "focused"
-model_hint = "claude-sonnet-4-6"
-depends_on = []
-context = { read_files = [{ path = "src/lib.rs" }] }
-verify = [{ phase = "compile", command = "cargo check -p demo" }]
-
-[[task]]
-id = "T2"
-title = "Build Separate Bridge"
-description = "Bridge the workspace core adapters"
-role = "implementer"
-tier = "focused"
-model_hint = "claude-sonnet-4-6"
-depends_on = []
-context = { read_files = [{ path = "src/lib.rs" }] }
-verify = [{ phase = "compile", command = "cargo check -p demo" }]
-"#,
-        )
-        .expect("parse tasks");
-
-        let keywords = extract_keywords_from_plan(&parsed.tasks);
-
-        assert!(keywords.len() <= 10);
-        assert!(keywords.contains(&"compose".to_string()));
-        assert!(keywords.contains(&"pipeline".to_string()));
-        assert!(keywords.contains(&"bridge".to_string()));
-    }
-
-    #[test]
-    fn format_validation_issues_renders_locations_and_severity() {
-        let rendered = format_validation_issues(&[
-            ValidationIssue {
-                severity: Severity::Error,
-                category: "PLAN_003".to_string(),
-                message: "task 'T1' is missing required field 'role'".to_string(),
-                location: Some("T1".to_string()),
-            },
-            ValidationIssue {
-                severity: Severity::Warning,
-                category: "PLAN_009".to_string(),
-                message: "task 'T2' uses model alias 'sonnet'".to_string(),
-                location: None,
-            },
-        ]);
-
-        assert!(rendered.contains("**ERROR** [PLAN_003]"));
-        assert!(rendered.contains("(in T1)"));
-        assert!(rendered.contains("**WARNING** [PLAN_009]"));
-    }
-
-    #[test]
-    fn validate_plan_grounding_collects_task_and_workspace_issues() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path();
-        let plan_dir = root.join("plans").join("demo");
-        fs::create_dir_all(&plan_dir).expect("plan dir");
-        fs::create_dir_all(root.join("crates").join("roko-core")).expect("existing crate");
-        fs::create_dir_all(root.join("crates").join("roko-other")).expect("other crate");
-
-        let tasks_path = plan_dir.join("tasks.toml");
-        fs::write(
-            &tasks_path,
-            r#"
-[meta]
-plan = "demo"
-max_parallel = 1
-
-[[task]]
-id = "T1"
-title = "Create crate roko-core"
-role = ""
-status = "ready"
-tier = "focused"
-model_hint = "sonnet"
-files = ["crates/missing-crate/src/lib.rs"]
-depends_on = []
-"#,
-        )
-        .expect("write tasks");
-
-        let tasks = roko_cli::task_parser::TasksFile::parse(&tasks_path).expect("parse tasks");
-        let mut models = HashMap::new();
-        models.insert(
-            "claude-sonnet-4-6".to_string(),
-            roko_core::config::schema::ModelProfile {
-                provider: "claude_cli".to_string(),
-                slug: "claude-sonnet-4-6".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let issues =
-            validate_plan_grounding(&tasks_path, Some(&tasks), &plan_dir, root, Some(&models));
-
-        assert!(
-            issues
-                .iter()
-                .any(|issue| issue.category == "task_structure")
-        );
-        assert!(issues.iter().any(|issue| issue.category == "modern_fields"));
-        assert!(issues.iter().any(|issue| issue.category == "PLAN_003"));
-        assert!(issues.iter().any(|issue| issue.category == "PLAN_009"));
-        assert!(issues.iter().any(|issue| issue.category == "PLAN_030"));
-        assert!(issues.iter().any(|issue| issue.category == "PLAN_032"));
-        assert!(issues.iter().any(|issue| issue.severity == Severity::Error));
-        assert!(
-            issues
-                .iter()
-                .any(|issue| issue.severity == Severity::Warning)
-        );
-    }
 }
