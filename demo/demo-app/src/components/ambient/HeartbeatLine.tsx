@@ -134,7 +134,7 @@ export default function HeartbeatLine({
       className={`heartbeat-line ${className ?? ''}`}
       style={{ height: `${height}px` }}
     >
-      <canvas ref={canvasRef} />
+      <canvas ref={canvasRef} role="presentation" aria-hidden="true" />
     </div>
   );
 }

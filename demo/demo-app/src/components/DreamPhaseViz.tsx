@@ -139,7 +139,8 @@ function PhaseSparkline({
   return (
     <canvas
       ref={canvasRef}
-      aria-hidden="true"
+      role="img"
+      aria-label="Dream consolidation phase visualization"
       style={{ width: '100%', height, display: 'block' }}
     />
   );

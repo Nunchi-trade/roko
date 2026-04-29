@@ -249,7 +249,7 @@ pub async fn create_share(
     Json(json!({
         "token": token,
         "url": share_url,
-        "metadata": metadata,
+        "metadata": stored.metadata,
         "transcript": transcript,
     }))
     .into_response()

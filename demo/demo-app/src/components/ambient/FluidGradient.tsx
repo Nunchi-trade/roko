@@ -139,7 +139,7 @@ export default function FluidGradient({
 
   return (
     <div className={`fluid-gradient ${className ?? ''}`}>
-      <canvas ref={canvasRef} />
+      <canvas ref={canvasRef} role="presentation" aria-hidden="true" />
     </div>
   );
 }

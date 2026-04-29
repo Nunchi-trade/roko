@@ -116,7 +116,7 @@ export default function TimelineChart({ tasks, height = 300 }: TimelineChartProp
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Timeline chart of events" />
     </div>
   );
 }

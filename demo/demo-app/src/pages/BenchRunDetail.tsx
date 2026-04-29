@@ -244,7 +244,7 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
             <p className="bench-empty-text">No cost data available.</p>
           </div>
         ) : (
-          <canvas ref={canvasRef} className="chart-canvas" />
+          <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Task duration distribution chart" />
         )}
       </div>
     </div>
@@ -377,7 +377,7 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Gate pass rate chart" />
     </div>
   );
 }

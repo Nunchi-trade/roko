@@ -752,10 +752,18 @@ fn build_app_state(
         roko_config.serve.auth.privy_app_id = Some(crate::jwks::NUNCHI_PRIVY_APP_ID.to_string());
     }
     if !roko_config.serve.auth.enabled {
-        if let Ok(Some(cred)) = load_stored_credential() {
-            if cred.get("method").and_then(|v| v.as_str()) == Some("privy") {
-                info!("Privy credential found — enabling auth");
-                roko_config.serve.auth.enabled = true;
+        // Only auto-enable auth for non-loopback binds. Local dev (127.0.0.1 /
+        // localhost) should respect the explicit `enabled = false` in roko.toml.
+        let bind = &roko_config.server.bind;
+        let is_loopback = bind == "127.0.0.1"
+            || bind == "::1"
+            || bind.eq_ignore_ascii_case("localhost");
+        if !is_loopback {
+            if let Ok(Some(cred)) = load_stored_credential() {
+                if cred.get("method").and_then(|v| v.as_str()) == Some("privy") {
+                    info!("Privy credential found — enabling auth for public bind");
+                    roko_config.serve.auth.enabled = true;
+                }
             }
         }
     }

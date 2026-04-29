@@ -88,7 +88,7 @@ export default function CostChart({ data, title, color: colorProp, height = 200 
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Cost over time chart" />
     </div>
   );
 }

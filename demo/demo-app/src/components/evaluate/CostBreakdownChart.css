@@ -1,0 +1,12 @@
+/* CostBreakdownChart */
+.cost-breakdown-chart {
+  display: flex;
+  flex-direction: column;
+}
+
+.cost-breakdown-chart__controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex: 0 0 auto;
+}

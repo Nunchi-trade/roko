@@ -72,9 +72,11 @@ impl GateService {
                 ShellGate::new("git", vec!["diff".into(), "--stat".into()]).with_timeout_ms(30_000),
             )),
             "fmt" | "fmt:cargo" | "format" => Some(Box::new(FormatCheckGate::cargo())),
-            // TODO: thread `GateConfig.shell_gates` through this helper so shell can use the
-            // configured program/args instead of a placeholder command.
-            "shell" => Some(Box::new(ShellGate::new("true", vec![]).with_name("shell"))),
+            // "shell" / "custom:shell" / "custom" are intentionally absent here.
+            // They require a `ShellGateCommand` from `GateConfig.shell_gates` to know which
+            // program to run.  Returning a stub that runs `true` would silently pass when the
+            // caller intended a real check.  Shell gates must go through `run_gates()`, which
+            // pops the next `ShellGateCommand` from config or records a skipped verdict.
             "judge" | "llm-judge" => Some(Box::new(StubJudgeGate)),
             _ => None,
         }
@@ -408,10 +410,20 @@ mod tests {
         assert!(svc.gate_for_name("test", bs).is_some());
         assert!(svc.gate_for_name("diff", bs).is_some());
         assert!(svc.gate_for_name("fmt", bs).is_some());
-        let shell_gate = svc
-            .gate_for_name("shell", bs)
-            .expect("shell gate should be recognized");
-        assert_eq!(shell_gate.name(), "shell");
+        // "shell", "custom:shell", and "custom" require a ShellGateCommand from config.
+        // gate_for_name() returns None for them — callers must use run_gates() instead.
+        assert!(
+            svc.gate_for_name("shell", bs).is_none(),
+            "shell gate must not return a stub; use run_gates() with a ShellGateCommand"
+        );
+        assert!(
+            svc.gate_for_name("custom:shell", bs).is_none(),
+            "custom:shell gate must not return a stub; use run_gates() with a ShellGateCommand"
+        );
+        assert!(
+            svc.gate_for_name("custom", bs).is_none(),
+            "custom gate must not return a stub; use run_gates() with a ShellGateCommand"
+        );
         assert!(svc.gate_for_name("judge", bs).is_some());
         assert!(svc.gate_for_name("nonexistent", bs).is_none());
     }

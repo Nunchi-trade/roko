@@ -169,7 +169,7 @@ function HashChainViz({
 
   return (
     <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+      <canvas ref={canvasRef} role="img" aria-label="Integrity verification timeline" style={{ width: '100%', height: '100%', display: 'block' }} />
     </div>
   );
 }

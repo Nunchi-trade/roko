@@ -136,7 +136,7 @@ async fn start_bench_run(
 
     // Publish start event.
     state.event_bus.publish(ServerEvent::BenchRunStarted {
-        run_id: run_id.clone(),
+        bench_id: run_id.clone(),
         suite_id: suite.id.clone(),
         total_tasks: suite.tasks.len(),
     });
@@ -234,8 +234,9 @@ async fn execute_bench_run(
     for (idx, task) in suite.tasks.iter().enumerate() {
         // Publish task start.
         state.event_bus.publish(ServerEvent::BenchTaskStarted {
-            run_id: run_id.clone(),
+            bench_id: run_id.clone(),
             task_id: task.id.clone(),
+            task_name: task.name.clone(),
             task_index: idx,
             total_tasks,
         });
@@ -282,12 +283,14 @@ async fn execute_bench_run(
                 BenchTaskResult {
                     task_id: task.id.clone(),
                     task_name: task.name.clone(),
-                    passed,
+                    status: if passed { "pass".into() } else { "fail".into() },
                     duration_ms,
-                    model_used: overrides.model.clone(),
-                    input_tokens,
-                    output_tokens,
+                    model: overrides.model.clone().unwrap_or_default(),
+                    tokens_in: input_tokens,
+                    tokens_out: output_tokens,
                     cost_usd,
+                    gate_verdicts: Vec::new(),
+                    retries_used: 0,
                     output_preview,
                     error: None,
                 }
@@ -295,18 +298,20 @@ async fn execute_bench_run(
             Err(e) => BenchTaskResult {
                 task_id: task.id.clone(),
                 task_name: task.name.clone(),
-                passed: false,
+                status: "fail".into(),
                 duration_ms,
-                model_used: overrides.model.clone(),
-                input_tokens: 0,
-                output_tokens: 0,
+                model: overrides.model.clone().unwrap_or_default(),
+                tokens_in: 0,
+                tokens_out: 0,
                 cost_usd: bench::estimate_cost_usd(overrides.model.as_deref(), 0, 0),
+                gate_verdicts: Vec::new(),
+                retries_used: 0,
                 output_preview: None,
                 error: Some(format!("{e}")),
             },
         };
 
-        if task_result.passed {
+        if task_result.passed() {
             passed_count += 1;
         } else {
             failed_count += 1;
@@ -314,22 +319,21 @@ async fn execute_bench_run(
 
         // Publish task completion.
         state.event_bus.publish(ServerEvent::BenchTaskCompleted {
-            run_id: run_id.clone(),
+            bench_id: run_id.clone(),
             task_id: task_result.task_id.clone(),
-            passed: task_result.passed,
-            duration_ms: task_result.duration_ms,
-            cost_usd: task_result.cost_usd,
+            result: serde_json::to_value(&task_result).unwrap_or_default(),
         });
+
+        let cost_so_far: f64 = results.iter().map(|r: &BenchTaskResult| r.cost_usd).sum::<f64>() + task_result.cost_usd;
 
         results.push(task_result);
 
         // Publish progress.
         state.event_bus.publish(ServerEvent::BenchProgress {
-            run_id: run_id.clone(),
+            bench_id: run_id.clone(),
             completed: results.len(),
             total: total_tasks,
-            passed: passed_count,
-            failed: failed_count,
+            cost_so_far,
         });
 
         if let Some((playbook_store, knowledge_store)) = learning_stores.as_ref() {
@@ -353,7 +357,7 @@ async fn execute_bench_run(
                     .unwrap_or(0);
 
                 state.event_bus.publish(ServerEvent::BenchLearningEvent {
-                    run_id: run_id.clone(),
+                    bench_id: run_id.clone(),
                     task_id: task.id.clone(),
                     playbooks_created,
                     anti_patterns_created,
@@ -401,11 +405,8 @@ async fn execute_bench_run(
 
     // Publish completion event.
     state.event_bus.publish(ServerEvent::BenchRunCompleted {
-        run_id: run_id.clone(),
-        suite_id: suite.id,
-        pass_rate: summary.pass_rate,
-        total_cost_usd: summary.total_cost_usd,
-        total_duration_ms: summary.total_duration_ms,
+        bench_id: run_id.clone(),
+        summary: serde_json::to_value(&summary).unwrap_or_default(),
     });
 
     // Clean up handle.
@@ -438,8 +439,8 @@ async fn bench_run_status(
         "status": run.status,
         "current_task_index": run.current_task_index,
         "total_tasks": run.total_tasks,
-        "passed": run.results.iter().filter(|r| r.passed).count(),
-        "failed": run.results.iter().filter(|r| !r.passed).count(),
+        "passed": run.results.iter().filter(|r| r.passed()).count(),
+        "failed": run.results.iter().filter(|r| !r.passed()).count(),
         "summary": run.summary,
     })))
 }

@@ -223,9 +223,18 @@ where
     deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::architectural())
 }
 
+fn default_pipeline_template() -> String {
+    "standard".to_string()
+}
+
 /// Complexity-to-pipeline mapping.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineConfig {
+    /// Workflow template used by `roko run` when no per-task band is resolved.
+    /// Valid values: "standard", "express", "focused", "integrative", "full", "architectural".
+    /// Defaults to "standard".
+    #[serde(default = "default_pipeline_template")]
+    pub default_template: String,
     /// Mechanical tasks: skip strategist and reviewers.
     #[serde(
         default = "default_mechanical_pipeline",
@@ -269,6 +278,7 @@ impl PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
+            default_template: default_pipeline_template(),
             mechanical: PipelineBandConfig::mechanical(),
             focused: PipelineBandConfig::focused(),
             integrative: PipelineBandConfig::integrative(),

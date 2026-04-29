@@ -266,8 +266,9 @@ pub(crate) async fn cmd_run(
     let external_hub: Option<&roko_cli::state_hub::StateHub> = None;
 
     if engine == crate::EngineVariant::V2 {
-        // TODO(W03): expose workflow_template via Config.
-        let template = "standard";
+        // Read the workflow template from roko.toml [pipeline].default_template,
+        // falling back to "standard" when not configured.
+        let template = config.pipeline.default_template.as_str();
 
         // Build enabled gates list and typed shell commands from declared gate configs.
         let enabled_gates = roko_cli::run::workflow_enabled_gate_names(&config.gates);

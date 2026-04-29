@@ -119,7 +119,7 @@ export default function RadarChart({ axes, datasets, height = 320 }: RadarChartP
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Radar chart comparing metrics" />
     </div>
   );
 }

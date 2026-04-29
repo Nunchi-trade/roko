@@ -74,7 +74,7 @@ export default function HeatmapChart({ rows, columns, values, height = 280 }: He
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Heatmap data visualization" />
     </div>
   );
 }

@@ -90,10 +90,13 @@ Call one tool at a time. After each tool result, decide your next action.\n\n";
                 None => tool_instruction.to_string(),
             };
 
-            let agent = ToolLoopAgent::new(tool_loop)
+            let mut agent = ToolLoopAgent::new(tool_loop)
                 .with_tools(tools)
                 .with_name(agent_name)
                 .with_system_prompt(system_prompt);
+            if let Some(ref dir) = options.working_dir {
+                agent = agent.with_worktree_path(dir.clone());
+            }
 
             return Ok(Box::new(agent));
         }

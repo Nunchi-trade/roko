@@ -150,7 +150,7 @@ export default function ScatterChart({
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Scatter plot visualization" />
     </div>
   );
 }

@@ -380,6 +380,9 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             if let Some(prompt) = &options.system_prompt {
                 agent = agent.with_system_prompt(prompt.clone());
             }
+            if let Some(ref dir) = options.working_dir {
+                agent = agent.with_worktree_path(dir.clone());
+            }
 
             return Ok(Box::new(agent));
         }

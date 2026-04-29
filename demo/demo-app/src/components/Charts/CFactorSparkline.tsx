@@ -213,7 +213,7 @@ export default function CFactorSparkline({ trend, woolley, height = 320 }: CFact
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="C-factor trend sparkline" />
     </div>
   );
 }

@@ -397,7 +397,7 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
 
   return (
     <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+      <canvas ref={canvasRef} role="img" aria-label="Agent fleet topology network" style={{ width: '100%', height: '100%', display: 'block' }} />
     </div>
   );
 }

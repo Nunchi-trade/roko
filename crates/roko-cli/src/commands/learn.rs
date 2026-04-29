@@ -516,22 +516,22 @@ fn efficiency_model_label(event: &roko_learn::efficiency::AgentEfficiencyEvent) 
 fn attempt_correlation_summary(
     events: &[roko_learn::efficiency::AgentEfficiencyEvent],
 ) -> Option<String> {
-    let events_with_attempt_id = events
+    let events_with_task_id = events
         .iter()
-        .filter(|event| !event.attempt_id.is_empty())
+        .filter(|event| !event.task_id.is_empty())
         .count();
-    if events_with_attempt_id == 0 {
+    if events_with_task_id == 0 {
         return None;
     }
 
     let linked_gate_failures = events
         .iter()
-        .filter(|event| !event.attempt_id.is_empty() && !event.gate_passed)
+        .filter(|event| !event.task_id.is_empty() && !event.gate_passed)
         .count();
 
     Some(format!(
-        "  Attempt correlation: {} events with attempt_id, {} gate failures linked",
-        events_with_attempt_id, linked_gate_failures
+        "  Attempt correlation: {} events with task_id, {} gate failures linked",
+        events_with_task_id, linked_gate_failures
     ))
 }
 

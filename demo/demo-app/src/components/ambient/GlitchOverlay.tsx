@@ -128,7 +128,7 @@ export default function GlitchOverlay({
 
   return (
     <div className={`glitch-overlay ${className ?? ''}`}>
-      <canvas ref={canvasRef} />
+      <canvas ref={canvasRef} role="presentation" aria-hidden="true" />
     </div>
   );
 }

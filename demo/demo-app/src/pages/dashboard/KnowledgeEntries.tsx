@@ -114,7 +114,7 @@ function DomainChart({ entries, height = 140 }: { entries: KnowledgeEntry[]; hei
 
   return (
     <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+      <canvas ref={canvasRef} role="img" aria-label="Knowledge entry frequency chart" style={{ width: '100%', height: '100%', display: 'block' }} />
     </div>
   );
 }
@@ -217,7 +217,7 @@ function ConfidenceHistogram({ entries, height = 140 }: { entries: KnowledgeEntr
 
   return (
     <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+      <canvas ref={canvasRef} role="img" aria-label="Knowledge tier distribution chart" style={{ width: '100%', height: '100%', display: 'block' }} />
     </div>
   );
 }

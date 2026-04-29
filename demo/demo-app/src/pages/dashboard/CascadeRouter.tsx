@@ -119,7 +119,7 @@ function ModelConfidenceChart({ rows, height = 200 }: { rows: [string, Confidenc
 
   return (
     <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
-      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+      <canvas ref={canvasRef} role="img" aria-label="Cascade router model distribution" style={{ width: '100%', height: '100%', display: 'block' }} />
     </div>
   );
 }

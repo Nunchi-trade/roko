@@ -1,0 +1,81 @@
+/* ── StatusTab ─────────────────────────────────────────── */
+.status-tab { display: flex; flex-direction: column; gap: 20px; }
+.status-tab__loading,
+.status-tab__error { color: var(--text-secondary, var(--text-dim)); padding: 40px; text-align: center; font-family: var(--mono); }
+.status-tab__cfactor { margin-top: 8px; }
+.status-tab__providers { margin-top: 8px; }
+
+/* ── Sparkline strip (extracted from Explorer stat strip) ── */
+.status-tab__sparkstrip {
+  display: flex;
+  gap: 1px;
+  background: var(--glass-border);
+  border-radius: var(--radius-md, 8px);
+  overflow: hidden;
+}
+
+.status-tab__sparkpill {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 12px 6px;
+  background: var(--bg-void);
+  gap: 2px;
+  transition: background 300ms var(--ease, ease);
+  position: relative;
+}
+
+.status-tab__sparkpill:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.status-tab__sparklabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: var(--text-xs, 12px);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.status-tab__sparkvalue {
+  font-family: var(--display);
+  font-weight: 300;
+  font-style: italic;
+  font-size: 24px;
+  line-height: 1.1;
+  text-shadow: 0 0 20px currentColor;
+  letter-spacing: -0.01em;
+  transition: text-shadow 300ms var(--ease, ease);
+}
+
+.status-tab__sparkpill:hover .status-tab__sparkvalue {
+  text-shadow: 0 0 28px currentColor, 0 0 48px rgba(220, 165, 189, 0.2);
+}
+
+.status-tab__spark {
+  width: 100%;
+  height: 28px;
+  display: block;
+  opacity: 0.8;
+}
+
+/* ── Responsive ── */
+@media (max-width: 900px) {
+  .status-tab__sparkstrip { flex-wrap: wrap; }
+  .status-tab__sparkpill { min-width: 100px; }
+}
+
+@media (max-width: 600px) {
+  .status-tab__sparkstrip { flex-direction: column; gap: 1px; }
+  .status-tab__sparkpill {
+    flex-direction: row;
+    justify-content: space-between;
+    padding: 8px 16px;
+  }
+  .status-tab__spark { width: 80px; }
+}

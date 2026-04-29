@@ -212,6 +212,8 @@ export default function MatrixRaceTrack({
     >
       <canvas
         ref={canvasRef}
+        role="img"
+        aria-label="Matrix benchmark race track"
         style={{ width: '100%', height: '100%', display: 'block' }}
       />
     </div>

@@ -119,7 +119,7 @@ export default function TokenVelocitySparkline({ points, height = 120 }: TokenVe
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Token velocity sparkline" />
     </div>
   );
 }

@@ -58,6 +58,9 @@ pub(super) fn create_tool_loop_agent(
     if let Some(prompt) = &options.system_prompt {
         agent = agent.with_system_prompt(prompt.clone());
     }
+    if let Some(ref dir) = options.working_dir {
+        agent = agent.with_worktree_path(dir.clone());
+    }
 
     Ok(Box::new(agent))
 }

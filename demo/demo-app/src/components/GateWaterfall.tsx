@@ -186,7 +186,7 @@ export default function GateWaterfall({ runs, height = 360 }: GateWaterfallProps
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Gate waterfall timing chart" />
     </div>
   );
 }

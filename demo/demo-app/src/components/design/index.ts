@@ -14,3 +14,4 @@ export { default as StepProgress } from './StepProgress';
 export { default as VerticalTimeline } from './VerticalTimeline';
 export { default as CircularProgress } from './CircularProgress';
 export { default as MilestoneProgress } from './MilestoneProgress';
+export { default as ComponentErrorBoundary } from './ComponentErrorBoundary';

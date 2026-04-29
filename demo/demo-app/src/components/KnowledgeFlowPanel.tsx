@@ -362,7 +362,7 @@ export default function KnowledgeFlowPanel({
     >
       {/* Canvas diagram */}
       <div className="kf-canvas-wrap">
-        <canvas ref={canvasRef} />
+        <canvas ref={canvasRef} role="img" aria-label="Knowledge flow network visualization" />
         <div className={`kf-aha-label${ahaLabel ? ' visible' : ''}`}>Knowledge reused</div>
       </div>
 

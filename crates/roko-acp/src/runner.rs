@@ -7,6 +7,7 @@
 //! 4. Emitting ACP session updates (plan entries, tool calls) through the event channel
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use roko_core::foundation::EventConsumer as CoreEventConsumer;
@@ -34,7 +35,7 @@ use crate::pipeline::{PipelineAction, PipelineEvent, PipelinePhase, WorkflowTemp
 use crate::session::{CancelToken, SharedWorkflowRun};
 use crate::types::{
     ContentBlock, FileChangeNotification, FileChangeType, PlanEntry, PlanStatus, Priority,
-    StopReason, ToolCallKind, ToolCallStatus,
+    StopReason, ToolCallKind, ToolCallStatus, UsageInfo,
 };
 use crate::workflow::WorkflowRun;
 
@@ -472,6 +473,8 @@ struct AcpWorkflowEventConsumer {
     template: Arc<Mutex<Option<String>>>,
     provenance_card: Arc<Mutex<Option<String>>>,
     sender: mpsc::Sender<CognitiveEvent>,
+    /// Total tokens accumulated across all AgentCompleted events in this run.
+    accumulated_tokens: Arc<AtomicU64>,
 }
 
 impl AcpWorkflowEventConsumer {
@@ -486,6 +489,7 @@ impl AcpWorkflowEventConsumer {
             template: Arc::new(Mutex::new(None)),
             provenance_card: Arc::new(Mutex::new(provenance_card)),
             sender,
+            accumulated_tokens: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -554,7 +558,16 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
                     self.publish(CognitiveEvent::TokenChunk(chunk.clone()));
                 }
             }
-            CoreRuntimeEvent::AgentCompleted { .. } => {}
+            CoreRuntimeEvent::AgentCompleted {
+                run_id,
+                tokens_used,
+                ..
+            } => {
+                if self.accepts_run(run_id) {
+                    self.accumulated_tokens
+                        .fetch_add(*tokens_used, Ordering::Relaxed);
+                }
+            }
             CoreRuntimeEvent::AgentFailed {
                 run_id,
                 agent_id,
@@ -606,9 +619,25 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
             }
             CoreRuntimeEvent::WorkflowCompleted { run_id, outcome } => {
                 if self.accepts_run(run_id) {
+                    let total_tokens = self.accumulated_tokens.load(Ordering::Relaxed);
+                    let usage = if total_tokens > 0 {
+                        Some(UsageInfo {
+                            total_tokens,
+                            // AgentCompleted only carries a combined token count; we surface
+                            // the full total as output_tokens so downstream cost calculations
+                            // can use it, even though the input/output split is unknown here.
+                            input_tokens: 0,
+                            output_tokens: total_tokens,
+                            thought_tokens: None,
+                            cached_read_tokens: None,
+                            cached_write_tokens: None,
+                        })
+                    } else {
+                        None
+                    };
                     self.publish(CognitiveEvent::Complete {
                         stop_reason: stop_reason_for_core_outcome(outcome),
-                        usage: None,
+                        usage,
                     });
                 }
             }

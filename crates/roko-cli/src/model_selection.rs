@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::{ProviderConfig, RokoConfig};
 use roko_learn::cascade_router::CascadeRouter;
 use thiserror::Error;
 
-use crate::config_helpers::find_role_override;
+use crate::config_helpers::{find_role_override, load_roko_config};
 
 /// Provenance for the selected model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,13 +100,13 @@ impl EffectiveModelSelection {
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum Error {
     /// The caller provided an empty model string for a required input.
-    #[error("{source} received an empty model value")]
-    EmptyModel { source: SelectionSource },
+    #[error("{origin} received an empty model value")]
+    EmptyModel { origin: SelectionSource },
     /// The selected model points at a provider key that is not configured.
-    #[error("{source} selected model '{model}', but provider '{provider_key}' is not configured")]
+    #[error("{origin} selected model '{model}', but provider '{provider_key}' is not configured")]
     MissingProvider {
         /// Which precedence step selected the model.
-        source: SelectionSource,
+        origin: SelectionSource,
         /// Model that won precedence.
         model: String,
         /// Provider key referenced by the selected model.
@@ -113,11 +114,11 @@ pub enum Error {
     },
     /// The selected model could not be backed by any configured provider.
     #[error(
-        "{source} selected unknown model '{model}', and no configured provider matches kind '{provider_kind}'"
+        "{origin} selected unknown model '{model}', and no configured provider matches kind '{provider_kind}'"
     )]
     UnknownModel {
         /// Which precedence step selected the model.
-        source: SelectionSource,
+        origin: SelectionSource,
         /// Model that won precedence.
         model: String,
         /// Provider kind inferred from the selected model.
@@ -170,6 +171,26 @@ pub fn resolve_effective_model(
     })
 }
 
+/// Convenience wrapper used by CLI command handlers.
+///
+/// Loads `roko.toml` from `workdir`, resolves the effective model with the
+/// standard precedence chain, prints the selection to stderr, and returns the
+/// `effective_model_key` string.  The `context` string is used only in the
+/// error message when resolution fails.
+pub fn resolve_effective_model_key(
+    workdir: &Path,
+    cli_model: Option<String>,
+    role: Option<&str>,
+    context: &str,
+) -> anyhow::Result<String> {
+    let config = load_roko_config(workdir)?;
+    let selection =
+        resolve_effective_model(cli_model, None, role.map(str::to_string), None, &config)
+            .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
+    selection.print_stderr();
+    Ok(selection.effective_model_key)
+}
+
 fn select_candidate(
     cli_model: Option<String>,
     task_hint: Option<String>,
@@ -215,7 +236,7 @@ fn select_candidate(
         let model = model.trim();
         if model.is_empty() {
             return Err(Error::EmptyModel {
-                source: SelectionSource::CascadeRouter,
+                origin: SelectionSource::CascadeRouter,
             });
         }
         return Ok(ModelCandidate {
@@ -243,7 +264,7 @@ fn required_model(input: Option<String>, source: SelectionSource) -> Result<Opti
         Some(model) => {
             let model = model.trim();
             if model.is_empty() {
-                Err(Error::EmptyModel { source })
+                Err(Error::EmptyModel { origin: source })
             } else {
                 Ok(Some(model.to_string()))
             }
@@ -274,7 +295,7 @@ fn select_provider<'a>(
         let provider_key = profile.provider.trim();
         if provider_key.is_empty() {
             return Err(Error::MissingProvider {
-                source,
+                origin: source,
                 model: model.to_string(),
                 provider_key: profile.provider.clone(),
             });
@@ -283,7 +304,7 @@ fn select_provider<'a>(
         let provider = providers
             .get(provider_key)
             .ok_or_else(|| Error::MissingProvider {
-                source,
+                origin: source,
                 model: model.to_string(),
                 provider_key: provider_key.to_string(),
             })?;
@@ -294,7 +315,7 @@ fn select_provider<'a>(
     let Some((provider_key, provider)) = provider_for_kind(providers, resolved.provider_kind)
     else {
         return Err(Error::UnknownModel {
-            source,
+            origin: source,
             model: model.to_string(),
             provider_kind: resolved.provider_kind.label().to_string(),
         });

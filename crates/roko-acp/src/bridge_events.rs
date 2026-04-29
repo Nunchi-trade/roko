@@ -9,7 +9,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -272,6 +272,9 @@ async fn append_acp_episode(
     stream_result: Option<&StreamResult>,
     task_error: Option<&str>,
     stream_error: Option<&str>,
+    /// When provided, overrides the pricing-table cost calculation with the
+    /// actual cost reported by the provider (e.g. from `WorkflowRunReport.cost`).
+    cost_override: Option<f64>,
 ) {
     let resolved = resolve_model(roko_config, model_key);
     let elapsed = dispatch_started.elapsed();
@@ -317,20 +320,26 @@ async fn append_acp_episode(
         usage.output_tokens = output_tokens;
         usage.cache_read_tokens = cached_read_tokens;
         usage.cache_write_tokens = provider_usage.cached_write_tokens.unwrap_or(0);
-        usage.cost_usd = calculate_cost_for_model_slug(
-            &resolved.slug,
-            input_tokens,
-            output_tokens,
-            cached_read_tokens,
-        )
-        .unwrap_or(0.0);
-        usage.cost_usd_without_cache = calculate_cost_without_cache_for_model_slug(
-            &resolved.slug,
-            input_tokens,
-            output_tokens,
-            cached_read_tokens,
-        )
-        .unwrap_or(usage.cost_usd);
+        usage.cost_usd = cost_override
+            .unwrap_or_else(|| {
+                calculate_cost_for_model_slug(
+                    &resolved.slug,
+                    input_tokens,
+                    output_tokens,
+                    cached_read_tokens,
+                )
+                .unwrap_or(0.0)
+            });
+        usage.cost_usd_without_cache = cost_override
+            .unwrap_or_else(|| {
+                calculate_cost_without_cache_for_model_slug(
+                    &resolved.slug,
+                    input_tokens,
+                    output_tokens,
+                    cached_read_tokens,
+                )
+                .unwrap_or(usage.cost_usd)
+            });
     }
     episode.usage = usage;
     episode.tokens_used = stream_usage.map(|usage| usage.total_tokens).unwrap_or(0);
@@ -810,6 +819,12 @@ where
 
     let shared_run = session.shared_run.clone();
 
+    // Shared channel for the workflow engine path: the cognitive task writes the
+    // WorkflowRunReport's actual cost (which was aggregated from AgentCompleted events)
+    // here so that append_acp_episode can use it instead of the pricing-table estimate.
+    let workflow_cost_sink: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
+    let workflow_cost_sink_task = Arc::clone(&workflow_cost_sink);
+
     let cognitive_task = tokio::spawn(async move {
         if is_slash_command {
             return run_slash_command(
@@ -881,6 +896,14 @@ where
                 event_sender,
             )
             .await?;
+
+            // Thread the actual cost from the report back to the main task so
+            // append_acp_episode can record it instead of using the pricing-table estimate.
+            if let Some(cost) = report.cost {
+                if let Ok(mut sink) = workflow_cost_sink_task.lock() {
+                    *sink = Some(cost);
+                }
+            }
 
             if !report.success {
                 return Err(anyhow::anyhow!(
@@ -1014,6 +1037,10 @@ where
     let stream_error = stream_result.as_ref().err().map(|err| err.to_string());
 
     if !is_slash_command {
+        // For the workflow engine path, the cognitive task wrote the actual provider cost
+        // (from WorkflowRunReport) to workflow_cost_sink. Use it to override the
+        // pricing-table estimate in append_acp_episode so the episode has accurate cost data.
+        let cost_override = workflow_cost_sink.lock().ok().and_then(|g| *g);
         append_acp_episode(
             &roko_config_for_logging,
             &workdir_for_logging,
@@ -1026,6 +1053,7 @@ where
             stream_result.as_ref().ok(),
             task_error.as_deref(),
             stream_error.as_deref(),
+            cost_override,
         )
         .await;
 
@@ -2898,6 +2926,7 @@ mod tests {
             Some(&stream_result),
             None,
             None,
+            None,
         )
         .await;
 
@@ -2959,6 +2988,7 @@ mod tests {
             true,
             dispatch_started,
             Some(&stream_result),
+            None,
             None,
             None,
         )

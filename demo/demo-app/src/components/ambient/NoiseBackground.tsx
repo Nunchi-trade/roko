@@ -86,7 +86,7 @@ export default function NoiseBackground({
 
   return (
     <div className={`noise-background ${className ?? ''}`}>
-      <canvas ref={canvasRef} />
+      <canvas ref={canvasRef} role="presentation" aria-hidden="true" />
     </div>
   );
 }

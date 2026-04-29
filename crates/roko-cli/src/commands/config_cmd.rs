@@ -204,6 +204,10 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
         ConfigCmd::Secrets { .. } => {
             unreachable!("secrets dispatched in dispatch_subcommand")
         }
+        // ── MCP (intercepted in dispatch_subcommand) ─────────────────
+        ConfigCmd::Mcp { .. } => {
+            unreachable!("mcp dispatched in dispatch_subcommand")
+        }
     }
 }
 
@@ -345,7 +349,7 @@ pub(crate) async fn cmd_provider_test(
     let role = role_arg.map(str::to_string);
 
     let (provider_name, provider, model, selection_note) = if let Some(cli_model) = cli_model {
-        let selection = crate::model_selection::resolve_effective_model(
+        let selection = roko_cli::model_selection::resolve_effective_model(
             Some(cli_model.to_string()),
             None,
             role.clone(),
@@ -380,7 +384,7 @@ pub(crate) async fn cmd_provider_test(
         let provider = providers
             .get(&provider_name)
             .ok_or_else(|| anyhow!("provider '{provider_name}' is not configured"))?;
-        let runtime_selection = crate::model_selection::resolve_effective_model(
+        let runtime_selection = roko_cli::model_selection::resolve_effective_model(
             None,
             None,
             role.clone(),
@@ -425,13 +429,13 @@ pub(crate) async fn cmd_provider_test(
     let report = match provider.kind {
         ProviderKind::OpenAiCompat => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{provider_name}' requires a model profile for testing")
+                anyhow!("provider '{}' requires a model profile for testing", provider_name)
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
         ProviderKind::AnthropicApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{provider_name}' requires a model profile for testing")
+                anyhow!("provider '{}' requires a model profile for testing", provider_name)
             })?;
             run_anthropic_provider_test(&provider_name, provider, model, json).await?
         }
@@ -440,13 +444,13 @@ pub(crate) async fn cmd_provider_test(
         }
         ProviderKind::GeminiApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{provider_name}' requires a model profile for testing")
+                anyhow!("provider '{}' requires a model profile for testing", provider_name)
             })?;
             run_gemini_provider_test(&provider_name, provider, model, json).await?
         }
         ProviderKind::PerplexityApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{provider_name}' requires a model profile for testing")
+                anyhow!("provider '{}' requires a model profile for testing", provider_name)
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
@@ -455,7 +459,7 @@ pub(crate) async fn cmd_provider_test(
         }
         ProviderKind::CerebrasApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!("provider '{provider_name}' requires a model profile for testing")
+                anyhow!("provider '{}' requires a model profile for testing", provider_name)
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
@@ -580,7 +584,7 @@ fn format_effective_model_selection_summary(
     requested_model: &str,
     cli_model: Option<&str>,
     role: AgentRole,
-    selection: &crate::model_selection::EffectiveModelSelection,
+    selection: &roko_cli::model_selection::EffectiveModelSelection,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Resolved model selection for '{requested_model}':");
@@ -598,12 +602,12 @@ fn format_effective_model_selection_summary(
     out
 }
 
-fn model_selection_recommendation(error: &crate::model_selection::Error) -> String {
+fn model_selection_recommendation(error: &roko_cli::model_selection::Error) -> String {
     match error {
-        crate::model_selection::Error::EmptyModel { source } => {
-            format!("pass a non-empty model value for {source}")
+        roko_cli::model_selection::Error::EmptyModel { origin } => {
+            format!("pass a non-empty model value for {origin}")
         }
-        crate::model_selection::Error::MissingProvider {
+        roko_cli::model_selection::Error::MissingProvider {
             model,
             provider_key,
             ..
@@ -612,7 +616,7 @@ fn model_selection_recommendation(error: &crate::model_selection::Error) -> Stri
                 "configure provider '{provider_key}' for model '{model}', or choose a model backed by an installed provider"
             )
         }
-        crate::model_selection::Error::UnknownModel {
+        roko_cli::model_selection::Error::UnknownModel {
             model,
             provider_kind,
             ..
@@ -640,7 +644,7 @@ pub(crate) fn cmd_model_route(
     }
 
     let role = parse_agent_role(role_arg)?;
-    let selection = crate::model_selection::resolve_effective_model(
+    let selection = roko_cli::model_selection::resolve_effective_model(
         cli_model.map(str::to_string),
         Some(requested_model.to_string()),
         Some(role.to_string()),
@@ -1064,7 +1068,7 @@ pub(crate) struct ProviderTestReport {
 
 fn model_profile_for_effective_selection(
     config: &RokoConfig,
-    selection: &crate::model_selection::EffectiveModelSelection,
+    selection: &roko_cli::model_selection::EffectiveModelSelection,
 ) -> ModelProfile {
     roko_core::agent::resolve_model(config, &selection.effective_model_key)
         .profile

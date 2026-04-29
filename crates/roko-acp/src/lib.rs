@@ -12,7 +12,6 @@ pub(crate) mod knowledge;
 pub mod pipeline;
 pub mod runner;
 pub mod session;
-pub(crate) mod knowledge;
 pub mod transport;
 pub mod types;
 pub mod workflow;

@@ -7,6 +7,7 @@
 //! Falls back to the legacy line-oriented REPL when stdout is not a TTY.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
@@ -759,6 +760,13 @@ struct ChatSession {
     dispatch: DispatchMode,
     /// Channel for receiving async responses from background dispatch calls.
     response_rx: Option<tokio::sync::mpsc::Receiver<Result<DispatchResult, String>>>,
+    /// Channel for receiving live streaming events from the Session dispatch path.
+    ///
+    /// Present only when `dispatch == DispatchMode::Session` and a turn is in
+    /// flight. Events are forwarded here instead of being drained so that
+    /// `MessageDelta` tokens reach the TUI viewport in real time.
+    streaming_event_rx:
+        Option<tokio::sync::mpsc::Receiver<roko_agent::AgentRuntimeEvent>>,
     /// Number of completed user→agent exchanges.
     turn_count: u32,
     /// When the current thinking phase began (for animated labels).
@@ -1122,6 +1130,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
             serve_url: serve_url.to_string(),
         },
         response_rx: None,
+        streaming_event_rx: None,
         turn_count: 0,
         thinking_started: None,
         conversation: Vec::new(),
@@ -1189,6 +1198,40 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
             }
         }
 
+        // Forward live streaming events from the Session dispatch path.
+        //
+        // Drains all pending events from the channel this frame (bounded by
+        // the channel capacity so we never spin indefinitely). On first
+        // `MessageDelta` the phase transitions from `Thinking` to `Streaming`
+        // so the TUI switches from the spinner to the live text viewport.
+        if let Some(ref mut event_rx) = session.streaming_event_rx {
+            loop {
+                match event_rx.try_recv() {
+                    Ok(event) => match &event {
+                        roko_agent::AgentRuntimeEvent::MessageDelta { text } => {
+                            if session.phase == Phase::Thinking {
+                                session.phase = Phase::Streaming;
+                            }
+                            session.streaming.append(text);
+                        }
+                        roko_agent::AgentRuntimeEvent::ToolCall { name, .. } => {
+                            session.streaming.set_phase(format!("tool:{name}"));
+                        }
+                        roko_agent::AgentRuntimeEvent::ToolOutput { .. } => {
+                            session.streaming.set_phase("Streaming");
+                        }
+                        _ => {}
+                    },
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        // Sender dropped — turn is complete; channel will be
+                        // cleared when response_rx delivers the final result.
+                        break;
+                    }
+                }
+            }
+        }
+
         // Check for async response from background HTTP call
         if let Some(ref mut rx) = session.response_rx {
             match rx.try_recv() {
@@ -1248,6 +1291,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                     }
                     session.phase = Phase::Input;
                     session.response_rx = None;
+                    session.streaming_event_rx = None;
                     term.push_blank()?;
                 }
                 Ok(Err(err)) => {
@@ -1255,12 +1299,14 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                         session.thinking_started = None;
                         session.phase = Phase::Input;
                         session.response_rx = None;
+                        session.streaming_event_rx = None;
                     } else {
                         push_error_with_suggestions(&mut term, &theme, &err)?;
                         let prompt = session.last_prompt.clone().unwrap_or_default();
                         session.thinking_started = None;
                         session.phase = Phase::Error { prompt, error: err };
                         session.response_rx = None;
+                        session.streaming_event_rx = None;
                     }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
@@ -1275,6 +1321,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                     )])?;
                     session.phase = Phase::Input;
                     session.response_rx = None;
+                    session.streaming_event_rx = None;
                 }
             }
         }
@@ -1475,6 +1522,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
         started_at: Instant::now(),
         dispatch,
         response_rx: None,
+        streaming_event_rx: None,
         turn_count: 0,
         thinking_started: None,
         conversation: Vec::new(),
@@ -1530,6 +1578,31 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                         _ => {}
                     },
                     Phase::Done => break,
+                }
+            }
+        }
+
+        // Forward live streaming events from the Session dispatch path.
+        if let Some(ref mut event_rx) = session.streaming_event_rx {
+            loop {
+                match event_rx.try_recv() {
+                    Ok(event) => match &event {
+                        roko_agent::AgentRuntimeEvent::MessageDelta { text } => {
+                            if session.phase == Phase::Thinking {
+                                session.phase = Phase::Streaming;
+                            }
+                            session.streaming.append(text);
+                        }
+                        roko_agent::AgentRuntimeEvent::ToolCall { name, .. } => {
+                            session.streaming.set_phase(format!("tool:{name}"));
+                        }
+                        roko_agent::AgentRuntimeEvent::ToolOutput { .. } => {
+                            session.streaming.set_phase("Streaming");
+                        }
+                        _ => {}
+                    },
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                 }
             }
         }
@@ -1593,6 +1666,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                     }
                     session.phase = Phase::Input;
                     session.response_rx = None;
+                    session.streaming_event_rx = None;
                     term.push_blank()?;
                 }
                 Ok(Err(err)) => {
@@ -1600,12 +1674,14 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                         session.thinking_started = None;
                         session.phase = Phase::Input;
                         session.response_rx = None;
+                        session.streaming_event_rx = None;
                     } else {
                         push_error_with_suggestions(&mut term, &theme, &err)?;
                         let prompt = session.last_prompt.clone().unwrap_or_default();
                         session.thinking_started = None;
                         session.phase = Phase::Error { prompt, error: err };
                         session.response_rx = None;
+                        session.streaming_event_rx = None;
                     }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
@@ -1619,6 +1695,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                     session.thinking_started = None;
                     session.phase = Phase::Input;
                     session.response_rx = None;
+                    session.streaming_event_rx = None;
                 }
             }
         }
@@ -1712,14 +1789,17 @@ fn dispatch_prompt(session: &mut ChatSession, prompt: &str) {
 
             let mut agent_session = clone_chat_agent_session(agent_session);
             let model = agent_session.model.clone();
-            tokio::spawn(async move {
-                let (event_tx, mut event_rx) =
-                    tokio::sync::mpsc::channel::<roko_agent::AgentRuntimeEvent>(256);
-                let drain_handle =
-                    tokio::spawn(async move { while let Some(_event) = event_rx.recv().await {} });
 
+            // Create a channel for live streaming events so the TUI can display
+            // text deltas in real time instead of waiting for the full turn.
+            let (event_tx, event_rx) =
+                tokio::sync::mpsc::channel::<roko_agent::AgentRuntimeEvent>(256);
+
+            // Install the receiver so the event loop can poll it each frame.
+            session.streaming_event_rx = Some(event_rx);
+
+            tokio::spawn(async move {
                 let result = agent_session.send_turn_streaming(&text, event_tx).await;
-                let _ = drain_handle.await;
 
                 let mapped = match result {
                     Ok(turn) if turn.cancelled => Err("__cancelled__".to_string()),
@@ -2152,6 +2232,33 @@ fn handle_agent_session_slash_command(
             term.push_lines(&[styled::continuation(theme, "config", &msg, None)])?;
             Ok(Some(false))
         }
+        SlashResult::Display(text) => {
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (idx, line) in text.lines().enumerate() {
+                if idx == 0 {
+                    let parts: Vec<&str> = line.splitn(2, "  ").collect();
+                    let (label, value) = if parts.len() == 2 {
+                        (parts[0].to_string(), parts[1].to_string())
+                    } else {
+                        (String::new(), line.to_string())
+                    };
+                    lines.push(styled::section_start(theme, &label, &value, None));
+                } else if line.trim().is_empty() {
+                    continue;
+                } else {
+                    let trimmed_line = line.trim_start_matches("  ");
+                    let parts: Vec<&str> = trimmed_line.splitn(2, "  ").collect();
+                    let (label, value) = if parts.len() == 2 {
+                        (parts[0].trim().to_string(), parts[1].trim().to_string())
+                    } else {
+                        (String::new(), trimmed_line.to_string())
+                    };
+                    lines.push(styled::continuation(theme, &label, &value, None));
+                }
+            }
+            term.push_lines(&lines)?;
+            Ok(Some(false))
+        }
         SlashResult::Error(msg) => {
             term.push_lines(&[styled::continuation(theme, "error", &msg, None)])?;
             Ok(Some(false))
@@ -2337,6 +2444,7 @@ fn handle_slash_command(
                         "roko-serve".to_string()
                     }
                 }
+                DispatchMode::Session => "agent-session".to_string(),
             };
             let workdir = std::env::current_dir()
                 .map(|p| p.display().to_string())

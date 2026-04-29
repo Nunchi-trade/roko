@@ -122,6 +122,8 @@ export function useTerminal(sessionId?: string) {
 
     // Track disposal state for async callbacks.
     let disposed = false;
+    let ready = false;
+    const pendingMessages: Uint8Array[] = [];
 
     term.open(el);
 
@@ -134,17 +136,26 @@ export function useTerminal(sessionId?: string) {
       // DOM renderer fallback — fine for low-end GPUs
     }
 
-    // Push cursor to bottom so text anchors at the bottom
+    // Push cursor to bottom so text anchors at the bottom, then connect WS
+    // after fit completes so the terminal has correct dimensions.
     requestAnimationFrame(() => {
-      if (!disposed) {
-        try {
-          fitAddon.fit();
-          const rows = term.rows;
-          if (rows > 1) {
-            term.write('\n'.repeat(rows - 1));
-          }
-        } catch { /* disposed */ }
-      }
+      if (disposed) return;
+      try {
+        fitAddon.fit();
+        const rows = term.rows;
+        if (rows > 1) {
+          term.write('\n'.repeat(rows - 1));
+        }
+        // Flush any messages buffered before terminal was ready
+        ready = true;
+        for (const buf of pendingMessages) {
+          term.write(buf);
+          appendOutput(new TextDecoder().decode(buf));
+        }
+        pendingMessages.length = 0;
+        // Now connect WS — terminal is fitted and ready for data
+        connectWs();
+      } catch { /* disposed */ }
     });
 
     // Internal output buffer, capped high enough for artifact scraping.
@@ -275,10 +286,18 @@ export function useTerminal(sessionId?: string) {
       ws.onmessage = (e: MessageEvent) => {
         if (disposed) return;
         if (e.data instanceof ArrayBuffer) {
-          const text = new TextDecoder().decode(e.data);
-          term.write(new Uint8Array(e.data));
-          appendOutput(text);
+          const bytes = new Uint8Array(e.data);
+          if (!ready) {
+            pendingMessages.push(bytes);
+            return;
+          }
+          term.write(bytes);
+          appendOutput(new TextDecoder().decode(e.data));
         } else if (typeof e.data === 'string') {
+          if (!ready) {
+            pendingMessages.push(new TextEncoder().encode(e.data));
+            return;
+          }
           term.write(e.data);
           appendOutput(e.data);
         }
@@ -300,7 +319,8 @@ export function useTerminal(sessionId?: string) {
       };
     }
 
-    connectWs();
+    // connectWs() is called from the requestAnimationFrame callback above
+    // after fit completes, not here — avoids the WS race condition.
 
     const ro = new ResizeObserver(() => { if (!disposed) { try { fitAddon.fit(); } catch { /* disposed */ } } });
     ro.observe(el);

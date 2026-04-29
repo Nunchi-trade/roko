@@ -1,11 +1,13 @@
-import { useEffect } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { Outlet } from 'react-router';
 import Grain from './Grain';
-import HeroParticleField from './HeroParticleField';
 import Curtain from './Curtain';
 import ScrollTrack from './ScrollTrack';
 import TopNav from './TopNav';
+import ComponentErrorBoundary from './design/ComponentErrorBoundary';
 import { useApiWithFallback } from '../hooks/useApiWithFallback';
+
+const LazyHeroParticleField = lazy(() => import('./HeroParticleField'));
 
 export default function AppShell() {
   const { dataMode } = useApiWithFallback();
@@ -29,7 +31,11 @@ export default function AppShell() {
   return (
     <>
       <Grain />
-      <HeroParticleField />
+      <ComponentErrorBoundary name="HeroParticleField">
+        <Suspense fallback={null}>
+          <LazyHeroParticleField />
+        </Suspense>
+      </ComponentErrorBoundary>
       <Curtain />
       <ScrollTrack />
       <TopNav />

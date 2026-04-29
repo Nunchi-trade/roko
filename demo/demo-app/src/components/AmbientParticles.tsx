@@ -77,7 +77,7 @@ export default function AmbientParticles() {
 
   return (
     <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0 }}>
-      <canvas ref={canvasRef} />
+      <canvas ref={canvasRef} role="img" aria-label="Ambient particle field background animation" />
     </div>
   );
 }

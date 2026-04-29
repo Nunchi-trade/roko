@@ -122,7 +122,7 @@ export default function ParetoChart({ data, height = 320 }: ParetoChartProps) {
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Pareto distribution chart" />
     </div>
   );
 }

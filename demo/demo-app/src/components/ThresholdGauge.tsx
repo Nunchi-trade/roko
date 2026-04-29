@@ -191,6 +191,7 @@ export default function ThresholdGauge({ rung, data, size = 120 }: ThresholdGaug
         <canvas
           ref={canvasRef}
           className="chart-canvas"
+          role="img"
           style={{ width: '100%', height: '100%', display: 'block' }}
           aria-label={`${rung} adaptive threshold gauge`}
         />

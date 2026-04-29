@@ -231,9 +231,9 @@ pub(crate) fn validate_prd_grounding(
 #[derive(Serialize)]
 struct ContextSidecar<'a> {
     slug: &'a str,
-    keywords: &'a [String],
-    workspace_members: &'a [String],
     timestamp: String,
+    /// Full repository context pack — all fields the agent saw at generation time.
+    context_pack: &'a roko_cli::repo_context::RepoContextPack,
 }
 
 /// Persist the generation context as a JSON sidecar file alongside the PRD.
@@ -241,15 +241,13 @@ struct ContextSidecar<'a> {
 fn persist_context_sidecar(
     prd_drafts_dir: &std::path::Path,
     slug: &str,
-    keywords: &[String],
-    workspace_members: &[String],
+    repo_context: &roko_cli::repo_context::RepoContextPack,
 ) {
     let sidecar_path = prd_drafts_dir.join(format!("{slug}.context.json"));
     let sidecar = ContextSidecar {
         slug,
-        keywords,
-        workspace_members,
         timestamp: chrono::Utc::now().to_rfc3339(),
+        context_pack: repo_context,
     };
 
     match serde_json::to_string_pretty(&sidecar) {
@@ -350,7 +348,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     }
                     eprintln!("Found empty scaffold from previous run — regenerating.");
                 }
-                let model_key = resolve_effective_model_key(
+                let model_key = roko_cli::model_selection::resolve_effective_model_key(
                     &workdir,
                     cli.model.clone(),
                     Some("scribe"),
@@ -380,19 +378,20 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 );
                 let feature_keyword_refs: Vec<&str> =
                     feature_keywords.iter().map(String::as_str).collect();
-                let repo_context_section: Option<String> =
-                    match crate::repo_context::build_repo_context(&workdir, &feature_keyword_refs)
+                // Keep the full pack so it can be persisted to the context sidecar.
+                let repo_context_pack: Option<roko_cli::repo_context::RepoContextPack> =
+                    match roko_cli::repo_context::build_repo_context(&workdir, &feature_keyword_refs)
                         .await
                     {
-                        Ok(repo_context) => {
-                            if !repo_context.context_root_verified {
+                        Ok(pack) => {
+                            if !pack.context_root_verified {
                                 eprintln!(
                                     "WARNING: Repository context not verified for keywords {:?}. \
                                      Generated PRD may reference nonexistent code.",
                                     feature_keywords
                                 );
                             }
-                            Some(repo_context.to_prompt_section())
+                            Some(pack)
                         }
                         Err(err) => {
                             eprintln!(
@@ -402,6 +401,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                             None
                         }
                     };
+                let repo_context_section: Option<String> =
+                    repo_context_pack.as_ref().map(|p| p.to_prompt_section());
                 let context_suffix = repo_context_section
                     .as_deref()
                     .map(|ctx| format!("\n\n---\n\n{ctx}"))
@@ -514,7 +515,9 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     None
                 };
                 if exit_code == 0 {
-                    persist_context_sidecar(&drafts, &slug, &feature_keywords, &workspace_members);
+                    if let Some(ref pack) = repo_context_pack {
+                        persist_context_sidecar(&drafts, &slug, pack);
+                    }
                     if let Some(ref report) = validation_report {
                         persist_validation_sidecar(&drafts, &slug, report);
                         println!("Context sidecar: {}.context.json", slug);
@@ -661,7 +664,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
         },
         PrdCmd::Plan { slug, dry_run } => {
             let prd_path = find_prd(&workdir, &slug)?;
-            let model_key = resolve_effective_model_key(
+            let model_key = roko_cli::model_selection::resolve_effective_model_key(
                 &workdir,
                 cli.model.clone(),
                 Some("strategist"),
@@ -732,20 +735,6 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             Ok(exit_code)
         }
     }
-}
-
-fn resolve_effective_model_key(
-    workdir: &Path,
-    cli_model: Option<String>,
-    role: Option<&str>,
-    context: &str,
-) -> Result<String> {
-    let config = crate::load_roko_config(workdir)?;
-    let selection =
-        roko_cli::model_selection::resolve_effective_model(cli_model, None, role, None, &config)
-            .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
-    selection.print_stderr();
-    Ok(selection.effective_model_key)
 }
 
 /// Find a PRD by slug in either published or drafts.

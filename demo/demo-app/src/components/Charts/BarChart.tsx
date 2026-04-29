@@ -68,7 +68,7 @@ export default function BarChart({ data, title, height = 200 }: BarChartProps) {
 
   return (
     <div className="chart-container" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Bar chart visualization" />
     </div>
   );
 }

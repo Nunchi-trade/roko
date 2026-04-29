@@ -380,6 +380,8 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
       </div>
       <canvas
         ref={canvasRef}
+        role="img"
+        aria-label="Cost race comparison between models"
         style={{
           width: '100%',
           height: '100%',

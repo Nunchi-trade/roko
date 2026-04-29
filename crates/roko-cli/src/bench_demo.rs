@@ -9,14 +9,17 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use roko_serve::bench::BenchStrategy;
 
+use crate::config::load_layered;
 use crate::inline::primitives::*;
 use crate::inline::styled;
 use crate::inline::symbols;
 use crate::inline::terminal::{InlineTerminal, should_use_inline};
+use crate::run::run_once;
 use crate::tui::Theme;
 
 /// A single benchmark task.
@@ -544,11 +547,98 @@ fn simulate_task(task: &BenchTask, mode: &str) -> BenchResult {
 }
 
 /// Run a task for real via roko's universal loop.
+///
+/// Naive mode: [`BenchStrategy::Minimal`] — no context enrichment, forces a single
+/// heavy-weight model so the cost reflects an unoptimized dispatch.
+///
+/// Optimized mode: [`BenchStrategy::FullCascade`] — full stack (CascadeRouter,
+/// playbooks, neuro-augmented context, gate pipeline).
 async fn run_task_real(workdir: &Path, task: &BenchTask, mode: &str) -> Result<BenchResult> {
-    // TODO: wire into actual run_once with config overrides for naive vs optimized
-    // For now, simulate with longer delays to feel real
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    Ok(simulate_task(task, mode))
+    let started = Instant::now();
+
+    // Load the project config from `roko.toml` in `workdir`. Fall back to a
+    // minimal default (command = "claude") when no config file is present so
+    // that `roko bench demo --real` works even from a bare directory.
+    let mut config = load_layered(workdir)
+        .map(|resolved| resolved.config)
+        .unwrap_or_else(|_| {
+            let mut c = crate::config::Config::default();
+            c.agent.command = "claude".into();
+            c
+        });
+
+    // Map mode → strategy and apply model overrides.
+    let (strategy, model_label) = if mode == "naive" {
+        // Force opus so that the naive run uses the most expensive model,
+        // giving a meaningful cost differential for the comparison.
+        config.agent.model = Some("claude-opus-4-5".to_string());
+        (BenchStrategy::Minimal, "opus".to_string())
+    } else {
+        // Let the CascadeRouter pick the model; fall back to the configured
+        // model label for display purposes.
+        let label = config
+            .agent
+            .model
+            .clone()
+            .unwrap_or_else(|| "routed".to_string());
+        (BenchStrategy::FullCascade, label)
+    };
+
+    let prompt = format!(
+        "Task: {}\nDifficulty: {}\n\nImplement the described task. Provide a complete, working solution.",
+        task.description, task.difficulty
+    );
+
+    let result = run_once(workdir, &config, &prompt, Some(strategy), None).await;
+    let duration_s = started.elapsed().as_secs_f64();
+
+    match result {
+        Ok(report) => {
+            let input_tokens = report.usage.map(|u| u.input_tokens).unwrap_or(0);
+            let output_tokens = report.usage.map(|u| u.output_tokens).unwrap_or(0);
+            let gates_total = report.gate_verdicts.len() as u32;
+            let gates_passed = report
+                .gate_verdicts
+                .iter()
+                .filter(|(_, ok)| *ok)
+                .count() as u32;
+
+            Ok(BenchResult {
+                task_id: task.id.clone(),
+                mode: mode.to_string(),
+                passed: report.overall_success(),
+                // RunReport does not expose a cost breakdown; leave as 0.0.
+                // The comparison table will show real token counts instead.
+                cost_usd: 0.0,
+                input_tokens,
+                output_tokens,
+                // Cache hit rate is not tracked at the run_once level.
+                cache_hit_rate: 0.0,
+                duration_s,
+                model: model_label,
+                gates_passed,
+                gates_total,
+            })
+        }
+        Err(e) => {
+            // Dispatch failed — return a failed BenchResult rather than
+            // propagating the error so the benchmark loop can continue.
+            tracing::warn!(task = %task.id, mode, error = %e, "real dispatch failed");
+            Ok(BenchResult {
+                task_id: task.id.clone(),
+                mode: mode.to_string(),
+                passed: false,
+                cost_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_hit_rate: 0.0,
+                duration_s,
+                model: model_label,
+                gates_passed: 0,
+                gates_total: 1,
+            })
+        }
+    }
 }
 
 async fn run_bench_plain(workdir: &Path, tasks: &[BenchTask], real_dispatch: bool) -> Result<()> {
