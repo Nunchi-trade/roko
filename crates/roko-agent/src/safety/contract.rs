@@ -5,6 +5,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, RwLock};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,6 +22,17 @@ const EDIT_TOOLS: &[&str] = &[
     "apply_patch",
     "notebook_edit",
 ];
+
+/// Process-wide cache of parsed agent contracts, keyed by role name.
+///
+/// Contract assets are baked into the crate via `env!("CARGO_MANIFEST_DIR")`
+/// at build time and never change during a process lifetime. Caching avoids
+/// redundant disk reads and JSON parses on every tool dispatch check.
+///
+/// Uses `RwLock` for thread-safe concurrent reads with exclusive writes on
+/// cache misses. Only successful loads are cached; errors always re-read.
+static CONTRACT_CACHE: LazyLock<RwLock<HashMap<String, AgentContract>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// How to handle a missing or invalid bundled contract asset.
 ///
@@ -108,6 +121,14 @@ impl AgentContract {
         let role = role.as_ref().trim();
         validate_role(role)?;
 
+        // Check cache first (read lock — cheap concurrent path).
+        if let Ok(guard) = CONTRACT_CACHE.read() {
+            if let Some(cached) = guard.get(role) {
+                return Ok(cached.clone());
+            }
+        }
+
+        // Cache miss: load from disk.
         let path = contract_asset_path(role);
         let source = fs::read_to_string(&path).map_err(|source| match source.kind() {
             std::io::ErrorKind::NotFound => ContractLoadError::MissingAsset {
@@ -135,6 +156,13 @@ impl AgentContract {
         }
 
         contract.role = role.to_owned();
+
+        // Store in cache on success (write lock — only on first load per role).
+        // Ignore lock poisoning (don't fail the load just because cache is broken).
+        if let Ok(mut guard) = CONTRACT_CACHE.write() {
+            guard.insert(role.to_owned(), contract.clone());
+        }
+
         Ok(contract)
     }
 
@@ -163,6 +191,17 @@ impl AgentContract {
                     Ok(Self::restricted(role_ref))
                 }
             },
+        }
+    }
+
+    /// Clear the contract cache. Used in tests to ensure each test loads fresh
+    /// contracts without interference from previous test runs.
+    ///
+    /// Only available in test builds.
+    #[cfg(test)]
+    pub fn invalidate_contract_cache() {
+        if let Ok(mut guard) = CONTRACT_CACHE.write() {
+            guard.clear();
         }
     }
 
@@ -680,6 +719,7 @@ mod tests {
 
     #[test]
     fn bundled_contracts_load_from_assets() {
+        AgentContract::invalidate_contract_cache();
         let implementer = AgentContract::load_for_role("implementer").expect("load implementer");
         let reviewer = AgentContract::load_for_role("reviewer").expect("load reviewer");
         let researcher = AgentContract::load_for_role("researcher").expect("load researcher");
@@ -998,6 +1038,7 @@ mod tests {
 
     #[test]
     fn load_for_role_with_mode_strict_errors_on_missing() {
+        AgentContract::invalidate_contract_cache();
         let err =
             AgentContract::load_for_role_with_mode("totally-not-a-role", ContractLoadMode::Strict)
                 .expect_err("missing role must error in strict mode");
@@ -1009,6 +1050,7 @@ mod tests {
 
     #[test]
     fn load_for_role_with_mode_fallback_returns_restricted() {
+        AgentContract::invalidate_contract_cache();
         let contract = AgentContract::load_for_role_with_mode(
             "totally-not-a-role",
             ContractLoadMode::RestrictedFallback,
