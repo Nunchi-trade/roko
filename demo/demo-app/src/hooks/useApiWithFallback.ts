@@ -6,7 +6,7 @@ import * as BenchDemo from '../lib/bench-demo-data';
 
 // Map API paths to demo fallback data (used only when offline or endpoint returns nothing)
 function getFallback(path: string): unknown {
-  if (path.includes('/health')) return Demo.DEMO_HEALTH;
+  if (path.includes('/health') && !path.includes('/providers/health')) return Demo.DEMO_HEALTH;
   if (path.includes('/managed-agents')) return Demo.DEMO_AGENTS;
   if (path.includes('/knowledge/entries')) return Demo.DEMO_KNOWLEDGE_ENTRIES;
   if (path.includes('/knowledge/edges')) return Demo.DEMO_KNOWLEDGE_EDGES;
@@ -18,6 +18,7 @@ function getFallback(path: string): unknown {
   if (path.includes('/status')) return Demo.DEMO_STATUS;
   if (path.includes('/statehub/events')) return Demo.DEMO_EVENTS;
   if (path.includes('/dashboard')) return Demo.DEMO_DASHBOARD;
+  if (path.includes('/learn/provider-outcomes') || path.includes('/providers/health')) return Demo.DEMO_PROVIDER_HEALTH;
   if (path.includes('/bench/suites')) return BenchDemo.DEMO_BENCH_SUITES;
   if (path.includes('/bench/models')) return BenchDemo.DEMO_BENCH_MODELS;
   if (path.includes('/bench/runs')) return BenchDemo.DEMO_BENCH_RUNS;
