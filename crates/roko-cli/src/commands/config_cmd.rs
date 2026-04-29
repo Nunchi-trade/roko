@@ -364,14 +364,12 @@ pub(crate) async fn cmd_provider_test(
         }
 
         let provider_name = selection.provider_key.clone();
-        let provider = providers.get(&provider_name).ok_or_else(|| {
-            anyhow!("provider '{provider_name}' is not configured")
-        })?;
+        let provider = providers
+            .get(&provider_name)
+            .ok_or_else(|| anyhow!("provider '{provider_name}' is not configured"))?;
         let model = model_profile_for_effective_selection(&config, &selection);
-        let note = format!(
-            "Resolved provider test from --model {cli_model}: {} ({})",
-            selection.provider_key, selection.reason
-        );
+        selection.print_stderr();
+        let note = "Resolved provider test selection".to_string();
         (provider_name, provider, Some(model), Some(note))
     } else {
         let provider_name = provider_name
@@ -379,9 +377,9 @@ pub(crate) async fn cmd_provider_test(
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow!("provide a provider name or use --all"))?
             .to_string();
-        let provider = providers.get(&provider_name).ok_or_else(|| {
-            anyhow!("provider '{provider_name}' is not configured")
-        })?;
+        let provider = providers
+            .get(&provider_name)
+            .ok_or_else(|| anyhow!("provider '{provider_name}' is not configured"))?;
         let runtime_selection = crate::model_selection::resolve_effective_model(
             None,
             None,
@@ -396,9 +394,10 @@ pub(crate) async fn cmd_provider_test(
             | ProviderKind::GeminiApi
             | ProviderKind::PerplexityApi
             | ProviderKind::CerebrasApi => Some(
-                if let Some(selection) = runtime_selection.as_ref().filter(|selection| {
-                    selection.provider_key == provider_name.as_str()
-                }) {
+                if let Some(selection) = runtime_selection
+                    .as_ref()
+                    .filter(|selection| selection.provider_key == provider_name.as_str())
+                {
                     model_profile_for_effective_selection(&config, selection)
                 } else {
                     select_provider_test_model(&config, &provider_name)
@@ -512,12 +511,7 @@ pub(crate) async fn cmd_provider_test_all(workdir: &Path, json: bool) -> Result<
                     provider: name.clone(),
                     kind: provider.kind.to_string(),
                     status: "\u{2713} OK".into(),
-                    duration_ms: Some(
-                        started
-                            .elapsed()
-                            .as_millis()
-                            .min(u64::MAX as u128) as u64,
-                    ),
+                    duration_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
                 });
             }
             Err(e) => {
@@ -525,12 +519,7 @@ pub(crate) async fn cmd_provider_test_all(workdir: &Path, json: bool) -> Result<
                     provider: name.clone(),
                     kind: provider.kind.to_string(),
                     status: format!("\u{2717} {e:#}"),
-                    duration_ms: Some(
-                        started
-                            .elapsed()
-                            .as_millis()
-                            .min(u64::MAX as u128) as u64,
-                    ),
+                    duration_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
                 });
             }
         }
@@ -603,13 +592,7 @@ fn format_effective_model_selection_summary(
         "  Requested model: {}",
         selection.requested_model.as_deref().unwrap_or("—")
     );
-    let _ = writeln!(out, "  Source: {}", selection.source);
-    let _ = writeln!(out, "  Effective model: {}", selection.effective_model_key);
-    let _ = writeln!(
-        out,
-        "  Provider: {} ({})",
-        selection.provider_key, selection.provider_kind
-    );
+    let _ = writeln!(out, "  Selection: {}", selection.display_line());
     let _ = writeln!(out, "  Backend slug: {}", selection.backend_slug);
     let _ = writeln!(out, "  Reason: {}", selection.reason);
     out
@@ -625,14 +608,18 @@ fn model_selection_recommendation(error: &crate::model_selection::Error) -> Stri
             provider_key,
             ..
         } => {
-            format!("configure provider '{provider_key}' for model '{model}', or choose a model backed by an installed provider")
+            format!(
+                "configure provider '{provider_key}' for model '{model}', or choose a model backed by an installed provider"
+            )
         }
         crate::model_selection::Error::UnknownModel {
             model,
             provider_kind,
             ..
         } => {
-            format!("add a model profile for '{model}' backed by provider kind '{provider_kind}', or use a configured model")
+            format!(
+                "add a model profile for '{model}' backed by provider kind '{provider_kind}', or use a configured model"
+            )
         }
     }
 }
@@ -711,13 +698,7 @@ pub(crate) fn cmd_model_route(
     match selection {
         Ok(selection) => {
             if !explain {
-                println!(
-                    "Resolved '{requested_model}': {} via {} ({}, {})",
-                    selection.effective_model_key,
-                    selection.provider_key,
-                    selection.provider_kind,
-                    selection.source
-                );
+                println!("{}", selection.display_line());
                 println!("Reason: {}", selection.reason);
                 return Ok(());
             }
@@ -751,7 +732,8 @@ pub(crate) fn cmd_model_route(
             println!("Routing failed for '{requested_model}': {err}");
             println!("Recommendation: {}", model_selection_recommendation(&err));
             if !explain {
-                let selected_name = display_model_name(&aliases, &route_recommendation.selected_slug);
+                let selected_name =
+                    display_model_name(&aliases, &route_recommendation.selected_slug);
                 let provider = model_providers
                     .get(&route_recommendation.selected_slug)
                     .cloned()

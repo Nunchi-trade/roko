@@ -59,8 +59,12 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     }
                     eprintln!("Found empty scaffold from previous run — regenerating.");
                 }
-                let model_key =
-                    resolve_effective_model_key(&workdir, cli.model.clone(), Some("scribe"), "prd draft new")?;
+                let model_key = resolve_effective_model_key(
+                    &workdir,
+                    cli.model.clone(),
+                    Some("scribe"),
+                    "prd draft new",
+                )?;
                 // Write scaffold first so agent can read and fill it
                 let frontmatter = roko_cli::prd::new_draft_frontmatter(&slug, &title);
                 let scaffold = format!(
@@ -268,16 +272,19 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
         },
         PrdCmd::Plan { slug, dry_run } => {
             let prd_path = find_prd(&workdir, &slug)?;
-            let model_key =
-                resolve_effective_model_key(&workdir, cli.model.clone(), Some("strategist"), "prd plan")?;
-            let _generated_plans_root =
-                roko_cli::prd::generate_plan_from_prd_with_model(
-                    &slug,
-                    &prd_path,
-                    dry_run,
-                    Some(model_key.as_str()),
-                )
-                .await?;
+            let model_key = resolve_effective_model_key(
+                &workdir,
+                cli.model.clone(),
+                Some("strategist"),
+                "prd plan",
+            )?;
+            let _generated_plans_root = roko_cli::prd::generate_plan_from_prd_with_model(
+                &slug,
+                &prd_path,
+                dry_run,
+                Some(model_key.as_str()),
+            )
+            .await?;
             Ok(0)
         }
         PrdCmd::Consolidate => {
@@ -345,15 +352,10 @@ fn resolve_effective_model_key(
     context: &str,
 ) -> Result<String> {
     let config = crate::load_roko_config(workdir)?;
-    let selection = roko_cli::model_selection::resolve_effective_model(
-        cli_model,
-        None,
-        role,
-        None,
-        &config,
-    )
-    .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
-    eprintln!("[{context}] effective selection: {}", selection.reason);
+    let selection =
+        roko_cli::model_selection::resolve_effective_model(cli_model, None, role, None, &config)
+            .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
+    selection.print_stderr();
     Ok(selection.effective_model_key)
 }
 

@@ -126,6 +126,7 @@ struct DispatchOutcome {
     agent_result: AgentResult,
     external_actions: Vec<ExternalAction>,
     injected_playbook_ids: Vec<String>,
+    model_selection: Option<EffectiveModelSelection>,
 }
 
 /// Write a RunReport to `.roko/shared/{token}.json` and return the token.
@@ -550,10 +551,7 @@ pub async fn run_with_workflow_engine_with_hub(
     external_hub: Option<&StateHub>,
 ) -> anyhow::Result<WorkflowRunReport> {
     let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
-    eprintln!(
-        "model: {} via {} (source: {})",
-        selection.effective_model_key, selection.provider_key, selection.source
-    );
+    selection.print_stderr();
 
     let pipeline_config = model_config.pipeline.clone();
     let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
@@ -599,10 +597,7 @@ pub async fn run_workflow_engine_report_with_hub(
     external_hub: Option<&StateHub>,
 ) -> anyhow::Result<WorkflowRunReport> {
     let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
-    eprintln!(
-        "model: {} via {} (source: {})",
-        selection.effective_model_key, selection.provider_key, selection.source
-    );
+    selection.print_stderr();
     let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
 
     run_workflow_engine_with_services(
@@ -1185,6 +1180,7 @@ pub async fn run_once(
         agent_result,
         external_actions,
         injected_playbook_ids,
+        model_selection,
     } = dispatch_agent(workdir, config, &prompt, prompt_text, &ctx, strategy).await?;
 
     // Optionally post-process the agent output to strip ANSI escapes and
@@ -1298,6 +1294,7 @@ pub async fn run_once(
         &verdict_summary,
         &agent_result,
         &external_actions,
+        model_selection.as_ref(),
     )
     .await
     {
@@ -1923,6 +1920,7 @@ async fn dispatch_agent(
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
             injected_playbook_ids,
+            model_selection: resolved_cli_model.clone(),
         })
     } else if config.agent.command == "claude" && has_anthropic_api_key(config) {
         // Anthropic API tool loop — direct HTTP calls with full tool visibility.
@@ -1932,6 +1930,7 @@ async fn dispatch_agent(
             selected_model_override.clone(),
             prompt_text,
             strategy,
+            resolved_cli_model.clone(),
         )
         .await;
     } else if config.agent.command == "claude" {
@@ -2002,6 +2001,7 @@ async fn dispatch_agent(
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
             injected_playbook_ids,
+            model_selection: resolved_cli_model.clone(),
         })
     } else if config.agent.command == "ollama" {
         Ok(run_ollama_agentic_single(
@@ -2010,6 +2010,7 @@ async fn dispatch_agent(
             selected_model_override.clone(),
             prompt_text,
             strategy,
+            resolved_cli_model.clone(),
         )
         .await)
     } else if is_known_protocol_command(&config.agent.command) {
@@ -2053,6 +2054,7 @@ async fn dispatch_agent(
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
             injected_playbook_ids: Vec::new(),
+            model_selection: resolved_cli_model.clone(),
         })
     } else {
         let model = selected_model_override
@@ -2094,6 +2096,7 @@ async fn dispatch_agent(
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
             injected_playbook_ids: Vec::new(),
+            model_selection: resolved_cli_model.clone(),
         })
     }
 }
@@ -2106,6 +2109,7 @@ async fn run_ollama_agentic_single(
     model_override: Option<String>,
     prompt_text: &str,
     strategy: Option<BenchStrategy>,
+    model_selection: Option<EffectiveModelSelection>,
 ) -> DispatchOutcome {
     use parking_lot::RwLock;
     use roko_agent::dispatcher::ToolDispatcher;
@@ -2197,12 +2201,14 @@ async fn run_ollama_agentic_single(
             agent_result: AgentResult::ok(sig).with_usage(usage),
             external_actions,
             injected_playbook_ids,
+            model_selection,
         }
     } else {
         DispatchOutcome {
             agent_result: AgentResult::fail(sig).with_usage(usage),
             external_actions,
             injected_playbook_ids,
+            model_selection,
         }
     }
 }
@@ -2254,6 +2260,7 @@ async fn run_anthropic_api_tool_loop(
     model_override: Option<String>,
     prompt_text: &str,
     strategy: Option<BenchStrategy>,
+    model_selection: Option<EffectiveModelSelection>,
 ) -> Result<DispatchOutcome> {
     use parking_lot::RwLock;
     use roko_agent::dispatcher::ToolDispatcher;
@@ -2380,12 +2387,14 @@ async fn run_anthropic_api_tool_loop(
             agent_result: AgentResult::ok(sig).with_usage(usage),
             external_actions,
             injected_playbook_ids,
+            model_selection,
         })
     } else {
         Ok(DispatchOutcome {
             agent_result: AgentResult::fail(sig).with_usage(usage),
             external_actions,
             injected_playbook_ids,
+            model_selection,
         })
     }
 }
@@ -2529,6 +2538,7 @@ async fn append_episode_log(
     verdicts: &[(String, bool)],
     agent_result: &AgentResult,
     external_actions: &[ExternalAction],
+    model_selection: Option<&EffectiveModelSelection>,
 ) -> Result<()> {
     let agent_id = agent_result
         .output
@@ -2567,10 +2577,23 @@ async fn append_episode_log(
         "role".to_string(),
         serde_json::json!(normalized_role_label(&config.prompt.role)),
     );
+    let resolved_model_value = model_selection
+        .map(|selection| selection.effective_model_key.clone())
+        .unwrap_or_else(|| resolved_model(config));
     episode.extra.insert(
         "model".to_string(),
-        serde_json::json!(resolved_model(config)),
+        serde_json::json!(resolved_model_value.as_str()),
     );
+    episode.extra.insert(
+        "resolved_model".to_string(),
+        serde_json::json!(resolved_model_value.as_str()),
+    );
+    if let Some(selection) = model_selection {
+        episode.extra.insert(
+            "selection_source".to_string(),
+            serde_json::json!(selection.source.to_string()),
+        );
+    }
     episode.extra.insert(
         "provider".to_string(),
         serde_json::json!(infer_provider(config)),

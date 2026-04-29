@@ -637,7 +637,7 @@ fn resolve_effective_model_key(
     let selection =
         roko_cli::model_selection::resolve_effective_model(cli_model, None, role, None, &config)
             .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
-    eprintln!("[{context}] effective selection: {}", selection.reason);
+    selection.print_stderr();
     Ok(selection.effective_model_key)
 }
 

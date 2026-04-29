@@ -17740,6 +17740,7 @@ impl PlanRunner {
             task_id = %task_id,
             role = %role,
             model = %model,
+            resolved_model = %model,
             cost_usd = event.cost_usd,
             duration_ms = wall_ms,
             success = success,
@@ -17849,6 +17850,7 @@ impl PlanRunner {
             task_id = %task_id,
             role = %role,
             model = %model,
+            resolved_model = %model,
             strategy = %strategy_attempted,
             "failed-task efficiency event"
         );

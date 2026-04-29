@@ -149,8 +149,8 @@ pub struct AgentEfficiencyEvent {
     /// Verify error summaries recorded for failed tasks.
     #[serde(default)]
     pub gate_errors: Vec<String>,
-    /// Model used for the task attempt.
-    #[serde(default)]
+    /// Resolved model used for the task attempt.
+    #[serde(rename = "resolved_model", alias = "model_used", default)]
     pub model_used: String,
     /// Operating frequency for the turn.
     #[serde(default = "default_operating_frequency")]
@@ -933,6 +933,22 @@ mod tests {
         let json = serde_json::to_string(&e).expect("serialize");
         let e2: AgentEfficiencyEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(e, e2);
+    }
+
+    #[test]
+    fn efficiency_event_serializes_resolved_model() {
+        let event = AgentEfficiencyEvent {
+            model_used: "claude-sonnet-4-6".to_string(),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&event).expect("serialize event");
+        assert_eq!(json["resolved_model"], "claude-sonnet-4-6");
+        assert!(json.get("model_used").is_none());
+
+        let roundtrip: AgentEfficiencyEvent =
+            serde_json::from_value(json).expect("deserialize event");
+        assert_eq!(roundtrip.model_used, "claude-sonnet-4-6");
     }
 
     #[test]

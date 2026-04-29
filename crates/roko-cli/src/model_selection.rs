@@ -65,6 +65,36 @@ pub struct EffectiveModelSelection {
     pub reason: String,
 }
 
+impl EffectiveModelSelection {
+    /// Return the canonical one-line rendering for stderr / user-facing logs.
+    #[must_use]
+    pub fn display_line(&self) -> String {
+        format!(
+            "model: {} via {} (source: {})",
+            self.effective_model_key, self.provider_key, self.source
+        )
+    }
+
+    /// Print the canonical selection line to stderr.
+    pub fn print_stderr(&self) {
+        eprintln!("{}", self.display_line());
+    }
+
+    /// Serialize the selection to a JSON value for embedding in log records.
+    #[must_use]
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "effective_model_key": &self.effective_model_key,
+            "provider_key": &self.provider_key,
+            "provider_kind": &self.provider_kind,
+            "backend_slug": &self.backend_slug,
+            "source": self.source.to_string(),
+            "reason": &self.reason,
+            "requested_model": &self.requested_model,
+        })
+    }
+}
+
 /// Errors returned by [`resolve_effective_model`].
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum Error {
@@ -467,6 +497,26 @@ mod tests {
         assert_eq!(selection.effective_model_key, builtin_default);
         assert_eq!(selection.provider_key, "claude_cli");
         assert!(selection.reason.contains("built-in default"));
+    }
+
+    #[test]
+    fn display_line_and_json_are_canonical() {
+        let mut config = RokoConfig::default();
+        config.agent.default_model = "claude-opus-4-6".to_string();
+
+        let selection =
+            resolve_effective_model(None, None, None, None, &config).expect("selection");
+
+        assert_eq!(
+            selection.display_line(),
+            "model: claude-opus-4-6 via claude_cli (source: project default)"
+        );
+
+        let json = selection.as_json();
+        assert_eq!(json["effective_model_key"], "claude-opus-4-6");
+        assert_eq!(json["provider_key"], "claude_cli");
+        assert_eq!(json["source"], "project default");
+        assert_eq!(json["requested_model"], "claude-opus-4-6");
     }
 
     #[test]
