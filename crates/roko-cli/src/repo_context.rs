@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -272,6 +273,206 @@ pub fn collect_workspace_members(root: &Path, kind: &ProjectKind) -> (Vec<String
 
     let do_not_create = members.clone();
     (members, do_not_create)
+}
+
+/// Build a complete RepoContextPack for the given workspace and feature keywords.
+///
+/// Time budget: 10 seconds. On timeout, returns partial results with warnings.
+/// Missing files or directories produce incomplete packs, never errors.
+pub async fn build_repo_context(
+    workdir: &Path,
+    feature_keywords: &[&str],
+) -> Result<RepoContextPack> {
+    let start = std::time::Instant::now();
+    let time_budget = std::time::Duration::from_secs(10);
+    let project_kind = ProjectKind::detect(workdir);
+    let workdir = workdir.to_path_buf();
+    let feature_keywords_owned = feature_keywords
+        .iter()
+        .map(|keyword| (*keyword).to_owned())
+        .collect::<Vec<_>>();
+
+    let mut workspace_members = Vec::new();
+    let mut do_not_create = Vec::new();
+    let mut key_files = Vec::new();
+    let mut matching_symbols = Vec::new();
+    let mut related_prds = Vec::new();
+    let mut related_plans = Vec::new();
+    let mut timed_out = false;
+
+    if start.elapsed() < time_budget {
+        let workdir = workdir.clone();
+        match run_blocking_step_with_budget(start, time_budget, "workspace members", move || {
+            collect_workspace_members(&workdir, &project_kind)
+        })
+        .await
+        {
+            Some((members, do_not_create_members)) => {
+                workspace_members = members;
+                do_not_create = do_not_create_members;
+            }
+            None => timed_out = true,
+        }
+    } else {
+        timed_out = true;
+    }
+
+    if !timed_out && start.elapsed() < time_budget {
+        let workdir = workdir.clone();
+        let keywords = feature_keywords_owned.clone();
+        match run_blocking_step_with_budget(start, time_budget, "key files", move || {
+            let keyword_refs: Vec<&str> = keywords.iter().map(String::as_str).collect();
+            find_key_files(&workdir, &keyword_refs, 20)
+        })
+        .await
+        {
+            Some(results) => key_files = results,
+            None => timed_out = true,
+        }
+    }
+
+    if !timed_out && start.elapsed() < time_budget {
+        let workdir = workdir.clone();
+        let keywords = feature_keywords_owned.clone();
+        match run_blocking_step_with_budget(start, time_budget, "symbol matches", move || {
+            let keyword_refs: Vec<&str> = keywords.iter().map(String::as_str).collect();
+            find_symbol_matches(&workdir, &keyword_refs, 30)
+        })
+        .await
+        {
+            Some(results) => matching_symbols = results,
+            None => timed_out = true,
+        }
+    }
+
+    if !timed_out && start.elapsed() < time_budget {
+        let workdir = workdir.clone();
+        let keywords = feature_keywords_owned.clone();
+        match run_blocking_step_with_budget(start, time_budget, "related PRDs", move || {
+            let keyword_refs: Vec<&str> = keywords.iter().map(String::as_str).collect();
+            find_related_prds(&workdir, &keyword_refs, 5)
+        })
+        .await
+        {
+            Some(results) => related_prds = results,
+            None => timed_out = true,
+        }
+    }
+
+    if !timed_out && start.elapsed() < time_budget {
+        let workdir = workdir.clone();
+        let keywords = feature_keywords_owned.clone();
+        match run_blocking_step_with_budget(start, time_budget, "related plans", move || {
+            let keyword_refs: Vec<&str> = keywords.iter().map(String::as_str).collect();
+            find_related_plans(&workdir, &keyword_refs, 5)
+        })
+        .await
+        {
+            Some(results) => related_plans = results,
+            None => timed_out = true,
+        }
+    }
+
+    let feature_keyword_refs: Vec<&str> =
+        feature_keywords_owned.iter().map(String::as_str).collect();
+    let context_root_verified =
+        verify_context_root(&workdir, &feature_keyword_refs, &workspace_members, &key_files);
+
+    extend_do_not_create(&mut do_not_create, &workdir);
+
+    if !timed_out && start.elapsed() >= time_budget {
+        eprintln!(
+            "warning: repo context build exceeded the 10-second budget; returning partial results"
+        );
+    }
+
+    Ok(RepoContextPack {
+        root: workdir,
+        project_kind,
+        workspace_members,
+        key_files,
+        matching_symbols,
+        related_prds,
+        related_plans,
+        do_not_create,
+        keywords: feature_keywords_owned,
+        context_root_verified,
+    })
+}
+
+/// Extend `do_not_create` with crate directory names that may not yet be in the workspace manifest.
+fn extend_do_not_create(do_not_create: &mut Vec<String>, root: &Path) {
+    for dir_name in ["crates", "packages", "libs"] {
+        let dir = root.join(dir_name);
+        if !dir.is_dir() {
+            continue;
+        }
+
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+
+            let name = name.to_owned();
+            if !do_not_create.contains(&name) {
+                do_not_create.push(name);
+            }
+        }
+    }
+
+    do_not_create.sort_unstable();
+    do_not_create.dedup();
+}
+
+async fn run_blocking_step_with_budget<T, F>(
+    start: std::time::Instant,
+    time_budget: std::time::Duration,
+    task_name: &'static str,
+    task: F,
+) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if start.elapsed() >= time_budget {
+        eprintln!(
+            "warning: repo context build timed out before collecting {task_name}; returning partial results"
+        );
+        return None;
+    }
+
+    let handle = tokio::task::spawn_blocking(task);
+    loop {
+        if handle.is_finished() {
+            return match handle.await {
+                Ok(value) => Some(value),
+                Err(err) => {
+                    eprintln!("warning: repo context {task_name} task failed: {err}");
+                    None
+                }
+            };
+        }
+
+        if start.elapsed() >= time_budget {
+            handle.abort();
+            eprintln!(
+                "warning: repo context build timed out while collecting {task_name}; returning partial results"
+            );
+            return None;
+        }
+
+        tokio::task::yield_now().await;
+    }
 }
 
 fn collect_rust_members(root: &Path) -> Vec<String> {
@@ -1068,6 +1269,74 @@ use ./module-c
             .iter()
             .any(|path| path.to_string_lossy().contains("unrelated-feature")));
         assert!(results.iter().all(|path| !path.is_absolute()));
+    }
+
+    #[tokio::test]
+    async fn build_repo_context_returns_partial_pack_when_files_are_missing() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+
+        let pack = build_repo_context(tmp.path(), &["compose"])
+            .await
+            .expect("build repo context");
+
+        assert_eq!(pack.root, tmp.path());
+        assert_eq!(pack.project_kind, ProjectKind::Unknown);
+        assert_eq!(pack.keywords, vec![String::from("compose")]);
+        assert!(pack.workspace_members.is_empty());
+        assert!(pack.key_files.is_empty());
+        assert!(pack.matching_symbols.is_empty());
+        assert!(pack.related_prds.is_empty());
+        assert!(pack.related_plans.is_empty());
+        assert!(pack.do_not_create.is_empty());
+        assert!(!pack.context_root_verified);
+    }
+
+    #[tokio::test]
+    async fn build_repo_context_extends_do_not_create_and_verifies_root() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        write_file(
+            tmp.path().join("Cargo.toml"),
+            r#"[workspace]
+members = ["crates/roko-compose"]
+"#,
+        );
+        write_file(
+            tmp.path().join("crates/roko-compose/Cargo.toml"),
+            r#"[package]
+name = "roko-compose"
+version = "0.1.0"
+"#,
+        );
+        write_file(
+            tmp.path().join("crates/roko-compose/src/lib.rs"),
+            "pub fn build_prompt() {}\n",
+        );
+        fs::create_dir_all(tmp.path().join("packages/extra")).expect("create extra dir");
+        fs::create_dir_all(tmp.path().join("libs/sidecar")).expect("create sidecar dir");
+
+        let pack = build_repo_context(tmp.path(), &["compose"])
+            .await
+            .expect("build repo context");
+
+        assert_eq!(pack.project_kind, ProjectKind::Rust);
+        assert_eq!(pack.keywords, vec![String::from("compose")]);
+        assert_eq!(
+            pack.workspace_members,
+            vec![String::from("roko-compose")]
+        );
+        assert!(pack
+            .key_files
+            .iter()
+            .any(|path| path.to_string_lossy().ends_with("crates/roko-compose/src/lib.rs")));
+        assert!(pack.context_root_verified);
+        assert_eq!(
+            pack.do_not_create,
+            vec![
+                String::from("extra"),
+                String::from("roko-compose"),
+                String::from("sidecar"),
+            ]
+        );
     }
 }
 
