@@ -13,7 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use roko_agent::gemini::{Content, GeminiCacheClient, Part};
@@ -2437,6 +2437,46 @@ fn render_search_context(
     context
 }
 
+/// Simple TTL cache for efficiency signals to avoid re-reading
+/// `efficiency.jsonl` on every agent dispatch or conductor check.
+///
+/// Signals older than the TTL are reloaded from disk.
+struct EfficiencyCache {
+    data: Vec<Engram>,
+    loaded_at: Instant,
+    ttl: Duration,
+}
+
+impl EfficiencyCache {
+    fn new(ttl: Duration) -> Self {
+        // Force the first call to read from disk by backdating `loaded_at`.
+        Self {
+            data: Vec::new(),
+            loaded_at: Instant::now() - ttl - Duration::from_secs(1),
+            ttl,
+        }
+    }
+
+    fn is_stale(&self) -> bool {
+        self.loaded_at.elapsed() > self.ttl
+    }
+
+    /// Returns cached data if still fresh, `None` if stale.
+    fn get(&self) -> Option<&[Engram]> {
+        if self.is_stale() {
+            None
+        } else {
+            Some(&self.data)
+        }
+    }
+
+    /// Store fresh data and record the load time.
+    fn set(&mut self, data: Vec<Engram>) {
+        self.data = data;
+        self.loaded_at = Instant::now();
+    }
+}
+
 // ─── PlanRunner ───────────────────────────────────────────────────────────
 
 /// The runtime harness that drives plan execution end-to-end.
@@ -2599,6 +2639,8 @@ pub struct PlanRunner {
     custody_logger: CustodyLogger,
     /// Extension chain for composable agent behavior hooks (A1 audit finding).
     extension_chain: ExtensionChain,
+    /// TTL cache for efficiency signals to avoid re-reading `efficiency.jsonl`.
+    efficiency_cache: EfficiencyCache,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4382,7 +4424,12 @@ impl PlanRunner {
             // because no extension loader/factory exists yet — all dispatch
             // hooks (pre/post_inference, on_gate, on_error) are already wired
             // and will fire once extensions are registered here.
-            extension_chain: ExtensionChain::new(),
+            extension_chain: ExtensionChain::default(),
+            efficiency_cache: EfficiencyCache {
+                data: Vec::new(),
+                loaded_at: Instant::now() - Duration::from_secs(11),
+                ttl: Duration::from_secs(10),
+            },
         })
     }
 
@@ -4592,6 +4639,7 @@ impl PlanRunner {
             code_index_cache: None,
             custody_logger: custody_logger_for(workdir),
             extension_chain: ExtensionChain::new(),
+            efficiency_cache: EfficiencyCache::new(Duration::from_secs(10)),
         })
     }
 
@@ -4803,6 +4851,7 @@ impl PlanRunner {
             code_index_cache: None,
             custody_logger: custody_logger_for(workdir),
             extension_chain: ExtensionChain::new(),
+            efficiency_cache: EfficiencyCache::new(Duration::from_secs(10)),
         })
     }
 
@@ -5856,12 +5905,21 @@ impl PlanRunner {
 
         let ctx = Context::now();
         let mut signals = self.conductor_signals.clone();
-        if let Ok(efficiency_signals) = load_efficiency_signals_sync(
-            &self.learning.paths().efficiency_jsonl,
-            self.executor.config().budget_usd,
-        ) {
-            signals.extend(efficiency_signals);
-        }
+        let efficiency_signals = if let Some(cached) = self.efficiency_cache.get() {
+            cached.to_vec()
+        } else {
+            match load_efficiency_signals_sync(
+                &self.learning.paths().efficiency_jsonl,
+                self.executor.config().budget_usd,
+            ) {
+                Ok(sigs) => {
+                    self.efficiency_cache.set(sigs.clone());
+                    sigs
+                }
+                Err(_) => Vec::new(),
+            }
+        };
+        signals.extend(efficiency_signals);
         let decision = self.conductor.evaluate(&signals, &ctx);
 
         // INT-19: Collect compound patterns from the conductor's pattern detector.
@@ -14534,12 +14592,21 @@ impl PlanRunner {
                 routing_ctx.conductor_load = routing_ctx.conductor_load.max(budget_pressure);
                 let routing_bias = {
                     let mut signals = self.conductor_signals.clone();
-                    if let Ok(efficiency_signals) = load_efficiency_signals_sync(
-                        &self.learning.paths().efficiency_jsonl,
-                        self.executor.config().budget_usd,
-                    ) {
-                        signals.extend(efficiency_signals);
-                    }
+                    let efficiency_signals = if let Some(cached) = self.efficiency_cache.get() {
+                        cached.to_vec()
+                    } else {
+                        match load_efficiency_signals_sync(
+                            &self.learning.paths().efficiency_jsonl,
+                            self.executor.config().budget_usd,
+                        ) {
+                            Ok(sigs) => {
+                                self.efficiency_cache.set(sigs.clone());
+                                sigs
+                            }
+                            Err(_) => Vec::new(),
+                        }
+                    };
+                    signals.extend(efficiency_signals);
                     let _ = self.conductor.decide(&signals, &Context::now());
                     self.conductor.routing_bias()
                 };
