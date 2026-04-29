@@ -9,6 +9,7 @@ pub mod experiment;
 pub mod job;
 pub mod knowledge;
 pub mod learn;
+pub mod init;
 pub mod plan;
 pub mod prd;
 pub mod research;

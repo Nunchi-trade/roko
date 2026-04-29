@@ -71,6 +71,8 @@ pub(crate) mod gate_runner;
 mod heartbeat;
 pub mod index;
 pub mod inject;
+#[path = "commands/init.rs"]
+pub mod init;
 pub mod inline;
 pub(crate) mod knowledge_helpers;
 #[path = "../../../scripts/layer_check.rs"]

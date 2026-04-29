@@ -179,8 +179,8 @@ pub(crate) async fn cmd_init(
         crate::commands::prd::domain_gate_hint(domain)
     );
     println!(
-        "agent command set to \"claude\". \
-         Edit roko.toml [agent] command to use a different agent CLI."
+        "default provider command set to \"claude\". \
+         Edit roko.toml [providers.claude_cli] to use a different command."
     );
 
     // Check for interrupted session from a previous run.
