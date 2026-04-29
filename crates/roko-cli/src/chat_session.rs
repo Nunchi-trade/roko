@@ -1728,4 +1728,232 @@ sleep 5
         assert!(tool_calls.is_empty());
         assert!(pending_ids.is_empty());
     }
+
+    mod streaming_tests {
+        use super::{ToolCallSummary, accumulate_tool_event, render_stream_event};
+        use roko_agent::provider::claude_cli::parse_stream_line;
+        use roko_agent::runtime_events::AgentRuntimeEvent;
+
+        /// Mock Claude CLI `stream-json` output used to prove the full
+        /// parser -> accumulator -> renderer path without any subprocesses.
+        const MOCK_STREAM: &str = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"sess-test-123","model":"claude-sonnet-4-6","tools":[]}"#,
+            "\n",
+            r#"{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"Hello, "}],"usage":null}}"#,
+            "\n",
+            r#"{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"world!"}],"usage":null}}"#,
+            "\n",
+            r#"{"type":"assistant","subtype":"message","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"path":"foo"}}],"usage":null}}"#,
+            "\n",
+            r#"{"type":"tool","subtype":"result","tool_name":"Read","tool_use_id":"tu_1","content":"file contents here"}"#,
+            "\n",
+            r#"{"type":"result","session_id":"sess-test-123","total_cost_usd":0.01,"num_turns":1,"is_error":false,"usage":{"input_tokens":150,"output_tokens":42,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}"#,
+            "\n",
+        );
+
+        fn parsed_mock_stream_events() -> Vec<AgentRuntimeEvent> {
+            MOCK_STREAM.lines().flat_map(parse_stream_line).collect()
+        }
+
+        #[test]
+        fn parse_text_deltas_incrementally() {
+            let text_deltas: Vec<String> = parsed_mock_stream_events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    AgentRuntimeEvent::MessageDelta { text } => Some(text),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(
+                text_deltas,
+                vec!["Hello, ".to_string(), "world!".to_string()]
+            );
+        }
+
+        #[test]
+        fn parse_session_id_from_system_event() {
+            let events = parsed_mock_stream_events();
+            let system_event = events
+                .iter()
+                .find(|event| matches!(event, AgentRuntimeEvent::SystemInit { .. }));
+
+            assert!(system_event.is_some(), "should have SystemInit event");
+
+            if let Some(AgentRuntimeEvent::SystemInit { session_id, model }) = system_event {
+                assert_eq!(session_id, "sess-test-123");
+                assert_eq!(model, "claude-sonnet-4-6");
+            }
+        }
+
+        #[test]
+        fn parse_session_id_from_result_event() {
+            let events = parsed_mock_stream_events();
+            let turn_completed = events
+                .iter()
+                .find(|event| matches!(event, AgentRuntimeEvent::TurnCompleted { .. }));
+
+            assert!(turn_completed.is_some(), "should have TurnCompleted event");
+
+            if let Some(AgentRuntimeEvent::TurnCompleted {
+                session_id,
+                is_error,
+                ..
+            }) = turn_completed
+            {
+                assert_eq!(session_id.as_deref(), Some("sess-test-123"));
+                assert!(!is_error);
+            }
+        }
+
+        #[test]
+        fn parse_token_usage_from_result() {
+            let events = parsed_mock_stream_events();
+            let usage_events: Vec<_> = events
+                .iter()
+                .filter(|event| matches!(event, AgentRuntimeEvent::TokenUsage { .. }))
+                .collect();
+
+            assert_eq!(usage_events.len(), 1, "expected one TokenUsage event");
+
+            if let AgentRuntimeEvent::TokenUsage {
+                input_tokens,
+                output_tokens,
+                ..
+            } = usage_events[0]
+            {
+                assert_eq!(*input_tokens, 150);
+                assert_eq!(*output_tokens, 42);
+            }
+        }
+
+        #[test]
+        fn parse_tool_events() {
+            let events = parsed_mock_stream_events();
+            let tool_calls: Vec<_> = events
+                .iter()
+                .filter(|event| matches!(event, AgentRuntimeEvent::ToolCall { .. }))
+                .collect();
+            let tool_outputs: Vec<_> = events
+                .iter()
+                .filter(|event| matches!(event, AgentRuntimeEvent::ToolOutput { .. }))
+                .collect();
+
+            assert_eq!(tool_calls.len(), 1, "expected 1 ToolCall");
+            assert_eq!(tool_outputs.len(), 1, "expected 1 ToolOutput");
+
+            if let AgentRuntimeEvent::ToolCall { id, name } = &tool_calls[0] {
+                assert_eq!(id, "tu_1");
+                assert_eq!(name, "Read");
+            }
+            if let AgentRuntimeEvent::ToolOutput { id, output } = &tool_outputs[0] {
+                assert_eq!(id, "tu_1");
+                assert_eq!(output, "file contents here");
+            }
+        }
+
+        #[test]
+        fn empty_lines_produce_no_events() {
+            assert!(parse_stream_line("").is_empty());
+            assert!(parse_stream_line("   ").is_empty());
+            assert!(parse_stream_line("{not json}").is_empty());
+        }
+
+        #[test]
+        fn error_event_parsed() {
+            let events = parse_stream_line(r#"{"type":"error","message":"rate limited"}"#);
+            assert_eq!(events.len(), 1, "expected 1 Error event");
+            if let AgentRuntimeEvent::Error { message } = &events[0] {
+                assert!(message.contains("rate limited"));
+            } else {
+                panic!("expected AgentRuntimeEvent::Error");
+            }
+        }
+
+        #[tokio::test]
+        async fn streaming_channel_receives_events() {
+            let expected = parsed_mock_stream_events();
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentRuntimeEvent>(100);
+
+            let tx_clone = tx.clone();
+            let handle = tokio::spawn(async move {
+                for line in MOCK_STREAM.lines() {
+                    for event in parse_stream_line(line) {
+                        let _ = tx_clone.send(event).await;
+                    }
+                }
+            });
+
+            drop(tx);
+            let _ = handle.await;
+
+            let mut received = Vec::new();
+            while let Some(event) = rx.recv().await {
+                received.push(event);
+            }
+
+            assert_eq!(received, expected);
+        }
+
+        #[test]
+        fn render_stream_event_smoke_handles_parsed_events() {
+            let mut events = parsed_mock_stream_events();
+            events.push(AgentRuntimeEvent::TurnCompleted {
+                session_id: Some("sess-error".to_string()),
+                total_cost_usd: None,
+                num_turns: None,
+                is_error: true,
+            });
+            events.push(AgentRuntimeEvent::Error {
+                message: "rate limited".to_string(),
+            });
+
+            for event in &events {
+                render_stream_event(event);
+            }
+        }
+
+        #[test]
+        fn accumulate_tool_event_matches_by_id() {
+            let mut tool_calls: Vec<ToolCallSummary> = Vec::new();
+            let mut pending_ids: Vec<(String, usize)> = Vec::new();
+
+            for event in parsed_mock_stream_events() {
+                accumulate_tool_event(&mut tool_calls, &mut pending_ids, &event);
+            }
+
+            assert_eq!(tool_calls.len(), 1);
+            assert_eq!(tool_calls[0].name, "Read");
+            assert_eq!(tool_calls[0].input_abbrev, "file contents here");
+            assert!(tool_calls[0].success);
+            assert!(pending_ids.is_empty());
+        }
+
+        #[test]
+        fn tool_output_truncated_at_200_chars() {
+            let mut tool_calls: Vec<ToolCallSummary> = Vec::new();
+            let mut pending_ids: Vec<(String, usize)> = Vec::new();
+
+            accumulate_tool_event(
+                &mut tool_calls,
+                &mut pending_ids,
+                &AgentRuntimeEvent::ToolCall {
+                    id: "tu_x".to_string(),
+                    name: "Read".to_string(),
+                },
+            );
+            let long_output = "a".repeat(300);
+            accumulate_tool_event(
+                &mut tool_calls,
+                &mut pending_ids,
+                &AgentRuntimeEvent::ToolOutput {
+                    id: "tu_x".to_string(),
+                    output: long_output,
+                },
+            );
+
+            assert_eq!(tool_calls[0].input_abbrev.len(), 203);
+            assert!(tool_calls[0].input_abbrev.ends_with("..."));
+        }
+    }
 }
