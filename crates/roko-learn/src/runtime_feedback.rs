@@ -2044,9 +2044,21 @@ impl LearningRuntime {
             write.retry_outcomes = 1;
         }
 
-        if let Some(seed) = KnowledgeSeedRecord::from_successful_episode(episode) {
-            self.append_knowledge_seed(&seed).await?;
-            write.knowledge_seeds = 1;
+        // Gate knowledge seeds on artifact validity as well as process success.
+        // `artifact_valid = false` means the process ran, but the produced artifact
+        // failed grounding validation. Do not store positive learning from that case.
+        let artifact_valid = extra_bool(episode, "artifact_valid").unwrap_or(true);
+        if artifact_valid {
+            if let Some(seed) = KnowledgeSeedRecord::from_successful_episode(episode) {
+                self.append_knowledge_seed(&seed).await?;
+                write.knowledge_seeds = 1;
+            }
+        } else {
+            tracing::info!(
+                task_id = %episode.task_id,
+                episode_id = %episode.episode_id,
+                "Withholding knowledge seed: artifact_valid=false in episode extra"
+            );
         }
 
         Ok(write)
@@ -2234,8 +2246,20 @@ impl LearningRuntime {
         }
 
         // ── Cascade router observation ─────────────────────────────────
-        if !skip_only && self.update_frequency.router_due(episode_count) {
+        // Do not feed positive observations for artifact-invalid episodes.
+        // Missing `artifact_valid` remains backward-compatible and counts as valid.
+        let artifact_valid_for_router = extra_bool(&input.episode, "artifact_valid").unwrap_or(true);
+        if !skip_only
+            && self.update_frequency.router_due(episode_count)
+            && artifact_valid_for_router
+        {
             update.router_updated = self.update_cascade_router(&input.episode);
+        } else if !artifact_valid_for_router {
+            tracing::debug!(
+                task_id = %input.episode.task_id,
+                model = ?extra_string(&input.episode, "model"),
+                "Cascade router: skipping positive observation -- artifact_valid=false"
+            );
         }
 
         // Persist immediately so the router state file always reflects the
@@ -5020,5 +5044,41 @@ mod tests {
         assert!(!snapshot.episodes[0].success);
         assert!(snapshot.knowledge_seeds.is_empty());
         assert_eq!(snapshot.provider_model_outcomes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn artifact_invalid_completed_run_withholds_seed_and_router_observation() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+
+        let mut episode = sample_pattern_episode(true, "artifact-invalid");
+        episode
+            .extra
+            .insert("artifact_valid".to_string(), serde_json::json!(false));
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput::from_episode(episode))
+            .await
+            .unwrap();
+
+        assert_eq!(update.episode_logged, ApplyStatus::Applied);
+        assert_eq!(update.knowledge_seed_recorded, ApplyStatus::Skipped);
+        assert!(!update.router_updated);
+
+        let snapshot = runtime
+            .query_feedback(&RuntimeFeedbackQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(snapshot.episodes.len(), 1);
+        assert!(snapshot.episodes[0].success);
+        assert_eq!(
+            snapshot.episodes[0]
+                .extra
+                .get("artifact_valid")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert!(snapshot.knowledge_seeds.is_empty());
+        assert_eq!(runtime.cascade_router().total_observations(), 0);
     }
 }
