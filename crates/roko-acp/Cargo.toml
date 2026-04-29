@@ -21,6 +21,7 @@ roko-core = { path = "../roko-core" }
 roko-runtime = { path = "../roko-runtime" }
 roko-agent = { path = "../roko-agent" }
 roko-gate = { path = "../roko-gate" }
+roko-compose = { path = "../roko-compose" }
 roko-orchestrator = { path = "../roko-orchestrator" }
 roko-learn = { path = "../roko-learn" }
 roko-dreams = { path = "../roko-dreams" }

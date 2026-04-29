@@ -10,6 +10,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use roko_compose::SystemPromptBuilder;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify};
@@ -101,38 +102,6 @@ pub const FALLBACK_MODEL: &str = "sonnet";
 const MAX_HISTORY_TURNS: usize = 40;
 /// Maximum total characters across all history turns.
 const MAX_HISTORY_CHARS: usize = 64_000;
-
-// ── Mode-specific system prompts ─────────────────────────────────────
-
-const CODE_MODE_SYSTEM_PROMPT: &str = "\
-You are an expert code implementer. Your role is to write and edit code directly.
-
-Rules:
-- Make minimal, targeted changes. Don't refactor unrelated code.
-- Read existing code before modifying it. Understand context first.
-- Follow existing patterns and conventions in the codebase.
-- Write correct, working code. Verify your changes compile.
-- Be concise in explanations. Lead with the code change.";
-
-const PLAN_MODE_SYSTEM_PROMPT: &str = "\
-You are a software architect and strategist. Your role is to plan, not implement.
-
-Rules:
-- Decompose tasks into clear, actionable steps.
-- Identify files that need changes and describe what changes are needed.
-- Consider edge cases, dependencies, and ordering constraints.
-- Do NOT write implementation code directly. Describe what to build.
-- Output structured plans with numbered steps.";
-
-const RESEARCH_MODE_SYSTEM_PROMPT: &str = "\
-You are a technical researcher. Your role is to gather context and analyze options.
-
-Rules:
-- Search broadly before concluding. Check multiple sources of truth.
-- Cite specific files, functions, and line numbers when referencing code.
-- Compare alternatives with tradeoffs when multiple approaches exist.
-- Summarize findings clearly with actionable recommendations.
-- Do NOT make changes. Report what you find.";
 
 /// A single turn in the conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +235,9 @@ pub struct AcpSession {
     /// Slash commands and status queries read from this handle.
     #[serde(skip, default = "new_shared_run")]
     pub shared_run: SharedWorkflowRun,
+    /// Workspace CLAUDE.md content loaded once per session.
+    #[serde(skip)]
+    pub cached_conventions: Option<String>,
 }
 
 impl AcpSession {
@@ -287,6 +259,7 @@ impl AcpSession {
             conversation_history: Vec::new(),
             active_run: None,
             shared_run: new_shared_run(),
+            cached_conventions: None,
         }
     }
 
@@ -311,7 +284,19 @@ impl AcpSession {
             conversation_history: Vec::new(),
             active_run: None,
             shared_run: new_shared_run(),
+            cached_conventions: None,
         }
+    }
+
+    /// Load workspace CLAUDE.md content, truncated to 4096 characters.
+    ///
+    /// Returns `None` if the file does not exist or cannot be read.
+    #[must_use]
+    pub fn load_conventions(workdir: &std::path::Path) -> Option<String> {
+        let claude_md = workdir.join("CLAUDE.md");
+        std::fs::read_to_string(&claude_md)
+            .ok()
+            .map(|content| content.chars().take(4096).collect())
     }
 
     /// Returns the session metadata used by `session/list`.
@@ -376,14 +361,50 @@ impl AcpSession {
         self.config_state.agent_mode = mode_id;
     }
 
-    /// Returns the system prompt for the current agent mode.
+    /// Build a context-rich system prompt using the 9-layer prompt builder.
     #[must_use]
-    pub fn system_prompt_for_mode(&self) -> &'static str {
-        match self.config_state.agent_mode.as_str() {
-            "plan" => PLAN_MODE_SYSTEM_PROMPT,
-            "research" => RESEARCH_MODE_SYSTEM_PROMPT,
-            _ => CODE_MODE_SYSTEM_PROMPT,
+    pub fn build_system_prompt(
+        &self,
+        workdir: &std::path::Path,
+        gate_feedback_text: &[String],
+        conventions: Option<&str>,
+    ) -> String {
+        let role_identity = match self.config_state.agent_mode.as_str() {
+            "plan" => "You are a software architect and strategist. Your role is to plan, not implement. Decompose tasks into clear actionable steps, identify files that need changes, and produce structured plans with numbered steps. Do NOT write implementation code directly.",
+            "research" => "You are a technical researcher. Your role is to gather context and analyze options. Search broadly, cite specific files and line numbers, compare alternatives with tradeoffs. Do NOT make changes. Report what you find.",
+            _ => "You are an expert code implementer. Your role is to write and edit code directly. Make minimal targeted changes, read existing code before modifying it, follow existing patterns, and write correct working code.",
+        };
+
+        let mut builder = SystemPromptBuilder::new(role_identity);
+
+        let conventions = conventions
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                self.cached_conventions
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            });
+        if let Some(conventions) = conventions {
+            builder = builder.with_conventions(conventions);
         }
+
+        let domain = format!(
+            "Working directory: {}\nSession: {} (mode: {}, model: {})",
+            workdir.display(),
+            self.session_id,
+            self.config_state.agent_mode,
+            self.config_state.model,
+        );
+        builder = builder.with_domain(domain);
+
+        for feedback in gate_feedback_text
+            .iter()
+            .filter(|text| !text.trim().is_empty())
+        {
+            builder = builder.with_gate_feedback_text(feedback.as_str());
+        }
+
+        builder.build()
     }
 
     /// Pushes a user turn onto conversation history, then trims.
@@ -585,7 +606,8 @@ impl SessionManager {
 
     /// Creates and stores a new ACP session.
     pub fn create_session(&mut self, params: SessionNewParams) -> SessionNewResult {
-        let session = AcpSession::new_with_config(params, &self.roko_config);
+        let mut session = AcpSession::new_with_config(params, &self.roko_config);
+        session.cached_conventions = AcpSession::load_conventions(&self.workdir);
         let result = session.new_result();
         self.sessions.insert(session.session_id.clone(), session);
         result
@@ -663,7 +685,9 @@ impl SessionManager {
             .join("sessions")
             .join(format!("{session_id}.json"));
         let data = std::fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&data).ok()
+        let mut session: AcpSession = serde_json::from_str(&data).ok()?;
+        session.cached_conventions = AcpSession::load_conventions(&self.workdir);
+        Some(session)
     }
 
     /// Lists session IDs discovered on disk (not already in memory).
@@ -1436,19 +1460,76 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_for_mode_returns_correct_prompts() {
+    fn build_system_prompt_uses_mode_specific_role_identity() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path();
+
+        let session = AcpSession::new(session_params("prompts"));
+        let code_prompt = session.build_system_prompt(workdir, &[], None);
+        assert!(code_prompt.contains("expert code implementer"));
+
+        let mut plan_session = session.clone();
+        plan_session.set_mode("plan".into());
+        let plan_prompt = plan_session.build_system_prompt(workdir, &[], None);
+        assert!(plan_prompt.contains("software architect and strategist"));
+
+        let mut research_session = session;
+        research_session.set_mode("research".into());
+        let research_prompt = research_session.build_system_prompt(workdir, &[], None);
+        assert!(research_prompt.contains("technical researcher"));
+
+        assert_ne!(code_prompt, plan_prompt);
+        assert_ne!(plan_prompt, research_prompt);
+    }
+
+    #[test]
+    fn build_system_prompt_includes_conventions_and_gate_feedback() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path();
         let mut session = AcpSession::new(session_params("prompts"));
-        assert!(
-            session
-                .system_prompt_for_mode()
-                .contains("code implementer")
+        session.cached_conventions = Some("Use snake_case.\nKeep changes minimal.".to_string());
+
+        let prompt = session.build_system_prompt(
+            workdir,
+            &["Prior gate failed on tests".to_string()],
+            None,
         );
 
-        session.set_mode("plan".into());
-        assert!(session.system_prompt_for_mode().contains("architect"));
+        assert!(prompt.contains("## Project Conventions"));
+        assert!(prompt.contains("Use snake_case."));
+        assert!(prompt.contains("## Gate Feedback"));
+        assert!(prompt.contains("Prior gate failed on tests"));
+        assert!(prompt.contains("Working directory:"));
+        assert!(prompt.contains("Session:"));
+    }
 
-        session.set_mode("research".into());
-        assert!(session.system_prompt_for_mode().contains("researcher"));
+    #[test]
+    fn load_conventions_truncates_to_4096_characters() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path();
+        std::fs::write(workdir.join("CLAUDE.md"), "a".repeat(5_000)).expect("write claude");
+
+        let conventions = AcpSession::load_conventions(workdir).expect("load conventions");
+        assert_eq!(conventions.len(), 4_096);
+        assert!(conventions.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn create_session_loads_cached_conventions() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let workdir = tmp.path().to_path_buf();
+        std::fs::write(workdir.join("CLAUDE.md"), "Use snake_case.").expect("write claude");
+
+        let mut manager = SessionManager::new(workdir, Default::default());
+        let result = manager.create_session(session_params("alpha"));
+        let session = manager
+            .get_session(&result.session_id)
+            .expect("session should exist");
+
+        assert_eq!(
+            session.cached_conventions.as_deref(),
+            Some("Use snake_case.")
+        );
     }
 
     #[test]

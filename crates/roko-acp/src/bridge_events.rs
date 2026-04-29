@@ -766,7 +766,7 @@ where
 
     // Get system prompt and history context for the single-agent path.
     let system_prompt = if should_resolve_context {
-        session.system_prompt_for_mode().to_owned()
+        session.build_system_prompt(workdir, &[], session.cached_conventions.as_deref())
     } else {
         String::new()
     };

@@ -1987,3 +1987,27 @@ async fn run_commit(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::session::AcpSession;
+    use roko_compose::SystemPromptBuilder;
+
+    #[test]
+    fn system_prompt_builder_is_available_for_acp_workflows() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        std::fs::write(tmp.path().join("CLAUDE.md"), "Use snake_case.").expect("write claude");
+
+        let prompt = SystemPromptBuilder::new("You are an expert code implementer.")
+            .with_conventions(
+                AcpSession::load_conventions(tmp.path()).expect("load cached conventions"),
+            )
+            .with_domain("Working directory: /tmp/workspace")
+            .with_task("Review the ACP workflow dispatch path")
+            .build();
+
+        assert!(prompt.contains("Use snake_case."));
+        assert!(prompt.contains("Working directory: /tmp/workspace"));
+        assert!(prompt.contains("Review the ACP workflow dispatch path"));
+    }
+}
