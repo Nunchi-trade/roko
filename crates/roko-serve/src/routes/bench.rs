@@ -18,11 +18,13 @@ use serde_json::{Value, json};
 
 use crate::bench::{
     self, BenchConfigOverrides, BenchRun, BenchRunIndexEntry, BenchRunKind, BenchRunStatus,
-    BenchRunSummary, BenchSuite, BenchTaskResult,
+    BenchRunSummary, BenchStrategy, BenchSuite, BenchTaskResult,
 };
 use crate::error::ApiError;
 use crate::events::ServerEvent;
 use crate::state::{AppState, BenchRunHandle};
+use roko_learn::playbook::PlaybookStore;
+use roko_neuro::KnowledgeStore;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -174,6 +176,20 @@ async fn execute_bench_run(
     let mut results = Vec::new();
     let mut passed_count = 0usize;
     let mut failed_count = 0usize;
+    let learning_stores = if matches!(overrides.strategy, BenchStrategy::Minimal) {
+        None
+    } else {
+        Some((
+            PlaybookStore::new(state.workdir.join(".roko").join("learn").join("playbooks")),
+            KnowledgeStore::for_workdir(&state.workdir),
+        ))
+    };
+    let mut learning_totals = if let Some((playbook_store, knowledge_store)) = learning_stores.as_ref()
+    {
+        current_learning_totals(playbook_store, knowledge_store).await
+    } else {
+        None
+    };
 
     for (idx, task) in suite.tasks.iter().enumerate() {
         // Publish task start.
@@ -275,6 +291,36 @@ async fn execute_bench_run(
             passed: passed_count,
             failed: failed_count,
         });
+
+        if let Some((playbook_store, knowledge_store)) = learning_stores.as_ref() {
+            if let Some(current_totals) = current_learning_totals(playbook_store, knowledge_store).await
+            {
+                let previous_totals = learning_totals.replace(current_totals);
+                let playbooks_created = previous_totals
+                    .map(|previous| {
+                        current_totals
+                            .playbooks_total
+                            .saturating_sub(previous.playbooks_total)
+                    })
+                    .unwrap_or(0);
+                let anti_patterns_created = previous_totals
+                    .map(|previous| {
+                        current_totals
+                            .anti_patterns_total
+                            .saturating_sub(previous.anti_patterns_total)
+                    })
+                    .unwrap_or(0);
+
+                state.event_bus.publish(ServerEvent::BenchLearningEvent {
+                    run_id: run_id.clone(),
+                    task_id: task.id.clone(),
+                    playbooks_created,
+                    anti_patterns_created,
+                    total_playbooks: current_totals.playbooks_total,
+                    total_anti_patterns: current_totals.anti_patterns_total,
+                });
+            }
+        }
 
         // Update on-disk state periodically.
         if let Ok(Some(mut run)) = bench::load_bench_run(&state.workdir, &run_id).await {
@@ -527,6 +573,7 @@ async fn bench_events_sse(
                         ServerEvent::BenchRunStarted { .. }
                             | ServerEvent::BenchTaskStarted { .. }
                             | ServerEvent::BenchTaskCompleted { .. }
+                            | ServerEvent::BenchLearningEvent { .. }
                             | ServerEvent::BenchProgress { .. }
                             | ServerEvent::BenchRunCompleted { .. }
                     );
@@ -557,4 +604,36 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LearningTotals {
+    playbooks_total: u32,
+    anti_patterns_total: u32,
+}
+
+async fn current_learning_totals(
+    playbook_store: &PlaybookStore,
+    knowledge_store: &KnowledgeStore,
+) -> Option<LearningTotals> {
+    let playbooks_total = match playbook_store.list().await {
+        Ok(playbooks) => playbooks.len().min(u32::MAX as usize) as u32,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to read bench playbook counts");
+            return None;
+        }
+    };
+
+    let anti_patterns_total = match knowledge_store.stats() {
+        Ok(stats) => stats.anti_knowledge_count.min(u32::MAX as usize) as u32,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to read bench anti-pattern counts");
+            return None;
+        }
+    };
+
+    Some(LearningTotals {
+        playbooks_total,
+        anti_patterns_total,
+    })
 }

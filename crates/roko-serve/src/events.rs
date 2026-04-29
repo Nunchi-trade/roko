@@ -447,6 +447,23 @@ pub enum ServerEvent {
         cost_usd: f64,
     },
 
+    /// Learning artifacts created while finishing a bench task.
+    #[serde(rename = "BenchLearningEvent")]
+    BenchLearningEvent {
+        /// Bench run identifier.
+        run_id: String,
+        /// Bench task identifier.
+        task_id: String,
+        /// Playbooks created for this task.
+        playbooks_created: u32,
+        /// Anti-patterns created for this task.
+        anti_patterns_created: u32,
+        /// Total playbooks observed after this task.
+        total_playbooks: u32,
+        /// Total anti-patterns observed after this task.
+        total_anti_patterns: u32,
+    },
+
     /// Overall progress of a bench run.
     BenchProgress {
         run_id: String,
@@ -632,5 +649,26 @@ mod tests {
         assert_eq!(json["content"], "hello");
         assert_eq!(json["done"], true);
         assert_eq!(json["metadata"]["cost_usd"], 0.1);
+    }
+
+    #[test]
+    fn bench_learning_event_serializes_with_counts() {
+        let event = ServerEvent::BenchLearningEvent {
+            run_id: "run-1".into(),
+            task_id: "task-7".into(),
+            playbooks_created: 1,
+            anti_patterns_created: 2,
+            total_playbooks: 9,
+            total_anti_patterns: 4,
+        };
+
+        let json = serde_json::to_value(event).expect("serialize bench learning event");
+        assert_eq!(json["type"], "BenchLearningEvent");
+        assert_eq!(json["run_id"], "run-1");
+        assert_eq!(json["task_id"], "task-7");
+        assert_eq!(json["playbooks_created"], 1);
+        assert_eq!(json["anti_patterns_created"], 2);
+        assert_eq!(json["total_playbooks"], 9);
+        assert_eq!(json["total_anti_patterns"], 4);
     }
 }
