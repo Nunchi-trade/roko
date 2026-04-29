@@ -8,13 +8,16 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use roko_agent::agent::Agent;
+use roko_agent::claude_cli_agent::ClaudeCliAgent;
 use roko_agent::safety::contract::AgentContract;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
-use roko_compose::{detect_conventions, ProjectConventions, TokenCounter};
+use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
 use roko_core::foundation::ChatMessage;
+use roko_core::{Body, Context, Engram, Kind};
 
 use crate::config::Config;
 use crate::model_selection::EffectiveModelSelection;
@@ -49,6 +52,42 @@ pub enum SlashResult {
     Unknown(String),
     /// Input is not a slash command.
     NotACommand,
+}
+
+/// Summary of a tool call captured during a turn.
+#[derive(Debug, Clone)]
+pub struct ToolCallSummary {
+    /// Tool name (for example `Read`, `Bash`, or `Edit`).
+    pub name: String,
+    /// Abbreviated input, capped at the first 200 characters.
+    pub input_abbrev: String,
+    /// Whether the tool call succeeded.
+    pub success: bool,
+}
+
+/// Result of a single agent turn.
+#[derive(Debug, Clone)]
+pub struct TurnResult {
+    /// The model's text response.
+    pub text: String,
+    /// Which model responded.
+    pub model: String,
+    /// Input tokens consumed during the turn.
+    pub input_tokens: u64,
+    /// Output tokens produced during the turn.
+    pub output_tokens: u64,
+    /// Tool calls executed during the turn.
+    pub tool_calls: Vec<ToolCallSummary>,
+    /// Session identifier for `--resume`.
+    ///
+    /// This batch uses `ClaudeCliAgent::run`, which does not surface the
+    /// stream `result` event session id into `AgentResult`, so this stays
+    /// `None` until the streaming turn path lands.
+    pub session_id: Option<String>,
+    /// Wall-clock duration of the turn.
+    pub duration: Duration,
+    /// Whether the turn was cancelled by the user.
+    pub cancelled: bool,
 }
 
 /// Unified agent session for interactive and one-shot CLI modes.
@@ -199,6 +238,74 @@ impl ChatAgentSession {
             }
             _ => SlashResult::Unknown(cmd.to_string()),
         }
+    }
+
+    /// Build a `ClaudeCliAgent` with the current session state.
+    ///
+    /// This is kept as a helper so tests can inspect the configured agent
+    /// without needing to spawn a turn.
+    pub fn build_agent(&self) -> Result<ClaudeCliAgent> {
+        let mut agent = ClaudeCliAgent::new("claude", self.workdir.clone(), self.model.clone())
+            .with_effort(&self.effort)
+            .with_bare_mode(false);
+
+        if !self.system_prompt.is_empty() {
+            agent = agent.with_system_prompt(&self.system_prompt);
+        }
+
+        if !self.allowed_tools_csv.is_empty() {
+            agent = agent.with_tools(&self.allowed_tools_csv);
+        }
+
+        if let Some(ref mcp_path) = self.mcp_config {
+            agent = agent.with_mcp_config(mcp_path.clone());
+        }
+
+        if let Some(ref sid) = self.session_id {
+            agent = agent.with_resume(sid.clone());
+        }
+
+        if let Some(timeout) = self.timeout {
+            agent = agent.with_timeout_ms(timeout.as_millis() as u64);
+        }
+
+        Ok(agent)
+    }
+
+    /// Build the input engram for a user prompt.
+    pub fn build_engram(&self, prompt: &str) -> Engram {
+        Engram::builder(Kind::Prompt)
+            .body(Body::text(prompt))
+            .build()
+    }
+
+    /// Send a single turn through the configured Claude CLI agent.
+    pub async fn send_turn(&mut self, prompt: &str) -> Result<TurnResult> {
+        let started = Instant::now();
+        let agent = self.build_agent()?;
+        let input = self.build_engram(prompt);
+        let ctx = Context::default();
+        let result = agent.run(&input, &ctx).await;
+
+        let text = result
+            .output
+            .body
+            .as_text()
+            .ok()
+            .map(str::to_string)
+            .unwrap_or_default();
+
+        Ok(TurnResult {
+            text,
+            model: self.model.clone(),
+            input_tokens: u64::from(result.usage.input_tokens),
+            output_tokens: u64::from(result.usage.output_tokens),
+            tool_calls: Vec::new(),
+            // `ClaudeCliAgent::run` does not expose session ids in its result.
+            session_id: None,
+            duration: started.elapsed(),
+            cancelled: false,
+        })
     }
 
     #[cfg(test)]
