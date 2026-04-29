@@ -259,7 +259,8 @@ pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(event) = serde_json::from_str::<roko_learn::efficiency::AgentEfficiencyEvent>(trimmed)
+        let Ok(event) =
+            serde_json::from_str::<roko_learn::efficiency::AgentEfficiencyEvent>(trimmed)
         else {
             continue;
         };
@@ -292,10 +293,7 @@ pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
 
     println!("Efficiency: {} events at {}", count, path.display());
     println!("  Range: {}", format_range(first_seen, last_seen));
-    println!(
-        "  Latest: {}",
-        latest.unwrap_or_else(|| "none".to_string())
-    );
+    println!("  Latest: {}", latest.unwrap_or_else(|| "none".to_string()));
 }
 
 pub(crate) async fn print_learn_episodes(workdir: &std::path::Path) {
@@ -351,10 +349,7 @@ pub(crate) async fn print_learn_episodes(workdir: &std::path::Path) {
 
     println!("Episodes: {} entries at {}", count, path.display());
     println!("  Range: {}", format_range(first_seen, last_seen));
-    println!(
-        "  Latest: {}",
-        latest.unwrap_or_else(|| "none".to_string())
-    );
+    println!("  Latest: {}", latest.unwrap_or_else(|| "none".to_string()));
 }
 
 pub(crate) async fn print_learn_knowledge(workdir: &std::path::Path) {
@@ -423,7 +418,11 @@ fn format_range(
 
 fn non_empty_or_unknown(value: &str) -> &str {
     let trimmed = value.trim();
-    if trimmed.is_empty() { "unknown" } else { trimmed }
+    if trimmed.is_empty() {
+        "unknown"
+    } else {
+        trimmed
+    }
 }
 
 fn efficiency_model_label(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> &str {
