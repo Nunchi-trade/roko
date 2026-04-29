@@ -12,6 +12,12 @@ pub struct ServeConfig {
     /// Port override for `roko serve`. Falls back to `server.port` (default 6677).
     #[serde(default)]
     pub port: Option<u16>,
+    /// Shared transcript retention period in days.
+    ///
+    /// Newly created shares expire after this many days unless they are
+    /// created with `--no-expire`.
+    #[serde(default = "default_share_ttl_days")]
+    pub share_ttl_days: u64,
     /// Whether to expose the PTY terminal routes.
     ///
     /// Disabled by default because the terminal is shell access.
@@ -32,12 +38,17 @@ impl Default for ServeConfig {
     fn default() -> Self {
         Self {
             port: None,
+            share_ttl_days: default_share_ttl_days(),
             terminal_enabled: false,
             auto_orchestrate: true,
             auth: ServeAuthConfig::default(),
             deploy: ServeDeployConfig::default(),
         }
     }
+}
+
+fn default_share_ttl_days() -> u64 {
+    7
 }
 
 /// Authentication settings for the HTTP API.
@@ -151,6 +162,16 @@ impl Default for ServeDeployWebhookConfig {
             owner: String::new(),
             repo: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_share_ttl_days_is_seven() {
+        assert_eq!(ServeConfig::default().share_ttl_days, 7);
     }
 }
 

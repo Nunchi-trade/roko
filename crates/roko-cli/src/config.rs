@@ -1188,6 +1188,7 @@ impl ConfigLayer {
                 let defaults = ServeConfig::default();
                 ServeConfig {
                     port: s.port,
+                    share_ttl_days: s.share_ttl_days.unwrap_or(defaults.share_ttl_days),
                     terminal_enabled: match s.terminal_enabled {
                         Some(terminal_enabled) => terminal_enabled,
                         None => defaults.terminal_enabled,
@@ -2348,6 +2349,9 @@ pub struct ServeLayer {
     /// Port override for `roko serve`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Shared transcript retention period in days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_ttl_days: Option<u64>,
     /// Whether to expose the PTY terminal routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_enabled: Option<bool>,
@@ -2368,6 +2372,7 @@ impl ServeLayer {
     pub fn merge(self, overlay: Self) -> Self {
         Self {
             port: overlay.port.or(self.port),
+            share_ttl_days: overlay.share_ttl_days.or(self.share_ttl_days),
             terminal_enabled: overlay.terminal_enabled.or(self.terminal_enabled),
             auto_orchestrate: overlay.auto_orchestrate.or(self.auto_orchestrate),
             auth: match (self.auth, overlay.auth) {
