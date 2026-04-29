@@ -1,0 +1,202 @@
+/* ── AgentTopology ── */
+
+.agent-topology {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  background: rgba(9, 11, 15, 0.78);
+  border-radius: var(--radius-md);
+}
+
+.agent-topology svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Edges ── */
+
+.at-edge {
+  fill: none;
+  stroke-linecap: round;
+}
+
+.at-edge--dependency {
+  stroke: rgba(200, 184, 144, 0.25);
+  stroke-width: 1.2;
+}
+
+.at-edge--communication {
+  stroke: rgba(194, 184, 201, 0.22);
+  stroke-width: 1;
+  stroke-dasharray: 6 4;
+}
+
+.at-edge--knowledge {
+  stroke: rgba(148, 148, 180, 0.2);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+
+/* Active edge flow animation */
+.at-edge--active {
+  animation: at-edge-flow 1.5s linear infinite;
+}
+
+@keyframes at-edge-flow {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -20; }
+}
+
+/* ── Nodes ── */
+
+.at-node {
+  cursor: pointer;
+  transition: opacity var(--duration-smooth) var(--ease);
+}
+
+.at-node:hover {
+  opacity: 1 !important;
+}
+
+.at-node-ring {
+  fill: none;
+  stroke-width: 1.5;
+  transition: stroke-width var(--duration-snap) var(--ease),
+              filter var(--duration-snap) var(--ease);
+}
+
+.at-node:hover .at-node-ring {
+  stroke-width: 2.5;
+}
+
+.at-node-fill {
+  transition: opacity var(--duration-snap) var(--ease);
+}
+
+.at-node-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  fill: var(--text-soft);
+  text-anchor: middle;
+  pointer-events: none;
+  text-transform: uppercase;
+}
+
+.at-node-role {
+  font-family: var(--mono);
+  font-size: 7px;
+  letter-spacing: 0.1em;
+  fill: var(--text-dim);
+  text-anchor: middle;
+  pointer-events: none;
+  text-transform: uppercase;
+}
+
+/* Status pulse ring */
+.at-node-pulse {
+  fill: none;
+  stroke-width: 1;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.at-node--active .at-node-pulse {
+  animation: at-pulse 2.5s ease-in-out infinite;
+}
+
+@keyframes at-pulse {
+  0%, 100% { opacity: 0; r: 20; }
+  50%      { opacity: 0.4; r: 26; }
+}
+
+/* Status indicator dot */
+.at-status-dot {
+  r: 3;
+  stroke: rgba(9, 11, 15, 0.9);
+  stroke-width: 1.5;
+}
+
+.at-status-dot--active    { fill: var(--success); }
+.at-status-dot--idle      { fill: var(--warning); }
+.at-status-dot--error     { fill: var(--status-error); }
+.at-status-dot--completed { fill: var(--text-dim); }
+
+/* ── Tooltip ── */
+
+.at-tooltip {
+  position: absolute;
+  background: rgba(10, 10, 16, 0.94);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-soft);
+  pointer-events: none;
+  z-index: 10;
+  white-space: nowrap;
+  animation: at-tooltip-in 150ms var(--ease) both;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+@keyframes at-tooltip-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.at-tooltip__name {
+  font-weight: 600;
+  color: var(--text-strong);
+  letter-spacing: 0.04em;
+  font-size: 12px;
+}
+
+.at-tooltip__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.at-tooltip__label {
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 9px;
+}
+
+.at-tooltip__value {
+  color: var(--text-primary);
+}
+
+/* ── Empty state ── */
+
+.at-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+
+/* ── Background gradient ── */
+
+.at-bg-gradient stop:first-child { stop-color: rgba(220, 165, 189, 0.06); }
+.at-bg-gradient stop:last-child  { stop-color: rgba(9, 11, 15, 0); }
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .at-edge--active,
+  .at-node--active .at-node-pulse {
+    animation: none;
+  }
+}

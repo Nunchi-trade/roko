@@ -1493,6 +1493,272 @@
   }
 }
 
+/* ═══ COUNTDOWN OVERLAY ═══ */
+
+.demo-countdown-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-void);
+  pointer-events: none;
+}
+
+.demo-countdown-num {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 8rem;
+  font-weight: 200;
+  color: var(--rose-bright);
+  text-shadow:
+    0 0 40px color-mix(in srgb, var(--rose-bright) 40%, transparent),
+    0 0 80px color-mix(in srgb, var(--rose) 20%, transparent);
+  animation: countdownPulse 800ms ease-out forwards;
+  letter-spacing: -0.05em;
+  user-select: none;
+}
+
+@keyframes countdownPulse {
+  0% {
+    opacity: 0;
+    transform: scale(1.6);
+    filter: blur(8px);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
+  80% {
+    opacity: 1;
+    transform: scale(0.98);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.9);
+    filter: blur(4px);
+  }
+}
+
+.demo-countdown-label {
+  position: absolute;
+  bottom: 30%;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+  animation: countdownLabelFade 800ms ease-out forwards;
+}
+
+@keyframes countdownLabelFade {
+  0% { opacity: 0; }
+  30% { opacity: 0.6; }
+  80% { opacity: 0.6; }
+  100% { opacity: 0; }
+}
+
+/* ═══ FULLSCREEN TERMINAL MODE ═══ */
+
+/* Before START: terminal fills all space, sidebar hidden */
+.demo-main.demo-main--fullscreen .demo-terminals {
+  flex: 1;
+}
+
+.demo-main.demo-main--fullscreen .demo-sidebar {
+  flex: 0;
+  width: 0;
+  min-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  padding: 0;
+  border: none;
+}
+
+/* Transition from fullscreen to split */
+.demo-main .demo-terminals {
+  transition: flex 600ms var(--ease-snappy);
+}
+
+.demo-main .demo-sidebar {
+  transition:
+    flex 600ms var(--ease-snappy),
+    width 600ms var(--ease-snappy),
+    opacity 400ms var(--ease) 200ms,
+    padding 600ms var(--ease-snappy);
+}
+
+/* Terminal fade-to-black during transition */
+.demo-terminals.term-blackout {
+  animation: termBlackout 600ms ease-in-out forwards;
+}
+
+@keyframes termBlackout {
+  0% { opacity: 1; }
+  40% { opacity: 0; }
+  60% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+/* ═══ COLLAPSIBLE BOTTOM TERMINAL ═══ */
+
+.demo-bottom-terminal-wrapper {
+  flex-shrink: 0;
+  border-top: 1px solid var(--glass-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: height 300ms var(--ease-snappy);
+  position: relative;
+}
+
+.demo-bottom-terminal-wrapper.collapsed {
+  height: 0 !important;
+  border-top-color: transparent;
+}
+
+.demo-bottom-terminal-wrapper.expanded {
+  height: 180px;
+}
+
+/* Drag handle / toggle bar */
+.demo-bottom-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  cursor: ns-resize;
+  background: color-mix(in srgb, var(--bg-raised) 80%, transparent);
+  border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
+  gap: 8px;
+  user-select: none;
+  transition: background 200ms;
+}
+
+.demo-bottom-handle:hover {
+  background: color-mix(in srgb, var(--bg-raised) 95%, transparent);
+}
+
+.demo-bottom-handle-grip {
+  width: 24px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text-ghost);
+  opacity: 0.5;
+  transition: opacity 200ms;
+}
+
+.demo-bottom-handle:hover .demo-bottom-handle-grip {
+  opacity: 0.8;
+}
+
+.demo-bottom-handle-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+
+.demo-bottom-handle-toggle {
+  background: transparent;
+  border: none;
+  color: var(--text-ghost);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0 4px;
+  transition: color 200ms;
+}
+
+.demo-bottom-handle-toggle:hover {
+  color: var(--text-dim);
+}
+
+.demo-bottom-term-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+/* ═══ TOP BAR — MERGED PLAYBACK CONTROLS ═══ */
+
+.demo-topbar-playback {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-left: 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--glass-border);
+}
+
+.demo-topbar-progress {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  margin-left: 4px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.demo-topbar-progress .demo-pb-step-label {
+  color: var(--rose-bright);
+  font-weight: 600;
+}
+
+.demo-topbar-cmd {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-ghost);
+  padding: 2px 6px;
+  background: color-mix(in srgb, white 2%, transparent);
+  border-radius: 2px;
+  border: 1px solid var(--glass-border);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Progress fill in top bar */
+.demo-topbar-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--rose-dim), var(--rose-bright));
+  transition: width 400ms var(--ease);
+  z-index: 1;
+}
+
+/* Running state glow on top bar */
+.demo-tabs-bar.demo-tabs-bar--running {
+  border-bottom-color: color-mix(in srgb, var(--rose-bright) 25%, transparent);
+}
+
+.demo-tabs-bar.demo-tabs-bar--running::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--rose-dim) 30%,
+    var(--rose-bright) 60%,
+    var(--rose-glow) 80%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: progressTrail 3s linear infinite;
+  z-index: 2;
+}
+
 /* ═══ REDUCED MOTION ═══ */
 
 @media (prefers-reduced-motion: reduce) {
@@ -1517,4 +1783,11 @@
   .demo-completion-card,
   .demo-completion-overlay.dismissing .demo-completion-card,
   .demo-complete-burst .particle { animation: none !important; }
+
+  /* Countdown */
+  .demo-countdown-num,
+  .demo-countdown-label { animation: none !important; opacity: 1; }
+
+  /* Fullscreen transition */
+  .demo-terminals.term-blackout { animation: none !important; }
 }

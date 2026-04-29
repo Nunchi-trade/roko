@@ -1,0 +1,94 @@
+/* CellTimeline — vertical timeline with status dots */
+
+.cell-timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cell-gap);
+  padding-left: 24px;
+}
+
+/* Vertical line */
+.cell-timeline::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 4px;
+  bottom: 4px;
+  width: 1px;
+  background: var(--border-soft);
+  animation: line-draw var(--duration-reveal) var(--ease) both;
+  transform-origin: top;
+}
+
+@keyframes line-draw {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+
+/* ── Item ── */
+
+.cell-timeline-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Dot */
+.cell-timeline-item__dot {
+  position: absolute;
+  left: -20px;
+  top: 6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-mid);
+  background: var(--text-ghost);
+  z-index: 1;
+  transition: background var(--duration-fast) var(--ease),
+              box-shadow var(--duration-fast) var(--ease);
+}
+
+.cell-timeline-item--active .cell-timeline-item__dot {
+  background: var(--rose-bright);
+  box-shadow: 0 0 8px var(--rose-bright);
+}
+
+.cell-timeline-item--done .cell-timeline-item__dot {
+  background: var(--status-success);
+  box-shadow: 0 0 6px var(--status-success);
+}
+
+.cell-timeline-item--error .cell-timeline-item__dot {
+  background: var(--status-error);
+  box-shadow: 0 0 6px var(--status-error);
+}
+
+.cell-timeline-item--pending .cell-timeline-item__dot {
+  background: var(--text-ghost);
+}
+
+/* Header row: icon + timestamp */
+.cell-timeline-item__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cell-timeline-item__icon {
+  font-size: var(--text-sm);
+  line-height: 1;
+}
+
+.cell-timeline-item__timestamp {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+/* Content slot */
+.cell-timeline-item__content {
+  /* inherits from parent */
+}

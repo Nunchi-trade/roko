@@ -46,20 +46,25 @@ function Section({
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="settings-section">
-      <div
+      <button
         className="settings-section-toggle"
         onClick={() => setOpen(o => !o)}
-        role="button"
-        tabIndex={0}
-        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}
+        aria-expanded={open}
+        aria-controls={`section-${title.toLowerCase().replace(/\s+/g, '-')}`}
+        type="button"
       >
         <h2>
           {title}
           {badge != null && <span className="badge">{badge}</span>}
         </h2>
         <span className={`settings-section-chevron${open ? '' : ' collapsed'}`}>&#9662;</span>
-      </div>
-      <div className={`settings-section-body${open ? '' : ' collapsed'}`}>
+      </button>
+      <div
+        id={`section-${title.toLowerCase().replace(/\s+/g, '-')}`}
+        className={`settings-section-body${open ? '' : ' collapsed'}`}
+        role="region"
+        aria-label={title}
+      >
         {children}
       </div>
     </div>

@@ -1,0 +1,274 @@
+/* ═══════════════════════════════════════════════════════════
+   AGENT CARD — glass morphism identity card
+   4 variants: compact | standard | detailed | hero
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── SpectreAvatar ─────────────────────────────────────── */
+
+.spectre-avatar {
+  flex-shrink: 0;
+  border-radius: 50%;
+  image-rendering: pixelated;
+}
+
+.spectre-avatar--breathing {
+  animation: spectre-breathe 3s ease-in-out infinite;
+}
+
+@keyframes spectre-breathe {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.15); }
+}
+
+/* ── Card base ─────────────────────────────────────────── */
+
+.ac-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(12px) saturate(180%);
+  transition:
+    transform var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease),
+    border-color var(--duration-smooth) var(--ease);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+.ac-card[role="button"] {
+  cursor: pointer;
+}
+
+.ac-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--ac-role-color, var(--rose-dim));
+  box-shadow:
+    0 8px 24px rgba(0,0,0,0.15),
+    0 0 16px color-mix(in srgb, var(--ac-role-color, var(--rose)) 15%, transparent);
+}
+
+/* ── Info column ───────────────────────────────────────── */
+
+.ac-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ac-name {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--text-strong);
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ac-role {
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: var(--ac-role-color, var(--text-dim));
+}
+
+/* ── Status pill ───────────────────────────────────────── */
+
+.ac-status-pill {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-radius: var(--radius-sm);
+  width: fit-content;
+}
+
+.ac-status-pill--active {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 25%, transparent);
+}
+
+.ac-status-pill--idle {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+}
+
+.ac-status-pill--error {
+  color: var(--rose-bright);
+  background: color-mix(in srgb, var(--rose-bright) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--rose-bright) 25%, transparent);
+}
+
+.ac-status-pill--completed {
+  color: var(--dream-bright);
+  background: color-mix(in srgb, var(--dream-bright) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dream-bright) 25%, transparent);
+}
+
+/* ── Stats row ─────────────────────────────────────────── */
+
+.ac-stats {
+  display: flex;
+  gap: var(--sp-3);
+  margin-top: 2px;
+}
+
+.ac-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ac-stat-label {
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-ghost);
+}
+
+.ac-stat-value {
+  font-family: var(--mono);
+  color: var(--text-soft);
+}
+
+/* ── Hero sparkline placeholder ────────────────────────── */
+
+.ac-sparkline-placeholder {
+  height: 24px;
+  margin-top: 4px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--ac-role-color, var(--rose)) 8%, transparent),
+    color-mix(in srgb, var(--ac-role-color, var(--rose)) 15%, transparent),
+    color-mix(in srgb, var(--ac-role-color, var(--rose)) 5%, transparent)
+  );
+  background-size: 200% 100%;
+  animation: ac-sparkline-shimmer 6s ease-in-out infinite;
+}
+
+@keyframes ac-sparkline-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   VARIANT: compact — single-line, minimal
+   ═══════════════════════════════════════════════════════════ */
+
+.ac-card--compact {
+  padding: 4px 8px;
+  gap: 6px;
+  border-radius: var(--radius-md);
+}
+
+.ac-card--compact .ac-info {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.ac-card--compact .ac-name {
+  font-size: var(--text-xs);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   VARIANT: standard — card with role + status
+   ═══════════════════════════════════════════════════════════ */
+
+.ac-card--standard {
+  padding: 10px 12px;
+}
+
+.ac-card--standard .ac-name {
+  font-size: var(--text-sm);
+}
+
+.ac-card--standard .ac-role {
+  font-size: 10px;
+}
+
+.ac-card--standard .ac-status-pill {
+  font-size: 9px;
+  padding: 1px 6px;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   VARIANT: detailed — card with stats
+   ═══════════════════════════════════════════════════════════ */
+
+.ac-card--detailed {
+  padding: 14px 16px;
+}
+
+.ac-card--detailed .ac-name {
+  font-size: var(--text-sm);
+}
+
+.ac-card--detailed .ac-role {
+  font-size: 10px;
+}
+
+.ac-card--detailed .ac-status-pill {
+  font-size: 9px;
+  padding: 1px 6px;
+}
+
+.ac-card--detailed .ac-stat-label {
+  font-size: 9px;
+}
+
+.ac-card--detailed .ac-stat-value {
+  font-size: var(--text-xs);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   VARIANT: hero — large avatar + full stats + sparkline
+   ═══════════════════════════════════════════════════════════ */
+
+.ac-card--hero {
+  padding: 20px 24px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+
+.ac-card--hero .ac-info {
+  width: 100%;
+}
+
+.ac-card--hero .ac-name {
+  font-size: var(--text-lg);
+}
+
+.ac-card--hero .ac-role {
+  font-size: var(--text-xs);
+}
+
+.ac-card--hero .ac-status-pill {
+  font-size: 10px;
+  padding: 2px 8px;
+}
+
+.ac-card--hero .ac-stat-label {
+  font-size: 10px;
+}
+
+.ac-card--hero .ac-stat-value {
+  font-size: var(--text-sm);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   REDUCED MOTION
+   ═══════════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  .spectre-avatar--breathing { animation: none; }
+  .ac-sparkline-placeholder { animation: none; }
+}

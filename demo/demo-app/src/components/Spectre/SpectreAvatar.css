@@ -1,0 +1,23 @@
+/* ── SpectreAvatar ── */
+
+.spectre-avatar {
+  position: relative;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid var(--glass-border);
+  background: var(--bg-deeper);
+  flex-shrink: 0;
+  transition: border-color var(--duration-smooth) var(--ease),
+              box-shadow var(--duration-smooth) var(--ease);
+}
+
+.spectre-avatar:hover {
+  border-color: rgba(204, 144, 168, 0.3);
+  box-shadow: 0 0 12px rgba(204, 144, 168, 0.15);
+}
+
+.spectre-avatar canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}

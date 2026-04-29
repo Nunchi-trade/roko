@@ -91,7 +91,7 @@ export default function TopNav() {
   const isConnecting = serverHealth === 'checking';
 
   return (
-    <nav className={`topnav${scrolled ? ' scrolled' : ''}`}>
+    <nav className={`topnav${scrolled ? ' scrolled' : ''}`} role="navigation" aria-label="Main navigation">
       <Link to="/" className="brand" style={{ textDecoration: 'none' }}>
         <span className="mark" aria-hidden="true" />
         <span className="brand-text">{'\u2308'} NUNCHI {'\u230B'}</span>
@@ -129,7 +129,12 @@ export default function TopNav() {
       </div>
 
       <div className="right">
-        <span className={`status-pill ${isLive ? 'live' : isConnecting ? 'connecting' : 'demo'}`}>
+        <span
+          className={`status-pill ${isLive ? 'live' : isConnecting ? 'connecting' : 'demo'}`}
+          role="status"
+          aria-live="polite"
+          aria-label={isLive ? `Server live, uptime ${fmtUptime(uptime)}` : isConnecting ? 'Connecting to server' : 'Using seed data'}
+        >
           {isLive
             ? <PulseIcon size={8} color="var(--success)" />
             : isConnecting

@@ -1,0 +1,7 @@
+/* ── DreamsView · Inline style extraction ─────────────────── */
+
+/* Dream artifact row with gap + padding override */
+.dreams-artifact-row {
+  gap: var(--sp-3);
+  padding: 5px 0;
+}

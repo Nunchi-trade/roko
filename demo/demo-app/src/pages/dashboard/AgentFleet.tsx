@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { hexToRgba } from '../../lib/color';
 import { ROLE_COLORS } from '../../lib/palette';
 import { useLiveApi } from '../../hooks/useLiveApi';
@@ -6,6 +6,11 @@ import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
+import AgentTopology, {
+  type TopologyNode,
+  type TopologyEdge,
+} from '../../components/Spectre/AgentTopology';
+import { identityFromAgent } from '../../components/Spectre/AgentIdentity';
 import './dashboard.css';
 import './AgentFleet.css';
 
@@ -387,10 +392,13 @@ function TopologyGraph({ data, height = 280 }: { data: TopoData; height?: number
 
 /* ── Component ───────────────────────────────────────────── */
 
+type FleetView = 'list' | 'topology';
+
 export default function AgentFleet() {
   const { get } = useLiveApi();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [topology, setTopology] = useState<TopoData>(EMPTY_TOPOLOGY);
+  const [view, setView] = useState<FleetView>('list');
 
   const fetchAll = useCallback(async () => {
     const data = await get<Agent[]>('/api/managed-agents');
@@ -421,6 +429,59 @@ export default function AgentFleet() {
     : 90;
   const totalTasks = agents.reduce((s, a) => s + agentTasks(a), 0);
 
+  /* Build Spectre topology nodes from API topology + agent list */
+  const spectreNodes: TopologyNode[] = useMemo(
+    () =>
+      topology.nodes.map((tn) => {
+        const agent = agents.find((a) => a.id === tn.agent_id);
+        const status: TopologyNode['status'] = agent
+          ? isAgentActive(agent)
+            ? 'active'
+            : agent.status === 'idle'
+              ? 'idle'
+              : 'completed'
+          : 'idle';
+        return {
+          id: tn.agent_id,
+          identity: identityFromAgent(tn.agent_id, tn.agent_id, tn.role),
+          status,
+        };
+      }),
+    [topology.nodes, agents],
+  );
+
+  const spectreEdges: TopologyEdge[] = useMemo(
+    () =>
+      topology.edges.map((te) => ({
+        source: te.from,
+        target: te.to,
+        type: (te.weight ?? 1) > 3 ? 'dependency' as const : 'communication' as const,
+        active: (te.weight ?? 1) > 1,
+      })),
+    [topology.edges],
+  );
+
+  /* View toggle badge */
+  const viewToggle = (
+    <span className="dash-inline--8">
+      <button
+        className={`dash-badge${view === 'list' ? '' : ' dash-ghost'}`}
+        style={{ cursor: 'pointer', background: 'none', border: 'none', font: 'inherit' }}
+        onClick={() => setView('list')}
+      >
+        list
+      </button>
+      <span className="dash-ghost">/</span>
+      <button
+        className={`dash-badge${view === 'topology' ? '' : ' dash-ghost'}`}
+        style={{ cursor: 'pointer', background: 'none', border: 'none', font: 'inherit' }}
+        onClick={() => setView('topology')}
+      >
+        topology
+      </button>
+    </span>
+  );
+
   return (
     <div className="dash-page">
       {/* TOP MOSAIC */}
@@ -437,10 +498,18 @@ export default function AgentFleet() {
       <div className="dash-agent-grid dash-stagger" style={{ '--stagger-i': 1 } as React.CSSProperties}>
         <Pane
           title="AGENT TOPOLOGY"
-          badge={<span className="dash-badge">force-directed</span>}
+          badge={viewToggle}
         >
           <div className="dash-chart-enter">
-            <TopologyGraph data={topology} height={240} />
+            {view === 'topology' ? (
+              <AgentTopology
+                nodes={spectreNodes}
+                edges={spectreEdges}
+                height={280}
+              />
+            ) : (
+              <TopologyGraph data={topology} height={240} />
+            )}
           </div>
         </Pane>
 

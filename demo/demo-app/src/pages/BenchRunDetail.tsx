@@ -10,6 +10,7 @@ import HeatmapChart from '../components/Charts/HeatmapChart';
 import TaskTable from '../components/TaskTable';
 import { ComponentErrorBoundary } from '../components/design';
 import './Bench.css';
+import './BenchRunDetail.css';
 
 /* ═══════════════════════════════════════════════════════════
    Shared animation helpers
@@ -60,16 +61,8 @@ function GateBadge({ passed, gate, delay = 0 }: { passed: boolean; gate: string;
 
   return (
     <span
-      className={`gate-pill ${passed ? 'gate-pass' : 'gate-fail'}`}
+      className={`gate-pill ${passed ? 'gate-pass' : 'gate-fail'} gate-badge-pill ${visible ? 'gate-badge-pill--visible' : 'gate-badge-pill--hidden'}`}
       title={`${gate}: ${passed ? 'PASS' : 'FAIL'}`}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        opacity: visible ? 1 : 0,
-        transform: visible ? 'scale(1)' : 'scale(0.5)',
-        transition: 'opacity 400ms var(--ease), transform 400ms var(--ease)',
-      }}
     >
       <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
         {passed ? (
@@ -382,8 +375,8 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
   }, [draw]);
 
   return (
-    <div className="chart-container" style={{ height, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 8, flex: '0 0 auto' }}>
+    <div className="chart-container cost-breakdown-container" style={{ height }}>
+      <div className="cost-breakdown-controls">
         {(['task', 'model', 'difficulty'] as const).map((mode) => (
           <label key={mode} className="gate-toggle">
             <input
@@ -396,9 +389,9 @@ function CostBreakdownChart({ results, height = 280 }: { results: BenchTaskResul
           </label>
         ))}
       </div>
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div className="cost-breakdown-canvas-wrap">
         {segments.length === 0 ? (
-          <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="cost-breakdown-empty">
             <p className="bench-empty-text">No cost data available.</p>
           </div>
         ) : (
@@ -548,7 +541,7 @@ function TokenFlowChart({ results, height = 280 }: { results: BenchTaskResult[];
 
   if (results.length === 0) {
     return (
-      <div className="chart-container" style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div className="chart-container token-flow-empty" style={{ height }}>
         <p className="bench-empty-text">No token data.</p>
       </div>
     );
@@ -589,56 +582,28 @@ function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
   const allTasks = [...failedWithOutput, ...passedWithOutput];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div className="output-preview-list">
       {allTasks.map((r, i) => {
         const isExpanded = expandedIds.has(r.task_id);
         return (
           <div
             key={r.task_id}
-            style={{
-              borderRadius: 6,
-              border: '1px solid var(--glass-border)',
-              overflow: 'hidden',
-              opacity: 1,
-              animation: `fadeUp 400ms var(--ease) ${i * 60}ms both`,
-            }}
+            className="output-preview-card"
+            style={{ animation: `fadeUp 400ms var(--ease) ${i * 60}ms both` }}
           >
             <button
               onClick={() => toggle(r.task_id)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                width: '100%',
-                padding: '8px 12px',
-                background: 'rgba(255,255,255,0.02)',
-                border: 'none',
-                cursor: 'pointer',
-                textAlign: 'left',
-                fontFamily: 'var(--mono)',
-                fontSize: 14,
-                color: 'var(--text-primary)',
-              }}
+              className="output-preview-header"
             >
-              <span
-                style={{
-                  color: 'var(--text-dim)',
-                  fontSize: 15,
-                  width: 12,
-                  display: 'inline-block',
-                  transition: 'transform 300ms var(--ease)',
-                  transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
-                }}
-              >
+              <span className={`output-preview-chevron${isExpanded ? ' output-preview-chevron--open' : ''}`}>
                 {'\u25B6'}
               </span>
-              <span className={`status-badge status-${r.status}`} style={{ fontSize: 15 }}>
+              <span className={`status-badge status-${r.status} status-badge-lg`}>
                 {r.status.toUpperCase()}
               </span>
-              <span style={{ flex: 1, color: 'var(--text-strong)' }}>{r.task_name}</span>
-              {/* Gate verdict badges */}
+              <span className="output-preview-name">{r.task_name}</span>
               {r.gate_verdicts.length > 0 && (
-                <span style={{ display: 'flex', gap: 2 }}>
+                <span className="output-preview-gates">
                   {r.gate_verdicts.map((g, gi) => (
                     <GateBadge
                       key={g.gate}
@@ -650,32 +615,16 @@ function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
                 </span>
               )}
             </button>
-            <div
-              style={{
-                maxHeight: isExpanded ? 400 : 0,
-                opacity: isExpanded ? 1 : 0,
-                overflow: 'hidden',
-                transition: 'max-height 400ms var(--ease), opacity 300ms var(--ease)',
-              }}
-            >
-              <div style={{ padding: '0 12px 12px' }}>
+            <div className={`output-preview-body ${isExpanded ? 'output-preview-body--expanded' : 'output-preview-body--collapsed'}`}>
+              <div className="output-preview-content">
                 {r.error && (
-                  <div className="task-error" style={{ marginTop: 8 }}>{r.error}</div>
+                  <div className="task-error output-preview-error">{r.error}</div>
                 )}
                 {r.output_preview && (
-                  <pre className="task-output-code" style={{
-                    marginTop: 8,
-                    padding: 10,
-                    background: 'rgba(0,0,0,0.3)',
-                    borderRadius: 4,
-                    fontSize: 13,
-                    color: 'var(--text-primary)',
-                    overflow: 'auto',
-                    maxHeight: 200,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    animation: isExpanded ? 'fadeIn 500ms var(--ease) 200ms both' : 'none',
-                  }}>
+                  <pre
+                    className="task-output-code output-preview-code"
+                    style={{ animation: isExpanded ? 'fadeIn 500ms var(--ease) 200ms both' : 'none' }}
+                  >
                     {r.output_preview}
                   </pre>
                 )}
@@ -695,13 +644,7 @@ function OutputPreviewPanel({ results }: { results: BenchTaskResult[] }) {
 function AnimatedSection({ delay, children }: { delay: number; children: React.ReactNode }) {
   const visible = useStagger(delay);
   return (
-    <div
-      style={{
-        opacity: visible ? 1 : 0,
-        transform: visible ? 'translateY(0)' : 'translateY(16px)',
-        transition: 'opacity 500ms var(--ease), transform 500ms var(--ease)',
-      }}
-    >
+    <div className={`bench-animated-section ${visible ? 'bench-animated-section--visible' : 'bench-animated-section--hidden'}`}>
       {children}
     </div>
   );
@@ -714,21 +657,7 @@ function AnimatedSection({ delay, children }: { delay: number; children: React.R
 function ModelBadge({ model, delay = 0 }: { model: string; delay?: number }) {
   const visible = useStagger(delay);
   return (
-    <span
-      style={{
-        display: 'inline-block',
-        padding: '2px 8px',
-        borderRadius: 'var(--radius-sm)',
-        background: 'var(--glass-bg)',
-        border: '1px solid var(--glass-border)',
-        fontFamily: 'var(--mono)',
-        fontSize: 'var(--text-sm)',
-        color: 'var(--rose-bright)',
-        opacity: visible ? 1 : 0,
-        transform: visible ? 'translateX(0)' : 'translateX(-12px)',
-        transition: 'opacity 400ms var(--ease), transform 400ms var(--ease)',
-      }}
-    >
+    <span className={`bench-model-badge ${visible ? 'bench-model-badge--visible' : 'bench-model-badge--hidden'}`}>
       {model}
     </span>
   );
@@ -806,27 +735,16 @@ export default function BenchRunDetail() {
       {/* ── Hero ── */}
       <div className="bench-hero">
         <div className="bench-hero-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div className="bench-hero-row">
             <Link
               to="/bench"
-              className="bench-back"
-              style={{
-                animation: 'scaleIn 400ms var(--ease) both',
-                display: 'inline-block',
-                transition: 'color 200ms var(--ease), transform 200ms var(--ease)',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = 'translateY(-1px) scale(1.05)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = 'translateY(0) scale(1)';
-              }}
+              className="bench-back bench-back-link"
             >
               &larr; Back
             </Link>
             <h1 className="bench-page-title">Run {run.id.slice(0, 8)}</h1>
           </div>
-          <p className="bench-page-sub" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <p className="bench-page-sub bench-page-sub-row">
             {run.suite_name} &middot; <ModelBadge model={run.config.model} delay={200} /> &middot; {run.config.strategy.replace(/_/g, ' ')}
           </p>
         </div>
@@ -958,16 +876,10 @@ export default function BenchRunDetail() {
 
         {/* ── Compare Button ── */}
         <AnimatedSection delay={700}>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16, marginBottom: 8 }}>
+          <div className="bench-compare-row">
             <Link
               to={`/bench/compare?ids=${run.id}`}
-              className="btn btn-sm"
-              style={{
-                textDecoration: 'none',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-              }}
+              className="btn btn-sm bench-compare-link"
             >
               Compare with...
             </Link>

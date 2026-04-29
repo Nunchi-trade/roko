@@ -1,13 +1,34 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { Outlet, useLocation } from 'react-router';
+import { Suspense, lazy, useEffect, useMemo } from 'react';
+import { Outlet, useNavigate } from 'react-router';
 import Grain from './Grain';
 import Curtain from './Curtain';
 import ScrollTrack from './ScrollTrack';
 import TopNav from './TopNav';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import HelpOverlay from './HelpOverlay';
+import ComponentErrorBoundary from './design/ComponentErrorBoundary';
+import { useKeyboardShortcuts, useHelpOverlay, type ShortcutDef } from '../hooks/useKeyboardShortcuts';
+
+const LazyHeroParticleField = lazy(() => import('./HeroParticleField'));
 
 export default function AppShell() {
-  const { dataMode } = useApiWithFallback();
+  const navigate = useNavigate();
+  const help = useHelpOverlay();
+
+  // Global keyboard shortcuts (E4/E5)
+  const shortcuts = useMemo<ShortcutDef[]>(() => [
+    { keys: '?', description: 'Show keyboard shortcuts', category: 'General', action: help.toggle },
+    { keys: 'Ctrl+/', description: 'Show keyboard shortcuts', category: 'General', action: help.toggle },
+    { keys: 'Escape', description: 'Close overlay / modal', category: 'General', action: help.close },
+    { keys: 'g d', description: 'Go to Dashboard', category: 'Navigation', action: () => navigate('/dashboard') },
+    { keys: 'g t', description: 'Go to Terminal', category: 'Navigation', action: () => navigate('/terminal') },
+    { keys: 'g b', description: 'Go to Bench', category: 'Navigation', action: () => navigate('/bench') },
+    { keys: 'g e', description: 'Go to Explorer', category: 'Navigation', action: () => navigate('/explorer') },
+    { keys: 'g m', description: 'Go to Demo', category: 'Navigation', action: () => navigate('/demo') },
+    { keys: 'g s', description: 'Go to Settings', category: 'Navigation', action: () => navigate('/settings') },
+    { keys: 'g p', description: 'Go to Builder', category: 'Navigation', action: () => navigate('/builder') },
+  ], [help.toggle, help.close, navigate]);
+
+  useKeyboardShortcuts(shortcuts);
 
   useEffect(() => {
     const io = new IntersectionObserver(
@@ -39,31 +60,10 @@ export default function AppShell() {
       <Curtain />
       <ScrollTrack />
       <TopNav />
-      {dataMode === 'seed' && (
-        <div
-          style={{
-            position: 'fixed',
-            top: 52,
-            right: 12,
-            zIndex: 9000,
-            background: 'rgba(255, 200, 0, 0.15)',
-            border: '1px solid rgba(255, 200, 0, 0.4)',
-            borderRadius: 4,
-            padding: '2px 8px',
-            fontSize: 11,
-            fontFamily: 'monospace',
-            color: 'rgba(255, 200, 0, 0.9)',
-            letterSpacing: '0.08em',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          }}
-        >
-          SEED DATA
-        </div>
-      )}
-      <div className="app-frame" style={{ paddingTop: 48, position: 'relative', zIndex: 1, minHeight: '100vh' }}>
+      <main id="main-content" role="main" aria-label="Page content" className="app-frame" style={{ paddingTop: 48, position: 'relative', zIndex: 1, minHeight: '100vh' }}>
         <Outlet />
-      </div>
+      </main>
+      <HelpOverlay open={help.open} onClose={help.close} shortcuts={shortcuts} />
     </>
   );
 }

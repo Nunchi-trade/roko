@@ -106,6 +106,16 @@ export default function Demo() {
   const completionOverlayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const completionAutoDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [, setLaunchingBtn] = useState(false);
+
+  // Countdown + fullscreen states
+  const [countdownNum, setCountdownNum] = useState<number | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(true);
+  const [termBlackout, setTermBlackout] = useState(false);
+
+  // Collapsible bottom terminal
+  const [bottomTermOpen, setBottomTermOpen] = useState(false);
+  const bottomTermSessionId = useRef(`bottom-${Date.now().toString(36)}`);
+  const bottomTermHandleRef = useRef<TerminalHandle | null>(null);
   const [speedIdx, setSpeedIdx] = useState(1);
   const [playbackMode, setPlaybackMode] = useState<'auto' | 'step'>('auto');
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -143,7 +153,6 @@ export default function Demo() {
   const [waitingForStep, setWaitingForStep] = useState(false);
   const [progressStep, setProgressStep] = useState(0);
   const [progressTotal, setProgressTotal] = useState(0);
-  const [cmdPreviewKey, setCmdPreviewKey] = useState(0);
   const [pipelineExampleId, setPipelineExampleId] = useState(DEFAULT_PIPELINE_EXAMPLE_ID);
   const selectedPipelineExample = getPipelineExample(pipelineExampleId);
   const [pipeline, setPipeline] = useState<PipelineDemoState>(
@@ -264,7 +273,7 @@ export default function Demo() {
       setProgressText(cmd);
       setProgressStep(Math.max(0, step));
       setProgressTotal(total);
-      setCmdPreviewKey((k) => k + 1);
+
     });
     playback.onWaitingChange(setWaitingForStep);
   }, []);
@@ -455,6 +464,8 @@ export default function Demo() {
       setShowIntro(true);
       setIntroDismissing(false);
       setTermReveal(false);
+      setIsFullscreen(true);
+      setCountdownNum(null);
       setStats({ model: '--', cost: '--', tokens: '--', time: '--' });
       setGates([]);
       setLogEntries([]);
@@ -509,25 +520,39 @@ export default function Demo() {
 
     runningRef.current = true;
     pausedRef.current = false;
-    setIsRunning(true);
-    setIsPaused(false);
     setScenarioComplete(false);
     setShowBurst(false);
     setShowCompletionOverlay(false);
     if (completionOverlayTimer.current) clearTimeout(completionOverlayTimer.current);
     if (completionAutoDismissTimer.current) clearTimeout(completionAutoDismissTimer.current);
 
-    // Cinematic intro dismiss with animation
+    // ── 3-2-1 Countdown ──
     setLaunchingBtn(true);
     setIntroDismissing(true);
     setTimeout(() => {
       setShowIntro(false);
       setIntroDismissing(false);
-      setLaunchingBtn(false);
-      // Trigger terminal pane staggered reveal
-      setTermReveal(true);
-      setTimeout(() => setTermReveal(false), 600);
     }, 550);
+
+    // Run countdown: 3, 2, 1
+    for (const n of [3, 2, 1]) {
+      setCountdownNum(n);
+      await sleep(800);
+    }
+    setCountdownNum(null);
+
+    // Transition from fullscreen to split layout
+    setTermBlackout(true);
+    setIsFullscreen(false);
+    await sleep(600);
+    setTermBlackout(false);
+    setLaunchingBtn(false);
+
+    // Now reveal terminals
+    setTermReveal(true);
+    setTimeout(() => setTermReveal(false), 600);
+    setIsRunning(true);
+    setIsPaused(false);
 
     setLogEntries([]);
     setStats({ model: '--', cost: '--', tokens: '--', time: '--' });
@@ -660,15 +685,13 @@ export default function Demo() {
     pausedRef.current = false;
     setIsRunning(false);
     setIsPaused(false);
+    setIsFullscreen(true);
+    setCountdownNum(null);
     playback.reset();
     timeline.reset();
     clearMarks();
     selectScenario(activeIdx);
   }, [activeIdx, selectScenario]);
-
-  const cycleSpeed = useCallback(() => {
-    setSpeedIdx((prev) => (prev + 1) % SPEEDS.length);
-  }, []);
 
   useEffect(() => {
     setSpeedMultiplier(SPEEDS[speedIdx]);
@@ -724,6 +747,7 @@ export default function Demo() {
       }
       if (e.code === 'KeyN' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); handleStep(); }
       if (e.code === 'KeyR' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); handleReset(); }
+      if (e.code === 'KeyT' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); setBottomTermOpen((v) => !v); }
       const n = parseInt(e.key);
       if (n >= 1 && n <= SCENARIOS.length && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
@@ -840,8 +864,16 @@ export default function Demo() {
 
   return (
     <div className="demo-page">
-      {/* ── Top bar ── */}
-      <div className="demo-tabs-bar">
+      {/* ── Top bar (tabs + merged playback) ── */}
+      <div className={`demo-tabs-bar${isRunning ? ' demo-tabs-bar--running' : ''}`}>
+        {/* Progress fill bar */}
+        {isRunning && progressTotal > 0 && (
+          <div
+            className="demo-topbar-fill"
+            style={{ width: `${(progressStep / progressTotal) * 100}%` }}
+          />
+        )}
+
         <div className={`demo-tab-list-wrapper${tabScrollState.left ? ' scroll-left' : ''}${tabScrollState.right ? ' scroll-right' : ''}`}>
           <div className="demo-tab-list" ref={tabListRef}>
             {SCENARIOS.map((s, i) => {
@@ -877,22 +909,83 @@ export default function Demo() {
                 : <CrossIcon size={10} color="var(--rose-bright)" />}
             {serverHealth === 'connected' ? 'serve live' : serverHealth === 'checking' ? 'checking serve' : 'serve offline'}
           </div>
-          <button className="demo-speed btn-interactive" onClick={cycleSpeed}>
-            {SPEEDS[speedIdx]}x
-          </button>
+
+          {/* Playback controls — merged into top bar */}
           {isRunning ? (
-            <button className="demo-ctrl-btn btn-interactive" onClick={handlePauseResume}>
+            <button className="demo-ctrl-btn btn-interactive" onClick={handlePauseResume} title="Pause (Space)">
               {isPaused ? '\u25B6' : '\u275A\u275A'}
             </button>
           ) : (
             <button
               className="demo-ctrl-btn play btn-primary-glow"
               onClick={handlePlay}
-              title={`Play (${readyTerminalCount}/${scenario.panes} terminals ready)`}
+              title={`Play (Space) — ${readyTerminalCount}/${scenario.panes} terminals ready`}
             >
               {'\u25B6'}
             </button>
           )}
+          <button
+            className={`demo-ctrl-btn btn-interactive${playbackMode === 'step' ? ' play' : ''}${waitingForStep ? ' waiting' : ''}`}
+            onClick={handleStep}
+            title="Next step (N)"
+            disabled={playbackMode !== 'step' && !waitingForStep}
+          >
+            {waitingForStep ? 'N' : '\u25B6\u2759'}
+          </button>
+          <button className="demo-ctrl-btn btn-interactive" onClick={handleReset} title="Reset (R)">
+            {'\u21BA'}
+          </button>
+
+          {/* Mode toggle */}
+          <div className="demo-mode-toggle">
+            <div className={`demo-mode-toggle-track${playbackMode === 'step' ? ' at-step' : ''}`} />
+            <button
+              className={`demo-mode-btn${playbackMode === 'auto' ? ' active' : ''}`}
+              onClick={() => toggleMode('auto')}
+            >
+              Auto
+            </button>
+            <button
+              className={`demo-mode-btn${playbackMode === 'step' ? ' active' : ''}`}
+              onClick={() => toggleMode('step')}
+            >
+              Step
+            </button>
+          </div>
+
+          {/* Speed pills */}
+          <div className="demo-pb-speed-pills">
+            {SPEEDS.map((s, i) => (
+              <button
+                key={s}
+                className={`demo-pb-speed-pill${i === speedIdx ? ' active' : ''}`}
+                onClick={() => setSpeedIdx(i)}
+              >
+                {s}x
+              </button>
+            ))}
+          </div>
+
+          {/* Progress + command preview (visible when running) */}
+          {isRunning && (
+            <div className="demo-topbar-playback">
+              <div className="demo-topbar-progress">
+                <span className="demo-pb-step-label">{progressLabel}</span>
+              </div>
+              <div className="demo-topbar-cmd">{progressText}</div>
+            </div>
+          )}
+
+          {/* Bottom terminal toggle */}
+          <Tooltip content={bottomTermOpen ? 'Hide shell' : 'Open shell'} placement="bottom">
+            <button
+              className={`demo-ctrl-btn btn-interactive${bottomTermOpen ? ' play' : ''}`}
+              onClick={() => setBottomTermOpen((v) => !v)}
+              title="Toggle shell (T)"
+            >
+              {'\u2318'}
+            </button>
+          </Tooltip>
         </div>
       </div>
 
@@ -912,7 +1005,11 @@ export default function Demo() {
       />
 
       {/* ── Main content ── */}
-      <div className={`demo-main${scenario.id === 'prd-pipeline' ? ' demo-main-pipeline' : ''}`}>
+      <div className={[
+        'demo-main',
+        scenario.id === 'prd-pipeline' ? 'demo-main-pipeline' : '',
+        isFullscreen ? 'demo-main--fullscreen' : '',
+      ].filter(Boolean).join(' ')}>
         {/* Terminal zone */}
         <div className={[
           'demo-terminals',
@@ -921,6 +1018,7 @@ export default function Demo() {
           scenarioAnim === 'enter' ? 'scenario-enter' : '',
           phaseFlash ? 'phase-flash' : '',
           scenarioComplete ? 'scenario-complete' : '',
+          termBlackout ? 'term-blackout' : '',
         ].filter(Boolean).join(' ')}>
           <ConfettiBurst
             active={showBurst}
@@ -932,6 +1030,14 @@ export default function Demo() {
             active={showGateRing}
             onDone={() => setShowGateRing(false)}
           />
+
+          {/* ── Countdown overlay ── */}
+          {countdownNum !== null && (
+            <div className="demo-countdown-overlay">
+              <span key={countdownNum} className="demo-countdown-num">{countdownNum}</span>
+              <span className="demo-countdown-label">launching {scenario.title}</span>
+            </div>
+          )}
 
           {/* ── Completion summary overlay ── */}
           {showCompletionOverlay && (
@@ -1016,82 +1122,27 @@ export default function Demo() {
         )}
       </div>
 
-      {/* ── Playback bar ── */}
-      <div className={`demo-playback-bar${isRunning ? ' running' : ''}`}>
-        {/* Progress fill */}
-        <div className="demo-pb-fill">
-          <div
-            className="demo-pb-fill-inner"
-            style={{ width: progressTotal > 0 ? `${(progressStep / progressTotal) * 100}%` : '0%' }}
-          />
-        </div>
-
-        <div className="demo-pb-controls">
-          {isRunning ? (
-            <button className="demo-pb-btn btn-interactive" onClick={handlePauseResume} title="Pause (Space)">
-              {isPaused ? '\u25B6' : '\u275A\u275A'}
-            </button>
-          ) : (
-            <button
-              className={`demo-pb-btn primary btn-primary-glow${!isRunning && serverHealth === 'connected' ? ' idle-pulse' : ''}`}
-              onClick={handlePlay}
-              title={`Play (Space) - ${readyTerminalCount}/${scenario.panes} terminals ready`}
-            >
-              {'\u25B6'}
-            </button>
-          )}
-          <button
-            className={`demo-pb-btn btn-interactive${playbackMode === 'step' ? ' primary' : ''}${waitingForStep ? ' waiting' : ''}`}
-            onClick={handleStep}
-            title="Next step (N)"
-            disabled={playbackMode !== 'step' && !waitingForStep}
-          >
-            {waitingForStep ? 'NEXT' : '\u25B6\u2759'}
-          </button>
-          <button className="demo-pb-btn btn-interactive" onClick={handleReset} title="Reset (R)">
-            {'\u21BA'}
-          </button>
-        </div>
-
-        {/* Mode toggle — segmented control */}
-        <div className="demo-mode-toggle">
-          <div className={`demo-mode-toggle-track${playbackMode === 'step' ? ' at-step' : ''}`} />
-          <button
-            className={`demo-mode-btn${playbackMode === 'auto' ? ' active' : ''}`}
-            onClick={() => toggleMode('auto')}
-          >
-            Auto
-          </button>
-          <button
-            className={`demo-mode-btn${playbackMode === 'step' ? ' active' : ''}`}
-            onClick={() => toggleMode('step')}
-          >
-            Step
-          </button>
-        </div>
-
-        {/* Speed pills */}
-        <div className="demo-pb-speed-pills">
-          {SPEEDS.map((s, i) => (
-            <button
-              key={s}
-              className={`demo-pb-speed-pill${i === speedIdx ? ' active' : ''}`}
-              onClick={() => setSpeedIdx(i)}
-            >
-              {s}x
-            </button>
-          ))}
-        </div>
-
-        <div className={`demo-pb-progress${isRunning ? ' active' : ''}`}>
-          <span className="demo-pb-step-label">{progressLabel}</span>
-        </div>
+      {/* ── Collapsible bottom terminal ── */}
+      <div className={`demo-bottom-terminal-wrapper ${bottomTermOpen ? 'expanded' : 'collapsed'}`}>
         <div
-          key={cmdPreviewKey}
-          className={`demo-pb-cmd-preview${cmdPreviewKey > 0 ? ' typewriter-enter' : ''}`}
+          className="demo-bottom-handle"
+          onClick={() => setBottomTermOpen((v) => !v)}
         >
-          {progressText}
+          <span className="demo-bottom-handle-grip" />
+          <span className="demo-bottom-handle-label">
+            {bottomTermOpen ? 'shell' : 'open shell'}
+          </span>
+          <button className="demo-bottom-handle-toggle">
+            {bottomTermOpen ? '\u25BC' : '\u25B2'}
+          </button>
         </div>
+        {bottomTermOpen && (
+          <BottomTerminalPane
+            sessionId={bottomTermSessionId.current}
+            handleRef={bottomTermHandleRef}
+            workspaceDir={workspaceDirRef.current}
+          />
+        )}
       </div>
     </div>
   );
@@ -1348,6 +1399,54 @@ function TerminalPaneWithHandle({
       )}
       <div className="demo-term-body" ref={bodyCallbackRef} />
       <div className="demo-term-vignette" />
+    </div>
+  );
+}
+
+/* ── Collapsible bottom terminal ─────────────────────────────── */
+
+function BottomTerminalPane({
+  sessionId,
+  handleRef,
+  workspaceDir,
+}: {
+  sessionId: string;
+  handleRef: React.RefObject<TerminalHandle | null>;
+  workspaceDir: string;
+}) {
+  const { attach, status, handle } = useTerminal(sessionId);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const cdSent = useRef(false);
+
+  useEffect(() => {
+    if (handleRef && 'current' in handleRef) {
+      (handleRef as React.MutableRefObject<TerminalHandle | null>).current = handle.current;
+    }
+  }, [handleRef, handle]);
+
+  // Auto-cd into workspace when connected
+  useEffect(() => {
+    if (status === 'connected' && workspaceDir && !cdSent.current && handle.current?.ws?.readyState === WebSocket.OPEN) {
+      cdSent.current = true;
+      handle.current.sendRaw(`cd ${workspaceDir}\r`);
+    }
+  }, [status, workspaceDir, handle]);
+
+  const bodyCallbackRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      (bodyRef as React.MutableRefObject<HTMLDivElement | null>).current = node;
+      attach(node);
+    },
+    [attach],
+  );
+
+  return (
+    <div className="demo-bottom-term-body" ref={bodyCallbackRef}>
+      {status === 'connecting' && (
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <SpinnerIcon size={16} />
+        </div>
+      )}
     </div>
   );
 }
