@@ -52,6 +52,7 @@ use roko_core::DaimonPolicy;
 use roko_core::React;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::attestation::{self, SigningKey};
+use roko_core::foundation::ShellGateCommand as CoreShellGateCommand;
 use roko_core::config::schema::{
     GatesConfig, LearningConfig as RuntimeLearningConfig, RokoConfig, RoleOverride,
 };
@@ -229,6 +230,37 @@ const PRE_AGENT_REMEDIATION_OUTPUT_TAIL: usize = 4000;
 /// Whether this domain requires git operations (worktrees, changed-files, commits).
 fn domain_uses_git(domain: &TaskDomain) -> bool {
     matches!(domain, TaskDomain::Code | TaskDomain::Chain)
+}
+
+fn workflow_enabled_gate_names(gates: &[crate::config::GateConfig]) -> Vec<String> {
+    gates
+        .iter()
+        .map(|gate| match gate {
+            crate::config::GateConfig::Shell { .. } => "shell".to_string(),
+            crate::config::GateConfig::Compile { .. } => "compile".to_string(),
+            crate::config::GateConfig::Clippy { .. } => "clippy".to_string(),
+            crate::config::GateConfig::Test { .. } => "test".to_string(),
+        })
+        .collect()
+}
+
+/// Preserve the parsed shell command config exactly as declared in roko.toml.
+fn workflow_shell_gate_commands(gates: &[crate::config::GateConfig]) -> Vec<CoreShellGateCommand> {
+    gates
+        .iter()
+        .filter_map(|gate| match gate {
+            crate::config::GateConfig::Shell {
+                program,
+                args,
+                timeout_ms,
+            } => Some(CoreShellGateCommand {
+                program: program.clone(),
+                args: args.clone(),
+                timeout_ms: *timeout_ms,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Resolve an `AgentRole` from a task's `role` string (kebab-case label).
@@ -7560,9 +7592,11 @@ impl PlanRunner {
 
     async fn run_with_v2_engine(&self, path: &Path) -> Result<OrchestrationReport> {
         let tasks = crate::run::discover_plan_workflow_tasks(path)?;
-        let enabled_gates = crate::run::workflow_enabled_gate_names(&self.config.gates);
-        let shell_gates = crate::run::workflow_shell_gate_commands(&self.config.gates);
+        let enabled_gates = workflow_enabled_gate_names(&self.config.gates);
+        let shell_gates = workflow_shell_gate_commands(&self.config.gates);
 
+        // Keep the workspace root attached to the workflow engine so shell
+        // gates execute in the same cwd as the plan's worktree.
         let report = crate::run::run_plan_tasks_with_workflow_engine(
             &tasks,
             &self.workdir,
@@ -16641,8 +16675,8 @@ impl PlanRunner {
         steps
     }
 
-    /// Build gate steps for a non-code domain. Uses task verify steps, config
-    /// domain_gates, or a pass-through ShellGate as fallback.
+    /// Build gate steps for a non-code domain. Uses task verify steps or
+    /// config domain_gates, in declaration order.
     fn domain_gate_steps(
         &self,
         plan_id: &str,
@@ -16695,14 +16729,6 @@ impl PlanRunner {
                     }
                 }
             }
-        }
-
-        // 3. Fallback: pass-through gate (always passes).
-        if steps.is_empty() {
-            steps.push((
-                Rung::Compile,
-                Box::new(ShellGate::new("true", vec![]).with_name("domain:pass-through")),
-            ));
         }
 
         steps
@@ -21074,6 +21100,43 @@ read_files = [
                 "src/mod.rs".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn workflow_shell_gate_commands_preserve_configured_program_and_args() {
+        let gates = vec![
+            crate::config::GateConfig::Shell {
+                program: "python".to_string(),
+                args: vec![
+                    "-m".to_string(),
+                    "pytest".to_string(),
+                    "--maxfail=1".to_string(),
+                ],
+                timeout_ms: 42,
+            },
+            crate::config::GateConfig::Compile {
+                build_system: "cargo".to_string(),
+                timeout_ms: 60_000,
+            },
+        ];
+
+        assert_eq!(
+            workflow_enabled_gate_names(&gates),
+            vec!["shell".to_string(), "compile".to_string()]
+        );
+
+        let shell_gates = workflow_shell_gate_commands(&gates);
+        assert_eq!(shell_gates.len(), 1);
+        assert_eq!(shell_gates[0].program, "python");
+        assert_eq!(
+            shell_gates[0].args,
+            vec![
+                "-m".to_string(),
+                "pytest".to_string(),
+                "--maxfail=1".to_string()
+            ]
+        );
+        assert_eq!(shell_gates[0].timeout_ms, 42);
     }
 
     #[test]
