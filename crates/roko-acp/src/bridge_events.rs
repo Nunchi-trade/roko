@@ -6,33 +6,23 @@
 //! [`crate::runner::run_with_workflow_engine`], which uses `ModelCallService`
 //! for provider-agnostic model calls.
 
+use std::path::{Path, PathBuf};
 use std::time::Instant;
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-};
 
 use roko_agent::StreamChunk;
 use roko_agent::streaming::parse_sse_line;
 use roko_core::ContentHash;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
-use roko_dreams::{load_dream_routing_advice, relevant_pattern_summaries};
-use roko_learn::{
-    episode_logger::{Episode, EpisodeLogger, Usage as EpUsage},
-    playbook::Playbook,
-};
-use roko_neuro::{KnowledgeKind, KnowledgeQueryHit, KnowledgeTier};
+use roko_learn::episode_logger::{Episode, EpisodeLogger, Usage as EpUsage};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite},
     sync::mpsc,
-    task,
 };
 use tracing::{debug, error, info, warn};
 
-use crate::knowledge::{DispatchKnowledge, append_context, query_dispatch_knowledge};
 use crate::runner::run_with_workflow_engine;
 use crate::{
     session::{AcpSession, CancelToken},
@@ -208,7 +198,6 @@ pub struct StreamResult {
     pub assistant_text: String,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn append_acp_episode(
     roko_config: &RokoConfig,
     workdir: &Path,
@@ -533,13 +522,6 @@ where
     };
     let should_resolve_context = !is_slash_command && pipeline_template.is_none();
 
-    let knowledge = if is_slash_command {
-        DispatchKnowledge::default()
-    } else {
-        query_dispatch_knowledge(workdir, &prompt_text).await
-    };
-    let knowledge_context = knowledge.context_text();
-
     // Resolve context only for the single-agent path.
     // Resource blocks always resolve; @-mentions are only resolved when
     // prompt-time context is enabled.
@@ -571,9 +553,11 @@ where
     };
     let messages = if should_resolve_context {
         // Build combined system prompt with resolved context.
-        let mut full_system = system_prompt.clone();
-        full_system = append_context(&full_system, &file_context);
-        full_system = append_context(&full_system, &knowledge_context);
+        let full_system = if file_context.is_empty() {
+            system_prompt.clone()
+        } else {
+            format!("{system_prompt}\n\n{file_context}")
+        };
         session.build_messages_array(&full_system, &prompt_text)
     } else {
         Vec::new()
@@ -585,21 +569,6 @@ where
     }
 
     let (event_sender, event_receiver) = mpsc::channel(64);
-    if !is_slash_command {
-        emit_knowledge_card(&knowledge, &event_sender).await;
-    }
-    let provenance = if is_slash_command {
-        None
-    } else {
-        build_provenance(&knowledge.hits, &knowledge.playbooks, &prompt_text, workdir).await
-    };
-    let provenance_card = provenance.as_ref().map(render_provenance_card);
-    if !is_slash_command
-        && pipeline_template.is_none()
-        && let Some(chain) = provenance.as_ref()
-    {
-        emit_provenance_card(chain, &event_sender).await;
-    }
     let cancel_token = session.cancel_token.clone();
     let session_id = session.session_id.clone();
     let workdir = workdir.to_path_buf();
@@ -637,8 +606,6 @@ where
                 let result = crate::runner::run_workflow_pipeline(
                     &session_id,
                     &prompt_text,
-                    knowledge_context.clone(),
-                    provenance_card.clone(),
                     &workdir,
                     crate::runner::PipelineConfig {
                         template,
@@ -664,19 +631,17 @@ where
                 return match final_phase {
                     Some(crate::pipeline::PipelinePhase::Complete) => Ok(()),
                     Some(crate::pipeline::PipelinePhase::Halted { reason }) => {
-                        Err(anyhow::anyhow!("workflow pipeline halted: {reason}").into())
+                        Err(anyhow::anyhow!("workflow pipeline halted: {reason}"))
                     }
                     Some(crate::pipeline::PipelinePhase::Cancelled) => {
-                        Err(anyhow::anyhow!("workflow pipeline cancelled").into())
+                        Err(anyhow::anyhow!("workflow pipeline cancelled"))
                     }
                     Some(phase) => Err(anyhow::anyhow!(
                         "workflow pipeline ended in unexpected phase: {phase:?}"
-                    )
-                    .into()),
+                    )),
                     None => Err(anyhow::anyhow!(
                         "workflow pipeline completed without shared run state"
-                    )
-                    .into()),
+                    )),
                 };
             }
 
@@ -685,7 +650,6 @@ where
                 &prompt_text,
                 &workdir,
                 workflow_template_name(&template),
-                provenance_card,
                 event_sender,
             )
             .await?;
@@ -694,8 +658,7 @@ where
                 return Err(anyhow::anyhow!(
                     "workflow engine reported unsuccessful run: {}",
                     report.output
-                )
-                .into());
+                ));
             }
 
             return Ok(());
@@ -1072,369 +1035,6 @@ async fn run_openai_compat_cognitive_task(
     }
 }
 
-async fn emit_knowledge_card(
-    knowledge: &DispatchKnowledge,
-    event_sender: &mpsc::Sender<CognitiveEvent>,
-) {
-    let Some(card) = knowledge.card() else {
-        return;
-    };
-
-    let tool_call_id = "knowledge-query".to_string();
-    let _ = event_sender
-        .send(CognitiveEvent::ToolCallStart {
-            tool_call_id: tool_call_id.clone(),
-            title: card.title,
-            kind: ToolCallKind::Other,
-        })
-        .await;
-    let _ = event_sender
-        .send(CognitiveEvent::ToolCallComplete {
-            tool_call_id,
-            status: ToolCallStatus::Completed,
-            content: vec![ContentBlock::Text { text: card.body }],
-        })
-        .await;
-}
-
-/// A chain tracing why Roko chose a particular approach.
-#[derive(Debug, Clone, PartialEq)]
-struct ProvenanceChain {
-    sources: Vec<ProvenanceSource>,
-    confidence: f64,
-}
-
-/// One source in a decision provenance chain.
-#[derive(Debug, Clone, PartialEq)]
-enum ProvenanceSource {
-    Playbook {
-        id: String,
-        goal: String,
-        total_outcomes: u64,
-        success_rate: f64,
-    },
-    Episode {
-        task_id: String,
-        success: bool,
-        gate_summary: String,
-    },
-    Knowledge {
-        kind: KnowledgeKind,
-        tier: KnowledgeTier,
-        score: f64,
-        summary: String,
-    },
-    DreamPattern {
-        description: String,
-        guidance: String,
-        confidence: f64,
-    },
-}
-
-/// Build provenance from already-queried knowledge/playbook results and
-/// best-effort episode/dream lookups.
-async fn build_provenance(
-    knowledge_hits: &[KnowledgeQueryHit],
-    playbooks: &[Playbook],
-    prompt: &str,
-    workdir: &Path,
-) -> Option<ProvenanceChain> {
-    let mut sources = Vec::new();
-    let mut has_playbook_source = false;
-
-    for playbook in playbooks {
-        let Some(success_rate) = playbook.success_rate() else {
-            continue;
-        };
-
-        has_playbook_source = true;
-        sources.push(ProvenanceSource::Playbook {
-            id: playbook.id.clone(),
-            goal: truncate_with_limit(playbook.goal.trim(), 80, "..."),
-            total_outcomes: playbook.total_outcomes(),
-            success_rate,
-        });
-    }
-
-    let episodes_path = workdir.join(".roko").join("episodes.jsonl");
-    let prompt_keywords = prompt_keywords(prompt);
-    let episodes_future = EpisodeLogger::read_all_lossy(&episodes_path);
-    let dreams_future = async {
-        if prompt_keywords.is_empty() {
-            return Vec::new();
-        }
-
-        match task::spawn_blocking({
-            let workdir = workdir.to_path_buf();
-            move || load_dream_routing_advice(&workdir)
-        })
-        .await
-        {
-            Ok(Ok(advice)) => {
-                let mut seen_signatures = HashSet::new();
-                let mut dream_sources = Vec::new();
-                for keyword in prompt_keywords {
-                    for pattern in relevant_pattern_summaries(&advice, &keyword, 0.5, 2) {
-                        if !seen_signatures.insert(pattern.signature) {
-                            continue;
-                        }
-
-                        dream_sources.push(ProvenanceSource::DreamPattern {
-                            description: truncate_with_limit(&pattern.description, 80, "..."),
-                            guidance: truncate_with_limit(&pattern.guidance, 80, "..."),
-                            confidence: pattern.confidence,
-                        });
-
-                        if dream_sources.len() == 2 {
-                            return dream_sources;
-                        }
-                    }
-                }
-
-                dream_sources
-            }
-            Ok(Err(err)) => {
-                warn!(
-                    workdir = %workdir.display(),
-                    error = %err,
-                    "dream routing advice load failed"
-                );
-                Vec::new()
-            }
-            Err(err) => {
-                warn!(
-                    workdir = %workdir.display(),
-                    error = %err,
-                    "dream routing advice task failed"
-                );
-                Vec::new()
-            }
-        }
-    };
-
-    let (episodes_result, dream_sources) = tokio::join!(episodes_future, dreams_future);
-
-    match episodes_result {
-        Ok(episodes) => {
-            let matched_ids: HashSet<&str> = playbooks.iter().map(|pb| pb.id.as_str()).collect();
-            let mut episode_count = 0usize;
-            for episode in episodes.iter().rev().take(100) {
-                if !matched_ids.contains(episode.task_id.as_str()) {
-                    continue;
-                }
-
-                let gate_summary = if episode.gate_verdicts.is_empty() {
-                    String::from("no gate verdicts")
-                } else {
-                    episode
-                        .gate_verdicts
-                        .iter()
-                        .map(|verdict| {
-                            format!(
-                                "{}:{}",
-                                verdict.gate,
-                                if verdict.passed { "pass" } else { "fail" }
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                };
-
-                sources.push(ProvenanceSource::Episode {
-                    task_id: episode.task_id.clone(),
-                    success: episode.success,
-                    gate_summary,
-                });
-
-                episode_count += 1;
-                if episode_count == 3 {
-                    break;
-                }
-            }
-        }
-        Err(err) => {
-            warn!(
-                workdir = %workdir.display(),
-                error = %err,
-                "episode log read failed"
-            );
-        }
-    }
-
-    for hit in knowledge_hits.iter().take(3) {
-        sources.push(ProvenanceSource::Knowledge {
-            kind: hit.entry.kind,
-            tier: hit.entry.tier,
-            score: hit.total_score,
-            summary: truncate_with_limit(hit.entry.content.trim(), 80, "..."),
-        });
-    }
-
-    for source in dream_sources {
-        sources.push(source);
-    }
-
-    if sources.is_empty() || (!has_playbook_source && sources.len() < 2) {
-        return None;
-    }
-
-    let scores = sources
-        .iter()
-        .map(|source| match source {
-            ProvenanceSource::Playbook { success_rate, .. } => *success_rate,
-            ProvenanceSource::Episode { success, .. } => {
-                if *success {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-            ProvenanceSource::Knowledge { score, .. } => score_to_confidence(*score),
-            ProvenanceSource::DreamPattern { confidence, .. } => *confidence,
-        })
-        .collect::<Vec<_>>();
-
-    let confidence = if scores.is_empty() {
-        0.0
-    } else {
-        scores.iter().sum::<f64>() / scores.len() as f64
-    };
-
-    Some(ProvenanceChain {
-        sources,
-        confidence,
-    })
-}
-
-/// Emit a provenance card into ACP updates.
-async fn emit_provenance_card(
-    chain: &ProvenanceChain,
-    event_sender: &mpsc::Sender<CognitiveEvent>,
-) {
-    let tool_call_id = format!("decision-provenance-{}", uuid::Uuid::new_v4());
-    let _ = event_sender
-        .send(CognitiveEvent::ToolCallStart {
-            tool_call_id: tool_call_id.clone(),
-            title: "Decision provenance".to_string(),
-            kind: ToolCallKind::Other,
-        })
-        .await;
-    let _ = event_sender
-        .send(CognitiveEvent::ToolCallComplete {
-            tool_call_id,
-            status: ToolCallStatus::Completed,
-            content: vec![ContentBlock::Text {
-                text: render_provenance_card(chain),
-            }],
-        })
-        .await;
-}
-
-fn render_provenance_card(chain: &ProvenanceChain) -> String {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "{} source{}, {:.0}% confidence",
-        chain.sources.len(),
-        if chain.sources.len() == 1 { "" } else { "s" },
-        chain.confidence * 100.0
-    ));
-    lines.push(String::new());
-
-    for source in &chain.sources {
-        match source {
-            ProvenanceSource::Playbook {
-                id,
-                goal,
-                total_outcomes,
-                success_rate,
-            } => {
-                lines.push(format!(
-                    "- Playbook `{id}` ({} runs, {:.0}% success)",
-                    total_outcomes,
-                    success_rate * 100.0
-                ));
-                lines.push(format!("  Goal: {}", goal));
-            }
-            ProvenanceSource::Episode {
-                task_id,
-                success,
-                gate_summary,
-            } => {
-                lines.push(format!(
-                    "- Episode `{task_id}` [{}]",
-                    if *success { "pass" } else { "fail" }
-                ));
-                lines.push(format!(
-                    "  Gates: {}",
-                    truncate_with_limit(gate_summary, 80, "...")
-                ));
-            }
-            ProvenanceSource::Knowledge {
-                kind,
-                tier,
-                score,
-                summary,
-            } => {
-                lines.push(format!(
-                    "- Knowledge [{}/{}] ({:.2})",
-                    kind.as_str(),
-                    knowledge_tier_label(*tier),
-                    score
-                ));
-                lines.push(format!("  {}", summary));
-            }
-            ProvenanceSource::DreamPattern {
-                description,
-                guidance,
-                confidence,
-            } => {
-                lines.push(format!("- Dream pattern ({:.0}%)", confidence * 100.0));
-                lines.push(format!("  Description: {}", description));
-                lines.push(format!("  Guidance: {}", guidance));
-            }
-        }
-        lines.push(String::new());
-    }
-
-    while lines.last().is_some_and(|line| line.is_empty()) {
-        lines.pop();
-    }
-
-    lines.join("\n")
-}
-
-fn prompt_keywords(prompt: &str) -> Vec<String> {
-    let mut keywords = Vec::new();
-
-    for raw in prompt.split(|ch: char| !ch.is_alphanumeric()) {
-        let keyword = raw.trim().to_ascii_lowercase();
-        if keyword.len() <= 4 || keywords.iter().any(|existing| existing == &keyword) {
-            continue;
-        }
-
-        keywords.push(keyword);
-        if keywords.len() == 5 {
-            break;
-        }
-    }
-
-    keywords
-}
-
-fn knowledge_tier_label(tier: KnowledgeTier) -> &'static str {
-    match tier {
-        KnowledgeTier::Transient => "transient",
-        KnowledgeTier::Working => "working",
-        KnowledgeTier::Consolidated => "consolidated",
-        KnowledgeTier::Persistent => "persistent",
-    }
-}
-
-fn score_to_confidence(score: f64) -> f64 {
-    let score = score.max(0.0);
-    score / (1.0 + score)
-}
-
 // ── Slash command dispatch ───────────────────────────────────────────
 
 /// Runs a roko CLI slash command and streams the output as ACP updates.
@@ -1726,20 +1326,10 @@ Use the Workflow dropdown in the status bar to select, or:
         }
         "express" => {
             require_args!("express", "<prompt>");
-            let knowledge = query_dispatch_knowledge(workdir, args).await;
-            emit_knowledge_card(&knowledge, &event_sender).await;
-            let provenance_card =
-                build_provenance(&knowledge.hits, &knowledge.playbooks, args, workdir)
-                    .await
-                    .as_ref()
-                    .map(render_provenance_card);
-            let knowledge_context = knowledge.context_text();
             if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
                 return Ok(crate::runner::run_workflow_pipeline(
                     session_id,
                     args,
-                    knowledge_context,
-                    provenance_card,
                     workdir,
                     crate::runner::PipelineConfig {
                         template: crate::pipeline::WorkflowTemplate::Express,
@@ -1755,33 +1345,15 @@ Use the Workflow dropdown in the status bar to select, or:
                 .await?);
             }
 
-            run_with_workflow_engine(
-                session_id,
-                args,
-                workdir,
-                "express",
-                provenance_card,
-                event_sender,
-            )
-            .await?;
+            run_with_workflow_engine(session_id, args, workdir, "express", event_sender).await?;
             return Ok(());
         }
         "full" => {
             require_args!("full", "<prompt>");
-            let knowledge = query_dispatch_knowledge(workdir, args).await;
-            emit_knowledge_card(&knowledge, &event_sender).await;
-            let provenance_card =
-                build_provenance(&knowledge.hits, &knowledge.playbooks, args, workdir)
-                    .await
-                    .as_ref()
-                    .map(render_provenance_card);
-            let knowledge_context = knowledge.context_text();
             if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
                 return Ok(crate::runner::run_workflow_pipeline(
                     session_id,
                     args,
-                    knowledge_context,
-                    provenance_card,
                     workdir,
                     crate::runner::PipelineConfig {
                         template: crate::pipeline::WorkflowTemplate::Full,
@@ -1797,15 +1369,7 @@ Use the Workflow dropdown in the status bar to select, or:
                 .await?);
             }
 
-            run_with_workflow_engine(
-                session_id,
-                args,
-                workdir,
-                "full",
-                provenance_card,
-                event_sender,
-            )
-            .await?;
+            run_with_workflow_engine(session_id, args, workdir, "full", event_sender).await?;
             return Ok(());
         }
         "review-this" => {
@@ -2773,134 +2337,5 @@ mod tests {
         assert!(truncated.ends_with("... [truncated]"));
         assert!(truncated.len() < text.len());
         assert!(truncated[..prefix_len].chars().all(|c| c == 'é'));
-    }
-
-    #[tokio::test]
-    async fn build_provenance_includes_all_source_types() {
-        let tmp = tempfile::tempdir().expect("create tmpdir");
-        let workdir = tmp.path();
-        std::fs::create_dir_all(workdir.join(".roko").join("learn")).expect("create learn dir");
-
-        let playbook = Playbook {
-            id: "dispatch-chain".into(),
-            name: "dispatch-chain".into(),
-            goal: "Reuse the proven dispatch path for similar tasks".into(),
-            steps: Vec::new(),
-            success_count: 3,
-            failure_count: 1,
-            created_at_ms: 0,
-            last_used_ms: Some(0),
-        };
-
-        let mut episode = Episode::new("agent-1", playbook.id.as_str()).succeeded();
-        episode.kind = "agent_turn".into();
-        episode.gate_verdicts = vec![
-            roko_learn::episode_logger::GateVerdict::new("compile", true),
-            roko_learn::episode_logger::GateVerdict::new("test", true),
-        ];
-        let logger = EpisodeLogger::new(workdir.join(".roko").join("episodes.jsonl"));
-        logger.append(&episode).await.expect("append episode");
-
-        let advice = roko_dreams::DreamRoutingAdvice {
-            generated_at: chrono::Utc::now(),
-            source_dream_report: "dream-report".into(),
-            recommendations: Vec::new(),
-            pattern_summaries: vec![roko_dreams::PatternSummary {
-                description: "dispatch decisions should show the evidence chain".into(),
-                applies_to: vec!["dispatch".into()],
-                guidance: "surface the chain before strategist work starts".into(),
-                confidence: 0.91,
-                signature: 42,
-            }],
-        };
-        std::fs::write(
-            workdir
-                .join(".roko")
-                .join("learn")
-                .join("dream-routing-advice.json"),
-            serde_json::to_string(&advice).expect("serialize dream advice"),
-        )
-        .expect("write dream advice");
-
-        let knowledge_hits = vec![KnowledgeQueryHit {
-            entry: roko_neuro::KnowledgeEntry {
-                id: "knowledge-1".into(),
-                kind: KnowledgeKind::StrategyFragment,
-                content: "Prefer the proven dispatcher path".into(),
-                confidence: 0.9,
-                tier: KnowledgeTier::Persistent,
-                source_episodes: vec![playbook.id.clone()],
-                tags: vec!["dispatch".into()],
-                ..Default::default()
-            },
-            total_score: 0.85,
-            breakdown: roko_neuro::KnowledgeQueryBreakdown {
-                keyword_score: 1.0,
-                effective_confidence: 0.9,
-                recency_factor: 1.0,
-                emotional_boost: 1.0,
-                hdc_similarity: None,
-            },
-        }];
-
-        let chain = build_provenance(
-            &knowledge_hits,
-            &[playbook],
-            "dispatch the request",
-            workdir,
-        )
-        .await
-        .expect("meaningful provenance");
-
-        assert_eq!(chain.sources.len(), 4);
-        assert!(matches!(
-            chain.sources[0],
-            ProvenanceSource::Playbook { .. }
-        ));
-        assert!(matches!(chain.sources[1], ProvenanceSource::Episode { .. }));
-        assert!(matches!(
-            chain.sources[2],
-            ProvenanceSource::Knowledge { .. }
-        ));
-        assert!(matches!(
-            chain.sources[3],
-            ProvenanceSource::DreamPattern { .. }
-        ));
-        assert!(chain.confidence > 0.0);
-
-        let card = render_provenance_card(&chain);
-        assert!(card.contains("4 sources"));
-        assert!(card.contains("Playbook `dispatch-chain`"));
-        assert!(card.contains("Episode `dispatch-chain`"));
-        assert!(card.contains("Knowledge [strategy_fragment/persistent]"));
-        assert!(card.contains("Dream pattern"));
-    }
-
-    #[tokio::test]
-    async fn build_provenance_suppresses_trivial_knowledge_only_chains() {
-        let tmp = tempfile::tempdir().expect("create tmpdir");
-        let workdir = tmp.path();
-
-        let knowledge_hits = vec![KnowledgeQueryHit {
-            entry: roko_neuro::KnowledgeEntry {
-                id: "knowledge-2".into(),
-                kind: KnowledgeKind::Insight,
-                content: "A lone idea without supporting history".into(),
-                confidence: 0.5,
-                tier: KnowledgeTier::Working,
-                ..Default::default()
-            },
-            total_score: 0.4,
-            breakdown: roko_neuro::KnowledgeQueryBreakdown {
-                keyword_score: 1.0,
-                effective_confidence: 0.5,
-                recency_factor: 1.0,
-                emotional_boost: 1.0,
-                hdc_similarity: None,
-            },
-        }];
-
-        let chain = build_provenance(&knowledge_hits, &[], "small", workdir).await;
-        assert!(chain.is_none());
     }
 }
