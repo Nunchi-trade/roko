@@ -495,19 +495,31 @@ async fn list_knowledge_edges(State(state): State<Arc<AppState>>) -> Result<Json
             }));
         }
     }
-    // Build edges from shared source episodes (entries that share an episode
-    // are related).
-    let mut episode_to_entries: HashMap<&str, Vec<&str>> = HashMap::new();
+    // Build edges from shared source episodes and shared semantic tags.
+    // Entries sharing an episode or a meaningful tag (plan:*, agent:*, gate:*)
+    // are connected; frequency counts shared dimensions.
+    let mut group_to_entries: HashMap<String, Vec<&str>> = HashMap::new();
     for entry in &all {
         for ep in &entry.source_episodes {
-            episode_to_entries
-                .entry(ep.as_str())
+            group_to_entries
+                .entry(format!("ep:{ep}"))
                 .or_default()
                 .push(&entry.id);
         }
+        for tag in &entry.tags {
+            if tag.starts_with("plan:")
+                || tag.starts_with("agent:")
+                || tag.starts_with("model:")
+            {
+                group_to_entries
+                    .entry(tag.clone())
+                    .or_default()
+                    .push(&entry.id);
+            }
+        }
     }
-    let mut seen = HashSet::new();
-    for ids in episode_to_entries.values() {
+    let mut pair_freq: HashMap<(&str, &str), u32> = HashMap::new();
+    for ids in group_to_entries.values() {
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
                 let pair = if ids[i] < ids[j] {
@@ -515,15 +527,16 @@ async fn list_knowledge_edges(State(state): State<Arc<AppState>>) -> Result<Json
                 } else {
                     (ids[j], ids[i])
                 };
-                if seen.insert(pair) {
-                    edges.push(json!({
-                        "source": pair.0,
-                        "target": pair.1,
-                        "frequency": 1,
-                    }));
-                }
+                *pair_freq.entry(pair).or_insert(0) += 1;
             }
         }
+    }
+    for (pair, freq) in &pair_freq {
+        edges.push(json!({
+            "source": pair.0,
+            "target": pair.1,
+            "frequency": freq,
+        }));
     }
     let total = edges.len();
     let body = json!(PaginatedResponse::new(edges, total, 0, total));
