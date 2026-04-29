@@ -14,6 +14,8 @@
 //! ```
 
 mod dry_run_fs;
+#[path = "plan_validate.rs"]
+mod plan_validate;
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -29,6 +31,7 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::{Body, Engram, Kind, Provenance, Store};
 use roko_fs::FileSubstrate;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+pub use roko_learn::runtime_feedback::{ArtifactValidationReport, GenerationOutcome};
 use roko_runtime::event_bus::{PublishOrigin, RokoEvent, global_event_bus};
 
 fn tier_rank(tier: &str) -> u8 {
@@ -688,7 +691,9 @@ async fn maybe_generate_plan_after_promote(
         slug.to_string(),
         prd_path.to_path_buf(),
         auto_execute,
-        |slug, path, dry_run| async move { generate_plan_from_prd(&slug, &path, dry_run).await },
+        |slug, path, dry_run| async move {
+            generate_plan_from_prd_with_outcome(&slug, &path, dry_run, None, None).await
+        },
     )
     .await
 }
@@ -702,17 +707,36 @@ async fn maybe_generate_plan_after_promote_with<F, Fut>(
 ) -> Result<Option<PathBuf>>
 where
     F: FnOnce(String, PathBuf, bool) -> Fut,
-    Fut: Future<Output = Result<PathBuf>>,
+    Fut: Future<Output = Result<(PathBuf, GenerationOutcome)>>,
 {
     if !auto_plan_enabled(workdir)? {
         return Ok(None);
     }
 
-    match generator(slug, prd_path, false).await {
-        Ok(plans_root) => {
-            println!("Plan generated: {}", plans_root.display());
-            if auto_execute {
-                run_generated_plans(workdir, &plans_root).await?;
+    let prd_path_display = prd_path.display().to_string();
+    match generator(slug, prd_path.clone(), false).await {
+        Ok((plans_root, outcome)) => {
+            if outcome.fully_successful() {
+                println!("Plan generated: {}", plans_root.display());
+                if auto_execute {
+                    run_generated_plans(workdir, &plans_root).await?;
+                }
+            } else if outcome.process_success {
+                eprintln!(
+                    "warning: plan generation completed but artifact validation failed ({})",
+                    outcome.status_label()
+                );
+            } else {
+                eprintln!(
+                    "warning: plan generation reported {} for {}",
+                    outcome.status_label(),
+                    prd_path_display
+                );
+            }
+            if auto_execute && !outcome.fully_successful() {
+                eprintln!(
+                    "warning: skipping auto-execute because generated artifact was not fully successful"
+                );
             }
             Ok(Some(plans_root))
         }
@@ -769,7 +793,9 @@ fn auto_plan_enabled(workdir: &Path) -> Result<bool> {
 
 /// Generate implementation plans from a published PRD file.
 pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) -> Result<PathBuf> {
-    generate_plan_from_prd_with_failure_context(slug, prd_path, dry_run, None, None).await
+    let (plans_root, _) =
+        generate_plan_from_prd_with_outcome(slug, prd_path, dry_run, None, None).await?;
+    Ok(plans_root)
 }
 
 /// Generate implementation plans from a published PRD file using an
@@ -780,7 +806,9 @@ pub async fn generate_plan_from_prd_with_model(
     dry_run: bool,
     model: Option<&str>,
 ) -> Result<PathBuf> {
-    generate_plan_from_prd_with_failure_context(slug, prd_path, dry_run, None, model).await
+    let (plans_root, _) =
+        generate_plan_from_prd_with_outcome(slug, prd_path, dry_run, None, model).await?;
+    Ok(plans_root)
 }
 
 /// Generate implementation plans from a published PRD file with optional
@@ -792,6 +820,19 @@ pub async fn generate_plan_from_prd_with_failure_context(
     failure_context: Option<&str>,
     model: Option<&str>,
 ) -> Result<PathBuf> {
+    let (plans_root, _) =
+        generate_plan_from_prd_with_outcome(slug, prd_path, dry_run, failure_context, model)
+            .await?;
+    Ok(plans_root)
+}
+
+async fn generate_plan_from_prd_with_outcome(
+    slug: &str,
+    prd_path: &Path,
+    dry_run: bool,
+    failure_context: Option<&str>,
+    model: Option<&str>,
+) -> Result<(PathBuf, GenerationOutcome)> {
     let workdir = prd_workdir(prd_path)?;
     let result = async {
         let content = std::fs::read_to_string(prd_path)
@@ -870,15 +911,25 @@ pub async fn generate_plan_from_prd_with_failure_context(
         }
 
         let changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);
+        let mut artifact_valid = true;
+        let mut validation_report: Option<ArtifactValidationReport> = None;
+
         if dry_run {
             if changed.is_empty() {
-                return Err(anyhow!(
-                    "dry-run plan generation did not produce any tasks.toml files"
-                ));
-            }
-
-            for path in &changed {
-                dry_run_fs::validate_and_print_preview(path)?;
+                artifact_valid = false;
+                eprintln!(
+                    "warning: dry-run plan generation did not produce any tasks.toml files"
+                );
+            } else {
+                for path in &changed {
+                    if let Err(err) = dry_run_fs::validate_and_print_preview(path) {
+                        artifact_valid = false;
+                        eprintln!(
+                            "warning: dry-run validation failed for {}: {err:#}",
+                            path.display()
+                        );
+                    }
+                }
             }
         } else {
             dry_run_fs::warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
@@ -892,31 +943,77 @@ pub async fn generate_plan_from_prd_with_failure_context(
                 template_kind.max_task_count()
             );
         }
-        Ok((
-            workspace_plans_dir(&workdir),
-            task_count,
-            estimated_complexity,
-        ))
+
+        match self::plan_validate::validate_plans_dir_with_workdir(
+            &plans_root,
+            None,
+            Some(workdir_ref),
+        ) {
+            Ok(report) => {
+                if report.totals.errors > 0 {
+                    artifact_valid = false;
+                    eprintln!(
+                        "warning: artifact validation found {} error(s) and {} warning(s) for {}",
+                        report.totals.errors,
+                        report.totals.warnings,
+                        slug
+                    );
+                }
+                validation_report = serde_json::to_value(&report).ok();
+                if validation_report.is_none() {
+                    artifact_valid = false;
+                }
+            }
+            Err(err) => {
+                artifact_valid = false;
+                eprintln!(
+                    "warning: artifact validation could not be completed for {}: {err:#}",
+                    slug
+                );
+            }
+        }
+
+        let outcome = GenerationOutcome {
+            process_success: true,
+            artifact_valid,
+            validation_report,
+        };
+
+        Ok((workspace_plans_dir(&workdir), task_count, estimated_complexity, outcome))
     }
     .await;
 
     match result {
-        Ok((plans_root, task_count, estimated_complexity)) => {
-            if !dry_run
-                && let Err(err) = emit_prd_plan_signal(
-                    &workdir,
-                    Kind::Custom("prd:plan:generated".into()),
-                    serde_json::json!({
-                        "plan_path": plans_root.display().to_string(),
-                        "task_count": task_count,
-                        "estimated_complexity": estimated_complexity,
-                    }),
-                )
-                .await
-            {
-                tracing::warn!("[prd] failed to emit generated-plan signal: {err}");
+        Ok((plans_root, task_count, estimated_complexity, outcome)) => {
+            if !dry_run {
+                let signal_kind = if outcome.fully_successful() {
+                    Some(Kind::Custom("prd:plan:generated".into()))
+                } else if outcome.process_success {
+                    Some(Kind::Custom("prd:plan:partial_success".into()))
+                } else {
+                    Some(Kind::Custom("prd:plan:failed".into()))
+                };
+
+                if let Some(kind) = signal_kind
+                    && let Err(err) = emit_prd_plan_signal(
+                        &workdir,
+                        kind,
+                        serde_json::json!({
+                            "plan_path": plans_root.display().to_string(),
+                            "task_count": task_count,
+                            "estimated_complexity": estimated_complexity,
+                            "status": outcome.status_label(),
+                            "process_success": outcome.process_success,
+                            "artifact_valid": outcome.artifact_valid,
+                            "validation_report": outcome.validation_report,
+                        }),
+                    )
+                    .await
+                {
+                    tracing::warn!("[prd] failed to emit plan signal: {err}");
+                }
             }
-            Ok(plans_root)
+            Ok((plans_root, outcome))
         }
         Err(err) => {
             if !dry_run
@@ -1153,6 +1250,32 @@ mod tests {
     #[test]
     fn parse_no_frontmatter() {
         assert!(PrdMeta::parse("# Just a heading").is_none());
+    }
+
+    #[test]
+    fn generation_outcome_labels_distinguish_process_from_artifact() {
+        let success = GenerationOutcome {
+            process_success: true,
+            artifact_valid: true,
+            validation_report: None,
+        };
+        let partial = GenerationOutcome {
+            process_success: true,
+            artifact_valid: false,
+            validation_report: None,
+        };
+        let failure = GenerationOutcome {
+            process_success: false,
+            artifact_valid: true,
+            validation_report: None,
+        };
+
+        assert!(success.fully_successful());
+        assert_eq!(success.status_label(), "success");
+        assert!(!partial.fully_successful());
+        assert_eq!(partial.status_label(), "partial_success");
+        assert!(!failure.fully_successful());
+        assert_eq!(failure.status_label(), "failure");
     }
 
     #[test]

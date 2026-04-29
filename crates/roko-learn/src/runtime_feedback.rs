@@ -737,6 +737,39 @@ pub enum RunnerFeedbackEvent {
     },
 }
 
+/// Opaque artifact validation payload carried alongside generation outcomes.
+pub type ArtifactValidationReport = serde_json::Value;
+
+/// Outcome of a generation operation, distinguishing process from artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationOutcome {
+    /// Whether the agent process completed without error.
+    pub process_success: bool,
+    /// Whether the generated artifact passes grounding validation.
+    pub artifact_valid: bool,
+    /// Validation report (if validation ran).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_report: Option<ArtifactValidationReport>,
+}
+
+impl GenerationOutcome {
+    /// True only when both process succeeded AND artifact is valid.
+    #[must_use]
+    pub fn fully_successful(&self) -> bool {
+        self.process_success && self.artifact_valid
+    }
+
+    /// Status string for display and logging.
+    #[must_use]
+    pub fn status_label(&self) -> &'static str {
+        match (self.process_success, self.artifact_valid) {
+            (true, true) => "success",
+            (true, false) => "partial_success",
+            (false, _) => "failure",
+        }
+    }
+}
+
 /// Counts of append-only records written by a feedback facade call.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeFeedbackWrite {
@@ -1623,6 +1656,59 @@ impl LearningRuntime {
         }
 
         Ok(write)
+    }
+
+    /// Record a generation outcome while distinguishing process success from artifact validity.
+    ///
+    /// Episodes are always persisted for analysis. Positive learning signals are only
+    /// generated when the process completed successfully and the artifact passed validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persistence of the episode or derived feedback fails.
+    pub async fn record_generation_outcome(
+        &self,
+        task_id: &str,
+        model: &str,
+        outcome: &GenerationOutcome,
+    ) -> Result<(), LearningRuntimeError> {
+        let mut episode = Episode::new("roko-cli", task_id);
+        episode.kind = "generation".to_string();
+        episode.agent_template = "generator".to_string();
+        episode.model = model.to_string();
+        episode.trigger_kind = "generation".to_string();
+        episode.success = outcome.fully_successful();
+        episode.failure_reason = if outcome.process_success && !outcome.artifact_valid {
+            Some("artifact validation failed".to_string())
+        } else if !outcome.process_success {
+            Some("generation process failed".to_string())
+        } else {
+            None
+        };
+        episode.extra.insert(
+            "process_success".to_string(),
+            serde_json::json!(outcome.process_success),
+        );
+        episode.extra.insert(
+            "artifact_valid".to_string(),
+            serde_json::json!(outcome.artifact_valid),
+        );
+        episode.extra.insert(
+            "generation_status".to_string(),
+            serde_json::json!(outcome.status_label()),
+        );
+        if let Some(report) = &outcome.validation_report {
+            episode
+                .extra
+                .insert("validation_report".to_string(), report.clone());
+        }
+        episode.attach_all_fingerprints();
+
+        self.record_runner_event(RunnerFeedbackEvent::Episode {
+            episode: Box::new(episode),
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Append an efficiency event to the JSONL log.
@@ -4911,5 +4997,32 @@ mod tests {
             "persisted score should survive reload"
         );
         assert_eq!(reloaded.local_reward_score("skill", "rust-impl"), 1.0);
+    }
+
+    #[tokio::test]
+    async fn generation_outcome_partial_success_does_not_seed_learning() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+
+        let outcome = GenerationOutcome {
+            process_success: true,
+            artifact_valid: false,
+            validation_report: None,
+        };
+
+        runtime
+            .record_generation_outcome("prd:plan:test", "claude-sonnet-4-6", &outcome)
+            .await
+            .unwrap();
+
+        let snapshot = runtime
+            .query_feedback(&RuntimeFeedbackQuery::default())
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.episodes.len(), 1);
+        assert!(!snapshot.episodes[0].success);
+        assert!(snapshot.knowledge_seeds.is_empty());
+        assert_eq!(snapshot.provider_model_outcomes.len(), 1);
     }
 }
