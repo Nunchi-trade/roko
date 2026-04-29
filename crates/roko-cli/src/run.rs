@@ -3102,6 +3102,8 @@ mod tests {
                     .map(|gate_name| GateVerdict {
                         gate_name,
                         passed: true,
+                        skipped: false,
+                        skip_reason: None,
                         output: "mock gate passed".to_string(),
                         duration_ms: 5,
                     })

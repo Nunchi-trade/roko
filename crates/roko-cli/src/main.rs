@@ -1569,6 +1569,12 @@ enum ConfigCmd {
         #[command(subcommand)]
         cmd: roko_cli::SecretsCmd,
     },
+    // ── MCP servers ────────────────────────────────────────────────
+    /// Manage MCP server configuration (list, test, add).
+    Mcp {
+        #[command(subcommand)]
+        cmd: ConfigMcpCmd,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1649,6 +1655,37 @@ enum ConfigSubscriptionCmd {
     Disable {
         /// Subscription ID.
         id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigMcpCmd {
+    /// List configured MCP servers.
+    List {
+        /// Directory containing `roko.toml` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Test whether a named MCP server starts successfully.
+    Test {
+        /// MCP server name (currently only "roko" is used).
+        name: String,
+        /// Directory containing `.roko/mcp-config.json` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Add an MCP server entry to `.roko/mcp-config.json`.
+    Add {
+        /// Server name (e.g. "roko").
+        name: String,
+        /// Launch command (e.g. "/usr/local/bin/roko-mcp").
+        command: String,
+        /// Optional arguments.
+        #[arg(last = true)]
+        args: Vec<String>,
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
     },
 }
 
@@ -3174,6 +3211,61 @@ mod tests {
             Some(Command::Config {
                 cmd: ConfigCmd::Secrets { .. }
             })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_config_mcp_list_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "config", "mcp", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::Mcp {
+                    cmd: ConfigMcpCmd::List { .. }
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_config_mcp_test_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "config", "mcp", "test", "roko"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::Mcp {
+                    cmd: ConfigMcpCmd::Test { name, .. }
+                }
+            }) if name == "roko"
+        ));
+    }
+
+    #[test]
+    fn cli_parses_config_mcp_add_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "config",
+            "mcp",
+            "add",
+            "roko",
+            "/bin/echo",
+            "--",
+            "hello",
+            "world",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::Mcp {
+                    cmd: ConfigMcpCmd::Add {
+                        name,
+                        command,
+                        args,
+                        ..
+                    }
+                }
+            }) if name == "roko" && command == "/bin/echo" && args == vec!["hello".to_string(), "world".to_string()]
         ));
     }
 

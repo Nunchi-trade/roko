@@ -2,296 +2,6 @@
 #![allow(unused_imports)]
 
 use crate::*;
-use serde::{Deserialize, Serialize};
-
-/// Extract feature keywords from a PRD slug and description for context lookup.
-/// Splits on hyphens, underscores, and spaces. Filters short words (<3 chars).
-/// Returns up to 10 lowercase unique keywords.
-fn extract_keywords_from_slug_and_description(slug: &str, description: &str) -> Vec<String> {
-    let mut words: Vec<String> = slug
-        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
-        .chain(description.split(|c: char| c == '-' || c == '_' || c.is_whitespace()))
-        .filter(|w| w.len() >= 3)
-        .map(|w| w.to_lowercase())
-        .collect();
-    words.sort();
-    words.dedup();
-    words.truncate(10);
-    words
-}
-
-/// Check that a generated PRD contains the required Repository Grounding section.
-/// Warns to stderr if missing. Returns true if found, false if missing.
-fn check_grounding_section(prd_content: &str, slug: &str) -> bool {
-    let has_section = prd_content.lines().any(|line| {
-        let trimmed = line.trim().to_lowercase();
-        trimmed.starts_with("## repository grounding")
-    });
-
-    if !has_section {
-        eprintln!(
-            "WARNING: PRD '{}' is missing '## Repository Grounding' section. \
-             The PRD may not be grounded in the actual repository.",
-            slug
-        );
-    }
-
-    has_section
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Severity {
-    Error,
-    Warning,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ArtifactKind {
-    Prd,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ValidationIssue {
-    pub(crate) severity: Severity,
-    pub(crate) category: String,
-    pub(crate) message: String,
-    pub(crate) location: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ArtifactValidationReport {
-    pub(crate) slug: String,
-    pub(crate) artifact_path: String,
-    pub(crate) artifact_kind: ArtifactKind,
-    pub(crate) process_success: bool,
-    pub(crate) artifact_valid: bool,
-    pub(crate) issues: Vec<ValidationIssue>,
-    pub(crate) timestamp: String,
-}
-
-fn severity_label(severity: &Severity) -> &'static str {
-    match severity {
-        Severity::Error => "ERROR",
-        Severity::Warning => "WARNING",
-    }
-}
-
-fn normalize_crate_name(name: &str) -> String {
-    name.trim()
-        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
-        .to_ascii_lowercase()
-        .replace('_', "-")
-}
-
-/// Extract a markdown section by heading name (case-insensitive `## heading`).
-/// Returns the body text from after the heading until the next `##` heading or end of file.
-fn extract_markdown_section(content: &str, heading: &str) -> Option<String> {
-    let heading_lower = heading.trim().to_ascii_lowercase();
-    let mut in_section = false;
-    let mut lines: Vec<&str> = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        let trimmed_lower = trimmed.to_ascii_lowercase();
-
-        if let Some(rest) = trimmed_lower.strip_prefix("## ") {
-            if in_section {
-                break;
-            }
-
-            if rest.trim().starts_with(heading_lower.as_str()) {
-                in_section = true;
-            }
-
-            continue;
-        }
-
-        if in_section {
-            lines.push(line);
-        }
-    }
-
-    let body = lines.join("\n");
-    if body.trim().is_empty() {
-        None
-    } else {
-        Some(body)
-    }
-}
-
-/// Extract a proposed new crate name from a line.
-/// Matches patterns like:
-/// - "**New crates**: roko-foo"
-/// - "- roko-foo (new crate)"
-/// - "create crate `roko-bar`"
-/// - "new crate: roko-baz"
-fn extract_new_crate_proposal(line: &str) -> Option<String> {
-    let line_lower = line.to_ascii_lowercase();
-    let patterns = ["new crate", "new crates", "create crate", "add crate"];
-    if !patterns.iter().any(|pattern| line_lower.contains(pattern)) {
-        return None;
-    }
-
-    for token in line.split_whitespace() {
-        let token =
-            token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
-        let normalized = token.to_ascii_lowercase();
-        if normalized.starts_with("roko-") || normalized.starts_with("roko_") {
-            return Some(token.to_string());
-        }
-    }
-
-    None
-}
-
-/// Validate the Repository Grounding section of a generated PRD against workspace members.
-pub(crate) fn validate_prd_grounding(
-    prd_content: &str,
-    slug: &str,
-    workspace_members: &[String],
-) -> ArtifactValidationReport {
-    let mut issues: Vec<ValidationIssue> = Vec::new();
-    let grounding_text = extract_markdown_section(prd_content, "repository grounding");
-
-    if grounding_text.is_none() {
-        issues.push(ValidationIssue {
-            severity: Severity::Warning,
-            category: "missing_section".to_string(),
-            message: "PRD has no '## Repository Grounding' section".to_string(),
-            location: None,
-        });
-    }
-
-    if let Some(text) = grounding_text.as_deref() {
-        let text_lower = text.to_ascii_lowercase();
-
-        if (text_lower.contains("no existing crates") || text_lower.contains("no relevant crates"))
-            && !workspace_members.is_empty()
-        {
-            let mut preview: Vec<String> = workspace_members.iter().take(5).cloned().collect();
-            let more = workspace_members.len().saturating_sub(preview.len());
-            if more > 0 {
-                preview.push(format!("and {more} more"));
-            }
-
-            issues.push(ValidationIssue {
-                severity: Severity::Warning,
-                category: "false_negative".to_string(),
-                message: format!(
-                    "PRD claims no existing crates but workspace has {} crate(s): {}",
-                    workspace_members.len(),
-                    preview.join(", ")
-                ),
-                location: Some("Repository Grounding".to_string()),
-            });
-        }
-
-        let workspace_members_normalized: Vec<String> = workspace_members
-            .iter()
-            .map(|member| normalize_crate_name(member))
-            .collect();
-
-        for line in text.lines() {
-            if let Some(proposed_name) = extract_new_crate_proposal(line) {
-                let proposed_normalized = normalize_crate_name(&proposed_name);
-                if workspace_members_normalized
-                    .iter()
-                    .any(|member| member == &proposed_normalized)
-                {
-                    issues.push(ValidationIssue {
-                        severity: Severity::Error,
-                        category: "duplicate_crate".to_string(),
-                        message: format!(
-                            "PRD proposes creating crate '{}' which already exists in the workspace",
-                            proposed_name
-                        ),
-                        location: Some("Repository Grounding".to_string()),
-                    });
-                }
-            }
-        }
-    }
-
-    let artifact_valid = !issues.iter().any(|issue| issue.severity == Severity::Error);
-
-    ArtifactValidationReport {
-        slug: slug.to_string(),
-        artifact_path: String::new(),
-        artifact_kind: ArtifactKind::Prd,
-        process_success: true,
-        artifact_valid,
-        issues,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    }
-}
-
-/// Sidecar record for the repository context used during generation.
-#[derive(Serialize)]
-struct ContextSidecar<'a> {
-    slug: &'a str,
-    keywords: &'a [String],
-    workspace_members: &'a [String],
-    timestamp: String,
-}
-
-/// Persist the generation context as a JSON sidecar file alongside the PRD.
-/// Non-blocking: write failures produce warnings only.
-fn persist_context_sidecar(
-    prd_drafts_dir: &std::path::Path,
-    slug: &str,
-    keywords: &[String],
-    workspace_members: &[String],
-) {
-    let sidecar_path = prd_drafts_dir.join(format!("{slug}.context.json"));
-    let sidecar = ContextSidecar {
-        slug,
-        keywords,
-        workspace_members,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    };
-
-    match serde_json::to_string_pretty(&sidecar) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&sidecar_path, json) {
-                eprintln!(
-                    "WARNING: Failed to write context sidecar {}: {}",
-                    sidecar_path.display(),
-                    e
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("WARNING: Failed to serialize context sidecar: {}", e);
-        }
-    }
-}
-
-/// Persist the validation report as a JSON sidecar file alongside the PRD.
-/// Non-blocking: write failures produce warnings only.
-fn persist_validation_sidecar(
-    prd_drafts_dir: &std::path::Path,
-    slug: &str,
-    report: &ArtifactValidationReport,
-) {
-    let sidecar_path = prd_drafts_dir.join(format!("{slug}.validation.json"));
-
-    match serde_json::to_string_pretty(report) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&sidecar_path, json) {
-                eprintln!(
-                    "WARNING: Failed to write validation sidecar {}: {}",
-                    sidecar_path.display(),
-                    e
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("WARNING: Failed to serialize validation sidecar: {}", e);
-        }
-    }
-}
 
 pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
@@ -324,7 +34,6 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             PrdDraftCmd::New { title } => {
                 let title = title.join(" ");
                 let slug = roko_cli::prd::slugify(&title);
-                let feature_keywords = extract_keywords_from_slug_and_description(&slug, &title);
                 let drafts = roko_cli::workspace_paths::drafts_dir(&workdir);
                 roko_cli::prd::ensure_dirs(&workdir)?;
                 let target = drafts.join(format!("{slug}.md"));
@@ -350,12 +59,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     }
                     eprintln!("Found empty scaffold from previous run — regenerating.");
                 }
-                let model_key = resolve_effective_model_key(
-                    &workdir,
-                    cli.model.clone(),
-                    Some("scribe"),
-                    "prd draft new",
-                )?;
+                let model_key =
+                    resolve_effective_model_key(&workdir, cli.model.clone(), Some("scribe"), "prd draft new")?;
                 // Write scaffold first so agent can read and fill it
                 let frontmatter = roko_cli::prd::new_draft_frontmatter(&slug, &title);
                 let scaffold = format!(
@@ -378,46 +83,14 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         path = target.display()
                     ),
                 );
-                let feature_keyword_refs: Vec<&str> =
-                    feature_keywords.iter().map(String::as_str).collect();
-                let repo_context_section: Option<String> =
-                    match roko_cli::repo_context::build_repo_context(
-                        &workdir,
-                        &feature_keyword_refs,
-                    )
-                    .await
-                    {
-                        Ok(repo_context) => {
-                            if !repo_context.context_root_verified {
-                                eprintln!(
-                                    "WARNING: Repository context not verified for keywords {:?}. \
-                                     Generated PRD may reference nonexistent code.",
-                                    feature_keywords
-                                );
-                            }
-                            Some(repo_context.to_prompt_section())
-                        }
-                        Err(err) => {
-                            eprintln!(
-                                "WARNING: Repository context unavailable for keywords {:?}: {err}",
-                                feature_keywords
-                            );
-                            None
-                        }
-                    };
-                let context_suffix = repo_context_section
-                    .as_deref()
-                    .map(|ctx| format!("\n\n---\n\n{ctx}"))
-                    .unwrap_or_default();
                 let task_prompt = format!(
                     "Generate a complete PRD for: {title}. \
                      If you have file tools available, search the codebase to understand \
                      what exists and write the completed PRD to {path}. \
                      Otherwise, output the complete PRD markdown with YAML frontmatter. \
                      Include specific requirements, machine-verifiable acceptance criteria, \
-                     and a design section.{context_suffix}",
-                    path = target.display(),
-                    context_suffix = context_suffix
+                     and a design section.",
+                    path = target.display()
                 );
                 // Snapshot file mtime before agent runs so we can detect
                 // whether a CLI agent wrote the file directly.
@@ -472,75 +145,6 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         "Agent returned empty output. Scaffold preserved at {}",
                         target.display()
                     );
-                }
-                let workspace_members: Vec<String> = if exit_code == 0 {
-                    let crates_dir = workdir.join("crates");
-                    let mut workspace_members: Vec<String> = Vec::new();
-                    if let Ok(entries) = std::fs::read_dir(&crates_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.is_dir() {
-                                workspace_members
-                                    .push(entry.file_name().to_string_lossy().into_owned());
-                            }
-                        }
-                    }
-                    workspace_members.sort_unstable();
-                    workspace_members.dedup();
-                    workspace_members
-                } else {
-                    Vec::new()
-                };
-                // Post-generation grounding check and semantic validation.
-                let validation_report: Option<ArtifactValidationReport> = if exit_code == 0 {
-                    if let Ok(written_content) = std::fs::read_to_string(&target) {
-                        check_grounding_section(&written_content, &slug);
-
-                        let mut report =
-                            validate_prd_grounding(&written_content, &slug, &workspace_members);
-                        report.artifact_path = target.display().to_string();
-
-                        for issue in &report.issues {
-                            eprintln!(
-                                "[{}] {}: {}",
-                                severity_label(&issue.severity),
-                                issue.category,
-                                issue.message
-                            );
-                        }
-
-                        Some(report)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if exit_code == 0 {
-                    persist_context_sidecar(&drafts, &slug, &feature_keywords, &workspace_members);
-                    if let Some(ref report) = validation_report {
-                        persist_validation_sidecar(&drafts, &slug, report);
-                        println!("Context sidecar: {}.context.json", slug);
-                        println!("Validation sidecar: {}.validation.json", slug);
-                        let error_count = report
-                            .issues
-                            .iter()
-                            .filter(|issue| issue.severity == Severity::Error)
-                            .count();
-                        let warning_count = report
-                            .issues
-                            .iter()
-                            .filter(|issue| issue.severity == Severity::Warning)
-                            .count();
-
-                        if report.artifact_valid {
-                            println!("Artifact validation: PASSED ({warning_count} warnings)");
-                        } else {
-                            println!(
-                                "Artifact validation: FAILED ({error_count} errors, {warning_count} warnings)"
-                            );
-                        }
-                    }
                 }
                 let _ = crate::commands::util::persist_capture_episode(
                     &workdir,
@@ -664,19 +268,16 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
         },
         PrdCmd::Plan { slug, dry_run } => {
             let prd_path = find_prd(&workdir, &slug)?;
-            let model_key = resolve_effective_model_key(
-                &workdir,
-                cli.model.clone(),
-                Some("strategist"),
-                "prd plan",
-            )?;
-            let _generated_plans_root = roko_cli::prd::generate_plan_from_prd_with_model(
-                &slug,
-                &prd_path,
-                dry_run,
-                Some(model_key.as_str()),
-            )
-            .await?;
+            let model_key =
+                resolve_effective_model_key(&workdir, cli.model.clone(), Some("strategist"), "prd plan")?;
+            let _generated_plans_root =
+                roko_cli::prd::generate_plan_from_prd_with_model(
+                    &slug,
+                    &prd_path,
+                    dry_run,
+                    Some(model_key.as_str()),
+                )
+                .await?;
             Ok(0)
         }
         PrdCmd::Consolidate => {
@@ -747,12 +348,12 @@ fn resolve_effective_model_key(
     let selection = roko_cli::model_selection::resolve_effective_model(
         cli_model,
         None,
-        role.map(str::to_string),
+        role.map(str::to_owned),
         None,
         &config,
     )
     .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
-    selection.print_stderr();
+    eprintln!("[{context}] effective selection: {}", selection.reason);
     Ok(selection.effective_model_key)
 }
 
@@ -796,62 +397,5 @@ pub(crate) fn domain_gate_hint(domain: &str) -> &'static str {
         "ruby" => "test (rspec), lint (rubocop)",
         "java" => "compile (mvn compile), test (mvn test)",
         _ => "compile, test, lint (configure in roko.toml)",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_markdown_section_is_case_insensitive() {
-        let content = "# PRD\n\n## Repository Grounding\nGrounded text.\n\n## Next\nMore text.\n";
-        let section =
-            extract_markdown_section(content, "repository grounding").expect("grounding section");
-        assert_eq!(section.trim(), "Grounded text.");
-    }
-
-    #[test]
-    fn extract_new_crate_proposal_handles_common_patterns() {
-        assert_eq!(
-            extract_new_crate_proposal("**New crates**: roko-foo"),
-            Some("roko-foo".to_string())
-        );
-        assert_eq!(
-            extract_new_crate_proposal("- roko-bar (new crate)"),
-            Some("roko-bar".to_string())
-        );
-        assert_eq!(
-            extract_new_crate_proposal("create crate `roko-baz`"),
-            Some("roko-baz".to_string())
-        );
-    }
-
-    #[test]
-    fn validate_prd_grounding_warns_and_errors_as_expected() {
-        let workspace_members = vec!["roko-compose".to_string(), "roko-agent".to_string()];
-        let content = "\
-## Repository Grounding
-No existing crates are relevant here.
-Create crate `roko-compose`.
-
-## Requirements
-Do work.
-";
-
-        let report = validate_prd_grounding(content, "demo", &workspace_members);
-        assert!(
-            report
-                .issues
-                .iter()
-                .any(|issue| issue.category == "false_negative")
-        );
-        assert!(
-            report
-                .issues
-                .iter()
-                .any(|issue| issue.category == "duplicate_crate")
-        );
-        assert!(!report.artifact_valid);
     }
 }

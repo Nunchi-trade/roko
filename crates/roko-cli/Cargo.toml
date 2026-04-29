@@ -53,6 +53,7 @@ futures = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
 toml = { workspace = true }
 serde_yaml_ng = { workspace = true }
 anyhow = { workspace = true }

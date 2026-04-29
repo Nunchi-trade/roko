@@ -1205,6 +1205,9 @@ impl ConfigLayer {
                         Some(deploy) => deploy.resolve(defaults.deploy),
                         None => defaults.deploy,
                     },
+                    acknowledge_public_risk: s
+                        .acknowledge_public_risk
+                        .unwrap_or(defaults.acknowledge_public_risk),
                 }
             }
             None => ServeConfig::default(),
@@ -2364,6 +2367,9 @@ pub struct ServeLayer {
     /// Cloud deployment settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy: Option<ServeDeployLayer>,
+    /// Whether a public bind has been explicitly acknowledged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledge_public_risk: Option<bool>,
 }
 
 impl ServeLayer {
@@ -2385,6 +2391,9 @@ impl ServeLayer {
                 (_, Some(overlay)) => Some(overlay),
                 (base, None) => base,
             },
+            acknowledge_public_risk: overlay
+                .acknowledge_public_risk
+                .or(self.acknowledge_public_risk),
         }
     }
 }

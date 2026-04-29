@@ -2,7 +2,9 @@
 #![allow(unused_imports)]
 
 use crate::*;
+use roko_agent::process::{find_mcp_launch, write_mcp_config, McpLaunch};
 use serde::Serialize;
+use std::io::Write as _;
 
 pub(crate) const fn edit_target(global: bool, project: bool) -> EditTarget {
     if global {
@@ -192,6 +194,29 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
             roko_cli::event_sources::cmd_list(&wd, cli.json)?;
             Ok(())
         }
+        ConfigCmd::Mcp { cmd } => {
+            let workdir = resolve_workdir(cli);
+            match cmd {
+                ConfigMcpCmd::List { workdir: wd } => {
+                    let wd = wd.unwrap_or_else(|| workdir.clone());
+                    cmd_mcp_list(&wd)?;
+                }
+                ConfigMcpCmd::Test { name, workdir: wd } => {
+                    let wd = wd.unwrap_or_else(|| workdir.clone());
+                    cmd_mcp_test(&wd, &name)?;
+                }
+                ConfigMcpCmd::Add {
+                    name,
+                    command,
+                    args,
+                    workdir: wd,
+                } => {
+                    let wd = wd.unwrap_or(workdir);
+                    cmd_mcp_add(&wd, &name, &command, args)?;
+                }
+            }
+            Ok(())
+        }
         // ── Experiments (intercepted in dispatch_subcommand) ────────
         ConfigCmd::Experiments { .. } => {
             unreachable!("experiments dispatched in dispatch_subcommand")
@@ -205,6 +230,79 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
             unreachable!("secrets dispatched in dispatch_subcommand")
         }
     }
+}
+
+// ── MCP server commands ────────────────────────────────────────────────
+
+fn cmd_mcp_list(workdir: &Path) -> Result<()> {
+    match find_mcp_launch(workdir) {
+        Some(launch) => {
+            println!("{:<12} {}", "name", "command");
+            println!("{}", "-".repeat(48));
+
+            let args_suffix = if launch.args.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", launch.args.join(" "))
+            };
+            println!("{:<12} {}{}", "roko", launch.command, args_suffix);
+        }
+        None => {
+            println!("no MCP servers configured");
+            println!("  Hint: roko config mcp add roko <command> [args...]");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_mcp_test(workdir: &Path, name: &str) -> Result<()> {
+    if name != "roko" {
+        bail!("unknown MCP server '{name}'; only 'roko' is supported");
+    }
+
+    let Some(launch) = find_mcp_launch(workdir) else {
+        bail!("no MCP config found in {}", workdir.display());
+    };
+
+    print!("testing {} ({})... ", name, launch.command);
+    std::io::stdout().flush().context("flush stdout")?;
+
+    let mut child = std::process::Command::new(&launch.command)
+        .args(&launch.args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to spawn '{}'", launch.command))?;
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let still_running = child.try_wait()?.is_none();
+    let _kill_status = child.kill();
+    let _wait_status = child.wait();
+
+    if still_running {
+        println!("OK");
+        Ok(())
+    } else {
+        println!("FAILED (process exited immediately)");
+        bail!("MCP server '{}' exited immediately after spawn", name);
+    }
+}
+
+fn cmd_mcp_add(workdir: &Path, name: &str, command: &str, args: Vec<String>) -> Result<()> {
+    if name != "roko" {
+        bail!("unknown MCP server '{name}'; only 'roko' is supported");
+    }
+
+    let launch = McpLaunch {
+        command: command.to_string(),
+        args,
+    };
+    let path = write_mcp_config(workdir, &launch)
+        .with_context(|| format!("write MCP config in {}", workdir.display()))?;
+
+    println!("wrote {}", path.display());
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -364,12 +462,14 @@ pub(crate) async fn cmd_provider_test(
         }
 
         let provider_name = selection.provider_key.clone();
-        let provider = providers
-            .get(&provider_name)
-            .ok_or_else(|| anyhow!("provider '{provider_name}' is not configured"))?;
+        let provider = providers.get(&provider_name).ok_or_else(|| {
+            anyhow!("provider '{provider_name}' is not configured")
+        })?;
         let model = model_profile_for_effective_selection(&config, &selection);
-        selection.print_stderr();
-        let note = "Resolved provider test selection".to_string();
+        let note = format!(
+            "Resolved provider test from --model {cli_model}: {} ({})",
+            selection.provider_key, selection.reason
+        );
         (provider_name, provider, Some(model), Some(note))
     } else {
         let provider_name = provider_name
@@ -377,9 +477,9 @@ pub(crate) async fn cmd_provider_test(
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow!("provide a provider name or use --all"))?
             .to_string();
-        let provider = providers
-            .get(&provider_name)
-            .ok_or_else(|| anyhow!("provider '{provider_name}' is not configured"))?;
+        let provider = providers.get(&provider_name).ok_or_else(|| {
+            anyhow!("provider '{provider_name}' is not configured")
+        })?;
         let runtime_selection = roko_cli::model_selection::resolve_effective_model(
             None,
             None,
@@ -394,10 +494,9 @@ pub(crate) async fn cmd_provider_test(
             | ProviderKind::GeminiApi
             | ProviderKind::PerplexityApi
             | ProviderKind::CerebrasApi => Some(
-                if let Some(selection) = runtime_selection
-                    .as_ref()
-                    .filter(|selection| selection.provider_key == provider_name.as_str())
-                {
+                if let Some(selection) = runtime_selection.as_ref().filter(|selection| {
+                    selection.provider_key == provider_name.as_str()
+                }) {
                     model_profile_for_effective_selection(&config, selection)
                 } else {
                     select_provider_test_model(&config, &provider_name)
@@ -425,19 +524,13 @@ pub(crate) async fn cmd_provider_test(
     let report = match provider.kind {
         ProviderKind::OpenAiCompat => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!(
-                    "provider '{}' requires a model profile for testing",
-                    provider_name
-                )
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
         ProviderKind::AnthropicApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!(
-                    "provider '{}' requires a model profile for testing",
-                    provider_name
-                )
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
             })?;
             run_anthropic_provider_test(&provider_name, provider, model, json).await?
         }
@@ -446,19 +539,13 @@ pub(crate) async fn cmd_provider_test(
         }
         ProviderKind::GeminiApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!(
-                    "provider '{}' requires a model profile for testing",
-                    provider_name
-                )
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
             })?;
             run_gemini_provider_test(&provider_name, provider, model, json).await?
         }
         ProviderKind::PerplexityApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!(
-                    "provider '{}' requires a model profile for testing",
-                    provider_name
-                )
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
@@ -467,10 +554,7 @@ pub(crate) async fn cmd_provider_test(
         }
         ProviderKind::CerebrasApi => {
             let model = model.as_ref().ok_or_else(|| {
-                anyhow!(
-                    "provider '{}' requires a model profile for testing",
-                    provider_name
-                )
+                anyhow!("provider '{provider_name}' requires a model profile for testing")
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
@@ -526,7 +610,12 @@ pub(crate) async fn cmd_provider_test_all(workdir: &Path, json: bool) -> Result<
                     provider: name.clone(),
                     kind: provider.kind.to_string(),
                     status: "\u{2713} OK".into(),
-                    duration_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+                    duration_ms: Some(
+                        started
+                            .elapsed()
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64,
+                    ),
                 });
             }
             Err(e) => {
@@ -534,7 +623,12 @@ pub(crate) async fn cmd_provider_test_all(workdir: &Path, json: bool) -> Result<
                     provider: name.clone(),
                     kind: provider.kind.to_string(),
                     status: format!("\u{2717} {e:#}"),
-                    duration_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+                    duration_ms: Some(
+                        started
+                            .elapsed()
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64,
+                    ),
                 });
             }
         }
@@ -607,7 +701,13 @@ fn format_effective_model_selection_summary(
         "  Requested model: {}",
         selection.requested_model.as_deref().unwrap_or("—")
     );
-    let _ = writeln!(out, "  Selection: {}", selection.display_line());
+    let _ = writeln!(out, "  Source: {}", selection.source);
+    let _ = writeln!(out, "  Effective model: {}", selection.effective_model_key);
+    let _ = writeln!(
+        out,
+        "  Provider: {} ({})",
+        selection.provider_key, selection.provider_kind
+    );
     let _ = writeln!(out, "  Backend slug: {}", selection.backend_slug);
     let _ = writeln!(out, "  Reason: {}", selection.reason);
     out
@@ -615,26 +715,24 @@ fn format_effective_model_selection_summary(
 
 fn model_selection_recommendation(error: &roko_cli::model_selection::Error) -> String {
     match error {
-        roko_cli::model_selection::Error::EmptyModel { origin } => {
-            format!("pass a non-empty model value for {origin}")
+        roko_cli::model_selection::Error::EmptyModel {
+            selection_source,
+        } => {
+            format!("pass a non-empty model value for {selection_source}")
         }
         roko_cli::model_selection::Error::MissingProvider {
             model,
             provider_key,
             ..
         } => {
-            format!(
-                "configure provider '{provider_key}' for model '{model}', or choose a model backed by an installed provider"
-            )
+            format!("configure provider '{provider_key}' for model '{model}', or choose a model backed by an installed provider")
         }
         roko_cli::model_selection::Error::UnknownModel {
             model,
             provider_kind,
             ..
         } => {
-            format!(
-                "add a model profile for '{model}' backed by provider kind '{provider_kind}', or use a configured model"
-            )
+            format!("add a model profile for '{model}' backed by provider kind '{provider_kind}', or use a configured model")
         }
     }
 }
@@ -713,7 +811,13 @@ pub(crate) fn cmd_model_route(
     match selection {
         Ok(selection) => {
             if !explain {
-                println!("{}", selection.display_line());
+                println!(
+                    "Resolved '{requested_model}': {} via {} ({}, {})",
+                    selection.effective_model_key,
+                    selection.provider_key,
+                    selection.provider_kind,
+                    selection.source
+                );
                 println!("Reason: {}", selection.reason);
                 return Ok(());
             }
@@ -747,8 +851,7 @@ pub(crate) fn cmd_model_route(
             println!("Routing failed for '{requested_model}': {err}");
             println!("Recommendation: {}", model_selection_recommendation(&err));
             if !explain {
-                let selected_name =
-                    display_model_name(&aliases, &route_recommendation.selected_slug);
+                let selected_name = display_model_name(&aliases, &route_recommendation.selected_slug);
                 let provider = model_providers
                     .get(&route_recommendation.selected_slug)
                     .cloned()

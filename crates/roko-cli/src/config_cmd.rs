@@ -139,6 +139,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
                 api_key: Some(String::new()),
             }),
             deploy: None,
+            acknowledge_public_risk: None,
         }),
     };
     let rendered = toml::to_string_pretty(&layer).context("serialize config")?;
