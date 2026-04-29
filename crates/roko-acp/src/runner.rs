@@ -503,6 +503,7 @@ pub async fn run_workflow_pipeline(
         );
 
         // Emit plan update, shared state, and inline phase badge after each transition.
+        // Phase narratives are emitted by the matched arm before the next loop badge.
         sync_shared_run(&shared_run, &run).await;
         emit_plan_update(&run, &event_sender).await;
         if let Some(badge) = phase_badge(&run.pipeline.phase, run.pipeline.iteration) {
@@ -522,9 +523,11 @@ pub async fn run_workflow_pipeline(
                 )
                 .await;
                 action = match result {
-                    Ok(output) => run
-                        .pipeline
-                        .step(PipelineEvent::StrategyComplete { brief: output }),
+                    Ok(output) => {
+                        let narrative = narrate_strategy(&output);
+                        emit_narrative(&narrative, &event_sender).await;
+                        run.pipeline.step(PipelineEvent::StrategyComplete { brief: output })
+                    }
                     Err(e) => run.pipeline.step(PipelineEvent::AgentFailed {
                         error: e.to_string(),
                     }),
@@ -600,11 +603,20 @@ pub async fn run_workflow_pipeline(
                 )
                 .await;
                 action = match gate_result {
-                    Ok(()) => run.pipeline.step(PipelineEvent::GatesPassed),
-                    Err(e) => run.pipeline.step(PipelineEvent::GateFailed {
-                        gate: "gate".into(),
-                        output: e.to_string(),
-                    }),
+                    Ok(()) => {
+                        emit_narrative(narrate_gates_passed(), &event_sender).await;
+                        run.pipeline.step(PipelineEvent::GatesPassed)
+                    }
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        let attempt = run.pipeline.iteration + 1;
+                        let narrative = narrate_gate_failure(&error_str, attempt);
+                        emit_narrative(&narrative, &event_sender).await;
+                        run.pipeline.step(PipelineEvent::GateFailed {
+                            gate: "gate".into(),
+                            output: error_str,
+                        })
+                    }
                 };
             }
 
@@ -686,6 +698,8 @@ pub async fn run_workflow_pipeline(
                         };
 
                         run.pipeline.files_changed = real_count;
+                        let narrative = narrate_commit(&msg);
+                        emit_narrative(&narrative, &event_sender).await;
                         run.pipeline.step(PipelineEvent::CommitDone { message: msg })
                     }
                     Err(e) => {
@@ -757,6 +771,15 @@ async fn emit_plan_update(run: &WorkflowRun, sender: &mpsc::Sender<CognitiveEven
     }
 }
 
+/// Emit a best-effort narrative token between phases.
+async fn emit_narrative(text: &str, sender: &mpsc::Sender<CognitiveEvent>) {
+    if !text.is_empty() {
+        let _ = sender
+            .send(CognitiveEvent::TokenChunk(text.to_string()))
+            .await;
+    }
+}
+
 /// Generate the inline badge that marks the current pipeline phase.
 fn phase_badge(phase: &PipelinePhase, iteration: u32) -> Option<String> {
     let (icon, name) = match phase {
@@ -784,6 +807,65 @@ fn phase_badge(phase: &PipelinePhase, iteration: u32) -> Option<String> {
     };
 
     Some(format!("\n\n{icon} **{name}**\n\n"))
+}
+
+/// Narrative after strategy agent completes.
+fn narrate_strategy(brief: &str) -> String {
+    let first_line = brief
+        .lines()
+        .find(|line| !line.trim().is_empty() && line.len() > 10)
+        .unwrap_or(brief);
+    let truncated: String = first_line.chars().take(120).collect();
+    let body = if first_line.chars().count() > 120 {
+        format!("{truncated}...")
+    } else {
+        truncated
+    };
+    format!("Approach: {body}\n\n")
+}
+
+/// Narrative after all gates pass.
+fn narrate_gates_passed() -> &'static str {
+    "All gates passed.\n\n"
+}
+
+/// Narrative after gate failure.
+fn narrate_gate_failure(error_output: &str, iteration: u32) -> String {
+    let test_failures = error_output
+        .lines()
+        .filter(|line| line.contains("FAILED") || line.contains("test result: FAILED"))
+        .count();
+    let error_count = error_output
+        .lines()
+        .filter(|line| line.contains("error[E") || (line.starts_with("error:") && line.contains(':')))
+        .count();
+
+    if test_failures > 0 {
+        format!(
+            "{} test{} fail. Moving to auto-fixer (attempt {iteration}).\n\n",
+            test_failures,
+            if test_failures == 1 { "" } else { "s" }
+        )
+    } else if error_count > 0 {
+        format!(
+            "{} compile error{}. Moving to auto-fixer (attempt {iteration}).\n\n",
+            error_count,
+            if error_count == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("Gate failed. Moving to auto-fixer (attempt {iteration}).\n\n")
+    }
+}
+
+/// Narrative after commit.
+fn narrate_commit(message: &str) -> String {
+    if message.is_empty() || message.starts_with("(commit failed:") {
+        String::new()
+    } else {
+        let short = message.lines().next().unwrap_or(message);
+        let short: String = short.chars().take(72).collect();
+        format!("Committed: {short}\n\n")
+    }
 }
 
 /// Build plan entries from the current run state.
