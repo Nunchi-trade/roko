@@ -44,36 +44,35 @@ pub(crate) async fn cmd_tune(
 ) -> Result<i32> {
     match subsystem {
         "gates" => {
-            let path = workdir.join(".roko/learn/gate-thresholds.json");
+            let path = learn_gate_thresholds_path(workdir);
             if path.exists() {
                 let content = std::fs::read_to_string(&path)?;
                 let thresholds: serde_json::Value = serde_json::from_str(&content)?;
                 println!("Verify adaptive thresholds ({}):", path.display());
                 println!("{}", serde_json::to_string_pretty(&thresholds)?);
             } else {
-                println!("No gate thresholds found at {}.", path.display());
-                println!("Run some plans first to generate adaptive thresholds.");
+                print_no_data(&path);
             }
         }
         "routing" => {
-            let path = workdir.join(".roko/learn/cascade-router.json");
+            let path = learn_router_path(workdir);
             if path.exists() {
                 let content = std::fs::read_to_string(&path)?;
                 let router: serde_json::Value = serde_json::from_str(&content)?;
                 println!("Cascade router state ({}):", path.display());
                 println!("{}", serde_json::to_string_pretty(&router)?);
             } else {
-                println!("No cascade router state found at {}.", path.display());
+                print_no_data(&path);
             }
         }
         "budget" => {
-            let path = workdir.join(".roko/learn/efficiency.jsonl");
+            let path = learn_efficiency_path(workdir);
             if path.exists() {
                 let content = std::fs::read_to_string(&path)?;
                 let count = content.lines().filter(|l| !l.trim().is_empty()).count();
                 println!("Efficiency log: {} entries at {}", count, path.display());
             } else {
-                println!("No efficiency log found at {}.", path.display());
+                print_no_data(&path);
             }
         }
         other => {
@@ -122,67 +121,63 @@ pub(crate) async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i
 }
 
 pub(crate) fn print_learn_router(workdir: &std::path::Path) {
-    let path = workdir.join(".roko/learn/cascade-router.json");
+    let path = learn_router_path(workdir);
     if !path.exists() {
-        println!("Cascade router: not initialized");
+        print_no_data(&path);
         return;
     }
     let Ok(content) = std::fs::read_to_string(&path) else {
-        println!("Cascade router: unreadable");
+        print_no_data(&path);
         return;
     };
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
-        println!("Cascade router: parse error");
-        return;
-    };
+    let snapshot = serde_json::from_str::<LearnCascadeRouterSnapshot>(&content).unwrap_or_default();
 
-    // Model slugs
-    let slugs: Vec<&str> = val
-        .get("model_slugs")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-    let total_obs = val
-        .get("arms")
-        .and_then(|v| v.as_array())
-        .map(|arms| {
-            arms.iter()
-                .filter_map(|arm| arm.get("observations").and_then(|v| v.as_u64()))
-                .sum::<u64>()
+    let mut first_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut last_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+    for transition in &snapshot.stage_transitions {
+        first_seen = Some(match first_seen {
+            Some(current) => current.min(transition.timestamp.clone()),
+            None => transition.timestamp.clone(),
+        });
+        last_seen = Some(match last_seen {
+            Some(current) => current.max(transition.timestamp.clone()),
+            None => transition.timestamp.clone(),
+        });
+    }
+
+    let latest = snapshot
+        .stage_transitions
+        .last()
+        .map(|transition| {
+            format!(
+                "{} {} -> {} after {} observations",
+                transition.timestamp.to_rfc3339(),
+                transition.from,
+                transition.to,
+                transition.observations
+            )
         })
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            format!(
+                "snapshot stage={} total_observations={}",
+                cascade_stage_for_observations(snapshot.total_observations),
+                snapshot.total_observations
+            )
+        });
 
     println!(
-        "Cascade router: {} models, {} total observations",
-        slugs.len(),
-        total_obs
+        "Cascade router: {} observations, {} models at {}",
+        snapshot.total_observations,
+        snapshot.model_slugs.len(),
+        path.display()
     );
-
-    // Per-arm summary
-    if let Some(arms) = val.get("arms").and_then(|v| v.as_array()) {
-        for arm in arms {
-            let slug = arm
-                .get("model_slug")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let obs = arm
-                .get("observations")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let reward = arm
-                .get("mean_reward")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            if obs > 0 {
-                println!("  {slug}: {obs} obs, mean_reward={reward:.3}");
-            }
-        }
-    }
+    println!("  Range: {}", format_range(first_seen, last_seen));
+    println!("  Latest: {}", latest);
 }
 
 pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
     // Prompt experiments
-    let prompt_path = workdir.join(".roko/learn/experiments.json");
+    let prompt_path = learn_root(workdir).join("experiments.json");
     let prompt_store = ExperimentStore::load_or_new(&prompt_path);
     let running = prompt_store.running_count();
     let concluded = prompt_store.concluded_count();
@@ -196,10 +191,7 @@ pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
     }
 
     // Model experiments
-    let model_path = workdir
-        .join(".roko")
-        .join("learn")
-        .join("model-experiments.json");
+    let model_path = learn_root(workdir).join("model-experiments.json");
     let model_store = roko_learn::model_experiment::ModelExperimentStore::load_or_new(&model_path);
     let model_running = model_store.running_count();
     let model_concluded = model_store.concluded_experiments().len();
@@ -225,148 +217,215 @@ pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
 
 #[allow(clippy::cast_precision_loss)]
 pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
-    let events = match roko_learn::runtime_feedback::read_project_efficiency_events(workdir).await {
-        Ok(events) => events,
-        Err(_) => {
-            println!("Efficiency log: empty");
-            return;
-        }
-    };
-    if events.is_empty() {
-        println!("Efficiency log: empty");
+    let path = learn_efficiency_path(workdir);
+    if !path.exists() {
+        print_no_data(&path);
         return;
     }
 
-    let total_cost: f64 = events.iter().map(|e| e.cost_usd).sum();
-    let total_input: u64 = events.iter().map(|e| e.input_tokens).sum();
-    let total_output: u64 = events.iter().map(|e| e.output_tokens).sum();
-    let success_count = events.iter().filter(|e| e.gate_passed).count();
-    let pass_rate = if events.is_empty() {
-        0.0
-    } else {
-        success_count as f64 / events.len() as f64 * 100.0
+    let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        print_no_data(&path);
+        return;
     };
 
-    println!(
-        "Efficiency: {} events, ${:.2} total, {:.0}% pass rate",
-        events.len(),
-        total_cost,
-        pass_rate
-    );
-    println!(
-        "  Tokens: {}K input, {}K output",
-        total_input / 1000,
-        total_output / 1000
-    );
+    let mut count = 0usize;
+    let mut first_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut last_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut latest: Option<String> = None;
 
-    // Per-model breakdown
-    let mut by_model: std::collections::HashMap<&str, (usize, f64, usize)> =
-        std::collections::HashMap::new();
-    for ev in &events {
-        let entry = by_model.entry(ev.model.as_str()).or_default();
-        entry.0 += 1;
-        entry.1 += ev.cost_usd;
-        if ev.gate_passed {
-            entry.2 += 1;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-    }
-    let mut model_summary: Vec<_> = by_model.into_iter().collect();
-    model_summary.sort_by(|a, b| {
-        b.1.1
-            .partial_cmp(&a.1.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for (model, (count, cost, passed)) in &model_summary {
-        let model_pass = if *count == 0 {
-            0.0
-        } else {
-            *passed as f64 / *count as f64 * 100.0
+        let Ok(event) = serde_json::from_str::<roko_learn::efficiency::AgentEfficiencyEvent>(trimmed)
+        else {
+            continue;
         };
-        println!("  {model}: {count} runs, ${cost:.2}, {model_pass:.0}% pass",);
+
+        count += 1;
+        let parsed_timestamp = parse_rfc3339_utc(&event.timestamp);
+        if let Some(timestamp) = parsed_timestamp {
+            first_seen = Some(match first_seen {
+                Some(current) => current.min(timestamp),
+                None => timestamp,
+            });
+            last_seen = Some(match last_seen {
+                Some(current) => current.max(timestamp),
+                None => timestamp,
+            });
+        }
+
+        let timestamp = parsed_timestamp
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_else(|| event.timestamp.clone());
+        let model = efficiency_model_label(&event);
+        let task_id = non_empty_or_unknown(&event.task_id);
+        let plan_id = non_empty_or_unknown(&event.plan_id);
+        let status = if event.gate_passed { "pass" } else { "fail" };
+        latest = Some(format!(
+            "{timestamp} model={model} task={task_id} plan={plan_id} {status} cost=${:.4}",
+            event.cost_usd
+        ));
     }
+
+    println!("Efficiency: {} events at {}", count, path.display());
+    println!("  Range: {}", format_range(first_seen, last_seen));
+    println!(
+        "  Latest: {}",
+        latest.unwrap_or_else(|| "none".to_string())
+    );
 }
 
 pub(crate) async fn print_learn_episodes(workdir: &std::path::Path) {
-    let episodes = match roko_learn::runtime_feedback::read_project_episodes_lossy(workdir).await {
-        Ok(episodes) => episodes,
-        Err(_) => {
-            println!("Episodes: none");
-            return;
-        }
-    };
-
-    if episodes.is_empty() {
-        println!("Episodes: none");
+    let path = learn_episodes_path(workdir);
+    if !path.exists() {
+        print_no_data(&path);
         return;
     }
 
-    let success_count = episodes.iter().filter(|e| e.success).count();
-    let total_cost: f64 = episodes.iter().map(|e| f64::from(e.usage.cost_usd)).sum();
-    let pass_rate = if episodes.is_empty() {
-        0.0
-    } else {
-        success_count as f64 / episodes.len() as f64 * 100.0
+    let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        print_no_data(&path);
+        return;
     };
 
-    println!(
-        "Episodes: {} recorded, {:.0}% success, ${:.2} total cost",
-        episodes.len(),
-        pass_rate,
-        total_cost,
-    );
+    let mut count = 0usize;
+    let mut first_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut last_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut latest: Option<String> = None;
 
-    // Per-model summary
-    let mut by_model: std::collections::HashMap<&str, (usize, usize)> =
-        std::collections::HashMap::new();
-    for ep in &episodes {
-        let entry = by_model.entry(ep.model.as_str()).or_default();
-        entry.0 += 1;
-        if ep.success {
-            entry.1 += 1;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-    }
-    let mut model_summary: Vec<_> = by_model.into_iter().collect();
-    model_summary.sort_by(|a, b| b.1.0.cmp(&a.1.0));
-    for (model, (count, passed)) in &model_summary {
-        let model_pass = if *count == 0 {
-            0.0
-        } else {
-            *passed as f64 / *count as f64 * 100.0
+        let Ok(episode) = serde_json::from_str::<roko_learn::episode_logger::Episode>(trimmed)
+        else {
+            continue;
         };
-        println!("  {model}: {count} episodes, {model_pass:.0}% success");
+
+        count += 1;
+        first_seen = Some(match first_seen {
+            Some(current) => current.min(episode.timestamp.clone()),
+            None => episode.timestamp.clone(),
+        });
+        last_seen = Some(match last_seen {
+            Some(current) => current.max(episode.timestamp.clone()),
+            None => episode.timestamp.clone(),
+        });
+
+        let status = if episode.success { "pass" } else { "fail" };
+        let model = non_empty_or_unknown(&episode.model);
+        let task_id = non_empty_or_unknown(&episode.task_id);
+        latest = Some(format!(
+            "{} model={model} task={task_id} {status} cost=${:.4}",
+            episode.timestamp.to_rfc3339(),
+            episode.usage.cost_usd
+        ));
     }
 
-    // Last 5 episodes
-    let last_n = episodes.len().min(5);
-    if last_n > 0 {
-        println!("  Recent:");
-        for ep in episodes.iter().rev().take(last_n) {
-            let status = if ep.success { "pass" } else { "fail" };
-            println!(
-                "    {} {} {} [{}] ${:.4}",
-                ep.timestamp.format("%Y-%m-%d %H:%M"),
-                ep.model,
-                ep.task_id,
-                status,
-                ep.usage.cost_usd,
-            );
-        }
-    }
+    println!("Episodes: {} entries at {}", count, path.display());
+    println!("  Range: {}", format_range(first_seen, last_seen));
+    println!(
+        "  Latest: {}",
+        latest.unwrap_or_else(|| "none".to_string())
+    );
 }
 
 pub(crate) async fn print_learn_knowledge(workdir: &std::path::Path) {
-    let Ok(snapshot) = roko_learn::runtime_feedback::read_project_learning_snapshot(workdir).await
-    else {
-        println!("Knowledge: unreadable");
+    let path = learn_knowledge_path(workdir);
+    if !path.exists() {
+        print_no_data(&path);
+        return;
+    }
+    let Ok(content) = tokio::fs::read_to_string(&path).await else {
+        print_no_data(&path);
         return;
     };
-    if snapshot.knowledge_entries == 0 {
-        println!("Knowledge: none");
-    } else {
-        println!(
-            "Knowledge: {} durable entries at {}",
-            snapshot.knowledge_entries,
-            snapshot.knowledge_path.display()
-        );
+    let count = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+        .count();
+    println!("Knowledge: {} durable entries at {}", count, path.display());
+}
+
+fn learn_root(workdir: &std::path::Path) -> std::path::PathBuf {
+    workdir.join(".roko").join("learn")
+}
+
+fn learn_gate_thresholds_path(workdir: &std::path::Path) -> std::path::PathBuf {
+    learn_root(workdir).join("gate-thresholds.json")
+}
+
+fn learn_router_path(workdir: &std::path::Path) -> std::path::PathBuf {
+    learn_root(workdir).join("cascade-router.json")
+}
+
+fn learn_efficiency_path(workdir: &std::path::Path) -> std::path::PathBuf {
+    learn_root(workdir).join("efficiency.jsonl")
+}
+
+fn learn_episodes_path(workdir: &std::path::Path) -> std::path::PathBuf {
+    learn_root(workdir).join("episodes.jsonl")
+}
+
+fn learn_knowledge_path(workdir: &std::path::Path) -> std::path::PathBuf {
+    workdir.join(".roko").join("neuro").join("knowledge.jsonl")
+}
+
+fn print_no_data(path: &std::path::Path) {
+    println!("No data at {}", path.display());
+}
+
+fn parse_rfc3339_utc(timestamp: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&chrono::Utc))
+}
+
+fn format_range(
+    first_seen: Option<chrono::DateTime<chrono::Utc>>,
+    last_seen: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    match (first_seen, last_seen) {
+        (Some(first_seen), Some(last_seen)) => {
+            format!("{} .. {}", first_seen.to_rfc3339(), last_seen.to_rfc3339())
+        }
+        _ => "n/a".to_string(),
     }
+}
+
+fn non_empty_or_unknown(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() { "unknown" } else { trimmed }
+}
+
+fn efficiency_model_label(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> &str {
+    let model_used = event.model_used.trim();
+    if model_used.is_empty() {
+        non_empty_or_unknown(&event.model)
+    } else {
+        model_used
+    }
+}
+
+fn cascade_stage_for_observations(observations: u64) -> &'static str {
+    if observations >= 200 {
+        "ucb"
+    } else if observations >= 50 {
+        "confidence"
+    } else {
+        "static"
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+struct LearnCascadeRouterSnapshot {
+    #[serde(default)]
+    model_slugs: Vec<String>,
+    #[serde(default)]
+    total_observations: u64,
+    #[serde(default)]
+    stage_transitions: Vec<roko_learn::cascade::StageTransition>,
 }
