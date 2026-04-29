@@ -11,10 +11,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth;
+use crate::chat_history::{SessionSummary, save_summary_nonblocking};
 
 #[derive(Debug, Deserialize)]
 struct SendMessageResponse {
@@ -246,6 +248,7 @@ pub async fn run_direct_provider_chat(
     agent_id: &str,
     provider_name: &str,
     config: &roko_core::config::schema::RokoConfig,
+    workdir: &Path,
 ) -> Result<()> {
     use roko_agent::provider::{AgentOptions, create_agent_for_model};
     use roko_core::{Body, Context, Engram, Kind};
@@ -267,6 +270,12 @@ pub async fn run_direct_provider_chat(
     println!("roko chat (direct) — provider: {provider_name}, model: {model_key}");
     println!("Type a message. Press Ctrl-D to exit.\n");
 
+    let started_at = Utc::now();
+    let mut turn_count: u32 = 0;
+    let mut first_message = String::new();
+    let mut last_message = String::new();
+    let mut total_tokens: u64 = 0;
+
     let stdin = io::stdin();
     let mut stdin_lock = stdin.lock();
     let mut history: Vec<serde_json::Value> = Vec::new();
@@ -283,6 +292,12 @@ pub async fn run_direct_provider_chat(
         if message.is_empty() {
             continue;
         }
+
+        if first_message.is_empty() {
+            first_message = message.chars().take(120).collect();
+        }
+        last_message = message.chars().take(120).collect();
+        turn_count += 1;
 
         history.push(json!({
             "role": "user",
@@ -304,6 +319,8 @@ pub async fn run_direct_provider_chat(
         std::io::stdout().flush().context("flush indicator")?;
 
         let result = agent.run(&engram, &ctx).await;
+        total_tokens +=
+            u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
 
         print!("\r\x1b[K");
 
@@ -326,6 +343,28 @@ pub async fn run_direct_provider_chat(
     }
 
     println!("\nbye.");
+
+    let ended_at = Utc::now();
+    let session_id = format!(
+        "{}-{}",
+        started_at.format("%Y-%m-%dT%H-%M-%S"),
+        agent_id
+    );
+    let summary = SessionSummary {
+        session_id,
+        agent_id: agent_id.to_string(),
+        provider: provider_name.to_string(),
+        model_key: model_key.clone(),
+        started_at: started_at.to_rfc3339(),
+        ended_at: ended_at.to_rfc3339(),
+        turn_count,
+        first_message,
+        last_message,
+        total_tokens,
+        total_cost_usd: 0.0,
+    };
+    save_summary_nonblocking(workdir.to_path_buf(), summary);
+    tokio::task::yield_now().await;
     Ok(())
 }
 

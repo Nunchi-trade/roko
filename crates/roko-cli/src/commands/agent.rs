@@ -28,8 +28,13 @@ pub(crate) async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<i32> {
             provider_config.agent.tier_models = config.agent.tier_models.clone();
             provider_config.agent.env = Some(config.agent.env.clone());
 
-            roko_cli::chat::run_direct_provider_chat(agent, provider_name, &provider_config)
-                .await?;
+            roko_cli::chat::run_direct_provider_chat(
+                agent,
+                provider_name,
+                &provider_config,
+                &workdir,
+            )
+            .await?;
             return Ok(EXIT_SUCCESS);
         }
     }
