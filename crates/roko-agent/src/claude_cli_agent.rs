@@ -248,17 +248,29 @@ impl ClaudeCliAgent {
     }
 
     fn failure(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
+        let stream_usage = StreamUsage::default();
+        self.failure_with_stream_usage(input, reason, started, &stream_usage)
+    }
+
+    fn failure_with_stream_usage(
+        &self,
+        input: &Engram,
+        reason: &str,
+        started: Instant,
+        stream_usage: &StreamUsage,
+    ) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let output = input
+        let mut output = input
             .derive(Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
-            .tag("failed", "true")
-            .build();
-        AgentResult::fail(output).with_usage(Usage {
-            wall_ms,
-            ..Default::default()
-        })
+            .tag("failed", "true");
+        if let Some(model) = stream_usage.model.as_deref().filter(|model| !model.trim().is_empty())
+        {
+            output = output.tag("model", model);
+        }
+        let output = output.build();
+        AgentResult::fail(output).with_usage(Self::usage_from_stream(stream_usage, wall_ms))
     }
 
     fn discovered_mcp_config(&self) -> Option<PathBuf> {
@@ -371,6 +383,83 @@ impl ClaudeCliAgent {
         } else {
             None
         }
+    }
+
+    fn parse_stream_usage(stdout: &str) -> StreamUsage {
+        let mut usage = StreamUsage::default();
+        for line in stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let Some(event) = Self::parse_stream_event(line) else {
+                continue;
+            };
+            if event.get("type").and_then(Value::as_str) != Some("result") {
+                continue;
+            }
+
+            usage.source = UsageSource::ProviderReported;
+            if let Some(model) = event
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            {
+                usage.model = Some(model.to_string());
+            }
+            if let Some(cost) = event.get("total_cost_usd").and_then(Value::as_f64) {
+                usage.cost_usd = Some(cost);
+            }
+            if let Some(result_usage) = event.get("usage") {
+                Self::update_stream_usage_field(
+                    &mut usage.input_tokens,
+                    Self::stream_usage_u64(result_usage, &["input_tokens"]),
+                );
+                Self::update_stream_usage_field(
+                    &mut usage.output_tokens,
+                    Self::stream_usage_u64(result_usage, &["output_tokens"]),
+                );
+                Self::update_stream_usage_field(
+                    &mut usage.cache_creation_tokens,
+                    Self::stream_usage_u64(
+                        result_usage,
+                        &["cache_creation_input_tokens", "cache_creation_tokens"],
+                    ),
+                );
+                Self::update_stream_usage_field(
+                    &mut usage.cache_read_tokens,
+                    Self::stream_usage_u64(
+                        result_usage,
+                        &["cache_read_input_tokens", "cache_read_tokens"],
+                    ),
+                );
+            }
+        }
+        usage
+    }
+
+    fn usage_from_stream(stream_usage: &StreamUsage, wall_ms: u64) -> Usage {
+        Usage {
+            input_tokens: Self::saturating_u64_to_u32(stream_usage.input_tokens),
+            output_tokens: Self::saturating_u64_to_u32(stream_usage.output_tokens),
+            cache_read_tokens: Self::saturating_u64_to_u32(stream_usage.cache_read_tokens),
+            cache_create_tokens: Self::saturating_u64_to_u32(stream_usage.cache_creation_tokens),
+            cost_usd: stream_usage.cost_usd.unwrap_or(0.0) as f32,
+            wall_ms,
+        }
+    }
+
+    fn stream_usage_u64(usage: &Value, keys: &[&str]) -> Option<u64> {
+        keys.iter().find_map(|key| usage.get(*key).and_then(Value::as_u64))
+    }
+
+    fn update_stream_usage_field<T>(slot: &mut Option<T>, value: Option<T>) {
+        if let Some(value) = value {
+            *slot = Some(value);
+        }
+    }
+
+    fn saturating_u64_to_u32(value: Option<u64>) -> u32 {
+        value
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0)
     }
 
     fn tool_summary(block: &Value) -> String {
@@ -703,6 +792,7 @@ impl Agent for ClaudeCliAgent {
         let stdout = stdout_handle.await.unwrap_or_default();
         let stderr = stderr_handle.await.unwrap_or_default();
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let stream_usage = Self::parse_stream_usage(&stdout).merge(Self::parse_stream_usage(&stderr));
 
         if !status.success() {
             let code = status
@@ -710,10 +800,11 @@ impl Agent for ClaudeCliAgent {
                 .map_or_else(|| "signal".to_string(), |c| c.to_string());
             eprintln!("[{}] failed (exit {code}) after {elapsed_secs}s", self.name);
             let stderr_reason = Self::first_human_stderr_line(&stderr).unwrap_or("claude failed");
-            return self.failure(
+            return self.failure_with_stream_usage(
                 input,
                 &format!("exit {code}: {stderr_reason}"),
                 started,
+                &stream_usage,
             );
         }
 
@@ -730,7 +821,12 @@ impl Agent for ClaudeCliAgent {
                 "[{}] finished after {elapsed_secs}s but produced empty output",
                 self.name
             );
-            return self.failure(input, "claude produced an empty response", started);
+            return self.failure_with_stream_usage(
+                input,
+                "claude produced an empty response",
+                started,
+                &stream_usage,
+            );
         }
 
         eprintln!(
@@ -743,15 +839,15 @@ impl Agent for ClaudeCliAgent {
             .derive(Kind::AgentOutput, Body::text(text))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
-            .tag("model", &self.model)
+            .tag(
+                "model",
+                stream_usage.model.as_deref().unwrap_or(&self.model),
+            )
             .build();
 
         AgentResult::ok(output_signal)
             .with_trace(self.stderr_trace(&stderr))
-            .with_usage(Usage {
-                wall_ms,
-                ..Default::default()
-            })
+            .with_usage(Self::usage_from_stream(&stream_usage, wall_ms))
     }
 
     fn name(&self) -> &str {
@@ -764,6 +860,48 @@ impl Agent for ClaudeCliAgent {
 
     fn supports_streaming(&self) -> bool {
         false
+    }
+}
+
+/// Whether usage was reported by the final Claude CLI result event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageSource {
+    ProviderReported,
+    Unknown,
+}
+
+impl Default for UsageSource {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+/// Parsed usage metadata from Claude CLI `result` events.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct StreamUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cost_usd: Option<f64>,
+    model: Option<String>,
+    source: UsageSource,
+}
+
+impl StreamUsage {
+    fn merge(mut self, other: Self) -> Self {
+        if self.source == UsageSource::Unknown {
+            return other;
+        }
+        if other.source == UsageSource::ProviderReported {
+            self.input_tokens = self.input_tokens.or(other.input_tokens);
+            self.output_tokens = self.output_tokens.or(other.output_tokens);
+            self.cache_creation_tokens = self.cache_creation_tokens.or(other.cache_creation_tokens);
+            self.cache_read_tokens = self.cache_read_tokens.or(other.cache_read_tokens);
+            self.cost_usd = self.cost_usd.or(other.cost_usd);
+            self.model = self.model.or(other.model);
+        }
+        self
     }
 }
 
@@ -813,6 +951,54 @@ mod tests {
         assert!(matcher_strings.contains(&"Bash(git switch *)"));
         assert!(matcher_strings.contains(&"Bash(git branch -m *)"));
         assert!(matcher_strings.contains(&"Bash(git push *)"));
+    }
+
+    #[test]
+    fn parse_stream_usage_extracts_result_event_fields_and_model() {
+        let usage = ClaudeCliAgent::parse_stream_usage(
+            r#"{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":999,"output_tokens":888,"cache_creation_input_tokens":777,"cache_read_input_tokens":666}}}
+{"type":"result","session_id":"sess-1","model":"claude-sonnet-4-6","total_cost_usd":0.25,"usage":{"input_tokens":11,"output_tokens":22,"cache_creation_input_tokens":33,"cache_read_input_tokens":44}}"#,
+        );
+        assert_eq!(usage.source, UsageSource::ProviderReported);
+        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.output_tokens, Some(22));
+        assert_eq!(usage.cache_creation_tokens, Some(33));
+        assert_eq!(usage.cache_read_tokens, Some(44));
+        assert_eq!(usage.cost_usd, Some(0.25));
+        assert_eq!(usage.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn parse_stream_usage_leaves_missing_fields_none_and_keeps_zeroes() {
+        let usage = ClaudeCliAgent::parse_stream_usage(
+            r#"{"type":"result","session_id":"sess-2","model":"claude-sonnet-4-6","total_cost_usd":0,"usage":{"input_tokens":0,"cache_read_input_tokens":5}}"#,
+        );
+        assert_eq!(usage.source, UsageSource::ProviderReported);
+        assert_eq!(usage.input_tokens, Some(0));
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.cache_creation_tokens, None);
+        assert_eq!(usage.cache_read_tokens, Some(5));
+        assert_eq!(usage.cost_usd, Some(0.0));
+        assert_eq!(usage.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn parse_stream_usage_accepts_cache_alias_fields() {
+        let usage = ClaudeCliAgent::parse_stream_usage(
+            r#"{"type":"result","session_id":"sess-3","model":"claude-sonnet-4-6","total_cost_usd":0.5,"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_tokens":3,"cache_read_tokens":4}}"#,
+        );
+        assert_eq!(usage.cache_creation_tokens, Some(3));
+        assert_eq!(usage.cache_read_tokens, Some(4));
+        assert_eq!(usage.cost_usd, Some(0.5));
+    }
+
+    #[test]
+    fn parse_stream_usage_stays_unknown_without_result_event() {
+        let usage = ClaudeCliAgent::parse_stream_usage(
+            r#"{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}}
+{"type":"tool","subtype":"result","tool_name":"Bash","tool_use_id":"tu_1","content":"done"}"#,
+        );
+        assert_eq!(usage, StreamUsage::default());
     }
 
     #[tokio::test]
@@ -945,6 +1131,65 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"ok"}}}}'
 
         let args_text = fs::read_to_string(&capture_args).unwrap();
         assert!(!args_text.contains("--resume"));
+    }
+
+    #[tokio::test]
+    async fn result_event_usage_is_threaded_into_agent_result() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("claude-fake.sh");
+        let script_body = r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"content_block_delta","delta":{"text":"hello"}}'
+printf '%s\n' '{"type":"result","session_id":"sess-1","model":"claude-sonnet-4-6","total_cost_usd":0.25,"usage":{"input_tokens":11,"output_tokens":22,"cache_creation_input_tokens":33,"cache_read_input_tokens":44}}'
+"#;
+        fs::write(&script, script_body).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let agent = ClaudeCliAgent::new(&script, tmp.path(), "claude-test-model");
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap().trim(), "hello");
+        assert_eq!(result.output.tag("model"), Some("claude-sonnet-4-6"));
+        assert_eq!(result.usage.input_tokens, 11);
+        assert_eq!(result.usage.output_tokens, 22);
+        assert_eq!(result.usage.cache_read_tokens, 44);
+        assert_eq!(result.usage.cache_create_tokens, 33);
+        assert!((result.usage.cost_usd - 0.25).abs() < 0.0001);
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_still_carries_result_event_usage() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("claude-fake.sh");
+        let script_body = r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"result","session_id":"sess-2","model":"claude-sonnet-4-6","total_cost_usd":0.5,"usage":{"input_tokens":9,"output_tokens":8,"cache_creation_input_tokens":7,"cache_read_input_tokens":6}}'
+exit 1
+"#;
+        fs::write(&script, script_body).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let agent = ClaudeCliAgent::new(&script, tmp.path(), "claude-test-model");
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+        assert!(!result.success);
+        assert_eq!(result.output.tag("model"), Some("claude-sonnet-4-6"));
+        assert_eq!(result.usage.input_tokens, 9);
+        assert_eq!(result.usage.output_tokens, 8);
+        assert_eq!(result.usage.cache_read_tokens, 6);
+        assert_eq!(result.usage.cache_create_tokens, 7);
+        assert!((result.usage.cost_usd - 0.5).abs() < 0.0001);
     }
 
     #[tokio::test]
