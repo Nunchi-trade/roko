@@ -385,4 +385,133 @@ mod tests {
             _ => panic!("expected Error"),
         }
     }
+
+    #[test]
+    fn parse_result_event_with_full_usage() {
+        let line = r#"{"type":"result","session_id":"sess-abc","total_cost_usd":0.0123,"num_turns":2,"is_error":false,"usage":{"input_tokens":850,"output_tokens":320,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}}"#;
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 2, "expected TurnCompleted + TokenUsage, got {events:?}");
+
+        match &events[0] {
+            AgentRuntimeEvent::TurnCompleted {
+                session_id,
+                total_cost_usd,
+                num_turns,
+                is_error,
+            } => {
+                assert_eq!(session_id.as_deref(), Some("sess-abc"));
+                assert!(
+                    (total_cost_usd.unwrap() - 0.0123).abs() < 1e-9,
+                    "total_cost_usd mismatch: {total_cost_usd:?}"
+                );
+                assert_eq!(*num_turns, Some(2));
+                assert!(!is_error);
+            }
+            other => panic!("events[0]: expected TurnCompleted, got {other:?}"),
+        }
+
+        match &events[1] {
+            AgentRuntimeEvent::TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            } => {
+                assert_eq!(*input_tokens, 850);
+                assert_eq!(*output_tokens, 320);
+                // cache_read_input_tokens maps to cache_read_tokens
+                assert_eq!(*cache_read_tokens, 200);
+                // cache_creation_input_tokens maps to cache_write_tokens
+                assert_eq!(*cache_write_tokens, 100);
+            }
+            other => panic!("events[1]: expected TokenUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_event_with_partial_usage_absent_cache_fields_default_to_zero() {
+        // Only input_tokens and output_tokens present; cache fields absent
+        let line = r#"{"type":"result","session_id":"sess-partial","total_cost_usd":0.005,"num_turns":1,"is_error":false,"usage":{"input_tokens":400,"output_tokens":150}}"#;
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 2, "expected TurnCompleted + TokenUsage, got {events:?}");
+
+        match &events[1] {
+            AgentRuntimeEvent::TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            } => {
+                assert_eq!(*input_tokens, 400, "input_tokens must be populated");
+                assert_eq!(*output_tokens, 150, "output_tokens must be populated");
+                // #[serde(default)] on ClaudeUsage fields means absent cache fields = 0
+                assert_eq!(*cache_read_tokens, 0, "absent cache field defaults to 0");
+                assert_eq!(*cache_write_tokens, 0, "absent cache field defaults to 0");
+            }
+            other => panic!("events[1]: expected TokenUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_event_without_usage_emits_only_turn_completed() {
+        // No "usage" key at all in the result event (already tested in parse_result_event
+        // but that test does not assert len or absence of TokenUsage explicitly)
+        let line = r#"{"type":"result","session_id":"sess-no-usage","total_cost_usd":0.002,"num_turns":1,"is_error":false}"#;
+        let events = parse_stream_line(line);
+        assert_eq!(
+            events.len(), 1,
+            "no usage field => only TurnCompleted, got {events:?}"
+        );
+        assert!(
+            matches!(events[0], AgentRuntimeEvent::TurnCompleted { .. }),
+            "expected TurnCompleted, got {:?}", events[0]
+        );
+    }
+
+    #[test]
+    fn absent_usage_in_result_must_not_emit_zero_token_usage() {
+        // Regression guard: an absent usage field must NOT produce a TokenUsage event
+        // with all-zero values. Zero tokens would be indistinguishable from a real
+        // zero-token call and would corrupt learning data.
+        let line = r#"{"type":"result","session_id":"sess-absent","is_error":false}"#;
+        let events = parse_stream_line(line);
+
+        let has_token_usage = events
+            .iter()
+            .any(|e| matches!(e, AgentRuntimeEvent::TokenUsage { .. }));
+        assert!(
+            !has_token_usage,
+            "absent usage field must NOT produce a TokenUsage event; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn stream_without_result_event_produces_no_turn_completed_and_no_token_usage() {
+        // A stream that only has assistant messages but no result event.
+        let lines = [
+            r#"{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"Working..."}],"usage":null}}"#,
+            r#"{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"Done."}],"usage":null}}"#,
+        ];
+
+        let all_events: Vec<AgentRuntimeEvent> = lines
+            .iter()
+            .flat_map(|line| parse_stream_line(line))
+            .collect();
+
+        let has_turn_completed = all_events
+            .iter()
+            .any(|e| matches!(e, AgentRuntimeEvent::TurnCompleted { .. }));
+        assert!(
+            !has_turn_completed,
+            "no result event => no TurnCompleted; got {all_events:?}"
+        );
+
+        let has_token_usage = all_events
+            .iter()
+            .any(|e| matches!(e, AgentRuntimeEvent::TokenUsage { .. }));
+        assert!(
+            !has_token_usage,
+            "no usage in assistant events (null) => no TokenUsage; got {all_events:?}"
+        );
+    }
 }

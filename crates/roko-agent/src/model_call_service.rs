@@ -440,9 +440,8 @@ impl ModelCallService {
         success: bool,
     ) -> Result<()> {
         let Some(sink) = &self.feedback_sink else {
-            return Err(RokoError::invalid(
-                "feedback sink not configured for model call service",
-            ));
+            tracing::debug!("feedback sink not configured for model call service; skipping");
+            return Ok(());
         };
 
         sink.record(FeedbackEvent::ModelCall {
