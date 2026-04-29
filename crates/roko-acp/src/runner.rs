@@ -442,9 +442,12 @@ pub async fn run_workflow_pipeline(
             "pipeline step"
         );
 
-        // Emit plan update and sync shared state after each phase transition.
+        // Emit plan update, shared state, and inline phase badge after each transition.
         sync_shared_run(&shared_run, &run).await;
         emit_plan_update(&run, &event_sender).await;
+        if let Some(badge) = phase_badge(&run.pipeline.phase, run.pipeline.iteration) {
+            let _ = event_sender.send(CognitiveEvent::TokenChunk(badge)).await;
+        }
 
         match action {
             PipelineAction::SpawnStrategist { ref prompt } => {
@@ -660,6 +663,35 @@ async fn emit_plan_update(run: &WorkflowRun, sender: &mpsc::Sender<CognitiveEven
     if !entries.is_empty() {
         let _ = sender.send(CognitiveEvent::PlanUpdate { entries }).await;
     }
+}
+
+/// Generate the inline badge that marks the current pipeline phase.
+fn phase_badge(phase: &PipelinePhase, iteration: u32) -> Option<String> {
+    let (icon, name) = match phase {
+        PipelinePhase::Strategizing => ("🧭", "Strategizing"),
+        PipelinePhase::Implementing => ("🛠️", "Implementing"),
+        PipelinePhase::AutoFixing => ("🔧", "Auto-fixing"),
+        PipelinePhase::Gating => ("🧪", "Running gates"),
+        PipelinePhase::Reviewing => ("🔍", "Reviewing"),
+        PipelinePhase::Committing => ("📝", "Committing"),
+        PipelinePhase::Complete => ("✅", "Complete"),
+        PipelinePhase::Halted { .. } => ("⛔", "Halted"),
+        PipelinePhase::Cancelled => ("⏹️", "Cancelled"),
+        PipelinePhase::Pending => return None,
+    };
+
+    let name = if iteration > 1
+        && matches!(
+            phase,
+            PipelinePhase::Implementing | PipelinePhase::AutoFixing | PipelinePhase::Gating
+        )
+    {
+        format!("{name} (iter {iteration})")
+    } else {
+        name.to_string()
+    };
+
+    Some(format!("\n\n{icon} **{name}**\n\n"))
 }
 
 /// Build plan entries from the current run state.
