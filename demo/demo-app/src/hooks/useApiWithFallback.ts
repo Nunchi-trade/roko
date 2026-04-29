@@ -15,6 +15,8 @@ function getFallback(path: string): unknown {
   if (path.includes('/metrics/c_factor')) return Demo.DEMO_CFACTOR;
   if (path.includes('/learn/cascade-router')) return Demo.DEMO_ROUTER_MODELS;
   if (path.includes('/gates/summary')) return Demo.DEMO_GATES_SUMMARY;
+  if (path.includes('/gates/history')) return Demo.DEMO_GATE_HISTORY;
+  if (path.includes('/learn/adaptive-thresholds')) return Demo.DEMO_ADAPTIVE_THRESHOLDS;
   if (path.includes('/status')) return Demo.DEMO_STATUS;
   if (path.includes('/statehub/events')) return Demo.DEMO_EVENTS;
   if (path.includes('/dashboard')) return Demo.DEMO_DASHBOARD;

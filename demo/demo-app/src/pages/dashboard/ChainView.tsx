@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useApiWithFallback } from '../../hooks/useApiWithFallback';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
+import GateWaterfall, { type GateRun } from '../../components/GateWaterfall';
 
 /* ── Types ───────────────────────────────────────────────── */
 
@@ -39,6 +40,7 @@ export default function ChainView() {
   const { get } = useApiWithFallback();
   const [episodes, setEpisodes] = useState(847);
   const [gateResults, setGateResults] = useState(847);
+  const [gateHistory, setGateHistory] = useState<GateRun[]>([]);
   const [typedHash, setTypedHash] = useState('');
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -48,6 +50,12 @@ export default function ChainView() {
       if (snap) {
         setEpisodes(snap.episodes_total ?? 847);
         setGateResults((snap.gates_passed ?? 791) + (snap.gates_failed ?? 56));
+      }
+    }).catch(() => {});
+
+    get<GateRun[]>('/api/gates/history?limit=20').then((data) => {
+      if (Array.isArray(data)) {
+        setGateHistory(data);
       }
     }).catch(() => {});
   }, [get]);
@@ -159,6 +167,14 @@ export default function ChainView() {
             </div>
           ))}
         </div>
+      </Pane>
+
+      {/* ═══ GATE WATERFALL ═══ */}
+      <Pane
+        title="GATE PIPELINE WATERFALL"
+        badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>7-rung pipeline</span>}
+      >
+        <GateWaterfall runs={gateHistory} height={340} />
       </Pane>
 
       {/* ═══ HASH DISPLAY ═══ */}
