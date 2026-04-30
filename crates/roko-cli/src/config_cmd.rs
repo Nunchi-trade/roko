@@ -7,8 +7,8 @@
 
 use crate::config::{
     AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
-    ResolvedConfig, ServeAuthLayer, ServeLayer, Source, ToolsLayer, apply_layer_value, detect_clis,
-    global_config_path, load_layered, resolve_paths,
+    ResolvedConfig, RunnerLayer, ServeAuthLayer, ServeLayer, Source, ToolsLayer,
+    apply_layer_value, detect_clis, global_config_path, load_layered, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::agent::ProviderKind;
@@ -126,6 +126,9 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
         repos: None,
         gates,
         executor: Some(default_executor_layer()),
+        runner: Some(RunnerLayer {
+            plan_timeout_secs: Some(3_600),
+        }),
         runtime: None,
         providers: None,
         models: None,
@@ -690,6 +693,11 @@ fn print_resolved(r: &ResolvedConfig) {
         r.config.gates.len(),
         r.sources.gates.tag()
     );
+    println!(
+        "  runner.plan_timeout_secs = {} {}",
+        r.config.runner.plan_timeout_secs,
+        r.sources.runner_plan_timeout_secs.tag()
+    );
     println!();
     println!("sources:");
     println!("  global : {}", r.paths.global.display());
@@ -709,7 +717,8 @@ fn print_resolved(r: &ResolvedConfig) {
         && r.sources.tools_prefer_mcp == Source::Default
         && r.sources.dreams_auto_dream == Source::Default
         && r.sources.dreams_idle_threshold_mins == Source::Default
-        && r.sources.dreams_min_episodes_for_dream == Source::Default;
+        && r.sources.dreams_min_episodes_for_dream == Source::Default
+        && r.sources.runner_plan_timeout_secs == Source::Default;
     if fully_default {
         println!("\nhint: no config files found — run `roko config init` to set one up.");
     }

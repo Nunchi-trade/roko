@@ -1233,6 +1233,8 @@ pub struct RunConfig {
     pub cli_model_override: Option<String>,
     /// Per-task timeout in seconds.
     pub timeout_secs: u64,
+    /// Wall-clock timeout for the entire plan execution.
+    pub plan_timeout_secs: u64,
     /// Maximum auto-fix retries per task.
     pub max_retries: u32,
     /// Maximum number of tasks that may execute concurrently within a plan.
@@ -1335,6 +1337,7 @@ impl RunConfig {
             model,
             cli_model_override: None,
             timeout_secs: roko_config.agent.timeout_ms.unwrap_or(600_000) / 1000,
+            plan_timeout_secs: RunnerConfig::default_plan_timeout_secs(),
             max_retries: 2,
             max_concurrent_tasks,
             approval: false,
@@ -1381,6 +1384,7 @@ impl Default for RunConfig {
             model: "claude-sonnet-4-6".to_string(),
             cli_model_override: None,
             timeout_secs: 600,
+            plan_timeout_secs: RunnerConfig::default_plan_timeout_secs(),
             max_retries: 5,
             max_concurrent_tasks: 4,
             approval: false,
@@ -1416,6 +1420,7 @@ impl std::fmt::Debug for RunConfig {
                 &self.cli_model_override.as_ref().map(|_| ".."),
             )
             .field("timeout_secs", &self.timeout_secs)
+            .field("plan_timeout_secs", &self.plan_timeout_secs)
             .field("max_retries", &self.max_retries)
             .field("max_concurrent_tasks", &self.max_concurrent_tasks)
             .field("max_gate_rung", &self.max_gate_rung)

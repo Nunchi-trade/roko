@@ -46,6 +46,9 @@ pub struct Config {
     /// Executor runtime settings.
     #[serde(default)]
     pub executor: ExecutorConfig,
+    /// Plan-level runner settings.
+    #[serde(default)]
+    pub runner: RunnerConfig,
     /// Durable runtime/control-plane settings.
     #[serde(default)]
     pub runtime: RuntimeControlConfig,
@@ -87,6 +90,7 @@ impl Default for Config {
             repos: Vec::new(),
             gates: vec![GateConfig::default_shell_true()],
             executor: ExecutorConfig::default(),
+            runner: RunnerConfig::default(),
             runtime: RuntimeControlConfig::default(),
             budget: BudgetConfig::default(),
             providers: HashMap::new(),
@@ -426,6 +430,28 @@ impl Default for RuntimeControlConfig {
         Self {
             process_session_ledger: Self::default_process_session_ledger(),
             resume_max_staleness_secs: Self::default_resume_max_staleness_secs(),
+        }
+    }
+}
+
+/// Plan-level runner configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RunnerConfig {
+    /// Wall-clock timeout for the entire plan execution.
+    #[serde(default = "RunnerConfig::default_plan_timeout_secs")]
+    pub plan_timeout_secs: u64,
+}
+
+impl RunnerConfig {
+    const fn default_plan_timeout_secs() -> u64 {
+        3_600
+    }
+}
+
+impl Default for RunnerConfig {
+    fn default() -> Self {
+        Self {
+            plan_timeout_secs: Self::default_plan_timeout_secs(),
         }
     }
 }
@@ -945,6 +971,9 @@ pub struct ConfigLayer {
     /// Executor settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<ExecutorLayer>,
+    /// Plan-level runner settings overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<RunnerLayer>,
     /// Runtime/control-plane settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeControlLayer>,
@@ -1054,6 +1083,12 @@ impl ConfigLayer {
                 None => e,
             });
         }
+        if let Some(runner) = overlay.runner {
+            self.runner = Some(match self.runner {
+                Some(base) => base.merge(runner),
+                None => runner,
+            });
+        }
         if let Some(runtime) = overlay.runtime {
             self.runtime = Some(match self.runtime {
                 Some(base) => base.merge(runtime),
@@ -1109,6 +1144,7 @@ impl ConfigLayer {
             && self.prompt.is_none()
             && self.gates.is_none()
             && self.executor.is_none()
+            && self.runner.is_none()
             && self.runtime.is_none()
             && self.providers.is_none()
             && self.models.is_none()
@@ -1199,6 +1235,10 @@ impl ConfigLayer {
             }
             None => ExecutorConfig::default(),
         };
+        let runner = match self.runner {
+            Some(runner) => runner.resolve(),
+            None => RunnerConfig::default(),
+        };
         let runtime = match self.runtime {
             Some(runtime) => runtime.resolve()?,
             None => RuntimeControlConfig::default(),
@@ -1269,6 +1309,7 @@ impl ConfigLayer {
             repos: self.repos.unwrap_or_default(),
             gates,
             executor,
+            runner,
             runtime,
             budget: BudgetConfig::default(),
             providers,
@@ -1722,6 +1763,14 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
                     .context("parse use_worktrees as bool")?,
             );
         }
+        ["runner", "plan_timeout_secs"] => {
+            let runner = layer.runner.get_or_insert_with(RunnerLayer::default);
+            runner.plan_timeout_secs = Some(
+                value
+                    .parse::<u64>()
+                    .context("parse plan_timeout_secs as u64")?,
+            );
+        }
         ["providers", name, "kind"] => {
             let provider = provider_layer_mut(layer, name);
             provider.kind = Some(parse_string_enum(value, "parse provider kind")?);
@@ -2154,6 +2203,7 @@ fn apply_env_source_overrides(sources: &mut ConfigSources, paths: &[String]) {
             "dreams.auto_dream" => sources.dreams_auto_dream = Source::Env,
             "dreams.idle_threshold_mins" => sources.dreams_idle_threshold_mins = Source::Env,
             "dreams.min_episodes_for_dream" => sources.dreams_min_episodes_for_dream = Source::Env,
+            "runner.plan_timeout_secs" => sources.runner_plan_timeout_secs = Source::Env,
             path if path.starts_with("providers.") => sources.providers = Source::Env,
             path if path.starts_with("models.") => sources.models = Source::Env,
             _ => {}
@@ -2395,6 +2445,35 @@ impl RuntimeControlLayer {
         };
         config.validate()?;
         Ok(config)
+    }
+}
+
+/// Partial `RunnerConfig` — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RunnerLayer {
+    /// Wall-clock timeout for the entire plan execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_timeout_secs: Option<u64>,
+}
+
+impl RunnerLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            plan_timeout_secs: overlay.plan_timeout_secs.or(self.plan_timeout_secs),
+        }
+    }
+
+    /// Resolve into a concrete [`RunnerConfig`] value.
+    #[must_use]
+    pub fn resolve(self) -> RunnerConfig {
+        let defaults = RunnerConfig::default();
+        RunnerConfig {
+            plan_timeout_secs: self
+                .plan_timeout_secs
+                .unwrap_or(defaults.plan_timeout_secs),
+        }
     }
 }
 
@@ -2761,6 +2840,8 @@ pub struct ConfigSources {
     pub dreams_min_episodes_for_dream: Source,
     /// Where `gates` came from.
     pub gates: Source,
+    /// Where `runner.plan_timeout_secs` came from.
+    pub runner_plan_timeout_secs: Source,
 }
 
 /// Load global + project configs, merge them, and return a `ResolvedConfig`.
@@ -2822,6 +2903,8 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
     let p_prompt = project.prompt.as_ref();
     let g_dreams = global.dreams.as_ref();
     let p_dreams = project.dreams.as_ref();
+    let g_runner = global.runner.as_ref();
+    let p_runner = project.runner.as_ref();
 
     let pick = |in_project: bool, in_global: bool| -> Source {
         if in_project {
@@ -2898,6 +2981,7 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
             g_dreams.and_then(|d| d.min_episodes_for_dream).is_some(),
         ),
         gates: pick(project.gates.is_some(), global.gates.is_some()),
+        runner_plan_timeout_secs: pick(p_runner.is_some(), g_runner.is_some()),
     }
 }
 
@@ -2930,6 +3014,7 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
             dreams.and_then(|d| d.min_episodes_for_dream).is_some(),
         ),
         gates: pick(layer.gates.is_some()),
+        runner_plan_timeout_secs: pick(layer.runner.is_some()),
     }
 }
 
@@ -3039,6 +3124,7 @@ command = "cat"
         assert!(cfg.tools.global_denied.is_empty());
         assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
+        assert_eq!(cfg.runner.plan_timeout_secs, 3_600);
         assert!(cfg.repos.is_empty());
     }
 
@@ -3156,6 +3242,7 @@ use_worktrees = true
         assert!(!cfg.tools.prefer_mcp);
         assert_eq!(cfg.tools.global_denied, vec!["bash".to_string()]);
         assert_eq!(cfg.tools.mcp_timeout_secs, 15);
+        assert_eq!(cfg.runner.plan_timeout_secs, 3_600);
     }
 
     #[test]
@@ -3277,6 +3364,9 @@ max_concurrent_plans = 6
 task_timeout_secs = 900
 auto_replan = false
 use_worktrees = true
+
+[runner]
+plan_timeout_secs = 1200
 "#,
         )
         .unwrap();
@@ -3290,6 +3380,7 @@ use_worktrees = true
         assert_eq!(cfg.executor.task_timeout_secs, 900);
         assert!(!cfg.executor.auto_replan);
         assert!(cfg.executor.use_worktrees);
+        assert_eq!(cfg.runner.plan_timeout_secs, 1_200);
         assert!(!cfg.serve.terminal_enabled);
         assert!(!cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
@@ -3422,6 +3513,7 @@ auto_plan = true
             cfg.serve.deploy.environment
         );
         assert_eq!(parsed.serve.deploy.webhooks, cfg.serve.deploy.webhooks);
+        assert_eq!(parsed.runner.plan_timeout_secs, cfg.runner.plan_timeout_secs);
     }
 
     #[test]
@@ -3581,6 +3673,7 @@ max_output = 131072
         apply_layer_value(&mut layer, "models.glm51.provider", "zai").unwrap();
         apply_layer_value(&mut layer, "models.glm51.slug", "glm-5.1").unwrap();
         apply_layer_value(&mut layer, "models.glm51.supports_thinking", "true").unwrap();
+        apply_layer_value(&mut layer, "runner.plan_timeout_secs", "1800").unwrap();
 
         let cfg = layer.resolve().unwrap();
         let provider = cfg.providers.get("zai").unwrap();
@@ -3594,6 +3687,7 @@ max_output = 131072
         assert_eq!(model.provider, "zai");
         assert_eq!(model.slug, "glm-5.1");
         assert!(model.supports_thinking);
+        assert_eq!(cfg.runner.plan_timeout_secs, 1_800);
     }
 
     #[test]
@@ -3629,6 +3723,7 @@ base_url = "https://api.z.ai/api/paas/v4"
         assert_eq!(cfg.daimon.strategy_space.domain, "coding");
         assert_eq!(cfg.daimon.strategy_space.dimensions[0], "complexity");
         assert!(cfg.gates.is_empty());
+        assert_eq!(cfg.runner.plan_timeout_secs, 3_600);
         assert!(!cfg.serve.terminal_enabled);
         assert!(!cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
@@ -3734,6 +3829,7 @@ token_budget = 8000
         assert_eq!(sources.dreams_auto_dream, Source::Default);
         assert_eq!(sources.dreams_idle_threshold_mins, Source::Default);
         assert_eq!(sources.dreams_min_episodes_for_dream, Source::Default);
+        assert_eq!(sources.runner_plan_timeout_secs, Source::Default);
     }
 
     #[test]
@@ -3754,6 +3850,10 @@ base_url = "https://file.example"
         let (env_layer, env_paths) = collect_env_override_layer_from(vec![
             ("ROKO__AGENT__MODEL".to_string(), "test".to_string()),
             (
+                "ROKO__RUNNER__PLAN_TIMEOUT_SECS".to_string(),
+                "77".to_string(),
+            ),
+            (
                 "ROKO__PROVIDERS__ZAI__BASE_URL".to_string(),
                 "https://env.example".to_string(),
             ),
@@ -3766,6 +3866,8 @@ base_url = "https://file.example"
 
         assert_eq!(resolved.agent.model.as_deref(), Some("test"));
         assert_eq!(sources.agent_model, Source::Env);
+        assert_eq!(resolved.runner.plan_timeout_secs, 77);
+        assert_eq!(sources.runner_plan_timeout_secs, Source::Env);
         assert_eq!(
             resolved.providers.get("zai").unwrap().base_url.as_deref(),
             Some("https://env.example")

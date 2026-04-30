@@ -402,6 +402,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 model: roko_config.agent.default_model.clone(),
                 cli_model_override: cli.model.clone(),
                 timeout_secs: task_timeout_secs,
+                plan_timeout_secs: config.runner.plan_timeout_secs,
                 max_retries: max_retries.unwrap_or(2),
                 max_concurrent_tasks,
                 approval,

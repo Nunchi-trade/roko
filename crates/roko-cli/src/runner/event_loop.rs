@@ -48,6 +48,7 @@ use super::types::{
     AgentCompletionSummary, AgentDispatchOutcome, AgentEvent, GateCompletion, GateCompletionKind,
     PlanOutcome, PlanRunSummary, PromptAssemblyDiagnostics, ResumeMarker, ResumeOutcome,
     RetryAction, RunConfig, RunOutcome, RunTotals, RunnerEvent, RunnerFailureKind,
+    TaskAttemptStatus,
     TaskAttemptOutcome, TaskAttemptRef,
 };
 
@@ -257,6 +258,10 @@ pub async fn run(
 
     let mut tick_interval = interval(Duration::from_millis(100));
     let mut flush_interval = interval(Duration::from_secs(2));
+    let plan_deadline =
+        tokio::time::Instant::now() + Duration::from_secs(config.plan_timeout_secs);
+    let plan_timeout = tokio::time::sleep_until(plan_deadline);
+    tokio::pin!(plan_timeout);
 
     info!(
         plan_count = plans.len(),
@@ -334,7 +339,8 @@ pub async fn run(
         //   Branch 2 (gate_rx.recv):  cancel-safe — mpsc::Receiver::recv drops no data.
         //   Branch 3 (tick_interval): cancel-safe — Interval::tick is restartable.
         //   Branch 4 (flush_interval): cancel-safe — Interval::tick is restartable.
-        //   Branch 5 (cancel.cancelled): cancel-safe — CancellationToken is idempotent.
+        //   Branch 5 (plan_timeout): cancel-safe — fixed deadline, no state lost.
+        //   Branch 6 (cancel.cancelled): cancel-safe — CancellationToken is idempotent.
         tokio::select! {
             // ─── Branch 1: Agent events ─────────────────────────────
             Some(event) = agent_rx.recv() => {
@@ -865,12 +871,25 @@ pub async fn run(
                 }
             }
 
-            // ─── Branch 5: Cancellation ─────────────────────────────
+            // ─── Branch 5: Plan timeout ──────────────────────────────
+            _ = &mut plan_timeout => {
+                handle_plan_timeout(
+                    &executor,
+                    &plans,
+                    &mut state,
+                    &mut agent_handle,
+                    &paths,
+                    &merge_queue,
+                    &tui,
+                    config,
+                )
+                .await?;
+            }
+
+            // ─── Branch 6: Cancellation ─────────────────────────────
             _ = cancel.cancelled() => {
                 warn!("cancellation requested — shutting down");
-                if let Some(handle) = agent_handle.take() {
-                    handle.kill(Duration::from_secs(3)).await;
-                }
+                stop_active_agent(&mut agent_handle, &mut state, Duration::from_secs(3)).await;
                 save_snapshot(&executor, &paths, &mut state, &merge_queue);
                 shutdown_subsystems(config, &tui).await;
                 let event =
@@ -878,6 +897,20 @@ pub async fn run(
                 emit_runner_event(&paths, &mut state, &tui, config, event);
                 break;
             }
+        }
+
+        if tokio::time::Instant::now() >= plan_deadline {
+            handle_plan_timeout(
+                &executor,
+                &plans,
+                &mut state,
+                &mut agent_handle,
+                &paths,
+                &merge_queue,
+                &tui,
+                config,
+            )
+            .await?;
         }
 
         if all_plans_terminal(&executor, &plans) {
@@ -2664,6 +2697,73 @@ async fn shutdown_subsystems(config: &RunConfig, tui: &TuiBridge) {
             tui.cascade_router_updated(&router.snapshot_json());
         }
     }
+}
+
+async fn handle_plan_timeout(
+    executor: &ParallelExecutor,
+    plans: &[Plan],
+    state: &mut RunState,
+    agent_handle: &mut Option<AgentHandle>,
+    paths: &PersistPaths,
+    merge_queue: &MergeQueue,
+    tui: &TuiBridge,
+    config: &RunConfig,
+) -> Result<()> {
+    let in_flight = collect_in_flight_attempts(state);
+    error!(
+        timeout_secs = config.plan_timeout_secs,
+        current_plan = %state.plan_id,
+        current_task = %state.current_task,
+        active_plans = ?executor.active_plans(),
+        in_flight_attempts = ?in_flight,
+        "plan execution exceeded wall-clock timeout"
+    );
+    stop_active_agent(agent_handle, state, Duration::from_secs(3)).await;
+    save_snapshot(executor, paths, state, merge_queue);
+    shutdown_subsystems(config, tui).await;
+    let event = build_run_completed_event(executor, plans, state, RunOutcome::Failed);
+    emit_runner_event(paths, state, tui, config, event);
+    Err(anyhow::anyhow!(
+        "plan execution exceeded wall-clock timeout after {} seconds",
+        config.plan_timeout_secs
+    ))
+}
+
+fn collect_in_flight_attempts(state: &RunState) -> Vec<String> {
+    let mut attempts = state
+        .lifecycle
+        .task_attempts
+        .values()
+        .filter(|attempt| {
+            !matches!(
+                attempt.status,
+                TaskAttemptStatus::Passed
+                    | TaskAttemptStatus::Failed
+                    | TaskAttemptStatus::Exhausted
+                    | TaskAttemptStatus::Cancelled
+            )
+        })
+        .map(|attempt| format!("{}:{:?}", attempt.attempt.key(), attempt.status))
+        .collect::<Vec<_>>();
+    attempts.sort();
+    attempts
+}
+
+async fn stop_active_agent(
+    agent_handle: &mut Option<AgentHandle>,
+    state: &mut RunState,
+    grace: Duration,
+) {
+    if let Some(handle) = agent_handle.take() {
+        let pid = handle.pid;
+        handle.kill(grace).await;
+        roko_agent::process::unregister_pid(pid);
+    } else if let Some(pid) = state.agent_pid.take() {
+        roko_agent::process::unregister_pid(pid);
+    }
+    state.agent_active = false;
+    state.agent_pid = None;
+    state.agent_turn_completed = false;
 }
 
 /// Register an agent feed entry after successful spawn.

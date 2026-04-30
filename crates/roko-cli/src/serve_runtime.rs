@@ -550,6 +550,7 @@ fn build_runner_config(
         model,
         cli_model_override: None,
         timeout_secs: cli_config.executor.task_timeout_secs,
+        plan_timeout_secs: cli_config.runner.plan_timeout_secs,
         max_retries: cli_config.executor.max_auto_fix_iterations,
         max_concurrent_tasks,
         approval: false,
