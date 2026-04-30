@@ -146,17 +146,17 @@ pub async fn run(
     // the validator returns Err. We surface the failure and abort the
     // run so the operator can either edit the plan back into a known
     // state or discard the snapshot.
-    {
+    let prior_run_state = {
         let mut plan_map: HashMap<String, Vec<TaskDef>> = HashMap::new();
         for plan in &plans {
             plan_map.insert(plan.id.clone(), plan.tasks.tasks.clone());
         }
-        let prior_fingerprints = match persist::load_run_state(&paths) {
-            Ok(Some(snapshot)) => snapshot.fingerprints,
-            Ok(None) => Vec::new(),
+        let loaded_run_state = match persist::load_run_state(&paths) {
+            Ok(Some(snapshot)) => Some(snapshot),
+            Ok(None) => None,
             Err(err) => {
                 warn!(error = %err, "failed to read prior run-state.json; treating as fresh run");
-                Vec::new()
+                None
             }
         };
         let resume_report = match super::resume::prepare_resume(&paths, &plan_map, &prior_fingerprints) {
@@ -211,7 +211,8 @@ pub async fn run(
                 }
             }
         }
-    }
+        loaded_run_state
+    };
 
     let config = &config;
 
@@ -275,6 +276,23 @@ pub async fn run(
                 .map(move |task| persist::TaskDefFingerprint::from_task(task, &plan.id))
         })
         .collect();
+
+    if matches!(resume.marker.outcome, ResumeOutcome::Resumed) {
+        if let Some(snapshot) = prior_run_state.as_ref() {
+            // Resume validation is stateless; now seed the live runner with
+            // the durable aggregates from the last saved run-state snapshot.
+            restore_run_state_from_snapshot(&mut state, snapshot);
+            if snapshot.total_cost_usd > 0.0 {
+                debug!(
+                    cost_usd = snapshot.total_cost_usd,
+                    tokens_in = snapshot.total_tokens_in,
+                    tokens_out = snapshot.total_tokens_out,
+                    agent_calls = snapshot.total_agent_calls,
+                    "restored cost tracking from snapshot"
+                );
+            }
+        }
+    }
 
     let mut agent_handle: Option<AgentHandle> = None;
 
@@ -1457,6 +1475,21 @@ fn build_run_completed_event(
             })
             .collect(),
     )
+}
+
+fn restore_run_state_from_snapshot(
+    state: &mut RunState,
+    snapshot: &persist::RunStateSnapshot,
+) {
+    state.tasks_completed = snapshot.tasks_completed;
+    state.tasks_failed = snapshot.tasks_failed;
+    state.total_tokens_in = snapshot.total_tokens_in;
+    state.total_tokens_out = snapshot.total_tokens_out;
+    state.total_cost_usd = snapshot.total_cost_usd;
+    state.total_agent_calls = snapshot.total_agent_calls;
+    state.plan_costs = snapshot.plan_costs.clone();
+    state.completed_tasks = snapshot.completed_tasks.clone();
+    state.snapshot_fail_streak = snapshot.snapshot_fail_streak;
 }
 
 // ─── Snapshot Helper ────────────────────────────────────────────────────
@@ -3412,5 +3445,64 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
         total_tokens_out: state.total_tokens_out,
         total_agent_calls: state.total_agent_calls,
         duration: state.elapsed(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn restore_run_state_from_snapshot_restores_durable_aggregates() {
+        let mut state = RunState::new(5);
+        state.total_tokens_in = 1;
+        state.total_tokens_out = 2;
+        state.total_cost_usd = 3.0;
+        state.total_agent_calls = 4;
+        state.tasks_completed = 1;
+        state.tasks_failed = 1;
+        state.plan_costs.insert("stale".to_string(), 9.0);
+        state.completed_tasks.insert("stale".to_string(), vec!["x".to_string()]);
+        state.snapshot_fail_streak = 2;
+
+        let mut plan_costs = HashMap::new();
+        plan_costs.insert("p1".to_string(), 12.5);
+        let mut completed_tasks = HashMap::new();
+        completed_tasks.insert("p1".to_string(), vec!["a".to_string(), "b".to_string()]);
+
+        let snapshot = persist::RunStateSnapshot {
+            schema_version: persist::RUN_STATE_SCHEMA_VERSION,
+            run_id: "prior".to_string(),
+            started_at_ms: 111,
+            timestamp_ms: 222,
+            tasks_total: 99,
+            tasks_completed: 8,
+            tasks_failed: 2,
+            total_tokens_in: 111,
+            total_tokens_out: 222,
+            total_cost_usd: 33.5,
+            total_agent_calls: 44,
+            plan_costs,
+            completed_tasks,
+            snapshot_fail_streak: 7,
+            fingerprints: Vec::new(),
+        };
+
+        restore_run_state_from_snapshot(&mut state, &snapshot);
+
+        assert_eq!(state.tasks_total, 5);
+        assert_eq!(state.tasks_completed, 8);
+        assert_eq!(state.tasks_failed, 2);
+        assert_eq!(state.total_tokens_in, 111);
+        assert_eq!(state.total_tokens_out, 222);
+        assert_eq!(state.total_cost_usd, 33.5);
+        assert_eq!(state.total_agent_calls, 44);
+        assert_eq!(state.plan_cost("p1"), 12.5);
+        assert_eq!(
+            state.completed_tasks.get("p1").cloned(),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(state.snapshot_fail_streak, 7);
     }
 }
