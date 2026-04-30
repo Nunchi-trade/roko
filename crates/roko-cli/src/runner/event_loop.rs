@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
+use roko_core::agent::ModelSpec;
 use roko_core::{AgentRole, PhaseKind, PlanPhase, TaskCategory, TaskComplexityBand};
 use roko_learn::contextual_bandit::{
     ActionSafetyBounds, BanditContextFeatures, BanditDecisionKind,
@@ -34,7 +35,9 @@ use crate::dispatch::{
     PromptAssembler, ResolvedAgentRuntime, WarmPool, resolve_agent_runtime,
     spawn_agent_result_bridge,
 };
+use crate::knowledge_helpers::{build_knowledge_routing_advice, neuro_prompt_task_category};
 use crate::task_parser::TaskDef;
+use roko_neuro::KnowledgeStore;
 
 use super::agent_events::handle_agent_event;
 use super::agent_stream::{AgentHandle, AgentSpawnConfig};
@@ -1977,6 +1980,26 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             ctx.state.task_agent_calls += 1;
 
             let role = task_def.role.as_deref().unwrap_or("implementer");
+            let role_enum = parse_dispatch_role(role);
+            let task_category = neuro_prompt_task_category(role_enum);
+            let bias_weight = knowledge_bias_weight(ctx.config);
+            let knowledge_candidates = candidate_model_slugs(ctx.config);
+            let knowledge_store = KnowledgeStore::for_workdir(&ctx.config.workdir);
+            let knowledge_advice = build_knowledge_routing_advice(
+                &knowledge_store,
+                &knowledge_candidates,
+                role_enum,
+                task_category.label(),
+            );
+            debug!(
+                plan_id = %plan_id,
+                task = %task_id,
+                role = %role_enum,
+                task_category = %task_category.label(),
+                hints = knowledge_advice.hints.len(),
+                bias_weight = bias_weight,
+                "knowledge store consulted for routing"
+            );
             let gate_feedback = DispatchGateFeedback::from_raw(&previous_gate_output);
             let dispatch_ctx = DispatchContext {
                 plan_id: plan_id.clone(),
@@ -1998,7 +2021,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 PromptAssembler::new(),
                 WarmPool::new(0),
             );
-            let dispatch_plan = match dispatcher.plan(task_def, &dispatch_ctx) {
+            let mut dispatch_plan = match dispatcher.plan(task_def, &dispatch_ctx) {
                 Ok(plan) => plan,
                 Err(err) => {
                     let message = format!("dispatch planning failed: {err}");
@@ -2010,10 +2033,38 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     return;
                 }
             };
+            let baseline_model = dispatch_plan.model.slug.clone();
+            let baseline_score = knowledge_advice.score_for(&baseline_model);
+            let mut selected_source = "dispatcher";
+            if let Some(best_hint) = knowledge_advice
+                .hints
+                .iter()
+                .filter(|hint| hint.model_slug != baseline_model)
+                .max_by(|left, right| {
+                    left.score
+                        .total_cmp(&right.score)
+                        .then_with(|| left.model_slug.cmp(&right.model_slug))
+                })
+            {
+                if best_hint.score + bias_weight > baseline_score {
+                    debug!(
+                        from = %baseline_model,
+                        to = %best_hint.model_slug,
+                        baseline_score,
+                        hint_score = best_hint.score,
+                        bias_weight = bias_weight,
+                        reason = %best_hint.reason,
+                        supporting_entries = best_hint.supporting_entries,
+                        "knowledge store nudged model selection"
+                    );
+                    dispatch_plan.model = ModelSpec::from_slug(best_hint.model_slug.clone());
+                    selected_source = "dispatcher+knowledge";
+                }
+            }
             let requested_model = dispatch_plan.model.slug.clone();
             let prompt_diagnostics = dispatch_plan.prompt.diagnostics.clone();
             ctx.tui
-                .model_selected(plan_id, &task_id, &requested_model, "dispatcher");
+                .model_selected(plan_id, &task_id, &requested_model, selected_source);
             let system_prompt = dispatch_plan.prompt.system_prompt;
             let mut final_prompt = dispatch_plan.prompt.user_prompt;
             debug!(
@@ -2651,6 +2702,64 @@ fn observe_cascade_router(
     );
 
     tui.cascade_router_updated(&router.snapshot_json());
+}
+
+fn parse_dispatch_role(role: &str) -> AgentRole {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "conductor" => AgentRole::Conductor,
+        "strategist" => AgentRole::Strategist,
+        "implementer" => AgentRole::Implementer,
+        "architect" => AgentRole::Architect,
+        "researcher" => AgentRole::Researcher,
+        "auditor" | "reviewer" => AgentRole::Auditor,
+        "quick-reviewer" | "quick_reviewer" => AgentRole::QuickReviewer,
+        "scribe" => AgentRole::Scribe,
+        "critic" => AgentRole::Critic,
+        "auto-fixer" => AgentRole::AutoFixer,
+        "refactorer" => AgentRole::Refactorer,
+        "pre-planner" => AgentRole::PrePlanner,
+        "doc-verifier" => AgentRole::DocVerifier,
+        "integration-tester" => AgentRole::IntegrationTester,
+        "merge-resolver" => AgentRole::MergeResolver,
+        "terminal-validator" => AgentRole::TerminalValidator,
+        "golem-lifecycle-tester" => AgentRole::GolemLifecycleTester,
+        "spec-drift-detector" => AgentRole::SpecDriftDetector,
+        "regression-detector" => AgentRole::RegressionDetector,
+        "performance-sentinel" => AgentRole::PerformanceSentinel,
+        "coverage-tracker" => AgentRole::CoverageTracker,
+        "plan-lifecycle-manager" | "plan-lifecycle-mgr" => AgentRole::PlanLifecycleManager,
+        "cross-system-tester" => AgentRole::CrossSystemTester,
+        "error-diagnoser" => AgentRole::ErrorDiagnoser,
+        "dep-validator" | "dependency-validator" => AgentRole::DependencyValidator,
+        "pattern-extractor" => AgentRole::PatternExtractor,
+        "snapshot-comparator" => AgentRole::SnapshotComparator,
+        "full-loop-validator" => AgentRole::FullLoopValidator,
+        _ => AgentRole::Implementer,
+    }
+}
+
+fn candidate_model_slugs(config: &RunConfig) -> Vec<String> {
+    let mut slugs = if let Some(router) = &config.cascade_router {
+        router.model_slugs().to_vec()
+    } else if let Some(roko_config) = &config.roko_config {
+        roko_config.effective_models().keys().cloned().collect()
+    } else {
+        Vec::new()
+    };
+    slugs.sort();
+    slugs.dedup();
+    slugs
+}
+
+fn knowledge_bias_weight(config: &RunConfig) -> f64 {
+    config
+        .roko_config
+        .as_ref()
+        // Reuse the existing routing latency weight as the knowledge-bias knob.
+        // It already defaults to 0.2 and is user-configurable in roko.toml.
+        .map(|cfg| cfg.routing.weights.default.latency)
+        .unwrap_or(0.2)
+        .clamp(0.0, 1.0)
 }
 
 /// Record bandit feedback for model-selection decisions.
