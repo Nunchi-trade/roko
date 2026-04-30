@@ -18,6 +18,7 @@
 //! forcing an extra allocation.
 
 use async_trait::async_trait;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// An error returned by the low-level HTTP transport.
@@ -226,6 +227,21 @@ impl HttpPoster for ReqwestPoster {
             Err(HttpPostError::http(status.as_u16(), text))
         }
     }
+}
+
+/// Create a shared HTTP poster for the process.
+///
+/// Call this once at startup and clone the returned [`Arc`] wherever HTTP
+/// dispatch is needed.
+#[must_use]
+pub fn shared_http_client() -> Arc<ReqwestPoster> {
+    Arc::new(ReqwestPoster::new())
+}
+
+/// Create a shared HTTP poster from an existing `reqwest::Client`.
+#[must_use]
+pub fn shared_http_client_from(client: reqwest::Client) -> Arc<ReqwestPoster> {
+    Arc::new(ReqwestPoster::with_client(client))
 }
 
 #[cfg(test)]
