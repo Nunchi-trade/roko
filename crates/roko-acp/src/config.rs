@@ -43,8 +43,7 @@ impl AcpConfig {
     /// provided, otherwise from `workdir/roko.toml`.
     pub fn load_roko_config(&self) -> roko_core::config::schema::RokoConfig {
         let loaded = if let Some(path) = &self.config_path {
-            let dir = path.parent().unwrap_or(&self.workdir);
-            roko_core::config::load_config(dir)
+            roko_core::config::load_config_file(path)
         } else {
             roko_core::config::load_config(&self.workdir)
         };
@@ -66,5 +65,38 @@ impl Default for AcpConfig {
             config_path: None,
             log_file: PathBuf::from(".roko/acp.log"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_config_path_loads_that_file_not_parent_roko_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let default_path = dir.path().join("roko.toml");
+        let explicit_path = dir.path().join("local-dev.toml");
+
+        std::fs::write(
+            &default_path,
+            "schema_version = 2\n[project]\nname = \"default\"\n",
+        )
+        .expect("write default config");
+        std::fs::write(
+            &explicit_path,
+            "schema_version = 2\n[project]\nname = \"local-dev\"\n",
+        )
+        .expect("write explicit config");
+
+        let cfg = AcpConfig::new(
+            dir.path(),
+            "local-dev",
+            Some(explicit_path),
+            dir.path().join("acp.log"),
+        )
+        .load_roko_config();
+
+        assert_eq!(cfg.project.name, "local-dev");
     }
 }
