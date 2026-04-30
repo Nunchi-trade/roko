@@ -136,32 +136,46 @@ pub async fn run(
     //
     // Run before any state file is reopened. The validator:
     // 1. Loads `.roko/state/run-state.json` if present.
-    // 2. Verifies every current task's fingerprint matches what the prior
-    //    run recorded — drift is a hard error.
-    // 3. Truncates `episodes.jsonl`, `events.jsonl`, and
+    // 2. Verifies current task fingerprints against the prior snapshot
+    //    unless `--force-resume` is set.
+    // 3. Reports drifted completed tasks so the caller can re-queue
+    //    them instead of aborting the resume.
+    // 4. Truncates `episodes.jsonl`, `events.jsonl`, and
     //    `efficiency.jsonl` after their last validated line (recovers
     //    from partial-append corruption left by a prior crash).
     //
-    // On `ResumeError::TaskMismatch` / `PlanMissing` / `UnsupportedSchema`
-    // the validator returns Err. We surface the failure and abort the
-    // run so the operator can either edit the plan back into a known
-    // state or discard the snapshot.
-    let prior_run_state = {
+    // On `PlanMissing` / `UnsupportedSchema` the validator still
+    // returns Err. We surface the failure and abort the run so the
+    // operator can either edit the plan back into a known state or
+    // discard the snapshot.
+    let resume_report = {
         let mut plan_map: HashMap<String, Vec<TaskDef>> = HashMap::new();
         for plan in &plans {
             plan_map.insert(plan.id.clone(), plan.tasks.tasks.clone());
         }
-        let loaded_run_state = match persist::load_run_state(&paths) {
+        let prior_snapshot = match persist::load_run_state(&paths) {
             Ok(Some(snapshot)) => Some(snapshot),
             Ok(None) => None,
             Err(err) => {
-                warn!(error = %err, "failed to read prior run-state.json; treating as fresh run");
+                warn!(
+                    error = %err,
+                    "failed to read prior run-state.json; continuing without seeded resume state"
+                );
                 None
             }
         };
-        let resume_report = match super::resume::prepare_resume(&paths, &plan_map, &prior_fingerprints) {
+        let prior_fingerprints = prior_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.fingerprints.as_slice())
+            .unwrap_or(&[]);
+        match super::resume::prepare_resume_with_force(
+            &paths,
+            &plan_map,
+            prior_fingerprints,
+            config.force_resume,
+        ) {
             Ok(report) => {
-                if report.resumed {
+                if report.resumed && !config.force_resume {
                     info!(
                         prior_run_id = ?report.prior_run_id,
                         validated_tasks = report.validated_tasks,
@@ -211,10 +225,7 @@ pub async fn run(
                 }
             }
         }
-        loaded_run_state
     };
-
-    let config = &config;
 
     // Build plan ID set for resume validation.
     let plan_ids: Vec<String> = plans.iter().map(|p| p.id.clone()).collect();
@@ -278,19 +289,13 @@ pub async fn run(
         .collect();
 
     if matches!(resume.marker.outcome, ResumeOutcome::Resumed) {
-        if let Some(snapshot) = prior_run_state.as_ref() {
-            // Resume validation is stateless; now seed the live runner with
-            // the durable aggregates from the last saved run-state snapshot.
-            restore_run_state_from_snapshot(&mut state, snapshot);
-            if snapshot.total_cost_usd > 0.0 {
-                debug!(
-                    cost_usd = snapshot.total_cost_usd,
-                    tokens_in = snapshot.total_tokens_in,
-                    tokens_out = snapshot.total_tokens_out,
-                    agent_calls = snapshot.total_agent_calls,
-                    "restored cost tracking from snapshot"
-                );
-            }
+        if let Some(snapshot) = prior_snapshot.as_ref() {
+            restore_state_from_resume_snapshot(
+                &mut state,
+                snapshot,
+                &task_index,
+                &resume_report.drifted_tasks,
+            );
         }
     }
 
@@ -1555,6 +1560,63 @@ fn save_snapshot(
             state.snapshot_failed();
         }
     }
+}
+
+fn restore_state_from_resume_snapshot(
+    state: &mut RunState,
+    snapshot: &persist::RunStateSnapshot,
+    task_index: &HashMap<String, HashMap<String, TaskDef>>,
+    drifted_tasks: &[super::resume::DriftedTask],
+) {
+    state.tasks_failed = snapshot.tasks_failed;
+    state.total_tokens_in = snapshot.total_tokens_in;
+    state.total_tokens_out = snapshot.total_tokens_out;
+    state.total_cost_usd = snapshot.total_cost_usd;
+    state.total_agent_calls = snapshot.total_agent_calls;
+    state.plan_costs = snapshot.plan_costs.clone();
+    state.snapshot_fail_streak = snapshot.snapshot_fail_streak;
+    state.completed_tasks = snapshot.completed_tasks.clone();
+    state.completed_tasks.retain(|plan_id, completed| {
+        let Some(tasks) = task_index.get(plan_id) else {
+            return false;
+        };
+        completed.retain(|task_id| tasks.contains_key(task_id));
+        !completed.is_empty()
+    });
+
+    let mut requeued_count = 0usize;
+    for drifted in drifted_tasks {
+        if let Some(completed) = state.completed_tasks.get_mut(&drifted.plan_id) {
+            let before = completed.len();
+            completed.retain(|task_id| task_id != &drifted.task_id);
+            if completed.len() != before {
+                requeued_count += 1;
+                warn!(
+                    plan = %drifted.plan_id,
+                    task = %drifted.task_id,
+                    "task definition drifted since snapshot — re-queuing"
+                );
+                info!(
+                    plan = %drifted.plan_id,
+                    task = %drifted.task_id,
+                    "re-queued (definition changed)"
+                );
+            }
+        }
+    }
+
+    if requeued_count > 0 {
+        warn!(
+            drifted_count = requeued_count,
+            "detected drifted tasks — completed ones were re-queued"
+        );
+    }
+
+    state.tasks_completed = state
+        .completed_tasks
+        .values()
+        .map(Vec::len)
+        .sum::<usize>();
 }
 
 // ─── Resume ─────────────────────────────────────────────────────────────

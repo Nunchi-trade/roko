@@ -209,6 +209,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             max_tasks,
             dry_run,
             fresh,
+            force_resume,
         } => {
             // ── Mandatory validation: reject malformed plans before execution ──
             // Runs in both normal and `--dry-run` mode.
@@ -407,6 +408,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 max_concurrent_tasks,
                 approval,
                 dangerously_skip_permissions: true,
+                force_resume,
                 mcp_config: None,
                 resume_session: cli.resume.clone(),
                 max_gate_rung: if roko_config.gates.skip_tests {

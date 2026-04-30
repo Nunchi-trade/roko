@@ -555,6 +555,7 @@ fn build_runner_config(
         max_concurrent_tasks,
         approval: false,
         dangerously_skip_permissions: true,
+        force_resume: false,
         mcp_config: cli_config.agent.mcp_config.clone(),
         resume_session: None,
         max_gate_rung: if roko_config.gates.skip_tests { 1 } else { 2 },

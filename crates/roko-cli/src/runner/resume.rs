@@ -7,26 +7,30 @@
 //! would skip "completed" tasks whose contents have changed since they
 //! ran. This module computes a [`TaskDefFingerprint`] for every task in
 //! the current plan set and compares it against the fingerprint stored
-//! in the previous run-state snapshot. Any mismatch is a hard
-//! [`ResumeError::TaskMismatch`].
+//! in the previous run-state snapshot. Any mismatch is reported as a
+//! [`DriftedTask`] so the caller can re-queue the affected task instead
+//! of aborting the entire resume.
 //!
 //! ## Failure mode
 //!
 //! When validation fails the caller should refuse to resume and either
 //! discard the snapshot (clean restart) or alert the operator. The
-//! validator never silently "fixes" the state.
+//! validator never silently "fixes" state; it only reports drift so the
+//! caller can decide whether to re-queue or force-resume.
 //!
 //! ## Recovery integration
 //!
 //! [`prepare_resume`] additionally invokes
-//! [`super::persist::recover_jsonl`] on `episodes.jsonl` and
-//! `events.jsonl` so partial-append corruption from a crashed prior run
-//! is repaired before the new run begins appending to the same files.
+//! [`super::persist::recover_jsonl`] on `episodes.jsonl`,
+//! `events.jsonl`, and `efficiency.jsonl` so partial-append corruption
+//! from a crashed prior run is repaired before the new run begins
+//! appending to the same files.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::info;
 
 use super::persist::{
     JsonlRecovery, PersistPaths, RUN_STATE_SCHEMA_VERSION, RunStateSnapshot, TaskDefFingerprint,
@@ -41,6 +45,9 @@ pub struct ResumeReport {
     pub resumed: bool,
     /// Run id of the resumed snapshot (if any).
     pub prior_run_id: Option<String>,
+    /// Drifted tasks that should be re-queued when resuming.
+    #[serde(default)]
+    pub drifted_tasks: Vec<DriftedTask>,
     /// JSONL recovery outcomes per logged file. Reports only the files
     /// the validator inspected.
     pub recovered_files: Vec<RecoveredFile>,
@@ -56,6 +63,14 @@ pub struct ResumeReport {
 pub struct RecoveredFile {
     pub path: String,
     pub recovery: JsonlRecoveryReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DriftedTask {
+    pub plan_id: String,
+    pub task_id: String,
+    pub old_fingerprint: String,
+    pub new_fingerprint: String,
 }
 
 /// Public-facing snapshot of [`JsonlRecovery`] for serialization.
@@ -104,24 +119,12 @@ pub enum ResumeError {
     /// runner's. Migration is the operator's responsibility.
     #[error("run-state snapshot schema version {found} is newer than runner version {expected}")]
     UnsupportedSchema { expected: u32, found: u32 },
-    /// One or more tasks present in the current plan set have a
-    /// fingerprint different from what the snapshot recorded.
-    #[error("{} task(s) drifted since the last run", mismatches.len())]
-    TaskMismatch { mismatches: Vec<TaskMismatch> },
     /// Plan present in snapshot but missing from the current run.
     #[error("plan `{plan_id}` is in snapshot but not in the current run")]
     PlanMissing { plan_id: String },
     /// Filesystem / parser failure surfacing as anyhow.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TaskMismatch {
-    pub plan_id: String,
-    pub task_id: String,
-    pub expected_fingerprint: String,
-    pub actual_fingerprint: String,
 }
 
 /// Strict resume validator + JSONL recovery driver.
@@ -135,10 +138,21 @@ pub fn prepare_resume(
     plans: &HashMap<String, Vec<TaskDef>>,
     snapshot_fingerprints: &[TaskDefFingerprint],
 ) -> Result<ResumeReport, ResumeError> {
+    prepare_resume_with_force(paths, plans, snapshot_fingerprints, false)
+}
+
+/// Strict resume validator + JSONL recovery driver with optional force-resume.
+pub(crate) fn prepare_resume_with_force(
+    paths: &PersistPaths,
+    plans: &HashMap<String, Vec<TaskDef>>,
+    snapshot_fingerprints: &[TaskDefFingerprint],
+    force_resume: bool,
+) -> Result<ResumeReport, ResumeError> {
     let snapshot = load_run_state(paths)?;
     let mut report = ResumeReport {
         resumed: snapshot.is_some(),
         prior_run_id: snapshot.as_ref().map(|s| s.run_id.clone()),
+        drifted_tasks: Vec::new(),
         recovered_files: Vec::new(),
         validated_tasks: 0,
         cascade_router_json: snapshot
@@ -154,31 +168,37 @@ pub fn prepare_resume(
             });
         }
 
-        // Strict validation against the snapshot fingerprints.
-        let snapshot_index: HashMap<(&str, &str), &TaskDefFingerprint> = snapshot_fingerprints
-            .iter()
-            .map(|fp| ((fp.plan_id.as_str(), fp.task_id.as_str()), fp))
-            .collect();
+        if force_resume {
+            info!(
+                prior_run_id = %prior.run_id,
+                "--force-resume: skipping task drift validation"
+            );
+        } else {
+            // Strict validation against the snapshot fingerprints.
+            let snapshot_index: HashMap<(&str, &str), &TaskDefFingerprint> = snapshot_fingerprints
+                .iter()
+                .map(|fp| ((fp.plan_id.as_str(), fp.task_id.as_str()), fp))
+                .collect();
 
-        let mut mismatches = Vec::new();
-        for (plan_id, tasks) in plans {
-            for task in tasks {
-                let actual = TaskDefFingerprint::from_task(task, plan_id);
-                let key = (plan_id.as_str(), task.id.as_str());
-                let Some(expected) = snapshot_index.get(&key) else {
-                    // Snapshot does not record this task — it's new.
-                    // That's allowed.
-                    continue;
-                };
-                if expected.fingerprint != actual.fingerprint {
-                    mismatches.push(TaskMismatch {
-                        plan_id: plan_id.clone(),
-                        task_id: task.id.clone(),
-                        expected_fingerprint: expected.fingerprint.clone(),
-                        actual_fingerprint: actual.fingerprint,
-                    });
+            for (plan_id, tasks) in plans {
+                for task in tasks {
+                    let actual = TaskDefFingerprint::from_task(task, plan_id);
+                    let key = (plan_id.as_str(), task.id.as_str());
+                    let Some(expected) = snapshot_index.get(&key) else {
+                        // Snapshot does not record this task — it's new.
+                        // That's allowed.
+                        continue;
+                    };
+                    if expected.fingerprint != actual.fingerprint {
+                        report.drifted_tasks.push(DriftedTask {
+                            plan_id: plan_id.clone(),
+                            task_id: task.id.clone(),
+                            old_fingerprint: expected.fingerprint.clone(),
+                            new_fingerprint: actual.fingerprint,
+                        });
+                    }
+                    report.validated_tasks += 1;
                 }
-                report.validated_tasks += 1;
             }
         }
 
@@ -191,10 +211,6 @@ pub fn prepare_resume(
                     plan_id: fp.plan_id.clone(),
                 });
             }
-        }
-
-        if !mismatches.is_empty() {
-            return Err(ResumeError::TaskMismatch { mismatches });
         }
     }
 
@@ -310,10 +326,11 @@ mod tests {
         assert!(!report.resumed);
         assert_eq!(report.validated_tasks, 0);
         assert!(report.cascade_router_json.is_none());
+        assert!(report.drifted_tasks.is_empty());
         // All three logs should be reported as Clean.
         assert_eq!(report.recovered_files.len(), 3);
         for f in &report.recovered_files {
-            matches!(f.recovery, JsonlRecoveryReport::Clean { lines: 0 });
+            assert!(matches!(f.recovery, JsonlRecoveryReport::Clean { lines: 0 }));
         }
     }
 
@@ -331,10 +348,11 @@ mod tests {
         assert!(report.resumed);
         assert_eq!(report.prior_run_id.as_deref(), Some("prior"));
         assert_eq!(report.validated_tasks, 1);
+        assert!(report.drifted_tasks.is_empty());
     }
 
     #[test]
-    fn changed_task_definition_is_a_strict_failure() {
+    fn changed_task_definition_is_reported_for_requeue() {
         let dir = tempdir().unwrap();
         let paths = paths_for(dir.path());
         let snap = snapshot_with_run_id("prior");
@@ -342,16 +360,15 @@ mod tests {
         let original = task("a", "Alpha original");
         let changed = task("a", "Alpha mutated");
         let fp_original = TaskDefFingerprint::from_task(&original, "p1");
+        let expected_fingerprint = fp_original.fingerprint.clone();
         let mut plans = HashMap::new();
         plans.insert("p1".to_string(), vec![changed]);
-        let err = prepare_resume(&paths, &plans, &[fp_original]).unwrap_err();
-        match err {
-            ResumeError::TaskMismatch { mismatches } => {
-                assert_eq!(mismatches.len(), 1);
-                assert_eq!(mismatches[0].task_id, "a");
-            }
-            other => panic!("expected TaskMismatch, got {other:?}"),
-        }
+        let report = prepare_resume(&paths, &plans, &[fp_original]).unwrap();
+        assert!(report.resumed);
+        assert_eq!(report.drifted_tasks.len(), 1);
+        assert_eq!(report.drifted_tasks[0].plan_id, "p1");
+        assert_eq!(report.drifted_tasks[0].task_id, "a");
+        assert_eq!(report.drifted_tasks[0].old_fingerprint, expected_fingerprint);
     }
 
     #[test]
@@ -433,5 +450,22 @@ mod tests {
         }
         let content = fs::read_to_string(&paths.episodes_jsonl).unwrap();
         assert_eq!(content, valid);
+    }
+
+    #[test]
+    fn force_resume_skips_drift_detection() {
+        let dir = tempdir().unwrap();
+        let paths = paths_for(dir.path());
+        let snap = snapshot_with_run_id("prior");
+        super::super::persist::save_run_state(&paths, &snap).unwrap();
+        let original = task("a", "Alpha original");
+        let changed = task("a", "Alpha mutated");
+        let fp_original = TaskDefFingerprint::from_task(&original, "p1");
+        let mut plans = HashMap::new();
+        plans.insert("p1".to_string(), vec![changed]);
+        let report = prepare_resume_with_force(&paths, &plans, &[fp_original], true).unwrap();
+        assert!(report.resumed);
+        assert!(report.drifted_tasks.is_empty());
+        assert_eq!(report.validated_tasks, 0);
     }
 }

@@ -1243,6 +1243,8 @@ pub struct RunConfig {
     pub approval: bool,
     /// Whether to dangerously skip permissions in the agent.
     pub dangerously_skip_permissions: bool,
+    /// When true, resume skips task-drift validation and reuses the snapshot state as-is.
+    pub force_resume: bool,
     /// Optional MCP config path.
     pub mcp_config: Option<PathBuf>,
     /// Optional session ID to resume from.
@@ -1342,6 +1344,7 @@ impl RunConfig {
             max_concurrent_tasks,
             approval: false,
             dangerously_skip_permissions: true,
+            force_resume: false,
             mcp_config: None,
             resume_session: None,
             max_gate_rung: if roko_config.gates.skip_tests {
@@ -1389,6 +1392,7 @@ impl Default for RunConfig {
             max_concurrent_tasks: 4,
             approval: false,
             dangerously_skip_permissions: true,
+            force_resume: false,
             mcp_config: None,
             resume_session: None,
             max_gate_rung: 2,
@@ -1426,6 +1430,7 @@ impl std::fmt::Debug for RunConfig {
             .field("max_gate_rung", &self.max_gate_rung)
             .field("max_plan_usd", &self.max_plan_usd)
             .field("max_turn_usd", &self.max_turn_usd)
+            .field("force_resume", &self.force_resume)
             .field(
                 "extension_chain",
                 &self.extension_chain.as_ref().map(|_| ".."),

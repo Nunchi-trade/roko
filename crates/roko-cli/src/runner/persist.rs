@@ -131,7 +131,7 @@ pub struct RunStateSnapshot {
 /// Hash inputs are deterministic and span the fields a plan author can mutate
 /// between runs (id, title, role, tier, dependencies, verify steps, gate
 /// budgets). Mismatch on resume is a hard failure: see
-/// [`super::resume::ResumeError::TaskMismatch`].
+/// [`super::resume::ResumeReport::drifted_tasks`] for the re-queue signal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskDefFingerprint {
     /// Plan identifier.

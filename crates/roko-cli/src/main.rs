@@ -1162,6 +1162,9 @@ Examples:
         /// Archive old run state and start from scratch (ignores any existing executor.json).
         #[arg(long)]
         fresh: bool,
+        /// Re-queue drifted tasks instead of aborting when resuming from a snapshot.
+        #[arg(long)]
+        force_resume: bool,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -2334,6 +2337,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 max_tasks: 0,
                 dry_run: false,
                 fresh: false,
+                force_resume: false,
             };
             commands::plan::cmd_plan(cli, plan_cmd).await
         }
@@ -3249,6 +3253,21 @@ mod tests {
             cli.command,
             Some(Command::Plan {
                 cmd: PlanCmd::Run { fresh: true, .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_plan_force_resume_flag() {
+        let cli =
+            Cli::try_parse_from(["roko", "plan", "run", "plans", "--force-resume"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Plan {
+                cmd: PlanCmd::Run {
+                    force_resume: true,
+                    ..
+                }
             })
         ));
     }

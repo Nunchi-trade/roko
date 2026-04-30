@@ -136,7 +136,7 @@ fn full_resume_cycle_validates_fingerprints_and_recovers_jsonl() {
 }
 
 #[test]
-fn drifted_task_definition_aborts_resume_with_typed_error() {
+fn drifted_task_definition_is_reported_for_requeue() {
     let dir = tempdir().expect("tempdir");
     let paths = PersistPaths::from_workdir(dir.path()).expect("paths");
 
@@ -153,19 +153,15 @@ fn drifted_task_definition_aborts_resume_with_typed_error() {
     let mut plans = HashMap::new();
     plans.insert("p1".to_string(), vec![task_a_drifted]);
 
-    let err = prepare_resume(&paths, &plans, &[fp_a_original.clone()]).unwrap_err();
-    match err {
-        ResumeError::TaskMismatch { mismatches } => {
-            assert_eq!(mismatches.len(), 1);
-            assert_eq!(mismatches[0].plan_id, "p1");
-            assert_eq!(mismatches[0].task_id, "a");
-            assert_ne!(
-                mismatches[0].expected_fingerprint, mismatches[0].actual_fingerprint,
-                "fingerprints should disagree on drift",
-            );
-        }
-        other => panic!("expected TaskMismatch, got {other:?}"),
-    }
+    let report = prepare_resume(&paths, &plans, &[fp_a_original.clone()]).unwrap();
+    assert!(report.resumed);
+    assert_eq!(report.drifted_tasks.len(), 1);
+    assert_eq!(report.drifted_tasks[0].plan_id, "p1");
+    assert_eq!(report.drifted_tasks[0].task_id, "a");
+    assert_ne!(
+        report.drifted_tasks[0].old_fingerprint, report.drifted_tasks[0].new_fingerprint,
+        "fingerprints should disagree on drift",
+    );
 }
 
 #[test]
