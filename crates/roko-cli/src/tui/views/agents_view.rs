@@ -1248,20 +1248,4 @@ fn agent_status_rank(status: &str) -> u8 {
     }
 }
 
-/// Shorten a model slug for compact display.
-fn shorten_model(slug: &str) -> String {
-    slug.replace("claude-", "")
-        .replace("gpt-", "")
-        .replace("-codex", "c")
-        .replace("-mini", "m")
-        .replace("sonnet-", "s")
-        .replace("opus-", "o")
-        .replace("haiku-", "h")
-}
-
-fn display_model(model: Option<&str>) -> String {
-    match model {
-        None | Some("") | Some("-") | Some("unknown-model") => "unknown".to_string(),
-        Some(m) => shorten_model(m),
-    }
-}
+use crate::tui::display_utils::{display_model, shorten_model};

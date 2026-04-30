@@ -43,6 +43,10 @@ pub struct RewardWeights {
     /// Relative weight for low latency.
     #[serde(default = "default_reward_weight_latency")]
     pub latency: f64,
+    /// Relative weight for knowledge-informed routing bias.
+    /// Falls back to `latency` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_bias: Option<f64>,
 }
 
 const fn default_reward_weight_quality() -> f64 {
@@ -63,6 +67,7 @@ impl Default for RewardWeights {
             quality: default_reward_weight_quality(),
             cost: default_reward_weight_cost(),
             latency: default_reward_weight_latency(),
+            knowledge_bias: None,
         }
     }
 }

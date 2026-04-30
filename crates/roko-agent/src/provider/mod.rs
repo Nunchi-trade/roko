@@ -183,7 +183,9 @@ pub fn create_agent_for_model(
             // through Claude CLI.
             let kind = match cmd_kind {
                 Some(ck) if ck == resolved.provider_kind => ck,
-                Some(ck) if mp.is_none() && resolved.provider_kind == ProviderKind::OpenAiCompat => {
+                Some(ck)
+                    if mp.is_none() && resolved.provider_kind == ProviderKind::OpenAiCompat =>
+                {
                     // Model slug wasn't recognised by from_model() — the
                     // OpenAiCompat kind is just the catch-all default.
                     // Check if an explicit provider for the model's kind

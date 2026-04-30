@@ -105,12 +105,12 @@ pub use chat_types::{ChatRequest, RequestOptions, ResponseFormat, ToolChoice};
 pub use claude_cli_agent::ClaudeCliAgent;
 pub use composition::{AgentComposition, CompositeAgent, MergeStrategy, SkillSelector};
 pub use exec::ExecAgent;
-pub use http::{shared_http_client, shared_http_client_from, HttpPoster, ReqwestPoster};
 pub use gateway_events::{AggregateStats, GatewayEvent, GatewayEventWriter, GatewayProjection};
 pub use gemini::{
     GeminiCompatAgent, GeminiEmbedAgent, GeminiMetadata, GeminiNativeAgent, GenerateContentRequest,
     GenerateContentResponse, GroundingMetadata,
 };
+pub use http::{HttpPoster, ReqwestPoster, shared_http_client, shared_http_client_from};
 pub use introspection::{AgentIdentity, Intervention, MetacognitiveMonitor, Turn};
 pub use lifecycle::*;
 pub use metamorphosis::{MorphError, MorphableAgent, RoleProfile};

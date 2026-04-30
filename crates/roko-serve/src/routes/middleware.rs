@@ -491,6 +491,10 @@ fn is_scrubbable_content_type(response: &Response) -> bool {
         return false;
     };
     let ct_lower = ct_str.to_ascii_lowercase();
+    // SSE responses are infinite streams — buffering them would block forever.
+    if ct_lower.contains("text/event-stream") {
+        return false;
+    }
     ct_lower.contains("json")
         || ct_lower.contains("text/")
         || ct_lower.contains("javascript")
@@ -543,11 +547,11 @@ pub async fn scrub_secrets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
+    use axum::http::StatusCode;
     use axum::http::header::AUTHORIZATION;
     use axum::http::header::CONTENT_TYPE;
-    use axum::http::StatusCode;
     use axum::routing::{get, post};
-    use axum::Router;
     use roko_core::config::{RokoConfig, ServeAuthConfig};
     use serde_json::Value;
     use tempfile::tempdir;
@@ -934,6 +938,15 @@ mod tests {
             .header(CONTENT_TYPE, "application/octet-stream")
             .body(Body::empty())
             .expect("invariant: response builder constructs octet-stream response");
+        assert!(!is_scrubbable_content_type(&resp));
+    }
+
+    #[test]
+    fn is_scrubbable_rejects_event_stream() {
+        let resp = Response::builder()
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::empty())
+            .expect("invariant: response builder constructs sse response");
         assert!(!is_scrubbable_content_type(&resp));
     }
 

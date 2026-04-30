@@ -112,6 +112,8 @@ pub struct RokoConfig {
     pub chain: ChainConfig,
     #[serde(default)]
     pub relay: RelayConfig,
+    #[serde(default)]
+    pub runner: CoreRunnerConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentDefinition>,
 }
@@ -159,6 +161,7 @@ impl Default for RokoConfig {
             oneirography: OneirographyConfig::default(),
             chain: ChainConfig::default(),
             relay: RelayConfig::default(),
+            runner: CoreRunnerConfig::default(),
             agents: Vec::new(),
         }
     }
@@ -1383,6 +1386,57 @@ fn run_resolve_api_key_child(test_name: &str, api_key_env: &str, expected: Optio
 }
 
 // ---- tests ---------------------------------------------------------------
+
+// ---- CoreRunnerConfig ----------------------------------------------------
+
+/// Plan-level runner configuration shared between `roko-core` and
+/// `roko-cli` so that both the CLI config layer and direct `RokoConfig`
+/// consumers (e.g. `RunConfig::from_roko_config`) see the same schema.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct CoreRunnerConfig {
+    /// Maximum number of tasks executing concurrently within a plan.
+    /// Defaults to 4. A value of 1 preserves sequential execution.
+    #[serde(default = "CoreRunnerConfig::default_max_concurrent_tasks")]
+    pub max_concurrent_tasks: Option<usize>,
+    /// Maximum number of plans executing concurrently.
+    #[serde(default)]
+    pub max_concurrent_plans: Option<usize>,
+    /// Wall-clock timeout for the entire plan execution, in seconds.
+    /// Defaults to 3600 (1 hour).
+    #[serde(default = "CoreRunnerConfig::default_plan_timeout_secs")]
+    pub plan_timeout_secs: u64,
+    /// When `true`, agents run with `--dangerously-skip-permissions`.
+    /// Defaults to `true` for backwards compatibility. Set to `false` in
+    /// production to require explicit tool approval.
+    #[serde(default = "CoreRunnerConfig::default_dangerously_skip_permissions")]
+    pub dangerously_skip_permissions: bool,
+}
+
+impl CoreRunnerConfig {
+    const fn default_max_concurrent_tasks() -> Option<usize> {
+        None
+    }
+
+    /// Default wall-clock timeout for plan execution: 1 hour.
+    pub const fn default_plan_timeout_secs() -> u64 {
+        3_600
+    }
+
+    const fn default_dangerously_skip_permissions() -> bool {
+        true
+    }
+}
+
+impl Default for CoreRunnerConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_tasks: None,
+            max_concurrent_plans: None,
+            plan_timeout_secs: Self::default_plan_timeout_secs(),
+            dangerously_skip_permissions: Self::default_dangerously_skip_permissions(),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

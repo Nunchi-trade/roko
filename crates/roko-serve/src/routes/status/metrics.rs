@@ -514,9 +514,11 @@ fn build_model_efficiency_response(
                 .sum::<u64>()
         })
         .unwrap_or(0);
-    let current_stage = snapshot
-        .as_ref()
-        .map(|_| cascade_stage_for_observations(total_observations).label().to_string());
+    let current_stage = snapshot.as_ref().map(|_| {
+        cascade_stage_for_observations(total_observations)
+            .label()
+            .to_string()
+    });
 
     let mut models: BTreeMap<String, ModelEfficiencyAggregate> = BTreeMap::new();
     if let Some(snapshot) = &snapshot {
@@ -554,7 +556,10 @@ fn build_model_efficiency_response(
             let success_rate = if aggregate.total_episodes == 0 {
                 Value::Null
             } else {
-                json!(ratio(aggregate.successful_episodes, aggregate.total_episodes))
+                json!(ratio(
+                    aggregate.successful_episodes,
+                    aggregate.total_episodes
+                ))
             };
             json!({
                 "model": model,
@@ -979,7 +984,9 @@ fn build_cfactor_metrics_response(
         events.iter().filter(|event| event.cost_usd == 0.0).count(),
     );
     let per_fleet = (!events.is_empty()).then_some(fleet);
-    let sub_metrics = composite.as_ref().map(|composite| composite.components.clone());
+    let sub_metrics = composite
+        .as_ref()
+        .map(|composite| composite.components.clone());
 
     let response = CFactorMetricsResponse {
         source: CFactorMetricsSource {
@@ -1264,11 +1271,8 @@ mod tests {
             )]),
         });
 
-        let response = build_model_efficiency_response(
-            Path::new("/tmp/cascade-router.json"),
-            snapshot,
-            &[],
-        );
+        let response =
+            build_model_efficiency_response(Path::new("/tmp/cascade-router.json"), snapshot, &[]);
 
         assert_eq!(response["data_quality"]["has_real_data"], false);
         assert_eq!(response["data_quality"]["entry_count"], 0);
@@ -1285,11 +1289,8 @@ mod tests {
 
     #[test]
     fn model_efficiency_reports_null_stage_without_snapshot() {
-        let response = build_model_efficiency_response(
-            Path::new("/tmp/cascade-router.json"),
-            None,
-            &[],
-        );
+        let response =
+            build_model_efficiency_response(Path::new("/tmp/cascade-router.json"), None, &[]);
 
         assert!(response["current_stage"].is_null());
         assert_eq!(response["data_quality"]["has_real_data"], false);

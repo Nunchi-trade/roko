@@ -841,20 +841,7 @@ fn set_toml_path(root: &mut toml::Value, key: &str, val: toml::Value) -> Result<
     Err("empty key path".to_string())
 }
 
-/// Truncate a string to `max` chars, appending `...` if needed.
-pub fn truncate(s: &str, max: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max {
-        return s.to_string();
-    }
-    if max <= 3 {
-        return ".".repeat(max);
-    }
-
-    let keep = max - 3;
-    let truncated = s.chars().take(keep).collect::<String>();
-    format!("{truncated}...")
-}
+pub use crate::tui::display_utils::truncate;
 
 /// Format a token count with K/M suffix.
 #[allow(clippy::cast_precision_loss)]

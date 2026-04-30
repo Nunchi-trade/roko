@@ -329,6 +329,10 @@ pub struct ChatAgentSession {
     pub settings_json: Option<PathBuf>,
     /// Per-turn timeout.
     pub timeout: Option<Duration>,
+    /// Base URL for the model's provider API (e.g. `https://api.anthropic.com`).
+    pub provider_base_url: Option<String>,
+    /// Env var name for the provider's API key (e.g. `ANTHROPIC_API_KEY`).
+    pub provider_api_key_env: Option<String>,
 }
 
 impl ChatAgentSession {
@@ -351,6 +355,12 @@ impl ChatAgentSession {
             (config.agent.timeout_ms > 0).then(|| Duration::from_millis(config.agent.timeout_ms));
         let model = model_selection.effective_model_key.clone();
 
+        let provider_cfg = config
+            .providers
+            .get(&model_selection.provider_key);
+        let provider_base_url = provider_cfg.and_then(|p| p.base_url.clone());
+        let provider_api_key_env = provider_cfg.and_then(|p| p.api_key_env.clone());
+
         Ok(Self {
             workdir,
             model,
@@ -364,6 +374,8 @@ impl ChatAgentSession {
             http_client: shared_http_client(),
             settings_json: None,
             timeout,
+            provider_base_url,
+            provider_api_key_env,
         })
     }
 
@@ -407,6 +419,14 @@ impl ChatAgentSession {
     /// returns a typed [`SessionError::ApiKeyMissing`] when the variable is
     /// absent or empty.
     fn resolve_api_key(&self) -> std::result::Result<String, SessionError> {
+        // Check provider-specific env var from config first, then fall back to convention.
+        if let Some(env_name) = &self.provider_api_key_env {
+            if let Ok(key) = std::env::var(env_name) {
+                if !key.trim().is_empty() {
+                    return Ok(key);
+                }
+            }
+        }
         let env_var = self.api_key_env_var();
         let key = std::env::var(&env_var).unwrap_or_default();
         if key.trim().is_empty() {
@@ -478,14 +498,6 @@ impl ChatAgentSession {
     /// Returns [`SessionError::ApiKeyMissing`] when no key is found,
     /// [`SessionError::AuthError`] on 401/403, [`SessionError::RateLimited`]
     /// on 429, and [`SessionError::NetworkError`] for other HTTP failures.
-    ///
-    /// # Implementation status
-    ///
-    /// The request construction and history management are complete.
-    /// The actual HTTP dispatch (`POST` call + response parsing) is marked
-    /// with `todo!()` so the types flow correctly through the whole path and
-    /// a future implementer only needs to fill in the network call.
-    #[allow(unreachable_code)]
     pub async fn send_turn_api(
         &mut self,
         prompt: &str,
@@ -540,119 +552,67 @@ impl ChatAgentSession {
             == ProviderKind::AnthropicApi.label()
         {
             // ── Anthropic Messages API ──────────────────────────────────────
-            //
-            // POST https://api.anthropic.com/v1/messages
-            // Headers:
-            //   x-api-key: <api_key>
-            //   anthropic-version: 2023-06-01
-            //   content-type: application/json
-            //
-            // Body:
-            //   { "model": "<slug>", "max_tokens": 4096, "messages": [...] }
-
             let request_body = serde_json::json!({
                 "model": model_slug,
                 "max_tokens": 4096_u32,
                 "messages": messages,
             });
-
-            let url = "https://api.anthropic.com/v1/messages";
-            tracing::debug!(
-                provider = %provider_kind,
-                model = %model_slug,
-                url = %url,
-                "send_turn_api: dispatching Anthropic Messages API request"
-            );
-
-            // TODO(R3_E01-followup): Replace this todo!() with the actual
-            // reqwest call.  The http_client, api_key, url, and request_body
-            // are all in scope and correctly typed.
-            //
-            // Sketch:
-            //   let resp = self.http_client
-            //       .post(url)
-            //       .header("x-api-key", &api_key)
-            //       .header("anthropic-version", "2023-06-01")
-            //       .json(&request_body)
-            //       .send()
-            //       .await
-            //       .map_err(|e| SessionError::NetworkError {
-            //           provider: provider_kind.clone(),
-            //           message: e.to_string(),
-            //       })?;
-            //   if !resp.status().is_success() {
-            //       let status = resp.status().as_u16();
-            //       let body = resp.text().await.unwrap_or_default();
-            //       return Err(self.classify_http_error(status, &body));
-            //   }
-            //   let body_text = resp.text().await.map_err(|e| SessionError::NetworkError {
-            //       provider: provider_kind.clone(),
-            //       message: e.to_string(),
-            //   })?;
-            //   // Parse body_text as MessagesResponse and extract text + usage.
-            let _ = (&api_key, &request_body); // suppress unused warnings until TODO filled
-            todo!(
-                "Anthropic Messages API HTTP dispatch: \
-                 POST {url} with x-api-key header, \
-                 parse response JSON for content[].text and usage.input_tokens/output_tokens"
-            )
+            let base = self
+                .provider_base_url
+                .as_deref()
+                .unwrap_or("https://api.anthropic.com");
+            let url = format!("{base}/v1/messages");
+            tracing::debug!(provider = %provider_kind, model = %model_slug, url = %url,
+                "send_turn_api: Anthropic Messages API");
+            let resp = self.http_client.post(&url)
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&request_body)
+                .send().await
+                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: e.to_string() })?;
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(self.classify_http_error(status, &body));
+            }
+            let body_text = resp.text().await
+                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: e.to_string() })?;
+            let body_json: serde_json::Value = serde_json::from_str(&body_text)
+                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: format!("invalid JSON: {e}") })?;
+            let text = body_json.pointer("/content").and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|b| b.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join(""))
+                .unwrap_or_default();
+            let in_tok = body_json.pointer("/usage/input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let out_tok = body_json.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            (text, in_tok, out_tok)
         } else {
             // ── OpenAI-compatible providers ─────────────────────────────────
-            //
-            // POST <base_url>/chat/completions
-            // Headers:
-            //   Authorization: Bearer <api_key>
-            //   content-type: application/json
-            //
-            // Body:
-            //   { "model": "<slug>", "messages": [...] }
-
-            // The base URL is provider-specific.  We use a well-known default
-            // and expect a future commit to look it up from roko.toml.
-            let base_url = "https://api.openai.com/v1";
+            let base_url = self.provider_base_url.as_deref().unwrap_or("https://api.openai.com/v1");
             let url = format!("{base_url}/chat/completions");
-
             let request_body = serde_json::json!({
                 "model": model_slug,
                 "messages": messages,
             });
-
-            tracing::debug!(
-                provider = %provider_kind,
-                model = %model_slug,
-                url = %url,
-                "send_turn_api: dispatching OpenAI-compat request"
-            );
-
-            // TODO(R3_E01-followup): Replace this todo!() with the actual
-            // reqwest call.
-            //
-            // Sketch:
-            //   let resp = self.http_client
-            //       .post(&url)
-            //       .bearer_auth(&api_key)
-            //       .json(&request_body)
-            //       .send()
-            //       .await
-            //       .map_err(|e| SessionError::NetworkError {
-            //           provider: provider_kind.clone(),
-            //           message: e.to_string(),
-            //       })?;
-            //   if !resp.status().is_success() {
-            //       let status = resp.status().as_u16();
-            //       let body = resp.text().await.unwrap_or_default();
-            //       return Err(self.classify_http_error(status, &body));
-            //   }
-            //   let body_text = resp.text().await.map_err(|e| ...)?;
-            //   // Parse body_text: extract choices[0].message.content and
-            //   // usage.prompt_tokens / usage.completion_tokens.
-            let _ = (&api_key, &request_body); // suppress unused warnings until TODO filled
-            todo!(
-                "OpenAI-compat HTTP dispatch: \
-                 POST {url} with Bearer auth, \
-                 parse response JSON for choices[0].message.content \
-                 and usage.prompt_tokens/completion_tokens"
-            )
+            tracing::debug!(provider = %provider_kind, model = %model_slug, url = %url,
+                "send_turn_api: OpenAI-compat");
+            let resp = self.http_client.post(&url)
+                .bearer_auth(&api_key)
+                .json(&request_body)
+                .send().await
+                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: e.to_string() })?;
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(self.classify_http_error(status, &body));
+            }
+            let body_text = resp.text().await
+                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: e.to_string() })?;
+            let body_json: serde_json::Value = serde_json::from_str(&body_text)
+                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: format!("invalid JSON: {e}") })?;
+            let text = body_json.pointer("/choices/0/message/content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let in_tok = body_json.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let out_tok = body_json.pointer("/usage/completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            (text, in_tok, out_tok)
         };
 
         // Step 5 — Push the assistant reply into history.
@@ -1012,6 +972,8 @@ impl ChatAgentSession {
             http_client: reqwest::Client::new(),
             settings_json: self.settings_json.clone(),
             timeout: self.timeout,
+            provider_base_url: self.provider_base_url.clone(),
+            provider_api_key_env: self.provider_api_key_env.clone(),
         }
     }
 }
@@ -1073,8 +1035,35 @@ async fn send_turn_streaming_with_program(
     program: &Path,
 ) -> std::result::Result<TurnResult, SessionError> {
     if !session.is_cli_provider() {
+        // Non-CLI providers: dispatch via send_turn_api() and emit synthetic
+        // streaming events so the TUI event loop gets the same shape of data.
+        let result = session.send_turn_api(prompt).await?;
+        let _ = tx
+            .send(AgentRuntimeEvent::MessageDelta {
+                text: result.text.clone(),
+            })
+            .await;
+        let _ = tx
+            .send(AgentRuntimeEvent::TokenUsage {
+                input_tokens: result.input_tokens,
+                output_tokens: result.output_tokens,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            })
+            .await;
+        let _ = tx
+            .send(AgentRuntimeEvent::TurnCompleted {
+                session_id: result.session_id.clone(),
+                total_cost_usd: None,
+                num_turns: Some(1),
+                is_error: false,
+            })
+            .await;
+        let _ = tx
+            .send(AgentRuntimeEvent::Exited { exit_code: None })
+            .await;
         drop(tx);
-        return Err(session.api_provider_not_implemented_error());
+        return Ok(result);
     }
 
     let started = Instant::now();
@@ -1758,6 +1747,8 @@ mod tests {
             http_client: reqwest::Client::new(),
             settings_json: None,
             timeout: Some(Duration::from_secs(30)),
+            provider_base_url: None,
+            provider_api_key_env: None,
         }
     }
 
@@ -1777,6 +1768,8 @@ mod tests {
             http_client: reqwest::Client::new(),
             settings_json: None,
             timeout: Some(Duration::from_secs(5)),
+            provider_base_url: None,
+            provider_api_key_env: None,
         }
     }
 
@@ -1840,14 +1833,9 @@ mod tests {
         session.model = "claude-sonnet-4-6".to_string();
 
         // Make sure the key is absent so we get a clean ApiKeyMissing error.
-        // (If ANTHROPIC_API_KEY happens to be set in the CI environment the
-        // todo!() will panic — that's intentional: it means the HTTP call is
-        // reachable, which is the correct next step.)
         let env_var = "ANTHROPIC_API_KEY";
         if std::env::var(env_var).is_ok() {
-            // Key present: we can only assert the path reaches send_turn_api.
-            // The todo!() will fire; mark the test skipped via early return.
-            return;
+            return; // key present — would attempt real HTTP call; skip.
         }
 
         let error = session.send_turn("hello").await.unwrap_err();
@@ -1882,7 +1870,7 @@ mod tests {
 
         let env_var = "OPENAI_COMPAT_API_KEY";
         if std::env::var(env_var).is_ok() {
-            return; // key present — todo!() would fire; skip.
+            return; // key present — would attempt real HTTP call; skip.
         }
 
         let error = session.send_turn_oneshot("hello").await.unwrap_err();
@@ -1996,7 +1984,7 @@ mod tests {
 
         let var = session.api_key_env_var();
         if std::env::var(&var).is_ok() {
-            return; // key present — skip to avoid hitting todo!()
+            return; // key present — would attempt real HTTP call; skip.
         }
 
         let err = session.send_turn_api("first message").await.unwrap_err();

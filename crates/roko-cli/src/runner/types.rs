@@ -1331,7 +1331,11 @@ impl RunConfig {
                 cfg
             }),
         ));
-        let max_concurrent_tasks = load_runner_max_concurrent_tasks(&workdir).unwrap_or(4).max(1);
+        let max_concurrent_tasks = roko_config
+            .runner
+            .max_concurrent_tasks
+            .unwrap_or(4)
+            .max(1);
 
         Self {
             workdir,
@@ -1339,11 +1343,11 @@ impl RunConfig {
             model,
             cli_model_override: None,
             timeout_secs: roko_config.agent.timeout_ms.unwrap_or(600_000) / 1000,
-            plan_timeout_secs: RunnerConfig::default_plan_timeout_secs(),
+            plan_timeout_secs: roko_config.runner.plan_timeout_secs,
             max_retries: 2,
             max_concurrent_tasks,
             approval: false,
-            dangerously_skip_permissions: true,
+            dangerously_skip_permissions: roko_config.runner.dangerously_skip_permissions,
             force_resume: false,
             mcp_config: None,
             resume_session: None,
@@ -1387,7 +1391,7 @@ impl Default for RunConfig {
             model: "claude-sonnet-4-6".to_string(),
             cli_model_override: None,
             timeout_secs: 600,
-            plan_timeout_secs: RunnerConfig::default_plan_timeout_secs(),
+            plan_timeout_secs: 3_600,
             max_retries: 5,
             max_concurrent_tasks: 4,
             approval: false,
@@ -1447,18 +1451,6 @@ impl std::fmt::Debug for RunConfig {
             .field("bandit_policy", &self.bandit_policy.as_ref().map(|_| ".."))
             .finish()
     }
-}
-
-/// Load `runner.max_concurrent_tasks` from `roko.toml` if present.
-pub(crate) fn load_runner_max_concurrent_tasks(workdir: &Path) -> Option<usize> {
-    let path = workdir.join("roko.toml");
-    let text = std::fs::read_to_string(&path).ok()?;
-    let value: toml::Value = toml::from_str(&text).ok()?;
-    let tasks = value
-        .get("runner")?
-        .get("max_concurrent_tasks")?
-        .as_integer()?;
-    (tasks >= 0).then_some((tasks as usize).max(1))
 }
 
 #[cfg(test)]

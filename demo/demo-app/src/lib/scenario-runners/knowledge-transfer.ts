@@ -139,6 +139,6 @@ export const knowledgeTransfer: Scenario = {
       customDesc: 'Shows efficiency comparison — cost, turns, and time savings from knowledge transfer.',
     });
 
-    timeline.setActive(5);
+    timeline.markAllComplete();
   },
 };

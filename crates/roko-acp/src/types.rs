@@ -174,8 +174,8 @@ pub struct InitializeResult {
     /// Capabilities supported by the agent.
     #[serde(default)]
     pub agent_capabilities: AgentCapabilities,
-    /// Supported authentication methods.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Supported authentication methods (always serialized per ACP spec).
+    #[serde(default)]
     pub auth_methods: Vec<serde_json::Value>,
     /// Agent identity metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,8 +371,15 @@ pub enum ContentBlock {
     Diff {
         /// Path the diff applies to.
         path: String,
+        /// Original text before the change (for inline diff rendering).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_text: Option<String>,
+        /// New text after the change (for inline diff rendering).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_text: Option<String>,
         /// Unified diff payload.
-        diff: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<String>,
     },
 }
 
@@ -418,6 +425,9 @@ pub enum SessionUpdate {
         /// Optional rendered tool content.
         #[serde(default)]
         content: Vec<ContentBlock>,
+        /// File locations for Follow Agent (auto-navigate to edited files).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locations: Option<Vec<ToolCallLocation>>,
     },
     /// An update to an existing tool call card.
     ToolCallUpdate {
@@ -429,6 +439,9 @@ pub enum SessionUpdate {
         /// Optional rendered tool content.
         #[serde(default)]
         content: Vec<ContentBlock>,
+        /// File locations for Follow Agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locations: Option<Vec<ToolCallLocation>>,
     },
     /// An update to the session plan.
     Plan {
@@ -477,6 +490,16 @@ pub enum ToolCallKind {
     Delete,
     /// A terminal command action.
     Terminal,
+    /// A file read action.
+    Read,
+    /// A grep/find search action.
+    Search,
+    /// A web/API fetch action.
+    Fetch,
+    /// An internal reasoning step.
+    Think,
+    /// A file rename/move action.
+    Move,
     /// Any other tool action.
     Other,
 }
@@ -493,6 +516,37 @@ pub enum ToolCallStatus {
     Completed,
     /// The tool call failed.
     Failed,
+}
+
+/// A file location referenced by a tool call for Follow Agent navigation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallLocation {
+    /// File URI (e.g. `file:///absolute/path`).
+    pub uri: String,
+    /// Optional range within the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<LocationRange>,
+}
+
+/// A range within a file (start and end positions).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocationRange {
+    /// Start position.
+    pub start: Position,
+    /// End position.
+    pub end: Position,
+}
+
+/// A position within a file (zero-indexed line and character).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Position {
+    /// Zero-indexed line number.
+    pub line: u32,
+    /// Zero-indexed character offset.
+    pub character: u32,
 }
 
 /// A configurable session option.
@@ -657,8 +711,10 @@ pub struct ConfigUpdateParams {
     /// Target session identifier.
     pub session_id: String,
     /// Configuration option identifier.
+    #[serde(alias = "configId")]
     pub option_id: String,
     /// Replacement option value.
+    #[serde(alias = "value")]
     pub new_value: serde_json::Value,
 }
 
@@ -668,6 +724,14 @@ pub struct ConfigUpdateParams {
 pub struct ConfigUpdateResult {
     /// Updated set of config options.
     pub config_options: Vec<ConfigOption>,
+}
+
+/// Parameters for the `session/close` request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCloseParams {
+    /// Target session identifier.
+    pub session_id: String,
 }
 
 /// Parameters for the `session/cancel` notification.
@@ -753,20 +817,108 @@ pub enum PermissionDecision {
 pub struct RequestPermissionParams {
     /// The session this request is for.
     pub session_id: String,
+    /// The tool call that needs permission.
+    pub tool_call: PermissionToolCall,
+    /// Available permission options for the user.
+    pub options: Vec<PermissionOption>,
+}
+
+/// Tool call metadata included in a permission request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionToolCall {
+    /// Tool call identifier.
+    pub tool_call_id: String,
     /// Human-readable title for the permission dialog.
     pub title: String,
-    /// Detailed description of the action being requested.
-    pub detail: String,
-    /// The action type being requested.
-    pub action: PermissionAction,
+}
+
+/// One selectable option in a permission request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionOption {
+    /// Stable option identifier.
+    pub option_id: String,
+    /// User-facing option name.
+    pub name: String,
+    /// Option behaviour kind.
+    pub kind: PermissionOptionKind,
+}
+
+/// Kind of permission option.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionOptionKind {
+    /// Allow the action once.
+    AllowOnce,
+    /// Allow the action for this session/workspace going forward.
+    AllowAlways,
+    /// Reject the action once.
+    RejectOnce,
+    /// Reject the action permanently for this session.
+    RejectAlways,
+}
+
+impl PermissionOptionKind {
+    /// Wire identifier matching serde snake_case.
+    pub fn option_id(&self) -> &'static str {
+        match self {
+            Self::AllowOnce => "allow_once",
+            Self::AllowAlways => "allow_always",
+            Self::RejectOnce => "reject_once",
+            Self::RejectAlways => "reject_always",
+        }
+    }
+
+    /// Maps a wire `option_id` back to a [`PermissionDecision`].
+    pub fn decision_from_option_id(id: &str) -> Option<PermissionDecision> {
+        match id {
+            "allow_once" => Some(PermissionDecision::Allow),
+            "allow_always" => Some(PermissionDecision::AlwaysAllow),
+            "reject_once" | "reject_always" => Some(PermissionDecision::Reject),
+            _ => None,
+        }
+    }
+
+    /// The four standard permission options for the editor dialog.
+    pub fn standard_options() -> Vec<PermissionOption> {
+        use PermissionOptionKind::*;
+        [
+            (AllowOnce, "Allow"),
+            (AllowAlways, "Always allow"),
+            (RejectOnce, "Reject"),
+            (RejectAlways, "Always reject"),
+        ]
+        .into_iter()
+        .map(|(kind, name)| PermissionOption {
+            option_id: kind.option_id().to_string(),
+            name: name.to_string(),
+            kind,
+        })
+        .collect()
+    }
 }
 
 /// Response from the editor to a `session/request_permission` request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionResponse {
-    /// The user's decision.
-    pub decision: PermissionDecision,
+    /// The user's decision outcome.
+    pub outcome: PermissionOutcome,
+}
+
+/// Outcome of a permission request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum PermissionOutcome {
+    /// The user cancelled the permission dialog.
+    Cancelled,
+    /// The user selected an option.
+    Selected {
+        /// The selected option identifier.
+        #[serde(alias = "optionId")]
+        option_id: String,
+    },
 }
 
 #[cfg(test)]
@@ -824,28 +976,53 @@ mod tests {
     fn permission_request_round_trip() {
         let params = RequestPermissionParams {
             session_id: "sess-1".to_string(),
-            title: "Allow editing?".to_string(),
-            detail: "The agent wants to edit src/lib.rs".to_string(),
-            action: PermissionAction::FileEdit,
+            tool_call: PermissionToolCall {
+                tool_call_id: "tc-1".to_string(),
+                title: "Allow editing src/lib.rs?".to_string(),
+            },
+            options: vec![
+                PermissionOption {
+                    option_id: "allow_once".to_string(),
+                    name: "Allow".to_string(),
+                    kind: PermissionOptionKind::AllowOnce,
+                },
+                PermissionOption {
+                    option_id: "allow_always".to_string(),
+                    name: "Always allow".to_string(),
+                    kind: PermissionOptionKind::AllowAlways,
+                },
+            ],
         };
 
         let serialized = serde_json::to_value(&params).expect("serialize permission params");
         let deserialized: RequestPermissionParams =
             serde_json::from_value(serialized).expect("deserialize permission params");
         assert_eq!(deserialized.session_id, params.session_id);
-        assert_eq!(deserialized.title, params.title);
-        assert_eq!(deserialized.detail, params.detail);
-        assert_eq!(deserialized.action, params.action);
+        assert_eq!(deserialized.tool_call.tool_call_id, "tc-1");
+        assert_eq!(deserialized.options.len(), 2);
 
         let response = PermissionResponse {
-            decision: PermissionDecision::AlwaysAllow,
+            outcome: PermissionOutcome::Selected {
+                option_id: "allow_always".to_string(),
+            },
         };
         let serialized = serde_json::to_value(&response).expect("serialize permission response");
         let deserialized: PermissionResponse =
             serde_json::from_value(serialized).expect("deserialize permission response");
         assert!(matches!(
-            deserialized.decision,
-            PermissionDecision::AlwaysAllow
+            deserialized.outcome,
+            PermissionOutcome::Selected { .. }
         ));
+
+        // Verify wire-format deserialization (what Zed actually sends).
+        let wire_json = json!({ "outcome": { "type": "selected", "optionId": "allow_always" } });
+        let from_wire: PermissionResponse =
+            serde_json::from_value(wire_json).expect("deserialize wire format");
+        match from_wire.outcome {
+            PermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "allow_always");
+            }
+            _ => panic!("expected Selected variant"),
+        }
     }
 }

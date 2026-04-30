@@ -540,13 +540,4 @@ fn render_plan_detail(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn truncate(s: &str, max: usize) -> String {
-    if max < 4 || s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max - 3;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &s[..end])
-}
+use crate::tui::display_utils::truncate;

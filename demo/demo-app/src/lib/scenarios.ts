@@ -22,6 +22,15 @@ export interface ScenarioStep {
   sublabel?: string;
 }
 
+export interface PipelineContext {
+  setPipeline: (state: PipelineDemoState) => void;
+  patchPipeline: (patch: Partial<PipelineDemoState>) => void;
+  patchPipelineStream: (patch: Partial<PipelineStreamState>) => void;
+  updatePipelineTask: (planId: string, taskId: string, patch: Partial<PipelineTask>) => void;
+  appendPipelineEvent: (event: PipelineEvent) => void;
+  example: PipelineScenarioExample;
+}
+
 export interface ScenarioContext {
   entries: TerminalHandle[];
   playback: PlaybackController;
@@ -30,15 +39,25 @@ export interface ScenarioContext {
   setGate: (name: string, status: 'pass' | 'fail' | 'pending') => void;
   logCommand: (cmd: string, desc: string) => void;
   logCommandComplete: (cmd: string, ok: boolean) => void;
+  signal: AbortSignal;
+  pipeline?: PipelineContext;
+  /** @deprecated Use ctx.pipeline!.setPipeline() */
   setPipeline: (state: PipelineDemoState) => void;
+  /** @deprecated Use ctx.pipeline!.patchPipeline() */
   patchPipeline: (patch: Partial<PipelineDemoState>) => void;
+  /** @deprecated Use ctx.pipeline!.patchPipelineStream() */
   patchPipelineStream: (patch: Partial<PipelineStreamState>) => void;
+  /** @deprecated Use ctx.pipeline!.updatePipelineTask() */
   updatePipelineTask: (planId: string, taskId: string, patch: Partial<PipelineTask>) => void;
+  /** @deprecated Use ctx.pipeline!.appendPipelineEvent() */
   appendPipelineEvent: (event: PipelineEvent) => void;
+  /** @deprecated Use ctx.pipeline!.example */
   pipelineExample: PipelineScenarioExample;
   /** Active model from ConfigWidget (e.g. "glm51", "sonnet") */
   activeModel?: string;
+  /** @deprecated Use signal.aborted */
   paused: { current: boolean };
+  /** @deprecated Use signal.aborted */
   running: { current: boolean };
   /** Server-created workspace directory path (pre-created before scenario runs). */
   workspaceDir: string;

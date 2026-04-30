@@ -3140,13 +3140,7 @@ fn tab_to_page(tab: Tab) -> Option<PageId> {
     }
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::truncate as truncate_str;
 
 fn apply_dashboard_snapshot(
     tui_state: &mut TuiState,

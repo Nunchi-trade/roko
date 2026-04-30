@@ -380,8 +380,11 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     feature_keywords.iter().map(String::as_str).collect();
                 // Keep the full pack so it can be persisted to the context sidecar.
                 let repo_context_pack: Option<roko_cli::repo_context::RepoContextPack> =
-                    match roko_cli::repo_context::build_repo_context(&workdir, &feature_keyword_refs)
-                        .await
+                    match roko_cli::repo_context::build_repo_context(
+                        &workdir,
+                        &feature_keyword_refs,
+                    )
+                    .await
                     {
                         Ok(pack) => {
                             if !pack.context_root_verified {
@@ -737,6 +740,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     }
 }
 
+#[allow(dead_code)]
 fn resolve_effective_model_key(
     workdir: &Path,
     cli_model: Option<String>,
@@ -744,15 +748,15 @@ fn resolve_effective_model_key(
     context: &str,
 ) -> Result<String> {
     let config = crate::load_roko_config(workdir)?;
-    let selection =
-        roko_cli::model_selection::resolve_effective_model(
-            cli_model,
-            None,
-            role.map(str::to_string),
-            None,
-            &config,
-        )
-            .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
+    let selection = roko_cli::model_selection::resolve_effective_model(
+        cli_model,
+        None,
+        role.map(str::to_string),
+        None,
+        &config,
+        None,
+    )
+    .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
     selection.print_stderr();
     Ok(selection.effective_model_key)
 }

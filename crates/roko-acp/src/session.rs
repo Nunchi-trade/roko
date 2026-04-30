@@ -169,22 +169,18 @@ impl Default for SessionConfigState {
 impl SessionConfigState {
     /// Create config state from roko.toml values.
     pub fn from_roko_config(config: &roko_core::config::schema::RokoConfig) -> Self {
-        let default_model = if config.models.contains_key("glm51") {
-            "glm51"
-        } else if config.models.contains_key("glm4") {
-            "glm4"
-        } else if config.models.contains_key("kimi-k26") {
-            "kimi-k26"
-        } else if config.models.contains_key("sonnet") {
-            "sonnet"
-        } else {
-            config
-                .models
-                .keys()
-                .next()
-                .map(|s| s.as_str())
-                .unwrap_or(FALLBACK_MODEL)
-        };
+        let configured_default = config.agent.default_model.trim();
+        let default_model =
+            if !configured_default.is_empty() && config.models.contains_key(configured_default) {
+                configured_default
+            } else {
+                config
+                    .models
+                    .keys()
+                    .next()
+                    .map(|s| s.as_str())
+                    .unwrap_or(FALLBACK_MODEL)
+            };
         Self {
             agent_mode: "code".to_owned(),
             model: default_model.to_owned(),
@@ -413,9 +409,15 @@ impl AcpSession {
         conventions: Option<&str>,
     ) -> String {
         let role_identity = match self.config_state.agent_mode.as_str() {
-            "plan" => "You are a software architect and strategist. Your role is to plan, not implement. Decompose tasks into clear actionable steps, identify files that need changes, and produce structured plans with numbered steps. Do NOT write implementation code directly.",
-            "research" => "You are a technical researcher. Your role is to gather context and analyze options. Search broadly, cite specific files and line numbers, compare alternatives with tradeoffs. Do NOT make changes. Report what you find.",
-            _ => "You are an expert code implementer. Your role is to write and edit code directly. Make minimal targeted changes, read existing code before modifying it, follow existing patterns, and write correct working code.",
+            "plan" => {
+                "You are a software architect and strategist. Your role is to plan, not implement. Decompose tasks into clear actionable steps, identify files that need changes, and produce structured plans with numbered steps. Do NOT write implementation code directly."
+            }
+            "research" => {
+                "You are a technical researcher. Your role is to gather context and analyze options. Search broadly, cite specific files and line numbers, compare alternatives with tradeoffs. Do NOT make changes. Report what you find."
+            }
+            _ => {
+                "You are an expert code implementer. Your role is to write and edit code directly. Make minimal targeted changes, read existing code before modifying it, follow existing patterns, and write correct working code."
+            }
         };
 
         let mut builder = SystemPromptBuilder::new(role_identity);
@@ -772,6 +774,15 @@ impl SessionManager {
         SessionListResult { sessions }
     }
 
+    /// Closes a session: cancels any active work, persists, and removes from memory.
+    pub fn close_session(&mut self, session_id: &str) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.cancel();
+        }
+        self.persist_session(session_id);
+        self.sessions.remove(session_id);
+    }
+
     /// Removes persisted sessions older than `max_age`.
     pub fn gc_old_sessions(&self, max_age: chrono::Duration) {
         let sessions_dir = self.workdir.join(".roko").join("sessions");
@@ -804,8 +815,8 @@ fn build_config_options(
         .iter()
         .map(|(key, profile)| ConfigOptionValue {
             value: key.clone(),
-            name: format!("{key} ({})", profile.provider),
-            description: Some(profile.slug.clone()),
+            name: profile.slug.clone(),
+            description: Some(format!("via {}", profile.provider)),
         })
         .collect();
     model_options.sort_by(|a, b| a.value.cmp(&b.value));
@@ -815,38 +826,38 @@ fn build_config_options(
             id: "model".to_owned(),
             name: "Model".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "agent".to_owned(),
+            category: "model".to_owned(),
             current_value: serde_json::Value::String(state.model.clone()),
             description: Some("Language model".to_owned()),
             options: Some(model_options),
         },
         ConfigOption {
             id: "effort".to_owned(),
-            name: "Effort".to_owned(),
+            name: "Thinking".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "agent".to_owned(),
+            category: "thought_level".to_owned(),
             current_value: serde_json::Value::String(state.effort.clone()),
-            description: Some("Agent effort level".to_owned()),
+            description: Some("Reasoning depth".to_owned()),
             options: Some(vec![
                 ConfigOptionValue {
                     value: "low".to_owned(),
-                    name: "Low".to_owned(),
-                    description: Some("Quick, minimal reasoning".to_owned()),
+                    name: "Quick".to_owned(),
+                    description: Some("Minimal reasoning".to_owned()),
                 },
                 ConfigOptionValue {
                     value: "medium".to_owned(),
-                    name: "Medium".to_owned(),
-                    description: Some("Balanced quality/speed".to_owned()),
+                    name: "Standard".to_owned(),
+                    description: Some("Balanced reasoning".to_owned()),
                 },
                 ConfigOptionValue {
                     value: "high".to_owned(),
-                    name: "High".to_owned(),
-                    description: Some("Thorough reasoning".to_owned()),
+                    name: "Deep".to_owned(),
+                    description: Some("Extended reasoning".to_owned()),
                 },
                 ConfigOptionValue {
                     value: "max".to_owned(),
                     name: "Max".to_owned(),
-                    description: Some("Maximum depth, slowest".to_owned()),
+                    description: Some("Full reasoning depth".to_owned()),
                 },
             ]),
         },
@@ -854,7 +865,7 @@ fn build_config_options(
             id: "temperament".to_owned(),
             name: "Temperament".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "agent".to_owned(),
+            category: "other".to_owned(),
             current_value: serde_json::Value::String(state.temperament.clone()),
             description: Some("Agent risk appetite".to_owned()),
             options: Some(vec![
@@ -884,7 +895,7 @@ fn build_config_options(
             id: "routing_mode".to_owned(),
             name: "Routing".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "routing".to_owned(),
+            category: "other".to_owned(),
             current_value: serde_json::Value::String(state.routing_mode.clone()),
             description: Some("Model routing strategy".to_owned()),
             options: Some(vec![
@@ -904,7 +915,7 @@ fn build_config_options(
             id: "clippy".to_owned(),
             name: "Clippy".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "gates".to_owned(),
+            category: "other".to_owned(),
             current_value: serde_json::Value::String(
                 if state.clippy_enabled { "on" } else { "off" }.to_owned(),
             ),
@@ -926,7 +937,7 @@ fn build_config_options(
             id: "tests".to_owned(),
             name: "Tests".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "gates".to_owned(),
+            category: "other".to_owned(),
             current_value: serde_json::Value::String(
                 if state.tests_enabled { "on" } else { "off" }.to_owned(),
             ),
@@ -949,7 +960,7 @@ fn build_config_options(
             id: "workflow".to_owned(),
             name: "Workflow".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "execution".to_owned(),
+            category: "other".to_owned(),
             current_value: serde_json::Value::String(state.workflow.clone()),
             description: Some("Pipeline workflow for prompts".to_owned()),
             options: Some(vec![
@@ -986,7 +997,7 @@ fn build_config_options(
             id: "review_strictness".to_owned(),
             name: "Review".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "execution".to_owned(),
+            category: "other".to_owned(),
             current_value: serde_json::Value::String(state.review_strictness.clone()),
             description: Some("Review strictness level".to_owned()),
             options: Some(vec![
@@ -1016,7 +1027,7 @@ fn build_config_options(
             id: "max_iterations".to_owned(),
             name: "Retries".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "execution".to_owned(),
+            category: "other".to_owned(),
             current_value: serde_json::Value::String(state.max_iterations.to_string()),
             description: Some("Max retry iterations on failure".to_owned()),
             options: Some(vec![
@@ -1046,7 +1057,7 @@ fn build_config_options_static(state: &SessionConfigState) -> Vec<ConfigOption> 
         id: "model".to_owned(),
         name: "Model".to_owned(),
         option_type: ConfigOptionType::Select,
-        category: "agent".to_owned(),
+        category: "model".to_owned(),
         current_value: serde_json::Value::String(state.model.clone()),
         description: Some("Language model".to_owned()),
         options: Some(vec![ConfigOptionValue {
@@ -1165,7 +1176,7 @@ pub fn build_slash_commands() -> Vec<SlashCommand> {
             name: "plan-generate".to_owned(),
             description: "Generate a plan from a prompt".to_owned(),
             input: Some(CommandInput {
-                hint: Some("describe what to build".to_owned()),
+                hint: Some("describe what to build...".to_owned()),
             }),
         },
         SlashCommand {
@@ -1228,7 +1239,7 @@ pub fn build_slash_commands() -> Vec<SlashCommand> {
             name: "review".to_owned(),
             description: "Review recent changes (git diff)".to_owned(),
             input: Some(CommandInput {
-                hint: Some("target ref (default HEAD~1)".to_owned()),
+                hint: Some("focus area or 'all'".to_owned()),
             }),
         },
         SlashCommand {
@@ -1534,11 +1545,8 @@ mod tests {
         let mut session = AcpSession::new(session_params("prompts"));
         session.cached_conventions = Some("Use snake_case.\nKeep changes minimal.".to_string());
 
-        let prompt = session.build_system_prompt(
-            workdir,
-            &["Prior gate failed on tests".to_string()],
-            None,
-        );
+        let prompt =
+            session.build_system_prompt(workdir, &["Prior gate failed on tests".to_string()], None);
 
         assert!(prompt.contains("## Project Conventions"));
         assert!(prompt.contains("Use snake_case."));
@@ -1594,12 +1602,16 @@ mod tests {
             .get_session(&result.session_id)
             .expect("session should exist");
 
-        assert!(session
-            .always_allowed
-            .contains(&crate::types::PermissionAction::FileEdit));
-        assert!(session
-            .always_allowed
-            .contains(&crate::types::PermissionAction::GitOperation));
+        assert!(
+            session
+                .always_allowed
+                .contains(&crate::types::PermissionAction::FileEdit)
+        );
+        assert!(
+            session
+                .always_allowed
+                .contains(&crate::types::PermissionAction::GitOperation)
+        );
     }
 
     #[test]

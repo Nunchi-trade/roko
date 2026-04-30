@@ -324,7 +324,11 @@ async fn execute_bench_run(
             result: serde_json::to_value(&task_result).unwrap_or_default(),
         });
 
-        let cost_so_far: f64 = results.iter().map(|r: &BenchTaskResult| r.cost_usd).sum::<f64>() + task_result.cost_usd;
+        let cost_so_far: f64 = results
+            .iter()
+            .map(|r: &BenchTaskResult| r.cost_usd)
+            .sum::<f64>()
+            + task_result.cost_usd;
 
         results.push(task_result);
 

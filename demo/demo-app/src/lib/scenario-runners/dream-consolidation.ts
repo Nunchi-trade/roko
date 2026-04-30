@@ -25,7 +25,7 @@ export const dreamConsolidation: Scenario = {
     { label: 'Integration', sublabel: 'knowledge merge' },
     { label: 'Report', sublabel: 'dream report' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, running, paused, workspaceDir }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, signal, workspaceDir }) {
     const [dream, monitor] = entries;
     await enterWorkspace(dream, workspaceDir);
     await enterWorkspace(monitor, workspaceDir);
@@ -43,8 +43,7 @@ export const dreamConsolidation: Scenario = {
 
     const waitForStep = async (stepIndex: number, label: string): Promise<boolean> => {
       await playback.waitForStep();
-      if (!running.current) return false;
-      while (paused.current) await rawSleep(100);
+      if (signal.aborted) return false;
       timeline.setActive(stepIndex);
       playback.setProgress(stepIndex + 1, totalSteps, label);
       return true;
@@ -53,8 +52,7 @@ export const dreamConsolidation: Scenario = {
     const allowPhaseTime = async (ms: number): Promise<boolean> => {
       const start = Date.now();
       while (Date.now() - start < ms) {
-        if (!running.current) return false;
-        while (paused.current) await rawSleep(100);
+        if (signal.aborted) return false;
         await rawSleep(100);
       }
       return true;
@@ -193,6 +191,6 @@ export const dreamConsolidation: Scenario = {
     });
     setMetric('model', 'consolidated');
 
-    timeline.setActive(totalSteps);
+    timeline.markAllComplete();
   },
 };

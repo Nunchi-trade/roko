@@ -609,14 +609,4 @@ fn render_create_job(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn truncate(s: &str, max: usize) -> String {
-    if max < 4 || s.len() <= max {
-        return s.to_string();
-    }
-    // Find a char boundary near max-3 for the "..." suffix.
-    let mut end = max - 3;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &s[..end])
-}
+use crate::tui::display_utils::truncate;

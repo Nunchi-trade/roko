@@ -55,6 +55,6 @@ export const providers: Scenario = {
       }),
     );
 
-    timeline.setActive(4);
+    timeline.markAllComplete();
   },
 };

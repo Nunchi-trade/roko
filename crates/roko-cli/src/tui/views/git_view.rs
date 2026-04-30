@@ -758,13 +758,7 @@ fn collect_status(workdir: &Path) -> Vec<String> {
         .collect()
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::truncate;
 
 #[cfg(test)]
 mod tests {

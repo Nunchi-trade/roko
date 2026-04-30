@@ -51,8 +51,7 @@ use super::types::{
     AgentCompletionSummary, AgentDispatchOutcome, AgentEvent, GateCompletion, GateCompletionKind,
     PlanOutcome, PlanRunSummary, PromptAssemblyDiagnostics, ResumeMarker, ResumeOutcome,
     RetryAction, RunConfig, RunOutcome, RunTotals, RunnerEvent, RunnerFailureKind,
-    TaskAttemptStatus,
-    TaskAttemptOutcome, TaskAttemptRef,
+    TaskAttemptOutcome, TaskAttemptRef, TaskAttemptStatus,
 };
 
 // ─── RunReport ──────────────────────────────────────────────────────────
@@ -151,22 +150,22 @@ pub async fn run(
     // returns Err. We surface the failure and abort the run so the
     // operator can either edit the plan back into a known state or
     // discard the snapshot.
+    let prior_snapshot = match persist::load_run_state(&paths) {
+        Ok(Some(snapshot)) => Some(snapshot),
+        Ok(None) => None,
+        Err(err) => {
+            warn!(
+                error = %err,
+                "failed to read prior run-state.json; continuing without seeded resume state"
+            );
+            None
+        }
+    };
     let resume_report = {
         let mut plan_map: HashMap<String, Vec<TaskDef>> = HashMap::new();
         for plan in &plans {
             plan_map.insert(plan.id.clone(), plan.tasks.tasks.clone());
         }
-        let prior_snapshot = match persist::load_run_state(&paths) {
-            Ok(Some(snapshot)) => Some(snapshot),
-            Ok(None) => None,
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "failed to read prior run-state.json; continuing without seeded resume state"
-                );
-                None
-            }
-        };
         let prior_fingerprints = prior_snapshot
             .as_ref()
             .map(|snapshot| snapshot.fingerprints.as_slice())
@@ -205,30 +204,34 @@ pub async fn run(
                 error!(error = %err, "resume validation failed; aborting run");
                 return Err(anyhow::anyhow!("resume validation failed: {err}"));
             }
-        };
+        }
+    };
 
-        // Prefer the embedded router snapshot over the file-backed router on resume.
-        if let Some(router_json) = resume_report.cascade_router_json.as_deref() {
-            if let Some(existing_router) = config.cascade_router.as_ref() {
-                let model_slugs = existing_router.model_slugs().to_vec();
-                match roko_learn::cascade_router::CascadeRouter::from_snapshot_json(
-                    router_json,
-                    model_slugs,
-                ) {
-                    Ok(router) => {
-                        info!("restored cascade router from run-state snapshot");
-                        config.cascade_router = Some(Arc::new(router));
-                    }
-                    Err(err) => {
-                        warn!(
-                            error = %err,
-                            "failed to restore cascade router from run-state snapshot; using file-based state"
-                        );
-                    }
+    // Prefer the embedded router snapshot over the file-backed router on resume.
+    if let Some(router_json) = resume_report.cascade_router_json.as_deref() {
+        if let Some(existing_router) = config.cascade_router.as_ref() {
+            let model_slugs = existing_router.model_slugs().to_vec();
+            match roko_learn::cascade_router::CascadeRouter::from_snapshot_json(
+                router_json,
+                model_slugs,
+            ) {
+                Ok(router) => {
+                    info!("restored cascade router from run-state snapshot");
+                    config.cascade_router = Some(Arc::new(router));
+                }
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "failed to restore cascade router from run-state snapshot; using file-based state"
+                    );
                 }
             }
         }
-    };
+    }
+
+    // All mutations to `config` are done; reborrow as shared reference so
+    // downstream helpers that expect `&RunConfig` work without extra `&`.
+    let config = &config;
 
     // Build plan ID set for resume validation.
     let plan_ids: Vec<String> = plans.iter().map(|p| p.id.clone()).collect();
@@ -1459,21 +1462,6 @@ fn build_run_completed_event(
             })
             .collect(),
     )
-}
-
-fn restore_run_state_from_snapshot(
-    state: &mut RunState,
-    snapshot: &persist::RunStateSnapshot,
-) {
-    state.tasks_completed = snapshot.tasks_completed;
-    state.tasks_failed = snapshot.tasks_failed;
-    state.total_tokens_in = snapshot.total_tokens_in;
-    state.total_tokens_out = snapshot.total_tokens_out;
-    state.total_cost_usd = snapshot.total_cost_usd;
-    state.total_agent_calls = snapshot.total_agent_calls;
-    state.plan_costs = snapshot.plan_costs.clone();
-    state.completed_tasks = snapshot.completed_tasks.clone();
-    state.snapshot_fail_streak = snapshot.snapshot_fail_streak;
 }
 
 // ─── Snapshot Helper ────────────────────────────────────────────────────
@@ -2731,9 +2719,14 @@ fn knowledge_bias_weight(config: &RunConfig) -> f64 {
     config
         .roko_config
         .as_ref()
-        // Reuse the existing routing latency weight as the knowledge-bias knob.
-        // It already defaults to 0.2 and is user-configurable in roko.toml.
-        .map(|cfg| cfg.routing.weights.default.latency)
+        .map(|cfg| {
+            // Prefer the dedicated knowledge_bias weight; fall back to latency.
+            cfg.routing
+                .weights
+                .default
+                .knowledge_bias
+                .unwrap_or(cfg.routing.weights.default.latency)
+        })
         .unwrap_or(0.2)
         .clamp(0.0, 1.0)
 }
@@ -2968,7 +2961,7 @@ async fn handle_plan_timeout(
         "plan execution exceeded wall-clock timeout"
     );
     stop_active_agent(agent_handle, state, Duration::from_secs(3)).await;
-    save_snapshot(executor, paths, state, merge_queue);
+    save_snapshot(config, executor, paths, state, merge_queue);
     shutdown_subsystems(config, tui).await;
     let event = build_run_completed_event(executor, plans, state, RunOutcome::Failed);
     emit_runner_event(paths, state, tui, config, event);
@@ -3645,61 +3638,3 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn restore_run_state_from_snapshot_restores_durable_aggregates() {
-        let mut state = RunState::new(5);
-        state.total_tokens_in = 1;
-        state.total_tokens_out = 2;
-        state.total_cost_usd = 3.0;
-        state.total_agent_calls = 4;
-        state.tasks_completed = 1;
-        state.tasks_failed = 1;
-        state.plan_costs.insert("stale".to_string(), 9.0);
-        state.completed_tasks.insert("stale".to_string(), vec!["x".to_string()]);
-        state.snapshot_fail_streak = 2;
-
-        let mut plan_costs = HashMap::new();
-        plan_costs.insert("p1".to_string(), 12.5);
-        let mut completed_tasks = HashMap::new();
-        completed_tasks.insert("p1".to_string(), vec!["a".to_string(), "b".to_string()]);
-
-        let snapshot = persist::RunStateSnapshot {
-            schema_version: persist::RUN_STATE_SCHEMA_VERSION,
-            run_id: "prior".to_string(),
-            started_at_ms: 111,
-            timestamp_ms: 222,
-            tasks_total: 99,
-            tasks_completed: 8,
-            tasks_failed: 2,
-            total_tokens_in: 111,
-            total_tokens_out: 222,
-            total_cost_usd: 33.5,
-            total_agent_calls: 44,
-            plan_costs,
-            completed_tasks,
-            snapshot_fail_streak: 7,
-            fingerprints: Vec::new(),
-        };
-
-        restore_run_state_from_snapshot(&mut state, &snapshot);
-
-        assert_eq!(state.tasks_total, 5);
-        assert_eq!(state.tasks_completed, 8);
-        assert_eq!(state.tasks_failed, 2);
-        assert_eq!(state.total_tokens_in, 111);
-        assert_eq!(state.total_tokens_out, 222);
-        assert_eq!(state.total_cost_usd, 33.5);
-        assert_eq!(state.total_agent_calls, 44);
-        assert_eq!(state.plan_cost("p1"), 12.5);
-        assert_eq!(
-            state.completed_tasks.get("p1").cloned(),
-            Some(vec!["a".to_string(), "b".to_string()])
-        );
-        assert_eq!(state.snapshot_fail_streak, 7);
-    }
-}

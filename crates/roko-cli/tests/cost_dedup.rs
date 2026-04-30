@@ -16,7 +16,10 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 fn force_failing_verify_step(workdir: &Path) {
-    let tasks_path = workdir.join("plans").join(common::SAMPLE_PLAN_ID).join("tasks.toml");
+    let tasks_path = workdir
+        .join("plans")
+        .join(common::SAMPLE_PLAN_ID)
+        .join("tasks.toml");
     let tasks = fs::read_to_string(&tasks_path).expect("read sample tasks.toml");
 
     let mut patched = String::with_capacity(tasks.len() + 128);

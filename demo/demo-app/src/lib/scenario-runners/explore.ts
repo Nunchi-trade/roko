@@ -1,6 +1,5 @@
 // --- src/lib/scenario-runners/explore.ts ---
 import type { Scenario } from '../scenarios';
-import { rawSleep } from '../scenario-helpers';
 import { enterWorkspace, showCmd, getRoko } from '../terminal-session';
 
 export const explore: Scenario = {
@@ -30,7 +29,7 @@ export const explore: Scenario = {
     { label: 'knowledge query', sublabel: 'knowledge' },
     { label: 'explain', sublabel: 'knowledge' },
   ],
-  async run({ entries, playback, timeline, logCommand, logCommandComplete, paused, running, workspaceDir }) {
+  async run({ entries, playback, timeline, logCommand, logCommandComplete, signal, workspaceDir }) {
     await enterWorkspace(entries[0], workspaceDir);
     await Promise.all(entries.slice(1).map(e => enterWorkspace(e, workspaceDir)));
 
@@ -55,16 +54,15 @@ export const explore: Scenario = {
     await Promise.all(
       entries.map(async (e, i) => {
         for (let j = 0; j < families[i].length; j++) {
-          if (!running.current) return;
-          while (paused.current) await rawSleep(100);
+          if (signal.aborted) return;
           const globalStep = i * 3 + j;
           timeline.setActive(globalStep);
           playback.setProgress(globalStep + 1, 12, families[i][j]);
-          await showCmd(e, families[i][j], { timeout: 45000, onLog: logCommand, onLogComplete: logCommandComplete, playback });
+          await showCmd(e, families[i][j], { timeout: 45000, onLog: logCommand, onLogComplete: logCommandComplete, playback, signal });
         }
       }),
     );
 
-    timeline.setActive(12);
+    timeline.markAllComplete();
   },
 };

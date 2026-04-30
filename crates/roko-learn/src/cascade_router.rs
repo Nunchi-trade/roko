@@ -238,9 +238,7 @@ impl CascadeRouter {
             .iter()
             .map(|slug| {
                 let available = configured.contains(slug.as_str())
-                    || stats
-                        .get(slug)
-                        .map_or(false, |entry| entry.successes > 0);
+                    || stats.get(slug).map_or(false, |entry| entry.successes > 0);
                 (slug.clone(), available)
             })
             .collect()
@@ -1609,8 +1607,7 @@ impl CascadeRouter {
         assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
 
         let version_changes = detect_version_changes(&persisted_model_slugs, &slugs);
-        let migrated_stats =
-            migrated_confidence_stats(&confidence_stats, &version_changes, &slugs);
+        let migrated_stats = migrated_confidence_stats(&confidence_stats, &version_changes, &slugs);
         let router = Self::new(slugs);
 
         // Restore confidence stats.

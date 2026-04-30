@@ -132,10 +132,7 @@ async fn learn_router_snapshot(
         .get("cascade_router")
         .cloned()
         .unwrap_or(Value::Null);
-    let raw_router = node
-        .get("value")
-        .cloned()
-        .unwrap_or_else(|| node.clone());
+    let raw_router = node.get("value").cloned().unwrap_or_else(|| node.clone());
     let models = cascade_router_availability(&state, &raw_router);
     let data_quality = cascade_router_data_quality(&raw_router);
     let mut payload = source_projection_payload(node, projections.evidence());
@@ -335,7 +332,11 @@ fn cascade_router_slugs(router: &Value) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
 
     if let Some(values) = router.get("model_slugs").and_then(Value::as_array) {
-        for slug in values.iter().filter_map(Value::as_str).map(ToOwned::to_owned) {
+        for slug in values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+        {
             if seen.insert(slug.clone()) {
                 slugs.push(slug);
             }
@@ -846,10 +847,7 @@ mod tests {
 
     #[test]
     fn efficiency_response_exposes_data_quality_for_empty_events() {
-        let response = build_efficiency_response_with_evidence(
-            &[],
-            json!({"state": "not_loaded"}),
-        );
+        let response = build_efficiency_response_with_evidence(&[], json!({"state": "not_loaded"}));
 
         assert!(!response.data_quality.has_real_data);
         assert_eq!(response.data_quality.entry_count, 0);

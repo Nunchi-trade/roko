@@ -61,7 +61,9 @@ fn read_from_disk(path: &str) -> Option<(Vec<u8>, String)> {
 
     // SPA fallback: serve index.html for client-side routes
     let index = dir.join("index.html");
-    std::fs::read(&index).ok().map(|b| (b, "index.html".to_string()))
+    std::fs::read(&index)
+        .ok()
+        .map(|b| (b, "index.html".to_string()))
 }
 
 /// Try to read from the embedded (compile-time) assets.
@@ -80,8 +82,7 @@ fn read_from_embedded(path: &str) -> Option<(Vec<u8>, String)> {
 pub async fn serve_embedded(req: axum::extract::Request) -> Response {
     let path = req.uri().path().trim_start_matches('/');
 
-    let Some((body, served_path)) =
-        read_from_disk(path).or_else(|| read_from_embedded(path))
+    let Some((body, served_path)) = read_from_disk(path).or_else(|| read_from_embedded(path))
     else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };

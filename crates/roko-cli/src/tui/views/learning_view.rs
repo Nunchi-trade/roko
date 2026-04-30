@@ -198,7 +198,7 @@ fn model_sparkline(
 
     let model_events: Vec<bool> = events
         .iter()
-        .filter(|e| event_model(e) == model_slug)
+        .filter(|e| event_model_slug(e) == model_slug)
         .map(|e| e.gate_passed)
         .collect();
 
@@ -232,32 +232,7 @@ fn model_sparkline(
         .collect()
 }
 
-/// Extract the effective model key from an efficiency event.
-fn event_model(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> &str {
-    let used = event.model_used.as_str();
-    if !used.is_empty() {
-        used
-    } else {
-        event.model.as_str()
-    }
-}
-
-fn shorten_model(slug: &str) -> String {
-    slug.replace("claude-", "")
-        .replace("gpt-", "")
-        .replace("-codex", "c")
-        .replace("-mini", "m")
-        .replace("sonnet-", "s")
-        .replace("opus-", "o")
-        .replace("haiku-", "h")
-}
-
-fn display_model(model: Option<&str>) -> String {
-    match model {
-        None | Some("") | Some("-") | Some("unknown-model") => "unknown".to_string(),
-        Some(m) => shorten_model(m),
-    }
-}
+use crate::tui::display_utils::{display_model, event_model_slug, shorten_model};
 
 fn render_selection_bars(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
     let router = &tui_state.cascade_router;
@@ -455,7 +430,7 @@ fn render_efficiency(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
 
     let mut model_stats: HashMap<String, ModelEffStats> = HashMap::new();
     for event in events {
-        let model = event_model(event).to_string();
+        let model = event_model_slug(event).to_string();
         let entry = model_stats.entry(model).or_default();
         entry.count += 1;
         if event.gate_passed {

@@ -166,6 +166,6 @@ export const knowledgeAccumulation: Scenario = {
       customDesc: 'Shows all learning state after the accumulated runs.',
     });
 
-    timeline.setActive(6);
+    timeline.markAllComplete();
   },
 };

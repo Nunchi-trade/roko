@@ -84,7 +84,11 @@ async fn single_dispatch_feeds_cascade_router() {
         .await
         .expect("dispatch should succeed");
 
-    let router_path = tmp.path().join(".roko").join("learn").join("cascade-router.json");
+    let router_path = tmp
+        .path()
+        .join(".roko")
+        .join("learn")
+        .join("cascade-router.json");
     assert!(router_path.exists(), "cascade-router.json must be created");
 
     let router = CascadeRouter::load_or_new(&router_path, vec!["gpt-5.4".to_string()]);
@@ -125,11 +129,7 @@ async fn pipeline_produces_combined_telemetry() {
         .mock_pipeline_dispatch(
             "Add retry logic",
             vec![
-                MockPhaseResponse::Implement(
-                    "Added retry with backoff.".into(),
-                    2_000,
-                    600,
-                ),
+                MockPhaseResponse::Implement("Added retry with backoff.".into(), 2_000, 600),
                 MockPhaseResponse::GatePass,
                 MockPhaseResponse::ReviewApprove("LGTM".into(), 1_000, 100),
             ],
@@ -151,14 +151,20 @@ async fn pipeline_produces_combined_telemetry() {
     assert!(result.cost_usd.unwrap() > 0.0);
     assert!(result.notifications.iter().any(has_usage_update));
 
-    let router_path = tmp.path().join(".roko").join("learn").join("cascade-router.json");
+    let router_path = tmp
+        .path()
+        .join(".roko")
+        .join("learn")
+        .join("cascade-router.json");
     let router = CascadeRouter::load_or_new(&router_path, vec!["gpt-5.4".to_string()]);
     assert!(router.total_observations() >= 2);
-    assert!(router
-        .confidence_snapshot()
-        .get("gpt-5.4")
-        .map(|(trials, _)| *trials >= 2)
-        .unwrap_or(false));
+    assert!(
+        router
+            .confidence_snapshot()
+            .get("gpt-5.4")
+            .map(|(trials, _)| *trials >= 2)
+            .unwrap_or(false)
+    );
 }
 
 #[tokio::test]
@@ -166,15 +172,17 @@ async fn failed_dispatch_still_logs_episode() {
     let tmp = TempDir::new().expect("create tmpdir");
     let session = create_test_session(tmp.path());
 
-    let result = session.mock_dispatch_failure("Fix bug", "connection timeout").await;
+    let result = session
+        .mock_dispatch_failure("Fix bug", "connection timeout")
+        .await;
     assert!(result.is_err());
 
     let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
     let content = std::fs::read_to_string(&episodes_path).expect("read episodes");
     assert!(!content.is_empty());
 
-    let ep: serde_json::Value = serde_json::from_str(content.lines().last().unwrap())
-        .expect("parse failure episode");
+    let ep: serde_json::Value =
+        serde_json::from_str(content.lines().last().unwrap()).expect("parse failure episode");
     assert_eq!(ep["success"], json!(false));
     let failure_reason = ep["failure_reason"].as_str().expect("failure reason");
     assert!(

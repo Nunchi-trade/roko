@@ -1058,30 +1058,7 @@ fn format_count(n: u64) -> String {
     }
 }
 
-fn shorten_model(slug: &str) -> String {
-    slug.replace("claude-", "")
-        .replace("gpt-", "")
-        .replace("-codex", "c")
-        .replace("-mini", "m")
-        .replace("sonnet-", "s")
-        .replace("opus-", "o")
-        .replace("haiku-", "h")
-}
-
-fn display_model(model: Option<&str>) -> String {
-    match model {
-        None | Some("") | Some("-") | Some("unknown-model") => "unknown".to_string(),
-        Some(m) => shorten_model(m),
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::{display_model, shorten_model, truncate};
 
 #[cfg(test)]
 mod tests {

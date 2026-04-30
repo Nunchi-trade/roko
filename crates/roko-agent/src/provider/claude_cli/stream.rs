@@ -390,7 +390,11 @@ mod tests {
     fn parse_result_event_with_full_usage() {
         let line = r#"{"type":"result","session_id":"sess-abc","total_cost_usd":0.0123,"num_turns":2,"is_error":false,"usage":{"input_tokens":850,"output_tokens":320,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}}"#;
         let events = parse_stream_line(line);
-        assert_eq!(events.len(), 2, "expected TurnCompleted + TokenUsage, got {events:?}");
+        assert_eq!(
+            events.len(),
+            2,
+            "expected TurnCompleted + TokenUsage, got {events:?}"
+        );
 
         match &events[0] {
             AgentRuntimeEvent::TurnCompleted {
@@ -433,7 +437,11 @@ mod tests {
         // Only input_tokens and output_tokens present; cache fields absent
         let line = r#"{"type":"result","session_id":"sess-partial","total_cost_usd":0.005,"num_turns":1,"is_error":false,"usage":{"input_tokens":400,"output_tokens":150}}"#;
         let events = parse_stream_line(line);
-        assert_eq!(events.len(), 2, "expected TurnCompleted + TokenUsage, got {events:?}");
+        assert_eq!(
+            events.len(),
+            2,
+            "expected TurnCompleted + TokenUsage, got {events:?}"
+        );
 
         match &events[1] {
             AgentRuntimeEvent::TokenUsage {
@@ -459,12 +467,14 @@ mod tests {
         let line = r#"{"type":"result","session_id":"sess-no-usage","total_cost_usd":0.002,"num_turns":1,"is_error":false}"#;
         let events = parse_stream_line(line);
         assert_eq!(
-            events.len(), 1,
+            events.len(),
+            1,
             "no usage field => only TurnCompleted, got {events:?}"
         );
         assert!(
             matches!(events[0], AgentRuntimeEvent::TurnCompleted { .. }),
-            "expected TurnCompleted, got {:?}", events[0]
+            "expected TurnCompleted, got {:?}",
+            events[0]
         );
     }
 

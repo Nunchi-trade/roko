@@ -24,7 +24,7 @@ export const gateRetry: Scenario = {
     { label: 'Retry', sublabel: 'second attempt' },
     { label: 'Pass', sublabel: 'gates green' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, running, paused, workspaceDir }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, signal, workspaceDir }) {
     const [task, gates] = entries;
     await enterWorkspace(task, workspaceDir);
     await enterWorkspace(gates, workspaceDir);
@@ -34,8 +34,7 @@ export const gateRetry: Scenario = {
     const gateNames = ['compile', 'test', 'clippy'] as const;
     const advance = async (stepIndex: number, label: string): Promise<boolean> => {
       await playback.waitForStep();
-      if (!running.current) return false;
-      while (paused.current) await rawSleep(100);
+      if (signal.aborted) return false;
       timeline.setActive(stepIndex);
       playback.setProgress(stepIndex + 1, totalSteps, label);
       return true;
@@ -273,7 +272,7 @@ export const gateRetry: Scenario = {
       if (runResult.cost) setMetric('cost', runResult.cost);
       if (runResult.tokens) setMetric('tokens', runResult.tokens);
 
-      timeline.setActive(6);
+      timeline.markAllComplete();
     } finally {
       if (taskMetricsTracker) clearInterval(taskMetricsTracker);
     }

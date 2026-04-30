@@ -17,7 +17,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 use serde::Deserialize;
@@ -37,7 +37,6 @@ use crate::tui::Theme;
 
 use crate::chat_session::{ChatAgentSession, SlashResult};
 use chrono;
-use roko_core::agent::ProviderKind;
 use roko_learn::cost_table::CostTable;
 
 // ---------------------------------------------------------------------------
@@ -896,11 +895,6 @@ fn load_last_session_summary() -> Option<(String, u32, f64, String)> {
     Some((saved_at, snap.turn_count, snap.total_cost, topic))
 }
 
-/// Get model name without needing mutable access.
-fn current_model_name_static(session: &ChatSession) -> String {
-    active_model_name(session)
-}
-
 fn active_model_name(session: &ChatSession) -> String {
     if let Some(agent_session) = session.agent_session.as_ref() {
         return agent_session.model.clone();
@@ -944,16 +938,17 @@ fn clone_chat_agent_session(session: &ChatAgentSession) -> ChatAgentSession {
         http_client: session.http_client.clone(),
         settings_json: session.settings_json.clone(),
         timeout: session.timeout,
+        provider_base_url: session.provider_base_url.clone(),
+        provider_api_key_env: session.provider_api_key_env.clone(),
     }
 }
 
 fn turn_result_to_dispatch_result(
     turn: crate::chat_session::TurnResult,
-    model: String,
 ) -> DispatchResult {
     DispatchResult {
         text: turn.text,
-        model,
+        model: turn.model,
         input_tokens: turn.input_tokens,
         output_tokens: turn.output_tokens,
         tool_outputs: turn
@@ -1271,11 +1266,10 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                     session.turn_count += 1;
                     session.thinking_started = None;
                     if !session.quiet {
-                        let model_name = current_model_name_static(&session);
                         push_usage_line(
                             &mut term,
                             &theme,
-                            &model_name,
+                            &result.model,
                             result.input_tokens,
                             result.output_tokens,
                             cost,
@@ -1433,83 +1427,91 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
     }
     term.push_lines(&[Line::raw("")])?;
 
-    let cost_table = CostTable {
-        models: HashMap::new(),
-    }
-    .with_defaults();
-
     let mut input = InputState::new();
     input.history = load_history();
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let (dispatch, agent_session, system_message) = match crate::config::load_layered(&workdir) {
-        Ok(resolved) => {
-            let config = resolved.config;
-            let mut model_config = roko_core::config::schema::RokoConfig::default();
-            model_config.providers.extend(config.providers.clone());
-            model_config.models.extend(config.models.clone());
-            if let Some(model) = config.agent.model.clone() {
-                model_config.agent.default_model = model;
-            }
-            model_config.agent.default_effort = config.agent.effort.clone();
-            model_config.agent.bare_mode = config.agent.bare_mode;
-            model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
-            model_config.agent.fallback_model = config.agent.fallback_model.clone();
-            model_config.agent.tier_models = config.agent.tier_models.clone();
-            model_config.agent.env = Some(config.agent.env.clone());
+    let (dispatch, agent_session, system_message, cost_table) =
+        match crate::config::load_layered(&workdir) {
+            Ok(resolved) => {
+                let config = resolved.config;
+                let mut model_config = roko_core::config::schema::RokoConfig::default();
+                model_config.providers.extend(config.providers.clone());
+                model_config.models.extend(config.models.clone());
+                if let Some(model) = config.agent.model.clone() {
+                    model_config.agent.default_model = model;
+                }
+                model_config.agent.default_effort = config.agent.effort.clone();
+                model_config.agent.bare_mode = config.agent.bare_mode;
+                model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
+                model_config.agent.fallback_model = config.agent.fallback_model.clone();
+                model_config.agent.tier_models = config.agent.tier_models.clone();
+                model_config.agent.env = Some(config.agent.env.clone());
 
-            let role = {
-                let role = config.prompt.role.trim();
-                (!role.is_empty()).then(|| role.to_string())
-            };
+                let ct = CostTable::from_config(&model_config.models).with_defaults();
 
-            match crate::model_selection::resolve_effective_model(
-                None,
-                None,
-                role,
-                None,
-                &model_config,
-            ) {
-                Ok(selection) if selection.provider_kind == ProviderKind::ClaudeCli.label() => {
-                    match ChatAgentSession::new(&config, workdir.clone(), selection) {
-                        Ok(agent_session) => {
-                            let system_message = Some(agent_session.system_prompt.clone());
-                            (DispatchMode::Session, Some(agent_session), system_message)
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %error,
-                                "ChatAgentSession init failed; using direct dispatch"
-                            );
-                            (DispatchMode::Direct { auth: auth.clone() }, None, None)
+                let role = {
+                    let role = config.prompt.role.trim();
+                    (!role.is_empty()).then(|| role.to_string())
+                };
+
+                match crate::model_selection::resolve_effective_model(
+                    None,
+                    None,
+                    role,
+                    None,
+                    &model_config,
+                    None,
+                ) {
+                    Ok(selection) => {
+                        match ChatAgentSession::new(&config, workdir.clone(), selection) {
+                            Ok(agent_session) => {
+                                let system_message =
+                                    Some(agent_session.system_prompt.clone());
+                                (
+                                    DispatchMode::Session,
+                                    Some(agent_session),
+                                    system_message,
+                                    ct,
+                                )
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    "ChatAgentSession init failed; using direct dispatch"
+                                );
+                                (
+                                    DispatchMode::Direct { auth: auth.clone() },
+                                    None,
+                                    None,
+                                    ct,
+                                )
+                            }
                         }
                     }
-                }
-                Ok(selection) => {
-                    tracing::warn!(
-                        provider = %selection.provider_kind,
-                        model = %selection.effective_model_key,
-                        "interactive chat resolved to unsupported provider; using direct dispatch"
-                    );
-                    (DispatchMode::Direct { auth: auth.clone() }, None, None)
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "failed to resolve interactive chat model; using direct dispatch"
-                    );
-                    (DispatchMode::Direct { auth: auth.clone() }, None, None)
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "failed to resolve interactive chat model; using direct dispatch"
+                        );
+                        (
+                            DispatchMode::Direct { auth: auth.clone() },
+                            None,
+                            None,
+                            ct,
+                        )
+                    }
                 }
             }
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "failed to load interactive chat config; using direct dispatch"
-            );
-            (DispatchMode::Direct { auth: auth.clone() }, None, None)
-        }
-    };
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to load interactive chat config; using direct dispatch"
+                );
+                let ct = CostTable::from_config(&HashMap::new()).with_defaults();
+                (DispatchMode::Direct { auth: auth.clone() }, None, None, ct)
+            }
+        };
 
     let mut session = ChatSession {
         phase: Phase::Input,
@@ -1646,11 +1648,10 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                     session.turn_count += 1;
                     session.thinking_started = None;
                     if !session.quiet {
-                        let model_name = current_model_name_static(&session);
                         push_usage_line(
                             &mut term,
                             &theme,
-                            &model_name,
+                            &result.model,
                             result.input_tokens,
                             result.output_tokens,
                             cost,
@@ -1788,7 +1789,6 @@ fn dispatch_prompt(session: &mut ChatSession, prompt: &str) {
             };
 
             let mut agent_session = clone_chat_agent_session(agent_session);
-            let model = agent_session.model.clone();
 
             // Create a channel for live streaming events so the TUI can display
             // text deltas in real time instead of waiting for the full turn.
@@ -1803,7 +1803,7 @@ fn dispatch_prompt(session: &mut ChatSession, prompt: &str) {
 
                 let mapped = match result {
                     Ok(turn) if turn.cancelled => Err("__cancelled__".to_string()),
-                    Ok(turn) => Ok(turn_result_to_dispatch_result(turn, model)),
+                    Ok(turn) => Ok(turn_result_to_dispatch_result(turn)),
                     Err(error) => Err(error.to_string()),
                 };
                 let _ = tx.send(mapped).await;
@@ -3752,9 +3752,12 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
     let dropdown_visible = session.input.completion.visible;
     let match_count = session.input.completion.matches.len();
 
-    // Multi-line input: height = min(line_count, 6), clamped to available space
-    let input_lines = session.input.line_count();
-    let max_input_height = (area.height as usize).saturating_sub(2); // leave room for spacer + status
+    // Build the input paragraph first so we can ask ratatui for the exact
+    // wrapped line count.  This avoids ad-hoc byte-length math that breaks
+    // on Unicode, emoji, and CJK characters.
+    let input_paragraph = build_input_paragraph(session, theme, dropdown_visible);
+    let input_lines = input_paragraph.line_count(area.width).max(1);
+    let max_input_height = (area.height as usize).saturating_sub(2); // room for spacer + status
     let input_height = input_lines.min(6).min(max_input_height).max(1) as u16;
 
     // Compute dropdown height: min(match_count, 8, viewport - input - 2)
@@ -3862,8 +3865,24 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
         frame.render_widget(Paragraph::new(lines), dropdown_area);
     }
 
-    // Input prompt — supports multi-line buffers and search mode
-    let input_area = chunks[2];
+    // Render the pre-built input paragraph into the input area.
+    frame.render_widget(input_paragraph, chunks[2]);
+
+    render_status_bar(frame, chunks[3], session, theme);
+}
+
+/// Render the command palette overlay (Ctrl+K).
+/// Build the input paragraph for height measurement and rendering.
+///
+/// This produces a single `Paragraph` with `.wrap(Wrap { trim: false })` that
+/// covers all three input modes (reverse search, single-line, multi-line).
+/// The caller uses `paragraph.line_count(width)` to allocate the correct
+/// vertical space before rendering.
+fn build_input_paragraph<'a>(
+    session: &ChatSession,
+    theme: &'a Theme,
+    dropdown_visible: bool,
+) -> Paragraph<'a> {
     let prompt_style = Style::default()
         .fg(Theme::ROSE)
         .add_modifier(Modifier::BOLD);
@@ -3872,7 +3891,7 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
         .fg(Theme::BONE)
         .add_modifier(Modifier::REVERSED);
 
-    if session.input.search.active {
+    let paragraph = if session.input.search.active {
         // Reverse search prompt: (reverse-i-search) 'query': matched_text
         let query = &session.input.search.query;
         let match_info = if session.input.search.matches.is_empty() && !query.is_empty() {
@@ -3908,9 +3927,9 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
                 Style::default().fg(Theme::EMBER),
             ));
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), input_area);
+        Paragraph::new(Line::from(spans))
     } else if !session.input.buffer.contains('\n') {
-        // Single-line: original compact rendering
+        // Single-line input with cursor rendering
         let before_cursor = &session.input.buffer[..session.input.cursor];
         let after_cursor = &session.input.buffer[session.input.cursor..];
 
@@ -3950,7 +3969,7 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
             }
         }
 
-        frame.render_widget(Paragraph::new(Line::from(input_spans)), input_area);
+        Paragraph::new(Line::from(input_spans))
     } else {
         // Multi-line rendering
         let (cursor_line, cursor_col) = session.input.cursor_line_col();
@@ -3966,7 +3985,6 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
             };
 
             if i == cursor_line {
-                // This line has the cursor
                 let before = &line_text[..cursor_col.min(line_text.len())];
                 let at_end = cursor_col >= line_text.len();
                 let cursor_char = if at_end {
@@ -3996,7 +4014,6 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
                     Span::styled(cursor_char, cursor_style),
                     Span::styled(after, theme.text()),
                 ];
-                // Line count badge on first line
                 if i == 0 {
                     spans.push(Span::styled(
                         format!("  {line_count_label}"),
@@ -4016,13 +4033,12 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
             }
         }
 
-        frame.render_widget(Paragraph::new(rendered_lines), input_area);
-    }
+        Paragraph::new(rendered_lines)
+    };
 
-    render_status_bar(frame, chunks[3], session, theme);
+    paragraph.wrap(Wrap { trim: false })
 }
 
-/// Render the command palette overlay (Ctrl+K).
 fn render_palette(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme: &Theme) {
     let palette = &session.input.palette;
     let max_visible = 10.min(area.height.saturating_sub(3) as usize);
@@ -4630,7 +4646,7 @@ mod tests {
     fn turn_result_to_dispatch_result_keeps_model_and_tool_preview() {
         let turn = crate::chat_session::TurnResult {
             text: "hello".to_string(),
-            model: "stale-backend".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             input_tokens: 12,
             output_tokens: 34,
             tool_calls: vec![crate::chat_session::ToolCallSummary {
@@ -4643,7 +4659,7 @@ mod tests {
             cancelled: false,
         };
 
-        let result = turn_result_to_dispatch_result(turn, "claude-sonnet-4-6".to_string());
+        let result = turn_result_to_dispatch_result(turn);
         assert_eq!(result.model, "claude-sonnet-4-6");
         assert_eq!(result.session_id.as_deref(), Some("sess-123"));
         assert_eq!(result.tool_outputs.len(), 1);

@@ -169,7 +169,10 @@ pub(crate) async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
 /// Print a security checklist and fail unless auth is enabled or `--unsafe-public` is set.
 ///
 /// Does not block for `localhost`/`127.0.0.1` targets.
-fn check_security_posture(config: &roko_core::config::schema::RokoConfig, unsafe_public: bool) -> Result<()> {
+fn check_security_posture(
+    config: &roko_core::config::schema::RokoConfig,
+    unsafe_public: bool,
+) -> Result<()> {
     let auth = &config.serve.auth;
     let auth_ok = auth.enabled && (!auth.api_key.is_empty() || !auth.api_keys.is_empty());
     let cors_configured = !config.server.cors_origins.is_empty();
@@ -184,7 +187,11 @@ fn check_security_posture(config: &roko_core::config::schema::RokoConfig, unsafe
     );
     println!(
         "  [{}] serve.auth.api_key set",
-        if !auth.api_key.is_empty() || !auth.api_keys.is_empty() { "x" } else { " " }
+        if !auth.api_key.is_empty() || !auth.api_keys.is_empty() {
+            "x"
+        } else {
+            " "
+        }
     );
     println!(
         "  [{}] server.cors_origins configured",

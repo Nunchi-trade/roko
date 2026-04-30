@@ -231,13 +231,14 @@ pub(crate) async fn cmd_run(
     let is_legacy_engine = matches!(engine, crate::EngineVariant::Legacy);
     roko_cli::run::ensure_share_supported(is_legacy_engine, share)?;
 
-    // Expose --provider as the ROKO_PROVIDER env var so that apply_env()
-    // picks it up during config resolution (same mechanism as the env var).
-    #[allow(unsafe_code)]
-    if let Some(ref p) = provider {
-        // SAFETY: single-threaded at this point (before tokio runtime starts).
-        unsafe { std::env::set_var("ROKO_PROVIDER", p) };
-    }
+    // Build CLI overrides from clap-parsed args instead of re-parsing
+    // process args or laundering through env vars.
+    let overrides = roko_cli::run::CliOverrides {
+        model: cli.model.clone(),
+        role: cli.role.clone(),
+        provider,
+    };
+
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
     let mut config = resolve_config_for_workdir(cli, &workdir)?;
@@ -289,6 +290,7 @@ pub(crate) async fn cmd_run(
             enabled_gates,
             shell_gates,
             None,
+            &overrides,
         )
         .await;
 
@@ -1552,7 +1554,7 @@ pub(crate) async fn persist_capture_episode(
         .await
         .map_err(|e| anyhow!("open learning runtime: {e}"))?;
     let distillation_workdir = workdir.to_path_buf();
-    let distillation_caller = crate::learning_helpers::distillation_model_caller(workdir);
+    let distillation_caller = roko_cli::learning_helpers::distillation_model_caller(workdir);
     runtime.set_episode_completion_hook(move |episode| {
         roko_neuro::spawn_episode_distillation(
             distillation_workdir.clone(),

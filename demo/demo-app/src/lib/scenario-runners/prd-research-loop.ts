@@ -167,6 +167,6 @@ export const prdResearchLoop: Scenario = {
     });
     setMetric('model', 'loop complete');
 
-    timeline.setActive(8); // all completed
+    timeline.markAllComplete();
   },
 };

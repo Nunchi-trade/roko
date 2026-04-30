@@ -49,6 +49,7 @@ impl AcpAdapter {
                     tool_call_id: agent_id.clone(),
                     title: format!("Agent: {role}"),
                     kind: ToolCallKind::Other,
+                    locations: None,
                 })
             }
             RuntimeEvent::AgentCompleted {
@@ -69,6 +70,7 @@ impl AcpAdapter {
                 tool_call_id: gate_call_id(gate_name),
                 title: format!("Gate: {gate_name}"),
                 kind: ToolCallKind::Other,
+                locations: None,
             }),
             RuntimeEvent::GatePassed { gate_name, .. } => Some(CognitiveEvent::ToolCallComplete {
                 tool_call_id: gate_call_id(gate_name),

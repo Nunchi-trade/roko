@@ -46,9 +46,9 @@ use crate::{
     transport::{StdioTransport, TransportError, TransportResult},
     types::{
         ContentBlock, CostInfo, JsonRpcMessage, PermissionAction, PermissionDecision,
-        PermissionResponse, PlanEntry, RequestPermissionParams, SESSION_BUSY, SessionCancelParams,
-        SessionPromptParams, SessionPromptResult, SessionUpdate, StopReason, ToolCallKind,
-        ToolCallStatus, UsageInfo,
+        PermissionOptionKind, PermissionOutcome, PermissionResponse, PermissionToolCall, PlanEntry,
+        RequestPermissionParams, SESSION_BUSY, SessionCancelParams, SessionPromptParams,
+        SessionPromptResult, SessionUpdate, StopReason, ToolCallKind, ToolCallStatus, UsageInfo,
     },
 };
 
@@ -191,6 +191,7 @@ pub enum CognitiveEvent {
         tool_call_id: String,
         title: String,
         kind: ToolCallKind,
+        locations: Option<Vec<crate::types::ToolCallLocation>>,
     },
     /// A tool call has finished with rendered content.
     ToolCallComplete {
@@ -324,26 +325,24 @@ async fn append_acp_episode(
         usage.output_tokens = output_tokens;
         usage.cache_read_tokens = cached_read_tokens;
         usage.cache_write_tokens = provider_usage.cached_write_tokens.unwrap_or(0);
-        usage.cost_usd = cost_override
-            .unwrap_or_else(|| {
-                calculate_cost_for_model_slug(
-                    &resolved.slug,
-                    input_tokens,
-                    output_tokens,
-                    cached_read_tokens,
-                )
-                .unwrap_or(0.0)
-            });
-        usage.cost_usd_without_cache = cost_override
-            .unwrap_or_else(|| {
-                calculate_cost_without_cache_for_model_slug(
-                    &resolved.slug,
-                    input_tokens,
-                    output_tokens,
-                    cached_read_tokens,
-                )
-                .unwrap_or(usage.cost_usd)
-            });
+        usage.cost_usd = cost_override.unwrap_or_else(|| {
+            calculate_cost_for_model_slug(
+                &resolved.slug,
+                input_tokens,
+                output_tokens,
+                cached_read_tokens,
+            )
+            .unwrap_or(0.0)
+        });
+        usage.cost_usd_without_cache = cost_override.unwrap_or_else(|| {
+            calculate_cost_without_cache_for_model_slug(
+                &resolved.slug,
+                input_tokens,
+                output_tokens,
+                cached_read_tokens,
+            )
+            .unwrap_or(usage.cost_usd)
+        });
     }
     episode.usage = usage;
     episode.tokens_used = stream_usage.map(|usage| usage.total_tokens).unwrap_or(0);
@@ -521,6 +520,27 @@ fn record_cascade_observation(
     }));
 }
 
+/// Truncate text to a session title: up to `max_len` chars, word-boundary aware.
+fn truncate_to_title(text: &str, max_len: usize) -> String {
+    let trimmed = text.trim();
+    // Take first line only.
+    let first_line = trimmed.lines().next().unwrap_or(trimmed);
+    if first_line.len() <= max_len {
+        return first_line.to_owned();
+    }
+    let mut end = max_len;
+    // Back up to last word boundary.
+    while end > 0 && !first_line.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Try to find a space to break at a word boundary.
+    if let Some(space_pos) = first_line[..end].rfind(' ') {
+        format!("{}...", &first_line[..space_pos])
+    } else {
+        format!("{}...", &first_line[..end])
+    }
+}
+
 fn truncate_assistant_history(text: &str) -> String {
     if text.len() <= MAX_HISTORY_ASSISTANT_BYTES {
         return text.to_owned();
@@ -573,11 +593,14 @@ where
         "requesting permission from editor"
     );
 
+    let tool_call_id = format!("perm-{}", uuid::Uuid::new_v4());
     let params = serde_json::to_value(RequestPermissionParams {
         session_id: session.session_id.clone(),
-        title: title.to_string(),
-        detail: detail.to_string(),
-        action: action.clone(),
+        tool_call: PermissionToolCall {
+            tool_call_id: tool_call_id.clone(),
+            title: format!("{title}: {detail}"),
+        },
+        options: PermissionOptionKind::standard_options(),
     })
     .unwrap_or_else(|error| {
         warn!(
@@ -616,7 +639,13 @@ where
                             .result
                             .as_ref()
                             .and_then(|value| serde_json::from_value::<PermissionResponse>(value.clone()).ok())
-                            .map(|response| response.decision)
+                            .map(|response| match response.outcome {
+                                PermissionOutcome::Selected { ref option_id } => {
+                                    PermissionOptionKind::decision_from_option_id(option_id)
+                                        .unwrap_or(PermissionDecision::Reject)
+                                }
+                                PermissionOutcome::Cancelled => PermissionDecision::Reject,
+                            })
                             .unwrap_or_else(|| {
                                 warn!(
                                     session_id = %session.session_id,
@@ -926,51 +955,7 @@ where
         session.push_user_turn(prompt_text.clone());
     }
 
-    let agent_mode = session.config_state.agent_mode.clone();
-    if !is_slash_command && pipeline_template.is_none() && agent_mode == "code" {
-        let permission_detail = format!(
-            "The {} agent may read and modify files in {}.",
-            agent_mode,
-            workdir.display()
-        );
-        let decision = request_permission(
-            transport,
-            session,
-            workdir,
-            PermissionAction::FileEdit,
-            "Allow code agent to edit files?",
-            &permission_detail,
-        )
-        .await;
-
-        if matches!(decision, PermissionDecision::Reject) {
-            info!(
-                session_id = %session.session_id,
-                "user rejected permission for code agent dispatch"
-            );
-            let (reject_sender, reject_receiver) = mpsc::channel(4);
-            let _ = reject_sender
-                .send(CognitiveEvent::TokenChunk(
-                    "Permission denied. The agent cannot proceed without file access.".to_string(),
-                ))
-                .await;
-            let _ = reject_sender
-                .send(CognitiveEvent::Complete {
-                    stop_reason: StopReason::EndTurn,
-                    usage: None,
-                })
-                .await;
-            drop(reject_sender);
-            return stream_events_to_editor(
-                transport,
-                &session.session_id,
-                reject_receiver,
-                &session.cancel_token,
-            )
-            .await
-            .map(|sr| sr.prompt_result);
-        }
-    }
+    // Permission is requested per-tool-call by the agent, not preemptively.
 
     let should_resolve_context = !is_slash_command && pipeline_template.is_none();
 
@@ -1063,34 +1048,34 @@ where
             &workdir,
         ) {
             Ok(()) => None,
-            Err(violation) => {
-                match violation.severity {
-                    ViolationSeverity::Block => {
-                        error!(
-                            session_id = %session.session_id,
-                            violation = ?violation.violation_type,
-                            message = %violation.message,
-                            "ACP pre-dispatch safety check BLOCKED dispatch"
-                        );
-                        Some(violation)
-                    }
-                    ViolationSeverity::Warn => {
-                        warn!(
-                            session_id = %session.session_id,
-                            violation = ?violation.violation_type,
-                            message = %violation.message,
-                            "ACP pre-dispatch safety warning"
-                        );
-                        None
-                    }
+            Err(violation) => match violation.severity {
+                ViolationSeverity::Block => {
+                    error!(
+                        session_id = %session.session_id,
+                        violation = ?violation.violation_type,
+                        message = %violation.message,
+                        "ACP pre-dispatch safety check BLOCKED dispatch"
+                    );
+                    Some(violation)
                 }
-            }
+                ViolationSeverity::Warn => {
+                    warn!(
+                        session_id = %session.session_id,
+                        violation = ?violation.violation_type,
+                        message = %violation.message,
+                        "ACP pre-dispatch safety warning"
+                    );
+                    None
+                }
+            },
         }
     };
 
     // Shared channel for the workflow engine path: the cognitive task writes the
     // WorkflowRunReport's actual cost (which was aggregated from AgentCompleted events)
     // here so that append_acp_episode can use it instead of the pricing-table estimate.
+    let prompt_text_for_title = prompt_text.clone();
+
     let workflow_cost_sink: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
     let workflow_cost_sink_task = Arc::clone(&workflow_cost_sink);
 
@@ -1108,12 +1093,8 @@ where
                     stop_reason: StopReason::EndTurn,
                     usage: None,
                 })
-            .await;
-            return Err(anyhow::anyhow!(
-                "ACP pre-dispatch safety violation: {}",
-                message
-            )
-            .into());
+                .await;
+            return Err(anyhow::anyhow!("ACP pre-dispatch safety violation: {}", message).into());
         }
 
         if is_slash_command {
@@ -1279,31 +1260,30 @@ where
     )
     .await;
 
-    if !is_slash_command {
-        if let Ok(ref sr) = stream_result {
-            if let Some(usage) = sr.usage.as_ref() {
-                let size = resolved_for_logging
-                    .profile
-                    .as_ref()
-                    .map(|profile| profile.context_window)
-                    .unwrap_or_else(|| ModelProfile::default().context_window);
-                let update = SessionUpdate::UsageUpdate {
-                    used: usage.total_tokens,
-                    size,
-                    cost: calculate_cost_for_model_slug(
-                        &resolved_for_logging.slug,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.cached_read_tokens.unwrap_or(0),
-                    )
-                    .map(|amount| CostInfo {
-                        amount,
-                        currency: "USD".to_string(),
-                    }),
-                };
-                let _ = send_session_update(transport, &session.session_id, update).await;
-            }
-        }
+    if !is_slash_command
+        && let Ok(ref sr) = stream_result
+        && let Some(usage) = sr.usage.as_ref()
+    {
+        let size = resolved_for_logging
+            .profile
+            .as_ref()
+            .map(|profile| profile.context_window)
+            .unwrap_or_else(|| ModelProfile::default().context_window);
+        let update = SessionUpdate::UsageUpdate {
+            used: usage.total_tokens,
+            size,
+            cost: calculate_cost_for_model_slug(
+                &resolved_for_logging.slug,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cached_read_tokens.unwrap_or(0),
+            )
+            .map(|amount| CostInfo {
+                amount,
+                currency: "USD".to_string(),
+            }),
+        };
+        let _ = send_session_update(transport, &session.session_id, update).await;
     }
 
     let task_result = cognitive_task.await;
@@ -1329,27 +1309,27 @@ where
     };
     let stream_error = stream_result.as_ref().err().map(|err| err.to_string());
 
-    if let Ok(ref sr) = stream_result {
-        if !sr.assistant_text.is_empty() {
-            let safety = SafetyLayer::with_defaults().with_role(&session.config_state.agent_mode);
-            let violations = safety.post_dispatch_check(
-                &session.session_id,
-                "session-prompt",
-                &session.config_state.agent_mode,
-                &sr.assistant_text,
-                &[],
-            );
-            for v in &violations {
-                // The response has already streamed; block-level findings are only logged here.
-                match v.severity {
-                    ViolationSeverity::Warn | ViolationSeverity::Block => {
-                        warn!(
-                            session_id = %session.session_id,
-                            violation = ?v.violation_type,
-                            message = %v.message,
-                            "ACP post-dispatch safety violation"
-                        );
-                    }
+    if let Ok(ref sr) = stream_result
+        && !sr.assistant_text.is_empty()
+    {
+        let safety = SafetyLayer::with_defaults().with_role(&session.config_state.agent_mode);
+        let violations = safety.post_dispatch_check(
+            &session.session_id,
+            "session-prompt",
+            &session.config_state.agent_mode,
+            &sr.assistant_text,
+            &[],
+        );
+        for v in &violations {
+            // The response has already streamed; block-level findings are only logged here.
+            match v.severity {
+                ViolationSeverity::Warn | ViolationSeverity::Block => {
+                    warn!(
+                        session_id = %session.session_id,
+                        violation = ?v.violation_type,
+                        message = %v.message,
+                        "ACP post-dispatch safety violation"
+                    );
                 }
             }
         }
@@ -1404,6 +1384,17 @@ where
 
     if let Some(join_error) = task_join_error {
         return Err(join_error);
+    }
+
+    // Auto-set session title from first user message.
+    if session.session_name.is_none() && !is_slash_command {
+        let title = truncate_to_title(&prompt_text_for_title, 60);
+        session.session_name = Some(title.clone());
+        let title_update = SessionUpdate::SessionInfoUpdate {
+            session_id: session.session_id.clone(),
+            session_name: Some(title),
+        };
+        let _ = send_session_update(transport, &session.session_id, title_update).await;
     }
 
     // Push assistant turn after streaming completes (skip slash commands).
@@ -1678,6 +1669,7 @@ async fn emit_knowledge_card(
             tool_call_id: tool_call_id.clone(),
             title: card.title,
             kind: ToolCallKind::Other,
+            locations: None,
         })
         .await;
     let _ = event_sender
@@ -1909,6 +1901,7 @@ async fn emit_provenance_card(
             tool_call_id: tool_call_id.clone(),
             title: "Decision provenance".to_string(),
             kind: ToolCallKind::Other,
+            locations: None,
         })
         .await;
     let _ = event_sender
@@ -2752,12 +2745,14 @@ fn map_event_to_update(event: CognitiveEvent) -> SessionUpdate {
             tool_call_id,
             title,
             kind,
+            locations,
         } => SessionUpdate::ToolCall {
             tool_call_id,
             title,
             kind,
             status: ToolCallStatus::InProgress,
             content: Vec::new(),
+            locations,
         },
         CognitiveEvent::ToolCallComplete {
             tool_call_id,
@@ -2767,6 +2762,7 @@ fn map_event_to_update(event: CognitiveEvent) -> SessionUpdate {
             tool_call_id,
             status,
             content,
+            locations: None,
         },
         CognitiveEvent::PlanUpdate { entries } => SessionUpdate::Plan { entries },
         CognitiveEvent::Complete { .. } | CognitiveEvent::MaxTokens => {
@@ -2801,7 +2797,9 @@ fn extract_prompt_text(prompt: &[ContentBlock]) -> String {
         .map(|block| match block {
             ContentBlock::Text { text } => text.clone(),
             ContentBlock::Resource { .. } => String::new(),
-            ContentBlock::Diff { path, diff } => format!("diff {path}:\n{diff}"),
+            ContentBlock::Diff { path, diff, .. } => {
+                format!("diff {path}:\n{}", diff.as_deref().unwrap_or(""))
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -3286,7 +3284,10 @@ mod tests {
         let (server_reader, server_writer) = tokio::io::split(server);
         let mut transport = StdioTransport::from_io(server_reader, server_writer);
         let ((), decision) = tokio::join!(
-            reply_to_permission_request(client, json!({ "decision": "always_allow" })),
+            reply_to_permission_request(
+                client,
+                json!({ "outcome": { "type": "selected", "optionId": "allow_always" } })
+            ),
             request_permission(
                 &mut transport,
                 &mut session,
@@ -3317,7 +3318,7 @@ mod tests {
         let (server_reader, server_writer) = tokio::io::split(server);
         let mut transport = StdioTransport::from_io(server_reader, server_writer);
         let ((), decision) = tokio::join!(
-            reply_to_permission_request(client, json!({ "decision": "maybe" })),
+            reply_to_permission_request(client, json!({ "outcome": { "type": "cancelled" } })),
             request_permission(
                 &mut transport,
                 &mut session,

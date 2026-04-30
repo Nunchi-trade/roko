@@ -2079,8 +2079,17 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             provider,
             max_retries,
         } => {
-            commands::util::cmd_run(cli, workdir, prompt, serve, share, engine, provider, max_retries)
-                .await
+            commands::util::cmd_run(
+                cli,
+                workdir,
+                prompt,
+                serve,
+                share,
+                engine,
+                provider,
+                max_retries,
+            )
+            .await
         }
         Command::Status {
             workdir,
@@ -2363,7 +2372,10 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                             roko_cli::chat_history::sessions_dir(&wd).display()
                         );
                     } else {
-                        println!("{:<40} {:<16} {:<8} {}", "session", "model", "turns", "started");
+                        println!(
+                            "{:<40} {:<16} {:<8} {}",
+                            "session", "model", "turns", "started"
+                        );
                         println!("{}", "-".repeat(80));
                         for session in &sessions {
                             println!(
@@ -2843,7 +2855,9 @@ fn load_env_file(path: &Path) -> Result<Vec<(String, String)>> {
 /// `dispatch_config` which is reserved for arms intercepted before reaching it).
 fn dispatch_mcp_cmd(cmd: &ConfigMcpCmd, workdir: &Path) -> Result<()> {
     match cmd {
-        ConfigMcpCmd::List { workdir: wd_override } => {
+        ConfigMcpCmd::List {
+            workdir: wd_override,
+        } => {
             let wd = wd_override.as_deref().unwrap_or(workdir);
             // Resolve MCP config: .roko/mcp.json → ~/.claude/mcp-config.json → walk-up .mcp.json
             let resolved = resolve_mcp_config_path(None, wd);
@@ -2863,7 +2877,10 @@ fn dispatch_mcp_cmd(cmd: &ConfigMcpCmd, workdir: &Path) -> Result<()> {
             }
             Ok(())
         }
-        ConfigMcpCmd::Test { name, workdir: wd_override } => {
+        ConfigMcpCmd::Test {
+            name,
+            workdir: wd_override,
+        } => {
             let wd = wd_override.as_deref().unwrap_or(workdir);
             let resolved = resolve_mcp_config_path(None, wd);
             let path = resolved.ok_or_else(|| {
@@ -2881,7 +2898,12 @@ fn dispatch_mcp_cmd(cmd: &ConfigMcpCmd, workdir: &Path) -> Result<()> {
             }
             Ok(())
         }
-        ConfigMcpCmd::Add { name, command, args, workdir: wd_override } => {
+        ConfigMcpCmd::Add {
+            name,
+            command,
+            args,
+            workdir: wd_override,
+        } => {
             let wd = wd_override.as_deref().unwrap_or(workdir);
             let path = {
                 let roko_dir = wd.join(".roko");
@@ -2890,13 +2912,20 @@ fn dispatch_mcp_cmd(cmd: &ConfigMcpCmd, workdir: &Path) -> Result<()> {
                 roko_dir.join("mcp.json")
             };
             let mut cfg = if path.is_file() {
-                roko_agent::mcp::McpConfig::load(&path)
-                    .map_err(|e| anyhow!("load existing MCP config from {}: {}", path.display(), e))?
+                roko_agent::mcp::McpConfig::load(&path).map_err(|e| {
+                    anyhow!("load existing MCP config from {}: {}", path.display(), e)
+                })?
             } else {
-                roko_agent::mcp::McpConfig { servers: Vec::new() }
+                roko_agent::mcp::McpConfig {
+                    servers: Vec::new(),
+                }
             };
             if cfg.servers.iter().any(|s| s.name == *name) {
-                return Err(anyhow!("server '{}' already exists in {}", name, path.display()));
+                return Err(anyhow!(
+                    "server '{}' already exists in {}",
+                    name,
+                    path.display()
+                ));
             }
             cfg.servers.push(roko_agent::mcp::McpServerConfig {
                 name: name.clone(),
@@ -2909,8 +2938,7 @@ fn dispatch_mcp_cmd(cmd: &ConfigMcpCmd, workdir: &Path) -> Result<()> {
                 tier: Default::default(),
             });
             let json = serde_json::to_string_pretty(&cfg).context("serialize MCP config")?;
-            std::fs::write(&path, json)
-                .with_context(|| format!("write {}", path.display()))?;
+            std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
             println!("added server '{}' to {}", name, path.display());
             Ok(())
         }
@@ -3259,8 +3287,7 @@ mod tests {
 
     #[test]
     fn cli_parses_plan_force_resume_flag() {
-        let cli =
-            Cli::try_parse_from(["roko", "plan", "run", "plans", "--force-resume"]).unwrap();
+        let cli = Cli::try_parse_from(["roko", "plan", "run", "plans", "--force-resume"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Plan {

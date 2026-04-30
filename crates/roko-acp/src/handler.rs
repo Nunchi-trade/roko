@@ -17,8 +17,8 @@ use crate::{
         ACP_PROTOCOL_VERSION, ACP_SPEC_VERSION, AgentCapabilities, AgentInfo, ConfigUpdateParams,
         ConfigUpdateResult, InitializeParams, InitializeResult, JsonRpcId, JsonRpcMessage,
         JsonRpcNotification, JsonRpcRequest, METHOD_NOT_FOUND, McpCapabilities, PARSE_ERROR,
-        PromptCapabilities, SESSION_NOT_FOUND, SessionCancelParams, SessionLoadParams,
-        SessionNewParams, SessionPromptParams, SessionSetModeParams,
+        PromptCapabilities, SESSION_NOT_FOUND, SessionCancelParams, SessionCloseParams,
+        SessionLoadParams, SessionNewParams, SessionPromptParams, SessionSetModeParams,
     },
 };
 
@@ -137,19 +137,7 @@ async fn handle_request(
             let result = sessions.create_session(params);
             let session_id = result.session_id.clone();
             send_success(transport, id, result).await?;
-            // Send available slash commands after session creation.
-            let commands = crate::session::build_slash_commands();
-            let update = serde_json::json!({
-                "sessionId": session_id,
-                "update": {
-                    "sessionUpdate": "available_commands_update",
-                    "availableCommands": commands,
-                }
-            });
-            transport
-                .send_notification("session/update", update)
-                .await
-                .context("failed to send slash commands notification")
+            send_slash_commands_notification(transport, &session_id).await
         }
         "session/list" => {
             let result = sessions.list_sessions_with_persisted();
@@ -222,6 +210,40 @@ async fn handle_request(
                 config_options: session.config_options(),
             };
             send_success(transport, id, result).await
+        }
+        "session/close" => {
+            let params: SessionCloseParams = match parse_params(params, &method) {
+                Ok(params) => params,
+                Err(error) => return send_error_response(transport, id, error).await,
+            };
+            sessions.close_session(&params.session_id);
+            send_success(transport, id, serde_json::json!({})).await
+        }
+        "session/resume" => {
+            let params: SessionLoadParams = match parse_params(params, &method) {
+                Ok(params) => params,
+                Err(error) => return send_error_response(transport, id, error).await,
+            };
+            let result = match sessions.load_session(&params.session_id) {
+                Ok(result) => result,
+                Err(_) => {
+                    return send_error_response(
+                        transport,
+                        id,
+                        session_not_found_error(&params.session_id),
+                    )
+                    .await;
+                }
+            };
+            let session_id = params.session_id.clone();
+            send_success(transport, id, result).await?;
+            send_slash_commands_notification(transport, &session_id).await?;
+            if let Some(session) = sessions.get_session(&session_id) {
+                let options = serde_json::to_value(session.config_options())
+                    .unwrap_or_else(|_| serde_json::json!([]));
+                send_config_options_notification(transport, &session_id, options).await?;
+            }
+            Ok(())
         }
         "session/set_mode" => {
             let params: SessionSetModeParams = match parse_params(params, &method) {
@@ -300,6 +322,42 @@ where
             format!("invalid params for '{method}': {error}"),
         )
     })
+}
+
+async fn send_slash_commands_notification(
+    transport: &mut StdioTransport<impl AsyncRead + Unpin, impl AsyncWrite + Unpin>,
+    session_id: &str,
+) -> Result<()> {
+    let commands = crate::session::build_slash_commands();
+    let update = serde_json::json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": commands,
+        }
+    });
+    transport
+        .send_notification("session/update", update)
+        .await
+        .context("failed to send slash commands notification")
+}
+
+async fn send_config_options_notification(
+    transport: &mut StdioTransport<impl AsyncRead + Unpin, impl AsyncWrite + Unpin>,
+    session_id: &str,
+    config_options: serde_json::Value,
+) -> Result<()> {
+    let update = serde_json::json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "config_option_update",
+            "configOptions": config_options,
+        }
+    });
+    transport
+        .send_notification("session/update", update)
+        .await
+        .context("failed to send config options notification")
 }
 
 fn json_rpc_error(code: i32, message: String) -> (i32, String) {

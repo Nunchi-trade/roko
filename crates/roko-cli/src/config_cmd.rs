@@ -142,7 +142,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
                 api_key: Some(String::new()),
             }),
             deploy: None,
-            acknowledge_public_risk: None,
+            auto_start: None,
         }),
         learning: None,
     };

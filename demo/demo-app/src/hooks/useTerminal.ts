@@ -9,7 +9,7 @@ import { ImageAddon } from '@xterm/addon-image';
 import { rosedustTheme } from '../lib/rosedust-theme';
 import { WS_BASE } from '../lib/serve-url';
 
-const PROMPT_RE = /[❯\$%>#]\s*$/;
+const PROMPT_RE = /(?:^|\n)[^\n]*[❯%#]\s*$|(?:^|\n)\$\s+$/;
 
 function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
@@ -28,7 +28,7 @@ export interface TerminalHandle {
   /** Type a command char-by-char then wait for prompt */
   typeCmd(cmd: string, speed?: number, timeout?: number): Promise<boolean>;
   /** Wait for a shell prompt to appear in output buffer */
-  waitForPrompt(timeout?: number): Promise<boolean>;
+  waitForPrompt(timeout?: number, signal?: AbortSignal): Promise<boolean>;
   /** Wait for a specific marker string in output */
   waitForMarker(marker: string, timeout?: number): Promise<boolean>;
   /** Get current output buffer content */
@@ -191,14 +191,16 @@ export function useTerminal(sessionId?: string) {
       }
     };
 
-    handle.waitForPrompt = async (timeout = 60000): Promise<boolean> => {
+    handle.waitForPrompt = async (timeout = 60000, signal?: AbortSignal): Promise<boolean> => {
       const start = Date.now();
       await sleep(80);
       while (Date.now() - start < timeout) {
+        if (signal?.aborted) return false;
         const tail = stripAnsi(outBuf).slice(-300);
         if (PROMPT_RE.test(tail)) {
           const snapshot = outBuf.length;
           await sleep(120);
+          if (signal?.aborted) return false;
           if (outBuf.length === snapshot) {
             const recheck = stripAnsi(outBuf).slice(-300);
             if (PROMPT_RE.test(recheck)) return true;

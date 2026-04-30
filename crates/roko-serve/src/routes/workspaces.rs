@@ -10,7 +10,7 @@ use axum::extract::{Path, State};
 use axum::routing::{delete, get};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::state::{AppState, WorkspaceInfo};
 use roko_fs::layout::RokoLayout;
@@ -92,10 +92,7 @@ async fn create_workspace(
 
     // Copy roko.toml from the server workspace so provider config is available.
     let server_toml = state.workdir.join("roko.toml");
-    if tokio::fs::try_exists(&server_toml)
-        .await
-        .unwrap_or(false)
-    {
+    if tokio::fs::try_exists(&server_toml).await.unwrap_or(false) {
         let _ = tokio::fs::copy(&server_toml, dir.join("roko.toml")).await;
     }
 

@@ -1,5 +1,5 @@
-import { Suspense, lazy, useEffect, useMemo } from 'react';
-import { Outlet, useNavigate } from 'react-router';
+import { Suspense, lazy, useEffect, useMemo, useRef } from 'react';
+import { Outlet, useNavigate, useLocation } from 'react-router';
 import Grain from './Grain';
 import Curtain from './Curtain';
 import ScrollTrack from './ScrollTrack';
@@ -9,10 +9,32 @@ import ComponentErrorBoundary from './design/ComponentErrorBoundary';
 import { useKeyboardShortcuts, useHelpOverlay, type ShortcutDef } from '../hooks/useKeyboardShortcuts';
 
 const LazyHeroParticleField = lazy(() => import('./HeroParticleField'));
+const LazyDemo = lazy(() => import('../pages/Demo/index'));
+
+function RouteLoading() {
+  return (
+    <div className="route-loading progressive-reveal">
+      <div className="route-loading__nav">
+        <div className="skeleton route-loading__nav-pill" />
+        <div className="skeleton route-loading__nav-pill" style={{ width: 96 }} />
+      </div>
+      <div className="route-loading__header">
+        <div className="skeleton skeleton-circle" />
+        <div className="skeleton skeleton-title" />
+      </div>
+    </div>
+  );
+}
 
 export default function AppShell() {
   const navigate = useNavigate();
+  const location = useLocation();
   const help = useHelpOverlay();
+
+  // KeepAlive: once Demo is visited, keep it mounted (display:none when elsewhere)
+  const isDemo = location.pathname === '/demo';
+  const demoVisitedRef = useRef(false);
+  if (isDemo) demoVisitedRef.current = true;
 
   // Global keyboard shortcuts (E4/E5)
   const shortcuts = useMemo<ShortcutDef[]>(() => [
@@ -61,7 +83,14 @@ export default function AppShell() {
       <ScrollTrack />
       <TopNav />
       <main id="main-content" role="main" aria-label="Page content" className="app-frame" style={{ paddingTop: 48, position: 'relative', zIndex: 1, minHeight: '100vh' }}>
-        <Outlet />
+        {demoVisitedRef.current && (
+          <div style={{ display: isDemo ? 'contents' : 'none' }}>
+            <Suspense fallback={<RouteLoading />}><LazyDemo /></Suspense>
+          </div>
+        )}
+        <div style={{ display: isDemo ? 'none' : 'contents' }}>
+          <Outlet />
+        </div>
       </main>
       <HelpOverlay open={help.open} onClose={help.close} shortcuts={shortcuts} />
     </>

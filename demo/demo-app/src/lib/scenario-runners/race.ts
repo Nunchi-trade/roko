@@ -63,6 +63,6 @@ export const race: Scenario = {
     clearInterval(leftTracker);
     clearInterval(rightTracker);
 
-    timeline.setActive(2);
+    timeline.markAllComplete();
   },
 };

@@ -170,6 +170,6 @@ export const providerRace: Scenario = {
     );
     logCommand('summary', `Race results: ${summary}`);
 
-    timeline.setActive(5);
+    timeline.markAllComplete();
   },
 };

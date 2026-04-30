@@ -8,8 +8,8 @@ use std::{path::Path, sync::Arc};
 use anyhow::Result;
 use roko_agent::chat_types::FinishReason;
 use roko_agent::model_call_service::ModelCallService;
-use roko_core::{AgentRole, Body, Engram, Kind};
 use roko_core::foundation::ModelCaller;
+use roko_core::{AgentRole, Body, Engram, Kind};
 use roko_learn::anomaly::AnomalyDetector;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
@@ -341,7 +341,12 @@ pub(crate) fn apply_concluded_experiment_overrides(learning: &LearningRuntime, w
 
 const DISTILLATION_MODEL: &str = "claude-haiku-4-5";
 
-pub(crate) fn distillation_model_caller(workdir: &Path) -> Arc<dyn ModelCaller> {
+/// Build a [`ModelCaller`] configured for episode distillation.
+///
+/// This is `pub` (not `pub(crate)`) because the binary target and the library
+/// target are compiled as separate crates — `pub(crate)` would make the
+/// function invisible to the binary.
+pub fn distillation_model_caller(workdir: &Path) -> Arc<dyn ModelCaller> {
     let mut config = roko_core::config::load_config(workdir).unwrap_or_default();
     config.apply_process_env();
     crate::config::merge_global_providers(&mut config);

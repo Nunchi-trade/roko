@@ -273,7 +273,7 @@ fn build_oneshot_session(
         model_config.agent.default_model = model;
     }
 
-    let selection = resolve_effective_model(None, None, None, None, &model_config)
+    let selection = resolve_effective_model(None, None, None, None, &model_config, None)
         .context("resolve oneshot model selection")?;
     if selection.provider_kind != ProviderKind::ClaudeCli.label() {
         return Err(anyhow::anyhow!(

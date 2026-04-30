@@ -776,9 +776,7 @@ mod tests {
     }
 
     impl HeaderPointerPoster {
-        fn new(
-            responses: Vec<Result<String, HttpPostError>>,
-        ) -> (Self, Arc<Mutex<Vec<usize>>>) {
+        fn new(responses: Vec<Result<String, HttpPostError>>) -> (Self, Arc<Mutex<Vec<usize>>>) {
             let auth_ptrs = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
@@ -804,10 +802,7 @@ mod tests {
                 .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
                 .map(|(_, value)| value.as_ptr() as usize)
                 .expect("authorization header");
-            self.auth_ptrs
-                .lock()
-                .expect("auth ptr lock")
-                .push(auth_ptr);
+            self.auth_ptrs.lock().expect("auth ptr lock").push(auth_ptr);
             self.responses
                 .lock()
                 .expect("responses lock")
@@ -838,8 +833,8 @@ mod tests {
             })
             .to_string()),
         ]);
-        let backend = OpenAiCompatLlmBackend::new("test-key", "glm-5.1")
-            .with_poster(Box::new(poster));
+        let backend =
+            OpenAiCompatLlmBackend::new("test-key", "glm-5.1").with_poster(Box::new(poster));
         let messages = [serde_json::json!({ "role": "user", "content": "hi" })];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
         let session = SessionState::default();
@@ -1259,8 +1254,7 @@ mod tests {
             return;
         };
 
-        let backend = OpenAiCompatLlmBackend::new(api_key, "gpt-4o")
-            .with_max_tokens(10);
+        let backend = OpenAiCompatLlmBackend::new(api_key, "gpt-4o").with_max_tokens(10);
         let result = backend
             .send_turn(
                 &[serde_json::json!({ "role": "user", "content": "say hi" })],

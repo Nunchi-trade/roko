@@ -113,7 +113,13 @@ async function writeFileViaPty(
   path: string,
   content: string,
 ): Promise<void> {
-  const b64 = btoa(content);
+  // btoa() only handles Latin1 — encode via TextEncoder for Unicode safety.
+  const bytes = new TextEncoder().encode(content);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const b64 = btoa(binary);
   await handle.execCmd(
     `echo '${b64}' | base64 -D > '${path}' 2>/dev/null || echo '${b64}' | base64 -d > '${path}'`,
     5000,
@@ -353,7 +359,7 @@ export const prdPipeline: Scenario = {
           gateResult.ok ? 'success' : 'error',
         ),
       );
-      timeline.setActive(5);
+      timeline.markAllComplete();
     } finally {
       closeWorkflowStreams();
     }

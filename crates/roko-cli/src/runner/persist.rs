@@ -237,8 +237,8 @@ pub fn load_gate_thresholds(paths: &PersistPaths) -> Result<GateThresholds> {
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     {
-        let mut file = fs::File::create(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
+        let mut file =
+            fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
         file.write_all(content)
             .with_context(|| format!("writing {}", tmp.display()))?;
         file.sync_data()
@@ -596,9 +596,9 @@ mod tests {
             "snapshot_fail_streak": 0,
             "fingerprints": []
         });
-        fs::write(
+        atomic_write(
             &paths.run_state_json,
-            serde_json::to_string(&payload).unwrap(),
+            serde_json::to_string(&payload).unwrap().as_bytes(),
         )
         .unwrap();
 

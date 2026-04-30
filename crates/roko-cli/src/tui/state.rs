@@ -395,14 +395,7 @@ fn route_tier_label_for_model(model: &str) -> &'static str {
     }
 }
 
-#[must_use]
-fn event_model_slug(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> String {
-    if event.model.trim().is_empty() {
-        event.model_used.trim().to_string()
-    } else {
-        event.model.trim().to_string()
-    }
-}
+use crate::tui::display_utils::event_model_slug;
 
 #[must_use]
 fn prompt_focus_score(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> f64 {
@@ -817,13 +810,7 @@ fn truncate_log_kind(kind: &str) -> String {
     }
 }
 
-fn truncate_log(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::truncate as truncate_log;
 
 fn format_log_count(n: u64) -> String {
     if n >= 1_000_000 {

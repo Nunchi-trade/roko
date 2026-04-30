@@ -345,15 +345,7 @@ fn render_hypotheses(frame: &mut Frame<'_>, area: Rect, snap: &DreamSnapshot) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else if max_len > 3 {
-        format!("{}...", &s[..max_len - 3])
-    } else {
-        s[..max_len].to_string()
-    }
-}
+use crate::tui::display_utils::truncate;
 
 // ---------------------------------------------------------------------------
 // Tests

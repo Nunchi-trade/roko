@@ -4785,16 +4785,7 @@ fn format_compact_count(value: u64) -> String {
     }
 }
 
-/// Truncate a string to `max` chars, adding "..." if truncated.
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else if max > 3 {
-        format!("{}...", &s[..max - 3])
-    } else {
-        s[..max].to_string()
-    }
-}
+use crate::tui::display_utils::truncate as truncate_str;
 
 fn signal_relative_age(created_at_ms: i64) -> String {
     let created_at_ms = u64::try_from(created_at_ms).unwrap_or_default();

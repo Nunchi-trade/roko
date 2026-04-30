@@ -1759,11 +1759,13 @@ mod tests {
             quality: 0.3,
             cost: 0.6,
             latency: 0.1,
+            knowledge_bias: None,
         };
         let quality_sensitive = RewardWeights {
             quality: 0.8,
             cost: 0.1,
             latency: 0.1,
+            knowledge_bias: None,
         };
 
         let cost_score = stats.scalarize(&cost_sensitive);
@@ -1843,6 +1845,7 @@ mod tests {
             quality: 0.3,
             cost: 0.6,
             latency: 0.1,
+            knowledge_bias: None,
         };
 
         router.update_with_metrics(&ctx, "claude-sonnet-4-5", 1.0, 0.2, 0.4, &weights);

@@ -2014,45 +2014,7 @@ fn aggregate_model_usage(
     usage
 }
 
-fn event_model_slug(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> String {
-    let model = if event.model.is_empty() {
-        event.model_used.as_str()
-    } else {
-        event.model.as_str()
-    };
-    if model.is_empty() {
-        "unknown".to_string()
-    } else {
-        model.to_string()
-    }
-}
-
-fn shorten_model(slug: &str) -> String {
-    slug.replace("claude-", "")
-        .replace("gpt-", "")
-        .replace("-codex", "c")
-        .replace("-mini", "m")
-        .replace("sonnet-", "s")
-        .replace("opus-", "o")
-        .replace("haiku-", "h")
-}
-
-fn display_model(model: Option<&str>) -> String {
-    match model {
-        None | Some("") | Some("-") | Some("unknown-model") => "unknown".to_string(),
-        Some(m) => shorten_model(m),
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else if max <= 3 {
-        s[..max].to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::{display_model, event_model_slug, shorten_model, truncate};
 
 fn fmt_count(n: u64) -> String {
     if n >= 1_000_000 {

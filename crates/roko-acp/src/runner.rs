@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use roko_agent::claude_cli_agent::build_settings_json;
-use roko_agent::{Agent as RokoAgent, ClaudeCliAgent};
 use roko_agent::safety::contract::AgentContract;
 use roko_agent::safety::{SafetyLayer, SafetyViolation, ViolationSeverity};
+use roko_agent::{Agent as RokoAgent, ClaudeCliAgent};
 use roko_core::foundation::EventConsumer as CoreEventConsumer;
 use roko_core::{
     Body, Context, Engram, Kind, RuntimeEvent as CoreRuntimeEvent, Verify,
@@ -106,11 +106,12 @@ struct GateAutopsy {
 
 /// Detect files changed in the most recent commit via `git diff --name-status HEAD~1 HEAD`.
 /// Returns an empty vec if git is unavailable or the repo has no prior commits.
-fn detect_file_changes(workdir: &Path) -> Vec<FileChangeNotification> {
-    let output = match std::process::Command::new("git")
+async fn detect_file_changes(workdir: &Path) -> Vec<FileChangeNotification> {
+    let output = match Command::new("git")
         .args(["diff", "--name-status", "HEAD~1", "HEAD"])
         .current_dir(workdir)
         .output()
+        .await
     {
         Ok(output) if output.status.success() => output,
         _ => return Vec::new(),
@@ -160,6 +161,33 @@ fn detect_file_changes(workdir: &Path) -> Vec<FileChangeNotification> {
     }
 
     changes
+}
+
+/// Split a combined `git diff` output into per-file chunks keyed by `b/` path.
+fn split_diff_by_file(combined: &str) -> std::collections::HashMap<String, String> {
+    let mut result = std::collections::HashMap::new();
+    let mut current_file: Option<String> = None;
+    let mut current_chunk = String::new();
+    for line in combined.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            if let Some(file) = current_file.take()
+                && !current_chunk.is_empty()
+            {
+                result.insert(file, std::mem::take(&mut current_chunk));
+            }
+            if let Some(b_path) = rest.split(" b/").last() {
+                current_file = Some(b_path.to_string());
+            }
+        }
+        current_chunk.push_str(line);
+        current_chunk.push('\n');
+    }
+    if let Some(file) = current_file
+        && !current_chunk.is_empty()
+    {
+        result.insert(file, current_chunk);
+    }
+    result
 }
 
 fn classify_gate_error(output: &str) -> GateErrorType {
@@ -518,6 +546,7 @@ impl AcpWorkflowEventConsumer {
             tool_call_id: tool_call_id.clone(),
             title: "Decision provenance".into(),
             kind: ToolCallKind::Other,
+            locations: None,
         });
         self.publish(CognitiveEvent::ToolCallComplete {
             tool_call_id,
@@ -595,6 +624,7 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
                         tool_call_id: gate_call_id(gate_name),
                         title: format!("Gate: {gate_name}"),
                         kind: ToolCallKind::Other,
+                        locations: None,
                     });
                 }
             }
@@ -919,6 +949,7 @@ pub async fn run_workflow_pipeline(
                             tool_call_id: tool_call_id.clone(),
                             title: "Decision provenance".into(),
                             kind: ToolCallKind::Other,
+                            locations: None,
                         })
                         .await;
                     let _ = event_sender
@@ -1048,6 +1079,7 @@ pub async fn run_workflow_pipeline(
                                 tool_call_id: autopsy_id.clone(),
                                 title: format!("Gate autopsy: {}", error_type.description()),
                                 kind: ToolCallKind::Other,
+                                locations: None,
                             })
                             .await;
 
@@ -1139,7 +1171,23 @@ pub async fn run_workflow_pipeline(
                 action = match commit_result {
                     Ok(msg) => {
                         let real_count = if msg != NO_CHANGES_TO_COMMIT_MESSAGE {
-                            let changes = detect_file_changes(workdir);
+                            let changes = detect_file_changes(workdir).await;
+
+                            // Batch: single async git diff for all files.
+                            let all_diffs = Command::new("git")
+                                .args(["diff", "HEAD~1"])
+                                .current_dir(workdir)
+                                .output()
+                                .await
+                                .ok()
+                                .and_then(|o| {
+                                    o.status
+                                        .success()
+                                        .then(|| String::from_utf8(o.stdout).ok())
+                                        .flatten()
+                                })
+                                .unwrap_or_default();
+                            let file_diffs = split_diff_by_file(&all_diffs);
 
                             for (index, change) in changes.iter().enumerate() {
                                 let tool_call_id = format!("file-change-{}", index + 1);
@@ -1154,16 +1202,33 @@ pub async fn run_workflow_pipeline(
                                         tool_call_id: tool_call_id.clone(),
                                         title: format!("{title_prefix} {}", change.path),
                                         kind,
+                                        locations: Some(vec![crate::types::ToolCallLocation {
+                                            uri: format!(
+                                                "file://{}/{}",
+                                                workdir.display(),
+                                                change.path
+                                            ),
+                                            range: None,
+                                        }]),
                                     })
                                     .await;
+                                // Look up diff from batched result instead of per-file subprocess.
+                                let diff_output = file_diffs
+                                    .get(&change.path)
+                                    .cloned()
+                                    .filter(|s| !s.is_empty());
+
+                                let content = vec![ContentBlock::Diff {
+                                    path: change.path.clone(),
+                                    old_text: None,
+                                    new_text: None,
+                                    diff: diff_output,
+                                }];
                                 let _ = event_sender
                                     .send(CognitiveEvent::ToolCallComplete {
                                         tool_call_id,
                                         status: ToolCallStatus::Completed,
-                                        content: vec![text_block(format!(
-                                            "{title_prefix} {}",
-                                            change.path
-                                        ))],
+                                        content,
                                     })
                                     .await;
                             }
@@ -1672,6 +1737,7 @@ async fn run_agent_phase(
             tool_call_id: tool_call_id.clone(),
             title: format!("{role}: working..."),
             kind: ToolCallKind::Other,
+            locations: None,
         })
         .await;
 
@@ -1681,13 +1747,8 @@ async fn run_agent_phase(
     match &output {
         Ok(text) => {
             let safety = safety_layer_for_pipeline_role(role);
-            let violations: Vec<SafetyViolation> = safety.post_dispatch_check(
-                session_id,
-                "pipeline-phase",
-                role,
-                text,
-                &[],
-            );
+            let violations: Vec<SafetyViolation> =
+                safety.post_dispatch_check(session_id, "pipeline-phase", role, text, &[]);
             log_safety_violations(role, &violations);
 
             let _ = event_sender
@@ -1832,6 +1893,7 @@ async fn run_verify_gate(
             tool_call_id: tool_call_id.clone(),
             title: format!("Gate: {gate_name}"),
             kind: ToolCallKind::Terminal,
+            locations: None,
         })
         .await;
 
@@ -1960,6 +2022,7 @@ async fn run_commit(
             tool_call_id: tool_call_id.clone(),
             title: "Creating commit".into(),
             kind: ToolCallKind::Terminal,
+            locations: None,
         })
         .await;
 

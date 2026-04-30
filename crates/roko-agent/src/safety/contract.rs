@@ -3,10 +3,10 @@
 //! These types define invariants, governance rules, and recovery actions that
 //! higher-level orchestration can evaluate with a low-latency policy check.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
-use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

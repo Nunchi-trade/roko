@@ -234,7 +234,10 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     match std::fs::rename(&state_path, &backup_path) {
                         Ok(()) => {
                             if !cli.quiet {
-                                eprintln!("▸ --fresh: archived old state to {}", backup_path.display());
+                                eprintln!(
+                                    "▸ --fresh: archived old state to {}",
+                                    backup_path.display()
+                                );
                             }
                         }
                         Err(err) => {
@@ -250,10 +253,17 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
             let task_timeout_secs = config.executor.task_timeout_secs;
+            let early_roko_config: roko_core::config::schema::RokoConfig =
+                std::fs::read_to_string(wd.join("roko.toml"))
+                    .ok()
+                    .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
+                    .unwrap_or_default();
             let max_concurrent_tasks = if max_tasks > 0 {
                 max_tasks
             } else {
-                crate::runner::types::load_runner_max_concurrent_tasks(&wd)
+                early_roko_config
+                    .runner
+                    .max_concurrent_tasks
                     .or_else(|| {
                         (config.executor.max_concurrent_tasks
                             != roko_orchestrator::ExecutorConfig::default().max_concurrent_tasks)
@@ -315,11 +325,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
 
             let plans = roko_cli::runner::plan_loader::load_plans(&plans_dir)?;
-            let roko_config: roko_core::config::schema::RokoConfig =
-                std::fs::read_to_string(wd.join("roko.toml"))
-                    .ok()
-                    .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
-                    .unwrap_or_default();
+            let roko_config = early_roko_config;
 
             // Initialize Phase 0 subsystems.
             let router_path = wd.join(".roko").join("learn").join("cascade-router.json");
@@ -734,8 +740,10 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             match roko_cli::task_parser::TasksFile::validate_modern_fields(&tasks_path) {
                 Ok(issues) if !issues.is_empty() => {
                     // Collect post-regeneration diagnostics for richer error output.
-                    let post_context =
-                        format_pre_validation_context(&tasks_path, &plan_validate::validate_plans_dir);
+                    let post_context = format_pre_validation_context(
+                        &tasks_path,
+                        &plan_validate::validate_plans_dir,
+                    );
                     std::fs::write(&tasks_path, &existing)
                         .with_context(|| format!("restore {}", tasks_path.display()))?;
                     anyhow::bail!(
@@ -765,6 +773,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     }
 }
 
+#[allow(dead_code)]
 fn resolve_effective_model_key(
     workdir: &Path,
     cli_model: Option<String>,
@@ -772,15 +781,15 @@ fn resolve_effective_model_key(
     context: &str,
 ) -> Result<String> {
     let config = crate::load_roko_config(workdir)?;
-    let selection =
-        roko_cli::model_selection::resolve_effective_model(
-            cli_model,
-            None,
-            role.map(str::to_string),
-            None,
-            &config,
-        )
-            .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
+    let selection = roko_cli::model_selection::resolve_effective_model(
+        cli_model,
+        None,
+        role.map(str::to_string),
+        None,
+        &config,
+        None,
+    )
+    .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
     eprintln!("[{context}] effective selection: {}", selection.reason);
     Ok(selection.effective_model_key)
 }
@@ -1254,6 +1263,37 @@ pub(crate) fn plan_path_exists(workdir: &std::path::Path, plan_id: &str) -> bool
     let plan_dir = workdir.join("plans").join(plan_id);
     let roko_plan_dir = workdir.join(".roko").join("plans").join(plan_id);
     plan_dir.exists() || roko_plan_dir.exists()
+}
+
+/// Format validation diagnostics for a tasks.toml file into a string context
+/// block suitable for embedding in agent prompts and error messages.
+fn format_pre_validation_context(
+    tasks_path: &std::path::Path,
+    validate_fn: &dyn Fn(
+        &std::path::Path,
+        Option<&std::collections::HashMap<String, roko_core::config::ModelProfile>>,
+    ) -> anyhow::Result<crate::plan_validate::ValidationReport>,
+) -> String {
+    let parent = tasks_path.parent().unwrap_or(tasks_path);
+    match validate_fn(parent, None) {
+        Ok(report) => {
+            let issues: Vec<String> = report
+                .plans
+                .iter()
+                .flat_map(|p| {
+                    p.diagnostics
+                        .iter()
+                        .map(move |d| format!("  - [{}] {}", p.plan_id, d.message))
+                })
+                .collect();
+            if issues.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n## Validation issues\n\n{}", issues.join("\n"))
+            }
+        }
+        Err(_) => String::new(),
+    }
 }
 
 #[cfg(test)]

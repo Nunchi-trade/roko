@@ -367,80 +367,28 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-// `cmd_run` only passes the resolved workspace config into the v2 path, so we
-// re-read the process args/env here to preserve the caller's `--model`/`--role`
-// inputs without introducing a second selection chain.
-fn workflow_cli_overrides() -> (Option<String>, Option<String>) {
-    let mut model = None;
-    let mut role = None;
-    let mut parsing_flags = true;
-    let mut args = std::env::args_os().skip(1).peekable();
-
-    while let Some(arg) = args.next() {
-        let arg = arg.to_string_lossy();
-        if parsing_flags && arg == "--" {
-            parsing_flags = false;
-            continue;
-        }
-        if !parsing_flags {
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("--model=") {
-            model = Some(value.to_string());
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("--role=") {
-            role = Some(value.to_string());
-            continue;
-        }
-        if arg == "--model" {
-            if let Some(value) = args.peek() {
-                let value = value.to_string_lossy().into_owned();
-                if !value.starts_with('-') {
-                    model = Some(value);
-                    let _ = args.next();
-                }
-            }
-            continue;
-        }
-        if arg == "--role" {
-            if let Some(value) = args.peek() {
-                let value = value.to_string_lossy().into_owned();
-                if !value.starts_with('-') {
-                    role = Some(value);
-                    let _ = args.next();
-                }
-            }
-            continue;
-        }
-    }
-
-    if model.is_none() {
-        model = std::env::var("ROKO_MODEL")
-            .ok()
-            .filter(|value| !value.is_empty());
-    }
-    if role.is_none() {
-        role = std::env::var("ROKO_ROLE")
-            .ok()
-            .filter(|value| !value.is_empty());
-    }
-
-    (model, role)
+/// CLI overrides parsed from clap args, threaded through the call chain
+/// instead of re-parsing `std::env::args_os()`.
+#[derive(Debug, Default, Clone)]
+pub struct CliOverrides {
+    pub model: Option<String>,
+    pub role: Option<String>,
+    pub provider: Option<String>,
 }
 
 fn resolve_workflow_model_selection(
     workdir: &std::path::Path,
+    overrides: &CliOverrides,
 ) -> anyhow::Result<(Config, RokoConfig, EffectiveModelSelection)> {
     let mut config = crate::config::load_layered(workdir)
         .map(|resolved| resolved.config)
         .unwrap_or_default();
-    let (cli_model_override, cli_role_override) = workflow_cli_overrides();
-    if let Some(model) = cli_model_override.clone() {
-        config.agent.model = Some(model);
+
+    if let Some(ref model) = overrides.model {
+        config.agent.model = Some(model.clone());
     }
-    if let Some(role) = cli_role_override.clone() {
-        config.prompt.role = role;
+    if let Some(ref role) = overrides.role {
+        config.prompt.role.clone_from(role);
     }
 
     let mut model_config = roko_core::config::load_config(workdir).unwrap_or_default();
@@ -461,8 +409,18 @@ fn resolve_workflow_model_selection(
     }
 
     let role = non_empty(&config.prompt.role).map(str::to_owned);
-    let selection = resolve_effective_model(cli_model_override, None, role, None, &model_config)
-        .map_err(|error| anyhow!("resolve workflow model selection: {error}"))?;
+    let selection = resolve_effective_model(
+        overrides.model.clone(),
+        None,
+        role,
+        None,
+        &model_config,
+        overrides.provider.clone(),
+    )
+    .map_err(|error| anyhow!("resolve workflow model selection: {error}"))?;
+
+    // Apply the resolved model back to config so downstream code sees it.
+    config.agent.model = Some(selection.effective_model_key.clone());
 
     Ok((config, model_config, selection))
 }
@@ -561,6 +519,7 @@ pub async fn run_with_workflow_engine(
         enabled_gates,
         Vec::new(),
         None,
+        &CliOverrides::default(),
     )
     .await
 }
@@ -574,8 +533,9 @@ pub async fn run_with_workflow_engine_with_hub(
     enabled_gates: Vec<String>,
     shell_gates: Vec<CoreShellGateCommand>,
     external_hub: Option<&StateHub>,
+    overrides: &CliOverrides,
 ) -> anyhow::Result<WorkflowRunReport> {
-    let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
+    let (config, model_config, selection) = resolve_workflow_model_selection(workdir, overrides)?;
     selection.print_stderr();
 
     let pipeline_config = model_config.pipeline.clone();
@@ -620,8 +580,9 @@ pub async fn run_workflow_engine_report_with_hub(
     enabled_gates: Vec<String>,
     shell_gates: Vec<CoreShellGateCommand>,
     external_hub: Option<&StateHub>,
+    overrides: &CliOverrides,
 ) -> anyhow::Result<WorkflowRunReport> {
-    let (config, model_config, selection) = resolve_workflow_model_selection(workdir)?;
+    let (config, model_config, selection) = resolve_workflow_model_selection(workdir, overrides)?;
     selection.print_stderr();
     let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
 
@@ -923,6 +884,7 @@ async fn execute_plan_prompt_with_workflow_engine(
         enabled_gates,
         shell_gates,
         None,
+        &CliOverrides::default(),
     )
     .await
 }
@@ -1870,7 +1832,9 @@ async fn dispatch_agent(
     crate::config::merge_global_providers(&mut routing_config);
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
     let use_provider_routing = has_routing && config.agent.command == "claude";
-    let (cli_model_override, _) = workflow_cli_overrides();
+    // Use the model already applied to config by resolve_config_for_workdir
+    // instead of re-parsing process args.
+    let cli_model_override = config.agent.model.clone();
     let resolved_cli_model = if let Some(requested_model) = cli_model_override.clone() {
         Some(
             resolve_effective_model(
@@ -1879,6 +1843,7 @@ async fn dispatch_agent(
                 Some(config.prompt.role.clone()),
                 None,
                 &routing_config,
+                None,
             )
             .map_err(|error| anyhow!("resolve legacy run model selection: {error}"))?,
         )
@@ -3596,6 +3561,7 @@ mod tests {
         assert_eq!(loaded.failure_count, 1);
     }
 
+    #[cfg(feature = "legacy-orchestrate")]
     #[tokio::test]
     async fn dispatch_agent_uses_exec_agent_for_plain_commands_without_routing() {
         if std::env::var("ANTHROPIC_API_KEY").is_err() {

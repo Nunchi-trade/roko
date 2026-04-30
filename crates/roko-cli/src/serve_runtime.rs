@@ -512,7 +512,9 @@ fn build_runner_config(
         .or_else(|| non_empty_string(&cli_config.agent.command))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("claude"));
-    let max_concurrent_tasks = crate::runner::types::load_runner_max_concurrent_tasks(workdir)
+    let max_concurrent_tasks = roko_config
+        .runner
+        .max_concurrent_tasks
         .or_else(|| {
             (cli_config.executor.max_concurrent_tasks
                 != roko_orchestrator::ExecutorConfig::default().max_concurrent_tasks)
@@ -554,7 +556,7 @@ fn build_runner_config(
         max_retries: cli_config.executor.max_auto_fix_iterations,
         max_concurrent_tasks,
         approval: false,
-        dangerously_skip_permissions: true,
+        dangerously_skip_permissions: roko_config.runner.dangerously_skip_permissions,
         force_resume: false,
         mcp_config: cli_config.agent.mcp_config.clone(),
         resume_session: None,

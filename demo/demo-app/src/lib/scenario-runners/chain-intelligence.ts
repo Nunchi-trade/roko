@@ -1,6 +1,5 @@
 // --- src/lib/scenario-runners/chain-intelligence.ts ---
 import type { Scenario } from '../scenarios';
-import { rawSleep } from '../scenario-helpers';
 import { enterWorkspace, showCmd, getRoko } from '../terminal-session';
 
 export const chainIntelligence: Scenario = {
@@ -24,7 +23,7 @@ export const chainIntelligence: Scenario = {
     { label: 'Cross-pollination', sublabel: 'insights compound' },
     { label: 'Results', sublabel: 'efficiency metrics' },
   ],
-  async run({ entries, playback, timeline, setMetric, logCommand, logCommandComplete, running, paused, workspaceDir }) {
+  async run({ entries, playback, timeline, setMetric, logCommand, logCommandComplete, signal, workspaceDir }) {
     const [alpha, beta] = entries;
 
     await enterWorkspace(alpha, workspaceDir);
@@ -93,8 +92,7 @@ export const chainIntelligence: Scenario = {
     setMetric('tokens', '0');
 
     // -- Phase 2: Alpha researches yields --
-    if (!running.current) return;
-    while (paused.current) await rawSleep(100);
+    if (signal.aborted) return;
 
     await playback.waitForStep();
     playback.setProgress(2, 6, 'Alpha researching yield opportunities');
@@ -124,8 +122,7 @@ export const chainIntelligence: Scenario = {
     setMetric('tokens', alphaResult.tokens ?? '~12k');
 
     // -- Phase 3: Beta picks up knowledge --
-    if (!running.current) return;
-    while (paused.current) await rawSleep(100);
+    if (signal.aborted) return;
 
     await playback.waitForStep();
     playback.setProgress(3, 6, 'Beta querying knowledge graph');
@@ -154,8 +151,7 @@ export const chainIntelligence: Scenario = {
     setMetric('cost', betaResult.cost ?? '$0.98');
 
     // -- Phase 4: Both execute strategies --
-    if (!running.current) return;
-    while (paused.current) await rawSleep(100);
+    if (signal.aborted) return;
 
     await playback.waitForStep();
     playback.setProgress(4, 6, 'executing DeFi strategies');
@@ -183,8 +179,7 @@ export const chainIntelligence: Scenario = {
     ]);
 
     // -- Phase 5: Cross-pollination --
-    if (!running.current) return;
-    while (paused.current) await rawSleep(100);
+    if (signal.aborted) return;
 
     await playback.waitForStep();
     playback.setProgress(5, 6, 'cross-pollination of insights');
@@ -210,8 +205,7 @@ export const chainIntelligence: Scenario = {
     });
 
     // -- Phase 6: Results --
-    if (!running.current) return;
-    while (paused.current) await rawSleep(100);
+    if (signal.aborted) return;
 
     await playback.waitForStep();
     playback.setProgress(6, 6, 'summary');
@@ -247,6 +241,6 @@ export const chainIntelligence: Scenario = {
       customDesc: 'Queries mirage knowledge graph statistics: total insights, confirmations, and reuse metrics.',
     });
 
-    timeline.setActive(6); // all completed
+    timeline.markAllComplete();
   },
 };

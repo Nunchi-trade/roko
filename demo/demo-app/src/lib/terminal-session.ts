@@ -10,6 +10,12 @@ import type { TerminalHandle } from '../hooks/useTerminal';
 import type { PlaybackController } from './playback-controller';
 import { lookupCmdDesc } from './cmd-descriptions';
 
+// ── ANSI stripping ──────────────────────────────────────────
+
+export function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+}
+
 // ── Speed multiplier ─────────────────────────────────────────
 
 let speedMultiplier = 1;
@@ -80,15 +86,17 @@ export function getRoko(): string {
 export async function enterWorkspace(
   handle: TerminalHandle,
   dir: string,
-): Promise<void> {
+): Promise<boolean> {
   const wsOk = await waitForOpen(handle);
-  if (!wsOk) return;
-  await handle.waitForPrompt(5000);
+  if (!wsOk) return false;
+  const promptOk = await handle.waitForPrompt(5000);
+  if (!promptOk) return false;
   await resolveRoko(handle);
-  await handle.execCmd(`cd ${dir}`, 3000);
+  await handle.execCmd(`cd "${dir}"`, 3000);
   // Only clear the output buffer (for prompt detection), not the visible terminal.
   // Scenarios can call handle.clearTerminal() explicitly when they want a clean slate.
   handle.outputBuffer = '';
+  return true;
 }
 
 // ── Command execution with logging ──────────────────────────
@@ -127,18 +135,12 @@ async function typeChars(
 }
 
 /**
- * Type a command with animation, execute it, wait for prompt, and detect output.
- *
- * Flow:
- *   1. Type command character-by-character (visible in terminal)
- *   2. In step mode: pause here — user sees the command, clicks Next to run it
- *   3. Send \r (Enter) to execute the command
- *   4. Wait for prompt to return (command finished)
- *   5. Detect gates, cost, tokens from output
+ * Type a command with animation into the terminal, press Enter, and wait
+ * for the shell prompt to reappear (indicating the command finished).
  *
  * @param handle - Terminal handle
- * @param cmd - Shell command to execute
- * @param opts - Options for command execution
+ * @param cmd - Shell command to type
+ * @param opts - Options for command display and detection
  * @returns Command result with detected metrics
  */
 export async function showCmd(
@@ -154,7 +156,8 @@ export async function showCmd(
     onGate?: (name: string, status: 'pass' | 'fail') => void;
     onCost?: (cost: string) => void;
     onTokens?: (tokens: string) => void;
-    /** In step mode, pauses after typing the command before executing. */
+    signal?: AbortSignal;
+    /** Unused — kept for caller compatibility. */
     playback?: PlaybackController;
   },
 ): Promise<CommandResult> {
@@ -168,32 +171,29 @@ export async function showCmd(
   // Log to command panel (as pending — not yet complete)
   opts?.onLog?.(cmd, desc);
 
-  // Step 1: Type the command character-by-character (visible animation)
+  if (opts?.signal?.aborted) {
+    opts?.onLogComplete?.(cmd, false);
+    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null };
+  }
+
+  // Type the command character-by-character (visible animation)
   const typed = await typeChars(handle, cmd);
   if (!typed) {
     opts?.onLogComplete?.(cmd, false);
     return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null };
   }
 
-  // Step 2: In step mode, pause after typing — user sees the command and
-  // clicks Next to execute it. In auto mode this resolves immediately.
-  if (opts?.playback) {
-    await opts.playback.waitForExec();
-  }
-
-  // Step 3: Send Enter to execute the command
+  // Press Enter and wait for prompt
   if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) {
     opts?.onLogComplete?.(cmd, false);
     return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null };
   }
   handle.ws.send('\r');
-
-  // Step 4: Wait for the shell prompt to return (command finished)
-  const ok = await handle.waitForPrompt(timeout);
+  const ok = await handle.waitForPrompt(timeout, opts?.signal);
 
   const elapsed = (Date.now() - startTime) / 1000;
 
-  // Step 5: Detect gates, cost, tokens from output
+  // Detect gates, cost, tokens from output
   const result = detectFromOutput(handle.outputBuffer, opts);
 
   // Mark the log entry as complete
@@ -221,13 +221,14 @@ interface DetectionResult {
  * Matching patterns from demo-web/demo.html detectFromOutput().
  */
 function detectFromOutput(
-  text: string,
+  rawText: string,
   opts?: {
     onGate?: (name: string, status: 'pass' | 'fail') => void;
     onCost?: (cost: string) => void;
     onTokens?: (tokens: string) => void;
   },
 ): DetectionResult {
+  const text = stripAnsi(rawText);
   const gates: GateResult[] = [];
 
   // Gate detection (✔ = pass, ✖ = fail)
@@ -278,6 +279,7 @@ async function waitForOpen(handle: TerminalHandle, timeout = 5000): Promise<bool
 
 /**
  * Continuously detect metrics from a handle's output buffer.
+ * Deduplicates callbacks — only fires when values change.
  * Returns an interval ID that should be cleared when done.
  */
 export function trackMetrics(
@@ -289,7 +291,26 @@ export function trackMetrics(
   },
   intervalMs = 500,
 ): ReturnType<typeof setInterval> {
+  let lastCost: string | null = null;
+  let lastTokens: string | null = null;
+  const seenGates = new Set<string>();
+
   return setInterval(() => {
-    detectFromOutput(handle.outputBuffer, opts);
+    const result = detectFromOutput(handle.outputBuffer);
+    if (result.cost && result.cost !== lastCost) {
+      lastCost = result.cost;
+      opts.onCost?.(result.cost);
+    }
+    if (result.tokens && result.tokens !== lastTokens) {
+      lastTokens = result.tokens;
+      opts.onTokens?.(result.tokens);
+    }
+    for (const gate of result.gates) {
+      const key = `${gate.name}:${gate.status}`;
+      if (!seenGates.has(key)) {
+        seenGates.add(key);
+        opts.onGate?.(gate.name, gate.status);
+      }
+    }
   }, intervalMs);
 }

@@ -8,15 +8,15 @@ use roko_acp::{
     transport::StdioTransport,
     types::{ContentBlock, JsonRpcNotification, SessionNewParams, SessionPromptParams},
 };
-use roko_core::{ContentHash, ProviderKind};
+use roko_agent::Usage as AgentUsage;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::{ContentHash, ProviderKind};
 use roko_learn::{
     cascade_router::CascadeRouter,
     cost_table::CostTable,
     episode_logger::{Episode, EpisodeLogger, Usage as EpisodeUsage},
     model_router::{RoutingContext, compute_routing_reward_v2, normalized_cost},
 };
-use roko_agent::Usage as AgentUsage;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream, duplex},
@@ -127,14 +127,13 @@ impl TestSession {
         })
     }
 
-    pub async fn mock_dispatch(&self, prompt: &str, response: MockResponse) -> Result<DispatchResult> {
-        self.mock_dispatch_inner(
-            prompt,
-            Some(response),
-            Duration::from_millis(5),
-            500,
-        )
-        .await
+    pub async fn mock_dispatch(
+        &self,
+        prompt: &str,
+        response: MockResponse,
+    ) -> Result<DispatchResult> {
+        self.mock_dispatch_inner(prompt, Some(response), Duration::from_millis(5), 500)
+            .await
     }
 
     pub async fn mock_dispatch_failure(
@@ -142,13 +141,8 @@ impl TestSession {
         prompt: &str,
         _failure_label: &str,
     ) -> Result<DispatchResult> {
-        self.mock_dispatch_inner(
-            prompt,
-            None,
-            Duration::from_millis(250),
-            100,
-        )
-        .await
+        self.mock_dispatch_inner(prompt, None, Duration::from_millis(250), 100)
+            .await
     }
 
     pub async fn mock_pipeline_dispatch(
@@ -213,7 +207,9 @@ impl TestSession {
             ..AgentUsage::default()
         };
         let total_cost_usd = cost_table.calculate(&self.model, &agent_usage);
-        router.save(&router_path).context("save mock cascade router")?;
+        router
+            .save(&router_path)
+            .context("save mock cascade router")?;
 
         let mut episode = Episode::new(self.mode.clone(), format!("pipeline-{}", self.workflow));
         episode.kind = format!("acp-pipeline-{}", self.workflow);
@@ -237,7 +233,9 @@ impl TestSession {
         };
         episode.tokens_used = total_input_tokens + total_output_tokens;
         episode.success = true;
-        episode.extra.insert("entry_point".to_string(), json!("acp"));
+        episode
+            .extra
+            .insert("entry_point".to_string(), json!("acp"));
         episode.extra.insert("model".to_string(), json!(self.model));
         episode.extra.insert("mode".to_string(), json!(self.mode));
         episode
@@ -246,7 +244,10 @@ impl TestSession {
         episode
             .extra
             .insert("phases_completed".to_string(), json!(phase_count as u64));
-        logger.append(&episode).await.context("append mock pipeline episode")?;
+        logger
+            .append(&episode)
+            .await
+            .context("append mock pipeline episode")?;
 
         let notifications = vec![JsonRpcNotification {
             jsonrpc: "2.0".to_string(),
@@ -329,12 +330,7 @@ fn build_mock_config(base_url: &str, timeout_ms: u64) -> RokoConfig {
     config
 }
 
-fn build_session(
-    roko_config: &RokoConfig,
-    mode: &str,
-    model: &str,
-    workflow: &str,
-) -> AcpSession {
+fn build_session(roko_config: &RokoConfig, mode: &str, model: &str, workflow: &str) -> AcpSession {
     let mut session = AcpSession::new_with_config(
         SessionNewParams {
             session_name: Some("telemetry-test".to_string()),
@@ -368,7 +364,10 @@ async fn spawn_mock_provider_server(
     let expected_model = expected_model.to_string();
 
     let task = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.context("accept mock provider request")?;
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .context("accept mock provider request")?;
         let (request_line, body) = read_http_request(&mut stream).await?;
         assert!(
             request_line.starts_with("POST /chat/completions "),
@@ -402,8 +401,14 @@ async fn spawn_mock_provider_server(
                 .write_all(response_bytes.as_bytes())
                 .await
                 .context("write mock provider response")?;
-            stream.flush().await.context("flush mock provider response")?;
-            stream.shutdown().await.context("shutdown mock provider response")?;
+            stream
+                .flush()
+                .await
+                .context("flush mock provider response")?;
+            stream
+                .shutdown()
+                .await
+                .context("shutdown mock provider response")?;
         } else {
             let _ = timeout_ms;
         }
@@ -418,7 +423,10 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<(String, Value)> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     let header_end = loop {
-        let read = stream.read(&mut chunk).await.context("read mock request bytes")?;
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .context("read mock request bytes")?;
         assert!(read > 0, "request closed before headers completed");
         buf.extend_from_slice(&chunk[..read]);
 
@@ -439,17 +447,16 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<(String, Value)> {
         .unwrap_or(0);
 
     while buf.len() < header_end + content_length {
-        let read = stream.read(&mut chunk).await.context("read mock request body")?;
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .context("read mock request body")?;
         assert!(read > 0, "request closed before body completed");
         buf.extend_from_slice(&chunk[..read]);
     }
 
     let request = String::from_utf8(buf).context("mock request must be valid utf-8")?;
-    let request_line = request
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .to_string();
+    let request_line = request.lines().next().unwrap_or_default().to_string();
     let body = &request[header_end..header_end + content_length];
     let json = serde_json::from_str(body).context("parse mock request body")?;
     Ok((request_line, json))
@@ -482,9 +489,7 @@ fn mock_sse_body(response: &MockResponse) -> String {
     format!("data: {content}\n\ndata: {finish}\n\ndata: {usage}\n\ndata: [DONE]\n\n")
 }
 
-async fn collect_notifications(
-    client_output: DuplexStream,
-) -> Result<Vec<JsonRpcNotification>> {
+async fn collect_notifications(client_output: DuplexStream) -> Result<Vec<JsonRpcNotification>> {
     let mut reader = BufReader::new(client_output);
     let mut notifications = Vec::new();
 

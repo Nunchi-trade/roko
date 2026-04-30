@@ -80,7 +80,7 @@ pub mod inline;
 pub(crate) mod knowledge_helpers;
 #[path = "../../../scripts/layer_check.rs"]
 pub mod layer_check;
-pub(crate) mod learning_helpers;
+pub mod learning_helpers;
 pub mod oneshot;
 #[cfg(feature = "legacy-orchestrate")]
 pub mod orchestrate;

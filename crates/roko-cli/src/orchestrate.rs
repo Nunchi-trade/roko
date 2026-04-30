@@ -2598,8 +2598,6 @@ pub struct PlanRunner {
     runtime_event_rx: broadcast::Receiver<RuntimeEventEnvelope<RokoEvent>>,
     /// In-memory efficiency events collected during this run and drained periodically.
     efficiency_events: Vec<AgentEfficiencyEvent>,
-    /// Number of events already persisted from the current in-memory buffer.
-    flush_count: usize,
     /// Persistent dedupe/cap ledger for gate-failure-triggered plan revisions.
     replan_ledger: ReplanLedger,
     /// Learning settings loaded from `roko.toml`.
@@ -4461,7 +4459,6 @@ impl PlanRunner {
             runtime_event_bus,
             runtime_event_rx,
             efficiency_events: Vec::new(),
-            flush_count: 0,
             replan_ledger,
             learning_config,
             server_event_bus: None,
@@ -4681,7 +4678,6 @@ impl PlanRunner {
             runtime_event_bus,
             runtime_event_rx,
             efficiency_events: Vec::new(),
-            flush_count: 0,
             replan_ledger,
             learning_config,
             server_event_bus: None,
@@ -4894,7 +4890,6 @@ impl PlanRunner {
             runtime_event_bus,
             runtime_event_rx,
             efficiency_events: Vec::new(),
-            flush_count: 0,
             replan_ledger,
             learning_config,
             server_event_bus: None,
@@ -5875,63 +5870,47 @@ impl PlanRunner {
             }
         };
 
-        let flushed = self.flush_count.min(self.efficiency_events.len());
-        if flushed < self.efficiency_events.len() {
-            events.extend(self.efficiency_events[flushed..].iter().cloned());
-        }
-
+        // Append any events still buffered in memory (not yet flushed to disk).
+        events.extend(self.efficiency_events.iter().cloned());
         events
     }
 
-    /// Flush any unpersisted efficiency events to disk and release memory.
+    /// Flush all in-memory efficiency events to disk and release memory.
     fn flush_efficiency_events(&mut self) -> Result<()> {
         if self.efficiency_events.is_empty() {
-            self.flush_count = 0;
             return Ok(());
         }
 
         let efficiency_path = self.learning.paths().efficiency_jsonl.clone();
-        let flushed = self.flush_count.min(self.efficiency_events.len());
-        let released = self.efficiency_events.len();
-        let pending_len = released.saturating_sub(flushed);
-
-        if pending_len > 0 {
-            {
-                let pending = &self.efficiency_events[flushed..];
-                if let Some(parent) = efficiency_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("create {}", parent.display()))?;
-                }
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&efficiency_path)
-                    .with_context(|| format!("open {}", efficiency_path.display()))?;
-                {
-                    let mut writer = std::io::BufWriter::new(&mut file);
-                    for event in pending {
-                        serde_json::to_writer(&mut writer, event)
-                            .with_context(|| format!("write {}", efficiency_path.display()))?;
-                        writeln!(writer)
-                            .with_context(|| format!("write {}", efficiency_path.display()))?;
-                    }
-                    writer
-                        .flush()
-                        .with_context(|| format!("flush {}", efficiency_path.display()))?;
-                }
-                file.sync_all()
-                    .with_context(|| format!("sync {}", efficiency_path.display()))?;
-            }
+        if let Some(parent) = efficiency_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
         }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&efficiency_path)
+            .with_context(|| format!("open {}", efficiency_path.display()))?;
+        {
+            let mut writer = std::io::BufWriter::new(&mut file);
+            for event in self.efficiency_events.drain(..) {
+                serde_json::to_writer(&mut writer, &event)
+                    .with_context(|| format!("write {}", efficiency_path.display()))?;
+                writeln!(writer)
+                    .with_context(|| format!("write {}", efficiency_path.display()))?;
+            }
+            writer
+                .flush()
+                .with_context(|| format!("flush {}", efficiency_path.display()))?;
+        }
+        file.sync_all()
+            .with_context(|| format!("sync {}", efficiency_path.display()))?;
 
-        self.efficiency_events.clear();
+        let written = self.efficiency_events.len();
         self.efficiency_events.shrink_to_fit();
-        self.flush_count = 0;
         tracing::debug!(
             path = %efficiency_path.display(),
-            released,
-            persisted = flushed,
-            written = pending_len,
+            written,
             "flushed efficiency events"
         );
         Ok(())
@@ -11289,11 +11268,6 @@ impl PlanRunner {
             duration_ms = wall_ms,
             "task completed"
         );
-        if let Err(e) = self.flush_efficiency_events() {
-            tracing::warn!(
-                "[orchestrate] failed to flush efficiency events after task completion: {e}"
-            );
-        }
         Ok(())
     }
 
@@ -12517,12 +12491,6 @@ impl PlanRunner {
                 };
                 self.apply_replan_result(&result);
 
-                if let Err(e) = self.flush_efficiency_events() {
-                    tracing::warn!(
-                        "[orchestrate] failed to flush efficiency events after task skip: {e}"
-                    );
-                }
-
                 if self
                     .task_trackers
                     .get(plan_id)
@@ -12533,11 +12501,6 @@ impl PlanRunner {
                     );
                     self.replan_plan(plan_id, &task_id, &failure_summary, &architectural_model)
                         .await;
-                }
-                if let Err(e) = self.flush_efficiency_events() {
-                    tracing::warn!(
-                        "[orchestrate] failed to flush efficiency events after task skip: {e}"
-                    );
                 }
             }
             ReplanStrategy::RegeneratePlan => {
@@ -13323,11 +13286,6 @@ impl PlanRunner {
             1,
         )
         .await;
-        if let Err(e) = self.flush_efficiency_events() {
-            tracing::warn!(
-                "[orchestrate] failed to flush efficiency events after task failure: {e}"
-            );
-        }
         self.record_crate_familiarity(plan_id, task_id, task_def.as_ref(), false);
         if let Some(request) = self
             .build_failed_skill_request(plan_id, task_id, task_text, selected_model)
@@ -14728,6 +14686,7 @@ impl PlanRunner {
             Some(role.label().to_string()),
             Some(self.learning.cascade_router()),
             &roko_config_for_selection,
+            None,
         );
         let mut selected_model = match base_selection {
             Ok(ref sel) => {
@@ -14763,6 +14722,7 @@ impl PlanRunner {
                 Some(role.label().to_string()),
                 None,
                 &roko_config,
+                None,
             )
             .map_err(|error| {
                 anyhow!(
@@ -18090,11 +18050,6 @@ impl PlanRunner {
             .map(|tracker| tracker.last_prompt_sections.clone())
             .unwrap_or_default();
         let attempt_id = format!("{}:{}:{}", plan_id, task_id, result.output.id);
-        if let Err(e) = self.flush_efficiency_events() {
-            tracing::warn!(
-                "[orchestrate] failed to pre-flush efficiency events before task completion: {e}"
-            );
-        }
         let event = AgentEfficiencyEvent {
             agent_id: result.output.id.to_string(),
             role: role.to_string(),
@@ -18166,12 +18121,6 @@ impl PlanRunner {
 
         self.efficiency_events.push(event.clone());
 
-        if let Err(e) = self.learning.append_efficiency_event(&event).await {
-            tracing::warn!("failed to persist efficiency event: {e}");
-        } else {
-            self.flush_count = self.flush_count.saturating_add(1);
-        }
-
         // Publish token/cost metrics to the dashboard hub so the TUI can
         // update agent stats without polling.
         self.publish_dashboard_event(roko_core::DashboardEvent::EfficiencyEvent {
@@ -18219,11 +18168,6 @@ impl PlanRunner {
             .get(plan_id)
             .and_then(|tracker| tracker.last_attempt_id.clone())
             .unwrap_or_else(|| format!("{plan_id}:{task_id}:unknown"));
-        if let Err(e) = self.flush_efficiency_events() {
-            tracing::warn!(
-                "[orchestrate] failed to pre-flush efficiency events before task failure: {e}"
-            );
-        }
         let event = AgentEfficiencyEvent {
             agent_id: format!("{plan_id}:{task_id}:failure"),
             role: role.to_string(),
@@ -18288,12 +18232,7 @@ impl PlanRunner {
             "failed-task efficiency event"
         );
 
-        self.efficiency_events.push(event.clone());
-        if let Err(e) = self.learning.append_efficiency_event(&event).await {
-            tracing::warn!("failed to persist failure efficiency event: {e}");
-        } else {
-            self.flush_count = self.flush_count.saturating_add(1);
-        }
+        self.efficiency_events.push(event);
     }
 
     /// Build a tool manifest string for non-CLI agent backends.

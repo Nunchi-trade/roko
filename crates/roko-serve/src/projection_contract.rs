@@ -2617,11 +2617,8 @@ fn summarize_cost_evidence(records: &[Value], statehub_total_cost_usd: f64) -> V
     }
 
     let record_count = records.len() as u64;
-    let data_quality = DataQuality::from_counts(
-        !records.is_empty(),
-        records.len(),
-        null_cost_count,
-    );
+    let data_quality =
+        DataQuality::from_counts(!records.is_empty(), records.len(), null_cost_count);
     let total_cost_value = if record_count == 0 || null_cost_count == records.len() {
         Value::Null
     } else {
@@ -2675,7 +2672,12 @@ fn cascade_router_data_quality(value: Option<&Value>) -> DataQuality {
         .map(|value| {
             let mut slugs = BTreeSet::new();
             if let Some(items) = value.get("model_slugs").and_then(Value::as_array) {
-                slugs.extend(items.iter().filter_map(Value::as_str).map(ToOwned::to_owned));
+                slugs.extend(
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned),
+                );
             }
             if let Some(items) = value.get("confidence_stats").and_then(Value::as_object) {
                 slugs.extend(items.keys().cloned());

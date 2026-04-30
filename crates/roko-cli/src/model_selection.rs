@@ -14,6 +14,8 @@ use crate::config_helpers::{find_role_override, load_roko_config};
 pub enum SelectionSource {
     /// Explicit `--model` CLI override.
     CliOverride,
+    /// `--provider` CLI override resolved to a model.
+    ProviderOverride,
     /// Model hint from the task definition.
     TaskModel,
     /// Model override from the role configuration.
@@ -32,6 +34,7 @@ impl SelectionSource {
     pub const fn label(self) -> &'static str {
         match self {
             Self::CliOverride => "cli override",
+            Self::ProviderOverride => "provider override",
             Self::TaskModel => "task model",
             Self::RoleConfig => "role config",
             Self::CascadeRouter => "cascade router",
@@ -143,8 +146,9 @@ pub fn resolve_effective_model(
     role: Option<String>,
     cascade_router: Option<&CascadeRouter>,
     config: &RokoConfig,
+    cli_provider: Option<String>,
 ) -> Result<EffectiveModelSelection, Error> {
-    let candidate = select_candidate(cli_model, task_hint, role, cascade_router, config)?;
+    let candidate = select_candidate(cli_model, task_hint, role, cascade_router, config, cli_provider)?;
     let source = candidate.source;
     let requested_model = candidate.model;
     let resolved = resolve_model(config, &requested_model);
@@ -189,7 +193,7 @@ pub fn resolve_effective_model_key(
 ) -> anyhow::Result<String> {
     let config = load_roko_config(workdir)?;
     let selection =
-        resolve_effective_model(cli_model, None, role.map(str::to_string), None, &config)
+        resolve_effective_model(cli_model, None, role.map(str::to_string), None, &config, None)
             .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
     selection.print_stderr();
     Ok(selection.effective_model_key)
@@ -201,12 +205,22 @@ fn select_candidate(
     role: Option<String>,
     cascade_router: Option<&CascadeRouter>,
     config: &RokoConfig,
+    cli_provider: Option<String>,
 ) -> Result<ModelCandidate, Error> {
     if let Some(model) = required_model(cli_model, SelectionSource::CliOverride)? {
         return Ok(ModelCandidate {
             source: SelectionSource::CliOverride,
             model,
         });
+    }
+
+    if let Some(ref provider) = cli_provider {
+        if let Some(model) = find_model_for_provider(config, provider) {
+            return Ok(ModelCandidate {
+                source: SelectionSource::ProviderOverride,
+                model,
+            });
+        }
     }
 
     if let Some(model) = required_model(task_hint, SelectionSource::TaskModel)? {
@@ -285,6 +299,21 @@ fn normalized_label(input: Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|label| !label.is_empty())
         .map(str::to_owned)
+}
+
+/// Find the first model configured for the given provider name.
+///
+/// Returns the alphabetically first matching model key to ensure deterministic
+/// selection when multiple models share the same provider.
+fn find_model_for_provider(config: &RokoConfig, provider: &str) -> Option<String> {
+    let mut matches: Vec<&str> = config
+        .models
+        .iter()
+        .filter(|(_, profile)| profile.provider.eq_ignore_ascii_case(provider))
+        .map(|(key, _)| key.as_str())
+        .collect();
+    matches.sort_unstable();
+    matches.first().map(|k| (*k).to_owned())
 }
 
 fn builtin_default_model() -> String {
@@ -406,6 +435,7 @@ mod tests {
             Some("implementer".to_string()),
             Some(&router),
             &config,
+            None,
         )
         .expect("selection");
 
@@ -436,6 +466,7 @@ mod tests {
             Some("implementer".to_string()),
             Some(&router),
             &config,
+            None,
         )
         .expect("selection");
 
@@ -458,7 +489,7 @@ mod tests {
             .insert("architect".to_string(), role_model("claude-opus-4-6"));
 
         let selection =
-            resolve_effective_model(None, None, Some("architect".to_string()), None, &config)
+            resolve_effective_model(None, None, Some("architect".to_string()), None, &config, None)
                 .expect("selection");
 
         assert_eq!(selection.source, SelectionSource::RoleConfig);
@@ -477,7 +508,8 @@ mod tests {
         let router = cascade_router("claude-haiku-4-5");
 
         let selection =
-            resolve_effective_model(None, None, None, Some(&router), &config).expect("selection");
+            resolve_effective_model(None, None, None, Some(&router), &config, None)
+                .expect("selection");
 
         assert_eq!(selection.source, SelectionSource::CascadeRouter);
         assert_eq!(
@@ -495,7 +527,7 @@ mod tests {
         config.agent.default_model = "claude-opus-4-6".to_string();
 
         let selection =
-            resolve_effective_model(None, None, None, None, &config).expect("selection");
+            resolve_effective_model(None, None, None, None, &config, None).expect("selection");
 
         assert_eq!(selection.source, SelectionSource::ProjectDefault);
         assert_eq!(
@@ -514,7 +546,7 @@ mod tests {
         let builtin_default = RokoConfig::default().agent.default_model;
 
         let selection =
-            resolve_effective_model(None, None, None, None, &config).expect("selection");
+            resolve_effective_model(None, None, None, None, &config, None).expect("selection");
 
         assert_eq!(selection.source, SelectionSource::BuiltInDefault);
         assert_eq!(
@@ -532,7 +564,7 @@ mod tests {
         config.agent.default_model = "claude-opus-4-6".to_string();
 
         let selection =
-            resolve_effective_model(None, None, None, None, &config).expect("selection");
+            resolve_effective_model(None, None, None, None, &config, None).expect("selection");
 
         assert_eq!(
             selection.display_line(),
@@ -553,8 +585,9 @@ mod tests {
             .models
             .insert("custom".to_string(), explicit_profile("openai", "gpt-4o"));
 
-        let err = resolve_effective_model(Some("custom".to_string()), None, None, None, &config)
-            .expect_err("selection should fail");
+        let err =
+            resolve_effective_model(Some("custom".to_string()), None, None, None, &config, None)
+                .expect_err("selection should fail");
 
         assert!(err.to_string().contains("provider 'openai'"));
     }
@@ -569,6 +602,7 @@ mod tests {
             None,
             None,
             &config,
+            None,
         )
         .expect_err("selection should fail");
 

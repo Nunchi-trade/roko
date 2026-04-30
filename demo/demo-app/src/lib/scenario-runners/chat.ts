@@ -90,6 +90,6 @@ export const chat: Scenario = {
     await e.typeCmd('/model', 20);
     await rawSleep(2000);
 
-    timeline.setActive(3);
+    timeline.markAllComplete();
   },
 };
