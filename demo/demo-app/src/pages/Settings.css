@@ -131,7 +131,7 @@
 /* Card hover lift */
 .settings-section:hover {
   border-left-color: var(--rose);
-  box-shadow: var(--glow-rose-soft), 0 4px 20px rgba(0,0,0,.2);
+  box-shadow: var(--glow-rose-soft), 0 4px 20px color-mix(in srgb, black 20%, transparent);
   transform: translateY(-1px);
 }
 
@@ -418,7 +418,7 @@ input[type="checkbox"]:focus-visible + .toggle-track {
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-4);
-  background: rgba(18, 16, 26, .92);
+  background: color-mix(in srgb, var(--bg-void) 92%, transparent);
   border: 1px solid var(--success);
   border-radius: var(--radius-lg);
   backdrop-filter: blur(8px);

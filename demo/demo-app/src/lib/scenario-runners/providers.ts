@@ -22,7 +22,7 @@ export const providers: Scenario = {
     { label: 'Anthropic Haiku', sublabel: 'dispatch' },
     { label: 'Moonshot v1', sublabel: 'dispatch' },
   ],
-  async run({ entries, playback, timeline, logCommand, workspaceDir }) {
+  async run({ entries, playback, timeline, logCommand, logCommandComplete, workspaceDir }) {
     const providerNames = ['zhipu', 'openai', 'anthropic', 'moonshot'];
 
     await enterWorkspace(entries[0], workspaceDir);
@@ -38,9 +38,11 @@ export const providers: Scenario = {
       entries.map(async (e, i) => {
         timeline.setActive(i);
         await showCmd(e, `${ROKO} run "${prompt}" --provider ${providerNames[i]}`, {
+          playback,
           timeout: 180000,
           customDesc: `Dispatches the build to ${providerNames[i]} provider. Roko's provider-agnostic dispatch maps the same prompt and tool schema to any OpenAI-compatible or native API.`,
           onLog: logCommand,
+          onLogComplete: logCommandComplete,
         });
         // Check for provider-not-configured errors
         const buf = stripAnsi(e.outputBuffer);

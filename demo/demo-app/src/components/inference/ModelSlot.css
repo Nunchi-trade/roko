@@ -36,17 +36,17 @@
 
 .model-slot--t0 {
   color: var(--tier-t0);
-  background: rgba(138, 196, 160, 0.10);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
 }
 
 .model-slot--t1 {
   color: var(--tier-t1);
-  background: rgba(212, 200, 156, 0.10);
+  background: color-mix(in srgb, var(--bone) 10%, transparent);
 }
 
 .model-slot--t2 {
   color: var(--tier-t2);
-  background: rgba(216, 154, 178, 0.10);
+  background: color-mix(in srgb, var(--rose-bright) 10%, transparent);
 }
 
 /* -- Active inference glow -- */
@@ -57,15 +57,15 @@
 }
 
 .model-slot--active.model-slot--t0 {
-  box-shadow: 0 0 8px rgba(138, 196, 160, 0.3), inset 0 0 6px rgba(138, 196, 160, 0.08);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 30%, transparent), inset 0 0 6px color-mix(in srgb, var(--success) 8%, transparent);
 }
 
 .model-slot--active.model-slot--t1 {
-  box-shadow: 0 0 8px rgba(212, 200, 156, 0.3), inset 0 0 6px rgba(212, 200, 156, 0.08);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--bone) 30%, transparent), inset 0 0 6px color-mix(in srgb, var(--bone) 8%, transparent);
 }
 
 .model-slot--active.model-slot--t2 {
-  box-shadow: 0 0 8px rgba(216, 154, 178, 0.3), inset 0 0 6px rgba(216, 154, 178, 0.08);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 30%, transparent), inset 0 0 6px color-mix(in srgb, var(--rose-bright) 8%, transparent);
 }
 
 /* -- Expanded (hover) -- */
@@ -153,7 +153,7 @@
 
 .model-slot__badge {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.02em;
   text-transform: uppercase;
   line-height: 1;
@@ -165,12 +165,12 @@
 
 .model-slot__badge--tokens {
   color: var(--dream-bright);
-  background: rgba(164, 164, 200, 0.12);
+  background: color-mix(in srgb, var(--status-blocked) 12%, transparent);
 }
 
 .model-slot__badge--cost {
   color: var(--bone);
-  background: rgba(212, 200, 156, 0.12);
+  background: color-mix(in srgb, var(--bone) 12%, transparent);
   animation: ms-rolling-digits 0.4s ease-out;
 }
 

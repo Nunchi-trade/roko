@@ -30,7 +30,7 @@
 
 .cell-graph__edge-label {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   fill: var(--text-ghost);
   text-anchor: middle;
   dominant-baseline: central;
@@ -63,33 +63,33 @@
 }
 
 .cell-graph__node-rect--active {
-  fill: rgba(45, 212, 191, 0.08);
+  fill: color-mix(in srgb, var(--status-active) 8%, transparent);
   stroke: var(--status-active);
 }
 
 .cell-graph__node-rect--success {
-  fill: rgba(74, 222, 128, 0.08);
+  fill: color-mix(in srgb, var(--success) 8%, transparent);
   stroke: var(--status-success);
 }
 
 .cell-graph__node-rect--error {
-  fill: rgba(251, 113, 133, 0.08);
+  fill: color-mix(in srgb, var(--danger) 8%, transparent);
   stroke: var(--status-error);
 }
 
 .cell-graph__node-rect--blocked {
-  fill: rgba(167, 139, 250, 0.08);
+  fill: color-mix(in srgb, var(--status-blocked) 8%, transparent);
   stroke: var(--status-blocked);
 }
 
 .cell-graph__node-rect--highlighted {
   stroke-width: 2;
-  filter: drop-shadow(0 0 6px rgba(204, 144, 168, 0.3));
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--rose) 30%, transparent));
 }
 
 .cell-graph__node-label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.04em;
   fill: var(--text-primary);
   text-anchor: middle;

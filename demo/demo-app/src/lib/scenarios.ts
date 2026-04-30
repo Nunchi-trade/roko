@@ -29,6 +29,7 @@ export interface ScenarioContext {
   setMetric: (id: string, value: string) => void;
   setGate: (name: string, status: 'pass' | 'fail' | 'pending') => void;
   logCommand: (cmd: string, desc: string) => void;
+  logCommandComplete: (cmd: string, ok: boolean) => void;
   setPipeline: (state: PipelineDemoState) => void;
   patchPipeline: (patch: Partial<PipelineDemoState>) => void;
   patchPipelineStream: (patch: Partial<PipelineStreamState>) => void;

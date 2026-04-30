@@ -7,6 +7,7 @@
  * Reference: demo-web/demo.html showCmd/detectFromOutput
  */
 import type { TerminalHandle } from '../hooks/useTerminal';
+import type { PlaybackController } from './playback-controller';
 import { lookupCmdDesc } from './cmd-descriptions';
 
 // ── Speed multiplier ─────────────────────────────────────────
@@ -105,10 +106,14 @@ export interface GateResult {
   status: 'pass' | 'fail';
 }
 
-async function typeVisibleCommandAndWait(
+/**
+ * Type a command character-by-character into the terminal with a typing
+ * animation. Only types — does NOT send Enter or wait for output.
+ * Returns false if the WebSocket closes mid-typing.
+ */
+async function typeChars(
   handle: TerminalHandle,
   cmd: string,
-  timeout: number,
 ): Promise<boolean> {
   if (!handle?.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
 
@@ -117,14 +122,19 @@ async function typeVisibleCommandAndWait(
     handle.ws.send(ch);
     await adjustedSleep(6 + Math.random() * 3);
   }
-  await adjustedSleep(20);
-  if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
-  handle.ws.send('\r');
-  return handle.waitForPrompt(timeout);
+
+  return true;
 }
 
 /**
- * Type a command with animation, wait for prompt, and detect output.
+ * Type a command with animation, execute it, wait for prompt, and detect output.
+ *
+ * Flow:
+ *   1. Type command character-by-character (visible in terminal)
+ *   2. In step mode: pause here — user sees the command, clicks Next to run it
+ *   3. Send \r (Enter) to execute the command
+ *   4. Wait for prompt to return (command finished)
+ *   5. Detect gates, cost, tokens from output
  *
  * @param handle - Terminal handle
  * @param cmd - Shell command to execute
@@ -137,10 +147,15 @@ export async function showCmd(
   opts?: {
     timeout?: number;
     customDesc?: string;
+    /** Called when the command is typed (before execution). */
     onLog?: (cmd: string, desc: string) => void;
+    /** Called when the command finishes running. */
+    onLogComplete?: (cmd: string, ok: boolean) => void;
     onGate?: (name: string, status: 'pass' | 'fail') => void;
     onCost?: (cost: string) => void;
     onTokens?: (tokens: string) => void;
+    /** In step mode, pauses after typing the command before executing. */
+    playback?: PlaybackController;
   },
 ): Promise<CommandResult> {
   const timeout = opts?.timeout ?? 60000;
@@ -150,17 +165,39 @@ export async function showCmd(
   // Clear output buffer for fresh detection
   handle.outputBuffer = '';
 
-  // Log to command panel
+  // Log to command panel (as pending — not yet complete)
   opts?.onLog?.(cmd, desc);
 
-  // Type and execute. Waiting on an explicit marker is more reliable than
-  // trying to parse arbitrary themed shell prompts.
-  const ok = await typeVisibleCommandAndWait(handle, cmd, timeout);
+  // Step 1: Type the command character-by-character (visible animation)
+  const typed = await typeChars(handle, cmd);
+  if (!typed) {
+    opts?.onLogComplete?.(cmd, false);
+    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null };
+  }
+
+  // Step 2: In step mode, pause after typing — user sees the command and
+  // clicks Next to execute it. In auto mode this resolves immediately.
+  if (opts?.playback) {
+    await opts.playback.waitForExec();
+  }
+
+  // Step 3: Send Enter to execute the command
+  if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) {
+    opts?.onLogComplete?.(cmd, false);
+    return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null };
+  }
+  handle.ws.send('\r');
+
+  // Step 4: Wait for the shell prompt to return (command finished)
+  const ok = await handle.waitForPrompt(timeout);
 
   const elapsed = (Date.now() - startTime) / 1000;
 
-  // Detect gates, cost, tokens from output
+  // Step 5: Detect gates, cost, tokens from output
   const result = detectFromOutput(handle.outputBuffer, opts);
+
+  // Mark the log entry as complete
+  opts?.onLogComplete?.(cmd, ok);
 
   return {
     ok,

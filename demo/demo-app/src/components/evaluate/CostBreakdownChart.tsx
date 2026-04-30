@@ -118,6 +118,23 @@ export function CostBreakdownChart({ results, height = 280 }: CostBreakdownChart
   const [groupBy, setGroupBy] = useState<CostGroupBy>('task');
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const segments = useMemo(() => buildCostSegments(results, groupBy), [results, groupBy]);
+  const [animProgress, setAnimProgress] = useState(0);
+
+  // Animate bars from 0 to full on mount / groupBy change
+  useEffect(() => {
+    setAnimProgress(0);
+    const start = performance.now();
+    const duration = 700;
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setAnimProgress(eased);
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [segments]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -164,11 +181,15 @@ export function CostBreakdownChart({ results, height = 280 }: CostBreakdownChart
     }
 
     segments.forEach((segment, index) => {
+      // Per-bar stagger: each bar starts slightly later
+      const barDelay = index * 0.04;
+      const barProgress = Math.max(0, Math.min(1, (animProgress - barDelay) / (1 - barDelay)));
+
       const y = pad.top + index * (barHeight + rowGap);
       const centerY = y + barHeight / 2;
       const total = segment.inputCost + segment.outputCost;
-      const inputWidth = (segment.inputCost / maxCost) * plotW;
-      const outputWidth = (segment.outputCost / maxCost) * plotW;
+      const inputWidth = (segment.inputCost / maxCost) * plotW * barProgress;
+      const outputWidth = (segment.outputCost / maxCost) * plotW * barProgress;
       const barEnd = pad.left + inputWidth + outputWidth;
 
       ctx.fillStyle = 'rgba(255,255,255,0.04)';
@@ -188,15 +209,17 @@ export function CostBreakdownChart({ results, height = 280 }: CostBreakdownChart
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = labelColor;
+      ctx.globalAlpha = barProgress;
       ctx.fillText(fitLabel(ctx, segment.label, pad.left - 12), pad.left - 10, centerY);
 
-      const costText = `$${total.toFixed(3)}`;
+      const costText = `$${(total * barProgress).toFixed(3)}`;
       ctx.font = '11px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillStyle = costColor;
       const costTextWidth = ctx.measureText(costText).width;
       const costX = Math.max(pad.left + 4, Math.min(barEnd + 8, pad.left + plotW - costTextWidth));
       ctx.fillText(costText, costX, centerY);
+      ctx.globalAlpha = 1;
     });
 
     const legendY = h - 9;
@@ -215,7 +238,7 @@ export function CostBreakdownChart({ results, height = 280 }: CostBreakdownChart
       ctx.fillText(item.label, legendX + 14, legendY);
       legendX += ctx.measureText(item.label).width + 34;
     });
-  }, [segments]);
+  }, [segments, animProgress]);
 
   useEffect(() => {
     draw();
@@ -230,7 +253,7 @@ export function CostBreakdownChart({ results, height = 280 }: CostBreakdownChart
   }, [draw]);
 
   return (
-    <div className="cost-breakdown-chart" style={{ height, display: 'flex', flexDirection: 'column' }}>
+    <div className="cost-breakdown-chart" style={{ height }}>
       <div className="cost-breakdown-chart__controls">
         {(['task', 'model', 'difficulty'] as const).map((mode) => (
           <label key={mode} className="gate-toggle">
@@ -244,13 +267,13 @@ export function CostBreakdownChart({ results, height = 280 }: CostBreakdownChart
           </label>
         ))}
       </div>
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div className="cost-breakdown-chart__canvas-wrap">
         {segments.length === 0 ? (
-          <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="cost-breakdown-chart__empty">
             <p className="bench-empty-text">No cost data available.</p>
           </div>
         ) : (
-          <canvas ref={canvasRef} className="chart-canvas" />
+          <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Task cost breakdown chart" />
         )}
       </div>
     </div>

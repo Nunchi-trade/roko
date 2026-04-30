@@ -27,7 +27,7 @@ export default function PhosphorNumber({ value, format, className }: PhosphorNum
       style={{
         transition: 'color .3s ease, text-shadow .6s ease',
         color: flash ? 'var(--rose-bright, #dc9cb8)' : undefined,
-        textShadow: flash ? '0 0 12px rgba(220,165,189,.5)' : 'none',
+        textShadow: flash ? '0 0 12px color-mix(in srgb, var(--rose) 50%, transparent)' : 'none',
       }}
     >
       {display}

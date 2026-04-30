@@ -12,8 +12,8 @@
 }
 
 .spectre-avatar:hover {
-  border-color: rgba(204, 144, 168, 0.3);
-  box-shadow: 0 0 12px rgba(204, 144, 168, 0.15);
+  border-color: color-mix(in srgb, var(--rose) 30%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--rose) 15%, transparent);
 }
 
 .spectre-avatar canvas {

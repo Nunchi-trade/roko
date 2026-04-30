@@ -46,7 +46,7 @@
   font-family: var(--display);
   font-weight: 300;
   font-style: italic;
-  font-size: 24px;
+  font-size: var(--text-2xl);
   line-height: 1.1;
   text-shadow: 0 0 20px currentColor;
   letter-spacing: -0.01em;
@@ -54,7 +54,7 @@
 }
 
 .status-tab__sparkpill:hover .status-tab__sparkvalue {
-  text-shadow: 0 0 28px currentColor, 0 0 48px rgba(220, 165, 189, 0.2);
+  text-shadow: 0 0 28px currentColor, 0 0 48px color-mix(in srgb, var(--rose) 20%, transparent);
 }
 
 .status-tab__spark {

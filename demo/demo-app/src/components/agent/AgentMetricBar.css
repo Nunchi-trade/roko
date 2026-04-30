@@ -51,7 +51,7 @@
 
 .agent-metric-bar__unit {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-ghost);
@@ -61,7 +61,7 @@
 
 .agent-metric-bar__trend {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   line-height: 1;
   margin-left: 2px;
 }
@@ -85,7 +85,7 @@
 }
 
 .agent-metric-bar--compact .agent-metric-bar__label {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .agent-metric-bar--compact .agent-metric-bar__value {

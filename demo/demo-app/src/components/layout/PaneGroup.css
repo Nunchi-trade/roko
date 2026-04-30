@@ -21,15 +21,15 @@
   transform: translate(-50%, -50%);
   width: 3px;
   height: 16px;
-  background-image: radial-gradient(circle, rgba(216, 154, 178, 0.5) 1px, transparent 1px);
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--rose-bright) 50%, transparent) 1px, transparent 1px);
   background-size: 3px 4px;
   opacity: 0;
   transition: opacity 0.2s ease;
 }
 
 .pane-group__handle--horizontal:hover {
-  background: rgba(216, 154, 178, 0.15);
-  box-shadow: 0 0 8px rgba(204, 144, 168, 0.2);
+  background: color-mix(in srgb, var(--rose-bright) 15%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 20%, transparent);
 }
 
 .pane-group__handle--horizontal:hover::after {
@@ -53,15 +53,15 @@
   transform: translate(-50%, -50%);
   width: 16px;
   height: 3px;
-  background-image: radial-gradient(circle, rgba(216, 154, 178, 0.5) 1px, transparent 1px);
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--rose-bright) 50%, transparent) 1px, transparent 1px);
   background-size: 4px 3px;
   opacity: 0;
   transition: opacity 0.2s ease;
 }
 
 .pane-group__handle--vertical:hover {
-  background: rgba(216, 154, 178, 0.15);
-  box-shadow: 0 0 8px rgba(204, 144, 168, 0.2);
+  background: color-mix(in srgb, var(--rose-bright) 15%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 20%, transparent);
 }
 
 .pane-group__handle--vertical:hover::after {
@@ -69,6 +69,6 @@
 }
 
 .pane-group__handle:active {
-  background: rgba(138, 90, 112, 0.25) !important;
-  box-shadow: 0 0 14px rgba(204, 144, 168, 0.4);
+  background: color-mix(in srgb, var(--rose-dim) 25%, transparent) !important;
+  box-shadow: 0 0 14px color-mix(in srgb, var(--rose) 40%, transparent);
 }

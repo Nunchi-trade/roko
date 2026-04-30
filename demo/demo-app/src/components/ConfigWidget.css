@@ -263,9 +263,9 @@
 }
 
 .cw-badge.demo {
-  background: rgba(255, 200, 0, 0.15);
-  border: 1px solid rgba(255, 200, 0, 0.3);
-  color: rgba(255, 200, 0, 0.9);
+  background: color-mix(in srgb, var(--status-warning) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-warning) 30%, transparent);
+  color: color-mix(in srgb, var(--status-warning) 90%, transparent);
 }
 
 .cw-saved {

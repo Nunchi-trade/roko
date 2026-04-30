@@ -11,11 +11,11 @@
 }
 
 .status-badge--sm {
-  font-size: 11px;
+  font-size: var(--text-sm);
 }
 
 .status-badge--md {
-  font-size: 12px;
+  font-size: var(--text-md);
 }
 
 /* ── Dot ── */

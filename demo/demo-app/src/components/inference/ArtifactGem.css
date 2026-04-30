@@ -87,20 +87,20 @@
 /* Dim (0.3 - 0.6) */
 .artifact-gem[data-tier="dim"] .artifact-gem__shape {
   background: var(--rose-dim);
-  box-shadow: 0 0 6px rgba(138, 90, 112, 0.3);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rose-dim) 30%, transparent);
 }
 .artifact-gem[data-tier="dim"] .artifact-gem__inner {
-  background: rgba(184, 122, 148, 0.3);
+  background: color-mix(in srgb, var(--rose-dim) 30%, transparent);
 }
 
 /* Bright (0.6 - 0.8) */
 .artifact-gem[data-tier="bright"] .artifact-gem__shape {
   background: var(--rose-bright);
-  box-shadow: 0 0 12px rgba(216, 154, 178, 0.4),
-              0 0 24px rgba(216, 154, 178, 0.15);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--rose-bright) 40%, transparent),
+              0 0 24px color-mix(in srgb, var(--rose-bright) 15%, transparent);
 }
 .artifact-gem[data-tier="bright"] .artifact-gem__inner {
-  background: rgba(232, 181, 206, 0.5);
+  background: color-mix(in srgb, var(--rose-glow) 50%, transparent);
   opacity: 0.9;
 }
 
@@ -138,8 +138,8 @@
   }
   50% {
     filter: brightness(1.25);
-    box-shadow: 0 0 40px rgba(220, 165, 189, 0.6),
-                0 0 80px rgba(220, 165, 189, 0.3);
+    box-shadow: 0 0 40px color-mix(in srgb, var(--rose) 60%, transparent),
+                0 0 80px color-mix(in srgb, var(--rose) 30%, transparent);
   }
 }
 
@@ -182,8 +182,8 @@
 }
 
 @keyframes gem-flash {
-  0%   { opacity: 0; background: rgba(232, 181, 206, 0.6); }
-  30%  { opacity: 1; background: rgba(232, 181, 206, 0.4); }
+  0%   { opacity: 0; background: color-mix(in srgb, var(--rose-glow) 60%, transparent); }
+  30%  { opacity: 1; background: color-mix(in srgb, var(--rose-glow) 40%, transparent); }
   100% { opacity: 0; background: transparent; }
 }
 
@@ -274,10 +274,10 @@
 
 @keyframes gem-ripple {
   0% {
-    box-shadow: 0 0 0 0 rgba(216, 154, 178, 0.4);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--rose-bright) 40%, transparent);
   }
   100% {
-    box-shadow: 0 0 0 8px rgba(216, 154, 178, 0);
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--rose-bright) 0%, transparent);
   }
 }
 
@@ -293,7 +293,7 @@
   background: var(--bg-raised);
   border: 1px solid var(--border);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-soft);
   white-space: nowrap;
   pointer-events: none;

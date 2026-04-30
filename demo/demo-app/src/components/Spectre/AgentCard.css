@@ -191,11 +191,11 @@
 }
 
 .ac-card--standard .ac-role {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .ac-card--standard .ac-status-pill {
-  font-size: 9px;
+  font-size: var(--text-xs);
   padding: 1px 6px;
 }
 
@@ -212,16 +212,16 @@
 }
 
 .ac-card--detailed .ac-role {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .ac-card--detailed .ac-status-pill {
-  font-size: 9px;
+  font-size: var(--text-xs);
   padding: 1px 6px;
 }
 
 .ac-card--detailed .ac-stat-label {
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 
 .ac-card--detailed .ac-stat-value {
@@ -252,12 +252,12 @@
 }
 
 .ac-card--hero .ac-status-pill {
-  font-size: 10px;
+  font-size: var(--text-xs);
   padding: 2px 8px;
 }
 
 .ac-card--hero .ac-stat-label {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .ac-card--hero .ac-stat-value {

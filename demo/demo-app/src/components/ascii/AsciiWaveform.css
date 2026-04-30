@@ -9,7 +9,7 @@
 }
 
 .ascii-waveform__label {
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-dim);

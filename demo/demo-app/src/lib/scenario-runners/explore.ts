@@ -30,7 +30,7 @@ export const explore: Scenario = {
     { label: 'knowledge query', sublabel: 'knowledge' },
     { label: 'explain', sublabel: 'knowledge' },
   ],
-  async run({ entries, playback, timeline, logCommand, paused, running, workspaceDir }) {
+  async run({ entries, playback, timeline, logCommand, logCommandComplete, paused, running, workspaceDir }) {
     await enterWorkspace(entries[0], workspaceDir);
     await Promise.all(entries.slice(1).map(e => enterWorkspace(e, workspaceDir)));
 
@@ -60,7 +60,7 @@ export const explore: Scenario = {
           const globalStep = i * 3 + j;
           timeline.setActive(globalStep);
           playback.setProgress(globalStep + 1, 12, families[i][j]);
-          await showCmd(e, families[i][j], { timeout: 45000, onLog: logCommand });
+          await showCmd(e, families[i][j], { timeout: 45000, onLog: logCommand, onLogComplete: logCommandComplete, playback });
         }
       }),
     );

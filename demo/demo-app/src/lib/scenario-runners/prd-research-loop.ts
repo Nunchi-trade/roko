@@ -25,7 +25,7 @@ export const prdResearchLoop: Scenario = {
     { label: 'Learn', sublabel: 'learn all' },
     { label: 'Summary', sublabel: 'status + efficiency' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, workspaceDir }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, workspaceDir }) {
     const e = entries[0];
     await enterWorkspace(e, workspaceDir);
     const ROKO = getRoko();
@@ -37,8 +37,10 @@ export const prdResearchLoop: Scenario = {
     playback.setProgress(1, 8, `${ROKO} prd idea "..."`);
     timeline.setActive(0);
     await showCmd(e, `${ROKO} prd idea "Add config validation with schema checking and helpful error messages"`, {
+      playback,
       timeout: 45000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Captures a raw work item into the PRD backlog. This is the seed for the full pipeline.',
     });
     setMetric('cost', '$0.02');
@@ -49,8 +51,10 @@ export const prdResearchLoop: Scenario = {
     playback.setProgress(2, 8, `${ROKO} prd draft new ...`);
     timeline.setActive(1);
     await showCmd(e, `${ROKO} prd draft new cli-config-validation`, {
+      playback,
       timeout: 120000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Agent expands the idea into a structured PRD with motivation, design, tasks, and success criteria.',
     });
     setMetric('cost', '$0.08');
@@ -65,8 +69,10 @@ export const prdResearchLoop: Scenario = {
       'Enriching the PRD with research: prior art, implementation references, and architectural context. This step makes the generated plan more informed.',
     );
     await showCmd(e, `${ROKO} research enhance-prd cli-config-validation`, {
+      playback,
       timeout: 180000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc:
         'Research agent searches for relevant prior art, patterns, and references, then weaves findings into the PRD. The subsequent plan generation benefits from this enriched context.',
     });
@@ -78,8 +84,10 @@ export const prdResearchLoop: Scenario = {
     playback.setProgress(4, 8, `${ROKO} prd plan cli-config-validation`);
     timeline.setActive(3);
     await showCmd(e, `${ROKO} prd plan cli-config-validation`, {
+      playback,
       timeout: 180000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Generates tasks.toml from the research-enhanced PRD. The plan quality is higher because the PRD now contains prior art and implementation references.',
     });
     setMetric('cost', '$0.28');
@@ -93,8 +101,10 @@ export const prdResearchLoop: Scenario = {
     setGate('test', 'pending');
     setGate('clippy', 'pending');
     const runResult = await showCmd(e, `${ROKO} plan run .roko/plans --max-retries 1`, {
+      playback,
       timeout: 300000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       onGate: (name, status) => setGate(name, status),
       customDesc: 'Executes the generated plan through the Roko runner. Agents implement tasks, gates validate each one.',
     });
@@ -121,13 +131,17 @@ export const prdResearchLoop: Scenario = {
     timeline.setActive(6);
     e.clearTerminal();
     await showCmd(e, `${ROKO} learn all`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Full learning state: cascade router weights, prompt experiments, adaptive gate thresholds, and efficiency metrics.',
     });
     await showCmd(e, `${ROKO} learn tune routing`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Cascade router tuning: shows model confidence scores and routing decisions based on this execution.',
     });
     setMetric('cost', '$0.53');
@@ -138,13 +152,17 @@ export const prdResearchLoop: Scenario = {
     timeline.setActive(7);
     e.clearTerminal();
     await showCmd(e, `${ROKO} status`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Workspace status: signal counts, episode count, and overall health.',
     });
     await showCmd(e, `${ROKO} learn efficiency`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Per-turn efficiency events: tokens used, cost, latency, and model selection decisions across all steps of the pipeline.',
     });
     setMetric('model', 'loop complete');

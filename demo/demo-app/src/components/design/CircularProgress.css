@@ -51,7 +51,7 @@
 
 .circular-progress__label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-ghost);

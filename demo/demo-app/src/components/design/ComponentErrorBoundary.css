@@ -1,9 +1,9 @@
 /* ComponentErrorBoundary — animated error catch with recovery */
 
 /* ── severity accent vars ── */
-.component-error-boundary { --ceb-accent: var(--status-error); --ceb-accent-dim: rgba(251,113,133,.3); }
-.component-error-boundary[data-severity="timeout"] { --ceb-accent: var(--status-warning); --ceb-accent-dim: rgba(251,191,36,.3); }
-.component-error-boundary[data-severity="network"] { --ceb-accent: var(--status-blocked); --ceb-accent-dim: rgba(167,139,250,.3); }
+.component-error-boundary { --ceb-accent: var(--status-error); --ceb-accent-dim: color-mix(in srgb, var(--danger) 30%, transparent); }
+.component-error-boundary[data-severity="timeout"] { --ceb-accent: var(--status-warning); --ceb-accent-dim: color-mix(in srgb, var(--warning) 30%, transparent); }
+.component-error-boundary[data-severity="network"] { --ceb-accent: var(--status-blocked); --ceb-accent-dim: color-mix(in srgb, var(--status-blocked) 30%, transparent); }
 
 /* ── container ── */
 .component-error-boundary {
@@ -194,7 +194,7 @@
 /* ── stack trace accordion ── */
 .ceb-stack-toggle {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-ghost);
@@ -216,7 +216,7 @@
 .ceb-stack-toggle .ceb-chevron {
   display: inline-block;
   transition: transform var(--duration-smooth) var(--ease);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .ceb-stack-toggle[aria-expanded="true"] .ceb-chevron {
@@ -246,7 +246,7 @@
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   line-height: 1.6;
   color: var(--text-dim);
   text-align: left;

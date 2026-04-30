@@ -95,10 +95,10 @@
 
 .metric-value {
   font-family: var(--mono);
-  font-size: 24px;
+  font-size: var(--text-2xl);
   font-weight: 600;
   color: var(--bone);
-  text-shadow: 0 0 12px rgba(212, 200, 156, 0.3);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--bone) 30%, transparent);
 }
 
 /* ── Strategy ───────────────────────────────────────────── */

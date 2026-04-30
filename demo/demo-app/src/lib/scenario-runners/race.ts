@@ -19,7 +19,7 @@ export const race: Scenario = {
     { label: 'Naive run', sublabel: '--no-replan' },
     { label: 'Cascade run', sublabel: 'full pipeline' },
   ],
-  async run({ entries, playback, timeline, setMetric, logCommand, workspaceDir }) {
+  async run({ entries, playback, timeline, setMetric, logCommand, logCommandComplete, workspaceDir }) {
     const [left, right] = entries;
 
     await enterWorkspace(left, workspaceDir);
@@ -47,12 +47,16 @@ export const race: Scenario = {
         customDesc:
           'Runs with --no-replan: uses a single model without cascade routing or gate-failure replanning. The baseline approach.',
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
+        playback,
       }),
       showCmd(right, `${ROKO} run "${prompt}"`, {
         timeout: 180000,
         customDesc:
           'Runs with full pipeline: cascade router picks optimal models per-turn, gates validate, and failures trigger automatic replanning.',
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
+        playback,
       }),
     ]);
 

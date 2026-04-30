@@ -6,14 +6,21 @@ import { useState, useEffect, useRef } from 'react';
  *
  * @param target  The target number to animate towards.
  * @param duration  Animation duration in ms (default 900).
+ * @param enabled  When false, immediately returns target without animating (default true).
  * @returns The current animated value.
  */
-export function useCountUp(target: number, duration = 900): number {
+export function useCountUp(target: number, duration = 900, enabled = true): number {
   const [val, setVal] = useState(0);
   const prevTarget = useRef<number | null>(null);
   const valRef = useRef(0);
 
   useEffect(() => {
+    if (!enabled || target === 0) {
+      valRef.current = target;
+      setVal(target);
+      prevTarget.current = target;
+      return;
+    }
     if (prevTarget.current === target) return;
     prevTarget.current = target;
     const start = performance.now();
@@ -37,7 +44,7 @@ export function useCountUp(target: number, duration = 900): number {
 
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [target, duration]);
+  }, [target, duration, enabled]);
 
   return val;
 }

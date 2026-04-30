@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import type { PipelineStage } from '../lib/pipeline-types';
 import { scaleIn } from '../design/motion-tokens';
+import { relativeTime } from '../lib/format';
 import './ActivityStrip.css';
 
 export interface ActivityStripProps {
@@ -44,14 +45,6 @@ function stageLabel(stage: PipelineStage): string {
   }
 }
 
-/** Format a timestamp as relative time (e.g. "2s ago"). */
-function relativeTime(ts: number, now: number): string {
-  const delta = Math.max(0, Math.floor((now - ts) / 1000));
-  if (delta < 60) return `${delta}s ago`;
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  return `${Math.floor(delta / 3600)}h ago`;
-}
-
 export default function ActivityStrip({
   stage = 'idle',
   connected = false,
@@ -60,11 +53,11 @@ export default function ActivityStrip({
 }: ActivityStripProps) {
   const cat = stageCategory(stage);
 
-  // Tick relative time every second when we have a timestamp
-  const [now, setNow] = useState(Date.now);
+  // Tick every second to keep relative time fresh
+  const [, setTick] = useState(0);
   useEffect(() => {
     if (lastEventAt == null) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    const id = window.setInterval(() => setTick((t) => t + 1), 1000);
     return () => window.clearInterval(id);
   }, [lastEventAt]);
 
@@ -105,7 +98,7 @@ export default function ActivityStrip({
       {/* Last event timestamp */}
       {lastEventAt != null && (
         <span className="activity-strip__event">
-          {relativeTime(lastEventAt, now)}
+          {relativeTime(lastEventAt)}
         </span>
       )}
     </div>

@@ -2,13 +2,13 @@
 
 /* Keyframes for status dot pulse */
 @keyframes fleet-pulse-green {
-  0%, 100% { box-shadow: 0 0 4px 1px rgba(138,156,134,.6), 0 0 8px 2px rgba(138,156,134,.25); }
-  50%       { box-shadow: 0 0 8px 3px rgba(138,156,134,.9), 0 0 16px 5px rgba(138,156,134,.4); }
+  0%, 100% { box-shadow: 0 0 4px 1px color-mix(in srgb, var(--success) 60%, transparent), 0 0 8px 2px color-mix(in srgb, var(--success) 25%, transparent); }
+  50%       { box-shadow: 0 0 8px 3px color-mix(in srgb, var(--success) 90%, transparent), 0 0 16px 5px color-mix(in srgb, var(--success) 40%, transparent); }
 }
 
 @keyframes fleet-pulse-amber {
-  0%, 100% { box-shadow: 0 0 4px 1px rgba(216,168,120,.6), 0 0 8px 2px rgba(216,168,120,.25); }
-  50%       { box-shadow: 0 0 8px 3px rgba(216,168,120,.9), 0 0 16px 5px rgba(216,168,120,.4); }
+  0%, 100% { box-shadow: 0 0 4px 1px color-mix(in srgb, var(--warning) 60%, transparent), 0 0 8px 2px color-mix(in srgb, var(--warning) 25%, transparent); }
+  50%       { box-shadow: 0 0 8px 3px color-mix(in srgb, var(--warning) 90%, transparent), 0 0 16px 5px color-mix(in srgb, var(--warning) 40%, transparent); }
 }
 
 /* Agent card hover lift */
@@ -18,27 +18,27 @@
 
 .af-agent-card:hover {
   transform: translateY(-3px);
-  box-shadow: 0 8px 32px rgba(220,165,189,.12), 0 0 0 1px rgba(220,165,189,.25);
+  box-shadow: 0 8px 32px color-mix(in srgb, var(--rose) 12%, transparent), 0 0 0 1px color-mix(in srgb, var(--rose) 25%, transparent);
 }
 
 /* Status dot state variants */
 .af-dot--active {
   background: var(--success);
-  color: rgba(138,156,134,.6);
+  color: color-mix(in srgb, var(--success) 60%, transparent);
   animation: fleet-pulse-green 2.4s ease-in-out infinite;
   box-shadow: var(--glow-success);
 }
 
 .af-dot--idle {
   background: var(--warning);
-  color: rgba(216,168,120,.6);
+  color: color-mix(in srgb, var(--warning) 60%, transparent);
   animation: fleet-pulse-amber 3s ease-in-out infinite;
   box-shadow: var(--glow-warning);
 }
 
 .af-dot--inactive {
   background: var(--bone);
-  color: rgba(200,184,144,.3);
+  color: color-mix(in srgb, var(--bone) 30%, transparent);
   animation: none;
-  box-shadow: 0 0 4px rgba(200,184,144,.3);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--bone) 30%, transparent);
 }

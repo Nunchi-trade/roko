@@ -24,7 +24,7 @@ export const chainIntelligence: Scenario = {
     { label: 'Cross-pollination', sublabel: 'insights compound' },
     { label: 'Results', sublabel: 'efficiency metrics' },
   ],
-  async run({ entries, playback, timeline, setMetric, logCommand, running, paused, workspaceDir }) {
+  async run({ entries, playback, timeline, setMetric, logCommand, logCommandComplete, running, paused, workspaceDir }) {
     const [alpha, beta] = entries;
 
     await enterWorkspace(alpha, workspaceDir);
@@ -46,19 +46,24 @@ export const chainIntelligence: Scenario = {
 
     // Verify mirage is reachable from both terminals
     await showCmd(alpha, 'curl -sf http://localhost:8545/api/health | head -c 200 || echo "mirage not reachable"', {
+      playback,
       timeout: 10000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Checks mirage-rs health endpoint. Mirage provides a forked Ethereum mainnet with on-chain knowledge graph extensions.',
     });
     await showCmd(beta, 'curl -sf http://localhost:8545/api/health | head -c 200 || echo "mirage not reachable"', {
+      playback,
       timeout: 10000,
       customDesc: 'Verifying mirage is reachable from Beta terminal.',
     });
 
     // Show block number to confirm fork is live
     await showCmd(alpha, 'curl -sf -X POST http://localhost:8545 -H "Content-Type: application/json" -d \'{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}\' | head -c 200', {
+      playback,
       timeout: 10000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Queries the current block number on the forked chain to confirm the fork is live and producing blocks.',
     });
 
@@ -71,6 +76,7 @@ export const chainIntelligence: Scenario = {
       'cast rpc anvil_setBalance 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 0x8AC7230489E80000 --rpc-url http://localhost:8545 2>/dev/null',
       'echo "Alpha wallet funded: 10 ETH"',
     ].join(' && '), {
+      playback,
       timeout: 15000,
       customDesc: 'Funds Alpha wallet with 10 ETH using Anvil cheatcode on the forked chain.',
     });
@@ -78,6 +84,7 @@ export const chainIntelligence: Scenario = {
       'cast rpc anvil_setBalance 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC 0x5F68E8131ECFFF0000 --rpc-url http://localhost:8545 2>/dev/null',
       'echo "Beta wallet funded: 110 ETH"',
     ].join(' && '), {
+      playback,
       timeout: 15000,
       customDesc: 'Funds Beta wallet with 110 ETH using Anvil cheatcode on the forked chain.',
     });
@@ -105,8 +112,10 @@ export const chainIntelligence: Scenario = {
     ].join(' ');
 
     const alphaResult = await showCmd(alpha, `${ROKO} run "${alphaPrompt}"`, {
+      playback,
       timeout: 300000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       onGate: (name, status) => setMetric('gates', `${name}: ${status}`),
       customDesc: 'Runs Alpha (Yield Scout) agent. The agent queries Aave/Uniswap rates and posts insight entries to the on-chain knowledge graph via chain.post_insight.',
     });
@@ -134,8 +143,10 @@ export const chainIntelligence: Scenario = {
     ].join(' ');
 
     const betaResult = await showCmd(beta, `${ROKO} run "${betaPrompt}"`, {
+      playback,
       timeout: 300000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       onGate: (name, status) => setMetric('gates', `${name}: ${status}`),
       customDesc: 'Runs Beta (Risk Hedger) agent. Beta queries the knowledge graph first, finds Alpha\'s insights, confirms them (triggering the "aha" animation), then executes its hedge strategy.',
     });
@@ -158,11 +169,14 @@ export const chainIntelligence: Scenario = {
     // Show status from both agents
     await Promise.all([
       showCmd(alpha, `${ROKO} status`, {
+        playback,
         timeout: 30000,
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
         customDesc: 'Shows Alpha agent workspace status after yield research and execution.',
       }),
       showCmd(beta, `${ROKO} status`, {
+        playback,
         timeout: 30000,
         customDesc: 'Shows Beta agent workspace status after hedge execution.',
       }),
@@ -188,8 +202,10 @@ export const chainIntelligence: Scenario = {
     ].join(' ');
 
     await showCmd(alpha, `${ROKO} run "${crossPrompt}"`, {
+      playback,
       timeout: 180000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Alpha reviews the knowledge graph for Beta\'s insights. Cross-pollination: Alpha confirms Beta\'s carry trade discovery and posts a synthesis insight.',
     });
 
@@ -209,11 +225,14 @@ export const chainIntelligence: Scenario = {
     // Show final learning state
     await Promise.all([
       showCmd(alpha, `${ROKO} learn all`, {
+        playback,
         timeout: 30000,
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
         customDesc: 'Shows Alpha\'s learning state: episodes, efficiency, and knowledge metrics.',
       }),
       showCmd(beta, `${ROKO} learn all`, {
+        playback,
         timeout: 30000,
         customDesc: 'Shows Beta\'s learning state and knowledge graph statistics.',
       }),
@@ -221,8 +240,10 @@ export const chainIntelligence: Scenario = {
 
     // Query final knowledge graph stats
     await showCmd(alpha, 'curl -sf http://localhost:8545/api/stats | head -c 500 || echo "stats unavailable"', {
+      playback,
       timeout: 10000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Queries mirage knowledge graph statistics: total insights, confirmations, and reuse metrics.',
     });
 

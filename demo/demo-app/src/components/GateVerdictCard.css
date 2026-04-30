@@ -253,7 +253,7 @@
 .gate-cell::after {
   position: absolute;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-ghost);
   pointer-events: none;
   line-height: 1;
@@ -558,18 +558,18 @@
 }
 
 .gate-cell__score--md {
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: 0.04em;
 }
 
 .gate-cell__score--sm {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 /* ── gate duration ── */
 
 .gate-cell__duration {
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-dim);
   letter-spacing: 0.04em;
   line-height: 1;
@@ -578,7 +578,7 @@
 /* ── gate message ── */
 
 .gate-cell__message {
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-dim);
   max-width: 120px;
   overflow: hidden;
@@ -625,7 +625,7 @@
 }
 
 .gate-cell__tooltip-name {
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -633,26 +633,26 @@
 }
 
 .gate-cell__tooltip-status {
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-dim);
 }
 
 .gate-cell__tooltip-message {
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-soft);
   max-width: 200px;
   white-space: normal;
 }
 
 .gate-cell__tooltip-duration {
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-ghost);
 }
 
 .gate-cell__tooltip-score {
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--bone-dim);
 }
 
@@ -768,7 +768,7 @@
 }
 
 .gate-verdict-card--compact .gate-cell__name {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .gate-verdict-card--compact .gate-cell__duration,
@@ -855,7 +855,7 @@
   padding: var(--sp-2) var(--sp-3);
   border-top: 1px solid var(--glass-border);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   width: 100%;
 }
 
@@ -894,7 +894,7 @@
 
 .gate-summary-row__pct {
   color: var(--text-ghost);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.04em;
   min-width: 28px;
   text-align: right;
@@ -932,7 +932,7 @@
 }
 
 .gate-cell__fail-detail-label {
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: color-mix(in srgb, var(--warning) 70%, transparent);
@@ -940,7 +940,7 @@
 }
 
 .gate-cell__fail-detail-msg {
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-soft);
   line-height: 1.3;
   white-space: pre-wrap;

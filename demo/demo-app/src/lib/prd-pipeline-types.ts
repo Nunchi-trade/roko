@@ -33,6 +33,14 @@ export interface PipelineScenarioExample extends PipelineExampleSummary {
   workspacePrefix: string;
   repoName: string;
   setupDescription: string;
+  /** Pre-seeded PRD markdown for reliable demo playback */
+  seedPrd?: string;
+  /** Pre-seeded tasks.toml content */
+  seedTasksToml?: string;
+  /** Pre-seeded plan.md content */
+  seedPlanMd?: string;
+  /** Pre-seeded implementation files: { relativePath: content } */
+  seedFiles?: Record<string, string>;
 }
 
 export interface PipelinePrd {

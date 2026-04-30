@@ -46,7 +46,7 @@
 .agent-feed__ts {
   flex-shrink: 0;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.04em;
   color: var(--text-ghost);
   line-height: 1.6;
@@ -60,7 +60,7 @@
   display: inline-flex;
   align-items: center;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   line-height: 1;
@@ -73,22 +73,22 @@
 
 .agent-feed__type--inference {
   color: var(--dream-bright);
-  border-color: rgba(164, 164, 200, 0.3);
+  border-color: color-mix(in srgb, var(--status-blocked) 30%, transparent);
 }
 
 .agent-feed__type--tool_call {
   color: var(--bone);
-  border-color: rgba(212, 200, 156, 0.3);
+  border-color: color-mix(in srgb, var(--bone) 30%, transparent);
 }
 
 .agent-feed__type--gate {
   color: var(--success);
-  border-color: rgba(138, 156, 134, 0.3);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
 }
 
 .agent-feed__type--error {
   color: var(--status-error);
-  border-color: rgba(251, 113, 133, 0.3);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
 .agent-feed__type--status {
@@ -110,7 +110,7 @@
 
 .agent-feed__detail {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--text-ghost);
   line-height: 1.4;
   margin-top: 2px;

@@ -25,7 +25,7 @@
 .ascii-frame__title {
   flex: none;
   padding: 0 0.5em;
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -34,7 +34,7 @@
 .ascii-frame__status {
   flex: none;
   padding: 0 0.5em;
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.10em;
   text-transform: uppercase;
   color: var(--rose-dim);

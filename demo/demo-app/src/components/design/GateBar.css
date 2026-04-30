@@ -12,7 +12,7 @@
   align-items: center;
   gap: 5px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   line-height: 1;
@@ -22,7 +22,7 @@
 
 .gate-bar__icon {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--text-sm);
   line-height: 1;
 }
 

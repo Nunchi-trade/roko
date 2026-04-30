@@ -99,7 +99,7 @@
 
 .sp-mini-label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -204,7 +204,7 @@
 }
 
 .sp-fact-icon {
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--rose-dim);
 }
 
@@ -232,7 +232,7 @@
 
 .sp-flow-node {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -245,7 +245,7 @@
 
 .sp-flow-arrow {
   color: var(--rose-dim);
-  font-size: 12px;
+  font-size: var(--text-md);
   animation: sp-arrow-glow 3s ease-in-out infinite;
 }
 
@@ -275,7 +275,7 @@
 
 .sp-race-lane-label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -335,7 +335,7 @@
 
 .sp-retry-label {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: 0.06em;
   color: var(--text-dim);
 }
@@ -350,7 +350,7 @@
 
 .sp-provider-chip {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -370,7 +370,7 @@
 
 .sp-category-cell {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -397,7 +397,7 @@
 
 .sp-icon-label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-ghost);
@@ -412,7 +412,7 @@
 
 .sp-transfer-node {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -427,7 +427,7 @@
   flex-direction: column;
   gap: 2px;
   color: var(--rose-dim);
-  font-size: 12px;
+  font-size: var(--text-md);
   animation: sp-arrow-glow 3s ease-in-out infinite;
 }
 
@@ -447,7 +447,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--rose-dim);
 }
 

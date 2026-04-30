@@ -7,6 +7,7 @@ export interface TimelineStepState {
 export class PlaybackController {
   mode: 'auto' | 'step' = 'auto';
   private _stepResolve: (() => void) | null = null;
+  private _execResolve: (() => void) | null = null;
   private _currentStep = 0;
   private _totalSteps = 0;
   private _onProgress?: (step: number, total: number, cmd: string) => void;
@@ -28,13 +29,39 @@ export class PlaybackController {
     });
   }
 
+  /**
+   * In step mode, pause after typing the command but before pressing Enter.
+   * Resolves immediately in auto mode.
+   */
+  async waitForExec(): Promise<void> {
+    if (this.mode === 'auto') return;
+    this._onWaitingChange?.(true);
+    return new Promise(resolve => {
+      this._execResolve = resolve;
+    });
+  }
+
   advanceStep() {
+    // If waiting for exec confirmation (command already typed), advance exec
+    if (this._execResolve) {
+      this._onWaitingChange?.(false);
+      const r = this._execResolve;
+      this._execResolve = null;
+      r();
+      return;
+    }
+    // Otherwise advance the step gate
     if (this._stepResolve) {
       this._onWaitingChange?.(false);
       const r = this._stepResolve;
       this._stepResolve = null;
       r();
     }
+  }
+
+  /** Whether we're in the "exec" phase (command typed, waiting to run). */
+  get waitingForExec(): boolean {
+    return this._execResolve !== null;
   }
 
   setProgress(n: number, total: number, cmd: string) {
@@ -45,7 +72,10 @@ export class PlaybackController {
 
   setMode(mode: 'auto' | 'step') {
     this.mode = mode;
-    if (mode === 'auto' && this._stepResolve) this.advanceStep();
+    if (mode === 'auto') {
+      if (this._execResolve) this.advanceStep();
+      if (this._stepResolve) this.advanceStep();
+    }
   }
 
   get currentStep() {
@@ -59,6 +89,7 @@ export class PlaybackController {
   reset() {
     this._onWaitingChange?.(false);
     this._stepResolve = null;
+    this._execResolve = null;
     this._currentStep = 0;
     this._totalSteps = 0;
   }

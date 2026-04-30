@@ -21,7 +21,7 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 .routing-tab__table td {

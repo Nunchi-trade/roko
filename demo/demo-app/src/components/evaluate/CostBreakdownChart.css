@@ -6,7 +6,19 @@
 
 .cost-breakdown-chart__controls {
   display: flex;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: var(--sp-2, 8px);
+  margin-bottom: var(--sp-2, 8px);
   flex: 0 0 auto;
+}
+
+.cost-breakdown-chart__canvas-wrap {
+  flex: 1;
+  min-height: 0;
+}
+
+.cost-breakdown-chart__empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }

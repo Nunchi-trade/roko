@@ -33,7 +33,7 @@
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--bone-bright);
-  text-shadow: 0 0 12px rgba(228, 216, 176, 0.5);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--bone) 50%, transparent);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.2s ease-out;
@@ -66,7 +66,7 @@
 }
 
 .kf-feed-row:hover {
-  background: rgba(184, 122, 148, 0.04);
+  background: color-mix(in srgb, var(--rose-dim) 4%, transparent);
 }
 
 /* ── New entry celebration flash ── */
@@ -78,14 +78,14 @@
   0% {
     opacity: 0;
     transform: translateY(12px);
-    background: rgba(228, 216, 176, 0.12);
-    box-shadow: inset 0 0 20px rgba(228, 216, 176, 0.08);
+    background: color-mix(in srgb, var(--bone) 12%, transparent);
+    box-shadow: inset 0 0 20px color-mix(in srgb, var(--bone) 8%, transparent);
   }
   30% {
     opacity: 1;
     transform: translateY(0);
-    background: rgba(228, 216, 176, 0.08);
-    box-shadow: inset 0 0 12px rgba(228, 216, 176, 0.05);
+    background: color-mix(in srgb, var(--bone) 8%, transparent);
+    box-shadow: inset 0 0 12px color-mix(in srgb, var(--bone) 5%, transparent);
   }
   100% {
     opacity: 1;
@@ -110,39 +110,39 @@
 .kf-badge.heuristic {
   color: var(--dream-bright);
   background: var(--dream-deep);
-  border: 1px solid rgba(136, 136, 168, 0.25);
+  border: 1px solid color-mix(in srgb, var(--dream) 25%, transparent);
 }
 
 .kf-badge.strategy {
   color: var(--success);
-  background: rgba(138, 156, 134, 0.12);
-  border: 1px solid rgba(138, 156, 134, 0.25);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 25%, transparent);
 }
 
 .kf-badge.causal {
   color: var(--warning);
-  background: rgba(216, 168, 120, 0.1);
-  border: 1px solid rgba(216, 168, 120, 0.25);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
 }
 
 .kf-badge.warning {
   color: var(--rose-bright);
   background: var(--rose-deep);
-  border: 1px solid rgba(184, 122, 148, 0.3);
+  border: 1px solid color-mix(in srgb, var(--rose) 30%, transparent);
 }
 
 /* Badge glow on celebrate */
 .kf-celebrate .kf-badge.heuristic {
-  box-shadow: 0 0 8px rgba(164, 164, 200, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--status-blocked) 30%, transparent);
 }
 .kf-celebrate .kf-badge.strategy {
-  box-shadow: 0 0 8px rgba(138, 156, 134, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 30%, transparent);
 }
 .kf-celebrate .kf-badge.causal {
-  box-shadow: 0 0 8px rgba(216, 168, 120, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--warning) 30%, transparent);
 }
 .kf-celebrate .kf-badge.warning {
-  box-shadow: 0 0 8px rgba(184, 122, 148, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 30%, transparent);
 }
 
 /* Agent dot */
@@ -225,7 +225,7 @@
 @keyframes kfAhaPulse {
   0% {
     border-color: var(--bone-bright);
-    box-shadow: 0 0 20px rgba(228, 216, 176, 0.2);
+    box-shadow: 0 0 20px color-mix(in srgb, var(--bone) 20%, transparent);
   }
   100% {
     border-color: var(--glass-border);

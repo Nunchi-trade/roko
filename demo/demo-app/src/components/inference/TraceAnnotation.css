@@ -9,7 +9,7 @@
   align-items: center;
   gap: 3px;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   line-height: 1;

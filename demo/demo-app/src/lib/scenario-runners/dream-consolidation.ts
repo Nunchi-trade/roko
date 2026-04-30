@@ -25,7 +25,7 @@ export const dreamConsolidation: Scenario = {
     { label: 'Integration', sublabel: 'knowledge merge' },
     { label: 'Report', sublabel: 'dream report' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, running, paused, workspaceDir }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, running, paused, workspaceDir }) {
     const [dream, monitor] = entries;
     await enterWorkspace(dream, workspaceDir);
     await enterWorkspace(monitor, workspaceDir);
@@ -67,15 +67,19 @@ export const dreamConsolidation: Scenario = {
       'Checking the consolidation cadence before the cycle begins.',
     );
     const scheduleResult = await showCmd(dream, `${ROKO} knowledge dream schedule`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Shows the current dream consolidation schedule, including when the next cycle is due.',
     });
     if (scheduleResult.cost) setMetric('cost', scheduleResult.cost);
     if (scheduleResult.tokens) setMetric('tokens', scheduleResult.tokens);
     await showCmd(monitor, `${ROKO} knowledge stats`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Baseline knowledge stats before the dream cycle starts.',
     });
 
@@ -89,8 +93,10 @@ export const dreamConsolidation: Scenario = {
       dream,
       `${ROKO} run "Build a small Rust CLI that reads JSON from stdin and prints a summary"`,
       {
+        playback,
         timeout: 180000,
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
         customDesc: 'Seeds the episode store with a live task run. The later dream cycle will distill this run into reusable knowledge.',
       },
     );
@@ -104,15 +110,19 @@ export const dreamConsolidation: Scenario = {
       'Phase 1: replaying recent episodes and selecting the salient ones.',
     );
     const dreamRunPromise = showCmd(dream, `${ROKO} knowledge dream run`, {
+      playback,
       timeout: 300000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Runs the full dream cycle: hypnagogia replay selection, NREM clustering, REM synthesis, and final integration.',
     });
     if (!(await allowPhaseTime(1500))) return;
     setGate('hypnagogia', 'pass');
     await showCmd(monitor, `${ROKO} knowledge query "episode clusters"`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Mid-dream knowledge query while the cycle is still replaying and selecting episodes.',
     });
 
@@ -125,8 +135,10 @@ export const dreamConsolidation: Scenario = {
     if (!(await allowPhaseTime(1200))) return;
     setGate('nrem', 'pass');
     await showCmd(monitor, `${ROKO} knowledge stats`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Knowledge stats while clustering is underway. This is the live monitoring pane for the dream cycle.',
     });
 
@@ -139,8 +151,10 @@ export const dreamConsolidation: Scenario = {
     if (!(await allowPhaseTime(1200))) return;
     setGate('rem', 'pass');
     await showCmd(monitor, `${ROKO} knowledge query "consolidation patterns"`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Mid-dream query that should surface newly synthesized consolidation patterns.',
     });
 
@@ -164,13 +178,17 @@ export const dreamConsolidation: Scenario = {
       'Viewing the consolidation report after the cycle has merged distilled knowledge into the store.',
     );
     await showCmd(dream, `${ROKO} knowledge dream report`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Shows the dream consolidation report with the latest episode selection, cluster formation, synthesis, and integration details.',
     });
     await showCmd(monitor, `${ROKO} knowledge stats`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Post-dream knowledge stats that reflect the newly consolidated state.',
     });
     setMetric('model', 'consolidated');

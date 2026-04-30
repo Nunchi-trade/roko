@@ -28,7 +28,7 @@
 
 .confidence-meter__label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   line-height: 1;
@@ -39,7 +39,7 @@
   display: inline-flex;
   align-items: center;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   line-height: 1;
@@ -90,7 +90,7 @@
   font-family: var(--display);
   font-weight: 300;
   font-style: italic;
-  font-size: 28px;
+  font-size: var(--text-2xl);
   line-height: 1;
   letter-spacing: -0.02em;
   transition: color var(--duration-smooth) ease, text-shadow var(--duration-smooth) ease;
@@ -103,7 +103,7 @@
 
 .confidence-meter__unit {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--text-dim);
   letter-spacing: 0.02em;
 }
@@ -185,7 +185,7 @@
 
 .confidence-meter__counter {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: 0.02em;
   transition: color var(--duration-smooth) ease;
 }
@@ -204,14 +204,14 @@
 
 .confidence-meter__pct {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: 0.02em;
   color: var(--text-soft);
 }
 
 .confidence-meter__trend {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   line-height: 1;
@@ -247,7 +247,7 @@
 }
 
 .confidence-meter--compact .confidence-meter__label {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .confidence-meter--compact .confidence-meter__track {
@@ -267,7 +267,7 @@
   gap: var(--sp-1);
   flex-shrink: 0;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.02em;
   color: var(--text-soft);
 }
@@ -296,15 +296,15 @@
 
 @keyframes cm-crystallize {
   0%   { box-shadow: none; }
-  30%  { box-shadow: 0 0 12px rgba(220, 165, 189, 0.6), 0 0 24px rgba(220, 165, 189, 0.3); }
-  60%  { box-shadow: 0 0 8px rgba(220, 165, 189, 0.4); }
+  30%  { box-shadow: 0 0 12px color-mix(in srgb, var(--rose) 60%, transparent), 0 0 24px color-mix(in srgb, var(--rose) 30%, transparent); }
+  60%  { box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 40%, transparent); }
   100% { box-shadow: none; }
 }
 
 @keyframes cm-crystallize-gauge {
   0%   { filter: brightness(1) drop-shadow(0 0 0 transparent); }
-  30%  { filter: brightness(1.3) drop-shadow(0 0 16px rgba(220, 165, 189, 0.5)); }
-  60%  { filter: brightness(1.1) drop-shadow(0 0 8px rgba(220, 165, 189, 0.3)); }
+  30%  { filter: brightness(1.3) drop-shadow(0 0 16px color-mix(in srgb, var(--rose) 50%, transparent)); }
+  60%  { filter: brightness(1.1) drop-shadow(0 0 8px color-mix(in srgb, var(--rose) 30%, transparent)); }
   100% { filter: brightness(1) drop-shadow(0 0 0 transparent); }
 }
 

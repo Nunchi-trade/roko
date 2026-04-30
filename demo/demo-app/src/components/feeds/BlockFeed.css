@@ -92,7 +92,7 @@
 }
 
 @keyframes bf-flash {
-  0% { background: rgba(216, 154, 178, 0.15); }
+  0% { background: color-mix(in srgb, var(--rose-bright) 15%, transparent); }
   100% { background: transparent; }
 }
 
@@ -112,7 +112,7 @@
 
 .block-feed__row:first-child .block-feed__node {
   background: var(--rose-bright);
-  box-shadow: 0 0 6px rgba(216, 154, 178, 0.5);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rose-bright) 50%, transparent);
 }
 
 /* ── Block number ── */
@@ -143,7 +143,7 @@
   display: inline-flex;
   align-items: center;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   line-height: 1;
@@ -170,7 +170,7 @@
 
 .block-feed__gas {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-ghost);
   white-space: nowrap;
   flex-shrink: 0;

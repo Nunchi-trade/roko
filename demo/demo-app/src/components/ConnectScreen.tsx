@@ -12,7 +12,7 @@ export default function ConnectScreen({ onRetry }: ConnectScreenProps) {
       <div style={{
         width: 16, height: 16, borderRadius: '50%',
         background: 'var(--rose-dim, #6b4a5e)',
-        boxShadow: '0 0 30px rgba(220,165,189,.3)',
+        boxShadow: '0 0 30px color-mix(in srgb, var(--rose) 30%, transparent)',
         animation: 'connectPulse 1.8s ease-in-out infinite',
       }} />
       <div style={{

@@ -127,7 +127,7 @@
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  text-shadow: 0 0 16px rgba(220, 165, 189, 0.5);
+  text-shadow: 0 0 16px color-mix(in srgb, var(--rose) 50%, transparent);
 }
 
 /* Status dots */
@@ -303,7 +303,7 @@
   font-size: var(--text-md);
   font-weight: 500;
   color: var(--rose-glow);
-  text-shadow: 0 0 14px rgba(220, 165, 189, 0.6);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--rose) 60%, transparent);
 }
 
 .dash-value--bone {
@@ -352,7 +352,7 @@
 
 .dash-bar-fill--rose {
   background: linear-gradient(to right, var(--rose-dim), var(--rose-bright));
-  box-shadow: 0 0 10px rgba(220, 165, 189, 0.5), 0 0 4px rgba(220, 165, 189, 0.7);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rose) 50%, transparent), 0 0 4px color-mix(in srgb, var(--rose) 70%, transparent);
 }
 
 /* Inline mini-bar (48px wide, used in tables) */
@@ -807,10 +807,7 @@
   to   { width: 100%; }
 }
 
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%      { opacity: 0.7; transform: scale(1.15); }
-}
+/* pulse-dot → shared: src/styles/animations.css */
 
 @keyframes dash-breathe {
   0%, 100% { box-shadow: 0 0 4px 1px currentColor; opacity: 0.85; }
@@ -833,9 +830,9 @@
 /* dash-drawLine → shared animations.css (line-draw) */
 
 @keyframes dash-totalPulse {
-  0%  { text-shadow: 0 0 8px rgba(220,165,189,.3); }
-  50% { text-shadow: 0 0 22px rgba(220,165,189,.7), 0 0 40px rgba(220,165,189,.3); }
-  100%{ text-shadow: 0 0 8px rgba(220,165,189,.3); }
+  0%  { text-shadow: 0 0 8px color-mix(in srgb, var(--rose) 30%, transparent); }
+  50% { text-shadow: 0 0 22px color-mix(in srgb, var(--rose) 70%, transparent), 0 0 40px color-mix(in srgb, var(--rose) 30%, transparent); }
+  100%{ text-shadow: 0 0 8px color-mix(in srgb, var(--rose) 30%, transparent); }
 }
 
 /* ── Card mount stagger ─────────────────────────────────────── */
@@ -872,8 +869,8 @@
   width: 100%;
   background: linear-gradient(
     90deg,
-    rgba(220,165,189,.5) 0%,
-    rgba(200,184,144,.3) 50%,
+    color-mix(in srgb, var(--rose) 50%, transparent) 0%,
+    color-mix(in srgb, var(--bone) 30%, transparent) 50%,
     transparent 100%
   );
   animation: dash-headerLine 0.6s var(--ease) forwards;

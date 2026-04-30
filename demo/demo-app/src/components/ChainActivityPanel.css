@@ -35,7 +35,7 @@
     transparent
   );
   border-radius: 1px;
-  box-shadow: 0 0 8px var(--rose-glow), 0 0 16px rgba(232, 181, 206, 0.3);
+  box-shadow: 0 0 8px var(--rose-glow), 0 0 16px color-mix(in srgb, var(--rose-glow) 30%, transparent);
   animation: caIntegrityPulse 3s ease-in-out infinite;
 }
 
@@ -297,8 +297,8 @@
 /* Confirmed: green pulse */
 .ca-status-confirmed {
   color: var(--status-success);
-  border-color: rgba(74, 222, 128, 0.2);
-  background: rgba(74, 222, 128, 0.06);
+  border-color: color-mix(in srgb, var(--success) 20%, transparent);
+  background: color-mix(in srgb, var(--success) 6%, transparent);
 }
 
 .ca-status-confirmed .ca-status-dot {
@@ -315,8 +315,8 @@
 /* Pending: amber spin */
 .ca-status-pending {
   color: var(--status-warning);
-  border-color: rgba(251, 191, 36, 0.2);
-  background: rgba(251, 191, 36, 0.06);
+  border-color: color-mix(in srgb, var(--status-warning) 20%, transparent);
+  background: color-mix(in srgb, var(--status-warning) 6%, transparent);
 }
 
 .ca-status-pending .ca-status-dot {

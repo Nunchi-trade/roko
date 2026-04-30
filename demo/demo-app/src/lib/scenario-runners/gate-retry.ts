@@ -24,7 +24,7 @@ export const gateRetry: Scenario = {
     { label: 'Retry', sublabel: 'second attempt' },
     { label: 'Pass', sublabel: 'gates green' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, running, paused, workspaceDir }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, running, paused, workspaceDir }) {
     const [task, gates] = entries;
     await enterWorkspace(task, workspaceDir);
     await enterWorkspace(gates, workspaceDir);
@@ -43,8 +43,10 @@ export const gateRetry: Scenario = {
     const showGateMonitor = async (command: string, customDesc: string, timeout = 30000) => {
       gates.clearTerminal();
       return showCmd(gates, command, {
+        playback,
         timeout,
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
         customDesc,
       });
     };
@@ -90,8 +92,10 @@ export const gateRetry: Scenario = {
       );
 
       const runResult = await showCmd(task, runCmd, {
+        playback,
         timeout: 360000,
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
         onGate: (name, status) => setGate(name, status),
         customDesc:
           'Runs the task with gate-failure replanning enabled. The first attempt may fail compile, test, or clippy, after which the runner classifies the failure and retries with a revised plan.',

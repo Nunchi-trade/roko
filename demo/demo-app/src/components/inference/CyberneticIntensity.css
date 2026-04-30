@@ -17,7 +17,7 @@
   top: var(--sp-1);
   right: var(--sp-2);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   line-height: 1;
@@ -52,7 +52,7 @@
 .cybernetic-intensity[data-intensity="3"],
 .cybernetic-intensity[data-intensity="4"] {
   border: 1px solid var(--border-soft);
-  background: rgba(184, 122, 148, 0.02);
+  background: color-mix(in srgb, var(--rose-dim) 2%, transparent);
   color: var(--text-dim);
   box-shadow: none;
 }
@@ -69,9 +69,9 @@
 .cybernetic-intensity[data-intensity="5"],
 .cybernetic-intensity[data-intensity="6"] {
   border: 1px solid var(--border);
-  background: rgba(184, 122, 148, 0.04);
+  background: color-mix(in srgb, var(--rose-dim) 4%, transparent);
   color: var(--text-soft);
-  box-shadow: 0 0 4px rgba(184, 122, 148, 0.1);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--rose-dim) 10%, transparent);
 }
 
 .cybernetic-intensity[data-intensity="5"] .cybernetic-intensity__label,
@@ -86,9 +86,9 @@
 .cybernetic-intensity[data-intensity="7"],
 .cybernetic-intensity[data-intensity="8"] {
   border: 1px solid var(--rose-dim);
-  background: rgba(184, 122, 148, 0.06);
+  background: color-mix(in srgb, var(--rose-dim) 6%, transparent);
   color: var(--text-primary);
-  box-shadow: 0 0 8px rgba(220, 165, 189, 0.2);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 20%, transparent);
 }
 
 .cybernetic-intensity[data-intensity="7"] .cybernetic-intensity__label,
@@ -103,7 +103,7 @@
 .cybernetic-intensity[data-intensity="9"],
 .cybernetic-intensity[data-intensity="10"] {
   border: 1px solid var(--rose-bright);
-  background: rgba(184, 122, 148, 0.08);
+  background: color-mix(in srgb, var(--rose-dim) 8%, transparent);
   color: var(--text-strong);
   box-shadow: var(--glow-rose-bright);
   animation: ci-shimmer 3s ease-in-out infinite;
@@ -168,10 +168,10 @@
 
 @keyframes ci-shimmer {
   0%, 100% {
-    background: rgba(184, 122, 148, 0.08);
+    background: color-mix(in srgb, var(--rose-dim) 8%, transparent);
   }
   50% {
-    background: rgba(184, 122, 148, 0.12);
+    background: color-mix(in srgb, var(--rose-dim) 12%, transparent);
   }
 }
 

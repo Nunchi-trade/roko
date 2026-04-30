@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
+import { relativeTime } from '../../lib/format';
 import './BlockFeed.css';
 
 /* ── Types ── */
@@ -23,14 +24,6 @@ export interface BlockFeedProps {
 function truncateHash(hash: string): string {
   if (hash.length <= 10) return hash;
   return `${hash.slice(0, 6)}\u2026${hash.slice(-4)}`;
-}
-
-function relativeTime(ms: number): string {
-  const delta = Math.max(0, Date.now() - ms);
-  if (delta < 60_000) return `${Math.floor(delta / 1000)}s ago`;
-  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
-  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
-  return new Date(ms).toLocaleDateString();
 }
 
 function formatGas(gas: number): string {

@@ -35,7 +35,7 @@ body {
   line-height: 1.6;
   color: var(--text-primary);
   background: var(--bg-void);
-  background-image: radial-gradient(ellipse 80% 60% at 50% 30%, rgba(184, 122, 148, .045) 0%, transparent 70%);
+  background-image: radial-gradient(ellipse 80% 60% at 50% 30%, color-mix(in srgb, var(--rose-dim) 4%, transparent) 0%, transparent 70%);
   background-size: 200% 200%;
   animation: ambientShift 20s ease-in-out infinite;
   overflow-x: hidden;
@@ -68,7 +68,7 @@ code {
 }
 
 ::selection {
-  background: rgba(220, 165, 189, .2);
+  background: color-mix(in srgb, var(--rose) 20%, transparent);
   color: var(--text-strong);
 }
 
@@ -133,7 +133,7 @@ h1 em {
   font-style: italic;
   font-weight: 400;
   color: var(--rose-glow);
-  text-shadow: 0 0 30px rgba(204, 144, 168, .5), 0 0 60px rgba(204, 144, 168, .25);
+  text-shadow: 0 0 30px color-mix(in srgb, var(--rose) 50%, transparent), 0 0 60px color-mix(in srgb, var(--rose) 25%, transparent);
 }
 
 h2 {
@@ -147,7 +147,7 @@ h2 {
 
 h2 em {
   color: var(--rose-glow);
-  text-shadow: 0 0 28px rgba(220, 165, 189, .45);
+  text-shadow: 0 0 28px color-mix(in srgb, var(--rose) 45%, transparent);
 }
 
 h3 {
@@ -170,7 +170,7 @@ h4, .mono-label {
 .lead {
   font-family: var(--display);
   font-weight: 300;
-  font-size: 20px;
+  font-size: var(--text-xl);
   line-height: 1.65;
   color: var(--text-soft);
   max-width: 900px;
@@ -241,7 +241,7 @@ section + section::before {
   border: 1px solid var(--glass-border);
   border-left: 2px solid var(--rose-dim);
   background: var(--glass-bg);
-  background-image: linear-gradient(135deg, rgba(184, 122, 148, .025) 0%, transparent 40%);
+  background-image: linear-gradient(135deg, color-mix(in srgb, var(--rose-dim) 2%, transparent) 0%, transparent 40%);
   border-radius: var(--radius-lg);
   overflow: hidden;
   margin-top: 0;
@@ -254,7 +254,7 @@ section + section::before {
 }
 
 .pane:hover {
-  border-left-color: rgba(204, 144, 168, .5);
+  border-left-color: color-mix(in srgb, var(--rose) 50%, transparent);
   box-shadow:
     var(--glow-rose-soft),
     inset 0 1px 0 rgba(255,255,255,0.06),
@@ -303,13 +303,13 @@ section + section::before {
 
 /* Pane variants -- colored left-border accent + subtle header tint */
 .pane.pane--accent  { border-left: 2px solid var(--rose-bright) }
-.pane.pane--accent  .head { background: rgba(216, 154, 178, .06) }
+.pane.pane--accent  .head { background: color-mix(in srgb, var(--rose-bright) 6%, transparent) }
 .pane.pane--success { border-left: 2px solid var(--success) }
-.pane.pane--success .head { background: rgba(138, 156, 134, .08) }
+.pane.pane--success .head { background: color-mix(in srgb, var(--success) 8%, transparent) }
 .pane.pane--warning { border-left: 2px solid var(--warning) }
-.pane.pane--warning .head { background: rgba(216, 168, 120, .08) }
+.pane.pane--warning .head { background: color-mix(in srgb, var(--warning) 8%, transparent) }
 .pane.pane--error   { border-left: 2px solid var(--fail) }
-.pane.pane--error   .head { background: rgba(216, 154, 178, .10) }
+.pane.pane--error   .head { background: color-mix(in srgb, var(--rose) 10%, transparent) }
 
 /* Pane compact mode */
 .pane.pane--compact .head { padding: 4px 8px }
@@ -320,7 +320,7 @@ section + section::before {
 /* Pane collapsible chevron */
 .pane-chevron {
   display: inline-block;
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-dim);
   transition: transform var(--duration-snap) var(--ease);
   margin-left: 2px;
@@ -416,9 +416,9 @@ section + section::before {
 /* Hover depth: subtle raise with expand */
 .mosaic .cell:hover,
 .mosaic .cell.cell-hovered {
-  background: linear-gradient(135deg, rgba(204,144,168,.04), transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--rose) 4%, transparent), transparent);
   transform: scale(1.02) translateY(-1px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15), 0 0 12px rgba(204, 144, 168, 0.06);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15), 0 0 12px color-mix(in srgb, var(--rose) 6%, transparent);
   z-index: 2;
 }
 
@@ -428,9 +428,9 @@ section + section::before {
 }
 
 @keyframes mosaic-value-flash {
-  0%   { box-shadow: 0 0 0 rgba(204,144,168,0); }
-  30%  { box-shadow: 0 0 20px rgba(204,144,168,0.18); transform: scale(1.03); }
-  100% { box-shadow: 0 0 0 rgba(204,144,168,0); transform: scale(1); }
+  0%   { box-shadow: 0 0 0 color-mix(in srgb, var(--rose) 0%, transparent); }
+  30%  { box-shadow: 0 0 20px color-mix(in srgb, var(--rose) 18%, transparent); transform: scale(1.03); }
+  100% { box-shadow: 0 0 0 color-mix(in srgb, var(--rose) 0%, transparent); transform: scale(1); }
 }
 
 .mosaic .cell .k {
@@ -642,7 +642,7 @@ section + section::before {
   margin-top: 90px;
   padding: 44px 48px;
   border-left: 3px solid var(--rose-dim);
-  background: linear-gradient(135deg, rgba(58, 32, 48, .1) 0%, transparent 40%);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--rose-dim) 10%, transparent) 0%, transparent 40%);
 }
 
 .axiom .lab {
@@ -659,21 +659,21 @@ section + section::before {
   font-family: var(--display);
   font-weight: 300;
   font-style: italic;
-  font-size: 28px;
+  font-size: var(--text-2xl);
   line-height: 1.45;
   color: var(--text-strong);
 }
 
 .axiom .quote em {
   color: var(--rose-glow);
-  text-shadow: 0 0 18px rgba(220, 165, 189, .35);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--rose) 35%, transparent);
 }
 
 .axiom .cor {
   margin-top: 22px;
   font-family: var(--display);
   font-weight: 300;
-  font-size: 18px;
+  font-size: var(--text-xl);
   line-height: 1.6;
   color: var(--text-soft);
 }
@@ -693,7 +693,7 @@ section + section::before {
   text-transform: uppercase;
   color: var(--rose-glow);
   border: 1px solid var(--rose-dim);
-  background: rgba(220, 165, 189, .04);
+  background: color-mix(in srgb, var(--rose) 4%, transparent);
   cursor: pointer;
   transition: background .3s var(--ease), border-color .3s var(--ease), box-shadow .3s var(--ease), transform .3s var(--ease), color .3s var(--ease);
   font-weight: 400;
@@ -701,9 +701,9 @@ section + section::before {
 }
 
 .btn:hover {
-  background: rgba(220, 165, 189, .10);
+  background: color-mix(in srgb, var(--rose) 10%, transparent);
   border-color: var(--rose-glow);
-  box-shadow: 0 0 24px rgba(220, 165, 189, .18);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--rose) 18%, transparent);
   transform: translateY(-1px);
 }
 
@@ -713,13 +713,13 @@ section + section::before {
 }
 
 .btn.bone:hover {
-  background: rgba(216, 200, 160, .06);
+  background: color-mix(in srgb, var(--bone) 6%, transparent);
   border-color: var(--bone-bright);
-  box-shadow: 0 0 20px rgba(216, 200, 160, .12);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--bone) 12%, transparent);
 }
 
 .btn .arr {
-  font-size: 16px;
+  font-size: var(--text-xl);
   transition: transform .2s;
 }
 
@@ -747,7 +747,7 @@ section + section::before {
   position: absolute;
   background: rgba(6, 6, 8, .72);
   padding: 8px 14px;
-  border: 1px solid rgba(204, 144, 168, .18);
+  border: 1px solid color-mix(in srgb, var(--rose) 18%, transparent);
   backdrop-filter: blur(4px) saturate(180%);
   border-radius: 1px;
   font-family: var(--mono);
@@ -762,7 +762,7 @@ section + section::before {
   margin-top: 6px;
   font-family: var(--display);
   font-style: italic;
-  font-size: 22px;
+  font-size: var(--text-xl);
   color: var(--rose-glow);
   letter-spacing: -.005em;
   text-transform: none;
@@ -884,11 +884,11 @@ section + section::before {
    ═══════════════════════════════════════════════════════════ */
 
 .bloom-rose {
-  text-shadow: 0 0 8px rgba(204, 144, 168, .5), 0 0 24px rgba(204, 144, 168, .25);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--rose) 50%, transparent), 0 0 24px color-mix(in srgb, var(--rose) 25%, transparent);
 }
 
 .bloom-bone {
-  text-shadow: 0 0 8px rgba(200, 184, 144, .5), 0 0 24px rgba(200, 184, 144, .25);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--bone) 50%, transparent), 0 0 24px color-mix(in srgb, var(--bone) 25%, transparent);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -941,7 +941,7 @@ section + section::before {
 }
 
 .glass-card:hover {
-  border-color: rgba(204, 144, 168, .18);
+  border-color: color-mix(in srgb, var(--rose) 18%, transparent);
   box-shadow: var(--glow-rose-soft);
 }
 
@@ -952,7 +952,7 @@ section + section::before {
 @media (max-width: 768px) {
   h1 { font-size: clamp(40px, 10vw, 72px) }
   h2 { font-size: clamp(32px, 7vw, 48px) }
-  .lead { font-size: 16px }
+  .lead { font-size: var(--text-xl) }
   .axiom { padding: 28px 24px }
 }
 

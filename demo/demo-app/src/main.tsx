@@ -6,6 +6,7 @@ import AppShell from './components/AppShell';
 import { WorkspaceProvider } from './hooks/useWorkspace';
 import { RokoConfigProvider } from './hooks/useRokoConfig';
 import { ToastProvider } from './components/Toast';
+import { EventStreamProvider } from './contexts/EventStreamContext';
 import { bootstrapTransport } from './app/bootstrap';
 import './styles/rosedust.css';
 import './styles/typography.css';
@@ -87,6 +88,7 @@ createRoot(document.getElementById('root')!).render(
       <ErrorBoundary>
         <WorkspaceProvider>
         <RokoConfigProvider>
+        <EventStreamProvider>
         <ToastProvider>
         <Suspense fallback={<RouteLoading />}>
           <Routes>
@@ -115,6 +117,7 @@ createRoot(document.getElementById('root')!).render(
           </Routes>
         </Suspense>
         </ToastProvider>
+        </EventStreamProvider>
         </RokoConfigProvider>
         </WorkspaceProvider>
       </ErrorBoundary>

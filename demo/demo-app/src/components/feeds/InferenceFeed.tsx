@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { shortModel } from '../../lib/format';
 import './InferenceFeed.css';
 
 /* ── Types ── */
@@ -24,11 +25,6 @@ export interface InferenceFeedProps {
 }
 
 /* ── Helpers ── */
-
-/** Abbreviate model ID to first two dash-segments. */
-function shortModel(id: string): string {
-  return id.split('-').slice(0, 2).join('-');
-}
 
 function formatCost(cost: number): string {
   if (cost < 0.001) return `$${cost.toFixed(4)}`;

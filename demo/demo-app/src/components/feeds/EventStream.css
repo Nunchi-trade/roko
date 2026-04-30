@@ -22,7 +22,7 @@
 
 .event-stream__title {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-dim);
@@ -30,7 +30,7 @@
 
 .event-stream__count {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-ghost);
   padding: 1px 6px;
   border: 1px solid var(--border);
@@ -119,7 +119,7 @@
   display: inline-flex;
   align-items: center;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   line-height: 1;
@@ -140,19 +140,19 @@
 .event-stream__kind--success {
   color: var(--status-success);
   border-color: var(--status-success);
-  background: rgba(74, 222, 128, 0.12);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
 }
 
 .event-stream__kind--warning {
   color: var(--status-warning);
   border-color: var(--status-warning);
-  background: rgba(251, 191, 36, 0.12);
+  background: color-mix(in srgb, var(--status-warning) 12%, transparent);
 }
 
 .event-stream__kind--error {
   color: var(--status-error);
   border-color: var(--status-error);
-  background: rgba(251, 113, 133, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
 .event-stream__summary {
@@ -174,7 +174,7 @@
   transform: translateX(-50%);
   z-index: 3;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--rose-bright);

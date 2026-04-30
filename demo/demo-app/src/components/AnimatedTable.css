@@ -20,7 +20,7 @@
 .atbl-row:hover {
   background: linear-gradient(
     90deg,
-    rgba(184, 122, 148, 0.04) 0%,
+    color-mix(in srgb, var(--rose-dim) 4%, transparent) 0%,
     rgba(255, 255, 255, 0.025) 60%,
     transparent 100%
   );
@@ -66,8 +66,8 @@
 
 @keyframes atbl-cellFlash {
   0% {
-    background: rgba(228, 216, 176, 0.15);
-    box-shadow: inset 0 0 8px rgba(228, 216, 176, 0.1);
+    background: color-mix(in srgb, var(--bone) 15%, transparent);
+    box-shadow: inset 0 0 8px color-mix(in srgb, var(--bone) 10%, transparent);
   }
   100% {
     background: transparent;
@@ -131,7 +131,7 @@
 
 .atbl-row--selected {
   border-left: 2px solid var(--rose-bright, #d89ab2);
-  background: rgba(184, 122, 148, 0.06);
+  background: color-mix(in srgb, var(--rose-dim) 6%, transparent);
 }
 
 @keyframes atbl-checkScale {

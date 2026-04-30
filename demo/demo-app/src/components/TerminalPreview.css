@@ -117,7 +117,7 @@
 
 .terminal-preview-header .tp-label {
   font-family: var(--mono);
-  font-size: 7px;
+  font-size: var(--text-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -141,7 +141,7 @@
 
 .terminal-preview-body .tp-line {
   font-family: var(--mono);
-  font-size: 6px;
+  font-size: var(--text-xs);
   line-height: 1.4;
   color: var(--text-ghost);
   white-space: nowrap;

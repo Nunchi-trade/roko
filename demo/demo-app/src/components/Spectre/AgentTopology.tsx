@@ -182,7 +182,7 @@ export default function AgentTopology({
       >
         <defs>
           <radialGradient id="at-bg-grad" cx="50%" cy="40%" r="70%">
-            <stop offset="0%" stopColor="rgba(220, 165, 189, 0.06)" />
+            <stop offset="0%" stopColor="color-mix(in srgb, var(--rose) 6%, transparent)" />
             <stop offset="100%" stopColor="rgba(9, 11, 15, 0)" />
           </radialGradient>
           {/* Edge path definitions for knowledge transfer particles */}

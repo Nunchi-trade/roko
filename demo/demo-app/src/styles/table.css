@@ -35,6 +35,6 @@
 }
 
 .tbl-row--selected {
-  background: rgba(204, 144, 168, 0.06);
+  background: color-mix(in srgb, var(--rose) 6%, transparent);
   border-left: 2px solid var(--rose-dim);
 }

@@ -317,7 +317,7 @@
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-sm);
   padding: 6px 10px;
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--text-soft);
   white-space: nowrap;
   z-index: var(--z-floating);

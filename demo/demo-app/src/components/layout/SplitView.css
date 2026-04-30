@@ -65,7 +65,7 @@
 .split-view--horizontal .split-view__divider:hover .split-view__divider-line {
   width: 3px;
   background: var(--rose-dim);
-  box-shadow: 0 0 8px rgba(204, 144, 168, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 30%, transparent);
 }
 
 .split-view--horizontal .split-view__divider:hover .split-view__divider-line::before {
@@ -75,7 +75,7 @@
 .split-view--horizontal .split-view__divider:active .split-view__divider-line {
   width: 3px;
   background: var(--rose-bright);
-  box-shadow: 0 0 14px rgba(204, 144, 168, 0.5);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--rose) 50%, transparent);
 }
 
 /* Divider — vertical (row separator) */
@@ -123,7 +123,7 @@
 .split-view--vertical .split-view__divider:hover .split-view__divider-line {
   height: 3px;
   background: var(--rose-dim);
-  box-shadow: 0 0 8px rgba(204, 144, 168, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 30%, transparent);
 }
 
 .split-view--vertical .split-view__divider:hover .split-view__divider-line::before {
@@ -133,5 +133,5 @@
 .split-view--vertical .split-view__divider:active .split-view__divider-line {
   height: 3px;
   background: var(--rose-bright);
-  box-shadow: 0 0 14px rgba(204, 144, 168, 0.5);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--rose) 50%, transparent);
 }

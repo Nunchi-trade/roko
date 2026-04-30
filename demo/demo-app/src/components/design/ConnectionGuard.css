@@ -18,7 +18,7 @@
 
 .connection-guard__spinner {
   font-family: var(--mono);
-  font-size: 18px;
+  font-size: var(--text-xl);
   color: var(--rose-glow);
   animation: braille-spin 0.8s steps(8) infinite;
   line-height: 1;

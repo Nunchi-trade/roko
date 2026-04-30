@@ -312,14 +312,14 @@ export default function CostDashboard() {
                         style={{
                           width: `${pct}%`,
                           animationDelay: `${i * 80 + 200}ms`,
-                          boxShadow: pct > 0 ? '0 0 10px rgba(220,165,189,.45), 0 0 4px rgba(220,165,189,.6)' : 'none',
+                          boxShadow: pct > 0 ? '0 0 10px color-mix(in srgb, var(--rose) 45%, transparent), 0 0 4px color-mix(in srgb, var(--rose) 60%, transparent)' : 'none',
                         }}
                       />
                     </div>
                     <span
                       className="dash-value--bone"
                       style={{
-                        textShadow: pct > 0 ? '0 0 12px rgba(228,216,176,.5)' : 'none',
+                        textShadow: pct > 0 ? '0 0 12px color-mix(in srgb, var(--bone) 50%, transparent)' : 'none',
                       }}
                     >
                       {(val * 100).toFixed(1)}%

@@ -11,5 +11,5 @@
 
 .animated-number.flash {
   color: var(--bone-bright);
-  text-shadow: 0 0 8px rgba(216, 200, 160, 0.3);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--bone) 30%, transparent);
 }

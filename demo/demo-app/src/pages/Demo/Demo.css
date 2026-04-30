@@ -674,8 +674,8 @@
   flex-direction: column;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: var(--sp-2);
-  gap: var(--sp-2);
+  padding: 6px;
+  gap: 6px;
   background: var(--bg-deeper, var(--bg-void));
   min-height: 0;
   min-width: 0;
@@ -704,8 +704,8 @@
 .demo-main-pipeline .demo-sidebar {
   flex: 45;
   border-left: 1px solid var(--glass-border);
-  padding: var(--sp-3);
-  gap: var(--sp-3);
+  padding: 6px;
+  gap: 6px;
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
@@ -736,15 +736,15 @@
 /* Compact panes inside sidebar */
 .demo-sidebar .pane {
   margin-top: 0;
-  border-radius: 4px;
+  border-radius: 3px;
 }
 
 .demo-sidebar .pane .head {
-  padding: 8px 12px;
+  padding: 5px 8px;
 }
 
 .demo-sidebar .pane .body {
-  padding: 12px;
+  padding: 6px 8px;
 }
 
 .demo-sidebar .pane .body.flat {
@@ -752,47 +752,47 @@
 }
 
 .demo-sidebar .pane .foot {
-  padding: 6px 12px;
+  padding: 4px 8px;
 }
 
 /* ── Sidebar extracted-component helpers ── */
 
 .demo-sidebar-agent-flow {
-  padding: 8px 12px;
+  padding: 4px 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .demo-sidebar-confidence {
-  padding: 4px 16px;
+  padding: 2px 8px;
 }
 
 .demo-sidebar-handoff {
-  padding: 8px 12px;
+  padding: 4px 8px;
 }
 
 .demo-sidebar-gates {
-  padding: 12px 16px;
+  padding: 6px 8px;
 }
 
 /* Compact mosaic inside sidebar */
 .demo-stats-mosaic .mosaic .cell {
-  padding: 10px 12px;
+  padding: 6px 8px;
 }
 
 .demo-stats-mosaic .mosaic .cell .k {
-  margin-bottom: 4px;
-  font-size: var(--text-sm);
+  margin-bottom: 2px;
+  font-size: 10px;
 }
 
 .demo-stats-mosaic .mosaic .cell .v {
-  font-size: var(--text-md);
+  font-size: var(--text-sm);
   margin-bottom: 0;
 }
 
 .demo-stats-mosaic .mosaic .cell .v.mono {
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
 }
 
 /* ═══ PLAYBACK BAR ═══ */
@@ -1645,44 +1645,45 @@
 }
 
 .demo-bottom-terminal-wrapper.collapsed {
-  height: 0 !important;
-  border-top-color: transparent;
+  height: 32px;
 }
 
 .demo-bottom-terminal-wrapper.expanded {
-  height: 180px;
+  height: 220px;
 }
 
-/* Drag handle / toggle bar */
+/* Drag handle / toggle bar — full-width click target */
 .demo-bottom-handle {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 22px;
+  height: 32px;
   cursor: ns-resize;
-  background: color-mix(in srgb, var(--bg-raised) 80%, transparent);
+  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
-  gap: 8px;
+  gap: 10px;
   user-select: none;
-  transition: background 200ms;
+  transition: background 200ms, border-color 200ms;
 }
 
 .demo-bottom-handle:hover {
   background: color-mix(in srgb, var(--bg-raised) 95%, transparent);
+  border-bottom-color: var(--rose-dim);
 }
 
 .demo-bottom-handle-grip {
-  width: 24px;
-  height: 3px;
+  width: 40px;
+  height: 4px;
   border-radius: 2px;
   background: var(--text-ghost);
-  opacity: 0.5;
-  transition: opacity 200ms;
+  opacity: 0.4;
+  transition: opacity 200ms, background 200ms;
 }
 
 .demo-bottom-handle:hover .demo-bottom-handle-grip {
-  opacity: 0.8;
+  opacity: 0.9;
+  background: var(--rose-dim);
 }
 
 .demo-bottom-handle-label {
@@ -1691,6 +1692,11 @@
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-ghost);
+  transition: color 200ms;
+}
+
+.demo-bottom-handle:hover .demo-bottom-handle-label {
+  color: var(--text-dim);
 }
 
 .demo-bottom-handle-toggle {
@@ -1699,7 +1705,7 @@
   color: var(--text-ghost);
   font-size: 10px;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 2px 6px;
   transition: color 200ms;
 }
 

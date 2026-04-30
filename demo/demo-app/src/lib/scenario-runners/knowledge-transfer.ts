@@ -23,7 +23,7 @@ export const knowledgeTransfer: Scenario = {
     { label: 'Compare results', sublabel: 'efficiency metrics' },
   ],
   async run(ctx) {
-    const { entries, playback, timeline, setMetric, setGate, logCommand } = ctx;
+    const { entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete } = ctx;
     const [alpha, beta] = entries;
     const ROKO = getRoko();
     timeline.init(this.steps);
@@ -57,8 +57,10 @@ export const knowledgeTransfer: Scenario = {
       `Include CRUD endpoints for users, input validation with the validator crate, ` +
       `structured JSON error responses, and integration tests with reqwest."`,
       {
+        playback,
         timeout: 300000,
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
         onGate: setGate,
         customDesc: 'Alpha agent starts from scratch. No prior knowledge — discovers patterns through exploration.',
       },
@@ -74,13 +76,17 @@ export const knowledgeTransfer: Scenario = {
     playback.setProgress(2, 5, 'Distilling knowledge from Alpha');
 
     await showCmd(alpha, `${ROKO} learn all`, {
+      playback,
       timeout: 60000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Inspects episodes, router decisions, and efficiency metrics. The distiller extracts reusable insights.',
     });
     await showCmd(alpha, `${ROKO} knowledge stats`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Shows what knowledge entries were extracted — heuristics, strategies, and warnings.',
     });
 
@@ -109,8 +115,10 @@ export const knowledgeTransfer: Scenario = {
       `Include CRUD endpoints for products, search and filter, input validation, ` +
       `structured JSON error responses, and integration tests with reqwest."`,
       {
+        playback,
         timeout: 300000,
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
         onGate: setGate,
         customDesc: 'Beta agent starts with knowledge from Alpha. Skips exploration, uses proven patterns immediately.',
       },
@@ -124,8 +132,10 @@ export const knowledgeTransfer: Scenario = {
     playback.setProgress(4, 5, 'Comparing results');
 
     await showCmd(beta, `${ROKO} learn efficiency`, {
+      playback,
       timeout: 30000,
       onLog: logCommand,
+      onLogComplete: logCommandComplete,
       customDesc: 'Shows efficiency comparison — cost, turns, and time savings from knowledge transfer.',
     });
 

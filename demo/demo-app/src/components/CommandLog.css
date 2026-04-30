@@ -384,7 +384,7 @@
 
 .log-group-chevron {
   display: inline-block;
-  font-size: 10px;
+  font-size: var(--text-xs);
   transition: transform var(--duration-snap) var(--ease);
 }
 

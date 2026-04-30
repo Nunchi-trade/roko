@@ -52,7 +52,7 @@
 
 .cell-detail__subtitle {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--text-dim);
   letter-spacing: 0.04em;
   line-height: 1.3;
@@ -66,7 +66,7 @@
 .cell-detail__status {
   flex-shrink: 0;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   padding: 3px 8px;
@@ -76,8 +76,8 @@
 
 .cell-detail__status--active {
   color: var(--status-active);
-  background: rgba(45, 212, 191, 0.12);
-  border: 1px solid rgba(45, 212, 191, 0.25);
+  background: color-mix(in srgb, var(--status-active) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-active) 25%, transparent);
 }
 
 .cell-detail__status--idle {
@@ -88,14 +88,14 @@
 
 .cell-detail__status--error {
   color: var(--status-error);
-  background: rgba(251, 113, 133, 0.12);
-  border: 1px solid rgba(251, 113, 133, 0.25);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent);
 }
 
 .cell-detail__status--completed {
   color: var(--status-success);
-  background: rgba(74, 222, 128, 0.12);
-  border: 1px solid rgba(74, 222, 128, 0.25);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 25%, transparent);
 }
 
 /* ── Actions ── */
@@ -109,7 +109,7 @@
 
 .cell-detail__action {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   padding: 4px 10px;
@@ -122,13 +122,13 @@
 
 .cell-detail__action--primary {
   color: var(--rose-glow);
-  background: rgba(220, 165, 189, 0.08);
-  border: 1px solid rgba(220, 165, 189, 0.2);
+  background: color-mix(in srgb, var(--rose) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--rose) 20%, transparent);
 }
 
 .cell-detail__action--primary:hover {
-  background: rgba(220, 165, 189, 0.14);
-  border-color: rgba(220, 165, 189, 0.35);
+  background: color-mix(in srgb, var(--rose) 14%, transparent);
+  border-color: color-mix(in srgb, var(--rose) 35%, transparent);
 }
 
 .cell-detail__action--ghost {
@@ -156,7 +156,7 @@
 
 .cell-detail__section-title {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -174,7 +174,7 @@
 
 .cell-detail__field-label {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -192,7 +192,7 @@
 
 .cell-detail__field-value--mono {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-md);
   color: var(--bone);
 }
 

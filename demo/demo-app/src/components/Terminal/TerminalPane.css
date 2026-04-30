@@ -67,7 +67,7 @@
 /* ── 1. Glass morphism pane header ── */
 
 .pane-header {
-  padding: 1px 10px;
+  padding: 1px var(--sp-2);
   height: 20px;
   background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
   backdrop-filter: blur(8px) saturate(180%);
@@ -76,9 +76,9 @@
   box-shadow: inset 0 1px 0 color-mix(in srgb, white 4%, transparent), inset 0 -1px 0 color-mix(in srgb, black 10%, transparent);
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-1);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: .10em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -120,7 +120,7 @@
 }
 
 .pane-role {
-  font-size: 9px;
+  font-size: var(--text-xs);
   letter-spacing: .10em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -130,7 +130,7 @@
 
 .pane-status {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-ghost);
   letter-spacing: .10em;
 }
@@ -189,10 +189,10 @@
 .pane-body:empty::after {
   content: "\2588";
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-md);
   color: var(--rose-dim);
   animation: cursorBlink 1.2s step-end infinite;
-  margin: 4px;
+  margin: var(--sp-1);
   display: block;
 }
 

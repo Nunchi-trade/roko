@@ -38,7 +38,7 @@
 }
 
 .agent-handoff--compact .agent-handoff__name {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .agent-handoff--compact .agent-handoff__role {
@@ -50,7 +50,7 @@
 }
 
 .agent-handoff--compact .agent-handoff__label {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .agent-handoff--compact .agent-handoff__sublabel {
@@ -81,7 +81,7 @@
 }
 
 .agent-handoff__role {
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-ghost);
@@ -100,7 +100,7 @@
 }
 
 .agent-handoff[data-status="active"] .agent-handoff__card--target .agent-avatar {
-  box-shadow: 0 0 14px currentColor, 0 0 28px rgba(216, 154, 178, 0.25);
+  box-shadow: 0 0 14px currentColor, 0 0 28px color-mix(in srgb, var(--rose-bright) 25%, transparent);
 }
 
 /* Done: source fully receded, target settled with glow */
@@ -115,8 +115,8 @@
 }
 
 @keyframes target-arrival-glow {
-  0%   { box-shadow: 0 0 20px var(--success), 0 0 40px rgba(138, 156, 134, 0.5); }
-  100% { box-shadow: 0 0 8px rgba(138, 156, 134, 0.3); }
+  0%   { box-shadow: 0 0 20px var(--success), 0 0 40px color-mix(in srgb, var(--success) 50%, transparent); }
+  100% { box-shadow: 0 0 8px color-mix(in srgb, var(--success) 30%, transparent); }
 }
 
 /* Agent status indicators */
@@ -138,16 +138,16 @@
 
 .agent-handoff__connected-badge {
   display: inline-block;
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--success);
-  border: 1px solid rgba(138, 156, 134, 0.4);
+  border: 1px solid color-mix(in srgb, var(--success) 40%, transparent);
   border-radius: var(--radius-sm);
   padding: 1px 6px;
   animation: badge-appear 400ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
   animation-delay: 200ms;
-  text-shadow: 0 0 8px rgba(138, 156, 134, 0.4);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--success) 40%, transparent);
 }
 
 @keyframes badge-appear {
@@ -233,7 +233,7 @@
 .agent-handoff[data-status="done"] .agent-handoff__beam-glow {
   opacity: 0.6;
   background: var(--success);
-  box-shadow: 0 0 8px rgba(138, 156, 134, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 30%, transparent);
   animation: none;
   clip-path: none;
 }
@@ -247,7 +247,7 @@
 
 .agent-handoff[data-status="active"] .agent-handoff__line {
   background: var(--rose-dim);
-  box-shadow: 0 0 8px var(--rose-dim), 0 0 16px rgba(184, 122, 148, 0.2);
+  box-shadow: 0 0 8px var(--rose-dim), 0 0 16px color-mix(in srgb, var(--rose-dim) 20%, transparent);
 }
 
 .agent-handoff[data-status="done"] .agent-handoff__line {
@@ -398,7 +398,7 @@
 
 .agent-handoff[data-status="done"] .agent-handoff__settled-glow {
   opacity: 1;
-  background: linear-gradient(90deg, transparent, rgba(138, 156, 134, 0.15), transparent);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--success) 15%, transparent), transparent);
   animation: handoff-settled 3s ease-in-out infinite;
 }
 
@@ -427,7 +427,7 @@
 /* ── Labels ── */
 
 .agent-handoff__label {
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -458,7 +458,7 @@
 
 .agent-handoff[data-status="active"] .agent-handoff__label {
   color: var(--rose-bright);
-  text-shadow: 0 0 12px rgba(216, 154, 178, 0.3);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--rose-bright) 30%, transparent);
 }
 
 .agent-handoff[data-status="done"] .agent-handoff__label {
@@ -470,7 +470,7 @@
 }
 
 .agent-handoff__sublabel {
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   color: var(--text-ghost);
   white-space: nowrap;
@@ -482,7 +482,7 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   color: var(--text-ghost);
   padding: 1px 6px;
@@ -492,7 +492,7 @@
 }
 
 .agent-handoff[data-status="active"] .agent-handoff__artifacts {
-  border-color: rgba(216, 154, 178, 0.2);
+  border-color: color-mix(in srgb, var(--rose-bright) 20%, transparent);
   color: var(--text-dim);
 }
 
@@ -527,9 +527,9 @@
 /* ── Done checkmark ── */
 
 .agent-handoff__check {
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--success);
-  text-shadow: 0 0 8px rgba(138, 156, 134, 0.5);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--success) 50%, transparent);
 }
 
 /* ── Meta row (artifacts + sublabel) ── */

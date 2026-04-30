@@ -120,7 +120,7 @@
   background: var(--rose-bright);
   border-color: var(--rose-bright);
   color: var(--bg-void);
-  box-shadow: 0 0 8px var(--rose-bright), 0 0 16px rgba(216, 154, 178, 0.3);
+  box-shadow: 0 0 8px var(--rose-bright), 0 0 16px color-mix(in srgb, var(--rose-bright) 30%, transparent);
   animation: step-active-pulse 2.4s ease-in-out infinite;
 }
 
@@ -212,10 +212,10 @@
 
 @keyframes step-active-pulse {
   0%, 100% {
-    box-shadow: 0 0 8px var(--rose-bright), 0 0 16px rgba(216, 154, 178, 0.3);
+    box-shadow: 0 0 8px var(--rose-bright), 0 0 16px color-mix(in srgb, var(--rose-bright) 30%, transparent);
   }
   50% {
-    box-shadow: 0 0 12px var(--rose-bright), 0 0 24px rgba(216, 154, 178, 0.5);
+    box-shadow: 0 0 12px var(--rose-bright), 0 0 24px color-mix(in srgb, var(--rose-bright) 50%, transparent);
   }
 }
 

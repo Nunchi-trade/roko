@@ -2,7 +2,7 @@
  * TokenFlowChart — horizontal stacked bars showing token in/out per task.
  * Extracted from BenchRunDetail.tsx (inline canvas component).
  */
-import { useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { getCssVar } from '../../lib/color';
 import type { BenchTaskResult } from '../../lib/bench-types';
 import './TokenFlowChart.css';
@@ -18,6 +18,22 @@ export interface TokenFlowChartProps {
 
 export function TokenFlowChart({ results, height = 280 }: TokenFlowChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [animProgress, setAnimProgress] = useState(0);
+
+  useEffect(() => {
+    setAnimProgress(0);
+    const start = performance.now();
+    const duration = 800;
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setAnimProgress(eased);
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [results]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -61,10 +77,14 @@ export function TokenFlowChart({ results, height = 280 }: TokenFlowChartProps) {
     }
 
     results.forEach((r, index) => {
+      const barDelay = index * 0.03;
+      const denominator = 1 - barDelay * results.length > 0.5 ? 0.5 : 1;
+      const barProgress = Math.max(0, Math.min(1, (animProgress - barDelay) / denominator));
+
       const y = pad.top + index * (barHeight + rowGap);
       const centerY = y + barHeight / 2;
-      const inW = (r.tokens_in / maxTokens) * plotW;
-      const outW = (r.tokens_out / maxTokens) * plotW;
+      const inW = (r.tokens_in / maxTokens) * plotW * barProgress;
+      const outW = (r.tokens_out / maxTokens) * plotW * barProgress;
 
       // Background
       ctx.fillStyle = 'rgba(255,255,255,0.03)';
@@ -87,16 +107,18 @@ export function TokenFlowChart({ results, height = 280 }: TokenFlowChartProps) {
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = getCssVar('--text-dim');
+      ctx.globalAlpha = barProgress;
       const nameText = r.task_name.length > 12 ? r.task_name.slice(0, 11) + '\u2026' : r.task_name;
       ctx.fillText(nameText, pad.left - 8, centerY);
 
       // Token count
-      const total = r.tokens_in + r.tokens_out;
+      const total = Math.round((r.tokens_in + r.tokens_out) * barProgress);
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillStyle = getCssVar('--text-soft');
       const barEnd = pad.left + inW + outW;
       ctx.fillText(total.toLocaleString(), Math.min(barEnd + 6, pad.left + plotW - 40), centerY);
+      ctx.globalAlpha = 1;
     });
 
     // Legend
@@ -116,7 +138,7 @@ export function TokenFlowChart({ results, height = 280 }: TokenFlowChartProps) {
       ctx.fillText(item.label, legendX + 14, legendY);
       legendX += ctx.measureText(item.label).width + 34;
     });
-  }, [results]);
+  }, [results, animProgress]);
 
   useEffect(() => {
     draw();
@@ -138,7 +160,7 @@ export function TokenFlowChart({ results, height = 280 }: TokenFlowChartProps) {
 
   return (
     <div className="token-flow-chart" style={{ height }}>
-      <canvas ref={canvasRef} className="chart-canvas" />
+      <canvas ref={canvasRef} className="chart-canvas" role="img" aria-label="Gate pass rate chart" />
     </div>
   );
 }

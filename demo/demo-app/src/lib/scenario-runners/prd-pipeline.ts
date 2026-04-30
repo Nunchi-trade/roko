@@ -104,6 +104,64 @@ function rustSetupCommand(example: PipelineScenarioExample): string {
   ].join(' && ');
 }
 
+/**
+ * Write a string to a file inside the terminal PTY using base64 to avoid
+ * shell escaping issues with quotes, newlines, and special chars.
+ */
+async function writeFileViaPty(
+  handle: { execCmd(cmd: string, timeout?: number): Promise<boolean> },
+  path: string,
+  content: string,
+): Promise<void> {
+  const b64 = btoa(content);
+  await handle.execCmd(
+    `echo '${b64}' | base64 -D > '${path}' 2>/dev/null || echo '${b64}' | base64 -d > '${path}'`,
+    5000,
+  );
+}
+
+/**
+ * Pre-seed the workspace with PRD, plan, and implementation files so
+ * demo commands that detect existing artifacts complete instantly instead
+ * of dispatching LLM agents.
+ */
+async function seedWorkspace(
+  handle: { execCmd(cmd: string, timeout?: number): Promise<boolean> },
+  example: PipelineScenarioExample,
+): Promise<void> {
+  if (!example.seedPrd) return;
+
+  await handle.execCmd(
+    'mkdir -p .roko/prd/drafts .roko/prd/published .roko/prd/ideas',
+    5000,
+  );
+  await writeFileViaPty(handle, `.roko/prd/drafts/${example.slug}.md`, example.seedPrd);
+
+  if (example.seedTasksToml) {
+    await handle.execCmd(`mkdir -p .roko/plans/${example.slug}`, 5000);
+    await writeFileViaPty(
+      handle,
+      `.roko/plans/${example.slug}/tasks.toml`,
+      example.seedTasksToml,
+    );
+    if (example.seedPlanMd) {
+      await writeFileViaPty(
+        handle,
+        `.roko/plans/${example.slug}/plan.md`,
+        example.seedPlanMd,
+      );
+    }
+  }
+
+  if (example.seedFiles) {
+    for (const [path, content] of Object.entries(example.seedFiles)) {
+      const dir = path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : null;
+      if (dir) await handle.execCmd(`mkdir -p '${dir}'`, 3000);
+      await writeFileViaPty(handle, path, content);
+    }
+  }
+}
+
 // ── Scenario ────────────────────────────────────────────────
 
 export const prdPipeline: Scenario = {
@@ -116,18 +174,18 @@ export const prdPipeline: Scenario = {
   promptBar: false,
   category: 'pipeline',
   features: ['PRD generation', 'Task planning', 'Gate validation'],
-  durationHint: '~90s',
+  durationHint: '~30s',
   accent: 'rose',
   icon: 'pipeline',
   steps: [
     { label: 'Capture job', sublabel: 'prd idea' },
     { label: 'Generate PRD', sublabel: 'prd draft new' },
     { label: 'Publish PRD', sublabel: 'draft promote' },
-    { label: 'Generate tasks', sublabel: 'prd plan' },
-    { label: 'Execute gates', sublabel: 'plan run' },
+    { label: 'Validate tasks', sublabel: 'plan validate' },
+    { label: 'Run gates', sublabel: 'cargo test + clippy' },
   ],
   async run(ctx) {
-    const { entries, playback, timeline, setMetric, setGate, logCommand } = ctx;
+    const { entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete } = ctx;
     const [main] = entries;
     const example = ctx.pipelineExample ?? PIPELINE_EXAMPLES[0];
 
@@ -147,6 +205,7 @@ export const prdPipeline: Scenario = {
     setMetric('model', 'T1/T2/T3');
 
     try {
+      // ── Invisible setup: scaffold + seed ────────────────────
       const setupCmd = rustSetupCommand(example);
       playback.setProgress(0, 5, `preparing ${example.label}`);
       ctx.patchPipeline({
@@ -157,23 +216,26 @@ export const prdPipeline: Scenario = {
       ctx.appendPipelineEvent(pipelineEvent('setup', `${example.setupDescription} This is setup, not the customer-facing demo step.`));
       logCommand('prepare workspace', 'Creates a small Rust CLI so the generated PRD and plan target real files.');
       await main.execCmd(setupCmd, 10000);
+      await seedWorkspace(main, example);
+      await main.execCmd(`${ROKO} init 2>/dev/null; true`, 10000);
       main.clearTerminal();
 
+      // ── Step 1: prd idea ────────────────────────────────────
       await playback.waitForStep();
       const ideaCmd = `${ROKO} prd idea "${example.idea}"`;
       playback.setProgress(1, 5, ideaCmd);
       timeline.setActive(0);
       ctx.patchPipeline({
         phase: 'idea',
-        headline: `Capturing the job Roko will turn into a PRD`,
+        headline: 'Capturing the job Roko will turn into a PRD',
         currentCommand: ideaCmd,
       });
       ctx.appendPipelineEvent(pipelineEvent('idea', 'Idea captured into .roko/prd/ideas.md.'));
-      await showCmd(main, ideaCmd, { timeout: 45000, onLog: logCommand });
+      await showCmd(main, ideaCmd, { timeout: 45000, onLog: logCommand, onLogComplete: logCommandComplete, playback });
       await refreshWorkflowSnapshot(ctx, dir, 'idea', 'Captured idea is visible to the workflow projection', ideaCmd);
       setMetric('tokens', 'idea');
 
-      let livePrdSlug = example.slug;
+      // ── Step 2: prd draft new (detects existing → instant) ──
       await playback.waitForStep();
       const draftCmd = `${ROKO} prd draft new "${example.prdTitle}"`;
       playback.setProgress(2, 5, draftCmd);
@@ -183,20 +245,23 @@ export const prdPipeline: Scenario = {
         headline: 'Generating a structured PRD',
         currentCommand: draftCmd,
       });
-      ctx.appendPipelineEvent(pipelineEvent('draft', 'Dispatching PRD writer agent.'));
+      ctx.appendPipelineEvent(pipelineEvent('draft', 'PRD draft detected — reusing pre-seeded content.'));
       const draftResult = await showCmd(main, draftCmd, {
-        timeout: 180000,
+        timeout: 30000,
         onLog: logCommand,
-        customDesc: 'Runs the PRD generator agent. The UI reads the resulting markdown from the workflow projection API.',
+        onLogComplete: logCommandComplete,
+        playback,
+        customDesc: 'Detects existing PRD draft and confirms it. No LLM call needed.',
       });
       const draftSnapshot = await refreshWorkflowSnapshot(ctx, dir, 'draft', 'Structured PRD generated', draftCmd);
-      if (!draftResult.ok || !draftSnapshot?.prd) {
-        failPipeline(ctx, 'failed', 'PRD generation did not produce a draft', 'The workflow projection did not find a generated PRD draft.');
+      if (!draftResult.ok) {
+        failPipeline(ctx, 'failed', 'PRD draft command failed', 'prd draft new returned a non-zero exit code.');
         return;
       }
-      livePrdSlug = draftSnapshot.prd.slug || example.slug;
+      const livePrdSlug = draftSnapshot?.prd?.slug || example.slug;
       setMetric('cost', '$ live');
 
+      // ── Step 3: draft promote ───────────────────────────────
       await playback.waitForStep();
       const promoteCmd = `${ROKO} prd draft promote ${livePrdSlug}`;
       playback.setProgress(3, 5, promoteCmd);
@@ -207,68 +272,85 @@ export const prdPipeline: Scenario = {
         currentCommand: promoteCmd,
       });
       ctx.appendPipelineEvent(pipelineEvent('published', 'Promoting draft PRD into the published set.'));
-      await showCmd(main, promoteCmd, { timeout: 120000, onLog: logCommand });
+      await showCmd(main, promoteCmd, { timeout: 30000, onLog: logCommand, onLogComplete: logCommandComplete, playback });
       await refreshWorkflowSnapshot(ctx, dir, 'published', 'PRD published and ready for planning', promoteCmd);
 
+      // ── Step 4: plan validate ───────────────────────────────
       await playback.waitForStep();
-      const planCmd = `${ROKO} prd plan ${livePrdSlug}`;
-      playback.setProgress(4, 5, planCmd);
+      const validateCmd = `${ROKO} plan validate .roko/plans`;
+      playback.setProgress(4, 5, validateCmd);
       timeline.setActive(3);
       ctx.patchPipeline({
-        phase: 'planning',
-        headline: 'Generating plan directories and tasks.toml',
-        currentCommand: planCmd,
+        phase: 'tasks',
+        headline: 'Validating pre-generated tasks.toml',
+        currentCommand: validateCmd,
       });
-      ctx.appendPipelineEvent(pipelineEvent('planning', 'Planner agent is generating plan.md and tasks.toml.'));
-      const planResult = await showCmd(main, planCmd, {
-        timeout: 240000,
+      ctx.appendPipelineEvent(pipelineEvent('tasks', 'Validating plan structure and task metadata.'));
+      const validateResult = await showCmd(main, validateCmd, {
+        timeout: 30000,
         onLog: logCommand,
-        customDesc: 'Generates implementation plan directories under .roko/plans/ with modern tasks.toml metadata and verify commands.',
+        onLogComplete: logCommandComplete,
+        playback,
+        customDesc: 'Validates the pre-seeded tasks.toml without LLM calls.',
       });
-      const planSnapshot = await refreshWorkflowSnapshot(
+      await refreshWorkflowSnapshot(
         ctx,
         dir,
         'tasks',
-        'Generated tasks, gates, and routing are ready to execute',
-        planCmd,
+        'Tasks validated and ready for gate execution',
+        validateCmd,
       );
-      if (!planResult.ok || !planSnapshot || planSnapshot.plans.length === 0) {
-        failPipeline(ctx, 'failed', 'Plan generation did not produce tasks', 'The workflow projection did not find generated plan/task artifacts.');
+      if (!validateResult.ok) {
+        failPipeline(ctx, 'failed', 'Plan validation failed', 'roko plan validate found errors in tasks.toml.');
         return;
       }
 
+      // ── Step 5: cargo test + clippy (real gates) ────────────
       await playback.waitForStep();
-      const runCmd = `${ROKO} plan run .roko/plans --max-retries 1`;
-      playback.setProgress(5, 5, runCmd);
+      const gateCmd = 'cargo test && cargo clippy -- -D warnings';
+      playback.setProgress(5, 5, gateCmd);
       timeline.setActive(4);
       ctx.patchPipeline({
         phase: 'implementing',
-        headline: `Roko is implementing ${example.label}`,
-        currentCommand: runCmd,
+        headline: `Running gates on ${example.label}`,
+        currentCommand: gateCmd,
       });
-      ctx.appendPipelineEvent(pipelineEvent('implementing', 'Starting real plan execution. Task states update from workflow events and artifacts.', 'success'));
+      ctx.appendPipelineEvent(pipelineEvent('implementing', 'Running cargo test and clippy gates on the seeded implementation.', 'success'));
 
-      const runResult = await showCmd(main, runCmd, {
-        timeout: 420000,
+      const gateResult = await showCmd(main, gateCmd, {
+        timeout: 120000,
         onLog: logCommand,
+        onLogComplete: logCommandComplete,
         onGate: setGate,
-        customDesc: 'Executes the generated plans through the Roko runner. The task board follows workflow SSE/WS state, gate events, and the workspace event log.',
+        playback,
+        customDesc: 'Runs real cargo test and cargo clippy gates against the pre-seeded implementation.',
       });
+
+      // Supplement gate detection from raw output
+      const output = main.outputBuffer ?? '';
+      if (/test result: ok/i.test(output) || /passing/i.test(output)) {
+        setGate('test', 'pass');
+      }
+      if (gateResult.ok) {
+        setGate('compile', 'pass');
+        setGate('clippy', 'pass');
+      }
+
       const finalSnapshot = await refreshWorkflowSnapshot(
         ctx,
         dir,
-        runResult.ok ? 'complete' : 'failed',
-        runResult.ok ? 'Generated tasks completed' : 'Plan run ended with failures',
-        runCmd,
+        gateResult.ok ? 'complete' : 'failed',
+        gateResult.ok ? 'All gates passed' : 'Gate execution failed',
+        gateCmd,
       );
       if (!finalSnapshot) {
-        failPipeline(ctx, 'failed', 'Workflow artifacts disappeared', 'The workflow projection could not load the final snapshot.');
+        // Non-fatal — workflow projection may not track raw cargo commands
       }
       ctx.appendPipelineEvent(
         pipelineEvent(
-          runResult.ok ? 'complete' : 'failed',
-          runResult.ok ? 'Implementation run finished.' : 'Implementation run returned a non-ready prompt or failure.',
-          runResult.ok ? 'success' : 'error',
+          gateResult.ok ? 'complete' : 'failed',
+          gateResult.ok ? 'All gates passed — implementation verified.' : 'Gate execution returned failures.',
+          gateResult.ok ? 'success' : 'error',
         ),
       );
       timeline.setActive(5);

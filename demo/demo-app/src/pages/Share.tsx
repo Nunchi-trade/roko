@@ -155,7 +155,7 @@ export default function SharePage() {
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
-              padding: '6px var(--sp-3)',
+              padding: 'var(--sp-1) var(--sp-3)',
               borderBottom: '1px solid var(--border)',
               fontFamily: 'var(--mono)',
               fontSize: 'var(--text-xs)',
@@ -202,7 +202,7 @@ export default function SharePage() {
           {/* Gate results */}
           {receipt.gate_results && (
             <div className="share-gates">
-              <div style={{ marginBottom: 8 }}>
+              <div style={{ marginBottom: 'var(--sp-2)' }}>
                 <span
                   style={{
                     fontFamily: 'var(--mono)',

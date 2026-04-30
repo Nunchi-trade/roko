@@ -25,11 +25,11 @@
   background: rgba(12, 10, 18, 0.88);
   backdrop-filter: blur(12px) saturate(180%);
   -webkit-backdrop-filter: blur(12px) saturate(180%);
-  border: 1px solid rgba(184, 122, 148, 0.18);
+  border: 1px solid color-mix(in srgb, var(--rose-dim) 18%, transparent);
   color: var(--text-primary);
   box-shadow:
     0 4px 16px rgba(0, 0, 0, 0.3),
-    0 0 12px rgba(184, 122, 148, 0.06);
+    0 0 12px color-mix(in srgb, var(--rose-dim) 6%, transparent);
   white-space: nowrap;
 }
 
@@ -40,7 +40,7 @@
   width: 8px;
   height: 8px;
   background: rgba(12, 10, 18, 0.88);
-  border: 1px solid rgba(184, 122, 148, 0.18);
+  border: 1px solid color-mix(in srgb, var(--rose-dim) 18%, transparent);
   transform: rotate(45deg);
 }
 
@@ -129,10 +129,10 @@
 .tooltip-bubble.tooltip-rich {
   padding: 10px 14px;
   white-space: normal;
-  border-color: rgba(184, 122, 148, 0.24);
+  border-color: color-mix(in srgb, var(--rose-dim) 24%, transparent);
   box-shadow:
     0 6px 24px rgba(0, 0, 0, 0.35),
-    0 0 20px rgba(184, 122, 148, 0.08);
+    0 0 20px color-mix(in srgb, var(--rose-dim) 8%, transparent);
 }
 
 /* ── Variant: code ── */
@@ -142,7 +142,7 @@
   font-size: var(--text-xs);
   letter-spacing: 0.02em;
   background: rgba(20, 15, 24, 0.92);
-  border-color: rgba(212, 200, 156, 0.14);
+  border-color: color-mix(in srgb, var(--bone) 14%, transparent);
   color: var(--bone);
 }
 

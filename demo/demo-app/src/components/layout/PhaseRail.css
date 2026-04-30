@@ -67,13 +67,13 @@
 .phase-rail__dot--current {
   background: var(--rose-glow);
   border: 2px solid var(--rose-glow);
-  box-shadow: 0 0 8px rgba(232, 181, 206, 0.5);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-glow) 50%, transparent);
   animation: phasePulseDot 2.4s ease-in-out infinite;
 }
 
 @keyframes phasePulseDot {
-  0%, 100% { box-shadow: 0 0 8px rgba(232, 181, 206, 0.5); }
-  50%      { box-shadow: 0 0 16px rgba(232, 181, 206, 0.7); }
+  0%, 100% { box-shadow: 0 0 8px color-mix(in srgb, var(--rose-glow) 50%, transparent); }
+  50%      { box-shadow: 0 0 16px color-mix(in srgb, var(--rose-glow) 70%, transparent); }
 }
 
 /* dot enter animation */
@@ -90,13 +90,13 @@
 .phase-rail__dot--failed {
   background: var(--status-error);
   border: 2px solid var(--status-error);
-  box-shadow: 0 0 10px rgba(251, 113, 133, 0.5);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--danger) 50%, transparent);
 }
 
 /* ── label ── */
 .phase-rail__label {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   transition: color 200ms;

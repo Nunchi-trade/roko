@@ -96,7 +96,7 @@
   border: none;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 10px;
+  font-size: var(--text-xs);
   transition: color var(--duration-snap), transform 200ms var(--ease);
   padding: 0;
 }
@@ -176,7 +176,7 @@
 .resizable-pane__handle--right:hover::after {
   width: 3px;
   background: var(--rose-dim);
-  box-shadow: 0 0 8px rgba(204, 144, 168, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 30%, transparent);
 }
 
 .resizable-pane__handle--right:hover::before {
@@ -222,7 +222,7 @@
 .resizable-pane__handle--bottom:hover::after {
   height: 3px;
   background: var(--rose-dim);
-  box-shadow: 0 0 8px rgba(204, 144, 168, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 30%, transparent);
 }
 
 .resizable-pane__handle--bottom:hover::before {
@@ -232,7 +232,7 @@
 /* Dragging state */
 .resizable-pane__handle--dragging::after {
   background: var(--rose-bright) !important;
-  box-shadow: 0 0 14px rgba(204, 144, 168, 0.5) !important;
+  box-shadow: 0 0 14px color-mix(in srgb, var(--rose) 50%, transparent) !important;
 }
 
 .resizable-pane__handle--right.resizable-pane__handle--dragging::after {

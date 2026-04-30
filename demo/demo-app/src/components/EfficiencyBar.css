@@ -21,7 +21,7 @@
 }
 
 .efficiency-bar .mosaic .cell .v {
-  font-size: 22px;
+  font-size: var(--text-xl);
   margin-bottom: 0;
 }
 
@@ -154,13 +154,13 @@
 }
 
 .ebar-delta-up {
-  background: rgba(74, 222, 128, 0.12);
-  border: 1px solid rgba(74, 222, 128, 0.25);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 25%, transparent);
 }
 
 .ebar-delta-down {
-  background: rgba(251, 113, 133, 0.12);
-  border: 1px solid rgba(251, 113, 133, 0.25);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent);
 }
 
 /* ── Threshold markers ───────────────────────────────────── */
@@ -206,9 +206,9 @@
 }
 
 @keyframes ebarPulseGlow {
-  0% { box-shadow: 0 0 0 0 rgba(220, 165, 189, 0); }
-  30% { box-shadow: 0 0 8px 2px rgba(220, 165, 189, 0.25); }
-  100% { box-shadow: 0 0 0 0 rgba(220, 165, 189, 0); }
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--rose) 0%, transparent); }
+  30% { box-shadow: 0 0 8px 2px color-mix(in srgb, var(--rose) 25%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--rose) 0%, transparent); }
 }
 
 /* ── Hover state ─────────────────────────────────────────── */

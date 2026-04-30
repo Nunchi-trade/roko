@@ -1,14 +1,9 @@
 import Mosaic, { MosaicCell } from '../Mosaic';
 import type { HealthData } from './StatusTab';
+import { fmtUptime } from '../../lib/format';
 
 export interface HealthMosaicProps {
   health: HealthData;
-}
-
-function fmtUptime(secs: number): string {
-  if (secs < 60) return `${secs.toFixed(0)}s`;
-  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
-  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
 }
 
 /**

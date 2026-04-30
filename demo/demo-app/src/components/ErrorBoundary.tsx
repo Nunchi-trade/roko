@@ -124,7 +124,7 @@ export default class ErrorBoundary extends Component<Props, State> {
               textTransform: 'uppercase',
               color: 'var(--status-error, #fb7185)',
               background: 'transparent',
-              border: '1px solid rgba(251,113,133,.3)',
+              border: '1px solid color-mix(in srgb, var(--danger) 30%, transparent)',
               cursor: 'pointer',
               fontFamily: 'inherit',
               borderRadius: 3,
@@ -136,12 +136,12 @@ export default class ErrorBoundary extends Component<Props, State> {
             onMouseEnter={e => {
               const t = e.currentTarget;
               t.style.borderColor = 'var(--status-error, #fb7185)';
-              t.style.boxShadow = '0 0 16px rgba(251,113,133,.3)';
+              t.style.boxShadow = '0 0 16px color-mix(in srgb, var(--danger) 30%, transparent)';
               t.style.color = 'var(--text-strong, #f8f0f8)';
             }}
             onMouseLeave={e => {
               const t = e.currentTarget;
-              t.style.borderColor = 'rgba(251,113,133,.3)';
+              t.style.borderColor = 'color-mix(in srgb, var(--danger) 30%, transparent)';
               t.style.boxShadow = 'none';
               t.style.color = 'var(--status-error, #fb7185)';
             }}

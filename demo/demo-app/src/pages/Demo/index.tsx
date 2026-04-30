@@ -393,8 +393,24 @@ export default function Demo() {
         setLogEntries((prev) => [
           ...prev,
           { ts, text: `$ ${cmd}`, type: 'info' as const },
-          { ts, text: desc || lookupCmdDesc(cmd) || 'Executing...', type: 'success' as const },
+          { ts, text: desc || lookupCmdDesc(cmd) || 'Executing...', type: 'info' as const },
         ]);
+      },
+      logCommandComplete: (cmd: string, ok: boolean) => {
+        setLogEntries((prev) => {
+          // Find the last log entry for this command's description and mark it
+          const copy = [...prev];
+          for (let i = copy.length - 1; i >= 0; i--) {
+            if (copy[i].text === `$ ${cmd}`) {
+              // The description entry is the one right after the command entry
+              if (i + 1 < copy.length) {
+                copy[i + 1] = { ...copy[i + 1], type: ok ? 'success' : 'error' };
+              }
+              break;
+            }
+          }
+          return copy;
+        });
       },
       setPipeline,
       patchPipeline,

@@ -53,7 +53,7 @@ export default function Curtain() {
           height: 24,
           borderRadius: '50%',
           background: 'var(--rose-glow)',
-          boxShadow: '0 0 40px var(--rose-glow), 0 0 80px rgba(220,165,189,.3)',
+          boxShadow: '0 0 40px var(--rose-glow), 0 0 80px color-mix(in srgb, var(--rose) 30%, transparent)',
           animation: 'curtainPulse 1.2s ease-in-out infinite',
         }}
       />

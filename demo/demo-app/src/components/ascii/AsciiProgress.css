@@ -5,7 +5,7 @@
   align-items: center;
   gap: 0.6em;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-md);
   line-height: 1;
   white-space: nowrap;
   user-select: none;
@@ -15,7 +15,7 @@
   color: var(--text-dim);
   letter-spacing: 0.10em;
   text-transform: uppercase;
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .ascii-progress__bar {
@@ -40,6 +40,6 @@
   color: var(--text-dim);
   min-width: 3.5em;
   text-align: right;
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
 }

@@ -13,7 +13,7 @@
 /* Border flash on state change */
 .lazy-pane--flash {
   border-color: var(--rose-glow);
-  box-shadow: 0 0 12px rgba(232, 181, 206, 0.15);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--rose-glow) 15%, transparent);
 }
 
 /* ── Status bar ── */
@@ -84,8 +84,8 @@
   justify-content: center;
   gap: 8px;
   padding: 6px 12px;
-  background: rgba(251, 113, 133, 0.08);
-  border-bottom: 1px solid rgba(251, 113, 133, 0.15);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 15%, transparent);
   font-family: var(--mono);
   font-size: var(--text-xs);
   letter-spacing: 0.1em;

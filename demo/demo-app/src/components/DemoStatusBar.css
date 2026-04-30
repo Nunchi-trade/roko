@@ -13,7 +13,7 @@
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-ghost);
@@ -59,7 +59,7 @@
   border-radius: 2px;
   background: color-mix(in srgb, var(--success) 12%, transparent);
   color: var(--success);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
 }
 
@@ -119,7 +119,7 @@
 
 .dsb-term-label {
   color: var(--text-ghost);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 /* ── Section: Scenario indicator ── */
@@ -168,7 +168,7 @@
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   flex-shrink: 0;
 }

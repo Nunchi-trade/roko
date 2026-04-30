@@ -22,7 +22,7 @@ export const providerRace: Scenario = {
     { label: 'Winner', sublabel: 'first to pass' },
     { label: 'Cost summary', sublabel: 'compare totals' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, workspaceDir }) {
+  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, workspaceDir }) {
     const providerNames = ['anthropic', 'openai', 'gemini', 'moonshot'];
     const providerModels = ['haiku', 'gpt-5.4-mini', 'flash', 'v1'];
     const providerLabels = ['anthropic (haiku)', 'openai (gpt-5.4-mini)', 'gemini (flash)', 'moonshot (v1)'];
@@ -104,9 +104,11 @@ export const providerRace: Scenario = {
     const racePromise = Promise.all(
       entries.map(async (handle, index): Promise<RaceResult> => {
         const result = await showCmd(handle, `${ROKO} run "${prompt}" --provider ${providerNames[index]}`, {
+          playback,
           timeout: 240000,
           customDesc: `Racing ${providerLabels[index]} against the field.`,
           onLog: logCommand,
+          onLogComplete: logCommandComplete,
           onGate: (name, status) => markGate(index, name, status),
           onCost: cost => updateCost(index, cost),
           onTokens: value => updateTokens(index, value),
