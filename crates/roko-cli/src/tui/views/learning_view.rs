@@ -242,6 +242,23 @@ fn event_model(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> &str {
     }
 }
 
+fn shorten_model(slug: &str) -> String {
+    slug.replace("claude-", "")
+        .replace("gpt-", "")
+        .replace("-codex", "c")
+        .replace("-mini", "m")
+        .replace("sonnet-", "s")
+        .replace("opus-", "o")
+        .replace("haiku-", "h")
+}
+
+fn display_model(model: Option<&str>) -> String {
+    match model {
+        None | Some("") | Some("-") | Some("unknown-model") => "unknown".to_string(),
+        Some(m) => shorten_model(m),
+    }
+}
+
 fn render_selection_bars(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
     let router = &tui_state.cascade_router;
     let colors = [
@@ -263,10 +280,15 @@ fn render_selection_bars(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState
                 .get(slug)
                 .map(|s| s.trials)
                 .unwrap_or(0);
-            let label = if slug.len() > 12 { &slug[..12] } else { slug };
+            let label = display_model(Some(slug.as_str()));
+            let label = if label.len() > 12 {
+                label[..12].to_string()
+            } else {
+                label
+            };
             Bar::default()
                 .value(trials)
-                .label(Line::from(label.to_string()))
+                .label(Line::from(label))
                 .style(Style::default().fg(colors[i % colors.len()]))
         })
         .collect();
@@ -493,7 +515,7 @@ fn render_efficiency(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
             };
 
             Row::new(vec![
-                Cell::from(model.as_str()),
+                Cell::from(display_model(Some(model.as_str()))),
                 Cell::from(stats.count.to_string()),
                 Cell::from(stats.passed.to_string()),
                 Cell::from(pass_pct).style(Style::default().fg(rate_color)),
@@ -540,14 +562,15 @@ fn render_efficiency(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
         .map(|(i, (model, stats))| {
             let avg = stats.total_cost / stats.count as f64;
             let value = (avg * 10000.0).round() as u64;
-            let label = if model.len() > 12 {
-                &model[..12]
+            let label = display_model(Some(model.as_str()));
+            let label = if label.len() > 12 {
+                label[..12].to_string()
             } else {
-                model
+                label
             };
             Bar::default()
                 .value(value)
-                .label(Line::from(label.to_string()))
+                .label(Line::from(label))
                 .style(Style::default().fg(colors[i % colors.len()]))
         })
         .collect();

@@ -461,7 +461,7 @@ fn render_cost_by_model(
                 theme.text()
             };
             Row::new(vec![
-                Cell::from(truncate(model, 20)),
+                Cell::from(truncate(&display_model(Some(model.as_str())), 20)),
                 Cell::from(Span::styled(format!("${:.4}", agg.cost_usd), cost_style)),
                 Cell::from(format_count(agg.input_tokens)),
                 Cell::from(format_count(agg.output_tokens)),
@@ -544,7 +544,10 @@ fn render_cascade_router(
                     theme.muted()
                 };
                 Row::new(vec![
-                    Cell::from(truncate(slug, 20)),
+                    Cell::from(truncate(
+                        &display_model(Some(slug.as_str())),
+                        20,
+                    )),
                     Cell::from(trials.to_string()),
                     Cell::from(successes.to_string()),
                     Cell::from(Span::styled(format!("{rate:.0}%"), rate_style)),
@@ -1052,6 +1055,23 @@ fn format_count(n: u64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+fn shorten_model(slug: &str) -> String {
+    slug.replace("claude-", "")
+        .replace("gpt-", "")
+        .replace("-codex", "c")
+        .replace("-mini", "m")
+        .replace("sonnet-", "s")
+        .replace("opus-", "o")
+        .replace("haiku-", "h")
+}
+
+fn display_model(model: Option<&str>) -> String {
+    match model {
+        None | Some("") | Some("-") | Some("unknown-model") => "unknown".to_string(),
+        Some(m) => shorten_model(m),
     }
 }
 

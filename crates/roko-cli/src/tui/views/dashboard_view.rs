@@ -413,11 +413,7 @@ fn render_agent_routes_table(
                 } else {
                     Style::default()
                 };
-                let model = if metric.model.is_empty() {
-                    "-".to_string()
-                } else {
-                    truncate(&shorten_model(&metric.model), 18)
-                };
+                let model = truncate(&display_model(Some(metric.model.as_str())), 18);
                 Row::new(vec![
                     Cell::from(truncate(&agent.id, 14)),
                     Cell::from(Span::styled(
@@ -827,7 +823,10 @@ fn render_sub_mcp(
         ]));
         for (model, usage) in model_usage {
             lines.push(Line::from(vec![
-                Span::styled(format!("{:>12}: ", truncate(&model, 12)), theme.muted()),
+                Span::styled(
+                    format!("{:>12}: ", truncate(&display_model(Some(model.as_str())), 12)),
+                    theme.muted(),
+                ),
                 Span::styled(format!("{} turns", usage.turns), theme.text()),
                 Span::styled("  in ", theme.muted()),
                 Span::styled(fmt_count(usage.input_tokens), theme.info()),
@@ -2036,6 +2035,13 @@ fn shorten_model(slug: &str) -> String {
         .replace("sonnet-", "s")
         .replace("opus-", "o")
         .replace("haiku-", "h")
+}
+
+fn display_model(model: Option<&str>) -> String {
+    match model {
+        None | Some("") | Some("-") | Some("unknown-model") => "unknown".to_string(),
+        Some(m) => shorten_model(m),
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
