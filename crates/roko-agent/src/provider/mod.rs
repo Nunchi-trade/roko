@@ -531,6 +531,43 @@ pub struct AgentOptions {
     pub extra_args: Vec<String>,
     pub effort: Option<String>,
     pub bare_mode: bool,
+    /// Whether to skip Claude's permission system for this agent.
+    ///
+    /// Security audit inventory (PE_01):
+    /// - NEEDS FIX (hardcoded `true`):
+    ///   - crates/roko-agent/src/claude_cli_agent.rs:128
+    ///   - crates/roko-cli/src/runner/types.rs:1337
+    ///   - crates/roko-cli/src/runner/types.rs:1382
+    ///   - crates/roko-cli/src/agent_exec.rs:145
+    ///   - crates/roko-cli/src/serve_runtime.rs:547
+    ///   - crates/roko-cli/src/commands/plan.rs:394
+    ///   - crates/roko-serve/src/dispatch.rs:1824
+    ///   - crates/roko-acp/src/runner.rs:1763
+    /// - OK (hardcoded `false` / test-only):
+    ///   - crates/roko-agent/src/provider/claude_cli.rs:241
+    ///   - crates/roko-agent/src/claude_cli_agent.rs:1109
+    ///   - crates/roko-cli/src/agent_serve.rs:429
+    ///   - crates/roko-cli/src/commands/research.rs:66,264,377
+    ///   - crates/roko-cli/src/dispatch_v2.rs:1037
+    ///   - crates/roko-cli/src/orchestrate.rs:1712,15951,15979
+    ///   - crates/roko-cli/src/run.rs:2054,2096
+    ///   - crates/roko-cli/tests/smoke.rs:260
+    ///   - crates/roko-dreams/src/runner.rs:169
+    /// - DIVERGENCE:
+    ///   - crates/roko-cli/src/run.rs:2784 (unknown roles default `true`; includes `network`)
+    ///   - crates/roko-cli/src/orchestrate.rs:18822 (typed `AgentRole`; no `network` check)
+    /// - PROPAGATION:
+    ///   - crates/roko-agent/src/provider/claude_cli.rs:54
+    ///   - crates/roko-agent/src/claude_cli_agent.rs:328
+    ///   - crates/roko-cli/src/runner/agent_stream.rs:66,138
+    ///   - crates/roko-cli/src/runner/event_loop.rs:2043
+    ///   - crates/roko-cli/src/agent_spawn.rs:59
+    ///   - crates/roko-cli/src/dispatch_v2.rs:320
+    ///   - crates/roko-cli/src/dispatch_v2.rs:357
+    ///   - crates/roko-cli/src/dispatch_v2.rs:728
+    ///   - crates/roko-cli/src/orchestrate.rs:1601,1662,1762,15762
+    ///   - crates/roko-cli/src/run.rs:1923,2003
+    /// Default MUST be `false`. PE_02 will flip all NEEDS FIX sites.
     pub dangerously_skip_permissions: bool,
     pub name: String,
 }
