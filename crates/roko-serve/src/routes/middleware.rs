@@ -518,7 +518,7 @@ pub async fn scrub_secrets(
     // empty 500 rather than leaking unscrubbed partial data.
     // Cap at 16 MiB to avoid unbounded memory growth.
     let Ok(bytes) = axum::body::to_bytes(body, 16 * 1024 * 1024).await else {
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        return ApiError::internal("response body collection failed").into_response();
     };
 
     // Fast path: if the body is empty or not valid UTF-8, pass through.

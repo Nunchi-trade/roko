@@ -285,6 +285,7 @@ impl ClaudeAgent {
 
     fn headers(&self) -> Vec<(String, String)> {
         let mut headers = vec![
+            ("content-type".to_owned(), "application/json".to_owned()),
             ("x-api-key".to_owned(), self.api_key.clone()),
             (
                 "anthropic-version".to_owned(),

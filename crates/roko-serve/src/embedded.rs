@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 struct EmbeddedAssets;
 
 /// Resolved once at startup: the on-disk dist/ directory, if it exists.
-fn disk_dist_dir() -> &'static Option<PathBuf> {
+fn disk_dist_dir() -> Option<&'static PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {
         // 1. Explicit env override
@@ -44,11 +44,12 @@ fn disk_dist_dir() -> &'static Option<PathBuf> {
         tracing::debug!("no on-disk dist/ found, serving embedded SPA assets");
         None
     })
+    .as_ref()
 }
 
 /// Try to read a file from disk, returning `(bytes, actual_path_served)`.
 fn read_from_disk(path: &str) -> Option<(Vec<u8>, String)> {
-    let dir = disk_dist_dir().as_ref()?;
+    let dir = disk_dist_dir()?;
 
     // Try exact path first
     if !path.is_empty() {

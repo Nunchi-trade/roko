@@ -92,8 +92,17 @@ impl Translator for OpenAiTranslator {
                 .pointer("/function/arguments")
                 .and_then(|v| v.as_str())
                 .unwrap_or("{}");
-            let args: serde_json::Value = serde_json::from_str(args_str)
-                .map_err(|e| TranslatorError::Malformed(format!("bad arguments json: {e}")))?;
+            let args: serde_json::Value = match serde_json::from_str(args_str) {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::warn!(
+                        tool = %name,
+                        len = args_str.len(),
+                        "truncated tool-call arguments — salvaging as raw content"
+                    );
+                    serde_json::json!({ "__truncated": true, "raw": args_str })
+                }
+            };
             out.push(ToolCall::new(id, name, args));
         }
         Ok(out)
@@ -582,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_malformed_arguments_json_fails() {
+    fn parse_malformed_arguments_json_salvaged() {
         let resp = BackendResponse::Json(serde_json::json!({
             "choices": [{
                 "message": {
@@ -596,11 +605,13 @@ mod tests {
                 }
             }]
         }));
-        let err = OpenAiTranslator
+        let calls = OpenAiTranslator
             .parse_calls(&resp)
-            .expect_err("malformed args should fail");
-        assert!(matches!(err, TranslatorError::Malformed(_)));
-        assert!(err.to_string().contains("bad arguments json"));
+            .expect("truncated args should be salvaged");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["__truncated"], true);
+        assert_eq!(calls[0].arguments["raw"], "{bad");
     }
 
     #[test]

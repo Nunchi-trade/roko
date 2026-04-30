@@ -1060,7 +1060,7 @@ where
             &session.session_id,
             "session-prompt",
             &session.config_state.agent_mode,
-            workdir,
+            &workdir,
         ) {
             Ok(()) => None,
             Err(violation) => {

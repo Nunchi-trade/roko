@@ -148,8 +148,7 @@ impl HttpPoster for ReqwestPoster {
         let mut req = self
             .client
             .post(url)
-            .timeout(Duration::from_millis(timeout_ms))
-            .header("content-type", "application/json");
+            .timeout(Duration::from_millis(timeout_ms));
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
         }

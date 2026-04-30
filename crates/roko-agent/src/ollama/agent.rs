@@ -138,8 +138,10 @@ impl OllamaAgent {
         };
 
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
+        let json_headers: [(String, String); 1] =
+            [("content-type".to_owned(), "application/json".to_owned())];
         let raw = match poster
-            .post_json(&url, &[], body.as_bytes(), self.timeout_ms)
+            .post_json(&url, &json_headers, body.as_bytes(), self.timeout_ms)
             .await
         {
             Ok(raw) => raw,
@@ -568,9 +570,11 @@ impl OllamaLlmBackend {
         url: &str,
         body_bytes: &[u8],
     ) -> Result<BackendResponse, LlmError> {
+        let json_headers: [(String, String); 1] =
+            [("content-type".to_owned(), "application/json".to_owned())];
         let raw = self
             .poster
-            .post_json(url, &[], body_bytes, self.timeout_ms)
+            .post_json(url, &json_headers, body_bytes, self.timeout_ms)
             .await
             .map_err(|e| LlmError::Network(e.to_string()))?;
 

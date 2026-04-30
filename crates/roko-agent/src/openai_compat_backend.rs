@@ -1247,4 +1247,37 @@ mod tests {
         assert!(s.contains("OpenAiCompatLlmBackend"));
         assert!(s.contains("glm-5.1"));
     }
+
+    /// Live integration test — sends a real request to OpenAI to verify the
+    /// request body is well-formed and the model parameter is accepted.
+    ///
+    /// Requires `OPENAI_API_KEY` in the environment. Skipped otherwise.
+    #[tokio::test]
+    async fn live_openai_gpt4o_accepts_request() {
+        let Ok(api_key) = std::env::var("OPENAI_API_KEY") else {
+            eprintln!("skipping: OPENAI_API_KEY not set");
+            return;
+        };
+
+        let backend = OpenAiCompatLlmBackend::new(api_key, "gpt-4o")
+            .with_max_tokens(10);
+        let result = backend
+            .send_turn(
+                &[serde_json::json!({ "role": "user", "content": "say hi" })],
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+            )
+            .await;
+
+        match &result {
+            Ok(BackendResponse::Json(json)) => {
+                assert!(
+                    json.pointer("/choices/0/message/content").is_some(),
+                    "expected choices[0].message.content in response: {json}"
+                );
+            }
+            Ok(other) => panic!("unexpected response variant: {other:?}"),
+            Err(e) => panic!("request failed: {e:?}"),
+        }
+    }
 }
