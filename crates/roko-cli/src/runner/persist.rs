@@ -119,6 +119,11 @@ pub struct RunStateSnapshot {
     /// to detect drift between runs.
     #[serde(default)]
     pub fingerprints: Vec<TaskDefFingerprint>,
+    /// CascadeRouter snapshot JSON captured at save time.
+    ///
+    /// `None` for old snapshots or when no router is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cascade_router_json: Option<String>,
 }
 
 /// Forensic fingerprint of a task definition used for strict resume validation.
@@ -559,5 +564,36 @@ mod tests {
         let content = fs::read_to_string(&paths.agent_pids_json).unwrap();
         let pids: Vec<u32> = serde_json::from_str(&content).unwrap();
         assert_eq!(pids, vec![1234, 5678]);
+    }
+
+    #[test]
+    fn load_run_state_defaults_missing_cascade_router_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = PersistPaths::from_workdir(tmp.path()).unwrap();
+        let payload = serde_json::json!({
+            "schema_version": RUN_STATE_SCHEMA_VERSION,
+            "run_id": "run-1",
+            "started_at_ms": 1,
+            "timestamp_ms": 2,
+            "tasks_total": 3,
+            "tasks_completed": 1,
+            "tasks_failed": 0,
+            "total_tokens_in": 10,
+            "total_tokens_out": 20,
+            "total_cost_usd": 0.25,
+            "total_agent_calls": 2,
+            "plan_costs": {},
+            "completed_tasks": {},
+            "snapshot_fail_streak": 0,
+            "fingerprints": []
+        });
+        fs::write(
+            &paths.run_state_json,
+            serde_json::to_string(&payload).unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = load_run_state(&paths).unwrap().unwrap();
+        assert!(snapshot.cascade_router_json.is_none());
     }
 }

@@ -1592,6 +1592,84 @@ impl CascadeRouter {
         Ok(())
     }
 
+    fn from_snapshot(snapshot: CascadeSnapshot, model_slugs: Vec<String>) -> Self {
+        let CascadeSnapshot {
+            model_slugs: persisted_model_slugs,
+            confidence_stats,
+            total_observations,
+            role_table,
+            stage_transitions,
+        } = snapshot;
+
+        let slugs = if model_slugs.is_empty() {
+            persisted_model_slugs.clone()
+        } else {
+            model_slugs
+        };
+        assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
+
+        let version_changes = detect_version_changes(&persisted_model_slugs, &slugs);
+        let migrated_stats =
+            migrated_confidence_stats(&confidence_stats, &version_changes, &slugs);
+        let router = Self::new(slugs);
+
+        // Restore confidence stats.
+        let mut stats = router.confidence_stats.lock();
+        for (model, persisted) in &migrated_stats {
+            stats.insert(
+                model.clone(),
+                ModelStats {
+                    trials: persisted.trials,
+                    successes: persisted.successes,
+                    total_citations: persisted.total_citations,
+                    total_search_latency_ms: persisted.total_search_latency_ms,
+                    total_cost_usd: persisted.total_cost_usd,
+                    perplexity_requests: persisted.perplexity_requests,
+                    total_gemini_thinking_tokens: persisted.total_gemini_thinking_tokens,
+                    total_gemini_cached_tokens: persisted.total_gemini_cached_tokens,
+                    total_gemini_grounding_queries: persisted.total_gemini_grounding_queries,
+                    gemini_code_execution_successes: persisted.gemini_code_execution_successes,
+                    gemini_code_execution_failures: persisted.gemini_code_execution_failures,
+                    gemini_context_window_le_200k_requests: persisted
+                        .gemini_context_window_le_200k_requests,
+                    gemini_context_window_gt_200k_requests: persisted
+                        .gemini_context_window_gt_200k_requests,
+                    gemini_requests: persisted.gemini_requests,
+                },
+            );
+        }
+        drop(stats);
+
+        let total = if total_observations > 0 {
+            total_observations
+        } else {
+            confidence_stats.values().map(|s| s.trials).sum()
+        };
+        router.linucb.set_total_observations(total);
+        if !role_table.is_empty() {
+            let mut rt = router.role_table.lock();
+            for (role, slug) in role_table {
+                rt.insert(role, remap_role_table_entry(slug, &version_changes));
+            }
+        }
+        {
+            let mut stage_tracking = router.stage_tracking.lock();
+            stage_tracking.current = stage_for_observations(total);
+            stage_tracking.transitions = stage_transitions;
+        }
+
+        router
+    }
+
+    /// Build a router from an in-memory snapshot JSON string.
+    pub fn from_snapshot_json(
+        json: &str,
+        model_slugs: Vec<String>,
+    ) -> Result<Self, serde_json::Error> {
+        let snapshot: CascadeSnapshot = serde_json::from_str(json)?;
+        Ok(Self::from_snapshot(snapshot, model_slugs))
+    }
+
     /// Load a cascade router from a persisted JSON file, or create a new one.
     pub fn load_or_new(path: &Path, model_slugs: Vec<String>) -> Self {
         let snapshot = std::fs::read_to_string(path)
@@ -1599,74 +1677,7 @@ impl CascadeRouter {
             .and_then(|s| serde_json::from_str::<CascadeSnapshot>(&s).ok());
 
         match snapshot {
-            Some(CascadeSnapshot {
-                model_slugs: persisted_model_slugs,
-                confidence_stats,
-                total_observations,
-                role_table,
-                stage_transitions,
-            }) => {
-                let slugs = if model_slugs.is_empty() {
-                    persisted_model_slugs.clone()
-                } else {
-                    model_slugs
-                };
-                assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
-                let version_changes = detect_version_changes(&persisted_model_slugs, &slugs);
-                let migrated_stats =
-                    migrated_confidence_stats(&confidence_stats, &version_changes, &slugs);
-                let router = Self::new(slugs);
-
-                // Restore confidence stats.
-                let mut stats = router.confidence_stats.lock();
-                for (model, persisted) in &migrated_stats {
-                    stats.insert(
-                        model.clone(),
-                        ModelStats {
-                            trials: persisted.trials,
-                            successes: persisted.successes,
-                            total_citations: persisted.total_citations,
-                            total_search_latency_ms: persisted.total_search_latency_ms,
-                            total_cost_usd: persisted.total_cost_usd,
-                            perplexity_requests: persisted.perplexity_requests,
-                            total_gemini_thinking_tokens: persisted.total_gemini_thinking_tokens,
-                            total_gemini_cached_tokens: persisted.total_gemini_cached_tokens,
-                            total_gemini_grounding_queries: persisted
-                                .total_gemini_grounding_queries,
-                            gemini_code_execution_successes: persisted
-                                .gemini_code_execution_successes,
-                            gemini_code_execution_failures: persisted
-                                .gemini_code_execution_failures,
-                            gemini_context_window_le_200k_requests: persisted
-                                .gemini_context_window_le_200k_requests,
-                            gemini_context_window_gt_200k_requests: persisted
-                                .gemini_context_window_gt_200k_requests,
-                            gemini_requests: persisted.gemini_requests,
-                        },
-                    );
-                }
-                drop(stats);
-
-                let total = if total_observations > 0 {
-                    total_observations
-                } else {
-                    confidence_stats.values().map(|s| s.trials).sum()
-                };
-                router.linucb.set_total_observations(total);
-                if !role_table.is_empty() {
-                    let mut rt = router.role_table.lock();
-                    for (role, slug) in role_table {
-                        rt.insert(role, remap_role_table_entry(slug, &version_changes));
-                    }
-                }
-                {
-                    let mut stage_tracking = router.stage_tracking.lock();
-                    stage_tracking.current = stage_for_observations(total);
-                    stage_tracking.transitions = stage_transitions;
-                }
-
-                router
-            }
+            Some(snapshot) => Self::from_snapshot(snapshot, model_slugs),
             None => Self::new(model_slugs),
         }
     }

@@ -47,6 +47,9 @@ pub struct ResumeReport {
     /// Number of fingerprints compared against the snapshot; useful for
     /// observability when the snapshot is empty.
     pub validated_tasks: usize,
+    /// Embedded CascadeRouter snapshot JSON from the prior run-state snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cascade_router_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -138,6 +141,9 @@ pub fn prepare_resume(
         prior_run_id: snapshot.as_ref().map(|s| s.run_id.clone()),
         recovered_files: Vec::new(),
         validated_tasks: 0,
+        cascade_router_json: snapshot
+            .as_ref()
+            .and_then(|s| s.cascade_router_json.clone()),
     };
 
     if let Some(prior) = snapshot.as_ref() {
@@ -276,7 +282,23 @@ mod tests {
             completed_tasks: HashMap::new(),
             snapshot_fail_streak: 0,
             fingerprints: Vec::new(),
+            cascade_router_json: None,
         }
+    }
+
+    #[test]
+    fn resume_report_propagates_embedded_cascade_router_json() {
+        let dir = tempdir().unwrap();
+        let paths = paths_for(dir.path());
+        let mut snap = snapshot_with_run_id("prior");
+        snap.cascade_router_json = Some("{\"model_slugs\":[\"x\"]}".to_string());
+        super::super::persist::save_run_state(&paths, &snap).unwrap();
+
+        let report = prepare_resume(&paths, &HashMap::new(), &[]).unwrap();
+        assert_eq!(
+            report.cascade_router_json.as_deref(),
+            Some("{\"model_slugs\":[\"x\"]}")
+        );
     }
 
     #[test]
@@ -287,6 +309,7 @@ mod tests {
         let report = prepare_resume(&paths, &plans, &[]).unwrap();
         assert!(!report.resumed);
         assert_eq!(report.validated_tasks, 0);
+        assert!(report.cascade_router_json.is_none());
         // All three logs should be reported as Clean.
         assert_eq!(report.recovered_files.len(), 3);
         for f in &report.recovered_files {

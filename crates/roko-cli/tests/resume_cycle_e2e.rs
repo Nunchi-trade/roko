@@ -75,6 +75,7 @@ fn baseline_snapshot(run_id: &str, fingerprints: Vec<TaskDefFingerprint>) -> Run
         completed_tasks: HashMap::from([("p1".to_string(), vec!["a".to_string()])]),
         snapshot_fail_streak: 0,
         fingerprints,
+        cascade_router_json: None,
     }
 }
 

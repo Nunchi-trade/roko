@@ -121,6 +121,7 @@ pub async fn run(
         ..Default::default()
     };
 
+    let mut config = config.clone();
     let paths = PersistPaths::from_workdir(&config.workdir)?;
     persist::cleanup_orphaned_agents(&paths);
     let mut gate_thresholds = persist::load_gate_thresholds(&paths).unwrap_or_default();
@@ -158,7 +159,7 @@ pub async fn run(
                 Vec::new()
             }
         };
-        match super::resume::prepare_resume(&paths, &plan_map, &prior_fingerprints) {
+        let resume_report = match super::resume::prepare_resume(&paths, &plan_map, &prior_fingerprints) {
             Ok(report) => {
                 if report.resumed {
                     info!(
@@ -181,13 +182,38 @@ pub async fn run(
                         }
                     }
                 }
+                report
             }
             Err(err) => {
                 error!(error = %err, "resume validation failed; aborting run");
                 return Err(anyhow::anyhow!("resume validation failed: {err}"));
             }
+        };
+
+        // Prefer the embedded router snapshot over the file-backed router on resume.
+        if let Some(router_json) = resume_report.cascade_router_json.as_deref() {
+            if let Some(existing_router) = config.cascade_router.as_ref() {
+                let model_slugs = existing_router.model_slugs().to_vec();
+                match roko_learn::cascade_router::CascadeRouter::from_snapshot_json(
+                    router_json,
+                    model_slugs,
+                ) {
+                    Ok(router) => {
+                        info!("restored cascade router from run-state snapshot");
+                        config.cascade_router = Some(Arc::new(router));
+                    }
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            "failed to restore cascade router from run-state snapshot; using file-based state"
+                        );
+                    }
+                }
+            }
         }
     }
+
+    let config = &config;
 
     // Build plan ID set for resume validation.
     let plan_ids: Vec<String> = plans.iter().map(|p| p.id.clone()).collect();
@@ -427,7 +453,7 @@ pub async fn run(
                         } else {
                             apply_agent_completion(&mut executor, &plan_id, &tui);
                         }
-                        save_snapshot(&executor, &paths, &mut state, &merge_queue);
+                        save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
                     }
                 }
 
@@ -495,7 +521,7 @@ pub async fn run(
                         }
                     }
 
-                    save_snapshot(&executor, &paths, &mut state, &merge_queue);
+                    save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
                 }
             }
 
@@ -845,7 +871,7 @@ pub async fn run(
                     }
                 }
 
-                save_snapshot(&executor, &paths, &mut state, &merge_queue);
+                save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
             }
 
             // ─── Branch 3: Executor tick ────────────────────────────
@@ -871,7 +897,7 @@ pub async fn run(
 
             // ─── Branch 4: Periodic flush ───────────────────────────
             _ = flush_interval.tick() => {
-                save_snapshot(&executor, &paths, &mut state, &merge_queue);
+                save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
                 if let Some(ref handle) = agent_handle {
                     let _ = persist::save_agent_pids(&paths, &[handle.pid]);
                 }
@@ -896,7 +922,7 @@ pub async fn run(
             _ = cancel.cancelled() => {
                 warn!("cancellation requested — shutting down");
                 stop_active_agent(&mut agent_handle, &mut state, Duration::from_secs(3)).await;
-                save_snapshot(&executor, &paths, &mut state, &merge_queue);
+                save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
                 shutdown_subsystems(config, &tui).await;
                 let event =
                     build_run_completed_event(&executor, &plans, &state, RunOutcome::Cancelled);
@@ -920,7 +946,7 @@ pub async fn run(
         }
 
         if all_plans_terminal(&executor, &plans) {
-            save_snapshot(&executor, &paths, &mut state, &merge_queue);
+            save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
             let outcome = if build_report(&executor, &plans, &state).all_succeeded() {
                 RunOutcome::Succeeded
             } else {
@@ -1051,7 +1077,7 @@ fn handle_plan_verify_completion(
         }
     }
 
-    save_snapshot(executor, paths, state, merge_queue);
+    save_snapshot(config, executor, paths, state, merge_queue);
 }
 
 fn merge_branch_from_task_id(task_id: &str) -> Option<String> {
@@ -1161,7 +1187,7 @@ fn handle_merge_completion(
     {
         info!(plan_id = %next_plan_id, "started next queued merge");
     }
-    save_snapshot(executor, paths, state, merge_queue);
+    save_snapshot(config, executor, paths, state, merge_queue);
 }
 
 fn append_agent_event(paths: &PersistPaths, event: &AgentEvent, state: &RunState) {
@@ -1441,9 +1467,10 @@ fn build_run_completed_event(
 /// - `.roko/state/orchestrator.json` (aggregate)
 /// - `.roko/state/executor.json` (orchestrator snapshot)
 /// - `.roko/state/run-state.json` (runner-owned: cost, tokens,
-///   completed-task set, run_id, fingerprints — used by
-///   `runner::resume::prepare_resume`)
+///   completed-task set, run_id, fingerprints, cascade router snapshot —
+///   used by `runner::resume::prepare_resume`)
 fn save_snapshot(
+    config: &RunConfig,
     executor: &ParallelExecutor,
     paths: &PersistPaths,
     state: &mut RunState,
@@ -1465,8 +1492,8 @@ fn save_snapshot(
     }
 
     // Runner-owned run-state.json — cost, tokens, completed tasks,
-    // fingerprints. Without this file the strict resume validator
-    // cannot detect drift.
+    // fingerprints, and embedded cascade router state. Without this
+    // file the strict resume validator cannot detect drift.
     let run_state = persist::RunStateSnapshot {
         schema_version: persist::RUN_STATE_SCHEMA_VERSION,
         run_id: state.run_id().to_string(),
@@ -1483,6 +1510,10 @@ fn save_snapshot(
         completed_tasks: state.completed_tasks.clone(),
         snapshot_fail_streak: state.snapshot_fail_streak,
         fingerprints: state.task_fingerprints.clone(),
+        cascade_router_json: config
+            .cascade_router
+            .as_ref()
+            .map(|router| router.snapshot_json()),
     };
     match persist::save_run_state(paths, &run_state) {
         Ok(()) => state.snapshot_succeeded(),
@@ -2257,7 +2288,13 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.config,
                 RunnerEvent::plan_completed(&run_id, plan_id, PlanOutcome::Succeeded, None),
             );
-            save_snapshot(ctx.executor, ctx.paths, ctx.state, ctx.merge_queue);
+            save_snapshot(
+                ctx.config,
+                ctx.executor,
+                ctx.paths,
+                ctx.state,
+                ctx.merge_queue,
+            );
         }
 
         ExecutorAction::FailPlan { plan_id, reason } => {
@@ -2310,7 +2347,13 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         branch = %branch_name,
                         "reserved merge queue request"
                     );
-                    save_snapshot(ctx.executor, ctx.paths, ctx.state, ctx.merge_queue);
+                    save_snapshot(
+                        ctx.config,
+                        ctx.executor,
+                        ctx.paths,
+                        ctx.state,
+                        ctx.merge_queue,
+                    );
                 }
                 MergeDispatch::Blocked { plan_id } => {
                     info!(
@@ -2318,7 +2361,13 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         blocked_conflicts = ?ctx.merge_queue.blocked_conflicts(),
                         "merge queued but currently blocked by file locks"
                     );
-                    save_snapshot(ctx.executor, ctx.paths, ctx.state, ctx.merge_queue);
+                    save_snapshot(
+                        ctx.config,
+                        ctx.executor,
+                        ctx.paths,
+                        ctx.state,
+                        ctx.merge_queue,
+                    );
                 }
             }
         }
