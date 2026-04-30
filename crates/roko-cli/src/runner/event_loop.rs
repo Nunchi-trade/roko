@@ -110,9 +110,11 @@ pub async fn run(
     state_hub: &StateHub,
     cancel: CancellationToken,
 ) -> Result<RunReport> {
+    let max_concurrent_tasks = config.max_concurrent_tasks.max(1);
+
     let exec_config = ExecutorConfig {
         max_concurrent_plans: 4,
-        max_concurrent_tasks: 1,
+        max_concurrent_tasks,
         max_auto_fix_iterations: config.max_retries,
         task_timeout_secs: config.timeout_secs,
         ..Default::default()

@@ -512,6 +512,14 @@ fn build_runner_config(
         .or_else(|| non_empty_string(&cli_config.agent.command))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("claude"));
+    let max_concurrent_tasks = crate::runner::types::load_runner_max_concurrent_tasks(workdir)
+        .or_else(|| {
+            (cli_config.executor.max_concurrent_tasks
+                != roko_orchestrator::ExecutorConfig::default().max_concurrent_tasks)
+                .then_some(cli_config.executor.max_concurrent_tasks)
+        })
+        .unwrap_or(4)
+        .max(1);
 
     // Initialize Phase 0 subsystems.
     let router_path = workdir
@@ -543,6 +551,7 @@ fn build_runner_config(
         cli_model_override: None,
         timeout_secs: cli_config.executor.task_timeout_secs,
         max_retries: cli_config.executor.max_auto_fix_iterations,
+        max_concurrent_tasks,
         approval: false,
         dangerously_skip_permissions: true,
         mcp_config: cli_config.agent.mcp_config.clone(),

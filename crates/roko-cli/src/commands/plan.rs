@@ -206,6 +206,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             resume_plan,
             approval,
             max_retries,
+            max_tasks,
             dry_run,
             fresh,
         } => {
@@ -248,6 +249,18 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
             let task_timeout_secs = config.executor.task_timeout_secs;
+            let max_concurrent_tasks = if max_tasks > 0 {
+                max_tasks
+            } else {
+                crate::runner::types::load_runner_max_concurrent_tasks(&wd)
+                    .or_else(|| {
+                        (config.executor.max_concurrent_tasks
+                            != roko_orchestrator::ExecutorConfig::default().max_concurrent_tasks)
+                            .then_some(config.executor.max_concurrent_tasks)
+                    })
+                    .unwrap_or(4)
+            }
+            .max(1);
             let state_hub = roko_cli::state_hub::shared_state_hub();
 
             // Runner v2 auto-resumes from .roko/state/executor.json if it exists.
@@ -390,6 +403,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 cli_model_override: cli.model.clone(),
                 timeout_secs: task_timeout_secs,
                 max_retries: max_retries.unwrap_or(2),
+                max_concurrent_tasks,
                 approval,
                 dangerously_skip_permissions: true,
                 mcp_config: None,

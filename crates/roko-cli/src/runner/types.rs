@@ -4,7 +4,7 @@
 //! loop, and the TUI bridge.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use roko_core::config::schema::RokoConfig;
@@ -1235,6 +1235,8 @@ pub struct RunConfig {
     pub timeout_secs: u64,
     /// Maximum auto-fix retries per task.
     pub max_retries: u32,
+    /// Maximum number of tasks that may execute concurrently within a plan.
+    pub max_concurrent_tasks: usize,
     /// Whether to require approval before each task.
     pub approval: bool,
     /// Whether to dangerously skip permissions in the agent.
@@ -1325,6 +1327,7 @@ impl RunConfig {
                 cfg
             }),
         ));
+        let max_concurrent_tasks = load_runner_max_concurrent_tasks(&workdir).unwrap_or(4).max(1);
 
         Self {
             workdir,
@@ -1333,6 +1336,7 @@ impl RunConfig {
             cli_model_override: None,
             timeout_secs: roko_config.agent.timeout_ms.unwrap_or(600_000) / 1000,
             max_retries: 2,
+            max_concurrent_tasks,
             approval: false,
             dangerously_skip_permissions: true,
             mcp_config: None,
@@ -1378,6 +1382,7 @@ impl Default for RunConfig {
             cli_model_override: None,
             timeout_secs: 600,
             max_retries: 5,
+            max_concurrent_tasks: 4,
             approval: false,
             dangerously_skip_permissions: true,
             mcp_config: None,
@@ -1412,6 +1417,7 @@ impl std::fmt::Debug for RunConfig {
             )
             .field("timeout_secs", &self.timeout_secs)
             .field("max_retries", &self.max_retries)
+            .field("max_concurrent_tasks", &self.max_concurrent_tasks)
             .field("max_gate_rung", &self.max_gate_rung)
             .field("max_plan_usd", &self.max_plan_usd)
             .field("max_turn_usd", &self.max_turn_usd)
@@ -1431,6 +1437,18 @@ impl std::fmt::Debug for RunConfig {
             .field("bandit_policy", &self.bandit_policy.as_ref().map(|_| ".."))
             .finish()
     }
+}
+
+/// Load `runner.max_concurrent_tasks` from `roko.toml` if present.
+pub(crate) fn load_runner_max_concurrent_tasks(workdir: &Path) -> Option<usize> {
+    let path = workdir.join("roko.toml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    let tasks = value
+        .get("runner")?
+        .get("max_concurrent_tasks")?
+        .as_integer()?;
+    (tasks >= 0).then_some((tasks as usize).max(1))
 }
 
 #[cfg(test)]

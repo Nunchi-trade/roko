@@ -1153,6 +1153,9 @@ Examples:
         /// Maximum retry attempts per task (overrides per-task and config values).
         #[arg(long)]
         max_retries: Option<u32>,
+        /// Maximum concurrent tasks per plan (0 keeps the config/default value).
+        #[arg(long, default_value_t = 0)]
+        max_tasks: usize,
         /// Parse and display the plan without executing. Shows tasks, dependencies, and estimates.
         #[arg(long)]
         dry_run: bool,
@@ -2328,6 +2331,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 workdir: Some(workdir),
                 approval: false,
                 max_retries: None,
+                max_tasks: 0,
                 dry_run: false,
                 fresh: false,
             };
