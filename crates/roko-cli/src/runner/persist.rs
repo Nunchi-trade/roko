@@ -137,6 +137,97 @@ pub struct TaskDefFingerprint {
     pub fingerprint: String,
 }
 
+/// Per-rung gate threshold statistics persisted in `.roko/learn/gate-thresholds.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateThresholdStats {
+    #[serde(default)]
+    pub pass_count: u64,
+    #[serde(default, alias = "total_observations")]
+    pub total_count: u64,
+    #[serde(default = "GateThresholdStats::default_ema_pass_rate")]
+    pub ema_pass_rate: f64,
+}
+
+impl GateThresholdStats {
+    const fn default_ema_pass_rate() -> f64 {
+        0.5
+    }
+}
+
+impl Default for GateThresholdStats {
+    fn default() -> Self {
+        Self {
+            pass_count: 0,
+            total_count: 0,
+            ema_pass_rate: Self::default_ema_pass_rate(),
+        }
+    }
+}
+
+/// Persisted adaptive gate thresholds loaded at runner startup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GateThresholds {
+    #[serde(default)]
+    pub rungs: HashMap<u32, GateThresholdStats>,
+}
+
+impl GateThresholds {
+    fn load(path: &Path) -> Result<Self> {
+        let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        serde_json::from_reader(file).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    pub(crate) fn observe(&mut self, rung: u32, passed: bool) {
+        let stats = self.rungs.entry(rung).or_default();
+        let value = if passed { 1.0 } else { 0.0 };
+
+        if stats.total_count == 0 {
+            stats.ema_pass_rate = value;
+        } else {
+            stats.ema_pass_rate = 0.1_f64.mul_add(value, 0.9 * stats.ema_pass_rate);
+        }
+
+        stats.total_count += 1;
+        if passed {
+            stats.pass_count += 1;
+        }
+    }
+
+    pub(crate) fn suggested_max_retries(&self, rung: u32) -> u32 {
+        const MIN_RETRIES: u32 = 1;
+        const MAX_RETRIES: u32 = 5;
+
+        let Some(stats) = self.rungs.get(&rung) else {
+            return 3;
+        };
+
+        if stats.total_count < 5 {
+            return 3;
+        }
+
+        let max_f = f64::from(MAX_RETRIES);
+        let range_f = f64::from(MAX_RETRIES - MIN_RETRIES);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let retries = stats.ema_pass_rate.mul_add(-range_f, max_f).round() as u32;
+
+        retries.clamp(MIN_RETRIES, MAX_RETRIES)
+    }
+
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
+        let json =
+            serde_json::to_string_pretty(self).context("serializing adaptive gate thresholds")?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        atomic_write(path, json.as_bytes())
+    }
+}
+
+/// Load persisted gate thresholds from disk.
+pub fn load_gate_thresholds(paths: &PersistPaths) -> Result<GateThresholds> {
+    GateThresholds::load(&paths.gate_thresholds_json)
+}
+
 /// Atomically write `content` to `path` via a `.tmp` sibling.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");

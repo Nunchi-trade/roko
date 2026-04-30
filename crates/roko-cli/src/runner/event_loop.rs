@@ -40,7 +40,7 @@ use super::agent_events::handle_agent_event;
 use super::agent_stream::{AgentHandle, AgentSpawnConfig};
 use super::gate_dispatch;
 use super::merge::{MergeDispatch, PlanMerger, PlanMergerConfig};
-use super::persist::{self, PersistPaths};
+use super::persist::{self, GateThresholds, PersistPaths};
 use super::plan_loader::Plan;
 use super::state::RunState;
 use super::tui_bridge::TuiBridge;
@@ -123,6 +123,7 @@ pub async fn run(
 
     let paths = PersistPaths::from_workdir(&config.workdir)?;
     persist::cleanup_orphaned_agents(&paths);
+    let mut gate_thresholds = persist::load_gate_thresholds(&paths).unwrap_or_default();
 
     // Ensure knowledge store directory exists for episode ingestion.
     let neuro_dir = config.workdir.join(".roko").join("neuro");
@@ -565,6 +566,10 @@ pub async fn run(
                     );
                 }
 
+                let retry_budget = config
+                    .max_retries
+                    .min(gate_thresholds.suggested_max_retries(completion.rung));
+
                 // Emit learning events for the completed agent+gate cycle.
                 emit_feedback(
                     &completion,
@@ -574,6 +579,7 @@ pub async fn run(
                     learning_runtime.as_ref(),
                     &tui,
                     config,
+                    &mut gate_thresholds,
                 )
                 .await;
 
@@ -716,7 +722,7 @@ pub async fn run(
                         .unwrap_or_else(|| RunnerFailureKind::from_output(&completion.output));
                     let can_retry = executor
                         .plan_state(&completion.plan_id)
-                        .map(|ps| ps.iteration <= config.max_retries && failure_kind.is_retryable())
+                        .map(|ps| ps.iteration <= retry_budget && failure_kind.is_retryable())
                         .unwrap_or(false);
                     if can_retry {
                         match executor.apply_event(&completion.plan_id, &ExecutorEvent::GateFailed) {
@@ -2333,6 +2339,7 @@ async fn emit_feedback(
     learning_runtime: Option<&LearningRuntime>,
     tui: &TuiBridge,
     config: &RunConfig,
+    gate_thresholds: &mut GateThresholds,
 ) {
     let episode = build_episode(completion, state, config, workdir);
     let efficiency_event = build_efficiency_event(completion, state);
@@ -2386,45 +2393,31 @@ async fn emit_feedback(
     observe_bandit_policy(config, state, completion, paths, tui);
 
     // Update adaptive gate thresholds based on this verdict.
-    update_gate_thresholds(workdir, completion.rung, completion.passed);
+    update_gate_thresholds(
+        gate_thresholds,
+        &paths.gate_thresholds_json,
+        completion.rung,
+        completion.passed,
+    );
 }
 
 /// Update EMA-based adaptive gate thresholds for a given rung.
-fn update_gate_thresholds(workdir: &Path, rung: u32, passed: bool) {
-    let path = workdir
-        .join(".roko")
-        .join("learn")
-        .join("gate-thresholds.json");
-    let mut thresholds: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({"rungs": {}}));
-
-    let rungs = thresholds.get_mut("rungs").and_then(|r| r.as_object_mut());
-    if let Some(rungs) = rungs {
-        let key = rung.to_string();
-        let entry = rungs.entry(key).or_insert_with(
-            || serde_json::json!({"pass_count": 0, "total_count": 0, "ema_pass_rate": 0.5}),
+fn update_gate_thresholds(
+    thresholds: &mut GateThresholds,
+    path: &Path,
+    rung: u32,
+    passed: bool,
+) {
+    thresholds.observe(rung, passed);
+    if let Err(err) = thresholds.save(path) {
+        warn!(
+            error = %err,
+            path = %path.display(),
+            rung,
+            passed,
+            "failed to persist adaptive gate thresholds"
         );
-        if let Some(obj) = entry.as_object_mut() {
-            let total = obj.get("total_count").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
-            let passes = obj.get("pass_count").and_then(|v| v.as_u64()).unwrap_or(0)
-                + if passed { 1 } else { 0 };
-            let alpha = 0.1;
-            let old_ema = obj
-                .get("ema_pass_rate")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5);
-            let new_ema = alpha * (if passed { 1.0 } else { 0.0 }) + (1.0 - alpha) * old_ema;
-            obj.insert("pass_count".into(), serde_json::json!(passes));
-            obj.insert("total_count".into(), serde_json::json!(total));
-            obj.insert("ema_pass_rate".into(), serde_json::json!(new_ema));
-        }
     }
-    let _ = std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&thresholds).unwrap_or_default(),
-    );
 }
 
 /// Record gate outcome in the cascade router for learned model selection.
