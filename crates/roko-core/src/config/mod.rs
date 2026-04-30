@@ -84,17 +84,25 @@ pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
     let path = std::env::var_os("ROKO_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| workdir.join("roko.toml"));
+    load_config_file(&path)
+}
+
+/// Load configuration from an exact file path.
+///
+/// Missing files fall back to `RokoConfig::default()`, matching
+/// [`load_config`].
+pub fn load_config_file(path: &Path) -> Result<RokoConfig, LoadConfigError> {
     if !path.exists() {
         return Ok(RokoConfig::default());
     }
 
     let text = std::fs::read_to_string(&path).map_err(|source| LoadConfigError::Read {
-        path: path.clone(),
+        path: path.to_path_buf(),
         source,
     })?;
     let mut config: RokoConfig =
         toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
-            path: path.clone(),
+            path: path.to_path_buf(),
             source,
         })?;
 
@@ -103,4 +111,31 @@ pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
     config.resolve_file_secrets();
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_config_file_reads_the_exact_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let default_path = dir.path().join("roko.toml");
+        let explicit_path = dir.path().join("local-dev.toml");
+
+        std::fs::write(
+            &default_path,
+            "schema_version = 2\n[project]\nname = \"default\"\n",
+        )
+        .expect("write default config");
+        std::fs::write(
+            &explicit_path,
+            "schema_version = 2\n[project]\nname = \"local-dev\"\n",
+        )
+        .expect("write explicit config");
+
+        let cfg = load_config_file(&explicit_path).expect("load explicit config");
+
+        assert_eq!(cfg.project.name, "local-dev");
+    }
 }

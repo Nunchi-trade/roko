@@ -3,7 +3,10 @@
 //! Bridges Roko's provider system (via `roko-agent`) to ACP
 //! `session/update` notifications.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use roko_agent::StreamChunk;
 use roko_agent::streaming::parse_sse_line;
@@ -426,6 +429,7 @@ where
     let review_strictness = session.config_state.review_strictness.clone();
 
     let shared_run = session.shared_run.clone();
+    let mcp_servers = session.mcp_servers.clone();
 
     let cognitive_task = tokio::spawn(async move {
         if is_slash_command {
@@ -514,6 +518,7 @@ where
                     &messages,
                     &model_key,
                     &roko_config,
+                    &mcp_servers,
                     cancel_token,
                     event_sender,
                 )
@@ -525,6 +530,7 @@ where
                     &messages,
                     &model_key,
                     &roko_config,
+                    &mcp_servers,
                     cancel_token,
                     event_sender,
                 )
@@ -592,14 +598,46 @@ async fn run_claude_cognitive_task(
 
 // ── OpenAI-compatible provider dispatch ──────────────────────────────
 
+/// Maximum number of tool-call → result rounds within a single prompt.
+/// Bounds runaway loops if a model keeps re-issuing tool calls forever.
+const MAX_TOOL_ITERATIONS: usize = 8;
+
+/// One streamed completion's outcome: text + any pending tool calls.
+struct CompletionOutcome {
+    /// Accumulated assistant text (may be empty when only tool calls).
+    content: String,
+    /// Tool calls the model wants to invoke before continuing.
+    tool_calls: Vec<PendingToolCall>,
+    /// Token usage for this leg (best-effort).
+    usage: Option<UsageInfo>,
+    /// Provider-reported finish reason — currently unused (tool-call detection
+    /// goes through the `tool_calls` vec) but kept for future routing.
+    #[allow(dead_code)]
+    finish_reason: Option<roko_agent::chat_types::FinishReason>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 /// Streams a prompt through an OpenAI-compatible provider (zhipu/GLM,
 /// moonshot/Kimi, OpenAI, Perplexity, Ollama, etc.) using the config
 /// from roko.toml. Accepts a pre-built messages array (with system prompt + history).
+///
+/// If `mcp_servers` is non-empty, this spawns the MCP servers, exposes their
+/// tools to the model, executes any tool calls the model emits, and loops
+/// until the model produces a final text-only response (or `MAX_TOOL_ITERATIONS`
+/// is hit).
+#[allow(clippy::too_many_arguments)]
 async fn run_openai_compat_cognitive_task(
     session_id: &str,
     messages: &[serde_json::Value],
     model_key: &str,
     roko_config: &RokoConfig,
+    mcp_servers: &[crate::types::McpServerConfig],
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
@@ -609,23 +647,26 @@ async fn run_openai_compat_cognitive_task(
     let base_url = provider_config
         .and_then(|p| p.base_url.as_deref())
         .unwrap_or("https://api.openai.com/v1");
-
     let api_key = provider_config
         .and_then(|p| p.resolve_api_key())
         .unwrap_or_default();
-
     let timeout_ms = provider_config
         .and_then(|p| p.timeout_ms)
         .unwrap_or(120_000);
-
-    let slug = &resolved.slug;
+    let slug = resolved.slug.clone();
+    let max_tokens = resolved
+        .profile
+        .as_ref()
+        .and_then(|profile| profile.max_output)
+        .and_then(|value| u32::try_from(value).ok());
 
     info!(
         session_id,
         model_key,
-        slug,
+        slug = %slug,
         base_url,
         has_api_key = !api_key.is_empty(),
+        mcp_server_count = mcp_servers.len(),
         "dispatching prompt via OpenAI-compat provider"
     );
 
@@ -633,85 +674,528 @@ async fn run_openai_compat_cognitive_task(
         return Ok(());
     }
 
-    // Build the request body with pre-built messages array.
+    // Spawn declared MCP servers and discover their tools. Each entry is
+    // namespaced by `server.tool_name` so multiple servers can coexist
+    // without name collisions.
+    let mcp_state = setup_session_mcp(session_id, mcp_servers).await;
+    let openai_tools = render_openai_tools(&mcp_state.tools);
+
     let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": slug,
-        "messages": messages,
-        "stream": true
-    });
+    let extra_headers: Vec<(String, String)> = provider_config
+        .and_then(|p| p.extra_headers.as_ref())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
 
     let client = reqwest::Client::new();
-    let mut request = client
-        .post(&endpoint)
-        .timeout(std::time::Duration::from_millis(timeout_ms))
-        .header("Content-Type", "application/json");
-
-    if !api_key.is_empty() {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    // Inject any extra headers from the provider config.
-    if let Some(extra) = provider_config.and_then(|p| p.extra_headers.as_ref()) {
-        for (k, v) in extra {
-            request = request.header(k.as_str(), v.as_str());
-        }
-    }
-
-    let response = match request.json(&body).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(session_id, error = %e, "HTTP request to provider failed");
-            let _ = event_sender
-                .send(CognitiveEvent::TokenChunk(format!(
-                    "Error: failed to connect to {base_url}: {e}"
-                )))
-                .await;
-            let _ = event_sender
-                .send(CognitiveEvent::Complete {
-                    stop_reason: StopReason::EndTurn,
-                    usage: None,
-                })
-                .await;
-            return Ok(());
-        }
-    };
-
-    let status = response.status();
-    if !status.is_success() {
-        let error_text = response.text().await.unwrap_or_default();
-        error!(session_id, %status, "provider returned error: {error_text}");
-        let _ = event_sender
-            .send(CognitiveEvent::TokenChunk(format!(
-                "Error ({status}): {error_text}"
-            )))
-            .await;
-        let _ = event_sender
-            .send(CognitiveEvent::Complete {
-                stop_reason: StopReason::EndTurn,
-                usage: None,
-            })
-            .await;
-        return Ok(());
-    }
-
-    // Stream SSE chunks.
-    let mut response = response;
-    let mut pending = Vec::new();
+    let mut working_messages: Vec<serde_json::Value> = messages.to_vec();
     let mut total_input = 0u64;
     let mut total_output = 0u64;
 
-    loop {
+    for iteration in 0..MAX_TOOL_ITERATIONS {
         if cancel_token.is_cancelled() {
             return Ok(());
         }
 
-        let chunk = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => return Ok(()),
-            result = response.chunk() => result,
+        let outcome = match stream_one_completion(
+            session_id,
+            &endpoint,
+            &api_key,
+            &extra_headers,
+            timeout_ms,
+            &slug,
+            &working_messages,
+            &openai_tools,
+            max_tokens,
+            cancel_token.clone(),
+            &event_sender,
+            &client,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                error!(session_id, error = %e, "OpenAI-compat completion failed");
+                let _ = event_sender
+                    .send(CognitiveEvent::TokenChunk(format!("\nError: {e}")))
+                    .await;
+                let _ = event_sender
+                    .send(CognitiveEvent::Complete {
+                        stop_reason: StopReason::EndTurn,
+                        usage: None,
+                    })
+                    .await;
+                return Ok(());
+            }
         };
 
+        if let Some(u) = &outcome.usage {
+            total_input += u.input_tokens;
+            total_output += u.output_tokens;
+        }
+
+        // No tool calls → final answer; we're done.
+        if outcome.tool_calls.is_empty() {
+            let usage = (total_input > 0 || total_output > 0).then(|| UsageInfo {
+                total_tokens: total_input + total_output,
+                input_tokens: total_input,
+                output_tokens: total_output,
+                thought_tokens: None,
+                cached_read_tokens: None,
+                cached_write_tokens: None,
+            });
+            let _ = event_sender
+                .send(CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage,
+                })
+                .await;
+            return Ok(());
+        }
+
+        // Append the assistant message (with tool_calls) to history so the
+        // model can see what it asked for in the next turn.
+        let assistant_tool_calls: Vec<serde_json::Value> = outcome
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": if tc.arguments.is_empty() { "{}".to_string() } else { tc.arguments.clone() },
+                    }
+                })
+            })
+            .collect();
+        let mut assistant_msg = serde_json::Map::new();
+        assistant_msg.insert("role".into(), serde_json::Value::String("assistant".into()));
+        if outcome.content.is_empty() {
+            assistant_msg.insert("content".into(), serde_json::Value::Null);
+        } else {
+            assistant_msg.insert(
+                "content".into(),
+                serde_json::Value::String(outcome.content.clone()),
+            );
+        }
+        assistant_msg.insert(
+            "tool_calls".into(),
+            serde_json::Value::Array(assistant_tool_calls),
+        );
+        working_messages.push(serde_json::Value::Object(assistant_msg));
+
+        // Execute each tool call and append its result message.
+        for tc in &outcome.tool_calls {
+            if cancel_token.is_cancelled() {
+                return Ok(());
+            }
+
+            // Surface the call in the editor as a pending tool card.
+            let _ = event_sender
+                .send(CognitiveEvent::ToolCallStart {
+                    tool_call_id: tc.id.clone(),
+                    title: tc.name.clone(),
+                    kind: ToolCallKind::Other,
+                })
+                .await;
+
+            let parsed_args: serde_json::Value = if tc.arguments.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&tc.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::String(tc.arguments.clone()))
+            };
+
+            let (status, result_text) = match dispatch_session_mcp_tool(
+                &mcp_state,
+                &tc.name,
+                parsed_args,
+            )
+            .await
+            {
+                Ok(text) => (ToolCallStatus::Completed, text),
+                Err(text) => (ToolCallStatus::Failed, text),
+            };
+
+            let _ = event_sender
+                .send(CognitiveEvent::ToolCallComplete {
+                    tool_call_id: tc.id.clone(),
+                    status,
+                    content: vec![ContentBlock::Text {
+                        text: result_text.clone(),
+                    }],
+                })
+                .await;
+
+            working_messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result_text,
+            }));
+        }
+
+        debug!(
+            session_id,
+            iteration,
+            tool_call_count = outcome.tool_calls.len(),
+            "completed tool iteration; looping"
+        );
+    }
+
+    warn!(
+        session_id,
+        max_iterations = MAX_TOOL_ITERATIONS,
+        "tool-calling loop hit iteration cap; emitting Complete"
+    );
+    let _ = event_sender
+        .send(CognitiveEvent::TokenChunk(format!(
+            "\n[stopped after {MAX_TOOL_ITERATIONS} tool rounds — model kept requesting more tools]"
+        )))
+        .await;
+    let _ = event_sender
+        .send(CognitiveEvent::Complete {
+            stop_reason: StopReason::MaxTokens,
+            usage: None,
+        })
+        .await;
+    Ok(())
+}
+
+/// Per-session MCP runtime: live clients keyed by server name + namespaced tool
+/// catalog. Empty when no MCP servers were declared (or all failed to spawn).
+struct SessionMcpState {
+    /// `server_name` → live `McpClient` over stdio.
+    clients: std::collections::HashMap<
+        String,
+        std::sync::Arc<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>,
+    >,
+    /// Discovered tools, namespaced as `server.tool_name`. Each entry stores the
+    /// tool's input schema for later OpenAI tool rendering.
+    tools: Vec<NamespacedTool>,
+}
+
+#[derive(Clone)]
+struct NamespacedTool {
+    /// `server.tool_name` — the name the model emits in `tool_calls`.
+    qualified_name: String,
+    /// Owning server name (for routing the call back to the right client).
+    server: String,
+    /// Original (unprefixed) MCP tool name.
+    bare_name: String,
+    /// Tool description for the model.
+    description: String,
+    /// JSON-schema for the tool's input.
+    schema: serde_json::Value,
+}
+
+/// Spawn each declared MCP server, run the `initialize` handshake, list its
+/// tools, and namespace them as `server.tool_name`. Failures are logged but
+/// don't fail the session — the model just doesn't see those tools.
+async fn setup_session_mcp(
+    session_id: &str,
+    mcp_servers: &[crate::types::McpServerConfig],
+) -> SessionMcpState {
+    use roko_agent::mcp::{McpClient, StdioTransport};
+
+    let mut state = SessionMcpState {
+        clients: std::collections::HashMap::new(),
+        tools: Vec::new(),
+    };
+    let mut used_tool_names = HashSet::new();
+
+    for server in mcp_servers {
+        let (command, args) = match &server.transport {
+            crate::types::McpTransport::Stdio { command, args } => (command.clone(), args.clone()),
+            crate::types::McpTransport::Http { url } => {
+                warn!(
+                    session_id,
+                    server = %server.name,
+                    url = %url,
+                    "skipping HTTP MCP server — only stdio transport is supported via session/new today",
+                );
+                continue;
+            }
+        };
+
+        let transport = match StdioTransport::spawn(&command, &args) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(session_id, server = %server.name, error = %e, "failed to spawn MCP server");
+                continue;
+            }
+        };
+
+        let client = McpClient::new(transport);
+        match tokio::time::timeout(std::time::Duration::from_secs(8), client.initialize()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                warn!(session_id, server = %server.name, error = %e, "MCP initialize failed");
+                continue;
+            }
+            Err(_) => {
+                warn!(session_id, server = %server.name, "MCP initialize timed out after 8s");
+                continue;
+            }
+        }
+
+        let listed = match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            client.list_tools(),
+        )
+        .await
+        {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                warn!(session_id, server = %server.name, error = %e, "tools/list failed");
+                continue;
+            }
+            Err(_) => {
+                warn!(session_id, server = %server.name, "tools/list timed out");
+                continue;
+            }
+        };
+
+        info!(
+            session_id,
+            server = %server.name,
+            tool_count = listed.len(),
+            "discovered MCP tools"
+        );
+        for t in &listed {
+            // OpenAI/Anthropic restrict tool names to `^[a-zA-Z0-9_-]{1,64}$` —
+            // no dots — so we sanitize when building the model-visible name.
+            // The original (`bare_name`) is preserved for the actual MCP call.
+            let sanitized_server = sanitize_tool_segment(&server.name);
+            let sanitized_tool = sanitize_tool_segment(&t.name);
+            let base_qualified = format!("{sanitized_server}_{sanitized_tool}");
+            let qualified = unique_tool_name(&base_qualified, &mut used_tool_names);
+            if qualified != base_qualified {
+                warn!(
+                    session_id,
+                    server = %server.name,
+                    tool = %t.name,
+                    base_name = %base_qualified,
+                    qualified_name = %qualified,
+                    "renamed MCP tool after sanitized name collision"
+                );
+            }
+            state.tools.push(NamespacedTool {
+                qualified_name: qualified,
+                server: server.name.clone(),
+                bare_name: t.name.clone(),
+                description: t
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("{} tool", t.name)),
+                schema: t
+                    .input_schema
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+            });
+        }
+        state
+            .clients
+            .insert(server.name.clone(), std::sync::Arc::new(client));
+    }
+
+    state
+}
+
+/// Replace any character that's not in OpenAI's tool-name alphabet (`a-z`,
+/// `A-Z`, `0-9`, `_`, `-`) with `_`. Truncates at 28 chars per segment so the
+/// final `server_tool` form stays under the 64-char tool name limit even
+/// when both segments are at max length.
+fn sanitize_tool_segment(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars().take(28) {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn unique_tool_name(base: &str, used: &mut HashSet<String>) -> String {
+    if used.insert(base.to_owned()) {
+        return base.to_owned();
+    }
+
+    for i in 2.. {
+        let suffix = format!("_{i}");
+        let max_base_len = 64usize.saturating_sub(suffix.len());
+        let mut candidate_base: String = base.chars().take(max_base_len).collect();
+        candidate_base.push_str(&suffix);
+        if used.insert(candidate_base.clone()) {
+            return candidate_base;
+        }
+    }
+
+    unreachable!("unbounded suffix search must produce a unique tool name")
+}
+
+/// Render namespaced tools into OpenAI's `tools: [...]` request shape. Returns
+/// `None` when there are no tools (the request omits the field entirely so the
+/// provider doesn't reject it).
+fn render_openai_tools(tools: &[NamespacedTool]) -> Option<serde_json::Value> {
+    if tools.is_empty() {
+        return None;
+    }
+    Some(serde_json::Value::Array(
+        tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.qualified_name,
+                        "description": t.description,
+                        "parameters": t.schema,
+                    }
+                })
+            })
+            .collect(),
+    ))
+}
+
+/// Dispatch a model-emitted `tool_calls[].function.name` to the matching MCP
+/// server and return its rendered text result. Returns `Err(text)` if the tool
+/// cannot be resolved or the underlying call fails — that error text is fed
+/// back to the model so it can recover.
+async fn dispatch_session_mcp_tool(
+    state: &SessionMcpState,
+    qualified_name: &str,
+    arguments: serde_json::Value,
+) -> std::result::Result<String, String> {
+    let tool = state
+        .tools
+        .iter()
+        .find(|t| t.qualified_name == qualified_name)
+        .ok_or_else(|| format!("unknown tool: {qualified_name}"))?;
+    let client = state
+        .clients
+        .get(&tool.server)
+        .ok_or_else(|| format!("MCP server '{}' is not connected", tool.server))?;
+
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client.call_tool(&tool.bare_name, arguments),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(format!("tool call failed: {e}")),
+        Err(_) => return Err(format!("tool call timed out after 60s: {qualified_name}")),
+    };
+
+    let mut text = String::new();
+    for block in &result.content {
+        if let Some(t) = &block.text {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(t);
+        }
+    }
+    if result.is_error {
+        Err(if text.is_empty() {
+            "tool reported an error".to_string()
+        } else {
+            text
+        })
+    } else if text.is_empty() {
+        Ok("(empty result)".to_string())
+    } else {
+        Ok(text)
+    }
+}
+
+/// Stream one chat completion request, emitting content/thinking deltas as
+/// `CognitiveEvent`s and accumulating any `tool_calls` the model produces.
+/// Does not emit `Complete` — the caller decides when the loop terminates.
+#[allow(clippy::too_many_arguments)]
+async fn stream_one_completion(
+    session_id: &str,
+    endpoint: &str,
+    api_key: &str,
+    extra_headers: &[(String, String)],
+    timeout_ms: u64,
+    slug: &str,
+    messages: &[serde_json::Value],
+    openai_tools: &Option<serde_json::Value>,
+    max_tokens: Option<u32>,
+    cancel_token: CancelToken,
+    event_sender: &mpsc::Sender<CognitiveEvent>,
+    client: &reqwest::Client,
+) -> std::result::Result<CompletionOutcome, String> {
+    let mut body = serde_json::json!({
+        "model": slug,
+        "messages": messages,
+        "stream": true,
+    });
+    if let Some(body_obj) = body.as_object_mut() {
+        if let Some(max_tokens) = max_tokens {
+            body_obj.insert("max_tokens".into(), serde_json::Value::from(max_tokens));
+        }
+        if let Some(tools) = openai_tools {
+            body_obj.insert("tools".into(), tools.clone());
+            body_obj.insert(
+                "tool_choice".into(),
+                serde_json::Value::String("auto".into()),
+            );
+        }
+    }
+
+    let mut request = client
+        .post(endpoint)
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .header("Content-Type", "application/json");
+    if !api_key.is_empty() {
+        request = request.header("Authorization", format!("Bearer {api_key}"));
+    }
+    for (k, v) in extra_headers {
+        request = request.header(k.as_str(), v.as_str());
+    }
+
+    let response = request
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("connection failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("provider returned {status}: {error_text}"));
+    }
+
+    let mut response = response;
+    let mut pending = Vec::new();
+    let mut content = String::new();
+    let mut tool_call_slots: Vec<PendingToolCall> = Vec::new();
+    let mut usage: Option<UsageInfo> = None;
+    let mut finish: Option<roko_agent::chat_types::FinishReason> = None;
+
+    loop {
+        if cancel_token.is_cancelled() {
+            return Ok(CompletionOutcome {
+                content,
+                tool_calls: tool_call_slots,
+                usage,
+                finish_reason: finish,
+            });
+        }
+
+        let chunk = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => return Ok(CompletionOutcome {
+                content,
+                tool_calls: tool_call_slots,
+                usage,
+                finish_reason: finish,
+            }),
+            r = response.chunk() => r,
+        };
         let chunk = match chunk {
             Ok(Some(c)) => c,
             Ok(None) => break,
@@ -720,81 +1204,111 @@ async fn run_openai_compat_cognitive_task(
                 break;
             }
         };
-
         pending.extend_from_slice(&chunk);
 
-        // Process complete lines.
         while let Some(newline_idx) = pending.iter().position(|b| *b == b'\n') {
             let line_bytes: Vec<u8> = pending.drain(..=newline_idx).collect();
             let line = String::from_utf8_lossy(&line_bytes);
             let line = line.trim_end_matches(['\r', '\n']);
-
             if let Some(stream_chunk) = parse_sse_line(line) {
-                match stream_chunk {
-                    StreamChunk::ContentDelta(text) => {
-                        if event_sender
-                            .send(CognitiveEvent::TokenChunk(text))
-                            .await
-                            .is_err()
-                        {
-                            return Ok(());
-                        }
-                    }
-                    StreamChunk::ReasoningDelta(text) => {
-                        if event_sender
-                            .send(CognitiveEvent::ThinkingChunk(text))
-                            .await
-                            .is_err()
-                        {
-                            return Ok(());
-                        }
-                    }
-                    StreamChunk::Usage(usage) => {
-                        total_input = u64::from(usage.input_tokens);
-                        total_output = u64::from(usage.output_tokens);
-                    }
-                    StreamChunk::Done(_) => {}
-                    StreamChunk::Error(e) => {
-                        warn!(session_id, error = %e, "stream error from provider");
-                    }
-                    StreamChunk::ToolCallDelta { .. } => {
-                        // Tool calls not yet surfaced via ACP for openai-compat.
-                    }
-                }
+                apply_stream_chunk(
+                    stream_chunk,
+                    &mut content,
+                    &mut tool_call_slots,
+                    &mut usage,
+                    &mut finish,
+                    event_sender,
+                )
+                .await;
             }
         }
     }
 
-    // Process remaining bytes.
     if !pending.is_empty() {
         let line = String::from_utf8_lossy(&pending);
         let line = line.trim_end_matches(['\r', '\n']);
-        if let Some(StreamChunk::ContentDelta(text)) = parse_sse_line(line) {
-            let _ = event_sender.send(CognitiveEvent::TokenChunk(text)).await;
+        if let Some(stream_chunk) = parse_sse_line(line) {
+            apply_stream_chunk(
+                stream_chunk,
+                &mut content,
+                &mut tool_call_slots,
+                &mut usage,
+                &mut finish,
+                event_sender,
+            )
+            .await;
         }
     }
 
-    let usage = if total_input > 0 || total_output > 0 {
-        Some(UsageInfo {
-            total_tokens: total_input + total_output,
-            input_tokens: total_input,
-            output_tokens: total_output,
-            thought_tokens: None,
-            cached_read_tokens: None,
-            cached_write_tokens: None,
-        })
-    } else {
-        None
-    };
+    Ok(CompletionOutcome {
+        content,
+        tool_calls: tool_call_slots
+            .into_iter()
+            .filter(|tc| !tc.id.is_empty() || !tc.name.is_empty() || !tc.arguments.is_empty())
+            .collect(),
+        usage,
+        finish_reason: finish,
+    })
+}
 
-    let _ = event_sender
-        .send(CognitiveEvent::Complete {
-            stop_reason: StopReason::EndTurn,
-            usage,
-        })
-        .await;
-
-    Ok(())
+/// Apply one decoded `StreamChunk`: stream content/thinking to the editor
+/// immediately, accumulate tool-call deltas in slot order, and capture
+/// usage / finish_reason for the caller to inspect.
+async fn apply_stream_chunk(
+    chunk: StreamChunk,
+    content: &mut String,
+    tool_call_slots: &mut Vec<PendingToolCall>,
+    usage: &mut Option<UsageInfo>,
+    finish: &mut Option<roko_agent::chat_types::FinishReason>,
+    event_sender: &mpsc::Sender<CognitiveEvent>,
+) {
+    match chunk {
+        StreamChunk::ContentDelta(text) => {
+            content.push_str(&text);
+            let _ = event_sender.send(CognitiveEvent::TokenChunk(text)).await;
+        }
+        StreamChunk::ReasoningDelta(text) => {
+            let _ = event_sender.send(CognitiveEvent::ThinkingChunk(text)).await;
+        }
+        StreamChunk::Usage(u) => {
+            *usage = Some(UsageInfo {
+                total_tokens: u64::from(u.input_tokens) + u64::from(u.output_tokens),
+                input_tokens: u64::from(u.input_tokens),
+                output_tokens: u64::from(u.output_tokens),
+                thought_tokens: None,
+                cached_read_tokens: None,
+                cached_write_tokens: None,
+            });
+        }
+        StreamChunk::Done(reason) => {
+            *finish = Some(reason);
+        }
+        StreamChunk::Error(e) => {
+            warn!(error = %e, "stream error from provider");
+        }
+        StreamChunk::ToolCallDelta {
+            index,
+            id_delta,
+            name_delta,
+            arguments_delta,
+        } => {
+            while tool_call_slots.len() <= index {
+                tool_call_slots.push(PendingToolCall::default());
+            }
+            let slot = &mut tool_call_slots[index];
+            if let Some(id) = id_delta {
+                if !id.is_empty() {
+                    slot.id = id;
+                }
+            }
+            if let Some(name) = name_delta {
+                if !name.is_empty() {
+                    slot.name = name;
+                }
+            }
+            slot.arguments.push_str(&arguments_delta);
+        }
+    }
 }
 
 // ── Slash command dispatch ───────────────────────────────────────────
@@ -1724,5 +2238,29 @@ mod tests {
         assert_eq!(tool_name_to_kind("Write"), ToolCallKind::Create);
         assert_eq!(tool_name_to_kind("Bash"), ToolCallKind::Terminal);
         assert_eq!(tool_name_to_kind("Read"), ToolCallKind::Other);
+    }
+
+    #[test]
+    fn mcp_tool_names_are_unique_after_sanitizing() {
+        let mut used = HashSet::new();
+
+        let first = unique_tool_name("nunchi_desktop_tiles_create", &mut used);
+        let second = unique_tool_name("nunchi_desktop_tiles_create", &mut used);
+
+        assert_eq!(first, "nunchi_desktop_tiles_create");
+        assert_eq!(second, "nunchi_desktop_tiles_create_2");
+    }
+
+    #[test]
+    fn mcp_tool_name_suffix_preserves_openai_length_limit() {
+        let mut used = HashSet::new();
+        let base = "a".repeat(64);
+
+        let first = unique_tool_name(&base, &mut used);
+        let second = unique_tool_name(&base, &mut used);
+
+        assert_eq!(first.len(), 64);
+        assert_eq!(second.len(), 64);
+        assert!(second.ends_with("_2"));
     }
 }
