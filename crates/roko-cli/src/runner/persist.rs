@@ -236,7 +236,14 @@ pub fn load_gate_thresholds(paths: &PersistPaths) -> Result<GateThresholds> {
 /// Atomically write `content` to `path` via a `.tmp` sibling.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
+    {
+        let mut file = fs::File::create(&tmp)
+            .with_context(|| format!("creating {}", tmp.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        file.sync_data()
+            .with_context(|| format!("syncing {}", tmp.display()))?;
+    }
     fs::rename(&tmp, path)
         .with_context(|| format!("renaming {} → {}", tmp.display(), path.display()))?;
     Ok(())
@@ -256,6 +263,8 @@ pub fn append_jsonl(path: &Path, value: &impl Serialize) -> Result<()> {
     file.write_all(line.as_bytes())
         .with_context(|| format!("appending to {}", path.display()))?;
     file.flush()?;
+    file.sync_data()
+        .with_context(|| format!("syncing {}", path.display()))?;
     Ok(())
 }
 
