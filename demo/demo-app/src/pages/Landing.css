@@ -16,8 +16,8 @@
   min-height: 100vh;
   overflow-x: hidden;
   background:
-    radial-gradient(ellipse 80% 60% at 50% 30%, rgba(184, 122, 148, .06) 0%, transparent 70%),
-    radial-gradient(ellipse 60% 80% at 30% 70%, rgba(136, 136, 168, .04) 0%, transparent 60%);
+    radial-gradient(ellipse 80% 60% at 50% 30%, color-mix(in srgb, var(--rose) 10%, transparent) 0%, transparent 70%),
+    radial-gradient(ellipse 60% 80% at 30% 70%, color-mix(in srgb, var(--dream) 6%, transparent) 0%, transparent 60%);
   background-size: 200% 200%;
   animation: bgShift 20s ease-in-out infinite;
 }
@@ -74,7 +74,7 @@
   height: 80px;
   border-radius: 50%;
   border: 1px solid var(--rose-dim);
-  opacity: 0.12;
+  opacity: 0.22;
   animation: floatA 14s ease-in-out infinite;
 }
 
@@ -85,7 +85,7 @@
   height: 120px;
   border-radius: 50%;
   border: 1px solid var(--dream);
-  opacity: 0.08;
+  opacity: 0.16;
   animation: floatB 18s ease-in-out infinite;
 }
 
@@ -95,7 +95,7 @@
   width: 60px;
   height: 1px;
   background: linear-gradient(to right, transparent, var(--rose-dim), transparent);
-  opacity: 0.15;
+  opacity: 0.25;
   animation: floatC 10s ease-in-out infinite;
 }
 
@@ -106,7 +106,7 @@
   height: 24px;
   border: 1px solid var(--bone-dim);
   transform: rotate(45deg);
-  opacity: 0.1;
+  opacity: 0.2;
   animation: floatD 16s ease-in-out infinite;
 }
 
@@ -116,7 +116,7 @@
   width: 40px;
   height: 1px;
   background: linear-gradient(to right, transparent, var(--dream), transparent);
-  opacity: 0.1;
+  opacity: 0.18;
   animation: floatC 12s ease-in-out infinite 2s;
 }
 
@@ -132,8 +132,8 @@
   padding: 48px 64px;
   background: radial-gradient(
     ellipse 120% 130% at 50% 50%,
-    rgba(10, 6, 12, 0.85) 0%,
-    rgba(10, 6, 12, 0.6) 40%,
+    rgba(10, 6, 12, 0.75) 0%,
+    rgba(10, 6, 12, 0.45) 40%,
     rgba(10, 6, 12, 0.0) 100%
   );
 }
@@ -170,10 +170,10 @@
   font-family: var(--display);
   font-style: italic;
   font-weight: 300;
-  font-size: clamp(48px, 7vw, 88px);
+  font-size: clamp(56px, 8vw, 96px);
   line-height: 0.9;
-  letter-spacing: -0.035em;
-  margin-bottom: 8px;
+  letter-spacing: -0.03em;
+  margin-bottom: 12px;
   background: linear-gradient(
     135deg,
     var(--rose-glow) 0%,
@@ -201,13 +201,13 @@
 }
 
 .landing-subtitle {
-  font-family: var(--display);
-  font-style: italic;
-  font-weight: 300;
-  font-size: 19px;
-  color: var(--text-dim);
-  letter-spacing: 0.08em;
-  margin-bottom: 40px;
+  font-family: var(--mono);
+  font-weight: 400;
+  font-size: var(--text-sm);
+  color: var(--text-soft);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  margin-bottom: 36px;
   opacity: 0;
   animation: subtitleIn 0.8s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
@@ -244,10 +244,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 16px 56px;
+  padding: 12px 40px;
   font-family: var(--mono);
-  font-size: 15px;
-  letter-spacing: 0.22em;
+  font-size: var(--text-sm);
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--rose-glow);
   text-decoration: none;
@@ -267,14 +267,14 @@
   color: var(--text-strong);
   border-color: var(--rose-glow);
   box-shadow:
-    0 0 24px rgba(220, 165, 189, 0.25),
-    0 0 48px rgba(220, 165, 189, 0.1);
-  background: rgba(220, 165, 189, 0.06);
+    0 0 24px color-mix(in srgb, var(--rose-glow) 25%, transparent),
+    0 0 48px color-mix(in srgb, var(--rose-glow) 10%, transparent);
+  background: color-mix(in srgb, var(--rose-glow) 6%, transparent);
 }
 
 .landing-cta:active {
   transform: scale(0.97);
-  box-shadow: 0 0 12px rgba(220, 165, 189, 0.15);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--rose-glow) 15%, transparent);
   transition-duration: 0.1s;
 }
 
@@ -287,9 +287,9 @@
   color: var(--bone-bright);
   border-color: var(--bone-bright);
   box-shadow:
-    0 0 24px rgba(228, 216, 176, 0.2),
-    0 0 48px rgba(228, 216, 176, 0.08);
-  background: rgba(228, 216, 176, 0.04);
+    0 0 24px color-mix(in srgb, var(--bone-bright) 20%, transparent),
+    0 0 48px color-mix(in srgb, var(--bone-bright) 8%, transparent);
+  background: color-mix(in srgb, var(--bone-bright) 4%, transparent);
 }
 
 /* ── loop ticker below CTAs ── */
@@ -302,10 +302,10 @@
 }
 
 .landing-loop-ticker .phase {
-  padding: 7px 11px;
+  padding: 6px 8px;
   font-family: var(--mono);
-  font-size: 16px;
-  letter-spacing: 0.08em;
+  font-size: var(--text-sm);
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-ghost);
   transition: color 0.6s ease, text-shadow 0.6s ease;
@@ -314,7 +314,7 @@
 
 .landing-loop-ticker .phase.active {
   color: var(--rose-glow);
-  text-shadow: 0 0 12px rgba(220, 165, 189, 0.4);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--rose-glow) 40%, transparent);
 }
 
 .landing-loop-ticker .phase.active::after {
@@ -326,7 +326,7 @@
   width: 12px;
   height: 1px;
   background: var(--rose-glow);
-  box-shadow: 0 0 6px rgba(220, 165, 189, 0.6);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rose-glow) 60%, transparent);
 }
 
 .landing-loop-ticker .sep {
@@ -340,7 +340,7 @@
 
 .landing-rule {
   position: relative;
-  width: 200px;
+  width: 240px;
   height: 1px;
   background: linear-gradient(
     to right,
@@ -350,8 +350,8 @@
     var(--rose-dim) 70%,
     transparent 100%
   );
-  opacity: 0.4;
-  margin-bottom: 32px;
+  opacity: 0.55;
+  margin-bottom: 28px;
 }
 
 .landing-rule::before,
@@ -370,10 +370,10 @@
 .landing-rule::after { right: -4px; }
 
 .landing-rule--lower {
-  width: 120px;
+  width: 140px;
   background: linear-gradient(to right, transparent, var(--rose-dim), transparent);
-  opacity: 0.25;
-  margin-bottom: 40px;
+  opacity: 0.35;
+  margin-bottom: 36px;
 }
 
 .landing-rule--lower::before,
@@ -398,7 +398,7 @@
   content: '';
   position: absolute;
   background: var(--rose-dim);
-  opacity: 0.2;
+  opacity: 0.35;
 }
 
 .landing-corner--tl { top: 20px; left: 20px; }
@@ -422,18 +422,47 @@
 .landing-footer-mark {
   position: absolute;
   z-index: 2;
-  bottom: 20px;
+  bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
   font-family: var(--mono);
-  font-size: 16px;
-  letter-spacing: 0.12em;
+  font-size: var(--text-sm);
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--text-ghost);
+  color: var(--text-dim);
   pointer-events: none;
   white-space: nowrap;
   opacity: 0;
   animation: fadeIn 2.5s cubic-bezier(0.16, 0.7, 0.18, 1) 0.8s forwards;
+}
+
+/* ── scroll chevron ── */
+
+@keyframes scrollBounce {
+  0%, 100% { transform: translateX(-50%) translateY(0); }
+  50% { transform: translateX(-50%) translateY(6px); }
+}
+
+.landing-scroll-hint {
+  position: absolute;
+  z-index: 2;
+  bottom: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  animation: fadeIn 2.5s cubic-bezier(0.16, 0.7, 0.18, 1) 1.5s forwards;
+  pointer-events: none;
+}
+
+.landing-scroll-hint::after {
+  content: '▾';
+  font-size: var(--text-lg);
+  color: var(--text-ghost);
+  animation: scrollBounce 2s ease-in-out infinite;
 }
 
 /* ── scroll sections below hero ── */
@@ -441,11 +470,11 @@
 .landing-sections {
   position: relative;
   z-index: 1;
-  padding-bottom: 120px;
+  padding-bottom: 64px;
 }
 
 .landing-section {
-  padding: var(--section-y, 200px) 0;
+  padding: 80px 0;
   max-width: var(--wrap, 1240px);
   margin: 0 auto;
   padding-left: var(--gutter, 64px);
@@ -487,15 +516,15 @@
 
 .landing-feature {
   background: var(--bg-void);
-  padding: 32px 28px;
+  padding: 20px 16px;
   border-left: 2px solid transparent;
   transition: background var(--duration-smooth), border-color var(--duration-smooth), box-shadow var(--duration-smooth);
 }
 
 .landing-feature:hover {
-  background: linear-gradient(135deg, rgba(184, 122, 148, .03), transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--rose) 3%, transparent), transparent);
   border-left-color: var(--rose-dim);
-  box-shadow: var(--glow-ambient, 0 0 12px rgba(220,165,189,.15));
+  box-shadow: var(--glow-ambient, 0 0 12px color-mix(in srgb, var(--rose-glow) 15%, transparent));
 }
 
 .landing-feature__label {
@@ -503,57 +532,62 @@
   font-size: var(--text-xs);
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--rose-glow);
-  margin-bottom: 12px;
-  font-weight: 400;
+  color: var(--rose);
+  margin-bottom: 8px;
+  font-weight: 500;
 }
 
 .landing-feature__title {
   font-family: var(--display);
   font-weight: 300;
+  font-style: italic;
   font-size: var(--text-xl);
   color: var(--text-strong);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   letter-spacing: -0.01em;
 }
 
 .landing-feature__desc {
-  font-family: var(--sans);
+  font-family: var(--mono);
   font-size: var(--text-sm);
   color: var(--text-soft);
-  line-height: 1.6;
+  line-height: 1.55;
+  letter-spacing: 0.01em;
 }
 
 /* ── quote section ── */
 
 .landing-quote {
-  border-left: 3px solid var(--rose-dim);
-  padding: 44px 48px;
-  background: linear-gradient(135deg, rgba(58, 32, 48, .08) 0%, transparent 40%);
-  margin-top: 40px;
+  border-left: 2px solid var(--rose-dim);
+  padding: 24px 28px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--rose-deep) 6%, transparent) 0%, transparent 40%);
+  border-radius: var(--radius-md);
+  margin-top: 24px;
 }
 
 .landing-quote__label {
   font-family: var(--mono);
-  font-size: var(--text-sm);
-  letter-spacing: 0.12em;
+  font-size: var(--text-xs);
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-dim);
-  margin-bottom: 18px;
+  margin-bottom: 14px;
+  font-weight: 500;
 }
 
 .landing-quote__text {
   font-family: var(--display);
   font-weight: 300;
   font-style: italic;
-  font-size: 28px;
-  line-height: 1.45;
-  color: var(--text-strong);
+  font-size: 20px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  letter-spacing: -0.008em;
 }
 
 .landing-quote__text em {
   color: var(--rose-glow);
-  text-shadow: 0 0 18px rgba(220, 165, 189, .35);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--rose-glow) 35%, transparent);
   font-style: italic;
 }
 
@@ -596,8 +630,8 @@
   }
 
   .landing-cta {
-    padding: 14px 40px;
-    font-size: 14px;
+    padding: 12px 32px;
+    font-size: var(--text-sm);
   }
 
   .landing-cta-row {

@@ -74,14 +74,14 @@
   --weight-semibold: 600;
   --weight-bold: 700;
 
-  /* ── type scale ── */
-  --text-xs: 12px;
-  --text-sm: 14px;
-  --text-md: 16px;
-  --text-lg: 18px;
-  --text-xl: 24px;
-  --text-2xl: 32px;
-  --text-3xl: 38px;
+  /* ── type scale (terminal-dense) ── */
+  --text-xs: 10px;
+  --text-sm: 11px;
+  --text-md: 12px;
+  --text-lg: 14px;
+  --text-xl: 18px;
+  --text-2xl: 24px;
+  --text-3xl: 32px;
 
   /* ── spacing scale (8px base) ── */
   --sp-1: 4px;

@@ -17,7 +17,7 @@
   width: 100%;
   border-collapse: collapse;
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .matrix-detail-task-col {
@@ -33,7 +33,7 @@
   font-weight: 400;
   text-transform: uppercase;
   letter-spacing: .06em;
-  font-size: 11px;
+  font-size: var(--text-sm);
   border-bottom: 1px solid var(--glass-border);
   border-right: 1px solid var(--glass-border);
 }
@@ -48,7 +48,7 @@
 
 .matrix-detail-lane-label {
   display: block;
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--text-dim);
   letter-spacing: .04em;
   text-transform: uppercase;
@@ -56,7 +56,7 @@
 
 .matrix-detail-lane-rate {
   display: inline-block;
-  font-size: 12px;
+  font-size: var(--text-md);
   font-weight: 500;
   margin-top: 2px;
 }
@@ -65,7 +65,7 @@
 
 .matrix-detail-lane-cost {
   display: inline-block;
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--bone-dim);
   margin-left: 6px;
 }
@@ -77,7 +77,7 @@
   background: var(--bg-void);
   padding: 4px 10px;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--text-md);
   border-bottom: 1px solid color-mix(in srgb, #fff 2%, transparent);
   border-right: 1px solid var(--glass-border);
   white-space: nowrap;

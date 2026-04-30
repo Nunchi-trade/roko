@@ -22,13 +22,13 @@
   cursor: pointer;
   text-align: left;
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: var(--text-lg);
   color: var(--text-primary);
 }
 
 .output-preview__arrow {
   color: var(--text-dim);
-  font-size: 15px;
+  font-size: var(--text-lg);
   width: 12px;
 }
 
@@ -46,7 +46,7 @@
   padding: 10px;
   background: rgba(0, 0, 0, 0.3);
   border-radius: 4px;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-primary);
   overflow: auto;
   max-height: 200px;

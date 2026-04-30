@@ -41,7 +41,7 @@ export function TaskCell({ task, onClick }: TaskCellProps) {
       <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {task.title}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-1)', marginTop: 'var(--sp-2)', flexWrap: 'wrap' }}>
         {task.tier && <Badge>{task.tier}</Badge>}
         {task.model && <Badge variant="info">{task.model}</Badge>}
         {task.cost != null && (
@@ -49,7 +49,7 @@ export function TaskCell({ task, onClick }: TaskCellProps) {
         )}
       </div>
       {task.gates && task.gates.length > 0 && (
-        <div style={{ marginTop: '8px' }}>
+        <div style={{ marginTop: 'var(--sp-2)' }}>
           <GateBar gates={task.gates} />
         </div>
       )}

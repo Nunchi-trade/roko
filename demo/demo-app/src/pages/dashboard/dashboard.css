@@ -116,13 +116,17 @@
 /* Pane badge (mono label inside a Pane badge= prop) */
 .dash-badge {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--text-sm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .dash-badge--glow {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--text-sm);
   font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   text-shadow: 0 0 16px rgba(220, 165, 189, 0.5);
 }
 
@@ -179,11 +183,11 @@
 }
 
 .dash-row-sep {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid var(--glass-border);
 }
 
 .dash-row-sep--light {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--glass-border);
 }
 
 /* Inline flex helpers */
@@ -209,50 +213,54 @@
 /* Tag / pill badges */
 .dash-tag {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   letter-spacing: 0.06em;
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   color: var(--text-soft);
+  text-transform: uppercase;
 }
 
 .dash-tag--rose {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   letter-spacing: 0.06em;
   padding: 3px 8px;
-  border-radius: 4px;
-  background: rgba(220, 165, 189, 0.06);
-  border: 1px solid rgba(220, 165, 189, 0.12);
-  color: var(--rose-dim);
+  border-radius: var(--radius-sm);
+  background: var(--rose-deep);
+  border: 1px solid var(--rose-dim);
+  color: var(--rose-bright);
+  text-transform: uppercase;
 }
 
 .dash-tag--sm {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-xs);
   letter-spacing: 0.04em;
   padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   color: var(--text-soft);
+  text-transform: uppercase;
 }
 
 /* Phase / status badges */
 .dash-status-badge {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   padding: 2px 8px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 /* Label text (tiny mono uppercase) */
 .dash-label-xs {
   font-family: var(--mono);
-  font-size: 0.5rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -260,15 +268,15 @@
 
 .dash-label-sm {
   font-family: var(--mono);
-  font-size: 0.55rem;
-  letter-spacing: 0.14em;
+  font-size: var(--text-sm);
+  letter-spacing: 0.10em;
   text-transform: uppercase;
   color: var(--text-soft);
 }
 
 .dash-label-sans {
   font-family: var(--sans);
-  font-size: 0.6rem;
+  font-size: var(--text-sm);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -276,7 +284,7 @@
 
 .dash-label-sans-md {
   font-family: var(--sans);
-  font-size: 0.75rem;
+  font-size: var(--text-md);
   letter-spacing: 0.01em;
   color: var(--text-primary);
   flex: 1;
@@ -286,13 +294,13 @@
 /* Value text */
 .dash-value {
   font-family: var(--mono);
-  font-size: 0.78rem;
+  font-size: var(--text-md);
   color: var(--text-strong);
 }
 
 .dash-value--glow {
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: var(--text-md);
   font-weight: 500;
   color: var(--rose-glow);
   text-shadow: 0 0 14px rgba(220, 165, 189, 0.6);
@@ -300,7 +308,7 @@
 
 .dash-value--bone {
   font-family: var(--mono);
-  font-size: 0.78rem;
+  font-size: var(--text-md);
   font-weight: 500;
   color: var(--bone-bright);
   min-width: 52px;
@@ -309,7 +317,7 @@
 
 .dash-value--lg {
   font-family: var(--mono);
-  font-size: 1.2rem;
+  font-size: var(--text-xl);
   font-weight: 600;
   line-height: 1;
 }
@@ -317,9 +325,10 @@
 /* Model / agent label */
 .dash-model-label {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   color: var(--text-dim);
   letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .dash-mono-label {
@@ -329,8 +338,8 @@
 
 /* Progress bar (track + fill) */
 .dash-bar-track {
-  height: 4px;
-  background: rgba(255, 255, 255, 0.04);
+  height: 3px;
+  background: var(--glass-border);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -350,8 +359,8 @@
 .dash-minibar {
   display: inline-block;
   width: 48px;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.04);
+  height: 3px;
+  background: var(--glass-border);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -364,25 +373,35 @@
 
 /* Cards / blocks */
 .dash-card {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 8px;
-  padding: 10px 12px;
+  background: var(--glass-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--cell-radius);
+  padding: var(--cell-padding);
   display: flex;
   flex-direction: column;
   gap: 6px;
-  backdrop-filter: blur(12px) saturate(180%);
+  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+}
+
+.dash-card:hover {
+  border-color: var(--border);
+  box-shadow: var(--glow-ambient);
 }
 
 .dash-card--lg {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 10px;
-  padding: 10px 12px;
+  background: var(--glass-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: var(--cell-padding);
   display: flex;
   flex-direction: column;
   gap: 6px;
-  backdrop-filter: blur(12px) saturate(180%);
+  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+}
+
+.dash-card--lg:hover {
+  border-color: var(--border);
+  box-shadow: var(--glow-ambient);
 }
 
 .dash-card__header {
@@ -402,7 +421,7 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  border-top: 1px solid var(--glass-border);
   padding-top: 8px;
 }
 
@@ -412,7 +431,7 @@
 }
 
 .dash-table-row:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--glass-bg);
 }
 
 /* Scrollable container */
@@ -426,7 +445,9 @@
   padding: 24px;
   color: var(--text-ghost);
   font-family: var(--mono);
-  font-size: 0.75rem;
+  font-size: var(--text-sm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   text-align: center;
 }
 
@@ -434,7 +455,9 @@
   padding: 36px;
   color: var(--text-ghost);
   font-family: var(--mono);
-  font-size: 0.75rem;
+  font-size: var(--text-sm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   text-align: center;
 }
 
@@ -450,7 +473,7 @@
 
 .dash-empty__label {
   font-family: var(--mono);
-  font-size: 0.7rem;
+  font-size: var(--text-sm);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-ghost);
@@ -458,37 +481,37 @@
 
 .dash-empty__cmd {
   font-family: var(--mono);
-  font-size: 0.65rem;
+  font-size: var(--text-xs);
   color: var(--rose-dim);
-  background: rgba(184,122,148,.06);
-  border: 1px solid rgba(184,122,148,.12);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-sm);
   padding: 4px 10px;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
 }
 
 /* Display font for names/labels */
 .dash-display-name {
-  font-family: var(--display);
-  font-size: 13px;
+  font-family: var(--mono);
+  font-size: var(--text-md);
   font-weight: 500;
   color: var(--text-strong);
-  letter-spacing: 0.01em;
+  letter-spacing: 0.04em;
 }
 
 .dash-display-label {
-  font-family: var(--display);
-  font-size: 15px;
+  font-family: var(--mono);
+  font-size: var(--text-md);
   font-weight: 500;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
 }
 
 .dash-display-sm {
-  font-family: var(--display);
-  font-size: 14px;
+  font-family: var(--mono);
+  font-size: var(--text-md);
   font-weight: 500;
   color: var(--text-primary);
-  letter-spacing: 0.01em;
+  letter-spacing: 0.04em;
 }
 
 /* Agent card list container */
@@ -520,7 +543,7 @@
   display: flex;
   gap: 16px;
   padding-top: 6px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  border-top: 1px solid var(--glass-border);
 }
 
 /* Flex wrap */
@@ -535,9 +558,10 @@
   display: flex;
   gap: 14px;
   font-family: var(--mono);
-  font-size: 0.6rem;
+  font-size: var(--text-xs);
   color: var(--text-dim);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 /* HUD overlays for canvas */
@@ -546,9 +570,10 @@
   top: 8px;
   left: 12px;
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--text-sm);
   color: var(--text-dim);
   letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .dash-hud-tr {
@@ -564,9 +589,10 @@
   bottom: 8px;
   left: 12px;
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   color: var(--text-dim);
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .dash-hud-legend {
@@ -574,15 +600,16 @@
   align-items: center;
   gap: 4px;
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--text-xs);
   color: var(--text-dim);
   letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 /* Integrity view specifics */
 .dash-hash-code {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   color: var(--text-dim);
   letter-spacing: 0.02em;
 }
@@ -599,31 +626,33 @@
 
 .dash-feature-label {
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: var(--text-md);
   color: var(--text-primary);
+  letter-spacing: 0.04em;
 }
 
 .dash-feature-desc {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   color: var(--text-ghost);
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
   margin-top: 2px;
 }
 
 .dash-feature-check {
   color: var(--success);
-  font-size: 14px;
+  font-size: var(--text-lg);
   margin-top: 1px;
   flex-shrink: 0;
 }
 
 .dash-feature-desc-block {
-  font-family: var(--display);
-  font-size: 15px;
-  font-weight: 300;
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  font-weight: 400;
   color: var(--text-soft);
-  line-height: 1.7;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
   margin: 0 0 4px;
 }
 
@@ -643,7 +672,7 @@
   width: 100%;
   border-collapse: collapse;
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: var(--text-md);
 }
 
 .dash-table--plain {
@@ -652,16 +681,16 @@
 }
 
 .dash-table thead tr {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .dash-table th {
   text-align: left;
-  padding: 8px 12px;
+  padding: 6px 12px;
   font-weight: 600;
   letter-spacing: 0.1em;
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
 }
 
@@ -677,7 +706,7 @@
 /* Entry label with ellipsis */
 .dash-ellipsis {
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: var(--text-md);
   color: var(--text-primary);
   flex: 1;
   overflow: hidden;
@@ -688,7 +717,7 @@
 /* Ghost text (secondary info) */
 .dash-ghost {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   color: var(--text-ghost);
   letter-spacing: 0.06em;
   flex-shrink: 0;
@@ -696,7 +725,7 @@
 
 .dash-bone {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   color: var(--bone-bright);
   flex-shrink: 0;
 }
@@ -720,13 +749,14 @@
 
 .dash-domain-pct {
   font-family: var(--mono);
-  font-size: 0.55rem;
+  font-size: var(--text-xs);
   color: var(--text-ghost);
+  letter-spacing: 0.04em;
 }
 
 .dash-domain-count {
   font-family: var(--mono);
-  font-size: 0.7rem;
+  font-size: var(--text-md);
   font-weight: 500;
   color: var(--text-primary);
 }
@@ -743,7 +773,7 @@
 /* Provider stat label */
 .dash-provider-label {
   font-family: var(--mono);
-  font-size: 0.5rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -751,7 +781,7 @@
 
 .dash-provider-value {
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: var(--text-md);
   font-weight: 500;
 }
 
@@ -822,10 +852,8 @@
 }
 
 .dash-card-hover:hover {
-  transform: translateY(-3px);
-  box-shadow:
-    0 8px 24px rgba(220,165,189,.08),
-    0 0 0 1px rgba(220,165,189,.15);
+  transform: translateY(-2px);
+  box-shadow: var(--glow-rose-soft);
 }
 
 /* ── Section header gradient underline ──────────────────────── */

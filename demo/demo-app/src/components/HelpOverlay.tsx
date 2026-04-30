@@ -78,7 +78,7 @@ export default function HelpOverlay({ open, onClose, shortcuts }: HelpOverlayPro
               {part === 'Escape' ? 'Esc' : part}
             </kbd>
             {i < parts.length - 1 && keys.includes(' ') && (
-              <span style={{ color: 'var(--text-ghost)', margin: '0 2px', fontSize: 10 }}>then</span>
+              <span style={{ color: 'var(--text-ghost)', margin: '0 2px', fontSize: 'var(--text-xs)' }}>then</span>
             )}
           </span>
         ))}

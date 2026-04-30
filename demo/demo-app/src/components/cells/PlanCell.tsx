@@ -42,7 +42,7 @@ export function PlanCell({ plan, onClick }: PlanCellProps) {
 
       {/* Progress bar */}
       <div style={{
-        marginTop: '8px',
+        marginTop: 'var(--sp-2)',
         height: '4px',
         borderRadius: '2px',
         background: 'var(--glass-bg)',
@@ -57,7 +57,7 @@ export function PlanCell({ plan, onClick }: PlanCellProps) {
         }} />
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-1)', marginTop: 'var(--sp-2)', flexWrap: 'wrap' }}>
         <Badge>{plan.completedCount}/{plan.taskCount} tasks</Badge>
         {plan.estimatedCost != null && (
           <Badge>{formatCost(plan.estimatedCost)}</Badge>

@@ -67,10 +67,10 @@ function confBand(c: number): string {
 /** Confidence-driven inline styles for the strip background. */
 function confStyle(c: number): React.CSSProperties {
   const style: React.CSSProperties = {
-    backgroundColor: `rgba(184,122,148, ${c * 0.08})`,
+    backgroundColor: `color-mix(in srgb, var(--rose) ${Math.round(c * 8)}%, transparent)`,
   };
   if (c > 0.8) {
-    style.boxShadow = `0 0 8px rgba(184,122,148, ${(c - 0.8) * 0.5})`;
+    style.boxShadow = `0 0 8px color-mix(in srgb, var(--rose) ${Math.round((c - 0.8) * 50)}%, transparent)`;
   }
   return style;
 }

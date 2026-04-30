@@ -70,7 +70,7 @@ function DomainChart({ entries, height = 140 }: { entries: KnowledgeEntry[]; hei
     const total = entries.length;
     const pad = { left: 80, right: 60, top: 8, bottom: 8 };
     const plotW = w - pad.left - pad.right;
-    const barH = Math.min(22, (h - pad.top - pad.bottom) / sorted.length - 4);
+    const barH = Math.min(14, (h - pad.top - pad.bottom) / sorted.length - 4);
 
     sorted.forEach(([domain, count], i) => {
       const y = pad.top + i * (barH + 4);
@@ -93,9 +93,9 @@ function DomainChart({ entries, height = 140 }: { entries: KnowledgeEntry[]; hei
 
       // Bar fill
       ctx.fillStyle = color;
-      ctx.globalAlpha = 0.7;
+      ctx.globalAlpha = 0.5;
       ctx.beginPath();
-      ctx.roundRect(pad.left, y, Math.max(barW, 3), barH, 3);
+      ctx.roundRect(pad.left, y, Math.max(barW, 3), barH, 2);
       ctx.fill();
       ctx.globalAlpha = 1;
 
@@ -166,7 +166,7 @@ function ConfidenceHistogram({ entries, height = 140 }: { entries: KnowledgeEntr
     const pad = { left: 36, right: 16, top: 8, bottom: 24 };
     const plotW = w - pad.left - pad.right;
     const plotH = h - pad.top - pad.bottom;
-    const barW = plotW / 10 - 3;
+    const barW = plotW / 10 - 4;
 
     // Grid
     ctx.strokeStyle = 'rgba(255,255,255,0.04)';

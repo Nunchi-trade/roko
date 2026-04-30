@@ -100,7 +100,7 @@
 
 .topnav .brand .brand-text {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-md);
   font-weight: 500;
   font-style: normal;
   letter-spacing: .18em;
@@ -166,7 +166,7 @@
   align-items: center;
   justify-content: center;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 400;
   letter-spacing: .12em;
   text-transform: uppercase;
@@ -250,7 +250,7 @@
   align-items: center;
   gap: 6px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 400;
   letter-spacing: .10em;
   text-transform: uppercase;

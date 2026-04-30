@@ -171,14 +171,14 @@ export function RunListTab({
                         {run.status.toUpperCase()}
                       </span>
                     </td>
-                    <td style={{ display: 'flex', gap: 4 }}>
+                    <td style={{ display: 'flex', gap: 'var(--sp-1)' }}>
                       <Link
                         to={`/bench/run/${run.id}`}
                         className="btn btn-sm"
                         style={{
                           textDecoration: 'none',
-                          fontSize: 13,
-                          padding: '2px 6px',
+                          fontSize: 'var(--text-sm)',
+                          padding: '2px var(--sp-1)',
                         }}
                       >
                         View
@@ -186,7 +186,7 @@ export function RunListTab({
                       <button
                         className="btn btn-sm"
                         onClick={() => exportRun(run.id)}
-                        style={{ fontSize: 13, padding: '2px 6px' }}
+                        style={{ fontSize: 'var(--text-sm)', padding: '2px var(--sp-1)' }}
                       >
                         Export
                       </button>

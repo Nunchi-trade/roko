@@ -1018,7 +1018,7 @@ export default function Demo() {
             />
           )}
 
-          {(showIntro || introDismissing) && scenario.id !== 'prd-pipeline' && (
+          {(showIntro || introDismissing) && (
             <ScenarioPreview
               scenario={scenario}
               onPlay={handlePlay}

@@ -16,7 +16,7 @@
 
 .efficiency-bar .mosaic .cell .k {
   margin-bottom: 6px;
-  font-size: 16px;
+  font-size: var(--text-xl);
   letter-spacing: .32em;
 }
 
@@ -26,7 +26,7 @@
 }
 
 .efficiency-bar .mosaic .cell .v.mono {
-  font-size: 18px;
+  font-size: var(--text-xl);
 }
 
 /* ── Fill bars grid (mirrors mosaic columns) ─────────────── */
@@ -186,7 +186,7 @@
   top: -16px;
   white-space: nowrap;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   color: var(--text-ghost);
   text-transform: uppercase;
@@ -270,7 +270,7 @@
 
 .ebar-breakdown-label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
   color: var(--text-dim);
   text-transform: uppercase;
@@ -281,7 +281,7 @@
 
 .ebar-breakdown-value {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-soft);
   text-align: right;
 }

@@ -40,7 +40,7 @@
 }
 .bench-page-title {
   font-family: var(--display);
-  font-size: 1.5rem;
+  font-size: var(--text-xl);
   color: var(--text-strong);
   font-weight: 300;
   font-style: italic;
@@ -48,13 +48,14 @@
 }
 .bench-page-sub {
   color: var(--text-soft);
-  font-size: var(--text-md);
-  font-family: var(--sans);
-  margin-top: 6px;
-  letter-spacing: .01em;
+  font-size: var(--text-sm);
+  font-family: var(--mono);
+  margin-top: var(--sp-1);
+  letter-spacing: .08em;
+  text-transform: uppercase;
 }
 .bench-hero-stats {
-  margin-top: 12px;
+  margin-top: var(--sp-3);
 }
 .bench-back {
   color: var(--text-dim);
@@ -80,10 +81,10 @@
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-dim);
-  padding: 6px 16px;
+  padding: 5px 14px;
   border-radius: var(--radius-md);
   font-family: var(--mono);
-  font-size: var(--text-md);
+  font-size: var(--text-sm);
   letter-spacing: .08em;
   text-transform: uppercase;
   cursor: pointer;
@@ -126,14 +127,15 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 60px 24px;
+  padding: var(--sp-10) var(--sp-6);
 }
 .bench-empty-text {
-  font-family: var(--display);
+  font-family: var(--mono);
   font-size: var(--text-md);
-  font-weight: 300;
+  font-weight: 400;
   color: var(--text-soft);
   line-height: 1.6;
+  letter-spacing: 0.04em;
 }
 
 /* ── Configure ── */
@@ -215,15 +217,16 @@
 }
 .card-label {
   color: var(--text-strong);
-  font-weight: 400;
+  font-weight: 500;
   font-size: var(--text-md);
   font-family: var(--mono);
+  letter-spacing: 0.04em;
 }
 .card-desc {
   color: var(--text-soft);
-  font-size: var(--text-md);
-  font-family: var(--sans);
-  letter-spacing: .01em;
+  font-size: var(--text-sm);
+  font-family: var(--mono);
+  letter-spacing: .04em;
 }
 
 .config-input {
@@ -312,7 +315,7 @@
 }
 
 .bench-run-btn {
-  margin-top: 24px;
+  margin-top: var(--sp-6);
 }
 .bench-run-btn .btn {
   position: relative;

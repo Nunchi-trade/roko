@@ -62,7 +62,7 @@ const activeLinkStyle: CSSProperties = {
   color: 'var(--rose-bright)',
   background: 'var(--rose-deep)',
   borderColor: 'var(--rose-dim)',
-  boxShadow: '0 0 12px rgba(220,165,189,.15)',
+  boxShadow: 'var(--glow-rose-soft)',
 };
 
 const bodyStyle: CSSProperties = {

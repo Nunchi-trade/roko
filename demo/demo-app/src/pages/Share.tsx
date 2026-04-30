@@ -20,7 +20,7 @@ function ShareSkeleton() {
     <div className="share-card-border share-skeleton">
       <div className="share-card-inner">
         {/* Head */}
-        <div style={{ padding: '6px var(--sp-3)', borderBottom: '1px solid var(--border)' }}>
+        <div style={{ padding: 'var(--sp-1) var(--sp-3)', borderBottom: '1px solid var(--border)' }}>
           <div className="share-skel-line title" />
         </div>
         {/* Prompt */}
@@ -93,7 +93,11 @@ export default function SharePage() {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    if (!token) return;
+    if (!token) {
+      setLoaded(true);
+      setError(true);
+      return;
+    }
     (async () => {
       try {
         const r = await get<Receipt>(`/api/share/${token}`);

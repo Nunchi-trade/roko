@@ -21,7 +21,7 @@
   inset: 0;
   background: radial-gradient(
     ellipse 60% 50% at 50% 40%,
-    rgba(184, 122, 148, 0.06) 0%,
+    color-mix(in srgb, var(--rose) 6%, transparent) 0%,
     transparent 70%
   );
   animation: shareBreathe 6s ease-in-out infinite;
@@ -61,12 +61,12 @@
   from {
     opacity: 0;
     transform: scale(0.88);
-    box-shadow: 0 0 0 rgba(184, 122, 148, 0);
+    box-shadow: 0 0 0 color-mix(in srgb, var(--rose) 0%, transparent);
   }
   to {
     opacity: 1;
     transform: scale(1);
-    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.3), 0 0 60px rgba(184, 122, 148, 0.12);
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.3), 0 0 60px color-mix(in srgb, var(--rose) 12%, transparent);
   }
 }
 
@@ -149,7 +149,7 @@
   height: 100%;
   border-radius: 2px;
   background: linear-gradient(90deg, var(--rose-dim), var(--rose-bright));
-  box-shadow: 0 0 8px rgba(184, 122, 148, 0.4);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 40%, transparent);
   transform-origin: left;
   animation: shareFillBar 1s cubic-bezier(0.22, 1, 0.36, 1) 0.6s both;
 }
@@ -170,7 +170,7 @@
   text-transform: uppercase;
   color: var(--rose-glow);
   border: 1px solid var(--rose-dim);
-  background: rgba(220, 165, 189, 0.04);
+  background: color-mix(in srgb, var(--rose-glow) 4%, transparent);
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: background 0.3s var(--ease), border-color 0.3s var(--ease), color 0.3s var(--ease), box-shadow 0.3s var(--ease), transform 0.3s var(--ease);
@@ -179,23 +179,23 @@
 }
 
 .share-copy-btn:hover {
-  background: rgba(220, 165, 189, 0.10);
+  background: color-mix(in srgb, var(--rose-glow) 10%, transparent);
   border-color: var(--rose-glow);
-  box-shadow: 0 0 24px rgba(220, 165, 189, 0.18);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--rose-glow) 18%, transparent);
   transform: translateY(-1px);
 }
 
 .share-copy-btn.copied {
   border-color: var(--success);
   color: var(--success);
-  background: rgba(138, 156, 134, 0.08);
+  background: color-mix(in srgb, var(--success) 8%, transparent);
 }
 
 .share-copy-btn.copied::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: rgba(138, 156, 134, 0.15);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
   animation: shareCopyFlash 0.4s ease-out;
   pointer-events: none;
 }
@@ -274,8 +274,8 @@
 
 .share-social-btn.link:hover {
   color: var(--bone-bright);
-  border-color: rgba(228, 216, 176, 0.3);
-  box-shadow: 0 0 16px rgba(228, 216, 176, 0.1);
+  border-color: color-mix(in srgb, var(--bone-bright) 30%, transparent);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--bone-bright) 10%, transparent);
 }
 
 /* Skeleton loading */
@@ -289,7 +289,7 @@
   background: linear-gradient(
     90deg,
     var(--surface) 25%,
-    rgba(184, 122, 148, 0.08) 50%,
+    color-mix(in srgb, var(--rose) 8%, transparent) 50%,
     var(--surface) 75%
   );
   background-size: 400% 100%;
@@ -366,11 +366,12 @@
 }
 
 .share-error-title {
-  font-family: var(--display);
-  font-style: italic;
-  font-size: 24px;
+  font-family: var(--mono);
+  font-size: var(--text-xl);
   color: var(--text-strong);
-  font-weight: 300;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   margin-bottom: 12px;
 }
 
@@ -398,9 +399,10 @@
 
 .share-prompt-text {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-md);
   color: var(--text-primary);
   line-height: 1.5;
+  letter-spacing: 0.02em;
 }
 
 /* Gate section */

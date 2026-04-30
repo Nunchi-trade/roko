@@ -148,11 +148,11 @@ function PhaseSparkline({
 
 function PhaseStat({ label, value }: { label: string; value: string | number }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--sp-2)' }}>
       <span
         style={{
           fontFamily: 'var(--mono)',
-          fontSize: '0.6rem',
+          fontSize: 'var(--text-xs)',
           letterSpacing: '0.06em',
           textTransform: 'uppercase',
           color: 'var(--text-dim)',
@@ -163,7 +163,7 @@ function PhaseStat({ label, value }: { label: string; value: string | number }) 
       <span
         style={{
           fontFamily: 'var(--mono)',
-          fontSize: '0.7rem',
+          fontSize: 'var(--text-sm)',
           fontWeight: 500,
           color: 'var(--text-primary)',
         }}
@@ -186,7 +186,7 @@ function PhaseArrow({ color }: { color: string }) {
         color,
         opacity: 0.55,
         fontFamily: 'var(--mono)',
-        fontSize: 14,
+        fontSize: 'var(--text-lg)',
         letterSpacing: '0.08em',
       }}
     >
@@ -224,22 +224,22 @@ export default function DreamPhaseViz() {
   const completionText = hasJournal ? `${completedPhases}/4 phases complete` : 'awaiting journal data';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-3)', width: '100%' }}>
       <div
         style={{
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'baseline',
-          gap: 12,
+          gap: 'var(--sp-3)',
           flexWrap: 'wrap',
-          padding: '0 4px',
+          padding: '0 var(--sp-1)',
         }}
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <span
             style={{
               fontFamily: 'var(--mono)',
-              fontSize: '0.6rem',
+              fontSize: 'var(--text-xs)',
               letterSpacing: '0.12em',
               textTransform: 'uppercase',
               color: 'var(--text-dim)',
@@ -249,8 +249,9 @@ export default function DreamPhaseViz() {
           </span>
           <span
             style={{
-              fontFamily: 'var(--display)',
-              fontSize: '0.95rem',
+              fontFamily: 'var(--mono)',
+              fontSize: 'var(--text-lg)',
+              fontWeight: 500,
               color: 'var(--text-primary)',
             }}
           >
@@ -262,7 +263,7 @@ export default function DreamPhaseViz() {
             style={{
               display: 'block',
               fontFamily: 'var(--mono)',
-              fontSize: '0.6rem',
+              fontSize: 'var(--text-xs)',
               letterSpacing: '0.12em',
               textTransform: 'uppercase',
               color: 'var(--text-dim)',
@@ -273,7 +274,7 @@ export default function DreamPhaseViz() {
           <span
             style={{
               fontFamily: 'var(--mono)',
-              fontSize: '0.65rem',
+              fontSize: 'var(--text-sm)',
               color: 'var(--text-ghost)',
             }}
           >
@@ -326,11 +327,12 @@ export default function DreamPhaseViz() {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <span
                       style={{
-                        fontFamily: 'var(--display)',
-                        fontSize: 13,
+                        fontFamily: 'var(--mono)',
+                        fontSize: 'var(--text-md)',
                         fontWeight: 500,
                         color: style.color,
-                        letterSpacing: '0.02em',
+                        letterSpacing: '0.04em',
+                        textTransform: 'uppercase',
                       }}
                     >
                       {phaseName}
@@ -338,7 +340,7 @@ export default function DreamPhaseViz() {
                     <span
                       style={{
                         fontFamily: 'var(--mono)',
-                        fontSize: '0.58rem',
+                        fontSize: 'var(--text-xs)',
                         letterSpacing: '0.08em',
                         textTransform: 'uppercase',
                         color: 'var(--text-dim)',
@@ -386,11 +388,11 @@ export default function DreamPhaseViz() {
         style={{
           display: 'flex',
           justifyContent: 'space-between',
-          gap: 12,
+          gap: 'var(--sp-3)',
           flexWrap: 'wrap',
-          padding: '0 4px',
+          padding: '0 var(--sp-1)',
           fontFamily: 'var(--mono)',
-          fontSize: '0.6rem',
+          fontSize: 'var(--text-xs)',
           letterSpacing: '0.08em',
           textTransform: 'uppercase',
           color: 'var(--text-dim)',

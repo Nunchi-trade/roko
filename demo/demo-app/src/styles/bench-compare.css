@@ -131,7 +131,7 @@
   top: 4px;
   right: 4px;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.1em;
   color: var(--status-success);
   background: color-mix(in srgb, var(--status-success) 10%, transparent);
@@ -167,7 +167,7 @@
 }
 
 .compare-winner-crown {
-  font-size: 22px;
+  font-size: var(--text-xl);
   color: var(--status-success);
   animation: winnerBounce 600ms var(--ease-snappy) both;
   animation-delay: 300ms;
@@ -323,7 +323,7 @@
 /* ── Compare: winner star in table header ── */
 .compare-th-winner {
   color: var(--status-success);
-  font-size: 12px;
+  font-size: var(--text-md);
   filter: drop-shadow(0 0 4px color-mix(in srgb, var(--status-success) 40%, transparent));
 }
 

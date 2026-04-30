@@ -73,7 +73,7 @@
 }
 .builder-title {
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: var(--text-lg);
   letter-spacing: .22em;
   text-transform: uppercase;
   color: var(--text-strong);
@@ -81,8 +81,9 @@
 }
 .builder-info {
   color: var(--text-soft);
-  font-size: 16px;
-  font-family: var(--sans);
+  font-size: var(--text-sm);
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
 }
 .builder-presets {
   display: flex;
@@ -95,10 +96,10 @@
   background: var(--glass-bg);
   color: var(--text-dim);
   border: 1px solid var(--glass-border);
-  padding: 4px 12px;
-  border-radius: 12px;
+  padding: 3px 10px;
+  border-radius: 10px;
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-xs);
   letter-spacing: .04em;
   cursor: pointer;
   transition: color 200ms var(--ease), border-color 200ms var(--ease), background 200ms var(--ease), transform 200ms var(--ease), box-shadow 200ms var(--ease);
@@ -124,9 +125,9 @@
 .preset-btn:hover {
   color: var(--bone);
   border-color: var(--bone-dim);
-  background: rgba(200,184,144,.06);
+  background: var(--glass-bg-hover);
   transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(200,184,144,.08);
+  box-shadow: var(--glow-bone-soft);
 }
 .preset-btn:active {
   transform: translateY(0) scale(0.97);
@@ -250,13 +251,13 @@
 }
 .file-placeholder {
   color: var(--text-dim);
-  font-size: 16px;
+  font-size: var(--text-sm);
   font-family: var(--mono);
   padding: 4px 0;
 }
 .file-entry {
   padding: 3px 4px;
-  font-size: 16px;
+  font-size: var(--text-sm);
   font-family: var(--mono);
   color: var(--text-soft);
   border-radius: 2px;
@@ -327,7 +328,7 @@
   padding: 4px 12px;
   border-radius: 4px;
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-sm);
   letter-spacing: .04em;
   cursor: pointer;
   transition: color 200ms var(--ease), border-color 200ms var(--ease), transform 200ms var(--ease), box-shadow 200ms var(--ease);
@@ -336,7 +337,7 @@
   color: var(--bone);
   border-color: var(--rose-dim);
   transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(220,165,189,.08);
+  box-shadow: var(--glow-rose-soft);
 }
 .model-select-btn:active {
   transform: translateY(0) scale(0.97);
@@ -362,7 +363,7 @@
 .model-group-label {
   padding: 4px 12px 2px;
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-xs);
   letter-spacing: .12em;
   text-transform: uppercase;
   color: var(--text-ghost);
@@ -375,7 +376,7 @@
   border: none;
   padding: 5px 12px;
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: var(--text-sm);
   color: var(--text-soft);
   cursor: pointer;
   transition: color 150ms var(--ease), background 150ms var(--ease);
@@ -437,7 +438,7 @@
 .prompt-marker {
   color: var(--rose-bright);
   font-weight: 600;
-  font-size: 16px;
+  font-size: var(--text-md);
 }
 .builder-input-wrap input {
   width: 100%;
@@ -447,7 +448,7 @@
   padding: 8px 12px;
   color: var(--bone);
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--text-md);
   outline: none;
   transition: border-color 200ms var(--ease);
 }
@@ -465,7 +466,7 @@
   padding: 8px 20px;
   border-radius: 4px;
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: var(--text-sm);
   letter-spacing: .12em;
   text-transform: uppercase;
   cursor: pointer;
@@ -474,7 +475,7 @@
   overflow: hidden;
 }
 .builder-input .btn-build:hover:not(:disabled) {
-  background: rgba(220,165,189,.08);
+  background: var(--glass-bg-hover);
   border-color: var(--rose-glow);
   box-shadow: 0 0 16px rgba(220,165,189,.12);
   transform: translateY(-1px);
@@ -558,7 +559,7 @@
   border-top: 1px solid var(--glass-border);
   display: flex;
   justify-content: space-between;
-  font-size: 15px;
+  font-size: var(--text-xs);
   font-family: var(--mono);
   color: var(--text-dim);
   letter-spacing: .04em;
@@ -608,13 +609,13 @@
   border: none;
   padding: 6px 12px;
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: var(--text-sm);
   color: var(--text-soft);
   cursor: pointer;
   transition: color 150ms var(--ease), background 150ms var(--ease);
 }
 .autocomplete-item:hover,
 .autocomplete-item.active {
-  background: rgba(170,112,136,.1);
+  background: var(--glass-bg-active);
   color: var(--bone);
 }

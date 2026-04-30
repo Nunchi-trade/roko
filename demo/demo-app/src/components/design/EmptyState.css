@@ -12,7 +12,7 @@
 
 .empty-state__message {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -21,14 +21,14 @@
 
 .empty-state__action {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-md);
   color: var(--text-ghost);
   text-align: center;
 }
 
 .empty-state__hint {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--text-ghost);
   font-style: italic;
   text-align: center;

@@ -374,7 +374,7 @@ export default function CostRace({ models, live = false, height = 260 }: CostRac
           background: 'rgba(16, 16, 18, 0.55)',
           color: liveStatus === 'LIVE' ? 'var(--success)' : 'var(--text-soft)',
           fontFamily: 'var(--mono)',
-          fontSize: 13,
+          fontSize: 'var(--text-md)',
           letterSpacing: '0.08em',
           pointerEvents: 'none',
           textTransform: 'uppercase',

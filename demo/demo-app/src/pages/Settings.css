@@ -16,9 +16,9 @@
 }
 
 @keyframes successPulse {
-  0%   { box-shadow: 0 0 0 0 rgba(138, 156, 134, .4); }
-  70%  { box-shadow: 0 0 0 8px rgba(138, 156, 134, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(138, 156, 134, 0); }
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 40%, transparent); }
+  70%  { box-shadow: 0 0 0 8px color-mix(in srgb, var(--success) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 0%, transparent); }
 }
 
 @keyframes toastSlideIn {
@@ -65,11 +65,12 @@
 }
 
 .settings-title {
-  font-family: var(--display);
-  font-weight: 300;
-  font-size: 1.8rem;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: var(--text-xl);
   color: var(--text-strong);
-  letter-spacing: -.01em;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .settings-subtitle {
@@ -136,7 +137,7 @@
 
 .settings-section h2 {
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   font-weight: 500;
   letter-spacing: .1em;
   text-transform: uppercase;
@@ -162,7 +163,7 @@
 .settings-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
 }
 
 .settings-table th {
@@ -185,7 +186,7 @@
 }
 
 .settings-table tr:hover td {
-  background: rgba(184, 122, 148, .03);
+  background: color-mix(in srgb, var(--rose) 3%, transparent);
 }
 
 .settings-table tr:last-child td {
@@ -194,7 +195,7 @@
 
 .settings-table .mono {
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
 }
 
 /* ── Form fields ── */
@@ -214,7 +215,7 @@
 .settings-field label {
   min-width: 130px;
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   letter-spacing: .04em;
   color: var(--text-dim);
   transition: color var(--duration-snap);
@@ -233,7 +234,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   color: var(--text-primary);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   font-family: var(--mono);
   transition:
     border-color var(--duration-smooth) var(--ease),
@@ -249,7 +250,7 @@
 .settings-field input[type="text"]:focus {
   outline: none;
   border-color: var(--rose);
-  box-shadow: 0 0 0 3px rgba(184, 122, 148, .15), 0 0 12px rgba(184, 122, 148, .1);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rose) 15%, transparent), 0 0 12px color-mix(in srgb, var(--rose) 10%, transparent);
 }
 
 /* ── Toggle switch (replaces checkbox) ── */
@@ -320,7 +321,7 @@ input[type="checkbox"]:checked + .toggle-track {
 input[type="checkbox"]:checked + .toggle-track::before {
   transform: translateX(18px);
   background: var(--rose-bright);
-  box-shadow: 0 0 8px rgba(216, 154, 178, .5);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 50%, transparent);
 }
 
 input[type="checkbox"]:active + .toggle-track::after {
@@ -335,7 +336,7 @@ input[type="checkbox"]:disabled + .toggle-track {
 input[type="checkbox"]:focus-visible + .toggle-track {
   outline: 1px solid var(--rose-dim);
   outline-offset: 2px;
-  box-shadow: 0 0 0 3px rgba(184, 122, 148, .15);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rose) 15%, transparent);
 }
 
 /* ── Actions bar ── */
@@ -353,7 +354,7 @@ input[type="checkbox"]:focus-visible + .toggle-track {
   padding: 0.6rem 1.4rem;
   border-radius: var(--radius-md);
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   letter-spacing: .06em;
   text-transform: uppercase;
   cursor: pointer;
@@ -385,7 +386,7 @@ input[type="checkbox"]:focus-visible + .toggle-track {
 
 .settings-actions button.primary:hover:not(:disabled) {
   background: var(--rose);
-  box-shadow: 0 0 16px rgba(184, 122, 148, .3);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--rose) 30%, transparent);
 }
 
 .settings-actions button.primary:active:not(:disabled) {
@@ -422,7 +423,7 @@ input[type="checkbox"]:focus-visible + .toggle-track {
   border-radius: var(--radius-lg);
   backdrop-filter: blur(8px);
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   letter-spacing: .06em;
   color: var(--success);
   z-index: var(--z-floating);
@@ -443,7 +444,7 @@ input[type="checkbox"]:focus-visible + .toggle-track {
 .settings-field.invalid input,
 .settings-field.invalid select {
   border-color: var(--status-error);
-  box-shadow: 0 0 0 2px rgba(251, 113, 133, .15);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--rose-bright) 15%, transparent);
   animation: shakeX 0.4s ease-in-out;
 }
 
@@ -459,7 +460,7 @@ input[type="checkbox"]:focus-visible + .toggle-track {
 .settings-empty {
   color: var(--text-dim);
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   font-style: italic;
   padding: var(--sp-2) 0;
 }
@@ -478,7 +479,7 @@ input[type="checkbox"]:focus-visible + .toggle-track {
   border: 1px solid var(--danger);
   border-radius: var(--radius-lg);
   color: var(--text-primary);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   animation: fadeInUp var(--duration-reveal) var(--ease) both;
   animation-delay: 60ms;
 }
@@ -499,7 +500,7 @@ input[type="checkbox"]:focus-visible + .toggle-track {
 .settings-actions button.reset-btn:hover:not(:disabled) {
   border-color: var(--danger);
   color: var(--danger);
-  background: rgba(204, 85, 85, .06);
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
 }
 
 .settings-actions button.reset-btn.shaking {
@@ -522,7 +523,7 @@ input[type="checkbox"]:focus-visible + .toggle-track {
 }
 
 .settings-section-chevron {
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   color: var(--text-dim);
   transition: transform var(--duration-smooth) var(--ease);
 }

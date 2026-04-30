@@ -13,10 +13,10 @@
 }
 
 /* ── sizes ── */
-.ascii-label--xs { font-size: 10px; letter-spacing: 0.14em; }
-.ascii-label--sm { font-size: 11px; letter-spacing: 0.12em; }
-.ascii-label--md { font-size: 12px; letter-spacing: 0.10em; }
-.ascii-label--lg { font-size: 14px; letter-spacing: 0.08em; }
+.ascii-label--xs { font-size: var(--text-xs); letter-spacing: 0.14em; }
+.ascii-label--sm { font-size: var(--text-sm); letter-spacing: 0.12em; }
+.ascii-label--md { font-size: var(--text-md); letter-spacing: 0.10em; }
+.ascii-label--lg { font-size: var(--text-lg); letter-spacing: 0.08em; }
 
 /* ── frame delimiters ── */
 .ascii-label__frame {

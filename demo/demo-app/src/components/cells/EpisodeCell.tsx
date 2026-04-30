@@ -37,7 +37,7 @@ export function EpisodeCell({ episode, onClick }: EpisodeCellProps) {
       {/* Hash */}
       <div style={{
         fontFamily: 'var(--mono)',
-        fontSize: '12px',
+        fontSize: 'var(--text-md)',
         color: 'var(--bone)',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
@@ -46,7 +46,7 @@ export function EpisodeCell({ episode, onClick }: EpisodeCellProps) {
         {episode.hash.slice(0, 8)}
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-1)', marginTop: 'var(--sp-2)', flexWrap: 'wrap' }}>
         <Badge>{episode.agent}</Badge>
         <Badge variant={resultVariant}>{episode.result}</Badge>
         {episode.cost != null && <Badge>{formatCost(episode.cost)}</Badge>}

@@ -165,6 +165,9 @@ export default function Landing() {
           </div>
         </div>
 
+        {/* Scroll hint */}
+        <div className="landing-scroll-hint" />
+
         {/* Footer mark */}
         <div className="landing-footer-mark">
           18 crates &middot; one universal loop
@@ -179,7 +182,7 @@ export default function Landing() {
             ref={featuresReveal.ref}
             className={`landing-reveal ${featuresReveal.visible ? 'visible' : ''}`}
           >
-            <div className="stag" style={{ marginBottom: 32 }}>
+            <div className="stag" style={{ marginBottom: 'var(--sp-5)' }}>
               <span className="num">01</span>
               <span className="label">Architecture</span>
             </div>

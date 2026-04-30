@@ -40,7 +40,7 @@ export function AgentCell({ agent, onClick }: AgentCellProps) {
       {agent.role && (
         <div style={{
           fontFamily: 'var(--mono)',
-          fontSize: '11px',
+          fontSize: 'var(--text-sm)',
           textTransform: 'uppercase',
           letterSpacing: '0.08em',
           color: 'var(--text-dim)',
@@ -49,7 +49,7 @@ export function AgentCell({ agent, onClick }: AgentCellProps) {
           {agent.role}
         </div>
       )}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-1)', marginTop: 'var(--sp-2)', flexWrap: 'wrap' }}>
         {agent.taskCount != null && (
           <Badge>{agent.taskCount} task{agent.taskCount !== 1 ? 's' : ''}</Badge>
         )}

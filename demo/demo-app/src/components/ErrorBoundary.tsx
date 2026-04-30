@@ -106,7 +106,7 @@ export default class ErrorBoundary extends Component<Props, State> {
 
           {/* typewriter message */}
           <div style={{
-            fontSize: 14, letterSpacing: '.12em', marginTop: 16, marginBottom: 16,
+            fontSize: 'var(--text-lg)', letterSpacing: '.12em', marginTop: 'var(--sp-4)', marginBottom: 'var(--sp-4)',
             overflow: 'hidden', whiteSpace: 'nowrap',
             borderRight: '2px solid var(--status-error, #fb7185)',
             animation: 'eb-type 1.2s 0.5s steps(40, end) both, eb-blink 0.6s 0.5s step-end 4',
@@ -118,8 +118,8 @@ export default class ErrorBoundary extends Component<Props, State> {
             ref={this.btnRef}
             onClick={this.handleRetry}
             style={{
-              padding: '8px 20px',
-              fontSize: 13,
+              padding: 'var(--sp-2) var(--sp-5)',
+              fontSize: 'var(--text-md)',
               letterSpacing: '.2em',
               textTransform: 'uppercase',
               color: 'var(--status-error, #fb7185)',

@@ -684,9 +684,9 @@ export default function Bench() {
                                 {' '}{run.status.toUpperCase()}
                               </span>
                             </td>
-                            <td style={{ display: 'flex', gap: 4 }}>
-                              <Link to={`/bench/run/${run.id}`} className="btn btn-sm" style={{ textDecoration: 'none', fontSize: 13, padding: '2px 6px' }}>View</Link>
-                              <button className="btn btn-sm" onClick={() => exportRun(run.id)} style={{ fontSize: 13, padding: '2px 6px' }}>Export</button>
+                            <td style={{ display: 'flex', gap: 'var(--sp-1)' }}>
+                              <Link to={`/bench/run/${run.id}`} className="btn btn-sm" style={{ textDecoration: 'none', fontSize: 'var(--text-sm)', padding: '2px var(--sp-1)' }}>View</Link>
+                              <button className="btn btn-sm" onClick={() => exportRun(run.id)} style={{ fontSize: 'var(--text-sm)', padding: '2px var(--sp-1)' }}>Export</button>
                             </td>
                           </tr>
                         ))}

@@ -61,9 +61,9 @@ export default function Curtain() {
       {/* Cycling text */}
       <div
         style={{
-          marginTop: 24,
+          marginTop: 'var(--sp-6)',
           fontFamily: 'var(--mono)',
-          fontSize: 14,
+          fontSize: 'var(--text-lg)',
           letterSpacing: '.22em',
           textTransform: 'uppercase',
           color: 'var(--text-dim)',

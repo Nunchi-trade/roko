@@ -51,7 +51,7 @@ export function BenchRunCell({ run, onClick }: BenchRunCellProps) {
       </div>
 
       {/* Model badge */}
-      <div style={{ marginTop: '6px' }}>
+      <div style={{ marginTop: 'var(--sp-1)' }}>
         <Badge variant="info">{run.model}</Badge>
       </div>
 
@@ -60,12 +60,12 @@ export function BenchRunCell({ run, onClick }: BenchRunCellProps) {
         display: 'flex',
         alignItems: 'baseline',
         justifyContent: 'space-between',
-        marginTop: '10px',
+        marginTop: 'var(--sp-2)',
       }}>
         <span style={{
-          fontFamily: 'var(--display)',
-          fontSize: '24px',
-          fontWeight: 300,
+          fontFamily: 'var(--mono)',
+          fontSize: 'var(--text-xl)',
+          fontWeight: 500,
           color: 'var(--bone-bright)',
           letterSpacing: '-0.01em',
           lineHeight: 1,

@@ -151,7 +151,7 @@ export default function TaskTable({ results, showDifficulty = true, showOutputPr
                   </td>
                 </AnimatedRow>
                 <ExpandableDetail open={expandedId === r.task_id} colSpan={colCount}>
-                  <div className="task-detail" style={{ padding: '12px' }}>
+                  <div className="task-detail" style={{ padding: 'var(--sp-3)' }}>
                     <div className="task-detail-grid">
                       <div><span className="detail-label">Tokens in:</span> {r.tokens_in.toLocaleString()}</div>
                       <div><span className="detail-label">Tokens out:</span> {r.tokens_out.toLocaleString()}</div>

@@ -49,7 +49,7 @@ export function OutputPreview({ results }: OutputPreviewProps) {
             <span className="output-preview__arrow">
               {expandedIds.has(r.task_id) ? '\u25BC' : '\u25B6'}
             </span>
-            <span className={`status-badge status-${r.status}`} style={{ fontSize: 15 }}>
+            <span className={`status-badge status-${r.status}`} style={{ fontSize: 'var(--text-sm)' }}>
               {r.status.toUpperCase()}
             </span>
             <span className="output-preview__task-name">{r.task_name}</span>
@@ -57,7 +57,7 @@ export function OutputPreview({ results }: OutputPreviewProps) {
           {expandedIds.has(r.task_id) && (
             <div className="output-preview__body">
               {r.error && (
-                <div className="task-error" style={{ marginTop: 8 }}>{r.error}</div>
+                <div className="task-error" style={{ marginTop: 'var(--sp-2)' }}>{r.error}</div>
               )}
               {r.output_preview && (
                 <pre className="output-preview__code">

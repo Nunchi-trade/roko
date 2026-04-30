@@ -81,7 +81,7 @@
 }
 .output-preview-chevron {
   color: var(--text-dim);
-  font-size: 15px;
+  font-size: var(--text-sm);
   width: 12px;
   display: inline-block;
   transition: transform var(--duration-smooth) var(--ease);
@@ -121,7 +121,7 @@
   padding: var(--sp-3);
   background: color-mix(in srgb, black 30%, transparent);
   border-radius: var(--radius-sm);
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-primary);
   overflow: auto;
   max-height: 200px;
@@ -202,5 +202,5 @@
 
 /* Status badge font-size override */
 .status-badge-lg {
-  font-size: 15px;
+  font-size: var(--text-md);
 }

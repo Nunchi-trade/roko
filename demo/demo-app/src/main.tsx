@@ -110,6 +110,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="bench/run/:id" element={<BenchRunDetail />} />
               <Route path="bench/compare" element={<BenchCompare />} />
               <Route path="share/:token" element={<SharePage />} />
+              <Route path="share" element={<SharePage />} />
             </Route>
           </Routes>
         </Suspense>
