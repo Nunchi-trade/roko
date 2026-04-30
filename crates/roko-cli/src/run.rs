@@ -129,6 +129,18 @@ struct DispatchOutcome {
     model_selection: Option<EffectiveModelSelection>,
 }
 
+/// Reject `--share` for engines that do not support it.
+pub fn ensure_share_supported(is_legacy_engine: bool, share: bool) -> Result<()> {
+    if share && !is_legacy_engine {
+        return Err(anyhow!(
+            "--share is not yet supported with the v2 engine. \
+             Use --engine legacy for share functionality, or omit --share."
+        ));
+    }
+
+    Ok(())
+}
+
 /// Write a RunReport to `.roko/shared/{token}.json` and return the token.
 #[cfg(feature = "legacy-orchestrate")]
 pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow::Result<String> {
@@ -3290,6 +3302,18 @@ mod tests {
                     && role == "implementer"
                     && model == "share-mock-model"
         )));
+    }
+
+    #[test]
+    fn share_requires_legacy_engine() {
+        assert!(ensure_share_supported(true, true).is_ok());
+        assert!(ensure_share_supported(true, false).is_ok());
+
+        let err = ensure_share_supported(false, true).expect_err("v2 share should error");
+        assert!(
+            err.to_string()
+                .contains("--share is not yet supported with the v2 engine")
+        );
     }
 
     #[cfg(feature = "legacy-orchestrate")]

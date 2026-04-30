@@ -228,6 +228,9 @@ pub(crate) async fn cmd_run(
     provider: Option<String>,
     max_retries: Option<u32>,
 ) -> Result<i32> {
+    let is_legacy_engine = matches!(engine, crate::EngineVariant::Legacy);
+    roko_cli::run::ensure_share_supported(is_legacy_engine, share)?;
+
     // Expose --provider as the ROKO_PROVIDER env var so that apply_env()
     // picks it up during config resolution (same mechanism as the env var).
     #[allow(unsafe_code)]
