@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::state_hub::StateHub;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use roko_core::{AgentRole, PhaseKind, PlanPhase, TaskCategory, TaskComplexityBand};
 use roko_learn::contextual_bandit::{
     ActionSafetyBounds, BanditContextFeatures, BanditDecisionKind,
@@ -22,7 +22,7 @@ use roko_learn::runtime_feedback::{
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
-    RecoveryEngine,
+    RecoveryEngine, format_branch_name,
 };
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -2334,7 +2334,7 @@ async fn emit_feedback(
     tui: &TuiBridge,
     config: &RunConfig,
 ) {
-    let episode = build_episode(completion, state);
+    let episode = build_episode(completion, state, config, workdir);
     let efficiency_event = build_efficiency_event(completion, state);
 
     if let Err(err) = persist::append_jsonl(&paths.episodes_jsonl, &episode) {
@@ -2354,7 +2354,7 @@ async fn emit_feedback(
 
     if let Some(runtime) = learning_runtime {
         let mut input = CompletedRunInput::from_episode(episode.clone());
-        input.provider = Some(runtime_backend(state));
+        input.provider = Some(episode.backend.clone());
         if let Err(err) = runtime
             .record_runner_event(RunnerFeedbackEvent::CompletedRun {
                 input: Box::new(input),
@@ -2793,7 +2793,12 @@ fn register_agent_feed(
 }
 
 /// Build the canonical episode for a completed agent+gate cycle.
-fn build_episode(completion: &GateCompletion, state: &RunState) -> Episode {
+fn build_episode(
+    completion: &GateCompletion,
+    state: &RunState,
+    config: &RunConfig,
+    workdir: &Path,
+) -> Episode {
     let agent_id = format!("{}/{}", completion.plan_id, completion.task_id);
     let gate_verdicts: Vec<GateVerdict> = completion
         .verdicts
@@ -2808,10 +2813,24 @@ fn build_episode(completion: &GateCompletion, state: &RunState) -> Episode {
         .collect();
 
     let task_wall_ms = state.task_elapsed_ms();
+    let model = episode_model(state, config);
+    let provider = runtime_backend(state);
+    let task_branch = format_branch_name(&completion.plan_id);
+    let files_changed = match git_diff_names(workdir, &task_branch) {
+        Ok(files) => files,
+        Err(err) => {
+            debug!(
+                error = %err,
+                branch = %task_branch,
+                "could not get files changed"
+            );
+            Vec::new()
+        }
+    };
     let mut ep = Episode::new(&agent_id, &completion.task_id);
     ep.kind = "runner_task_gate".to_string();
-    ep.model = state.agent_model.clone();
-    ep.backend = runtime_backend(state);
+    ep.model = model.clone();
+    ep.backend = provider.clone();
     ep.agent_template = "implementer".to_string();
     ep.trigger_kind = format!("{:?}", completion.kind).to_ascii_lowercase();
     ep.duration_secs = task_wall_ms as f64 / 1000.0;
@@ -2834,6 +2853,16 @@ fn build_episode(completion: &GateCompletion, state: &RunState) -> Episode {
     ep.extra.insert(
         "run_id".to_string(),
         serde_json::Value::String(state.run_id().to_string()),
+    );
+    ep.extra
+        .insert("model".to_string(), serde_json::Value::String(model));
+    ep.extra.insert(
+        "provider".to_string(),
+        serde_json::Value::String(provider),
+    );
+    ep.extra.insert(
+        "files_changed".to_string(),
+        serde_json::json!(files_changed),
     );
     ep.extra.insert(
         "iteration".to_string(),
@@ -2954,6 +2983,86 @@ fn runtime_backend(state: &RunState) -> String {
         "unknown".to_string()
     } else {
         state.agent_provider.clone()
+    }
+}
+
+fn episode_model(state: &RunState, config: &RunConfig) -> String {
+    if state.agent_model.trim().is_empty() {
+        if config.model.trim().is_empty() {
+            "unknown".to_string()
+        } else {
+            config.model.clone()
+        }
+    } else {
+        state.agent_model.clone()
+    }
+}
+
+fn git_diff_names(workdir: &Path, branch: &str) -> Result<Vec<String>> {
+    fn run_diff(workdir: &Path, args: &[&str]) -> Result<Vec<String>> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workdir)
+            .output()
+            .with_context(|| format!("running git {}", args.join(" ")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let details = if stderr.is_empty() { stdout } else { stderr };
+            if details.is_empty() {
+                return Err(anyhow::anyhow!("git {} failed", args.join(" ")));
+            }
+            return Err(anyhow::anyhow!("git {} failed: {}", args.join(" "), details));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
+    }
+
+    let mut files = Vec::new();
+    let mut saw_success = false;
+    let mut first_err: Option<anyhow::Error> = None;
+    let branch = branch.trim();
+
+    if !branch.is_empty() {
+        match run_diff(workdir, &["diff", "--name-only", "main", branch]) {
+            Ok(names) => {
+                saw_success = true;
+                for name in names {
+                    if !files.iter().any(|existing| existing == &name) {
+                        files.push(name);
+                    }
+                }
+            }
+            Err(err) => {
+                first_err = Some(err);
+            }
+        }
+    }
+
+    match run_diff(workdir, &["diff", "--name-only", "HEAD"]) {
+        Ok(names) => {
+            saw_success = true;
+            for name in names {
+                if !files.iter().any(|existing| existing == &name) {
+                    files.push(name);
+                }
+            }
+        }
+        Err(err) => {
+            if !saw_success {
+                first_err = Some(err);
+            }
+        }
+    }
+
+    if saw_success {
+        Ok(files)
+    } else {
+        Err(first_err.unwrap_or_else(|| anyhow::anyhow!("git diff produced no results")))
     }
 }
 
