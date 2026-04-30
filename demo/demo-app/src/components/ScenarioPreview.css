@@ -17,7 +17,7 @@
     color-mix(in srgb, var(--rose) 10%, transparent) 0%,
     transparent 70%
   );
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px) saturate(180%);
   animation: fadeIn 400ms var(--ease) both;
 }
 

@@ -602,7 +602,7 @@
   padding: 8px 12px;
   z-index: var(--z-floating);
   pointer-events: none;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px) saturate(180%);
   white-space: nowrap;
   flex-direction: column;
   gap: 3px;

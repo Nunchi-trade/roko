@@ -9,7 +9,7 @@
   padding: 0 var(--sp-3);
   gap: 12px;
   background: color-mix(in srgb, #fff 2.5%, transparent);
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px) saturate(180%);
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
   font-family: var(--mono);

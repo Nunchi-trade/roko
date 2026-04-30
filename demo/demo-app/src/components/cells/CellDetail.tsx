@@ -1,4 +1,6 @@
 import type { ReactNode } from 'react';
+import { motion } from 'motion/react';
+import { slideRight } from '../../design/motion-tokens';
 import './CellDetail.css';
 
 /* ── Sub-components ── */
@@ -48,7 +50,12 @@ interface CellDetailProps {
 
 function CellDetail({ title, subtitle, icon, status, actions, children }: CellDetailProps) {
   return (
-    <div className="cell-detail">
+    <motion.aside
+      className="cell-detail"
+      initial={slideRight.initial}
+      animate={slideRight.animate}
+      exit={slideRight.exit}
+    >
       <div className="cell-detail__header">
         {icon && <div className="cell-detail__icon">{icon}</div>}
         <div className="cell-detail__titles">
@@ -75,7 +82,7 @@ function CellDetail({ title, subtitle, icon, status, actions, children }: CellDe
         )}
       </div>
       <div className="cell-detail__body">{children}</div>
-    </div>
+    </motion.aside>
   );
 }
 

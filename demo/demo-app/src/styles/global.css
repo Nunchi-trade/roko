@@ -697,7 +697,7 @@ section + section::before {
   cursor: pointer;
   transition: background .3s var(--ease), border-color .3s var(--ease), box-shadow .3s var(--ease), transform .3s var(--ease), color .3s var(--ease);
   font-weight: 400;
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px) saturate(180%);
 }
 
 .btn:hover {
@@ -748,7 +748,7 @@ section + section::before {
   background: rgba(6, 6, 8, .72);
   padding: 8px 14px;
   border: 1px solid rgba(204, 144, 168, .18);
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px) saturate(180%);
   border-radius: 1px;
   font-family: var(--mono);
   font-size: var(--text-sm);
@@ -813,7 +813,7 @@ section + section::before {
   color: var(--text-soft);
   z-index: 100;
   pointer-events: none;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px) saturate(180%);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -824,7 +824,7 @@ section + section::before {
 .dim { color: var(--text-dim) }
 .rose { color: var(--rose-glow) }
 .mono { font-family: var(--mono) }
-.label-caps { letter-spacing: 0.08em; text-transform: uppercase; font-size: 11px; }
+.label-caps { letter-spacing: 0.08em; text-transform: uppercase; font-size: var(--text-sm); }
 
 .glass-card {
   background: var(--glass-bg);

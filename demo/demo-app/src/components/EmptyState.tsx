@@ -1,3 +1,5 @@
+import { motion } from 'motion/react';
+import { fadeUp } from '../design/motion-tokens';
 import './EmptyState.css';
 
 interface EmptyStateProps {
@@ -10,7 +12,12 @@ export default function EmptyState({
   action,
 }: EmptyStateProps) {
   return (
-    <div className="empty-state">
+    <motion.div
+      className="empty-state"
+      initial={fadeUp.initial}
+      animate={fadeUp.animate}
+      exit={fadeUp.exit}
+    >
       <div className="empty-state__icon" />
       <div className="empty-state__title">{title}</div>
       {action && (
@@ -18,6 +25,6 @@ export default function EmptyState({
           {action.label}
         </button>
       )}
-    </div>
+    </motion.div>
   );
 }

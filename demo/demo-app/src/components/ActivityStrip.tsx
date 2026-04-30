@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import type { PipelineStage } from '../lib/pipeline-types';
+import { scaleIn } from '../design/motion-tokens';
 import './ActivityStrip.css';
 
 export interface ActivityStripProps {
@@ -69,9 +71,17 @@ export default function ActivityStrip({
   return (
     <div className="activity-strip" role="status" aria-label="Activity status">
       {/* Pipeline stage pill */}
-      <span className={`activity-strip__stage activity-strip__stage--${cat}`}>
-        {stageLabel(stage)}
-      </span>
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.span
+          key={stage}
+          className={`activity-strip__stage activity-strip__stage--${cat}`}
+          initial={scaleIn.initial}
+          animate={scaleIn.animate}
+          exit={scaleIn.exit}
+        >
+          {stageLabel(stage)}
+        </motion.span>
+      </AnimatePresence>
 
       <span className="activity-strip__sep" aria-hidden="true" />
 

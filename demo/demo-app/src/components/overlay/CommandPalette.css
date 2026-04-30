@@ -5,8 +5,8 @@
   inset: 0;
   z-index: var(--z-floating);
   background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px) saturate(180%);
+  -webkit-backdrop-filter: blur(8px) saturate(180%);
   display: flex;
   justify-content: center;
   padding-top: 20vh;
