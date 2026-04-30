@@ -39,9 +39,16 @@ impl AcpConfig {
         &self.log_file
     }
 
-    /// Load the workspace `RokoConfig` from `workdir/roko.toml`.
+    /// Load the workspace `RokoConfig` from an explicit config path when
+    /// provided, otherwise from `workdir/roko.toml`.
     pub fn load_roko_config(&self) -> roko_core::config::schema::RokoConfig {
-        match roko_core::config::load_config(&self.workdir) {
+        let loaded = if let Some(path) = &self.config_path {
+            let dir = path.parent().unwrap_or(&self.workdir);
+            roko_core::config::load_config(dir)
+        } else {
+            roko_core::config::load_config(&self.workdir)
+        };
+        match loaded {
             Ok(config) => config,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to load roko.toml, using defaults");

@@ -81,7 +81,9 @@ pub enum LoadConfigError {
 ///   2. `*_file` resolution — reads secrets from file paths in `extra_headers`
 ///      whose keys end with `_file`.
 pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
-    let path = workdir.join("roko.toml");
+    let path = std::env::var_os("ROKO_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| workdir.join("roko.toml"));
     if !path.exists() {
         return Ok(RokoConfig::default());
     }
