@@ -2198,7 +2198,13 @@ async fn append_dispatch_episode(
     let distill_workdir = repo_ctx
         .map(|ctx| ctx.repo_workdir.clone())
         .unwrap_or_else(|| state.workdir.clone());
-    spawn_episode_distillation(distill_workdir, episode.clone(), None);
+    let distillation_caller: Arc<dyn roko_core::foundation::ModelCaller> =
+        Arc::clone(&state.model_call_service);
+    spawn_episode_distillation(
+        distill_workdir,
+        episode.clone(),
+        Some(distillation_caller),
+    );
 
     if let Err(err) = publish_dispatch_learning_feedback(
         state,

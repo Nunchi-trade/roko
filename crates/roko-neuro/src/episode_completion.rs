@@ -13,7 +13,7 @@ use tokio::task;
 
 use crate::{DistillationBackend, Distiller, KnowledgeStore};
 
-const GATEWAY_DISTILLATION_MODEL: &str = "claude-haiku-3-5";
+const GATEWAY_DISTILLATION_MODEL: &str = "claude-haiku-4-5";
 
 /// Spawn background distillation for one completed episode.
 ///
@@ -37,23 +37,15 @@ async fn distill_episode(
     episode: Episode,
     model_caller: Option<Arc<dyn ModelCaller>>,
 ) -> Result<()> {
-    let distiller = if let Some(model_caller) = model_caller {
-        Distiller::with_backend(Arc::new(GatewayDistillationBackend::new(
-            model_caller,
-            GATEWAY_DISTILLATION_MODEL,
-        )))
-    } else {
-        let Some(api_key) = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .map(|key| key.trim().to_owned())
-            .filter(|key| !key.is_empty())
-        else {
-            return Ok(());
-        };
-
-        tracing::warn!("distillation using direct API key; gateway not available");
-        Distiller::with_claude(api_key)
+    let Some(model_caller) = model_caller else {
+        tracing::debug!("no ModelCaller provided; skipping episode distillation");
+        return Ok(());
     };
+
+    let distiller = Distiller::with_backend(Arc::new(GatewayDistillationBackend::new(
+        model_caller,
+        GATEWAY_DISTILLATION_MODEL,
+    )));
 
     let episodes = [episode];
     let entries = distiller

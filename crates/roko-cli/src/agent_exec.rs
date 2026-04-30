@@ -6,6 +6,7 @@
 
 use std::path::Path;
 use std::time::Instant;
+use std::sync::Arc;
 
 use crate::agent_config::{command_from_config, model_from_config};
 use crate::agent_episode::build_capture_episode;
@@ -15,6 +16,7 @@ use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
 use roko_core::{Body, Context, Engram, Kind};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
+use crate::learning_helpers::distillation_model_caller;
 
 /// Options for agent execution.
 pub struct AgentExecOpts<'a> {
@@ -208,8 +210,13 @@ pub async fn persist_capture_episode(
         .await
         .map_err(|e| anyhow::anyhow!("open learning runtime: {e}"))?;
     let distillation_workdir = workdir.to_path_buf();
+    let distillation_caller = distillation_model_caller(workdir);
     runtime.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode, None);
+        roko_neuro::spawn_episode_distillation(
+            distillation_workdir.clone(),
+            episode,
+            Some(Arc::clone(&distillation_caller)),
+        );
     });
 
     let mut completed = CompletedRunInput::from_episode(episode);

@@ -3,11 +3,13 @@
 //! Free functions for turn-level learning feedback, efficiency signals,
 //! skill/playbook loading, experiment overrides, and episode distillation.
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 use roko_agent::chat_types::FinishReason;
+use roko_agent::model_call_service::ModelCallService;
 use roko_core::{AgentRole, Body, Engram, Kind};
+use roko_core::foundation::ModelCaller;
 use roko_learn::anomaly::AnomalyDetector;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
@@ -337,32 +339,37 @@ pub(crate) fn apply_concluded_experiment_overrides(learning: &LearningRuntime, w
 
 // ─── Distillation hooks ──────────────────────────────────────────────────
 
+const DISTILLATION_MODEL: &str = "claude-haiku-4-5";
+
+pub(crate) fn distillation_model_caller(workdir: &Path) -> Arc<dyn ModelCaller> {
+    let mut config = roko_core::config::load_config(workdir).unwrap_or_default();
+    config.apply_process_env();
+    crate::config::merge_global_providers(&mut config);
+    config.agent.default_model = DISTILLATION_MODEL.to_string();
+    Arc::new(ModelCallService::new(DISTILLATION_MODEL.to_string()).with_config(config))
+}
+
 pub(crate) fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
     let distillation_workdir = workdir.to_path_buf();
+    let distillation_caller = distillation_model_caller(workdir);
     learning.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode, None);
+        roko_neuro::spawn_episode_distillation(
+            distillation_workdir.clone(),
+            episode,
+            Some(Arc::clone(&distillation_caller)),
+        );
     });
 }
 
-/// Log a one-time warning if `ANTHROPIC_API_KEY` is not set, which means
-/// episode distillation into the neuro knowledge store will be silently
-/// skipped.  Called at the start of each `PlanRunner::run_task_plans_inner`
-/// invocation but only emits the warning once per process.
+/// Log a one-time note that episode distillation now uses the shared
+/// `ModelCaller` path rather than a direct API-key fallback.
 pub(crate) fn warn_if_distillation_disabled() {
     use std::sync::Once;
     static WARN: Once = Once::new();
     WARN.call_once(|| {
-        let key_set = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .map(|k| k.trim().to_owned())
-            .is_some_and(|k| !k.is_empty());
-        if !key_set {
-            tracing::warn!(
-                "ANTHROPIC_API_KEY is not set; episode distillation into the neuro \
-                 knowledge store is disabled. Set it to enable automatic learning \
-                 from completed episodes."
-            );
-        }
+        tracing::debug!(
+            "episode distillation uses the shared ModelCaller path; no direct API-key fallback remains"
+        );
     });
 }
 

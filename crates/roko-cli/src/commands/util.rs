@@ -1552,8 +1552,13 @@ pub(crate) async fn persist_capture_episode(
         .await
         .map_err(|e| anyhow!("open learning runtime: {e}"))?;
     let distillation_workdir = workdir.to_path_buf();
+    let distillation_caller = crate::learning_helpers::distillation_model_caller(workdir);
     runtime.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode, None);
+        roko_neuro::spawn_episode_distillation(
+            distillation_workdir.clone(),
+            episode,
+            Some(std::sync::Arc::clone(&distillation_caller)),
+        );
     });
 
     let mut completed = CompletedRunInput::from_episode(episode);

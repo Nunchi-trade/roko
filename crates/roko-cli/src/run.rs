@@ -14,8 +14,8 @@ use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use crate::knowledge_helpers::{build_strategy_fragment_context, query_anti_knowledge_patterns};
 use crate::learning_helpers::{
-    load_or_create_playbook_store, load_or_create_skill_library, playbook_query_context,
-    render_prior_experience,
+    distillation_model_caller, load_or_create_playbook_store, load_or_create_skill_library,
+    playbook_query_context, render_prior_experience,
 };
 use crate::model_selection::{EffectiveModelSelection, resolve_effective_model};
 use crate::output_format;
@@ -2680,8 +2680,13 @@ async fn append_episode_log(
             .map_err(|e| anyhow!("open learning runtime: {e}"))?
     };
     let distillation_workdir = workdir.to_path_buf();
+    let distillation_caller = distillation_model_caller(workdir);
     runtime.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode, None);
+        roko_neuro::spawn_episode_distillation(
+            distillation_workdir.clone(),
+            episode,
+            Some(Arc::clone(&distillation_caller)),
+        );
     });
     let mut completed = CompletedRunInput::from_episode(episode);
     completed.provider = Some(infer_provider(config));
