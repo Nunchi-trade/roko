@@ -752,8 +752,13 @@ impl RokoConfig {
         );
         let _ = writeln!(
             out,
-            "replan_gate_attempts = {}\n",
+            "replan_gate_attempts = {}",
             c.learning.replan_gate_attempts
+        );
+        let _ = writeln!(
+            out,
+            "dream_on_completion = {}\n",
+            c.learning.dream_on_completion
         );
     }
     fn write_example_demurrage(out: &mut String, c: &Self) {

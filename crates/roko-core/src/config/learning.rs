@@ -43,6 +43,9 @@ pub struct LearningConfig {
     /// Consecutive gate failures required before emitting a plan revision.
     #[serde(default = "default_replan_gate_attempts")]
     pub replan_gate_attempts: u32,
+    /// Run dream consolidation after a plan completes.
+    #[serde(default = "default_true")]
+    pub dream_on_completion: bool,
     /// Enable the lookahead router for cost-saving tier downgrades.
     /// When true, the cascade router selection is post-filtered through
     /// `LookaheadRouter::route_with_lookahead()` which may downgrade to a
@@ -95,6 +98,7 @@ impl Default for LearningConfig {
             replan_on_gate_failure: true,
             replan_max_per_plan: default_replan_max_per_plan(),
             replan_gate_attempts: default_replan_gate_attempts(),
+            dream_on_completion: default_true(),
             use_lookahead_router: false,
             lookahead_threshold: default_lookahead_threshold(),
         }

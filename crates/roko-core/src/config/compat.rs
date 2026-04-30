@@ -271,6 +271,7 @@ fn convert_learning(m: &MoriConfig) -> LearningConfig {
         replan_on_gate_failure: d.replan_on_gate_failure,
         replan_max_per_plan: d.replan_max_per_plan,
         replan_gate_attempts: d.replan_gate_attempts,
+        dream_on_completion: d.dream_on_completion,
         use_lookahead_router: d.use_lookahead_router,
         lookahead_threshold: d.lookahead_threshold,
     }

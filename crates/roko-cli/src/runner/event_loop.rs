@@ -277,6 +277,7 @@ pub async fn run(
     // State and TUI bridge.
     let tui = TuiBridge::new(state_hub.sender());
     let mut state = RunState::new(total_tasks);
+    let mut dream_completion_pending = false;
 
     // Compute task fingerprints once at startup so every subsequent
     // `save_snapshot` writes them into `run-state.json` for the strict
@@ -733,40 +734,9 @@ pub async fn run(
                         let _ = executor.apply_event(&completion.plan_id, &ExecutorEvent::GatePassed);
                         info!(plan_id = %completion.plan_id, "all tasks passed — plan completing");
 
-                        // Trigger dream consolidation after plan completion.
-                        tokio::spawn({
-                            let workdir = config.workdir.clone();
-                            async move {
-                                info!("triggering dream consolidation after plan completion");
-                                let dream_config = roko_dreams::DreamLoopConfig {
-                                    auto_dream: true,
-                                    idle_threshold_mins: 0,
-                                    min_episodes_for_dream: 1,
-                                    agent: roko_dreams::DreamAgentConfig {
-                                        command: "claude".to_string(),
-                                        args: Vec::new(),
-                                        model: None,
-                                        bare_mode: true,
-                                        effort: "low".to_string(),
-                                        fallback_model: None,
-                                        timeout_ms: 120_000,
-                                        env: Vec::new(),
-                                    },
-                                };
-                                let mut dream_runner = roko_dreams::DreamRunner::new(
-                                    workdir.join(".roko"),
-                                    dream_config,
-                                );
-                                match dream_runner.consolidate_now() {
-                                    Ok(report) => info!(
-                                        knowledge_entries = report.knowledge_entries_written,
-                                        playbooks = report.playbooks_created,
-                                        "dream consolidation completed"
-                                    ),
-                                    Err(err) => warn!(error = %err, "dream consolidation failed"),
-                                }
-                            }
-                        });
+                        // Queue dream consolidation for the post-run drain.
+                        dream_completion_pending = true;
+                        debug!("dream consolidation queued after plan completion");
                     }
                 } else {
                     let failure_kind = completion
@@ -985,10 +955,16 @@ pub async fn run(
         }
     }
 
+    let report = build_report(&executor, &plans, &state);
+
     // Shutdown Phase 0 subsystems and persist learned state.
     shutdown_subsystems(config, &tui).await;
 
-    Ok(build_report(&executor, &plans, &state))
+    if dream_completion_pending && !cancel.is_cancelled() {
+        run_dream_consolidation_if_enabled(config).await;
+    }
+
+    Ok(report)
 }
 
 fn apply_agent_completion(executor: &mut ParallelExecutor, plan_id: &str, tui: &TuiBridge) {
@@ -3037,6 +3013,56 @@ async fn stop_active_agent(
     state.agent_active = false;
     state.agent_pid = None;
     state.agent_turn_completed = false;
+}
+
+async fn run_dream_consolidation_if_enabled(config: &RunConfig) {
+    let Some(roko_config) = config.roko_config.as_ref() else {
+        debug!("running dream consolidation after plan completion");
+        run_dream_consolidation(config).await;
+        return;
+    };
+
+    if !roko_config.learning.dream_on_completion {
+        debug!("dream consolidation after plan completion disabled");
+        return;
+    }
+
+    debug!("running dream consolidation after plan completion");
+    run_dream_consolidation(config).await;
+}
+
+async fn run_dream_consolidation(config: &RunConfig) {
+    let workdir = config.workdir.clone();
+    let dream_config = roko_dreams::DreamLoopConfig {
+        auto_dream: true,
+        idle_threshold_mins: 0,
+        min_episodes_for_dream: 1,
+        agent: roko_dreams::DreamAgentConfig {
+            command: "claude".to_string(),
+            args: Vec::new(),
+            model: None,
+            bare_mode: true,
+            effort: "low".to_string(),
+            fallback_model: None,
+            timeout_ms: 120_000,
+            env: Vec::new(),
+        },
+    };
+    let join = tokio::task::spawn_blocking(move || {
+        let mut dream_runner = roko_dreams::DreamRunner::new(workdir.join(".roko"), dream_config);
+        dream_runner.consolidate_now()
+    });
+    match tokio::time::timeout(Duration::from_secs(120), join).await {
+        Ok(Ok(Ok(report))) => info!(
+            processed_episodes = report.processed_episodes,
+            knowledge_entries = report.knowledge_entries_written,
+            playbooks = report.playbooks_created,
+            "dream consolidation completed"
+        ),
+        Ok(Ok(Err(err))) => warn!(error = %err, "dream consolidation failed — plan results unaffected"),
+        Ok(Err(join_err)) => warn!(error = %join_err, "dream consolidation worker aborted"),
+        Err(_) => warn!("dream consolidation timed out after 120s — skipping"),
+    }
 }
 
 /// Register an agent feed entry after successful spawn.
