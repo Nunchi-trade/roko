@@ -12,8 +12,7 @@ workspace = true
 
 [features]
 ## Enable the legacy orchestrate.rs plan runner (the pre-WorkflowEngine path).
-## Included in default features for backward compatibility.
-default = ["legacy-orchestrate"]
+default = []
 legacy-orchestrate = []
 
 [[bin]]
