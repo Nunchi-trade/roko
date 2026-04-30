@@ -53,6 +53,9 @@ pub struct RunState {
     pub plan_id: String,
     /// Task currently being executed.
     pub current_task: String,
+    /// Explicit `model_hint` for the current task, if the task definition
+    /// pinned one. Used to dampen routing feedback for non-router choices.
+    pub task_model_hint: Option<String>,
 
     // ─── Progress ───────────────────────────────────────────────────
     /// Number of tasks completed across all plans.
@@ -131,6 +134,7 @@ impl RunState {
             task_agent_calls: 0,
             plan_id: String::new(),
             current_task: String::new(),
+            task_model_hint: None,
             tasks_completed: 0,
             tasks_failed: 0,
             tasks_total: total_tasks,
@@ -381,6 +385,7 @@ impl RunState {
         self.task_agent_calls = 0;
         self.plan_id = plan_id.to_string();
         self.current_task = task_id.to_string();
+        self.task_model_hint = None;
         self.gate_output.clear();
         self.iteration = 0;
         self.task_started_at = Instant::now();

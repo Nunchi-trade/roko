@@ -1866,6 +1866,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 attempt: attempt_num.saturating_sub(1),
                 gate_feedback,
             };
+            ctx.state.task_model_hint = task_def.model_hint.clone();
             let dispatcher = Dispatcher::new(
                 ctx.config.cascade_router.clone(),
                 PromptAssembler::new(),
@@ -2341,7 +2342,16 @@ async fn emit_feedback(
     config: &RunConfig,
     gate_thresholds: &mut GateThresholds,
 ) {
-    let episode = build_episode(completion, state, config, workdir);
+    let mut episode = build_episode(completion, state, config, workdir);
+    if config.cascade_router.is_some() {
+        // The direct runner observation below is authoritative when a
+        // cascade router is configured, so suppress the generic
+        // learning-runtime router update to avoid double counting.
+        episode.extra.insert(
+            "cascade_router_observed".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
     let efficiency_event = build_efficiency_event(completion, state);
 
     if let Err(err) = persist::append_jsonl(&paths.episodes_jsonl, &episode) {
@@ -2440,9 +2450,26 @@ fn observe_cascade_router(
     };
 
     let quality = if completion.passed { 1.0 } else { 0.0 };
+    let is_manual_override =
+        config.cli_model_override.is_some() || state.task_model_hint.is_some();
+    let dampened_quality = if is_manual_override {
+        0.3 * quality
+    } else {
+        quality
+    };
     let normalized_cost = (state.cost_usd / 1.0).clamp(0.0, 1.0); // Normalize against $1 reference
     let wall_secs = state.task_elapsed_ms() as f64 / 1000.0;
     let normalized_latency = (wall_secs / 300.0).clamp(0.0, 1.0); // Normalize against 5min reference
+
+    if is_manual_override {
+        debug!(
+            model = %model,
+            dampening = 0.3,
+            force_backend = config.cli_model_override.is_some(),
+            task_model_hint = ?state.task_model_hint.as_deref(),
+            "manual override detected — recording dampened observation"
+        );
+    }
 
     let ctx = RoutingContext {
         task_category: TaskCategory::Implementation,
@@ -2466,14 +2493,14 @@ fn observe_cascade_router(
     router.observe_multi_objective(
         ctx.to_features(),
         model_idx,
-        quality,
+        dampened_quality,
         normalized_cost,
         normalized_latency,
         &weights,
     );
     debug!(
         model = %model,
-        quality,
+        quality = dampened_quality,
         cost = normalized_cost,
         latency = normalized_latency,
         "cascade router: recorded observation"
