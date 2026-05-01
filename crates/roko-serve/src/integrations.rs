@@ -15,7 +15,7 @@
 //! |---|---|---|
 //! | GitHub | `POST /webhooks/github` | `roko-mcp-github` |
 //! | Slack | `POST /webhooks/slack` | `roko-mcp-slack` |
-//! | Generic | `POST /webhooks/generic` | N/A |
+//! | Generic | `POST /api/webhooks/generic` | N/A |
 //! | Cron | `CronEventSource` | N/A |
 //! | FileWatch | `FileWatchEventSource` | N/A |
 //!
@@ -270,7 +270,7 @@ fn builtin_integrations() -> Vec<ServiceIntegration> {
             kind: IntegrationKind::Decorative,
             reception: Some(ReceptionDescriptor {
                 transport: ReceptionTransport::Webhook,
-                endpoint: "/webhooks/generic".into(),
+                endpoint: "/api/webhooks/generic".into(),
                 hmac_verified: false,
                 signal_kinds: vec!["webhook:generic".into()],
             }),

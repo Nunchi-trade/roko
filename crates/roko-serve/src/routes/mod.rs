@@ -57,6 +57,7 @@ use futures::stream::{self, Stream};
 use roko_core::config::ServeAuthConfig;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 pub use self::config::reload_config_from_disk;
@@ -115,6 +116,7 @@ pub fn build_router(
         .merge(workflows::routes())
         .merge(workspaces::routes())
         .merge(shared_runs::auth_routes())
+        .merge(webhooks::authenticated_routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())
@@ -164,7 +166,7 @@ pub fn build_router(
     let router = Router::new()
         // Top-level liveness probe — no auth, no /api prefix.
         .route("/health", get(top_level_health))
-        .merge(webhooks::routes())
+        .merge(webhooks::public_routes())
         // Public share-receipt reader: no auth required so recipients can
         // open share links without a roko API key.
         .merge(shared_runs::public_routes())
@@ -176,6 +178,7 @@ pub fn build_router(
         .fallback(crate::embedded::serve_embedded);
 
     router
+        .layer(RequestBodyLimitLayer::new(32 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

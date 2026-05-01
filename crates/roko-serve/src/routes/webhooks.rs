@@ -25,12 +25,16 @@ use crate::state::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Build the webhook router.
-pub fn routes() -> Router<Arc<AppState>> {
+/// Public webhook ingress (providers verify signatures themselves).
+pub fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/webhooks/github", post(github_webhook))
         .route("/webhooks/slack", post(slack_webhook))
-        .route("/webhooks/generic", post(generic_webhook))
+}
+
+/// Authenticated webhook ingress — arbitrary JSON payloads must not be accepted anonymously.
+pub fn authenticated_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/webhooks/generic", post(generic_webhook))
 }
 
 /// `POST /webhooks/github` — verify the GitHub signature, convert the payload
@@ -152,9 +156,9 @@ async fn slack_webhook(
     Ok(StatusCode::OK.into_response())
 }
 
-/// `POST /webhooks/generic` — accept arbitrary JSON, convert it into a
+/// `POST /api/webhooks/generic` — accept arbitrary JSON, convert it into a
 /// `Engram`, persist it, and publish it to the server event bus. This endpoint skips
-/// signature verification and is intended for internal use behind auth.
+/// signature verification and requires API authentication when auth is enabled.
 async fn generic_webhook(
     State(state): State<Arc<AppState>>,
     body: Bytes,
@@ -478,6 +482,73 @@ mod tests {
         assert_eq!(signal.kind.as_str(), "webhook:generic");
         assert_eq!(signal.body, Body::Json(payload));
         assert_eq!(signal.provenance.author, "webhook:generic");
+    }
+
+    #[tokio::test]
+    async fn generic_webhook_requires_auth_when_enabled() {
+        use std::sync::Arc;
+
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use roko_core::config::ServeAuthConfig;
+        use roko_core::config::schema::RokoConfig;
+        use tempfile::tempdir;
+        use tower::ServiceExt;
+
+        use crate::deploy::create_backend;
+        use crate::routes::build_router;
+        use crate::runtime::NoOpRuntime;
+        use crate::state::AppState;
+
+        let dir = tempdir().expect("tempdir");
+        let mut cfg = RokoConfig::default();
+        cfg.serve.auth.enabled = true;
+        cfg.serve.auth.api_key = "correct-key".into();
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let state = Arc::new(
+            AppState::new(
+                dir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                cfg,
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
+        let api_auth = ServeAuthConfig {
+            enabled: true,
+            api_key: "correct-key".into(),
+            ..Default::default()
+        };
+        let app = build_router(Arc::clone(&state), &[], api_auth);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/webhooks/generic")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/webhooks/generic")
+                    .header("X-Api-Key", "correct-key")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"ok":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(authorized.status(), StatusCode::OK);
     }
 
     #[cfg(feature = "hdc")]
