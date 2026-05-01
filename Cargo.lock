@@ -6414,6 +6414,7 @@ dependencies = [
  "dirs",
  "futures",
  "gethostname",
+ "governor",
  "hmac",
  "http-body-util",
  "jsonwebtoken 9.3.1",

@@ -45,20 +45,68 @@ mod ws;
 
 use std::convert::Infallible;
 use std::net::IpAddr;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use super::state::AppState;
 use crate::adapters::SseAdapter;
-use axum::extract::State;
+use crate::error::ApiError;
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures::stream::{self, Stream};
+use governor::clock::DefaultClock;
+use governor::middleware::NoOpMiddleware;
+use governor::state::{InMemoryState, NotKeyed};
+use governor::{Quota, RateLimiter};
 use roko_core::config::ServeAuthConfig;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
+
+/// Default global rate limit applied to every route.
+///
+/// 100 requests per second is generous for legitimate traffic but bounds the
+/// damage of a chatty / runaway client without per-endpoint configuration.
+pub(crate) const DEFAULT_GLOBAL_RATE_PER_SEC: u32 = 100;
+
+/// In-memory single-bucket rate limiter shared across all requests.
+type GlobalRateLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
+
+/// Build a non-keyed governor rate limiter with a fixed `req/s` budget.
+pub(crate) fn build_global_rate_limiter(per_second: u32) -> Arc<GlobalRateLimiter> {
+    let per_second =
+        NonZeroU32::new(per_second.max(1)).expect("rate-limit must be non-zero (max(1) above)");
+    Arc::new(RateLimiter::direct(Quota::per_second(per_second)))
+}
+
+/// Middleware: reject requests once the shared bucket has been exhausted.
+///
+/// Returns 429 with a stable `code = "rate_limited"` body so clients can
+/// distinguish throttling from auth/validation errors.
+pub(crate) async fn rate_limit_middleware(
+    State(limiter): State<Arc<GlobalRateLimiter>>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if limiter.check().is_err() {
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited".into(),
+            message: format!(
+                "global rate limit exceeded ({DEFAULT_GLOBAL_RATE_PER_SEC} requests/sec)"
+            ),
+            details: None,
+        });
+    }
+    Ok(next.run(req).await)
+}
 
 pub use self::config::reload_config_from_disk;
 pub use self::deployments::load_persisted_deployments;
@@ -179,8 +227,14 @@ pub fn build_router(
         // SPA fallback — serves embedded React app for all unmatched routes
         .fallback(crate::embedded::serve_embedded);
 
+    let rate_limiter = build_global_rate_limiter(DEFAULT_GLOBAL_RATE_PER_SEC);
+
     router
         .layer(RequestBodyLimitLayer::new(32 * 1024 * 1024))
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limiter,
+            rate_limit_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
@@ -329,5 +383,48 @@ mod tests {
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["code"], "unauthorized");
+    }
+
+    /// Drive the rate-limit middleware directly with a tiny budget. We use
+    /// `axum::middleware::from_fn_with_state` rather than `build_router` so
+    /// we don't have to defeat the production limiter (100 req/s is too high
+    /// to exhaust deterministically in a unit test).
+    #[tokio::test]
+    async fn rate_limit_middleware_returns_429_when_exceeded() {
+        let limiter = build_global_rate_limiter(2);
+        let app = axum::Router::new()
+            .route("/ping", axum::routing::get(|| async { "pong" }))
+            .layer(axum::middleware::from_fn_with_state(
+                limiter,
+                rate_limit_middleware,
+            ));
+
+        // First two requests fit inside the per-second budget.
+        for _ in 0..2 {
+            let req = Request::builder()
+                .uri("/ping")
+                .body(Body::empty())
+                .expect("build request");
+            let resp = app.clone().oneshot(req).await.expect("oneshot");
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // The third immediate request must be throttled because the bucket
+        // has been drained (governor refills at 2 tokens/sec, so a burst of
+        // 3 within the same instant is guaranteed to overflow).
+        let req = Request::builder()
+            .uri("/ping")
+            .body(Body::empty())
+            .expect("build request");
+        let resp = app.oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let json: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["code"], "rate_limited");
     }
 }
