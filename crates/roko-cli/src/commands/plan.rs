@@ -386,7 +386,12 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         ),
                     ))
                     .with_sink(std::sync::Arc::new(
-                        roko_cli::runtime_feedback::KnowledgeIngestionSink::at(&knowledge_path),
+                        roko_cli::runtime_feedback::KnowledgeIngestionSink::at(&knowledge_path)
+                            .with_ingestor(std::sync::Arc::new(
+                                roko_cli::runtime_feedback::NeuroKnowledgeIngestor::new(
+                                    roko_neuro::KnowledgeStore::for_workdir(&wd),
+                                ),
+                            )),
                     ))
                     .with_sink(std::sync::Arc::new(
                         roko_cli::runtime_feedback::ConductorObservationSink::at(&conductor_path),
