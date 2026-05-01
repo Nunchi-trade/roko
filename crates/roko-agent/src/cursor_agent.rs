@@ -47,7 +47,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::streaming::{StreamAccumulator, StreamChunk, parse_sse_line};
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
-use crate::usage::Usage;
+use crate::usage::{Usage, UsageObservation, UsageSource};
 use async_trait::async_trait;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
@@ -78,12 +78,31 @@ struct AcpMessage {
 }
 
 /// ACP usage block (token counts only — no cache tokens, no cost).
+///
+/// Fields are `Option` so an absent token field stays `None` rather than
+/// silently collapsing to `0`. The distinction is preserved in the
+/// downstream [`UsageObservation`].
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct ApiUsage {
     #[serde(default)]
-    input_tokens: u32,
+    input_tokens: Option<u32>,
     #[serde(default)]
-    output_tokens: u32,
+    output_tokens: Option<u32>,
+}
+
+impl ApiUsage {
+    fn into_observation(self, wall_ms: u64, model: Option<String>) -> UsageObservation {
+        UsageObservation {
+            input_tokens: self.input_tokens.map(u64::from),
+            output_tokens: self.output_tokens.map(u64::from),
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            cost_usd: None,
+            source: UsageSource::ProviderReported,
+            model,
+            wall_ms,
+        }
+    }
 }
 
 /// Top-level Cursor ACP response.
@@ -393,9 +412,15 @@ impl CursorAgent {
             .tag("agent", &self.name)
             .tag("failed", "true")
             .build();
-        AgentResult::fail(output).with_usage(Usage {
+        AgentResult::fail(output).with_usage_obs(UsageObservation {
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            cost_usd: None,
+            source: UsageSource::Unknown,
+            model: Some(self.model.clone()),
             wall_ms,
-            ..Default::default()
         })
     }
 }
@@ -475,14 +500,10 @@ impl Agent for CursorAgent {
         };
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let usage = Usage {
-            input_tokens: parsed.usage.input_tokens,
-            output_tokens: parsed.usage.output_tokens,
-            cache_read_tokens: 0,
-            cache_create_tokens: 0,
-            cost_usd: 0.0,
+        let observation = parsed.usage.into_observation(
             wall_ms,
-        };
+            parsed.model.clone().or_else(|| Some(self.model.clone())),
+        );
 
         let mut builder = input
             .derive(Kind::AgentOutput, Body::text(assistant_text))
@@ -497,7 +518,7 @@ impl Agent for CursorAgent {
         }
         let output = builder.build();
 
-        AgentResult::ok(output).with_usage(usage)
+        AgentResult::ok(output).with_usage_obs(observation)
     }
 
     fn name(&self) -> &str {
@@ -1041,5 +1062,41 @@ mod tests {
     async fn with_name_overrides_default() {
         let agent = CursorAgent::new("k", "m").with_name("my-cursor-agent");
         assert_eq!(agent.name(), "my-cursor-agent");
+    }
+
+    #[tokio::test]
+    async fn cursor_usage_distinguishes_absent_from_zero() {
+        // Explicit zeros — observation must be Some(0).
+        let body_zero = serde_json::json!({
+            "session_id": "z",
+            "messages": [
+                {"role": "assistant", "content": "ok"}
+            ],
+            "usage": {"input_tokens": 0, "output_tokens": 0}
+        })
+        .to_string();
+        let agent_zero = agent_with(MockPoster::ok(body_zero));
+        let result_zero = agent_zero.run(&prompt("hi"), &Context::now()).await;
+        let obs_zero = result_zero.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs_zero.input_tokens, Some(0));
+        assert_eq!(obs_zero.output_tokens, Some(0));
+        assert_eq!(obs_zero.source, UsageSource::ProviderReported);
+
+        // Absent: empty usage block — observation must be None.
+        let body_absent = serde_json::json!({
+            "session_id": "a",
+            "messages": [
+                {"role": "assistant", "content": "ok"}
+            ],
+            "usage": {}
+        })
+        .to_string();
+        let agent_absent = agent_with(MockPoster::ok(body_absent));
+        let result_absent = agent_absent.run(&prompt("hi"), &Context::now()).await;
+        let obs_absent = result_absent.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs_absent.input_tokens, None);
+        assert_eq!(obs_absent.output_tokens, None);
+        // Legacy view collapses absent to 0 for back-compat.
+        assert_eq!(result_absent.usage.input_tokens, 0);
     }
 }

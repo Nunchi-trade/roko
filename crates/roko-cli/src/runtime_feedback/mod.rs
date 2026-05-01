@@ -36,7 +36,7 @@ pub mod knowledge;
 pub mod routing;
 
 pub use episodes::EpisodeSink;
-pub use knowledge::KnowledgeIngestionSink;
+pub use knowledge::{KnowledgeIngestionSink, KnowledgeIngestor, NeuroKnowledgeIngestor};
 pub use routing::RoutingObservationSink;
 
 use crate::dispatch::{AgentOutcome, ModelChoiceSource};

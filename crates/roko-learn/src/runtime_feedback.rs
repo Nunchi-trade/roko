@@ -3071,6 +3071,13 @@ async fn append_jsonl_record<T: Serialize + Sync + ?Sized>(
 
     let mut line = serde_json::to_string(value)?;
     line.push('\n');
+    // Size-based rotation: shared with EpisodeLogger so efficiency /
+    // efficiency-summaries logs cannot grow unbounded over a long run.
+    crate::jsonl_rotation::rotate_if_needed(
+        path,
+        crate::jsonl_rotation::DEFAULT_ROTATION_THRESHOLD_BYTES,
+    )
+    .await?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)

@@ -22,7 +22,7 @@ use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
-use crate::usage::Usage;
+use crate::usage::{UsageObservation, UsageSource};
 use async_trait::async_trait;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
@@ -176,14 +176,18 @@ impl OllamaAgent {
             .tag("model", &self.model)
             .build();
 
-        let usage = Usage {
-            input_tokens: resp.prompt_eval_count.unwrap_or(0),
-            output_tokens: resp.eval_count.unwrap_or(0),
+        let observation = UsageObservation {
+            input_tokens: resp.prompt_eval_count.map(u64::from),
+            output_tokens: resp.eval_count.map(u64::from),
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            cost_usd: None,
+            source: UsageSource::ProviderReported,
+            model: Some(self.model.clone()),
             wall_ms,
-            ..Default::default()
         };
 
-        AgentResult::ok(output).with_usage(usage)
+        AgentResult::ok(output).with_usage_obs(observation)
     }
 
     fn failure_signal(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
@@ -195,9 +199,15 @@ impl OllamaAgent {
             .tag("model", &self.model)
             .tag("failed", "true")
             .build();
-        AgentResult::fail(output).with_usage(Usage {
+        AgentResult::fail(output).with_usage_obs(UsageObservation {
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            cost_usd: None,
+            source: UsageSource::Unknown,
+            model: Some(self.model.clone()),
             wall_ms,
-            ..Default::default()
         })
     }
 }
@@ -399,18 +409,37 @@ mod agent_tests {
         assert!(result.success);
         assert_eq!(result.usage.input_tokens, 12);
         assert_eq!(result.usage.output_tokens, 34);
+        let obs = result.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs.input_tokens, Some(12));
+        assert_eq!(obs.output_tokens, Some(34));
+        assert_eq!(obs.source, UsageSource::ProviderReported);
+        assert_eq!(obs.model.as_deref(), Some("llama3.1:8b"));
     }
 
     #[tokio::test]
-    async fn missing_counts_default_to_zero() {
+    async fn ollama_usage_distinguishes_absent_from_zero() {
         let agent = OllamaAgent::new("llama3.1:8b");
-        // No prompt_eval_count / eval_count fields.
-        let poster =
+
+        // Absent: no eval counts in the response — observation must be None.
+        let absent_poster =
             MockPoster::ok(r#"{"message":{"role":"assistant","content":"ok"},"done":true}"#);
-        let result = agent.run_with_poster(&poster, &prompt("hi")).await;
-        assert!(result.success);
-        assert_eq!(result.usage.input_tokens, 0);
-        assert_eq!(result.usage.output_tokens, 0);
+        let absent_result = agent.run_with_poster(&absent_poster, &prompt("hi")).await;
+        assert!(absent_result.success);
+        let absent_obs = absent_result.usage_obs.expect("usage_obs populated");
+        assert_eq!(absent_obs.input_tokens, None);
+        assert_eq!(absent_obs.output_tokens, None);
+        // Legacy view collapses absent to 0 for back-compat.
+        assert_eq!(absent_result.usage.input_tokens, 0);
+
+        // Zero: explicit zero counts — observation must be Some(0).
+        let zero_poster = MockPoster::ok(
+            r#"{"message":{"role":"assistant","content":"ok"},"done":true,"prompt_eval_count":0,"eval_count":0}"#,
+        );
+        let zero_result = agent.run_with_poster(&zero_poster, &prompt("hi")).await;
+        assert!(zero_result.success);
+        let zero_obs = zero_result.usage_obs.expect("usage_obs populated");
+        assert_eq!(zero_obs.input_tokens, Some(0));
+        assert_eq!(zero_obs.output_tokens, Some(0));
     }
 
     #[tokio::test]

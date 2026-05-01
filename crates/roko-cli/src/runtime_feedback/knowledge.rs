@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
@@ -61,6 +62,79 @@ pub enum KnowledgeCandidateKind {
 #[async_trait]
 pub trait KnowledgeIngestor: Send + Sync + std::fmt::Debug {
     async fn ingest(&self, candidate: &KnowledgeCandidate) -> Result<(), anyhow::Error>;
+}
+
+/// In-process ingestor that writes successful-task candidates as soft
+/// `Insight` entries into a [`KnowledgeStore`].
+///
+/// The runner-driven path is intentionally minimal: rich consolidation
+/// (anti-pattern extraction, distillation, refinement) happens in the
+/// offline reinforcement pass that consumes
+/// `knowledge-candidates.jsonl`. This adapter exists so the in-process
+/// store sees something during smoke runs and tests instead of being
+/// silent until the offline pass runs.
+///
+/// Gate-falsifier candidates are skipped here — the runner already
+/// invokes [`KnowledgeStore::record_anti_pattern_from_failure`] with
+/// the full gate context, which carries the topic / error text the
+/// candidate stream does not.
+#[derive(Debug)]
+pub struct NeuroKnowledgeIngestor {
+    store: KnowledgeStore,
+}
+
+impl NeuroKnowledgeIngestor {
+    /// Wrap a store for use as an [`KnowledgeIngestor`].
+    #[must_use]
+    pub fn new(store: KnowledgeStore) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl KnowledgeIngestor for NeuroKnowledgeIngestor {
+    async fn ingest(&self, candidate: &KnowledgeCandidate) -> Result<(), anyhow::Error> {
+        if candidate.kind != KnowledgeCandidateKind::Success {
+            return Ok(());
+        }
+
+        let provider_label = if candidate.provider.is_empty() {
+            "unknown".to_string()
+        } else {
+            candidate.provider.clone()
+        };
+        let model_label = if candidate.model.is_empty() {
+            "unknown".to_string()
+        } else {
+            candidate.model.clone()
+        };
+        let entry = KnowledgeEntry {
+            id: format!(
+                "runtime-feedback:{}:{}",
+                candidate.plan_id, candidate.task_id
+            ),
+            kind: KnowledgeKind::Insight,
+            source: Some("runtime-feedback-sink".to_string()),
+            content: format!(
+                "task {} completed via {}@{} in {}ms",
+                candidate.task_id, model_label, provider_label, candidate.duration_ms
+            ),
+            source_episodes: vec![candidate.task_id.clone()],
+            tags: vec![
+                "runtime-feedback".to_string(),
+                format!("provider:{provider_label}"),
+                format!("model:{model_label}"),
+            ],
+            source_model: Some(model_label),
+            ..KnowledgeEntry::default()
+        };
+
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.add(entry))
+            .await
+            .map_err(|e| anyhow::anyhow!("knowledge ingest task join: {e}"))??;
+        Ok(())
+    }
 }
 
 /// Sink that writes ingestion candidates to disk and / or hands them to
@@ -228,6 +302,52 @@ mod tests {
         .await
         .unwrap();
         assert!(!path.exists() || tokio::fs::read(&path).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn neuro_ingestor_writes_success_entry_to_store() {
+        let dir = tempdir().unwrap();
+        let store = roko_neuro::KnowledgeStore::new(dir.path().join("knowledge.jsonl"));
+        let sink = KnowledgeIngestionSink::at(dir.path().join("kc.jsonl"))
+            .with_ingestor(Arc::new(NeuroKnowledgeIngestor::new(store.clone())));
+        sink.on_event(&FeedbackEvent::TaskCompleted {
+            plan_id: "plan-x".into(),
+            task_id: "task-y".into(),
+            outcome: outcome(),
+            model_source: ModelChoiceSource::Router,
+            succeeded: true,
+        })
+        .await
+        .unwrap();
+        let entries = store.read_all().expect("read entries");
+        assert_eq!(entries.len(), 1, "exactly one entry should be ingested");
+        let entry = &entries[0];
+        assert_eq!(entry.id, "runtime-feedback:plan-x:task-y");
+        assert!(entry.content.contains("claude-sonnet-4-6"));
+        assert!(entry.content.contains("claude_cli"));
+        assert!(entry.tags.iter().any(|t| t == "runtime-feedback"));
+    }
+
+    #[tokio::test]
+    async fn neuro_ingestor_skips_falsifier_candidate() {
+        let dir = tempdir().unwrap();
+        let store = roko_neuro::KnowledgeStore::new(dir.path().join("knowledge.jsonl"));
+        let sink = KnowledgeIngestionSink::at(dir.path().join("kc.jsonl"))
+            .with_ingestor(Arc::new(NeuroKnowledgeIngestor::new(store.clone())));
+        sink.on_event(&FeedbackEvent::GateOutcome {
+            plan_id: "p".into(),
+            task_id: "t".into(),
+            rung: 2,
+            passed: false,
+            duration_ms: 1000,
+        })
+        .await
+        .unwrap();
+        let entries = store.read_all().expect("read entries");
+        assert!(
+            entries.is_empty(),
+            "ingestor must not emit anti-knowledge from thin candidates"
+        );
     }
 
     #[tokio::test]
