@@ -1279,9 +1279,6 @@ pub struct RunConfig {
     pub connector_registry: Option<Arc<std::sync::Mutex<roko_core::ConnectorRegistry>>>,
     /// Agent feed tracking registry.
     pub feed_registry: Option<Arc<std::sync::Mutex<roko_core::FeedRegistry>>>,
-    /// Contextual bandit policy for recording model-selection feedback.
-    pub bandit_policy:
-        Option<Arc<std::sync::Mutex<roko_learn::contextual_bandit::ContextualBanditPolicy>>>,
     /// Single feedback facade — receives every runner event and fans it
     /// out to the registered learning / knowledge / conductor / dream
     /// sinks. `None` means feedback is suppressed (tests, smoke runs).
@@ -1332,13 +1329,6 @@ impl RunConfig {
         let connector_registry =
             Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
         let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
-        let bandit_policy = Arc::new(std::sync::Mutex::new(
-            roko_learn::contextual_bandit::ContextualBanditPolicy::new({
-                let mut cfg = roko_learn::contextual_bandit::BanditPolicyConfig::default();
-                cfg.mode = roko_learn::contextual_bandit::BanditPolicyMode::Shadow;
-                cfg
-            }),
-        ));
         let max_concurrent_tasks = roko_config.runner.max_concurrent_tasks.unwrap_or(4).max(1);
 
         Self {
@@ -1375,7 +1365,6 @@ impl RunConfig {
             cascade_router: Some(cascade_router),
             connector_registry: Some(connector_registry),
             feed_registry: Some(feed_registry),
-            bandit_policy: Some(bandit_policy),
             // The runner constructs feedback / projection facades at run
             // start (`event_loop::run`) so they share their lifetime
             // with the run id. `None` here is the safe default for
@@ -1414,7 +1403,6 @@ impl Default for RunConfig {
             cascade_router: None,
             connector_registry: None,
             feed_registry: None,
-            bandit_policy: None,
             feedback_facade: None,
             projection: None,
         }
@@ -1452,7 +1440,6 @@ impl std::fmt::Debug for RunConfig {
                 &self.connector_registry.as_ref().map(|_| ".."),
             )
             .field("feed_registry", &self.feed_registry.as_ref().map(|_| ".."))
-            .field("bandit_policy", &self.bandit_policy.as_ref().map(|_| ".."))
             .finish()
     }
 }

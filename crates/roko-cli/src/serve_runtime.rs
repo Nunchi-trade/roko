@@ -538,13 +538,6 @@ fn build_runner_config(
     ));
     let connector_registry = Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
     let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
-    let bandit_policy = Arc::new(std::sync::Mutex::new(
-        roko_learn::contextual_bandit::ContextualBanditPolicy::new({
-            let mut cfg = roko_learn::contextual_bandit::BanditPolicyConfig::default();
-            cfg.mode = roko_learn::contextual_bandit::BanditPolicyMode::Shadow;
-            cfg
-        }),
-    ));
 
     crate::runner::RunConfig {
         workdir: workdir.to_path_buf(),
@@ -571,7 +564,6 @@ fn build_runner_config(
         cascade_router: Some(cascade_router),
         connector_registry: Some(connector_registry),
         feed_registry: Some(feed_registry),
-        bandit_policy: Some(bandit_policy),
         feedback_facade: None,
         projection: None,
     }

@@ -349,13 +349,6 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 std::sync::Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
             let feed_registry =
                 std::sync::Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
-            let bandit_policy = std::sync::Arc::new(std::sync::Mutex::new(
-                roko_learn::contextual_bandit::ContextualBanditPolicy::new({
-                    let mut cfg = roko_learn::contextual_bandit::BanditPolicyConfig::default();
-                    cfg.mode = roko_learn::contextual_bandit::BanditPolicyMode::Shadow;
-                    cfg
-                }),
-            ));
 
             // ── Wire dispatch / feedback / projection facades ──────────────
             //
@@ -437,7 +430,6 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 cascade_router: Some(cascade_router),
                 connector_registry: Some(connector_registry),
                 feed_registry: Some(feed_registry),
-                bandit_policy: Some(bandit_policy),
                 feedback_facade: Some(feedback_facade),
                 projection: Some(projection),
             };
