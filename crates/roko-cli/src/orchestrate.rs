@@ -17281,8 +17281,16 @@ impl PlanRunner {
                 Rung::Compile => {
                     steps.push((rung, Box::new(CompileGate::new(build_system))));
                 }
-                Rung::Lint if caps.has_lint_tool => {
-                    steps.push((rung, Box::new(ClippyGate::new(build_system))));
+                Rung::Lint => {
+                    if caps.has_lint_tool {
+                        steps.push((rung, Box::new(ClippyGate::new(build_system))));
+                    } else {
+                        tracing::debug!(
+                            rung = 1,
+                            "Lint gate skipped: no lint tool detected for build system"
+                        );
+                        skipped_count = skipped_count.saturating_add(1);
+                    }
                 }
                 Rung::Test => {
                     steps.push((rung, Box::new(TestGate::new(build_system))));
@@ -17291,10 +17299,36 @@ impl PlanRunner {
                     if let Some(store) = generated_tests.clone() {
                         steps.push((rung, Box::new(GeneratedTestGate::new(store))));
                     } else {
+                        tracing::debug!(
+                            rung = 4,
+                            "GeneratedTest gate skipped: no generated test store available"
+                        );
                         skipped_count = skipped_count.saturating_add(1);
                     }
                 }
+                Rung::Symbol => {
+                    tracing::debug!(
+                        rung = 3,
+                        "Symbol gate skipped: capability detection pending (T1-11)"
+                    );
+                    skipped_count = skipped_count.saturating_add(1);
+                }
+                Rung::PropertyTest => {
+                    tracing::debug!(
+                        rung = 5,
+                        "PropertyTest gate skipped: capability detection pending (T1-11)"
+                    );
+                    skipped_count = skipped_count.saturating_add(1);
+                }
+                Rung::Integration => {
+                    tracing::debug!(
+                        rung = 6,
+                        "Integration gate skipped: capability detection pending (T1-11)"
+                    );
+                    skipped_count = skipped_count.saturating_add(1);
+                }
                 _ => {
+                    tracing::debug!(?rung, "unknown rung variant skipped");
                     skipped_count = skipped_count.saturating_add(1);
                 }
             }
