@@ -90,3 +90,10 @@ predicates = { workspace = true }
 
 [package.metadata.roko]
 layer = 4
+
+# `tests/snapshot.rs` uses `roko_cli::orchestrate`, which is only built with
+# `--features legacy-orchestrate`.
+[[test]]
+name = "snapshot"
+path = "tests/snapshot.rs"
+required-features = ["legacy-orchestrate"]
