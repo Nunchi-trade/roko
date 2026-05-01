@@ -11,7 +11,7 @@ use crate::provider::AgentOptions;
 use crate::provider::current_safety_layer;
 use crate::safety::SafetyLayer;
 use crate::translate::{ChatResponse, FinishReason, ResponseMetadata, normalize_finish_reason};
-use crate::usage::Usage;
+use crate::usage::{UsageObservation, UsageSource};
 use crate::{Agent, AgentResult};
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
@@ -176,9 +176,15 @@ impl GeminiNativeAgent {
             .tag("agent", &self.name)
             .tag("failed", "true")
             .build();
-        AgentResult::fail(output).with_usage(Usage {
+        AgentResult::fail(output).with_usage_obs(UsageObservation {
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            cost_usd: None,
+            source: UsageSource::Unknown,
+            model: Some(self.model.slug.clone()),
             wall_ms,
-            ..Default::default()
         })
     }
 
@@ -339,17 +345,7 @@ impl GeminiNativeAgent {
             content: text_parts.join(""),
             reasoning: None,
             tool_calls,
-            usage: Usage {
-                input_tokens: usage_metadata
-                    .map(|usage| saturating_u64_to_u32(usage.prompt_token_count))
-                    .unwrap_or(0),
-                output_tokens: usage_metadata
-                    .and_then(|usage| usage.candidates_token_count)
-                    .map(saturating_u64_to_u32)
-                    .unwrap_or(0),
-                cache_read_tokens: cached_tokens.map(saturating_u64_to_u32).unwrap_or(0),
-                ..Default::default()
-            },
+            usage: gemini_observation(usage_metadata, 0, Some(self.model.slug.clone())).into(),
             finish_reason,
             metadata: ResponseMetadata {
                 model_used: Some(self.model.slug.clone()),
@@ -421,8 +417,11 @@ impl Agent for GeminiNativeAgent {
         };
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let mut usage = parsed.usage;
-        usage.wall_ms = wall_ms;
+        let observation = gemini_observation(
+            response.usage_metadata.as_ref(),
+            wall_ms,
+            Some(self.model.slug.clone()),
+        );
 
         let content = self
             .safety
@@ -443,7 +442,7 @@ impl Agent for GeminiNativeAgent {
         }
         let output = builder.build();
 
-        AgentResult::ok(output).with_usage(usage)
+        AgentResult::ok(output).with_usage_obs(observation)
     }
 
     fn name(&self) -> &str {
@@ -461,6 +460,41 @@ impl Agent for GeminiNativeAgent {
 
 fn saturating_u64_to_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// Build a canonical [`UsageObservation`] from Gemini's `usageMetadata`.
+///
+/// `None` for `usage_metadata` means the API did not report usage at all
+/// — every token field is left as `None` instead of collapsing to `0`.
+/// When `usage_metadata` is present, `prompt_token_count` and
+/// `candidates_token_count` are surfaced as `Some(n)` (preserving an
+/// explicit `0`); `cached_content_token_count` is already optional in
+/// the wire shape and flows through unchanged.
+fn gemini_observation(
+    usage_metadata: Option<&super::types::UsageMetadata>,
+    wall_ms: u64,
+    model: Option<String>,
+) -> UsageObservation {
+    let (input_tokens, output_tokens, cache_read_tokens, source) = match usage_metadata {
+        Some(usage) => (
+            Some(usage.prompt_token_count),
+            usage.candidates_token_count,
+            usage.cached_content_token_count,
+            UsageSource::ProviderReported,
+        ),
+        None => (None, None, None, UsageSource::Unknown),
+    };
+
+    UsageObservation {
+        input_tokens,
+        output_tokens,
+        cache_creation_tokens: None,
+        cache_read_tokens,
+        cost_usd: None,
+        source,
+        model,
+        wall_ms,
+    }
 }
 
 #[cfg(test)]
@@ -884,5 +918,72 @@ mod tests {
             "PASSWORD=[REDACTED]"
         );
         assert_eq!(result.output.lineage, vec![ancestor.id, input.id]);
+    }
+
+    #[tokio::test]
+    async fn gemini_usage_distinguishes_absent_from_zero() {
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let poster_zero = Arc::new(MockPoster::ok(
+            Arc::clone(&captured),
+            json!({
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [{ "text": "ok" }]
+                        },
+                        "finishReason": "STOP"
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 0,
+                    "candidatesTokenCount": 0,
+                    "totalTokenCount": 0,
+                    "cachedContentTokenCount": 0
+                }
+            }),
+        ));
+        let agent_zero = GeminiNativeAgent::new(
+            "test-key".to_string(),
+            "https://generativelanguage.googleapis.com".to_string(),
+            base_model(),
+            &AgentOptions::default(),
+        )
+        .with_http_poster(poster_zero);
+        let result_zero = agent_zero.run(&prompt("hi"), &Context::now()).await;
+        let obs_zero = result_zero.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs_zero.input_tokens, Some(0));
+        assert_eq!(obs_zero.output_tokens, Some(0));
+        assert_eq!(obs_zero.cache_read_tokens, Some(0));
+        assert_eq!(obs_zero.source, UsageSource::ProviderReported);
+
+        let captured_absent = Arc::new(Mutex::new(Captured::default()));
+        let poster_absent = Arc::new(MockPoster::ok(
+            Arc::clone(&captured_absent),
+            json!({
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [{ "text": "ok" }]
+                        },
+                        "finishReason": "STOP"
+                    }
+                ]
+            }),
+        ));
+        let agent_absent = GeminiNativeAgent::new(
+            "test-key".to_string(),
+            "https://generativelanguage.googleapis.com".to_string(),
+            base_model(),
+            &AgentOptions::default(),
+        )
+        .with_http_poster(poster_absent);
+        let result_absent = agent_absent.run(&prompt("hi"), &Context::now()).await;
+        let obs_absent = result_absent.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs_absent.input_tokens, None);
+        assert_eq!(obs_absent.output_tokens, None);
+        assert_eq!(obs_absent.cache_read_tokens, None);
+        assert_eq!(obs_absent.source, UsageSource::Unknown);
     }
 }
