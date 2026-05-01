@@ -49,7 +49,14 @@ async fn get_config_toml(
     State(state): State<Arc<AppState>>,
 ) -> Result<([(axum::http::header::HeaderName, &'static str); 1], String), ApiError> {
     let cfg = state.load_roko_config();
-    let toml_str = toml::to_string_pretty(cfg.as_ref())
+    let mut value = serde_json::to_value(cfg.as_ref())
+        .map_err(|e| ApiError::internal(format!("serialize config: {e}")))?;
+    mask_secret_fields(&mut value);
+    strip_mask_hint_fields(&mut value);
+    strip_json_nulls(&mut value);
+    let toml_value: toml::Value = serde_json::from_value(value)
+        .map_err(|e| ApiError::internal(format!("convert to toml: {e}")))?;
+    let toml_str = toml::to_string_pretty(&toml_value)
         .map_err(|e| ApiError::internal(format!("serialize toml: {e}")))?;
     Ok((
         [(axum::http::header::CONTENT_TYPE, "application/toml")],
@@ -242,6 +249,42 @@ fn merge_json(base: &mut Value, patch: &Value) {
     }
 }
 
+/// Remove `*_note` keys added by [`mask_secret_fields`] so the JSON can become TOML.
+fn strip_mask_hint_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|k, _| !k.ends_with("_note"));
+            for v in map.values_mut() {
+                strip_mask_hint_fields(v);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                strip_mask_hint_fields(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// TOML has no `null`. Drop null values before converting [`serde_json::Value`] to [`toml::Value`].
+fn strip_json_nulls(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_json_nulls(v);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                strip_json_nulls(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn mask_secret_fields(value: &mut Value) {
     mask_secret_field(
         value,
@@ -329,6 +372,51 @@ mod tests {
         assert_eq!(
             value["deploy"]["railway_api_token_note"],
             "Set `ROKO_DEPLOY_RAILWAY_API_TOKEN` in the environment."
+        );
+    }
+
+    #[tokio::test]
+    async fn get_config_toml_masks_secrets() {
+        use std::sync::Arc;
+
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        use crate::deploy::create_backend;
+        use crate::runtime::NoOpRuntime;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let mut cfg = RokoConfig::default();
+        cfg.serve.auth.api_key = "test-secret-key".into();
+        let state = Arc::new(
+            AppState::new(workdir, Arc::new(NoOpRuntime), cfg, deploy_backend)
+                .expect("AppState::new"),
+        );
+
+        let response = routes()
+            .with_state(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/config/toml")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(
+            !text.contains("test-secret-key"),
+            "TOML response leaked api key: {text}"
         );
     }
 
