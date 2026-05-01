@@ -240,6 +240,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
             bare_mode: false,
             dangerously_skip_permissions: false,
             name: "claude-cli-adapter".to_string(),
+            pre_discovered_mcp_tools: None,
         };
         let model = claude_model();
 

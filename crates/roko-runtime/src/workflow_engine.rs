@@ -201,7 +201,7 @@ impl WorkflowEngine {
                         warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
                     }
                     self.persist_affect_policy().await;
-                    return Ok(self.build_run_report_from_ledger(
+                    return Ok(Self::build_run_report_from_ledger(
                         &ledger,
                         &outcome,
                         started_at,
@@ -307,7 +307,7 @@ impl WorkflowEngine {
                         warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
                     }
                     self.persist_affect_policy().await;
-                    return Ok(self.build_run_report_from_ledger(
+                    return Ok(Self::build_run_report_from_ledger(
                         &ledger,
                         outcome,
                         started_at,
@@ -330,7 +330,7 @@ impl WorkflowEngine {
                         warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
                     }
                     self.persist_affect_policy().await;
-                    return Ok(self.build_run_report_from_ledger(
+                    return Ok(Self::build_run_report_from_ledger(
                         &ledger,
                         &outcome,
                         started_at,
@@ -573,7 +573,6 @@ impl WorkflowEngine {
     }
 
     fn build_run_report_from_ledger(
-        &self,
         ledger: &RunLedger,
         outcome: &WorkflowOutcome,
         started_at: Instant,

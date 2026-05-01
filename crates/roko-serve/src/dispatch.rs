@@ -1823,6 +1823,7 @@ fn build_agent(
             bare_mode: roko_config.agent.bare_mode,
             dangerously_skip_permissions: true,
             name: String::new(),
+            pre_discovered_mcp_tools: None,
         },
     )
     .with_context(|| format!("create agent for template '{}'", template.name))

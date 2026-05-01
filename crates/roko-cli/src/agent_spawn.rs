@@ -58,6 +58,7 @@ impl SpawnAgentSpec {
             bare_mode: self.bare_mode,
             dangerously_skip_permissions: self.dangerously_skip_permissions,
             name: self.name,
+            ..Default::default()
         }
     }
 }

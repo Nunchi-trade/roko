@@ -48,7 +48,7 @@ use roko_core::Temperament;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::tool::ToolRegistry;
+use roko_core::tool::{ToolDef, ToolRegistry};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -572,6 +572,9 @@ pub struct AgentOptions {
     /// Default MUST be `false`. PE_02 will flip all NEEDS FIX sites.
     pub dangerously_skip_permissions: bool,
     pub name: String,
+    /// Pre-discovered MCP tools. When `Some`, the provider adapter skips MCP
+    /// discovery entirely and uses these tools instead of spawning MCP servers.
+    pub pre_discovered_mcp_tools: Option<Arc<Vec<ToolDef>>>,
 }
 
 impl AgentOptions {

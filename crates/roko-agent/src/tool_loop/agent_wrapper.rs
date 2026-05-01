@@ -9,9 +9,12 @@ use roko_core::{Body, Context, Engram, Kind};
 use roko_fs::RokoLayout;
 
 use crate::agent::{Agent, AgentResult, derived_output};
+use crate::streaming::StreamChunk;
 use crate::task_runner::task_id_from_context;
 
 use super::{StopReason, ToolLoop};
+
+use tokio::sync::mpsc;
 
 /// Runtime-facing wrapper that lets the orchestrator drive [`ToolLoop`] via
 /// the existing [`Agent`] trait.
@@ -152,7 +155,68 @@ impl Agent for ToolLoopAgent {
     }
 
     fn supports_streaming(&self) -> bool {
-        false
+        true
+    }
+
+    async fn run_streaming(
+        &self,
+        input: &Engram,
+        ctx: &Context,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> AgentResult {
+        let prompt = input.body.as_text().unwrap_or_default();
+        let tool_ctx = ToolContext::testing(&self.worktree_path);
+        let tool_loop = match self.checkpoint_path(ctx) {
+            Some(path) => self.tool_loop.clone().with_checkpoint_path(path),
+            None => self.tool_loop.clone(),
+        };
+        let output = tool_loop
+            .run_streaming(
+                self.system_prompt.as_deref().unwrap_or(""),
+                prompt,
+                &self.tools,
+                &tool_ctx,
+                event_tx,
+            )
+            .await;
+
+        match output.stop_reason {
+            StopReason::Stop => AgentResult::ok(Self::output_signal(
+                input,
+                &output.final_text,
+                "stop",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+            StopReason::MaxIterations => AgentResult::fail(Self::output_signal(
+                input,
+                &format!("Max iterations ({}) reached", output.iterations),
+                "max_iterations",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+            StopReason::Cancelled => AgentResult::fail(Self::output_signal(
+                input,
+                "Tool loop cancelled",
+                "cancelled",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+            StopReason::BackendError(err) => AgentResult::fail(Self::output_signal(
+                input,
+                &err,
+                "backend_error",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+            StopReason::BudgetExhausted => AgentResult::fail(Self::output_signal(
+                input,
+                "Budget exhausted",
+                "budget_exhausted",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+        }
     }
 }
 
@@ -346,7 +410,7 @@ mod tests {
         assert_eq!(result.output.tag("stop_reason"), Some("stop"));
         assert_eq!(result.output.tag("iterations"), Some("1"));
         assert_eq!(agent.name(), "glm-tool-loop");
-        assert!(!agent.supports_streaming());
+        assert!(agent.supports_streaming());
     }
 
     #[tokio::test]

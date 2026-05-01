@@ -259,6 +259,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"mcp-ok"}}}}'
         bare_mode: false,
         dangerously_skip_permissions: false,
         name: "ux44-mcp-smoke".to_string(),
+        pre_discovered_mcp_tools: None,
     };
 
     let agent = ClaudeCliAdapter

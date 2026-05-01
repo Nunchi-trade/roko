@@ -142,6 +142,11 @@ pub enum DashboardEvent {
         percent: u8,
         message: String,
     },
+    /// Efficiency trend buckets were refreshed from the learning store.
+    EfficiencyTrendUpdated {
+        /// Current rolling efficiency buckets for the Learning tab.
+        buckets: Vec<EfficiencyBucket>,
+    },
     /// An error occurred.
     Error { message: String },
 }
@@ -1138,6 +1143,9 @@ impl DashboardSnapshot {
             }
             DashboardEvent::KnowledgeEntriesUpdated { entries } => {
                 self.knowledge_entries = entries.clone();
+            }
+            DashboardEvent::EfficiencyTrendUpdated { buckets } => {
+                self.efficiency_trend = buckets.clone();
             }
             DashboardEvent::JobExecutionStarted { .. } | DashboardEvent::JobProgress { .. } => {}
         }

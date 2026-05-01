@@ -149,6 +149,12 @@ impl ModelRouter {
         }
     }
 
+    /// Clone the inner cascade router `Arc` (for factory cache swap).
+    #[must_use]
+    pub fn cascade_arc(&self) -> Option<Arc<CascadeRouter>> {
+        self.cascade.clone()
+    }
+
     /// Override the default-fallback slug.
     pub fn with_default_slug(mut self, slug: impl Into<String>) -> Self {
         self.default_slug = slug.into();

@@ -1,8 +1,10 @@
 //! The `Agent` trait and `AgentResult` type.
 
+use crate::streaming::StreamChunk;
 use crate::usage::{Usage, UsageObservation};
 use async_trait::async_trait;
 use roko_core::{Body, ContentHash, Context, Engram, EngramBuilder, Kind};
+use tokio::sync::mpsc;
 
 /// The result of running an agent once.
 #[derive(Clone, Debug)]
@@ -161,6 +163,30 @@ pub trait Agent: Send + Sync {
     /// Does this agent emit a streaming trace (many signals), or a single output?
     fn supports_streaming(&self) -> bool {
         false
+    }
+
+    /// Run the agent with streaming output.
+    ///
+    /// Agents that support real streaming override this to forward
+    /// [`StreamChunk`]s as they arrive from the backend. The default
+    /// implementation falls back to [`run`](Self::run) and emits a single
+    /// `ContentDelta` with the full output text.
+    async fn run_streaming(
+        &self,
+        input: &Engram,
+        ctx: &Context,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> AgentResult {
+        let result = self.run(input, ctx).await;
+        if let Ok(text) = result.output.body.as_text() {
+            if !text.is_empty() {
+                let _ = event_tx.send(StreamChunk::ContentDelta(text.to_string()));
+            }
+        }
+        if result.usage.total_tokens() > 0 {
+            let _ = event_tx.send(StreamChunk::Usage(result.usage));
+        }
+        result
     }
 }
 

@@ -293,7 +293,11 @@ pub(crate) fn tool_registry_for_options(
     let base = StaticToolRegistry::new();
     let mut registry = DynamicToolRegistry::new(&base);
 
-    if let Some(mcp_config_path) = &options.mcp_config {
+    // Use pre-discovered MCP tools when available, skipping the expensive
+    // block_on + OS thread MCP discovery entirely.
+    if let Some(pre_discovered) = &options.pre_discovered_mcp_tools {
+        add_mcp_tools_to_registry(&mut registry, pre_discovered.as_ref().clone());
+    } else if let Some(mcp_config_path) = &options.mcp_config {
         let mcp_config = McpConfig::load(mcp_config_path).map_err(|err| {
             AgentCreationError::MissingConfig(format!(
                 "mcp config {}: {err}",

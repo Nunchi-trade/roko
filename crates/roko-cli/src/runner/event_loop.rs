@@ -22,9 +22,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::dispatch::{
-    AgentDispatchRequest, DispatchContext, Dispatcher, GateFeedback as DispatchGateFeedback,
-    PromptAssembler, ResolvedAgentRuntime, WarmPool, resolve_agent_runtime,
-    spawn_agent_result_bridge,
+    AgentDispatchRequest, DispatchContext, GateFeedback as DispatchGateFeedback, PromptCache,
+    ResolvedAgentRuntime, SharedAgentFactory,
 };
 use crate::knowledge_helpers::{build_knowledge_routing_advice, neuro_prompt_task_category};
 use crate::task_parser::TaskDef;
@@ -36,6 +35,7 @@ use super::gate_dispatch;
 use super::merge::{MergeDispatch, PlanMerger, PlanMergerConfig};
 use super::persist::{self, GateThresholds, PersistPaths};
 use super::plan_loader::Plan;
+use super::snapshot_writer::{SnapshotPayload, SnapshotWriter};
 use super::state::RunState;
 use super::tui_bridge::TuiBridge;
 use super::types::{
@@ -93,6 +93,9 @@ struct RunContext<'a> {
     gate_tx: &'a mpsc::Sender<GateCompletion>,
     paths: &'a PersistPaths,
     merge_queue: &'a MergeQueue,
+    snapshot_writer: &'a SnapshotWriter,
+    prompt_cache: &'a Arc<PromptCache>,
+    factory: &'a SharedAgentFactory,
 }
 
 // ─── Main Entry Point ───────────────────────────────────────────────────
@@ -116,6 +119,7 @@ pub async fn run(
 
     let mut config = config.clone();
     let paths = PersistPaths::from_workdir(&config.workdir)?;
+    let snapshot_writer = SnapshotWriter::new(4);
     persist::cleanup_orphaned_agents(&paths);
     let mut gate_thresholds = persist::load_gate_thresholds(&paths).unwrap_or_default();
 
@@ -255,6 +259,20 @@ pub async fn run(
 
     // Seed playbooks if the store is empty (bootstrap chicken-and-egg).
     seed_playbooks_if_empty(&config.workdir).await;
+
+    // Build prompt cache once — reused across all task dispatches.
+    // Refreshed when stale (default 5 min) or after gate failures.
+    let mut prompt_cache = Arc::new(PromptCache::load(&config.workdir));
+
+    // Shared agent factory — expensive components (semaphores, MCP tools,
+    // dispatcher, resolver) created once and reused for every task dispatch.
+    let factory = SharedAgentFactory::new(
+        config.roko_config.clone().unwrap_or_default(),
+        config.mcp_config.as_ref(),
+        config.cascade_router.clone(),
+        Some(Arc::clone(&prompt_cache)),
+    )
+    .await;
 
     // State and TUI bridge.
     let tui = TuiBridge::new(state_hub.sender());
@@ -461,7 +479,7 @@ pub async fn run(
                         } else {
                             apply_agent_completion(&mut executor, &plan_id, &tui);
                         }
-                        save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
+                        save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
                     }
                 }
 
@@ -529,7 +547,7 @@ pub async fn run(
                         }
                     }
 
-                    save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
+                    save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
                 }
             }
 
@@ -610,6 +628,7 @@ pub async fn run(
                     completion.rung,
                     completion.passed,
                 );
+                emit_gate_thresholds_event(&gate_thresholds, &tui);
 
                 // Extension: on_gate hook.
                 fire_on_gate_hook(config, &completion, &tui).await;
@@ -626,6 +645,7 @@ pub async fn run(
                         Duration::from_secs(config.timeout_secs),
                         &tui,
                         config,
+                        &snapshot_writer,
                     );
                     continue;
                 }
@@ -639,6 +659,7 @@ pub async fn run(
                         &merge_queue,
                         &tui,
                         config,
+                        &snapshot_writer,
                     );
                     continue;
                 }
@@ -784,6 +805,12 @@ pub async fn run(
                                         replan_context,
                                     );
                                 }
+
+                                // Refresh prompt cache after gate failure — the
+                                // agent may have written new episodes / knowledge
+                                // that should inform the retry prompt.
+                                prompt_cache = Arc::new(PromptCache::load(&config.workdir));
+                                debug!("prompt cache refreshed after gate failure");
                             }
                             Err(e) => {
                                 warn!(plan_id = %completion.plan_id, err = %e, "transition error after gate failure");
@@ -850,11 +877,16 @@ pub async fn run(
                     }
                 }
 
-                save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
+                save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
             }
 
             // ─── Branch 3: Executor tick ────────────────────────────
             _ = tick_interval.tick() => {
+                // Refresh prompt cache if stale (default 5 min).
+                if prompt_cache.is_stale() {
+                    prompt_cache = Arc::new(PromptCache::load(&config.workdir));
+                    debug!("prompt cache refreshed (stale)");
+                }
                 let actions = executor.tick();
                 for action in actions {
                     let mut ctx = RunContext {
@@ -869,6 +901,9 @@ pub async fn run(
                         gate_tx: &gate_tx,
                         paths: &paths,
                         merge_queue: &merge_queue,
+                        snapshot_writer: &snapshot_writer,
+                        prompt_cache: &prompt_cache,
+                        factory: &factory,
                     };
                     dispatch_action(&action, &mut ctx).await;
                 }
@@ -876,7 +911,7 @@ pub async fn run(
 
             // ─── Branch 4: Periodic flush ───────────────────────────
             _ = flush_interval.tick() => {
-                save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
+                save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
                 if let Some(ref handle) = agent_handle {
                     let _ = persist::save_agent_pids(&paths, &[handle.pid]);
                 }
@@ -893,6 +928,7 @@ pub async fn run(
                     &merge_queue,
                     &tui,
                     config,
+                    &snapshot_writer,
                 )
                 .await?;
             }
@@ -901,7 +937,8 @@ pub async fn run(
             _ = cancel.cancelled() => {
                 warn!("cancellation requested — shutting down");
                 stop_active_agent(&mut agent_handle, &mut state, Duration::from_secs(3)).await;
-                save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
+                save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
+                snapshot_writer.flush();
                 shutdown_subsystems(config, &tui).await;
                 let event =
                     build_run_completed_event(&executor, &plans, &state, RunOutcome::Cancelled);
@@ -920,12 +957,13 @@ pub async fn run(
                 &merge_queue,
                 &tui,
                 config,
+                &snapshot_writer,
             )
             .await?;
         }
 
         if all_plans_terminal(&executor, &plans) {
-            save_snapshot(config, &executor, &paths, &mut state, &merge_queue);
+            save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
             let outcome = if build_report(&executor, &plans, &state).all_succeeded() {
                 RunOutcome::Succeeded
             } else {
@@ -937,6 +975,9 @@ pub async fn run(
             break;
         }
     }
+
+    // Ensure all pending snapshots land on disk before returning.
+    snapshot_writer.flush();
 
     let report = build_report(&executor, &plans, &state);
 
@@ -995,6 +1036,7 @@ fn handle_plan_verify_completion(
     merge_queue: &MergeQueue,
     tui: &TuiBridge,
     config: &RunConfig,
+    writer: &SnapshotWriter,
 ) {
     if completion.passed {
         state.clear_retry_backoff(&completion.plan_id);
@@ -1062,7 +1104,7 @@ fn handle_plan_verify_completion(
         }
     }
 
-    save_snapshot(config, executor, paths, state, merge_queue);
+    save_snapshot(config, executor, paths, state, merge_queue, writer);
 }
 
 fn merge_branch_from_task_id(task_id: &str) -> Option<String> {
@@ -1102,6 +1144,7 @@ fn handle_merge_completion(
     regression_timeout: Duration,
     tui: &TuiBridge,
     config: &RunConfig,
+    writer: &SnapshotWriter,
 ) {
     let run_id = state.run_id().to_string();
     if completion.passed {
@@ -1172,7 +1215,7 @@ fn handle_merge_completion(
     {
         info!(plan_id = %next_plan_id, "started next queued merge");
     }
-    save_snapshot(config, executor, paths, state, merge_queue);
+    save_snapshot(config, executor, paths, state, merge_queue, writer);
 }
 
 fn append_agent_event(paths: &PersistPaths, event: &AgentEvent, state: &RunState) {
@@ -1447,39 +1490,39 @@ fn build_run_completed_event(
 
 // ─── Snapshot Helper ────────────────────────────────────────────────────
 
-/// Save executor snapshot and track consecutive failures.
-///
-/// Writes three files atomically:
-/// - `.roko/state/orchestrator.json` (aggregate)
-/// - `.roko/state/executor.json` (orchestrator snapshot)
-/// - `.roko/state/run-state.json` (runner-owned: cost, tokens,
-///   completed-task set, run_id, fingerprints, cascade router snapshot —
-///   used by `runner::resume::prepare_resume`)
+/// Build a [`SnapshotPayload`] from current state and enqueue it on the
+/// async writer. Serialisation (<1ms) happens on the caller's thread;
+/// the actual disk I/O runs on the dedicated writer thread.
 fn save_snapshot(
     config: &RunConfig,
     executor: &ParallelExecutor,
     paths: &PersistPaths,
     state: &mut RunState,
     merge_queue: &MergeQueue,
+    writer: &SnapshotWriter,
 ) {
     let timestamp_ms = chrono::Utc::now().timestamp_millis() as u64;
     let snapshot = executor.snapshot(timestamp_ms);
     let orchestrator_snapshot = OrchestratorSnapshot::new(snapshot.clone(), timestamp_ms)
         .with_merge_queue(merge_queue.snapshot());
-    if let Err(err) = persist::save_orchestrator_snapshot(paths, &orchestrator_snapshot) {
-        error!(error = %err, "failed to save orchestrator snapshot");
-        state.snapshot_failed();
-        return;
-    }
-    if let Err(e) = persist::save_executor_snapshot(paths, &snapshot) {
-        error!(err = %e, "failed to save executor snapshot");
-        state.snapshot_failed();
-        return;
-    }
 
-    // Runner-owned run-state.json — cost, tokens, completed tasks,
-    // fingerprints, and embedded cascade router state. Without this
-    // file the strict resume validator cannot detect drift.
+    let orchestrator_json = match orchestrator_snapshot.to_json() {
+        Ok(json) => json.into_bytes(),
+        Err(e) => {
+            error!(error = %e, "failed to serialize orchestrator snapshot");
+            state.snapshot_failed();
+            return;
+        }
+    };
+    let executor_json = match serde_json::to_string_pretty(&snapshot) {
+        Ok(json) => json.into_bytes(),
+        Err(e) => {
+            error!(error = %e, "failed to serialize executor snapshot");
+            state.snapshot_failed();
+            return;
+        }
+    };
+
     let run_state = persist::RunStateSnapshot {
         schema_version: persist::RUN_STATE_SCHEMA_VERSION,
         run_id: state.run_id().to_string(),
@@ -1501,13 +1544,23 @@ fn save_snapshot(
             .as_ref()
             .map(|router| router.snapshot_json()),
     };
-    match persist::save_run_state(paths, &run_state) {
-        Ok(()) => state.snapshot_succeeded(),
+    let run_state_json = match serde_json::to_string_pretty(&run_state) {
+        Ok(json) => json.into_bytes(),
         Err(e) => {
-            error!(err = %e, "failed to save run-state snapshot");
+            error!(error = %e, "failed to serialize run-state snapshot");
             state.snapshot_failed();
+            return;
         }
-    }
+    };
+
+    writer.write(SnapshotPayload {
+        orchestrator_json,
+        orchestrator_path: paths.orchestrator_json.clone(),
+        executor_json,
+        executor_path: paths.executor_json.clone(),
+        run_state_json,
+        run_state_path: paths.run_state_json.clone(),
+    });
 }
 
 fn restore_state_from_resume_snapshot(
@@ -1957,11 +2010,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 gate_feedback,
             };
             ctx.state.task_model_hint = task_def.model_hint.clone();
-            let dispatcher = Dispatcher::new(
-                ctx.config.cascade_router.clone(),
-                PromptAssembler::new(),
-                WarmPool::new(0),
-            );
+            let dispatcher = ctx.factory.dispatcher();
             let mut dispatch_plan = match dispatcher.plan(task_def, &dispatch_ctx) {
                 Ok(plan) => plan,
                 Err(err) => {
@@ -2028,10 +2077,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             // Extension: pre-inference hook.
             fire_pre_inference_hook(ctx.config, plan_id, &task_id, &requested_model, ctx.tui).await;
 
-            let dispatch = match resolve_agent_runtime(
-                ctx.config.roko_config.as_ref(),
-                &requested_model,
-            ) {
+            let dispatch = match ctx.factory.resolve_runtime(&requested_model) {
                 Ok(selection) => selection,
                 Err(message) => {
                     error!(plan_id = %plan_id, task = %task_id, error = %message, "agent provider resolution failed");
@@ -2105,7 +2151,9 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         spawn_config = spawn_config.with_cli_provider(provider);
                     }
 
-                    match dispatcher
+                    match ctx
+                        .factory
+                        .dispatcher()
                         .spawn_streaming_cli_agent(&spawn_config, ctx.agent_tx.clone())
                         .await
                     {
@@ -2205,7 +2253,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         bare_mode: false,
                         dangerously_skip_permissions: ctx.config.dangerously_skip_permissions,
                     };
-                    spawn_agent_result_bridge(roko_config, request, ctx.agent_tx.clone());
+                    ctx.factory.spawn_shared_agent_bridge(request, ctx.agent_tx.clone());
                     emit_runner_event(
                         ctx.paths,
                         ctx.state,
@@ -2384,6 +2432,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.paths,
                 ctx.state,
                 ctx.merge_queue,
+                ctx.snapshot_writer,
             );
         }
 
@@ -2443,6 +2492,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         ctx.paths,
                         ctx.state,
                         ctx.merge_queue,
+                        ctx.snapshot_writer,
                     );
                 }
                 MergeDispatch::Blocked { plan_id } => {
@@ -2457,6 +2507,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         ctx.paths,
                         ctx.state,
                         ctx.merge_queue,
+                        ctx.snapshot_writer,
                     );
                 }
             }
@@ -2481,6 +2532,13 @@ fn update_gate_thresholds(thresholds: &mut GateThresholds, path: &Path, rung: u3
             passed,
             "failed to persist adaptive gate thresholds"
         );
+    }
+}
+
+/// Emit gate thresholds into the TUI push pipeline after persisting to disk.
+fn emit_gate_thresholds_event(thresholds: &GateThresholds, tui: &TuiBridge) {
+    if let Ok(json) = serde_json::to_string(thresholds) {
+        tui.gate_thresholds_updated(&json);
     }
 }
 
@@ -2706,6 +2764,7 @@ async fn handle_plan_timeout(
     merge_queue: &MergeQueue,
     tui: &TuiBridge,
     config: &RunConfig,
+    writer: &SnapshotWriter,
 ) -> Result<()> {
     let in_flight = collect_in_flight_attempts(state);
     error!(
@@ -2717,7 +2776,8 @@ async fn handle_plan_timeout(
         "plan execution exceeded wall-clock timeout"
     );
     stop_active_agent(agent_handle, state, Duration::from_secs(3)).await;
-    save_snapshot(config, executor, paths, state, merge_queue);
+    save_snapshot(config, executor, paths, state, merge_queue, writer);
+    writer.flush();
     shutdown_subsystems(config, tui).await;
     let event = build_run_completed_event(executor, plans, state, RunOutcome::Failed);
     emit_runner_event(paths, state, tui, config, event);

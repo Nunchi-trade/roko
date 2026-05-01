@@ -352,9 +352,10 @@ pub enum CancellationOutcome {
 }
 
 /// Event persistence health for the run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum EventPersistenceHealth {
     /// No persistence issue observed.
+    #[default]
     Healthy,
     /// Event persistence is best-effort or unavailable.
     Degraded {
@@ -368,11 +369,6 @@ pub enum EventPersistenceHealth {
     },
 }
 
-impl Default for EventPersistenceHealth {
-    fn default() -> Self {
-        Self::Healthy
-    }
-}
 
 /// Typed effect error category.
 #[derive(Debug, Clone, PartialEq, Eq)]

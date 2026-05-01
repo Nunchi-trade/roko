@@ -2334,6 +2334,10 @@ impl App {
         self.tui_state.update_from_snapshot(&self.data);
         if let Some(state_hub) = &self._state_hub {
             let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+            let events_path = self.workdir.join(".roko").join("events.jsonl");
+            if events_path.exists() {
+                state_hub.replay_log_into_snapshot(&events_path);
+            }
         }
         self.reseed_verdicts_aggregator();
         self.refresh_verdicts_from_aggregator();
@@ -2686,10 +2690,22 @@ impl App {
                 }
             }
             if got_refresh {
-                // With a live orchestrator, the push path (drain_snapshot_channel)
-                // handles updates. Only fall back to file-based refresh when
-                // running standalone (`roko dashboard` with no orchestrator).
-                if self.snapshot_rx.is_none() {
+                // Re-bootstrap the in-process StateHub from disk files so
+                // `drain_snapshot_channel()` picks up the changes via the
+                // unified push path.  This replaces the old file-polling
+                // `tick_snapshot()` call and eliminates the dual data
+                // pipeline.
+                if let Some(state_hub) = &self._state_hub {
+                    let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+                    // Replay events.jsonl for any events not covered by
+                    // the bootstrap snapshot (e.g. orchestrator events
+                    // written since last bootstrap).
+                    let events_path = self.workdir.join(".roko").join("events.jsonl");
+                    if events_path.exists() {
+                        state_hub.replay_log_into_snapshot(&events_path);
+                    }
+                } else if self.snapshot_rx.is_none() {
+                    // Legacy fallback: no StateHub and no snapshot_rx.
                     self.tick_snapshot();
                 }
             }

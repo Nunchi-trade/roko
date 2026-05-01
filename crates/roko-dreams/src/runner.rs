@@ -170,6 +170,7 @@ impl DreamAgentConfig {
             bare_mode: self.bare_mode,
             dangerously_skip_permissions: false,
             name,
+            pre_discovered_mcp_tools: None,
         }
     }
 }

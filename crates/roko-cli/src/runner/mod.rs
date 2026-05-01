@@ -25,6 +25,7 @@ pub mod gate_dispatch;
 pub mod merge;
 pub mod persist;
 pub mod plan_loader;
+pub mod snapshot_writer;
 pub mod projection;
 pub mod resume;
 pub mod state;

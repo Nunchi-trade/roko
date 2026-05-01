@@ -148,6 +148,40 @@ impl TuiBridge {
         });
     }
 
+    /// Adaptive gate thresholds updated.
+    pub fn gate_thresholds_updated(&self, snapshot_json: &str) {
+        self.sender.publish(DashboardEvent::GateThresholdsUpdated {
+            snapshot_json: snapshot_json.to_string(),
+        });
+    }
+
+    /// Experiment winners refreshed.
+    pub fn experiment_winners_updated(
+        &self,
+        winners: Vec<roko_core::ExperimentWinnerSummary>,
+    ) {
+        self.sender
+            .publish(DashboardEvent::ExperimentWinnersUpdated { winners });
+    }
+
+    /// C-factor trend buckets refreshed.
+    pub fn cfactor_trend_updated(
+        &self,
+        buckets: Vec<roko_core::dashboard_snapshot::CFactorBucket>,
+    ) {
+        self.sender
+            .publish(DashboardEvent::CFactorTrendUpdated { buckets });
+    }
+
+    /// Efficiency trend buckets refreshed.
+    pub fn efficiency_trend_updated(
+        &self,
+        buckets: Vec<roko_core::dashboard_snapshot::EfficiencyBucket>,
+    ) {
+        self.sender
+            .publish(DashboardEvent::EfficiencyTrendUpdated { buckets });
+    }
+
     /// Model was selected for a task dispatch.
     pub fn model_selected(&self, plan_id: &str, task_id: &str, model: &str, source: &str) {
         self.sender.publish(DashboardEvent::EventLogEntry {

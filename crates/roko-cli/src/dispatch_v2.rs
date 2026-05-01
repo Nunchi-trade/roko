@@ -13,12 +13,14 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result as AnyhowResult};
 use roko_agent::AgentRuntimeEvent;
+use roko_agent::StreamChunk;
 use roko_agent::provider::{AgentOptions, ProviderSemaphores};
 use roko_agent::{Agent, AgentResult, create_agent_for_model};
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::{Body, Context, Engram, Kind};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 /// A single tool execution output captured from a dispatch response.
 #[derive(Debug, Clone)]
@@ -651,6 +653,19 @@ impl AgentDispatcherV2 {
         }
     }
 
+    /// Create a dispatcher that reuses pre-built semaphores.
+    ///
+    /// Used by `SharedAgentFactory` to avoid rebuilding the semaphore set
+    /// for every task dispatch.
+    pub fn with_shared(config: Arc<RokoConfig>, semaphores: Arc<ProviderSemaphores>) -> Self {
+        let resolver = ProviderDispatchResolver::new(Arc::clone(&config));
+        Self {
+            config,
+            resolver,
+            semaphores,
+        }
+    }
+
     /// Resolve a model without launching anything.
     pub fn resolve(&self, model_key: &str) -> ProviderDispatchSpec {
         self.resolver.resolve(model_key)
@@ -710,6 +725,132 @@ impl AgentDispatcherV2 {
         })
     }
 
+    /// Run a provider-factory agent with streaming events forwarded in real time.
+    ///
+    /// Emits `Started` immediately, spawns an internal forwarder that converts
+    /// [`StreamChunk`]s into [`AgentRuntimeEvent`]s as they arrive, then
+    /// emits `TurnCompleted` + `Exited` after the agent finishes.
+    pub async fn run_agent_streaming(
+        &self,
+        request: AgentDispatchRequest,
+        event_tx: mpsc::Sender<AgentRuntimeEvent>,
+    ) -> Result<AgentResult, DispatchV2Error> {
+        let created = self.create_agent(&request)?;
+
+        // Emit Started immediately so the TUI shows the agent is running.
+        let _ = event_tx
+            .send(AgentRuntimeEvent::Started {
+                agent_id: request.agent_id.clone(),
+                provider: created.target.provider_id.clone(),
+                model: created.target.model_slug.clone(),
+                pid: None,
+            })
+            .await;
+
+        // Set up streaming channel: chunks flow from agent -> forwarder -> event_tx.
+        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<StreamChunk>();
+        let forwarder_tx = event_tx.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(chunk) = chunk_rx.recv().await {
+                let event = agent_event_from_chunk(chunk);
+                if forwarder_tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let input = Engram::builder(Kind::Prompt)
+            .body(Body::text(request.prompt.clone()))
+            .build();
+        let result = created
+            .agent
+            .run_streaming(&input, &Context::now(), chunk_tx)
+            .await;
+
+        // Wait for forwarder to drain remaining chunks.
+        let _ = forwarder.await;
+
+        // Emit terminal events.
+        if result.usage.total_tokens() > 0 || result.usage.cost_usd > 0.0 {
+            let _ = event_tx
+                .send(AgentRuntimeEvent::TokenUsage {
+                    input_tokens: u64::from(result.usage.input_tokens),
+                    output_tokens: u64::from(result.usage.output_tokens),
+                    cache_read_tokens: u64::from(result.usage.cache_read_tokens),
+                    cache_write_tokens: u64::from(result.usage.cache_create_tokens),
+                })
+                .await;
+        }
+        if !result.success {
+            let message = result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("agent failed without text output")
+                .to_string();
+            let _ = event_tx
+                .send(AgentRuntimeEvent::Error { message })
+                .await;
+        }
+        let _ = event_tx
+            .send(AgentRuntimeEvent::TurnCompleted {
+                session_id: None,
+                total_cost_usd: (result.usage.cost_usd > 0.0)
+                    .then_some(f64::from(result.usage.cost_usd)),
+                num_turns: Some(1),
+                is_error: !result.success,
+            })
+            .await;
+        let _ = event_tx
+            .send(AgentRuntimeEvent::Exited {
+                exit_code: Some(if result.success { 0 } else { 1 }),
+            })
+            .await;
+
+        Ok(result)
+    }
+
+    /// Run a provider-factory agent with pre-discovered MCP tools.
+    ///
+    /// When `mcp_tools` is `Some`, the tools are passed to the provider adapter
+    /// so it skips MCP discovery entirely (no `block_on`, no OS thread).
+    pub async fn run_agent_result_bridge_with_mcp(
+        &self,
+        request: AgentDispatchRequest,
+        mcp_tools: Option<Arc<Vec<roko_core::tool::ToolDef>>>,
+    ) -> Result<AgentResultDispatch, DispatchV2Error> {
+        request.validate()?;
+        let target = self.resolve(&request.model_key);
+        if let ProviderRuntime::Unsupported(unsupported) = &target.runtime {
+            return Err(DispatchV2Error::UnsupportedResolvedProvider {
+                provider_id: target.provider_id.clone(),
+                detail: unsupported.detail.clone(),
+            });
+        }
+
+        let mut options = self.agent_options(&request);
+        if let Some(tools) = mcp_tools {
+            options.pre_discovered_mcp_tools = Some(tools);
+        }
+        let agent = create_agent_for_model(&self.config, &request.model_key, options).map_err(
+            |err| DispatchV2Error::AgentCreation {
+                model_key: request.model_key.clone(),
+                message: err.to_string(),
+            },
+        )?;
+
+        let input = Engram::builder(Kind::Prompt)
+            .body(Body::text(request.prompt.clone()))
+            .build();
+        let result = agent.run(&input, &Context::now()).await;
+        let events = dispatch_events_from_result(&request, &target, &result);
+        Ok(AgentResultDispatch {
+            target,
+            result,
+            events,
+        })
+    }
+
     fn agent_options(&self, request: &AgentDispatchRequest) -> AgentOptions {
         AgentOptions {
             command: request.command.clone(),
@@ -727,6 +868,7 @@ impl AgentDispatcherV2 {
             bare_mode: request.bare_mode,
             dangerously_skip_permissions: request.dangerously_skip_permissions,
             name: request.agent_id.clone(),
+            ..Default::default()
         }
     }
 }
@@ -860,6 +1002,35 @@ fn dispatch_events_from_result(
         exit_code: Some(if result.success { 0 } else { 1 }),
     });
     events
+}
+
+/// Convert a [`StreamChunk`] into the corresponding [`AgentRuntimeEvent`].
+fn agent_event_from_chunk(chunk: StreamChunk) -> AgentRuntimeEvent {
+    match chunk {
+        StreamChunk::ContentDelta(text) => AgentRuntimeEvent::MessageDelta { text },
+        StreamChunk::ReasoningDelta(text) => AgentRuntimeEvent::MessageDelta { text },
+        StreamChunk::ToolCallDelta {
+            id_delta,
+            name_delta,
+            ..
+        } => AgentRuntimeEvent::ToolCall {
+            id: id_delta.unwrap_or_default(),
+            name: name_delta.unwrap_or_default(),
+        },
+        StreamChunk::Usage(usage) => AgentRuntimeEvent::TokenUsage {
+            input_tokens: u64::from(usage.input_tokens),
+            output_tokens: u64::from(usage.output_tokens),
+            cache_read_tokens: u64::from(usage.cache_read_tokens),
+            cache_write_tokens: u64::from(usage.cache_create_tokens),
+        },
+        StreamChunk::Done(_) => AgentRuntimeEvent::TurnCompleted {
+            session_id: None,
+            total_cost_usd: None,
+            num_turns: None,
+            is_error: false,
+        },
+        StreamChunk::Error(message) => AgentRuntimeEvent::Error { message },
+    }
 }
 
 fn classify_runtime(

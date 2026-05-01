@@ -30,9 +30,11 @@
 //! [`AgentResultBridge`] that hides the provider for testing. Production
 //! callers wire in [`AgentDispatcherV2`]; tests can plug in a stub bridge.
 
+pub mod factory;
 pub mod model_routing;
 pub mod outcome;
 pub mod prompt_builder;
+pub mod prompt_cache;
 pub mod warm_pool;
 
 use std::sync::Arc;
@@ -43,16 +45,18 @@ use roko_core::config::schema::RokoConfig;
 use roko_learn::cascade_router::CascadeRouter;
 use tokio::sync::mpsc;
 
+pub use factory::SharedAgentFactory;
 pub use model_routing::{ModelChoice, ModelChoiceSource, ModelRouter, RoutingInputs};
 pub use outcome::{AgentOutcome, DispatchError};
 pub use prompt_builder::{
     AssembledPrompt, GateFeedback, PromptAssembler, PromptContext, PromptDiagnostics,
 };
+pub use prompt_cache::PromptCache;
 pub use warm_pool::{WarmPool, WarmPoolStats};
 
 pub use crate::dispatch_v2::AgentDispatchRequest;
 use crate::dispatch_v2::{AgentDispatcherV2, CliProviderConfig, ProviderDispatchResolver};
-use crate::dispatch_v2::{DispatchEvent, ProviderRuntime};
+use crate::dispatch_v2::ProviderRuntime;
 use crate::task_parser::TaskDef;
 
 // ─── Per-call value objects ────────────────────────────────────────────
@@ -122,6 +126,13 @@ impl Dispatcher {
     #[must_use]
     pub fn warm_pool(&self) -> &WarmPool {
         &self.warm_pool
+    }
+
+    /// Clone the cascade router `Arc` for use when reconstructing the
+    /// dispatcher with an updated prompt assembler.
+    #[must_use]
+    pub fn cascade_router_arc(&self) -> Option<Arc<CascadeRouter>> {
+        self.router.cascade_arc()
     }
 
     /// Resolve the model + prompt for `task` without dispatching.
@@ -261,7 +272,10 @@ pub fn resolve_agent_runtime(
     }
 }
 
-/// Spawn an API/provider-backed agent and forward normalized runtime events.
+/// Spawn an API/provider-backed agent and forward streaming runtime events.
+///
+/// Events are forwarded in real time as `StreamChunk`s arrive from the agent,
+/// rather than batched after the full run completes.
 pub fn spawn_agent_result_bridge(
     roko_config: Arc<RokoConfig>,
     request: AgentDispatchRequest,
@@ -269,34 +283,17 @@ pub fn spawn_agent_result_bridge(
 ) {
     tokio::spawn(async move {
         let dispatcher = AgentDispatcherV2::new(roko_config);
-        match dispatcher.run_agent_result_bridge(request).await {
-            Ok(dispatch) => {
-                for event in dispatch.events {
-                    if event_tx
-                        .send(agent_event_from_dispatch(event))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-            Err(err) => {
-                let _ = event_tx
-                    .send(AgentRuntimeEvent::Error {
-                        message: err.to_string(),
-                    })
-                    .await;
-                let _ = event_tx
-                    .send(AgentRuntimeEvent::Exited { exit_code: Some(1) })
-                    .await;
-            }
+        if let Err(err) = dispatcher.run_agent_streaming(request, event_tx.clone()).await {
+            let _ = event_tx
+                .send(AgentRuntimeEvent::Error {
+                    message: err.to_string(),
+                })
+                .await;
+            let _ = event_tx
+                .send(AgentRuntimeEvent::Exited { exit_code: Some(1) })
+                .await;
         }
     });
-}
-
-fn agent_event_from_dispatch(event: DispatchEvent) -> AgentRuntimeEvent {
-    event
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────

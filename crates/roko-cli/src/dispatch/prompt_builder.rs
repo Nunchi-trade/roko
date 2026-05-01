@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use super::DispatchContext;
 use super::outcome::DispatchError;
+use super::prompt_cache::PromptCache;
 use crate::task_parser::TaskDef;
 
 /// Maximum tokens an assembled prompt may emit before deterministic
@@ -224,16 +225,29 @@ trait PromptSectionSource: Send + Sync + std::fmt::Debug {
 }
 
 /// Reads durable `.roko` knowledge stores and prior episodes.
-#[derive(Debug, Default)]
-struct WorkdirKnowledgeSource;
+///
+/// When `cache` is present, searches in-memory vectors instead of hitting
+/// the filesystem. When absent, falls back to the original I/O path.
+#[derive(Debug, Clone)]
+struct WorkdirKnowledgeSource {
+    cache: Option<Arc<PromptCache>>,
+}
 
 /// Reads learned playbooks from `.roko/learn/playbooks`.
-#[derive(Debug, Default)]
-struct WorkdirPlaybookSource;
+///
+/// When `cache` is present, searches the pre-loaded playbook vec.
+#[derive(Debug, Clone)]
+struct WorkdirPlaybookSource {
+    cache: Option<Arc<PromptCache>>,
+}
 
 /// Applies learned section-effectiveness priority adjustments.
-#[derive(Debug, Default)]
-struct SectionEffectivenessSource;
+///
+/// When `cache` is present, reads from the pre-loaded registry.
+#[derive(Debug, Clone)]
+struct SectionEffectivenessSource {
+    cache: Option<Arc<PromptCache>>,
+}
 
 // ─── Assembler ─────────────────────────────────────────────────────────
 
@@ -252,15 +266,37 @@ pub struct PromptAssembler {
 }
 
 impl PromptAssembler {
-    /// Construct a production assembler.
+    /// Construct a production assembler (no cache — I/O per task).
     #[must_use]
     pub fn new() -> Self {
         Self {
             token_budget: DEFAULT_TOKEN_BUDGET,
             sources: vec![
-                Arc::new(WorkdirKnowledgeSource),
-                Arc::new(WorkdirPlaybookSource),
-                Arc::new(SectionEffectivenessSource),
+                Arc::new(WorkdirKnowledgeSource { cache: None }),
+                Arc::new(WorkdirPlaybookSource { cache: None }),
+                Arc::new(SectionEffectivenessSource { cache: None }),
+            ],
+        }
+    }
+
+    /// Construct a production assembler backed by a pre-loaded cache.
+    ///
+    /// Sources will search in-memory vectors from the cache instead of
+    /// reading from the filesystem, eliminating per-task I/O.
+    #[must_use]
+    pub fn with_cache(cache: Arc<PromptCache>) -> Self {
+        Self {
+            token_budget: DEFAULT_TOKEN_BUDGET,
+            sources: vec![
+                Arc::new(WorkdirKnowledgeSource {
+                    cache: Some(Arc::clone(&cache)),
+                }),
+                Arc::new(WorkdirPlaybookSource {
+                    cache: Some(Arc::clone(&cache)),
+                }),
+                Arc::new(SectionEffectivenessSource {
+                    cache: Some(cache),
+                }),
             ],
         }
     }
@@ -536,11 +572,20 @@ impl PromptAssembler {
 impl PromptSectionSource for WorkdirKnowledgeSource {
     fn collect(&self, task: &TaskDef, ctx: &PromptContext) -> Vec<PromptSection> {
         let mut sections = Vec::new();
-        if let Some(section) = collect_neuro_knowledge(task, ctx) {
-            sections.push(section);
-        }
-        if let Some(section) = collect_episode_knowledge(task, ctx) {
-            sections.push(section);
+        if let Some(cache) = &self.cache {
+            if let Some(section) = collect_neuro_knowledge_cached(task, ctx, &cache.neuro_entries) {
+                sections.push(section);
+            }
+            if let Some(section) = collect_episode_knowledge_cached(task, ctx, &cache.episodes) {
+                sections.push(section);
+            }
+        } else {
+            if let Some(section) = collect_neuro_knowledge(task, ctx) {
+                sections.push(section);
+            }
+            if let Some(section) = collect_episode_knowledge(task, ctx) {
+                sections.push(section);
+            }
         }
         sections
     }
@@ -548,36 +593,56 @@ impl PromptSectionSource for WorkdirKnowledgeSource {
 
 impl PromptSectionSource for WorkdirPlaybookSource {
     fn collect(&self, task: &TaskDef, ctx: &PromptContext) -> Vec<PromptSection> {
-        collect_playbooks(task, ctx).into_iter().collect()
+        if let Some(cache) = &self.cache {
+            collect_playbooks_cached(task, ctx, &cache.playbooks)
+                .into_iter()
+                .collect()
+        } else {
+            collect_playbooks(task, ctx).into_iter().collect()
+        }
     }
 }
 
 impl PromptSectionSource for SectionEffectivenessSource {
     fn collect(&self, _task: &TaskDef, ctx: &PromptContext) -> Vec<PromptSection> {
-        let path = ctx
-            .workdir
-            .join(roko_learn::section_effect::DEFAULT_SECTION_EFFECTS_PATH);
-        if !path.exists() {
-            return Vec::new();
-        }
-        let registry = roko_learn::section_effect::SectionEffectivenessRegistry::load_or_new(&path);
-        let positive = registry.positive_lift_sections(&ctx.role);
-        if positive.is_empty() {
-            return Vec::new();
-        }
-        let mut body = String::from(
-            "# Prompt section effectiveness\nHistorically high-signal prompt sections for this role:\n",
-        );
-        for effect in positive.into_iter().take(5) {
-            body.push_str(&format!(
-                "- {} (lift {:+.2}, weight {:.2})\n",
-                effect.section_name,
-                effect.lift(),
-                effect.lift_weight()
-            ));
-        }
-        vec![PromptSection::new("section_effectiveness", body, 7)]
+        let registry = if let Some(cache) = &self.cache {
+            &cache.effectiveness
+        } else {
+            let path = ctx
+                .workdir
+                .join(roko_learn::section_effect::DEFAULT_SECTION_EFFECTS_PATH);
+            if !path.exists() {
+                return Vec::new();
+            }
+            // Fallback: load from disk (no cache available).
+            let loaded =
+                roko_learn::section_effect::SectionEffectivenessRegistry::load_or_new(&path);
+            return render_effectiveness_section(&loaded, &ctx.role);
+        };
+        render_effectiveness_section(registry, &ctx.role)
     }
+}
+
+fn render_effectiveness_section(
+    registry: &roko_learn::section_effect::SectionEffectivenessRegistry,
+    role: &str,
+) -> Vec<PromptSection> {
+    let positive = registry.positive_lift_sections(role);
+    if positive.is_empty() {
+        return Vec::new();
+    }
+    let mut body = String::from(
+        "# Prompt section effectiveness\nHistorically high-signal prompt sections for this role:\n",
+    );
+    for effect in positive.into_iter().take(5) {
+        body.push_str(&format!(
+            "- {} (lift {:+.2}, weight {:.2})\n",
+            effect.section_name,
+            effect.lift(),
+            effect.lift_weight()
+        ));
+    }
+    vec![PromptSection::new("section_effectiveness", body, 7)]
 }
 
 fn collect_neuro_knowledge(task: &TaskDef, ctx: &PromptContext) -> Option<PromptSection> {
@@ -714,6 +779,213 @@ fn collect_playbooks(task: &TaskDef, ctx: &PromptContext) -> Option<PromptSectio
             continue;
         };
         let haystack = playbook_text(&playbook).to_ascii_lowercase();
+        let lexical_score = query
+            .iter()
+            .filter(|keyword| haystack.contains(keyword.as_str()))
+            .count();
+        let outcome_score = playbook
+            .success_count
+            .saturating_sub(playbook.failure_count) as usize;
+        let score = lexical_score
+            .saturating_mul(10)
+            .saturating_add(outcome_score);
+        if score > 0 || scored.len() < 3 {
+            scored.push((score, playbook));
+        }
+    }
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.success_count.cmp(&a.1.success_count))
+            .then_with(|| a.1.id.cmp(&b.1.id))
+    });
+    scored.truncate(3);
+
+    let ids = scored
+        .iter()
+        .map(|(_, playbook)| playbook.id.clone())
+        .collect::<Vec<_>>();
+    let mut body = String::from("# Relevant playbooks\nReusable proven procedures:\n");
+    for (_, playbook) in scored {
+        body.push_str(&format!(
+            "- {}: {} (successes {}, failures {})\n",
+            playbook.id, playbook.goal, playbook.success_count, playbook.failure_count
+        ));
+        for step in playbook.steps.iter().take(5) {
+            body.push_str(&format!(
+                "  - {} via {}; expect {}\n",
+                step.description,
+                step.action_kind,
+                if step.expected_signals.is_empty() {
+                    "task-local verification".to_string()
+                } else {
+                    step.expected_signals.join(", ")
+                }
+            ));
+        }
+    }
+    Some(PromptSection::new("playbooks", body, 7).with_playbook_ids(ids))
+}
+
+// ─── Cached variants ──────────────────────────────────────────────────
+//
+// These mirror the original I/O-based functions but operate on in-memory
+// vectors pre-loaded by `PromptCache`.
+
+fn collect_neuro_knowledge_cached(
+    task: &TaskDef,
+    ctx: &PromptContext,
+    entries: &[roko_neuro::KnowledgeEntry],
+) -> Option<PromptSection> {
+    if entries.is_empty() {
+        return None;
+    }
+    let query = task_query_text(task, ctx);
+    let keywords = query_keywords(&query);
+    if keywords.is_empty() {
+        return None;
+    }
+
+    // Score entries by keyword overlap (mirrors KnowledgeStore::query's lexical path).
+    let mut scored: Vec<(usize, &roko_neuro::KnowledgeEntry)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let haystack = format!(
+                "{} {} {}",
+                entry.content,
+                entry.tags.join(" "),
+                entry.source.as_deref().unwrap_or("")
+            )
+            .to_ascii_lowercase();
+            let score = keywords
+                .iter()
+                .filter(|kw| haystack.contains(kw.as_str()))
+                .count();
+            if score > 0 {
+                Some((score, entry))
+            } else {
+                None
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.confidence.total_cmp(&a.1.confidence)));
+    scored.truncate(5);
+
+    if scored.is_empty() {
+        return None;
+    }
+
+    let ids = scored
+        .iter()
+        .map(|(_, entry)| entry.id.clone())
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    let mut body = String::from("# Neuro knowledge\nRelevant durable knowledge from prior runs:\n");
+    for (_, entry) in &scored {
+        let source = entry.source.as_deref().unwrap_or("neuro");
+        body.push_str(&format!(
+            "- [{}] {} (confidence {:.2}, source: {})\n",
+            entry.id,
+            truncate_chars(&entry.content, 420),
+            entry.confidence,
+            source
+        ));
+    }
+    Some(PromptSection::new("knowledge", body, 7).with_knowledge_ids(ids))
+}
+
+fn collect_episode_knowledge_cached(
+    task: &TaskDef,
+    ctx: &PromptContext,
+    episodes: &[roko_learn::episode_logger::Episode],
+) -> Option<PromptSection> {
+    let keywords = query_keywords(&task_query_text(task, ctx));
+    if keywords.is_empty() {
+        return None;
+    }
+
+    let mut scored: Vec<(usize, &roko_learn::episode_logger::Episode)> = Vec::new();
+    for episode in episodes {
+        let haystack = format!(
+            "{} {} {} {} {}",
+            episode.task_id,
+            episode.agent_id,
+            episode.model,
+            episode.reasoning_summary.as_deref().unwrap_or(""),
+            episode.failure_reason.as_deref().unwrap_or("")
+        )
+        .to_ascii_lowercase();
+        let score = keywords
+            .iter()
+            .filter(|keyword| haystack.contains(keyword.as_str()))
+            .count();
+        if score > 0 {
+            scored.push((score, episode));
+        }
+    }
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| {
+        b.1.success
+            .cmp(&a.1.success)
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| b.1.completed_at.cmp(&a.1.completed_at))
+    });
+    scored.truncate(5);
+
+    let ids = scored
+        .iter()
+        .map(|(_, episode)| {
+            if !episode.id.is_empty() {
+                episode.id.clone()
+            } else if !episode.episode_id.is_empty() {
+                episode.episode_id.clone()
+            } else {
+                episode.task_id.clone()
+            }
+        })
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    let mut body =
+        String::from("# Learned patterns from prior episodes\nSimilar prior work suggests:\n");
+    for (_, episode) in scored {
+        let outcome = if episode.success { "passed" } else { "failed" };
+        let summary = episode
+            .reasoning_summary
+            .as_deref()
+            .or(episode.reflection.as_deref())
+            .or(episode.failure_reason.as_deref())
+            .unwrap_or("no summary recorded");
+        body.push_str(&format!(
+            "- {} ({}, model: {}): {}\n",
+            episode.task_id,
+            outcome,
+            if episode.model.is_empty() {
+                "unknown"
+            } else {
+                &episode.model
+            },
+            truncate_chars(summary, 420)
+        ));
+    }
+    Some(PromptSection::new("episode_knowledge", body, 7).with_knowledge_ids(ids))
+}
+
+fn collect_playbooks_cached(
+    task: &TaskDef,
+    ctx: &PromptContext,
+    playbooks: &[roko_learn::playbook::Playbook],
+) -> Option<PromptSection> {
+    if playbooks.is_empty() {
+        return None;
+    }
+    let query = query_keywords(&task_query_text(task, ctx));
+    let mut scored: Vec<(usize, &roko_learn::playbook::Playbook)> = Vec::new();
+    for playbook in playbooks {
+        let haystack = playbook_text(playbook).to_ascii_lowercase();
         let lexical_score = query
             .iter()
             .filter(|keyword| haystack.contains(keyword.as_str()))
