@@ -722,7 +722,7 @@ async fn get_task(
 }
 
 async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+    super::ws::apply_ws_size_limits(ws).on_upgrade(move |socket| handle_ws(socket, state))
 }
 
 async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {

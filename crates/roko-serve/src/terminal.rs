@@ -532,7 +532,8 @@ pub async fn ws_terminal(
             }
         };
 
-    ws.on_upgrade(move |socket| handle_ws(socket, id, state, reader, sess_gen))
+    crate::routes::ws_size_limits(ws)
+        .on_upgrade(move |socket| handle_ws(socket, id, state, reader, sess_gen))
 }
 
 async fn handle_ws(

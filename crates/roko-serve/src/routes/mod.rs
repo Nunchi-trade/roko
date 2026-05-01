@@ -118,6 +118,7 @@ pub use self::config::reload_config_from_disk;
 pub use self::deployments::load_persisted_deployments;
 pub(crate) use self::middleware::cors_layer;
 pub(crate) use self::prds::start_prd_publish_subscriber;
+pub(crate) use self::ws::apply_ws_size_limits as ws_size_limits;
 
 /// Build the complete API router with all route groups and middleware.
 pub fn build_router(

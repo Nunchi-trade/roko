@@ -288,7 +288,7 @@ async fn workflow_ws_upgrade(
     State(state): State<Arc<AppState>>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_workflow_ws(state, socket))
+    super::ws::apply_ws_size_limits(ws).on_upgrade(move |socket| handle_workflow_ws(state, socket))
 }
 
 fn workflow_sse(

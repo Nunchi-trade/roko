@@ -25,9 +25,27 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/roko-ws", get(ws_upgrade))
 }
 
+/// Per-frame and per-message ceilings applied to every WebSocket upgrade.
+///
+/// `max_message_size` bounds the total reassembled payload a single message
+/// can carry (1 MiB) and `max_frame_size` bounds an individual fragmented
+/// frame (256 KiB). Together they prevent a hostile client from forcing the
+/// server to buffer arbitrary amounts of memory before the application code
+/// even runs.
+pub(crate) const WS_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+pub(crate) const WS_MAX_FRAME_SIZE: usize = 256 * 1024;
+
+/// Apply the standard `(max_message_size, max_frame_size)` caps to a
+/// [`WebSocketUpgrade`] before any handler-specific configuration. Every
+/// upgrade handler in this crate goes through this helper.
+pub(crate) fn apply_ws_size_limits(ws: WebSocketUpgrade) -> WebSocketUpgrade {
+    ws.max_message_size(WS_MAX_MESSAGE_SIZE)
+        .max_frame_size(WS_MAX_FRAME_SIZE)
+}
+
 /// `GET /ws` — upgrade to a WebSocket connection.
 async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(state, socket))
+    apply_ws_size_limits(ws).on_upgrade(move |socket| handle_ws(state, socket))
 }
 
 /// Back-pressure mode for a WebSocket subscription channel.
