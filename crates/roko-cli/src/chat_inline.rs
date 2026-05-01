@@ -11,14 +11,14 @@ use std::fs;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
-    Frame,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -764,8 +764,7 @@ struct ChatSession {
     /// Present only when `dispatch == DispatchMode::Session` and a turn is in
     /// flight. Events are forwarded here instead of being drained so that
     /// `MessageDelta` tokens reach the TUI viewport in real time.
-    streaming_event_rx:
-        Option<tokio::sync::mpsc::Receiver<roko_agent::AgentRuntimeEvent>>,
+    streaming_event_rx: Option<tokio::sync::mpsc::Receiver<roko_agent::AgentRuntimeEvent>>,
     /// Number of completed user→agent exchanges.
     turn_count: u32,
     /// When the current thinking phase began (for animated labels).
@@ -889,9 +888,7 @@ fn load_last_session_summary() -> Option<(String, u32, f64, String)> {
     let content = std::fs::read_to_string(&path).ok()?;
     let snap: SessionSnapshot = serde_json::from_str(&content).ok()?;
     let saved_at = snap.saved_at;
-    let topic = snap
-        .first_user_message
-        .unwrap_or_default();
+    let topic = snap.first_user_message.unwrap_or_default();
     Some((saved_at, snap.turn_count, snap.total_cost, topic))
 }
 
@@ -924,6 +921,114 @@ fn active_system_prompt(session: &ChatSession) -> Option<String> {
         .or_else(|| session.system_message.clone())
 }
 
+/// Reason a `/model` switch was rejected, with an optional hint.
+struct ModelSwitchError {
+    message: String,
+    hint: Option<String>,
+}
+
+impl ModelSwitchError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    fn with_hint(message: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hint: Some(hint.into()),
+        }
+    }
+}
+
+/// Apply a `/model <arg>` switch atomically.
+///
+/// In `DispatchMode::Session`, the new model is first resolved against
+/// the current workdir's config so a successful return guarantees a
+/// fresh `EffectiveModelSelection`. Both `agent_session.model` and
+/// `agent_session.model_selection` are then committed together. On
+/// failure neither field is touched and the caller surfaces a single
+/// error to the user.
+///
+/// In `DispatchMode::Direct`, the auth model is the only mutable
+/// piece; we still validate the argument is non-empty / non-whitespace
+/// before mutating so a typo never produces a half-applied state.
+fn apply_model_switch(session: &mut ChatSession, arg: &str) -> Result<String, ModelSwitchError> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err(ModelSwitchError::new("model name cannot be empty"));
+    }
+
+    match &mut session.dispatch {
+        DispatchMode::Direct { auth } => match auth {
+            AuthMethod::AnthropicApi { model, .. } | AuthMethod::OpenAiCompat { model, .. } => {
+                *model = Some(arg.to_string());
+                Ok(arg.to_string())
+            }
+            _ => Err(ModelSwitchError::with_hint(
+                "can only switch with API providers",
+                "set ZAI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY",
+            )),
+        },
+        DispatchMode::Http { .. } => Err(ModelSwitchError::new(
+            "model switching not supported in HTTP mode",
+        )),
+        DispatchMode::Session => {
+            let Some(agent_session) = session.agent_session.as_mut() else {
+                return Err(ModelSwitchError::new("ChatAgentSession unavailable"));
+            };
+            // Resolve into a temp struct first. If resolution fails we
+            // surface the typed error as a single human-readable line
+            // and leave both `model` and `model_selection` unchanged.
+            let next_selection = resolve_model_selection_for_workdir(&agent_session.workdir, arg)
+                .map_err(|err| ModelSwitchError::new(err.to_string()))?;
+            // Commit atomically — both fields move together so the
+            // surface display, dispatch routing, and provider lookup
+            // always agree on the same model.
+            agent_session.model = next_selection.effective_model_key.clone();
+            agent_session.model_selection = next_selection.clone();
+            Ok(next_selection.effective_model_key)
+        }
+    }
+}
+
+/// Re-resolve the effective model for `workdir` with `requested` as the
+/// CLI override. Mirrors the construction-time call site.
+fn resolve_model_selection_for_workdir(
+    workdir: &std::path::Path,
+    requested: &str,
+) -> Result<crate::model_selection::EffectiveModelSelection, crate::model_selection::Error> {
+    let resolved = match crate::config::load_layered(workdir) {
+        Ok(resolved) => resolved.config,
+        Err(_) => {
+            // No layered config on disk: build a minimal one so the
+            // resolver still has something to validate against. The
+            // caller will see UnknownModel for unrecognised slugs.
+            crate::config::Config::default()
+        }
+    };
+    let mut model_config = roko_core::config::schema::RokoConfig::default();
+    model_config.providers.extend(resolved.providers.clone());
+    model_config.models.extend(resolved.models.clone());
+    if let Some(model) = resolved.agent.model.clone() {
+        model_config.agent.default_model = model;
+    }
+    let role = {
+        let role = resolved.prompt.role.trim();
+        (!role.is_empty()).then(|| role.to_string())
+    };
+    crate::model_selection::resolve_effective_model(
+        Some(requested.to_string()),
+        None,
+        role,
+        None,
+        &model_config,
+        None,
+    )
+}
+
 fn clone_chat_agent_session(session: &ChatAgentSession) -> ChatAgentSession {
     ChatAgentSession {
         workdir: session.workdir.clone(),
@@ -943,9 +1048,7 @@ fn clone_chat_agent_session(session: &ChatAgentSession) -> ChatAgentSession {
     }
 }
 
-fn turn_result_to_dispatch_result(
-    turn: crate::chat_session::TurnResult,
-) -> DispatchResult {
+fn turn_result_to_dispatch_result(turn: crate::chat_session::TurnResult) -> DispatchResult {
     DispatchResult {
         text: turn.text,
         model: turn.model,
@@ -1466,8 +1569,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                     Ok(selection) => {
                         match ChatAgentSession::new(&config, workdir.clone(), selection) {
                             Ok(agent_session) => {
-                                let system_message =
-                                    Some(agent_session.system_prompt.clone());
+                                let system_message = Some(agent_session.system_prompt.clone());
                                 (
                                     DispatchMode::Session,
                                     Some(agent_session),
@@ -1480,12 +1582,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                                     error = %error,
                                     "ChatAgentSession init failed; using direct dispatch"
                                 );
-                                (
-                                    DispatchMode::Direct { auth: auth.clone() },
-                                    None,
-                                    None,
-                                    ct,
-                                )
+                                (DispatchMode::Direct { auth: auth.clone() }, None, None, ct)
                             }
                         }
                     }
@@ -1494,12 +1591,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                             error = %error,
                             "failed to resolve interactive chat model; using direct dispatch"
                         );
-                        (
-                            DispatchMode::Direct { auth: auth.clone() },
-                            None,
-                            None,
-                            ct,
-                        )
+                        (DispatchMode::Direct { auth: auth.clone() }, None, None, ct)
                     }
                 }
             }
@@ -2306,12 +2398,7 @@ fn handle_slash_command(
                 styled::continuation(theme, "/input-history", "show typed input history", None),
                 styled::continuation(theme, "/copy", "copy last response to clipboard", None),
                 styled::continuation(theme, "/compact", "toggle compact output", None),
-                styled::continuation(
-                    theme,
-                    "/quiet",
-                    "toggle per-turn usage summary",
-                    None,
-                ),
+                styled::continuation(theme, "/quiet", "toggle per-turn usage summary", None),
                 styled::continuation(theme, "/system <text>", "set system message", None),
                 styled::continuation(theme, "/reset", "clear conversation", None),
                 styled::continuation(theme, "/retry", "resend last message", None),
@@ -2767,52 +2854,22 @@ fn handle_slash_command(
                 };
                 term.push_lines(&[styled::continuation(theme, "model", &current, None)])?;
             } else {
-                match &mut session.dispatch {
-                    DispatchMode::Direct { auth } => match auth {
-                        AuthMethod::AnthropicApi { model, .. }
-                        | AuthMethod::OpenAiCompat { model, .. } => {
-                            *model = Some(arg.to_string());
-                            term.push_lines(&[styled::continuation(
-                                theme,
-                                "model",
-                                &format!("switched to {arg}"),
-                                None,
-                            )])?;
-                        }
-                        _ => {
-                            term.push_lines(&[styled::continuation(
-                                theme,
-                                "model",
-                                "can only switch with API providers",
-                                Some("set ZAI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY"),
-                            )])?;
-                        }
-                    },
-                    DispatchMode::Http { .. } => {
+                match apply_model_switch(session, arg) {
+                    Ok(label) => {
                         term.push_lines(&[styled::continuation(
                             theme,
                             "model",
-                            "model switching not supported in HTTP mode",
+                            &format!("switched to {label}"),
                             None,
                         )])?;
                     }
-                    DispatchMode::Session => {
-                        if let Some(agent_session) = session.agent_session.as_mut() {
-                            agent_session.model = arg.to_string();
-                            term.push_lines(&[styled::continuation(
-                                theme,
-                                "model",
-                                &format!("switched to {arg}"),
-                                None,
-                            )])?;
-                        } else {
-                            term.push_lines(&[styled::continuation(
-                                theme,
-                                "model",
-                                "ChatAgentSession unavailable",
-                                None,
-                            )])?;
-                        }
+                    Err(error) => {
+                        term.push_lines(&[styled::continuation(
+                            theme,
+                            "model",
+                            &error.message,
+                            error.hint.as_deref(),
+                        )])?;
                     }
                 }
             }
@@ -4462,10 +4519,7 @@ fn push_tool_outputs(
             )
         };
         term.push_lines(&[Line::from(vec![
-            Span::styled(
-                format!("  {indicator} "),
-                indicator_style,
-            ),
+            Span::styled(format!("  {indicator} "), indicator_style),
             Span::styled(
                 format!("[{tool_label}]"),
                 Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
@@ -5212,5 +5266,141 @@ mod tests {
     #[test]
     fn truncate_long() {
         assert_eq!(truncate_str("hello world", 8), "hello...");
+    }
+
+    // -----------------------------------------------------------------------
+    // /model atomic switch tests
+    // -----------------------------------------------------------------------
+
+    fn make_session(
+        dispatch: DispatchMode,
+        agent_session: Option<ChatAgentSession>,
+    ) -> ChatSession {
+        ChatSession {
+            phase: Phase::Input,
+            input: InputState::new(),
+            streaming: StreamingState::new(""),
+            cost: CostMeter::new(),
+            cost_table: CostTable::from_config(&HashMap::new()).with_defaults(),
+            agent_id: "test".to_string(),
+            tick: 0,
+            started_at: Instant::now(),
+            dispatch,
+            response_rx: None,
+            streaming_event_rx: None,
+            turn_count: 0,
+            thinking_started: None,
+            conversation: Vec::new(),
+            last_prompt: None,
+            system_message: None,
+            compact: false,
+            quiet: false,
+            agent_session,
+        }
+    }
+
+    fn make_agent_session(workdir: std::path::PathBuf) -> ChatAgentSession {
+        use crate::model_selection::{EffectiveModelSelection, SelectionSource};
+        ChatAgentSession {
+            workdir,
+            model: "model-original".to_string(),
+            model_selection: EffectiveModelSelection {
+                requested_model: Some("model-original".to_string()),
+                effective_model_key: "model-original".to_string(),
+                provider_key: "provider-original".to_string(),
+                provider_kind: "anthropic_api".to_string(),
+                backend_slug: "backend-original".to_string(),
+                source: SelectionSource::ProjectDefault,
+                reason: "test fixture".to_string(),
+            },
+            effort: "medium".to_string(),
+            system_prompt: String::new(),
+            allowed_tools_csv: String::new(),
+            mcp_config: None,
+            session_id: None,
+            api_history: Vec::new(),
+            http_client: reqwest::Client::new(),
+            settings_json: None,
+            timeout: None,
+            provider_base_url: None,
+            provider_api_key_env: None,
+        }
+    }
+
+    #[test]
+    fn apply_model_switch_rejects_empty_arg() {
+        let mut session = make_session(
+            DispatchMode::Direct {
+                auth: AuthMethod::AnthropicApi {
+                    key: "sk".to_string(),
+                    model: Some("claude-sonnet-4-6".to_string()),
+                },
+            },
+            None,
+        );
+        let err = apply_model_switch(&mut session, "   ").unwrap_err();
+        assert!(err.message.contains("empty"));
+        // Direct path: the auth model must remain unchanged.
+        if let DispatchMode::Direct {
+            auth: AuthMethod::AnthropicApi { model, .. },
+        } = &session.dispatch
+        {
+            assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+        } else {
+            panic!("dispatch mode should still be Direct/AnthropicApi");
+        }
+    }
+
+    #[test]
+    fn apply_model_switch_session_failure_leaves_selection_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent_session = make_agent_session(dir.path().to_path_buf());
+        let original_backend = agent_session.model_selection.backend_slug.clone();
+        let original_effective = agent_session.model_selection.effective_model_key.clone();
+        let original_provider = agent_session.model_selection.provider_key.clone();
+        let original_model = agent_session.model.clone();
+
+        let mut session = make_session(DispatchMode::Session, Some(agent_session));
+
+        // No roko.toml exists in the empty tempdir, and the resolver
+        // is invoked with a bogus slug — it must reject.
+        let err = apply_model_switch(&mut session, "no-such-bogus-model").unwrap_err();
+        assert!(!err.message.is_empty(), "error must surface a message");
+
+        let restored = session
+            .agent_session
+            .as_ref()
+            .expect("agent_session preserved");
+        assert_eq!(
+            restored.model_selection.backend_slug, original_backend,
+            "backend_slug must be unchanged on failure"
+        );
+        assert_eq!(
+            restored.model_selection.effective_model_key, original_effective,
+            "effective_model_key must be unchanged on failure"
+        );
+        assert_eq!(
+            restored.model_selection.provider_key, original_provider,
+            "provider_key must be unchanged on failure"
+        );
+        assert_eq!(
+            restored.model, original_model,
+            "agent_session.model must be unchanged on failure"
+        );
+    }
+
+    #[test]
+    fn apply_model_switch_direct_unsupported_auth_returns_hint() {
+        let mut session = make_session(
+            DispatchMode::Direct {
+                auth: AuthMethod::ClaudeCli,
+            },
+            None,
+        );
+        let err = apply_model_switch(&mut session, "claude-haiku-4-5").unwrap_err();
+        assert!(
+            err.hint.is_some(),
+            "ClaudeCli switch should suggest setting an API key"
+        );
     }
 }
