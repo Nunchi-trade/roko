@@ -974,6 +974,14 @@ impl EpisodeLogger {
         // Serialize writers within this process so concurrent appends
         // cannot interleave bytes across a single JSONL record.
         let gate = self.inner.write_gate.lock().await;
+        // Size-based rotation: once the live file is past the
+        // threshold, push it onto the rotation chain so the JSONL we
+        // open is fresh.
+        crate::jsonl_rotation::rotate_if_needed(
+            &self.inner.path,
+            crate::jsonl_rotation::DEFAULT_ROTATION_THRESHOLD_BYTES,
+        )
+        .await?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)

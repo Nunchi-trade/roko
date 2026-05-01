@@ -130,6 +130,8 @@ pub mod hdc_clustering;
 pub mod hdc_fingerprint;
 /// Heuristic, worldview, and research-provenance shells for learning parity.
 pub mod heuristics;
+/// Size-based rotation helper for append-only JSONL logs.
+pub mod jsonl_rotation;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
 pub mod local_reward;
