@@ -19,7 +19,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use roko_core::agent::AgentRole;
+use roko_core::config::RewardWeights;
+use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_core::{BehavioralState, DaimonPolicy};
 use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::model_router::RoutingContext;
 
 use super::{FeedbackEvent, FeedbackSink};
 #[cfg(test)]
@@ -68,16 +73,71 @@ impl FeedbackSink for RoutingObservationSink {
             return Ok(());
         };
 
-        // The `record_override_outcome` path expects a fully-built
-        // `RoutingContext` (LinUCB feature vector). The runner does not
-        // yet compute those features end-to-end, so for now both paths
-        // record through `record_outcome`; the source tag is preserved
-        // in the per-sink event log so the downstream learning pass can
-        // dampen override observations once feature plumbing lands.
-        // See `.roko/GAPS.md`.
+        // The model_source tag still flows through the per-sink event
+        // log so override-vs-router observations can be dampened
+        // downstream. See `.roko/GAPS.md`.
         let _ = model_source;
-        self.router.record_outcome(&outcome.model, *succeeded);
+
+        // If the slug isn't tracked yet, fall back to the binary
+        // outcome path so the trial counter still moves.
+        let Some(model_idx) = self.router.model_index_for_slug(&outcome.model) else {
+            self.router.record_outcome(&outcome.model, *succeeded);
+            return Ok(());
+        };
+
+        // FeedbackEvent does not yet carry the original dispatch
+        // RoutingContext (task category / complexity / role / queue
+        // pressure). Use stable defaults so the LinUCB feature vector
+        // is well-formed; richer plumbing is tracked separately.
+        let ctx = build_runner_feedback_context(&outcome.model);
+
+        if *succeeded {
+            // Quality is the binary success signal; cost / latency
+            // pressure are 0.0 because FeedbackEvent does not carry a
+            // budget remaining or SLA signal yet (T4-30 commit body).
+            let weights = RewardWeights::default();
+            self.router.observe_multi_objective(
+                ctx.to_features(),
+                model_idx,
+                /* quality */ 1.0,
+                /* normalized_cost */ 0.0,
+                /* normalized_latency */ 0.0,
+                &weights,
+            );
+        } else {
+            // observe_multi_objective always counts as success — record
+            // failures via the binary path so the trial counter and
+            // failure rate stay accurate.
+            self.router.record_outcome(&outcome.model, false);
+        }
         Ok(())
+    }
+}
+
+/// Build a stable [`RoutingContext`] for runner-feedback observations.
+///
+/// The runner feedback path does not yet propagate the original
+/// dispatch RoutingContext through `FeedbackEvent`, so this helper
+/// returns a deterministic minimum context with the model marked as
+/// `previous_model` for cache-affinity learning.
+fn build_runner_feedback_context(model: &str) -> RoutingContext {
+    RoutingContext {
+        task_category: TaskCategory::Implementation,
+        complexity: TaskComplexityBand::Standard,
+        iteration: 0,
+        role: AgentRole::Implementer,
+        crate_familiarity: 0.5,
+        has_prior_failure: false,
+        conductor_load: 0.0,
+        active_agents: 0,
+        ready_queue_depth: 0,
+        max_queue_wait_hours: 0.0,
+        daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
+        thinking_level: None,
+        temperament: None,
+        previous_model: Some(model.to_string()),
+        plan_context_tokens: None,
+        tier_thresholds: None,
     }
 }
 
@@ -111,7 +171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_observation_recorded_on_task_completed() {
+    async fn success_drives_observe_multi_objective_for_known_model() {
         let r = router();
         let sink = RoutingObservationSink::new(r.clone());
         let event = FeedbackEvent::TaskCompleted {
@@ -122,12 +182,21 @@ mod tests {
             succeeded: true,
         };
         sink.on_event(&event).await.unwrap();
-        // No public introspection on success counters — but the call
-        // does not panic and does not block other sinks.
+        let snap = r.confidence_snapshot();
+        let (trials, successes) = snap
+            .get("claude-sonnet-4-6")
+            .copied()
+            .expect("snapshot for the observed slug");
+        assert_eq!(trials, 1);
+        assert_eq!(successes, 1);
+        assert!(
+            r.total_observations() >= 1,
+            "observe_multi_objective should advance the LinUCB observation counter",
+        );
     }
 
     #[tokio::test]
-    async fn override_path_records_through_override_method() {
+    async fn failure_records_through_record_outcome() {
         let r = router();
         let sink = RoutingObservationSink::new(r.clone());
         let event = FeedbackEvent::TaskCompleted {
@@ -138,6 +207,38 @@ mod tests {
             succeeded: false,
         };
         sink.on_event(&event).await.unwrap();
+        let (trials, successes) = r
+            .confidence_snapshot()
+            .get("claude-sonnet-4-6")
+            .copied()
+            .expect("snapshot for the observed slug");
+        assert_eq!(trials, 1, "failure must increment trials");
+        assert_eq!(successes, 0, "failure must not increment successes");
+        assert_eq!(
+            r.total_observations(),
+            0,
+            "failures should not push LinUCB observations on the success-only path",
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_model_falls_back_to_record_outcome() {
+        let r = router();
+        let sink = RoutingObservationSink::new(r.clone());
+        let mut bad_outcome = outcome(true);
+        bad_outcome.model = "no-such-slug".into();
+        let event = FeedbackEvent::TaskCompleted {
+            plan_id: "p".into(),
+            task_id: "t".into(),
+            outcome: bad_outcome,
+            model_source: ModelChoiceSource::Router,
+            succeeded: true,
+        };
+        sink.on_event(&event).await.unwrap();
+        assert!(
+            r.confidence_snapshot().get("no-such-slug").is_none(),
+            "unknown slug must not be silently registered",
+        );
     }
 
     #[tokio::test]
