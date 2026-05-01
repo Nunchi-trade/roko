@@ -83,11 +83,11 @@ impl Translator for OpenAiTranslator {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let name = call
+            let raw_name = call
                 .pointer("/function/name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| TranslatorError::Malformed("missing function.name".into()))?
-                .to_string();
+                .ok_or_else(|| TranslatorError::Malformed("missing function.name".into()))?;
+            let name = unsanitize_tool_name(raw_name);
             let args_str = call
                 .pointer("/function/arguments")
                 .and_then(|v| v.as_str())
@@ -158,6 +158,28 @@ impl Translator for StrictOpenAiTranslator {
     }
 }
 
+/// Sanitize a tool name for OpenAI-compatible APIs.
+///
+/// OpenAI requires tool names to match `^[a-zA-Z0-9_-]+$`.  Dots (used by
+/// e.g. `chain.balance`) are replaced with `__DOT__` so the encoding is
+/// fully reversible without ambiguity.
+fn sanitize_tool_name(name: &str) -> String {
+    if name.contains('.') {
+        name.replace('.', "__DOT__")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Reverse [`sanitize_tool_name`]: `chain__DOT__balance` → `chain.balance`.
+fn unsanitize_tool_name(name: &str) -> String {
+    if name.contains("__DOT__") {
+        name.replace("__DOT__", ".")
+    } else {
+        name.to_string()
+    }
+}
+
 fn render_strict_tool(t: &ToolDef) -> serde_json::Value {
     match &t.source {
         ToolSource::Builtin | ToolSource::Mcp { .. } | ToolSource::Plugin { .. } => {
@@ -168,7 +190,7 @@ fn render_strict_tool(t: &ToolDef) -> serde_json::Value {
             serde_json::json!({
                 "type": "function",
                 "function": {
-                    "name": t.name,
+                    "name": sanitize_tool_name(&t.name),
                     "description": t.description,
                     "strict": true,
                     "parameters": params,
@@ -232,7 +254,7 @@ fn render_tool(t: &ToolDef) -> serde_json::Value {
             serde_json::json!({
                 "type": "function",
                 "function": {
-                    "name": t.name,
+                    "name": sanitize_tool_name(&t.name),
                     "description": t.description,
                     "parameters": t.parameters.as_value(),
                 }
@@ -255,7 +277,7 @@ fn render_tool_with_source(source: &ToolSource, _t: &ToolDef) -> serde_json::Val
             },
         }),
         // Builtin/Mcp/Plugin handled by callers; this is unreachable for them.
-        _ => serde_json::json!({ "type": "function", "function": { "name": _t.name } }),
+        _ => serde_json::json!({ "type": "function", "function": { "name": sanitize_tool_name(&_t.name) } }),
     }
 }
 
@@ -1007,5 +1029,98 @@ mod tests {
                 { "role": "assistant", "level": 0 }
             ]))
         );
+    }
+
+    // ── tool-name sanitization ────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_replaces_dots() {
+        assert_eq!(sanitize_tool_name("chain.balance"), "chain__DOT__balance");
+        assert_eq!(sanitize_tool_name("a.b.c"), "a__DOT__b__DOT__c");
+    }
+
+    #[test]
+    fn sanitize_leaves_clean_names_unchanged() {
+        assert_eq!(sanitize_tool_name("read_file"), "read_file");
+        assert_eq!(sanitize_tool_name("grep"), "grep");
+    }
+
+    #[test]
+    fn unsanitize_reverses_sanitize() {
+        assert_eq!(unsanitize_tool_name("chain__DOT__balance"), "chain.balance");
+        assert_eq!(unsanitize_tool_name("a__DOT__b__DOT__c"), "a.b.c");
+        assert_eq!(unsanitize_tool_name("read_file"), "read_file");
+    }
+
+    #[test]
+    fn render_tool_sanitizes_dotted_name() {
+        let mut t = tool("chain.balance", "Check balance");
+        t.name = "chain.balance".to_string();
+        let rendered = render_tool(&t);
+        assert_eq!(rendered["function"]["name"], "chain__DOT__balance");
+    }
+
+    #[test]
+    fn render_strict_tool_sanitizes_dotted_name() {
+        let mut t = tool("chain.transfer", "Transfer tokens");
+        t.name = "chain.transfer".to_string();
+        let rendered = render_strict_tool(&t);
+        assert_eq!(rendered["function"]["name"], "chain__DOT__transfer");
+    }
+
+    #[test]
+    fn parse_calls_unsanitizes_dotted_name() {
+        let resp = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_chain",
+                        "function": {
+                            "name": "chain__DOT__balance",
+                            "arguments": "{\"address\":\"0xabc\"}"
+                        }
+                    }]
+                }
+            }]
+        }));
+        let calls = OpenAiTranslator
+            .parse_calls(&resp)
+            .expect("parse should succeed");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "chain.balance");
+        assert_eq!(calls[0].arguments["address"], "0xabc");
+    }
+
+    #[test]
+    fn round_trip_dotted_tool_name() {
+        // Render a tool with a dot in the name.
+        let mut t = tool("chain.swap", "Swap tokens");
+        t.name = "chain.swap".to_string();
+        let rendered = render_tool(&t);
+        let wire_name = rendered["function"]["name"].as_str().unwrap();
+        assert_eq!(wire_name, "chain__DOT__swap");
+        // Verify the wire name passes OpenAI validation.
+        assert!(wire_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-'));
+
+        // Simulate the model calling back with the sanitized name.
+        let resp = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": wire_name,
+                            "arguments": "{}"
+                        }
+                    }]
+                }
+            }]
+        }));
+        let calls = OpenAiTranslator
+            .parse_calls(&resp)
+            .expect("parse should succeed");
+        assert_eq!(calls[0].name, "chain.swap");
     }
 }

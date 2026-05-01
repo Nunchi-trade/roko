@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/chain-intelligence.ts ---
 import type { Scenario } from '../scenarios';
-import { enterWorkspace, showCmd, getRoko } from '../terminal-session';
+import { enterWorkspace, showCmd, roko } from '../terminal-session';
 
 export const chainIntelligence: Scenario = {
   id: 'chain-intelligence',
@@ -23,20 +23,19 @@ export const chainIntelligence: Scenario = {
     { label: 'Cross-pollination', sublabel: 'insights compound' },
     { label: 'Results', sublabel: 'efficiency metrics' },
   ],
-  async run({ entries, playback, timeline, setMetric, logCommand, logCommandComplete, signal, workspaceDir }) {
+  async run(ctx) {
+    const { entries, playback, timeline, setMetric, logCommand, logCommandComplete, signal, workspaceDir } = ctx;
     const [alpha, beta] = entries;
 
     await enterWorkspace(alpha, workspaceDir);
     await enterWorkspace(beta, workspaceDir);
-
-    const ROKO = getRoko();
     timeline.init(this.steps);
 
     // -- Phase 1: Connect to fork --
     await playback.waitForStep();
     playback.setProgress(1, 6, 'connecting to mirage fork');
     timeline.setActive(0);
-    setMetric('model', 'sonnet');
+    setMetric('model', '--');
 
     logCommand(
       'mirage health check',
@@ -88,8 +87,8 @@ export const chainIntelligence: Scenario = {
       customDesc: 'Funds Beta wallet with 110 ETH using Anvil cheatcode on the forked chain.',
     });
 
-    setMetric('cost', '$0.00');
-    setMetric('tokens', '0');
+    setMetric('cost', '--');
+    setMetric('tokens', '--');
 
     // -- Phase 2: Alpha researches yields --
     if (signal.aborted) return;
@@ -99,7 +98,7 @@ export const chainIntelligence: Scenario = {
     timeline.setActive(1);
 
     logCommand(
-      `${ROKO} run (yield-scout)`,
+      'roko run (yield-scout)',
       'Alpha agent researches Aave V3 and Uniswap V3 yield opportunities for 500K USDC. Posts findings to the on-chain knowledge graph.',
     );
 
@@ -109,7 +108,7 @@ export const chainIntelligence: Scenario = {
       'Available: chain.balance, chain.get_pool_info, chain.post_insight, chain.search_insights.',
     ].join(' ');
 
-    const alphaResult = await showCmd(alpha, `${ROKO} run "${alphaPrompt}"`, {
+    const alphaResult = await showCmd(alpha, roko(ctx, `run "${alphaPrompt}"`), {
       playback,
       timeout: 300000,
       onLog: logCommand,
@@ -118,8 +117,8 @@ export const chainIntelligence: Scenario = {
       customDesc: 'Runs Alpha (Yield Scout) agent. The agent queries Aave/Uniswap rates and posts insight entries to the on-chain knowledge graph via chain.post_insight.',
     });
 
-    setMetric('cost', alphaResult.cost ?? '$1.42');
-    setMetric('tokens', alphaResult.tokens ?? '~12k');
+    if (alphaResult.cost) setMetric('cost', alphaResult.cost);
+    if (alphaResult.tokens) setMetric('tokens', alphaResult.tokens);
 
     // -- Phase 3: Beta picks up knowledge --
     if (signal.aborted) return;
@@ -129,7 +128,7 @@ export const chainIntelligence: Scenario = {
     timeline.setActive(2);
 
     logCommand(
-      `${ROKO} run (risk-hedger)`,
+      'roko run (risk-hedger)',
       'Beta agent checks the knowledge graph FIRST, finds Alpha\'s research, confirms it, then builds its hedge strategy on top. This is the key knowledge-transfer moment.',
     );
 
@@ -139,7 +138,7 @@ export const chainIntelligence: Scenario = {
       'If you find relevant insights, use them and call chain.confirm_insight. Post your own findings with chain.post_insight.',
     ].join(' ');
 
-    const betaResult = await showCmd(beta, `${ROKO} run "${betaPrompt}"`, {
+    const betaResult = await showCmd(beta, roko(ctx, `run "${betaPrompt}"`), {
       playback,
       timeout: 300000,
       onLog: logCommand,
@@ -148,7 +147,8 @@ export const chainIntelligence: Scenario = {
       customDesc: 'Runs Beta (Risk Hedger) agent. Beta queries the knowledge graph first, finds Alpha\'s insights, confirms them (triggering the "aha" animation), then executes its hedge strategy.',
     });
 
-    setMetric('cost', betaResult.cost ?? '$0.98');
+    if (betaResult.cost) setMetric('cost', betaResult.cost);
+    if (betaResult.tokens) setMetric('tokens', betaResult.tokens);
 
     // -- Phase 4: Both execute strategies --
     if (signal.aborted) return;
@@ -164,14 +164,14 @@ export const chainIntelligence: Scenario = {
 
     // Show status from both agents
     await Promise.all([
-      showCmd(alpha, `${ROKO} status`, {
+      showCmd(alpha, roko(ctx, 'status'), {
         playback,
         timeout: 30000,
         onLog: logCommand,
         onLogComplete: logCommandComplete,
         customDesc: 'Shows Alpha agent workspace status after yield research and execution.',
       }),
-      showCmd(beta, `${ROKO} status`, {
+      showCmd(beta, roko(ctx, 'status'), {
         playback,
         timeout: 30000,
         customDesc: 'Shows Beta agent workspace status after hedge execution.',
@@ -196,7 +196,7 @@ export const chainIntelligence: Scenario = {
       'and post a meta-insight comparing yield strategies.',
     ].join(' ');
 
-    await showCmd(alpha, `${ROKO} run "${crossPrompt}"`, {
+    await showCmd(alpha, roko(ctx, `run "${crossPrompt}"`), {
       playback,
       timeout: 180000,
       onLog: logCommand,
@@ -218,14 +218,14 @@ export const chainIntelligence: Scenario = {
 
     // Show final learning state
     await Promise.all([
-      showCmd(alpha, `${ROKO} learn all`, {
+      showCmd(alpha, roko(ctx, 'learn all'), {
         playback,
         timeout: 30000,
         onLog: logCommand,
         onLogComplete: logCommandComplete,
         customDesc: 'Shows Alpha\'s learning state: episodes, efficiency, and knowledge metrics.',
       }),
-      showCmd(beta, `${ROKO} learn all`, {
+      showCmd(beta, roko(ctx, 'learn all'), {
         playback,
         timeout: 30000,
         customDesc: 'Shows Beta\'s learning state and knowledge graph statistics.',

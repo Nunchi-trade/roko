@@ -1,7 +1,7 @@
 // --- src/lib/scenario-runners/prd-pipeline.ts ---
 import type { Scenario, ScenarioContext } from '../scenarios';
 import { compactTime, pipelineEvent } from '../scenario-helpers';
-import { enterWorkspace, showCmd, getRoko } from '../terminal-session';
+import { enterWorkspace, showCmd, roko } from '../terminal-session';
 import {
   type PipelineDemoState,
   type PipelinePhase,
@@ -225,9 +225,8 @@ export const prdPipeline: Scenario = {
     const dir = ctx.workspaceDir;
     await enterWorkspace(main, dir);
     const closeWorkflowStreams = startWorkflowSubscriptions(ctx, dir);
-    const ROKO = getRoko();
     timeline.init(this.steps);
-    setMetric('model', 'T1/T2/T3');
+    setMetric('model', '--');
 
     try {
       // ── Invisible setup: scaffold + seed ────────────────────
@@ -242,13 +241,13 @@ export const prdPipeline: Scenario = {
       logCommand('prepare workspace', 'Creates a small Rust CLI so the generated PRD and plan target real files.');
       await main.execCmd(setupCmd, 15000);
       await seedWorkspace(main, example);
-      await main.execCmd(`${ROKO} init 2>/dev/null; true`, 15000);
+      await main.execCmd(`${roko(ctx, 'init')} 2>/dev/null; true`, 15000);
       // Wipe all setup noise so the visible demo starts on a clean terminal.
       main.clearTerminal();
 
       // ── Step 1: prd idea ────────────────────────────────────
       await playback.waitForStep();
-      const ideaCmd = `${ROKO} prd idea "${example.idea}"`;
+      const ideaCmd = roko(ctx, `prd idea "${example.idea}"`);
       playback.setProgress(1, 5, ideaCmd);
       timeline.setActive(0);
       ctx.patchPipeline({
@@ -263,11 +262,11 @@ export const prdPipeline: Scenario = {
         return;
       }
       await refreshWorkflowSnapshot(ctx, dir, 'idea', 'Captured idea is visible to the workflow projection', ideaCmd);
-      setMetric('tokens', 'idea');
+      if (ideaResult.tokens) setMetric('tokens', ideaResult.tokens);
 
       // ── Step 2: prd draft new (detects existing → instant) ──
       await playback.waitForStep();
-      const draftCmd = `${ROKO} prd draft new "${example.prdTitle}"`;
+      const draftCmd = roko(ctx, `prd draft new "${example.prdTitle}"`);
       playback.setProgress(2, 5, draftCmd);
       timeline.setActive(1);
       ctx.patchPipeline({
@@ -289,11 +288,11 @@ export const prdPipeline: Scenario = {
         return;
       }
       const livePrdSlug = draftSnapshot?.prd?.slug || example.slug;
-      setMetric('cost', '$ live');
+      if (draftResult.cost) setMetric('cost', draftResult.cost);
 
       // ── Step 3: draft promote ───────────────────────────────
       await playback.waitForStep();
-      const promoteCmd = `${ROKO} prd draft promote ${livePrdSlug}`;
+      const promoteCmd = roko(ctx, `prd draft promote ${livePrdSlug}`);
       playback.setProgress(3, 5, promoteCmd);
       timeline.setActive(2);
       ctx.patchPipeline({
@@ -307,7 +306,7 @@ export const prdPipeline: Scenario = {
 
       // ── Step 4: plan validate ───────────────────────────────
       await playback.waitForStep();
-      const validateCmd = `${ROKO} plan validate .roko/plans`;
+      const validateCmd = roko(ctx, 'plan validate .roko/plans');
       playback.setProgress(4, 5, validateCmd);
       timeline.setActive(3);
       ctx.patchPipeline({

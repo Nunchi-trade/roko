@@ -88,8 +88,12 @@ impl AcpConfig {
     }
 
     /// Load and parse a specific `roko.toml` file path, falling back to defaults on error.
+    ///
+    /// Uses the lenient loader that skips strict safety validation (e.g.
+    /// `dangerously_skip_permissions`) since ACP doesn't enforce permission
+    /// semantics — it only needs provider/model configuration.
     fn load_from_path(path: &Path) -> roko_core::config::schema::RokoConfig {
-        match roko_core::config::load_config_from_path(path) {
+        match roko_core::config::load_config_from_path_lenient(path) {
             Ok(config) => {
                 tracing::info!(
                     path = %path.display(),

@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/knowledge-accumulation.ts ---
 import type { Scenario } from '../scenarios';
-import { enterWorkspace, showCmd, getRoko } from '../terminal-session';
+import { enterWorkspace, showCmd, roko } from '../terminal-session';
 
 export const knowledgeAccumulation: Scenario = {
   id: 'knowledge-accumulation',
@@ -23,32 +23,32 @@ export const knowledgeAccumulation: Scenario = {
     { label: 'Knowledge growth', sublabel: 'query after run 2' },
     { label: 'Final state', sublabel: 'knowledge stats' },
   ],
-  async run({ entries, playback, timeline, setMetric, logCommand, logCommandComplete, workspaceDir }) {
+  async run(ctx) {
+    const { entries, playback, timeline, setMetric, logCommand, logCommandComplete, workspaceDir } = ctx;
     const [runner, knowledge] = entries;
 
     await enterWorkspace(runner, workspaceDir);
     await enterWorkspace(knowledge, workspaceDir);
-    const ROKO = getRoko();
 
     timeline.init(this.steps);
-    setMetric('model', 'cascade');
+    setMetric('model', '--');
 
     // Step 1: Initial query shows an empty store.
     await playback.waitForStep();
     timeline.setActive(0);
-    playback.setProgress(1, 6, `${ROKO} knowledge stats`);
+    playback.setProgress(1, 6, roko(ctx, 'knowledge stats'));
     logCommand(
       'knowledge stats',
       'Checking the initial state of the neuro knowledge store. The store should be empty before any task runs.',
     );
-    await showCmd(knowledge, `${ROKO} knowledge stats`, {
+    await showCmd(knowledge, roko(ctx, 'knowledge stats'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
       onLogComplete: logCommandComplete,
       customDesc: 'Checks the initial knowledge store state before any runs.',
     });
-    await showCmd(knowledge, `${ROKO} knowledge query "error handling patterns"`, {
+    await showCmd(knowledge, roko(ctx, 'knowledge query "error handling patterns"'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
@@ -60,12 +60,12 @@ export const knowledgeAccumulation: Scenario = {
     // Step 2: First run grows the store.
     await playback.waitForStep();
     timeline.setActive(1);
-    playback.setProgress(2, 6, `${ROKO} run "Build a Rust CLI..."`);
+    playback.setProgress(2, 6, roko(ctx, 'run "Build a Rust CLI..."'));
     logCommand(
       'run 1',
       'First task run builds a small Rust CLI. Episodes and efficiency data flow into the knowledge store.',
     );
-    const firstRun = await showCmd(runner, `${ROKO} run "Build a Rust CLI that parses JSON from stdin"`, {
+    const firstRun = await showCmd(runner, roko(ctx, 'run "Build a Rust CLI that parses JSON from stdin"'), {
       playback,
       timeout: 180000,
       onLog: logCommand,
@@ -78,20 +78,20 @@ export const knowledgeAccumulation: Scenario = {
     // Step 3: Query after run 1 should return richer results.
     await playback.waitForStep();
     timeline.setActive(2);
-    playback.setProgress(3, 6, `${ROKO} knowledge query ...`);
+    playback.setProgress(3, 6, roko(ctx, 'knowledge query ...'));
     knowledge.clearTerminal();
     logCommand(
       'knowledge check 1',
       'Querying the store after the first run. The results should now include JSON parsing and CLI patterns.',
     );
-    await showCmd(knowledge, `${ROKO} knowledge stats`, {
+    await showCmd(knowledge, roko(ctx, 'knowledge stats'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
       onLogComplete: logCommandComplete,
       customDesc: 'Shows the store after one run has added entries.',
     });
-    await showCmd(knowledge, `${ROKO} knowledge query "JSON parsing"`, {
+    await showCmd(knowledge, roko(ctx, 'knowledge query "JSON parsing"'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
@@ -102,13 +102,13 @@ export const knowledgeAccumulation: Scenario = {
     // Step 4: Second run compounds the store.
     await playback.waitForStep();
     timeline.setActive(3);
-    playback.setProgress(4, 6, `${ROKO} run "Add error handling..."`);
+    playback.setProgress(4, 6, roko(ctx, 'run "Add error handling..."'));
     runner.clearTerminal();
     logCommand(
       'run 2',
       'Second task adds error handling to the existing code. Knowledge compounds with the first run.',
     );
-    const secondRun = await showCmd(runner, `${ROKO} run "Add comprehensive error handling with anyhow and thiserror"`, {
+    const secondRun = await showCmd(runner, roko(ctx, 'run "Add comprehensive error handling with anyhow and thiserror"'), {
       playback,
       timeout: 180000,
       onLog: logCommand,
@@ -121,20 +121,20 @@ export const knowledgeAccumulation: Scenario = {
     // Step 5: Query after run 2 should be richer again.
     await playback.waitForStep();
     timeline.setActive(4);
-    playback.setProgress(5, 6, `${ROKO} knowledge query ...`);
+    playback.setProgress(5, 6, roko(ctx, 'knowledge query ...'));
     knowledge.clearTerminal();
     logCommand(
       'knowledge check 2',
       'After two runs the store should have accumulated entries across both tasks.',
     );
-    await showCmd(knowledge, `${ROKO} knowledge stats`, {
+    await showCmd(knowledge, roko(ctx, 'knowledge stats'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
       onLogComplete: logCommandComplete,
       customDesc: 'Shows the store after two runs have accumulated more knowledge.',
     });
-    await showCmd(knowledge, `${ROKO} knowledge query "error handling patterns"`, {
+    await showCmd(knowledge, roko(ctx, 'knowledge query "error handling patterns"'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
@@ -145,20 +145,20 @@ export const knowledgeAccumulation: Scenario = {
     // Step 6: Final state shows learning surface area.
     await playback.waitForStep();
     timeline.setActive(5);
-    playback.setProgress(6, 6, `${ROKO} knowledge stats`);
+    playback.setProgress(6, 6, roko(ctx, 'knowledge stats'));
     knowledge.clearTerminal();
     logCommand(
       'final state',
       'Final knowledge store statistics after two accumulation cycles.',
     );
-    await showCmd(knowledge, `${ROKO} knowledge stats`, {
+    await showCmd(knowledge, roko(ctx, 'knowledge stats'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
       onLogComplete: logCommandComplete,
       customDesc: 'Final stats for the knowledge store after two task runs.',
     });
-    await showCmd(knowledge, `${ROKO} learn all`, {
+    await showCmd(knowledge, roko(ctx, 'learn all'), {
       playback,
       timeout: 30000,
       onLog: logCommand,

@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/knowledge-transfer.ts ---
 import type { Scenario } from '../scenarios';
-import { enterWorkspace, showCmd, getRoko, trackMetrics } from '../terminal-session';
+import { enterWorkspace, showCmd, roko, trackMetrics } from '../terminal-session';
 
 export const knowledgeTransfer: Scenario = {
   id: 'knowledge-transfer',
@@ -25,7 +25,6 @@ export const knowledgeTransfer: Scenario = {
   async run(ctx) {
     const { entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete } = ctx;
     const [alpha, beta] = entries;
-    const ROKO = getRoko();
     timeline.init(this.steps);
 
     // -- Phase 1: Setup workspaces --
@@ -53,9 +52,9 @@ export const knowledgeTransfer: Scenario = {
     });
 
     const alphaResult = await showCmd(alpha,
-      `${ROKO} run "Build a REST API in Rust using actix-web for user management. ` +
-      `Include CRUD endpoints for users, input validation with the validator crate, ` +
-      `structured JSON error responses, and integration tests with reqwest."`,
+      roko(ctx, 'run "Build a REST API in Rust using actix-web for user management. ' +
+      'Include CRUD endpoints for users, input validation with the validator crate, ' +
+      'structured JSON error responses, and integration tests with reqwest."'),
       {
         playback,
         timeout: 300000,
@@ -67,7 +66,7 @@ export const knowledgeTransfer: Scenario = {
     );
 
     clearInterval(alphaTracker);
-    setMetric('cost', alphaResult.cost ?? '$?.??');
+    if (alphaResult.cost) setMetric('cost', alphaResult.cost);
     setMetric('time', `${alphaResult.elapsed.toFixed(0)}s`);
 
     // -- Phase 3: Distill knowledge from Alpha --
@@ -75,14 +74,14 @@ export const knowledgeTransfer: Scenario = {
     timeline.setActive(2);
     playback.setProgress(2, 5, 'Distilling knowledge from Alpha');
 
-    await showCmd(alpha, `${ROKO} learn all`, {
+    await showCmd(alpha, roko(ctx, 'learn all'), {
       playback,
       timeout: 60000,
       onLog: logCommand,
       onLogComplete: logCommandComplete,
       customDesc: 'Inspects episodes, router decisions, and efficiency metrics. The distiller extracts reusable insights.',
     });
-    await showCmd(alpha, `${ROKO} knowledge stats`, {
+    await showCmd(alpha, roko(ctx, 'knowledge stats'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
@@ -112,9 +111,9 @@ export const knowledgeTransfer: Scenario = {
     });
 
     await showCmd(beta,
-      `${ROKO} run "Build a REST API in Rust using actix-web for inventory management. ` +
-      `Include CRUD endpoints for products, search and filter, input validation, ` +
-      `structured JSON error responses, and integration tests with reqwest."`,
+      roko(ctx, 'run "Build a REST API in Rust using actix-web for inventory management. ' +
+      'Include CRUD endpoints for products, search and filter, input validation, ' +
+      'structured JSON error responses, and integration tests with reqwest."'),
       {
         playback,
         timeout: 300000,
@@ -132,7 +131,7 @@ export const knowledgeTransfer: Scenario = {
     timeline.setActive(4);
     playback.setProgress(4, 5, 'Comparing results');
 
-    await showCmd(beta, `${ROKO} learn efficiency`, {
+    await showCmd(beta, roko(ctx, 'learn efficiency'), {
       playback,
       timeout: 30000,
       onLog: logCommand,

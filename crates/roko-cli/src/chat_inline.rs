@@ -1168,6 +1168,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
         return chat::run_chat_repl(agent_id, serve_url).await;
     }
 
+    // --- All fallible setup BEFORE entering raw mode ---
     let api_key =
         auth::resolve_api_key(&roko_core::config::ServeAuthConfig::default(), None).map(|r| r.key);
 
@@ -1185,6 +1186,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
         backend_url.clone()
     };
 
+    // --- NOW create the terminal (enters raw mode) ---
     let mut term = InlineTerminal::new().context("init inline terminal")?;
     let theme = *term.theme();
 
@@ -1512,18 +1514,12 @@ fn build_unified_inline_agent_session(
     let resolved = crate::config::load_layered(&workdir)
         .map_err(|source| ChatInlineDispatchError::ConfigLoad { source })?;
     let config = resolved.config;
-    let mut model_config = roko_core::config::schema::RokoConfig::default();
-    model_config.providers.extend(config.providers.clone());
-    model_config.models.extend(config.models.clone());
-    if let Some(model) = config.agent.model.clone() {
-        model_config.agent.default_model = model;
-    }
-    model_config.agent.default_effort = config.agent.effort.clone();
-    model_config.agent.bare_mode = config.agent.bare_mode;
-    model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
-    model_config.agent.fallback_model = config.agent.fallback_model.clone();
-    model_config.agent.tier_models = config.agent.tier_models.clone();
-    model_config.agent.env = Some(config.agent.env.clone());
+
+    // Load RokoConfig from roko.toml (respects user's default_model, default_backend, etc.)
+    // instead of starting from RokoConfig::default() which has hardcoded fallbacks.
+    let mut model_config = crate::config_helpers::load_roko_config(&workdir)
+        .unwrap_or_default();
+    crate::config::merge_global_providers(&mut model_config);
 
     let cost_table = CostTable::from_config(&model_config.models).with_defaults();
     let role = {
@@ -1557,15 +1553,24 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
         return Ok(());
     }
 
+    // --- All fallible setup BEFORE entering raw mode ---
+    // If config/model resolution fails, errors print cleanly to stderr
+    // without the terminal being in raw mode.
+    let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let (agent_session, system_message, cost_table) =
+        build_unified_inline_agent_session(workdir.clone()).map_err(|error| {
+            tracing::warn!("{error:#}");
+            error
+        })?;
+
+    // --- NOW create the terminal (enters raw mode) ---
     let mut term = InlineTerminal::new().context("init inline terminal")?;
     let theme = *term.theme();
 
     // Push welcome banner
     let version = env!("CARGO_PKG_VERSION");
-    let workspace = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| ".".to_string());
-    let roko_initialized = std::path::Path::new(".roko").exists();
+    let workspace = workdir.display().to_string();
+    let roko_initialized = workdir.join(".roko").exists();
     let init_status = if roko_initialized {
         ".roko/ initialized"
     } else {
@@ -1614,13 +1619,6 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
 
     let mut input = InputState::new();
     input.history = load_history();
-
-    let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let (agent_session, system_message, cost_table) =
-        build_unified_inline_agent_session(workdir.clone()).map_err(|error| {
-            tracing::warn!("{error:#}");
-            error
-        })?;
 
     let mut session = ChatSession {
         phase: Phase::Input,

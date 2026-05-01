@@ -1,7 +1,7 @@
 // --- src/lib/scenario-runners/providers.ts ---
 import type { Scenario } from '../scenarios';
 import { stripAnsi } from '../scenario-helpers';
-import { enterWorkspace, showCmd, getRoko } from '../terminal-session';
+import { enterWorkspace, showCmd, roko } from '../terminal-session';
 
 export const providers: Scenario = {
   id: 'providers',
@@ -22,13 +22,12 @@ export const providers: Scenario = {
     { label: 'Anthropic Haiku', sublabel: 'dispatch' },
     { label: 'Moonshot v1', sublabel: 'dispatch' },
   ],
-  async run({ entries, playback, timeline, logCommand, logCommandComplete, workspaceDir }) {
+  async run(ctx) {
+    const { entries, playback, timeline, logCommand, logCommandComplete, workspaceDir } = ctx;
     const providerNames = ['zhipu', 'openai', 'anthropic', 'moonshot'];
 
     await enterWorkspace(entries[0], workspaceDir);
     await Promise.all(entries.slice(1).map(e => enterWorkspace(e, workspaceDir)));
-
-    const ROKO = getRoko();
     timeline.init(this.steps);
 
     const prompt = 'Build a hello-world web server';
@@ -37,7 +36,7 @@ export const providers: Scenario = {
     await Promise.all(
       entries.map(async (e, i) => {
         timeline.setActive(i);
-        await showCmd(e, `${ROKO} run "${prompt}" --provider ${providerNames[i]}`, {
+        await showCmd(e, `${roko(ctx, `run "${prompt}"`)} --provider ${providerNames[i]}`, {
           playback,
           timeout: 180000,
           customDesc: `Dispatches the build to ${providerNames[i]} provider. Roko's provider-agnostic dispatch maps the same prompt and tool schema to any OpenAI-compatible or native API.`,

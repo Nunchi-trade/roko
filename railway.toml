@@ -2,8 +2,10 @@
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 watchPatterns = [
+  "apps/**",
   "crates/**",
   "demo/demo-app/**",
+  "docker/start-railway.sh",
   "Dockerfile",
   "Cargo.toml",
   "Cargo.lock",

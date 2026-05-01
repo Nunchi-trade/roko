@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/provider-race.ts ---
 import type { Scenario } from '../scenarios';
-import { enterWorkspace, showCmd, getRoko, trackMetrics } from '../terminal-session';
+import { enterWorkspace, showCmd, roko, trackMetrics } from '../terminal-session';
 
 export const providerRace: Scenario = {
   id: 'provider-race',
@@ -22,7 +22,8 @@ export const providerRace: Scenario = {
     { label: 'Winner', sublabel: 'first to pass' },
     { label: 'Cost summary', sublabel: 'compare totals' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, workspaceDir }) {
+  async run(ctx) {
+    const { entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, workspaceDir } = ctx;
     const providerNames = ['anthropic', 'openai', 'gemini', 'moonshot'];
     const providerModels = ['haiku', 'gpt-5.4-mini', 'flash', 'v1'];
     const providerLabels = ['anthropic (haiku)', 'openai (gpt-5.4-mini)', 'gemini (flash)', 'moonshot (v1)'];
@@ -60,7 +61,6 @@ export const providerRace: Scenario = {
     await enterWorkspace(entries[0], workspaceDir);
     await Promise.all(entries.slice(1).map(e => enterWorkspace(e, workspaceDir)));
 
-    const ROKO = getRoko();
     setMetric('model', 'provider race');
     refreshMetrics();
     logCommand('setup', `Workspace initialized for ${providerLabels.join(', ')}.`);
@@ -103,7 +103,7 @@ export const providerRace: Scenario = {
     const prompt = 'Build a Rust CLI that converts Celsius to Fahrenheit with tests';
     const racePromise = Promise.all(
       entries.map(async (handle, index): Promise<RaceResult> => {
-        const result = await showCmd(handle, `${ROKO} run "${prompt}" --provider ${providerNames[index]}`, {
+        const result = await showCmd(handle, `${roko(ctx, `run "${prompt}"`)} --provider ${providerNames[index]}`, {
           playback,
           timeout: 240000,
           customDesc: `Racing ${providerLabels[index]} against the field.`,

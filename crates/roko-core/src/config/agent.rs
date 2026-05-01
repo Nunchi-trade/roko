@@ -102,11 +102,7 @@ fn default_model() -> String {
 }
 
 fn default_backend() -> String {
-    if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
-        "anthropic_api".into()
-    } else {
-        "claude".into()
-    }
+    "claude".into()
 }
 
 fn default_effort() -> String {

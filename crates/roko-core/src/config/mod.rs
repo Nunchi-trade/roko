@@ -195,6 +195,28 @@ pub fn load_config_from_path(path: &Path) -> Result<RokoConfig, LoadConfigError>
     Ok(config)
 }
 
+/// Load configuration from an explicit file path without strict safety validation.
+///
+/// This skips the `dangerously_skip_permissions` check, making it suitable for
+/// contexts (like ACP) that don't enforce permission semantics and just need
+/// provider/model configuration.
+pub fn load_config_from_path_lenient(path: &Path) -> Result<RokoConfig, LoadConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|source| LoadConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let mut config: RokoConfig =
+        toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    config.interpolate_env_vars();
+    config.resolve_file_secrets();
+    Ok(config)
+}
+
 #[cfg(test)]
 mod load_config_tests {
     use super::*;

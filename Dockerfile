@@ -1,6 +1,14 @@
-# Roko control plane + mirage-rs + agent-relay + demo-app SPA (embed at build time).
+# Roko Railway image.
+#
+# One public Railway service:
+#   - roko serve listens on 0.0.0.0:$PORT
+#   - mirage-rs listens on 127.0.0.1:8545
+#   - agent-relay listens on 127.0.0.1:9011
+#
+# The sidecars are required build artifacts. A deploy must fail if they do not
+# build, instead of silently shipping a half-functional control plane.
 
-# ---- Frontend (Vite) ----
+# ---- Frontend (Vite) -------------------------------------------------------
 FROM node:22-bookworm-slim AS frontend
 WORKDIR /app/demo/demo-app
 COPY demo/demo-app/package.json demo/demo-app/package-lock.json* ./
@@ -8,125 +16,107 @@ RUN npm ci --prefer-offline
 COPY demo/demo-app/ ./
 RUN npm run build
 
-# ---- Rust binary ----
-FROM rust:1.91-bookworm AS builder
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libssl-dev git \
-    && rm -rf /var/lib/apt/lists/*
-RUN rustup component add clippy
+# ---- Rust binaries --------------------------------------------------------
+FROM rust:1.91-slim-bookworm AS builder
 WORKDIR /app
-COPY . .
-COPY --from=frontend /app/demo/demo-app/dist ./demo/demo-app/dist
-# BuildKit cache mounts: cargo registry + target dir persist across builds.
-# Only changed crates recompile instead of full rebuild every time.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    cargo build --release -p roko-cli \
-    && strip target/release/roko \
-    && cp target/release/roko /tmp/roko
 
-# mirage-rs + agent-relay: optional (skip if trait API out of sync)
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    (cargo build --release -p mirage-rs --features "binary,roko" \
-     && strip target/release/mirage-rs \
-     && cp target/release/mirage-rs /tmp/mirage-rs) \
-    || echo "WARN: mirage-rs build skipped (trait API mismatch)"
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    (cargo build --release -p agent-relay \
-     && strip target/release/agent-relay \
-     && cp target/release/agent-relay /tmp/agent-relay) \
-    || echo "WARN: agent-relay build skipped"
-
-# ---- Runtime ----
-FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates libssl3 libssl-dev pkg-config \
-       git bash gcc libc6-dev curl coreutils \
+        ca-certificates \
+        git \
+        libssl-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add clippy rustfmt
+
+COPY . .
+COPY --from=frontend /app/demo/demo-app/dist ./demo/demo-app/dist
+
+RUN cargo build --release -p roko-cli --bin roko \
+    && cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" \
+    && cargo build --release -p agent-relay --bin agent-relay \
+    && strip target/release/roko target/release/mirage-rs target/release/agent-relay \
+    && cp target/release/roko /tmp/roko \
+    && cp target/release/mirage-rs /tmp/mirage-rs \
+    && cp target/release/agent-relay /tmp/agent-relay
+
+# ---- Runtime ---------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        coreutils \
+        curl \
+        gcc \
+        git \
+        gosu \
+        libc6-dev \
+        libssl-dev \
+        libssl3 \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Rust toolchain — demo gate commands need cargo test / clippy
+# Rust toolchain: some server-launched coding/demo tasks need cargo, clippy, and
+# rustfmt at runtime.
 COPY --from=builder /usr/local/cargo /usr/local/cargo
 COPY --from=builder /usr/local/rustup /usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV PATH="/usr/local/cargo/bin:$PATH"
 
-# Foundry (cast) — needed for on-chain interactions
+# Foundry cast is used by chain/demo helpers. Keep this explicit so failures
+# happen at image build time, not during a Railway deployment.
 RUN curl -L https://foundry.paradigm.xyz | bash \
     && /root/.foundry/bin/foundryup \
     && cp /root/.foundry/bin/cast /usr/local/bin/cast \
     && rm -rf /root/.foundry
 
 COPY --from=builder /tmp/roko /usr/local/bin/roko
-# Optional binaries (may not exist if build was skipped)
-RUN --mount=from=builder,source=/tmp,target=/builder-tmp \
-    cp /builder-tmp/mirage-rs /usr/local/bin/mirage-rs 2>/dev/null || true \
-    && cp /builder-tmp/agent-relay /usr/local/bin/agent-relay 2>/dev/null || true
+COPY --from=builder /tmp/mirage-rs /usr/local/bin/mirage-rs
+COPY --from=builder /tmp/agent-relay /usr/local/bin/agent-relay
+COPY docker/start-railway.sh /usr/local/bin/start-railway
 COPY --from=builder /app/roko.toml /workspace/roko.toml
-# Docker containers always bind 0.0.0.0 — acknowledge public risk in config
+
+# Docker/Railway containers intentionally bind the public HTTP server to
+# 0.0.0.0. Use API providers by default because the Claude CLI is not installed
+# in this image.
 RUN sed -i 's/acknowledge_public_risk = false/acknowledge_public_risk = true/' /workspace/roko.toml \
-    # Providers: use anthropic API (not claude_cli which needs the claude binary)
     && sed -i '/^\[providers\.anthropic\]$/,/^\[/ { s/kind = "claude_cli"/kind = "anthropic_api"/; /^command = /d; }' /workspace/roko.toml \
     && sed -i '/^\[providers\.claude_cli\]$/,/^\[/ { s/kind = "claude_cli"/kind = "anthropic_api"/; }' /workspace/roko.toml \
-    # Agent: use anthropic API backend, not CLI
-    && sed -i '/^\[agent\]$/,/^\[/ { s/^command = "claude"/# command = "claude"/; }' /workspace/roko.toml
+    && sed -i '/^\[agent\]$/,/^\[/ { s/^command = "claude"/# command = "claude"/; }' /workspace/roko.toml \
+    && chmod +x /usr/local/bin/start-railway \
+    && useradd --create-home --shell /bin/bash --uid 1000 roko \
+    && mkdir -p \
+        /workspace/.roko/dreams \
+        /workspace/.roko/learn \
+        /workspace/.roko/neuro \
+        /workspace/.roko/state \
+    && chown -R roko:roko /workspace
 
-# Minimal terminal prompt
-RUN echo 'export PS1="> "' >> /root/.bashrc
-
-# Start script: launches agent-relay, mirage-rs, then roko serve
-RUN cat <<'SCRIPT' > /usr/local/bin/start.sh
-#!/usr/bin/env bash
-set -e
-
-cleanup() {
-  echo "Shutting down..."
-  kill $RELAY_PID $MIRAGE_PID 2>/dev/null || true
-  wait $RELAY_PID $MIRAGE_PID 2>/dev/null || true
-  exit 0
-}
-trap cleanup SIGTERM SIGINT
-
-# Start agent-relay (if available)
-if command -v agent-relay &>/dev/null; then
-  agent-relay &
-  RELAY_PID=$!
-fi
-
-# Start mirage-rs (if available)
-if command -v mirage-rs &>/dev/null; then
-  MIRAGE_ARGS="--bind 0.0.0.0 --port 8545"
-  MIRAGE_ARGS="$MIRAGE_ARGS --block-interval-ms ${MIRAGE_BLOCK_INTERVAL_MS:-50}"
-  MIRAGE_ARGS="$MIRAGE_ARGS --chain-id ${MIRAGE_CHAIN_ID:-88888}"
-  MIRAGE_ARGS="$MIRAGE_ARGS --enable-hdc --enable-knowledge --enable-stigmergy"
-  [ -n "$ETH_RPC_URL" ] && MIRAGE_ARGS="$MIRAGE_ARGS --rpc-url $ETH_RPC_URL"
-  mirage-rs $MIRAGE_ARGS &
-  MIRAGE_PID=$!
-fi
-
-# Give services a moment to start
-sleep 1
-
-# Start roko serve (foreground, PID 1 semantics)
-exec roko serve --bind 0.0.0.0 --port 6677
-SCRIPT
-RUN chmod +x /usr/local/bin/start.sh
-
-VOLUME ["/workspace/.roko"]
 WORKDIR /workspace
 
 ENV RUST_LOG=info
 ENV SHELL=/bin/bash
-ENV MIRAGE_RPC_URL=http://127.0.0.1:8545
-ENV MIRAGE_BLOCK_INTERVAL_MS=50
-ENV MIRAGE_CHAIN_ID=88888
+ENV ROKO_BIND=0.0.0.0
+ENV ROKO_PORT=6677
+ENV MIRAGE_HOST=127.0.0.1
+ENV MIRAGE_PORT=8545
+ENV MIRAGE_CHAIN_ID=31337
+ENV MIRAGE_BLOCK_INTERVAL_MS=1000
+ENV MIRAGE_SNAPSHOT_INTERVAL_SECS=15
 ENV ROKO_AGENT_RELAY_BIND=127.0.0.1:9011
 ENV ROKO_AGENT_RELAY_URL=http://127.0.0.1:9011
-EXPOSE 6677 8545
+ENV ROKO_MIRAGE_URL=http://127.0.0.1:8545
+ENV MIRAGE_RPC_URL=http://127.0.0.1:8545
 
-ENTRYPOINT ["/usr/local/bin/start.sh"]
-CMD []
+EXPOSE 6677
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD public_port="${PORT:-${ROKO_PORT:-6677}}" \
+    && curl -fsS "http://127.0.0.1:${public_port}/health" >/dev/null \
+    && curl -fsS "http://127.0.0.1:${MIRAGE_PORT:-8545}/health" >/dev/null \
+    && curl -fsS "http://${ROKO_AGENT_RELAY_BIND:-127.0.0.1:9011}/relay/health" >/dev/null
+
+ENTRYPOINT ["/usr/local/bin/start-railway"]

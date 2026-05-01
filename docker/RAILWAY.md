@@ -1,8 +1,41 @@
 # Railway Deployment Guide
 
-Deploy roko as a multi-service Railway project: control plane + optional mirage chain relay + N agent workers.
+The recommended Railway path is the root `Dockerfile`: one Railway service, one
+public HTTP port, with `roko serve` as the public process and `mirage-rs` plus
+`agent-relay` as loopback sidecars in the same container.
+
+This keeps first deploys simple:
+
+```text
+Railway Service
+├── roko serve    public  0.0.0.0:$PORT
+├── mirage-rs     private 127.0.0.1:8545
+└── agent-relay   private 127.0.0.1:9011
+```
+
+The image build is strict: `roko`, `mirage-rs`, and `agent-relay` are required
+artifacts. If any of them fails to build, the deployment fails instead of
+shipping a control plane with missing sidecars.
+
+The older multi-service layout is still useful for larger deployments with
+independent workers, but it should not be the default path for a simple Railway
+demo.
 
 ## Architecture
+
+### Single-service default
+
+- **Dockerfile:** root `Dockerfile`
+- **Railway config:** root `railway.toml`
+- **Healthcheck:** `/health`
+- **Public port:** Railway `$PORT`
+- **Internal chain URL:** `http://127.0.0.1:8545`
+- **Internal relay URL:** `http://127.0.0.1:9011`
+- **Startup script:** `docker/start-railway.sh`
+- **State:** `/workspace/.roko`, or `RAILWAY_VOLUME_MOUNT_PATH` symlinked to
+  `/workspace/.roko` when Railway mounts a volume elsewhere
+
+### Multi-service layout
 
 ```
 Railway Project

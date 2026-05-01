@@ -22,14 +22,15 @@ export const chat: Scenario = {
     { label: 'Send message', sublabel: 'explain cascade routing' },
     { label: 'Slash commands', sublabel: '/status, /model' },
   ],
-  async run({ entries, playback, timeline, logCommand, workspaceDir }) {
+  async run(ctx) {
+    const { entries, playback, timeline, logCommand, workspaceDir } = ctx;
     const e = entries[0];
     await enterWorkspace(e, workspaceDir);
     const ROKO = getRoko();
 
     timeline.init(this.steps);
 
-    // Phase 1: start roko
+    // Phase 1: start roko (bare command — no --model for interactive chat)
     await playback.waitForStep();
     playback.setProgress(1, 3, ROKO);
     timeline.setActive(0);

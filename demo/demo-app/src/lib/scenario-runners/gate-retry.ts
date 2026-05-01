@@ -1,7 +1,7 @@
 // --- src/lib/scenario-runners/gate-retry.ts ---
 import type { Scenario } from '../scenarios';
 import { rawSleep, stripAnsi } from '../scenario-helpers';
-import { enterWorkspace, showCmd, getRoko, trackMetrics } from '../terminal-session';
+import { enterWorkspace, showCmd, roko, trackMetrics } from '../terminal-session';
 
 export const gateRetry: Scenario = {
   id: 'gate-retry',
@@ -24,12 +24,11 @@ export const gateRetry: Scenario = {
     { label: 'Retry', sublabel: 'second attempt' },
     { label: 'Pass', sublabel: 'gates green' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, signal, workspaceDir }) {
+  async run(ctx) {
+    const { entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, signal, workspaceDir } = ctx;
     const [task, gates] = entries;
     await enterWorkspace(task, workspaceDir);
     await enterWorkspace(gates, workspaceDir);
-
-    const ROKO = getRoko();
     const totalSteps = 6;
     const gateNames = ['compile', 'test', 'clippy'] as const;
     const advance = async (stepIndex: number, label: string): Promise<boolean> => {
@@ -62,9 +61,9 @@ export const gateRetry: Scenario = {
     const replanSignals = /\b(?:attempting replan|replan(?:ned|ning)?|classification(?:=|:)?|needs_replan|transient|structural|architectural_conflict_requires_replan)\b/i;
 
     timeline.init(this.steps);
-    setMetric('model', 'cascade');
+    setMetric('model', '--');
 
-    await task.execCmd(`${ROKO} config set learning.replan_on_gate_failure true`, 10000);
+    await task.execCmd(roko(ctx, 'config set learning.replan_on_gate_failure true'), 10000);
     task.clearTerminal();
 
     let taskMetricsTracker: ReturnType<typeof setInterval> | null = trackMetrics(task, {
@@ -77,7 +76,7 @@ export const gateRetry: Scenario = {
       gateNames.forEach(name => setGate(name, 'pending'));
 
       const prompt = 'Build a small Rust async HTTP client with exponential backoff, JSON config loading, and focused tests. Keep compile, test, and clippy green.';
-      const runCmd = `${ROKO} run "${prompt}" --max-retries 2`;
+      const runCmd = roko(ctx, `run "${prompt}" --max-retries 2`);
 
       if (!(await advance(0, runCmd))) return;
       logCommand(
@@ -86,7 +85,7 @@ export const gateRetry: Scenario = {
       );
 
       const gateOverviewPromise = showGateMonitor(
-        `${ROKO} learn tune gates`,
+        roko(ctx, 'learn tune gates'),
         'Shows the gate tuning and retry policy in the monitoring pane while the first attempt runs.',
       );
 
@@ -134,7 +133,7 @@ export const gateRetry: Scenario = {
         );
 
         await showGateMonitor(
-          `${ROKO} status`,
+          roko(ctx, 'status'),
           'Final workspace status after the failure-and-retry cycle. The gate bar reflects the recovered state.',
         );
 
@@ -147,7 +146,7 @@ export const gateRetry: Scenario = {
         );
 
         await showGateMonitor(
-          `${ROKO} learn all`,
+          roko(ctx, 'learn all'),
           'Learning snapshot after the recovered gate failure. Replan history and task outcomes are visible here.',
         );
 
@@ -158,7 +157,7 @@ export const gateRetry: Scenario = {
         );
 
         await showGateMonitor(
-          `${ROKO} learn efficiency`,
+          roko(ctx, 'learn efficiency'),
           'Efficiency snapshot showing the retry overhead from the recovered run.',
         );
 
@@ -183,7 +182,7 @@ export const gateRetry: Scenario = {
         );
 
         await showGateMonitor(
-          `${ROKO} status`,
+          roko(ctx, 'status'),
           'Final workspace status after the failed run. The gate bar stays red because the retry budget was exhausted.',
         );
 
@@ -196,7 +195,7 @@ export const gateRetry: Scenario = {
         );
 
         await showGateMonitor(
-          `${ROKO} learn all`,
+          roko(ctx, 'learn all'),
           'Learning snapshot after an unrecovered gate failure.',
         );
 
@@ -207,7 +206,7 @@ export const gateRetry: Scenario = {
         );
 
         await showGateMonitor(
-          `${ROKO} learn efficiency`,
+          roko(ctx, 'learn efficiency'),
           'Efficiency snapshot showing the failed attempt overhead.',
         );
 
@@ -230,7 +229,7 @@ export const gateRetry: Scenario = {
         );
 
         await showGateMonitor(
-          `${ROKO} status`,
+          roko(ctx, 'status'),
           'Final workspace status after a clean first attempt.',
         );
 
@@ -241,7 +240,7 @@ export const gateRetry: Scenario = {
         );
 
         await showGateMonitor(
-          `${ROKO} learn all`,
+          roko(ctx, 'learn all'),
           'Learning snapshot after a clean first attempt.',
         );
 
@@ -252,7 +251,7 @@ export const gateRetry: Scenario = {
         );
 
         await showGateMonitor(
-          `${ROKO} learn efficiency`,
+          roko(ctx, 'learn efficiency'),
           'Efficiency snapshot showing the baseline overhead for a first-try success.',
         );
 

@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/explore.ts ---
 import type { Scenario } from '../scenarios';
-import { enterWorkspace, showCmd, getRoko } from '../terminal-session';
+import { enterWorkspace, showCmd, roko } from '../terminal-session';
 
 export const explore: Scenario = {
   id: 'explore',
@@ -29,25 +29,25 @@ export const explore: Scenario = {
     { label: 'knowledge query', sublabel: 'knowledge' },
     { label: 'explain', sublabel: 'knowledge' },
   ],
-  async run({ entries, playback, timeline, logCommand, logCommandComplete, signal, workspaceDir }) {
+  async run(ctx) {
+    const { entries, playback, timeline, logCommand, logCommandComplete, signal, workspaceDir } = ctx;
     await enterWorkspace(entries[0], workspaceDir);
     await Promise.all(entries.slice(1).map(e => enterWorkspace(e, workspaceDir)));
 
-    const ROKO = getRoko();
     timeline.init(this.steps);
 
     const families = [
-      [`${ROKO} status`, `${ROKO} doctor`, `${ROKO} prd list`],
-      [`${ROKO} learn all`, `${ROKO} learn efficiency`, `${ROKO} learn tune gates`],
+      [roko(ctx, 'status'), roko(ctx, 'doctor'), roko(ctx, 'prd list')],
+      [roko(ctx, 'learn all'), roko(ctx, 'learn efficiency'), roko(ctx, 'learn tune gates')],
       [
-        `${ROKO} config providers list`,
-        `${ROKO} config models list`,
-        `${ROKO} config validate`,
+        roko(ctx, 'config providers list'),
+        roko(ctx, 'config models list'),
+        roko(ctx, 'config validate'),
       ],
       [
-        `${ROKO} knowledge stats`,
-        `${ROKO} knowledge query "routing"`,
-        `${ROKO} explain "cascade routing"`,
+        roko(ctx, 'knowledge stats'),
+        roko(ctx, 'knowledge query "routing"'),
+        roko(ctx, 'explain "cascade routing"'),
       ],
     ];
 

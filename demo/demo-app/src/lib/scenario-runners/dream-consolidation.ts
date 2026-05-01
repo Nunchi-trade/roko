@@ -1,7 +1,7 @@
 // --- src/lib/scenario-runners/dream-consolidation.ts ---
 import type { Scenario } from '../scenarios';
 import { rawSleep } from '../scenario-helpers';
-import { enterWorkspace, showCmd, getRoko } from '../terminal-session';
+import { enterWorkspace, showCmd, roko, stripAnsi } from '../terminal-session';
 
 export const dreamConsolidation: Scenario = {
   id: 'dream-consolidation',
@@ -25,17 +25,17 @@ export const dreamConsolidation: Scenario = {
     { label: 'Integration', sublabel: 'knowledge merge' },
     { label: 'Report', sublabel: 'dream report' },
   ],
-  async run({ entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, signal, workspaceDir }) {
+  async run(ctx) {
+    const { entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, signal, workspaceDir } = ctx;
     const [dream, monitor] = entries;
     await enterWorkspace(dream, workspaceDir);
     await enterWorkspace(monitor, workspaceDir);
-    const ROKO = getRoko();
     const totalSteps = this.steps.length;
 
     timeline.init(this.steps);
-    setMetric('model', 'dream engine');
-    setMetric('cost', 'pending');
-    setMetric('tokens', 'pending');
+    setMetric('model', '--');
+    setMetric('cost', '--');
+    setMetric('tokens', '--');
     setGate('hypnagogia', 'pending');
     setGate('nrem', 'pending');
     setGate('rem', 'pending');
@@ -49,22 +49,33 @@ export const dreamConsolidation: Scenario = {
       return true;
     };
 
-    const allowPhaseTime = async (ms: number): Promise<boolean> => {
+    /**
+     * Poll the dream terminal's output buffer for a phase keyword.
+     * Returns true if the phase was detected, false on abort/timeout.
+     */
+    const waitForPhaseInOutput = async (
+      phase: string,
+      timeoutMs = 60000,
+    ): Promise<boolean> => {
+      const pattern = new RegExp(phase, 'i');
       const start = Date.now();
-      while (Date.now() - start < ms) {
+      while (Date.now() - start < timeoutMs) {
         if (signal.aborted) return false;
-        await rawSleep(100);
+        const text = stripAnsi(dream.outputBuffer);
+        if (pattern.test(text)) return true;
+        await rawSleep(250);
       }
-      return true;
+      // Timed out — the phase keyword wasn't detected, but don't fake it
+      return false;
     };
 
     // Step 0: show schedule and baseline store state.
-    if (!(await waitForStep(0, `${ROKO} knowledge dream schedule`))) return;
+    if (!(await waitForStep(0, roko(ctx, 'knowledge dream schedule')))) return;
     logCommand(
       'dream schedule',
       'Checking the consolidation cadence before the cycle begins.',
     );
-    const scheduleResult = await showCmd(dream, `${ROKO} knowledge dream schedule`, {
+    const scheduleResult = await showCmd(dream, roko(ctx, 'knowledge dream schedule'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
@@ -73,7 +84,7 @@ export const dreamConsolidation: Scenario = {
     });
     if (scheduleResult.cost) setMetric('cost', scheduleResult.cost);
     if (scheduleResult.tokens) setMetric('tokens', scheduleResult.tokens);
-    await showCmd(monitor, `${ROKO} knowledge stats`, {
+    await showCmd(monitor, roko(ctx, 'knowledge stats'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
@@ -82,14 +93,14 @@ export const dreamConsolidation: Scenario = {
     });
 
     // Step 1: seed a recent episode run so the dream cycle has material to distill.
-    if (!(await waitForStep(1, `${ROKO} run "..."`))) return;
+    if (!(await waitForStep(1, roko(ctx, 'run "..."')))) return;
     logCommand(
       'seed episodes',
       'Running a fresh task so the dream cycle can consolidate new episodes into durable knowledge.',
     );
     const seedResult = await showCmd(
       dream,
-      `${ROKO} run "Build a small Rust CLI that reads JSON from stdin and prints a summary"`,
+      roko(ctx, 'run "Build a small Rust CLI that reads JSON from stdin and prints a summary"'),
       {
         playback,
         timeout: 180000,
@@ -102,21 +113,22 @@ export const dreamConsolidation: Scenario = {
     if (seedResult.tokens) setMetric('tokens', seedResult.tokens);
 
     // Step 2: hypnagogia - replay selection while the dream run is in flight.
-    if (!(await waitForStep(2, `${ROKO} knowledge dream run`))) return;
+    if (!(await waitForStep(2, roko(ctx, 'knowledge dream run')))) return;
     logCommand(
       'hypnagogia',
       'Phase 1: replaying recent episodes and selecting the salient ones.',
     );
-    const dreamRunPromise = showCmd(dream, `${ROKO} knowledge dream run`, {
+    const dreamRunPromise = showCmd(dream, roko(ctx, 'knowledge dream run'), {
       playback,
       timeout: 300000,
       onLog: logCommand,
       onLogComplete: logCommandComplete,
       customDesc: 'Runs the full dream cycle: hypnagogia replay selection, NREM clustering, REM synthesis, and final integration.',
     });
-    if (!(await allowPhaseTime(1500))) return;
-    setGate('hypnagogia', 'pass');
-    await showCmd(monitor, `${ROKO} knowledge query "episode clusters"`, {
+    // Wait for real hypnagogia phase output from dream run
+    const hypnOk = await waitForPhaseInOutput('hypnagog|replay|select', 30000);
+    setGate('hypnagogia', hypnOk ? 'pass' : 'fail');
+    await showCmd(monitor, roko(ctx, 'knowledge query "episode clusters"'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
@@ -130,9 +142,10 @@ export const dreamConsolidation: Scenario = {
       'NREM',
       'Phase 2: clustering recurring patterns from the selected episodes.',
     );
-    if (!(await allowPhaseTime(1200))) return;
-    setGate('nrem', 'pass');
-    await showCmd(monitor, `${ROKO} knowledge stats`, {
+    // Wait for real NREM/cluster phase output
+    const nremOk = await waitForPhaseInOutput('nrem|cluster|pattern', 45000);
+    setGate('nrem', nremOk ? 'pass' : 'fail');
+    await showCmd(monitor, roko(ctx, 'knowledge stats'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
@@ -146,9 +159,10 @@ export const dreamConsolidation: Scenario = {
       'REM',
       'Phase 3: linking clusters into new associations and candidate playbooks.',
     );
-    if (!(await allowPhaseTime(1200))) return;
-    setGate('rem', 'pass');
-    await showCmd(monitor, `${ROKO} knowledge query "consolidation patterns"`, {
+    // Wait for real REM/synthesis phase output
+    const remOk = await waitForPhaseInOutput('rem|synth|link|associat', 45000);
+    setGate('rem', remOk ? 'pass' : 'fail');
+    await showCmd(monitor, roko(ctx, 'knowledge query "consolidation patterns"'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
@@ -168,28 +182,28 @@ export const dreamConsolidation: Scenario = {
     if (dreamResult.tokens) setMetric('tokens', dreamResult.tokens);
 
     // Step 6: report - clean panes and show the final consolidated state.
-    if (!(await waitForStep(6, `${ROKO} knowledge dream report`))) return;
+    if (!(await waitForStep(6, roko(ctx, 'knowledge dream report')))) return;
     dream.clearTerminal();
     monitor.clearTerminal();
     logCommand(
       'dream report',
       'Viewing the consolidation report after the cycle has merged distilled knowledge into the store.',
     );
-    await showCmd(dream, `${ROKO} knowledge dream report`, {
+    await showCmd(dream, roko(ctx, 'knowledge dream report'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
       onLogComplete: logCommandComplete,
       customDesc: 'Shows the dream consolidation report with the latest episode selection, cluster formation, synthesis, and integration details.',
     });
-    await showCmd(monitor, `${ROKO} knowledge stats`, {
+    await showCmd(monitor, roko(ctx, 'knowledge stats'), {
       playback,
       timeout: 30000,
       onLog: logCommand,
       onLogComplete: logCommandComplete,
       customDesc: 'Post-dream knowledge stats that reflect the newly consolidated state.',
     });
-    setMetric('model', 'consolidated');
+    setMetric('model', 'done');
 
     timeline.markAllComplete();
   },

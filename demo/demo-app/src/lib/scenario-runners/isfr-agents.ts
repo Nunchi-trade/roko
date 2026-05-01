@@ -1,5 +1,5 @@
 import type { Scenario } from '../scenarios';
-import { enterWorkspace, showCmd, getRoko, trackMetrics } from '../terminal-session';
+import { enterWorkspace, showCmd, roko, trackMetrics } from '../terminal-session';
 import { castBlockNumber } from '../isfr-helpers';
 
 export const isfrAgents: Scenario = {
@@ -35,7 +35,6 @@ export const isfrAgents: Scenario = {
   async run(ctx) {
     const { entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, signal } = ctx;
     const [aaveScout, compoundScout, ethenaScout, stakingScout, lendingAgg, structuredAgg, calculator, validator] = entries;
-    const ROKO = getRoko();
     timeline.init(this.steps);
 
     // -- Phase 0: Setup --
@@ -88,7 +87,7 @@ export const isfrAgents: Scenario = {
     // All 4 scouts run in parallel
     const [aaveResult, compoundResult, ethenaResult, stakingResult] = await Promise.all([
       showCmd(aaveScout,
-        `${ROKO} run "You are the Aave V3 scout. Fetch the USDC supply rate from Aave V3 on the Ethereum fork at http://127.0.0.1:8545 using cast call. Call getReserveData(address) on 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2 with USDC address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48. Convert the raw liquidityRate (ray, 1e27) to an annual percentage rate. Post the Aave USDC supply rate as a knowledge insight."`,
+        roko(ctx, `run "You are the Aave V3 scout. Fetch the USDC supply rate from Aave V3 on the Ethereum fork at http://127.0.0.1:8545 using cast call. Call getReserveData(address) on 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2 with USDC address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48. Convert the raw liquidityRate (ray, 1e27) to an annual percentage rate. Post the Aave USDC supply rate as a knowledge insight."`),
         {
           playback,
           timeout: 180000,
@@ -99,7 +98,7 @@ export const isfrAgents: Scenario = {
         },
       ),
       showCmd(compoundScout,
-        `${ROKO} run "You are the Compound V3 scout. Fetch the USDC supply rate from Compound V3 on the Ethereum fork at http://127.0.0.1:8545 using cast call. Call getSupplyRate(uint256) on 0xc3d688B66703497DAA19211EEdff47f25384cdc3 with arg 0. The result is per-second scaled by 1e18; convert to annual percentage rate. Post the Compound USDC supply rate as a knowledge insight."`,
+        roko(ctx, `run "You are the Compound V3 scout. Fetch the USDC supply rate from Compound V3 on the Ethereum fork at http://127.0.0.1:8545 using cast call. Call getSupplyRate(uint256) on 0xc3d688B66703497DAA19211EEdff47f25384cdc3 with arg 0. The result is per-second scaled by 1e18; convert to annual percentage rate. Post the Compound USDC supply rate as a knowledge insight."`),
         {
           playback,
           timeout: 180000,
@@ -110,7 +109,7 @@ export const isfrAgents: Scenario = {
         },
       ),
       showCmd(ethenaScout,
-        `${ROKO} run "You are the Ethena sUSDe scout. Fetch the sUSDe yield on the Ethereum fork at http://127.0.0.1:8545 using cast call. Call totalAssets() and totalSupply() on 0x9D39A5DE30e57443BfF2A8307A4256c8797A3497. Compute the exchange rate (totalAssets/totalSupply) and estimate the annualized yield. Post the Ethena sUSDe yield as a knowledge insight."`,
+        roko(ctx, `run "You are the Ethena sUSDe scout. Fetch the sUSDe yield on the Ethereum fork at http://127.0.0.1:8545 using cast call. Call totalAssets() and totalSupply() on 0x9D39A5DE30e57443BfF2A8307A4256c8797A3497. Compute the exchange rate (totalAssets/totalSupply) and estimate the annualized yield. Post the Ethena sUSDe yield as a knowledge insight."`),
         {
           playback,
           timeout: 180000,
@@ -121,7 +120,7 @@ export const isfrAgents: Scenario = {
         },
       ),
       showCmd(stakingScout,
-        `${ROKO} run "You are the ETH staking scout. Estimate the ETH beacon chain staking yield on the Ethereum fork at http://127.0.0.1:8545. Check the deposit contract balance at 0x00000000219ab540356cBB839Cbe05303d7705Fa using cast balance. Use the total staked ETH to estimate the current annualized staking yield. Post the ETH staking yield as a knowledge insight."`,
+        roko(ctx, `run "You are the ETH staking scout. Estimate the ETH beacon chain staking yield on the Ethereum fork at http://127.0.0.1:8545. Check the deposit contract balance at 0x00000000219ab540356cBB839Cbe05303d7705Fa using cast balance. Use the total staked ETH to estimate the current annualized staking yield. Post the ETH staking yield as a knowledge insight."`),
         {
           playback,
           timeout: 180000,
@@ -136,7 +135,8 @@ export const isfrAgents: Scenario = {
 
     const scoutsOk = aaveResult.ok && compoundResult.ok && ethenaResult.ok && stakingResult.ok;
     setGate('data-collection', scoutsOk ? 'pass' : 'fail');
-    setMetric('cost', aaveResult.cost ?? compoundResult.cost ?? '$?.??');
+    const firstScoutCost = aaveResult.cost ?? compoundResult.cost ?? ethenaResult.cost ?? stakingResult.cost;
+    if (firstScoutCost) setMetric('cost', firstScoutCost);
 
     if (signal.aborted) return;
 
@@ -155,7 +155,7 @@ export const isfrAgents: Scenario = {
 
     const [lendingAggResult, structuredAggResult] = await Promise.all([
       showCmd(lendingAgg,
-        `${ROKO} run "You are the Lending Aggregator. Search the knowledge graph for the Aave USDC supply rate and Compound USDC supply rate insights posted by the scout agents. Compute the TVL-weighted median for the LENDING asset class. Report the aggregated LENDING class rate in basis points. Post the LENDING class rate as a knowledge insight."`,
+        roko(ctx, `run "You are the Lending Aggregator. Search the knowledge graph for the Aave USDC supply rate and Compound USDC supply rate insights posted by the scout agents. Compute the TVL-weighted median for the LENDING asset class. Report the aggregated LENDING class rate in basis points. Post the LENDING class rate as a knowledge insight."`),
         {
           playback,
           timeout: 180000,
@@ -166,7 +166,7 @@ export const isfrAgents: Scenario = {
         },
       ),
       showCmd(structuredAgg,
-        `${ROKO} run "You are the Structured Aggregator. Search the knowledge graph for the Ethena sUSDe yield and ETH staking yield insights posted by the scout agents. Compute the weighted rate for the STRUCTURED asset class (Ethena) and the STAKING class (ETH staking). Report each class rate in basis points. Post the STRUCTURED and STAKING class rates as knowledge insights."`,
+        roko(ctx, `run "You are the Structured Aggregator. Search the knowledge graph for the Ethena sUSDe yield and ETH staking yield insights posted by the scout agents. Compute the weighted rate for the STRUCTURED asset class (Ethena) and the STAKING class (ETH staking). Report each class rate in basis points. Post the STRUCTURED and STAKING class rates as knowledge insights."`),
         {
           playback,
           timeout: 180000,
@@ -194,7 +194,7 @@ export const isfrAgents: Scenario = {
     });
 
     const calcResult = await showCmd(calculator,
-      `${ROKO} run "You are the ISFR Calculator. Retrieve all class rates from the knowledge graph: LENDING, STRUCTURED, FUNDING (use 0 if not available), and STAKING. Compute the Internet Secured Funding Rate as a weighted composite: ISFR = 0.60 * LENDING + 0.25 * STRUCTURED + 0.10 * FUNDING + 0.05 * STAKING. Express the result in basis points. Post the composite ISFR rate as a final insight."`,
+      roko(ctx, `run "You are the ISFR Calculator. Retrieve all class rates from the knowledge graph: LENDING, STRUCTURED, FUNDING (use 0 if not available), and STAKING. Compute the Internet Secured Funding Rate as a weighted composite: ISFR = 0.60 * LENDING + 0.25 * STRUCTURED + 0.10 * FUNDING + 0.05 * STAKING. Express the result in basis points. Post the composite ISFR rate as a final insight."`),
       {
         playback,
         timeout: 180000,
@@ -221,7 +221,7 @@ export const isfrAgents: Scenario = {
     });
 
     const valResult = await showCmd(validator,
-      `${ROKO} run "You are the ISFR Validator. Retrieve the ISFR composite rate from the knowledge graph. Validate that the rate is within reasonable bounds (0 to 5000 basis points, i.e. 0% to 50%). Check that all component class rates are present and non-negative. If valid, confirm the insight. Report the final validated ISFR rate and its component breakdown."`,
+      roko(ctx, `run "You are the ISFR Validator. Retrieve the ISFR composite rate from the knowledge graph. Validate that the rate is within reasonable bounds (0 to 5000 basis points, i.e. 0% to 50%). Check that all component class rates are present and non-negative. If valid, confirm the insight. Report the final validated ISFR rate and its component breakdown."`),
       {
         playback,
         timeout: 120000,

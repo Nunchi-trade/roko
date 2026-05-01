@@ -8,6 +8,7 @@
  */
 import type { TerminalHandle } from '../hooks/useTerminal';
 import type { PlaybackController } from './playback-controller';
+import type { ScenarioContext } from './scenarios';
 import { lookupCmdDesc } from './cmd-descriptions';
 
 // ── ANSI stripping ──────────────────────────────────────────
@@ -72,6 +73,19 @@ export function resetRokoResolution() {
 /** Get the resolved roko command. */
 export function getRoko(): string {
   return resolvedRoko;
+}
+
+/**
+ * Build a roko CLI command string, automatically injecting `--model` from ctx.
+ * Every scenario runner should use this instead of `${ROKO} subcommand`.
+ */
+export function roko(ctx: ScenarioContext, subcommand: string): string {
+  const bin = getRoko();
+  const model = ctx.activeModel;
+  if (model) {
+    return `${bin} --model ${model} ${subcommand}`;
+  }
+  return `${bin} ${subcommand}`;
 }
 
 // ── Workspace entry ──────────────────────────────────────────

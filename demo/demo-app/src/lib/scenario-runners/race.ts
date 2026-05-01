@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/race.ts ---
 import type { Scenario } from '../scenarios';
-import { enterWorkspace, showCmd, getRoko, trackMetrics } from '../terminal-session';
+import { enterWorkspace, showCmd, roko, trackMetrics } from '../terminal-session';
 
 export const race: Scenario = {
   id: 'race',
@@ -19,13 +19,12 @@ export const race: Scenario = {
     { label: 'Naive run', sublabel: '--no-replan' },
     { label: 'Cascade run', sublabel: 'full pipeline' },
   ],
-  async run({ entries, playback, timeline, setMetric, logCommand, logCommandComplete, workspaceDir }) {
+  async run(ctx) {
+    const { entries, playback, timeline, setMetric, logCommand, logCommandComplete, workspaceDir } = ctx;
     const [left, right] = entries;
 
     await enterWorkspace(left, workspaceDir);
     await enterWorkspace(right, workspaceDir);
-
-    const ROKO = getRoko();
     timeline.init(this.steps);
     timeline.setActive(0);
 
@@ -42,7 +41,7 @@ export const race: Scenario = {
     });
 
     await Promise.all([
-      showCmd(left, `${ROKO} run "${prompt}" --no-replan`, {
+      showCmd(left, roko(ctx, `run "${prompt}" --no-replan`), {
         timeout: 180000,
         customDesc:
           'Runs with --no-replan: uses a single model without cascade routing or gate-failure replanning. The baseline approach.',
@@ -50,7 +49,7 @@ export const race: Scenario = {
         onLogComplete: logCommandComplete,
         playback,
       }),
-      showCmd(right, `${ROKO} run "${prompt}"`, {
+      showCmd(right, roko(ctx, `run "${prompt}"`), {
         timeout: 180000,
         customDesc:
           'Runs with full pipeline: cascade router picks optimal models per-turn, gates validate, and failures trigger automatic replanning.',
