@@ -4,7 +4,8 @@ use std::sync::{Arc, OnceLock};
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::AUTHORIZATION;
+use axum::http::HeaderName;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, Method, Request};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -13,7 +14,7 @@ use chrono::Utc;
 use roko_core::config::{ApiKeyEntry, ServeAuthConfig};
 use roko_core::obs::LogScrubber;
 use sha2::{Digest, Sha256};
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -428,6 +429,37 @@ pub async fn require_scope(req: Request<Body>, next: Next) -> Result<Response, A
     Ok(next.run(req).await)
 }
 
+/// Methods the server actually serves on browser-callable routes.
+///
+/// T3-28: previously the CORS layer answered preflight checks with
+/// `Access-Control-Allow-Methods: *`, which is permissive enough to accept
+/// arbitrary verbs (TRACE, CONNECT, …) the server has no handler for.
+fn allowed_cors_methods() -> [Method; 6] {
+    [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::PATCH,
+        Method::OPTIONS,
+    ]
+}
+
+/// Headers the server actually consumes on browser-callable routes.
+///
+/// T3-28: replaces the previous `Any` allow-list. Webhook-only headers
+/// (`X-Hub-Signature-256`, `X-Slack-Signature`, …) are intentionally
+/// omitted because those endpoints are server-to-server, not browser.
+fn allowed_cors_headers() -> [HeaderName; 5] {
+    [
+        CONTENT_TYPE,
+        AUTHORIZATION,
+        HeaderName::from_static("x-api-key"),
+        HeaderName::from_static("x-user-id"),
+        HeaderName::from_static("x-user-email"),
+    ]
+}
+
 /// Build the CORS layer from configured origins.
 pub fn cors_layer(cors_origins: &[String], unsafe_public: bool) -> CorsLayer {
     if !cors_origins.is_empty() {
@@ -435,8 +467,8 @@ pub fn cors_layer(cors_origins: &[String], unsafe_public: bool) -> CorsLayer {
             cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
         return CorsLayer::new()
             .allow_origin(allowed)
-            .allow_methods(Any)
-            .allow_headers(Any);
+            .allow_methods(allowed_cors_methods())
+            .allow_headers(allowed_cors_headers());
     }
 
     if unsafe_public {
@@ -458,8 +490,8 @@ pub fn cors_layer(cors_origins: &[String], unsafe_public: bool) -> CorsLayer {
                 Err(_) => false,
             },
         ))
-        .allow_methods(Any)
-        .allow_headers(Any)
+        .allow_methods(allowed_cors_methods())
+        .allow_headers(allowed_cors_headers())
 }
 
 /// Returns `true` when `origin` is a localhost or loopback origin on any port.
@@ -1163,5 +1195,120 @@ mod tests {
         assert!(!is_local_origin("https://api.example.com"));
         assert!(!is_local_origin("localhost:3000"));
         assert!(!is_local_origin("http://192.168.1.1:6677"));
+    }
+
+    // --- T3-28: CORS allow-list tests ----------------------------------
+
+    /// Build a tiny router protected by the production `cors_layer` so
+    /// preflight OPTIONS requests exercise the real allow-lists.
+    fn cors_test_app(allowed_origin: &str) -> axum::Router {
+        let cors = cors_layer(&[allowed_origin.to_string()], false);
+        axum::Router::new()
+            .route("/api/ping", axum::routing::get(|| async { "pong" }))
+            .layer(cors)
+    }
+
+    async fn preflight(
+        app: &axum::Router,
+        origin: &str,
+        method: &str,
+        request_headers: Option<&str>,
+    ) -> axum::http::Response<Body> {
+        let mut req = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/ping")
+            .header(axum::http::header::ORIGIN, origin)
+            .header("access-control-request-method", method);
+        if let Some(headers) = request_headers {
+            req = req.header("access-control-request-headers", headers);
+        }
+        let req = req.body(Body::empty()).expect("request");
+        tower::ServiceExt::oneshot(app.clone(), req)
+            .await
+            .expect("oneshot")
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_listed_method_and_header() {
+        let app = cors_test_app("https://app.example.com");
+        let resp = preflight(
+            &app,
+            "https://app.example.com",
+            "POST",
+            Some("content-type, x-api-key"),
+        )
+        .await;
+
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let allow_methods = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        for verb in ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"] {
+            assert!(
+                allow_methods.contains(verb),
+                "{verb} missing from {allow_methods:?}"
+            );
+        }
+
+        let allow_headers = resp
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        for header in ["content-type", "authorization", "x-api-key"] {
+            assert!(
+                allow_headers.contains(header),
+                "{header} missing from {allow_headers:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_rejects_disallowed_method() {
+        let app = cors_test_app("https://app.example.com");
+        let resp = preflight(&app, "https://app.example.com", "TRACE", None).await;
+
+        // tower-http answers with 200 for any preflight but only echoes the
+        // matching headers. The absence of `access-control-allow-methods`
+        // is what makes the browser refuse the actual request.
+        let allow_methods = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        assert!(
+            !allow_methods.contains("TRACE"),
+            "TRACE leaked into allow-methods: {allow_methods:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_rejects_disallowed_header() {
+        let app = cors_test_app("https://app.example.com");
+        let resp = preflight(
+            &app,
+            "https://app.example.com",
+            "POST",
+            Some("x-totally-fake"),
+        )
+        .await;
+
+        // Same shape as the method case: the request-header is not echoed
+        // back, so the browser refuses the cross-origin call.
+        let allow_headers = resp
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        assert!(
+            !allow_headers.contains("x-totally-fake"),
+            "x-totally-fake leaked into allow-headers: {allow_headers:?}"
+        );
     }
 }
