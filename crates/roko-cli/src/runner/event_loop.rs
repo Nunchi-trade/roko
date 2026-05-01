@@ -10,20 +10,11 @@ use std::time::Duration;
 use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
 use roko_core::agent::ModelSpec;
-use roko_core::{AgentRole, PhaseKind, PlanPhase, TaskCategory, TaskComplexityBand};
-use roko_learn::contextual_bandit::{
-    ActionSafetyBounds, BanditContextFeatures, BanditDecisionKind,
-};
-use roko_learn::efficiency::AgentEfficiencyEvent;
-use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
-use roko_learn::model_router::RoutingContext;
-use roko_learn::runtime_feedback::{
-    CompletedRunInput, LearningPaths, LearningRuntime, RegressionConfig, RunnerFeedbackEvent,
-};
+use roko_core::{AgentRole, PhaseKind, PlanPhase};
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
-    RecoveryEngine, format_branch_name,
+    RecoveryEngine,
 };
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -261,18 +252,6 @@ pub async fn run(
     // Channels.
     let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(256);
     let (gate_tx, mut gate_rx) = mpsc::channel::<GateCompletion>(16);
-    let learning_runtime = match LearningRuntime::open(
-        LearningPaths::under(config.workdir.join(".roko").join("learn")),
-        RegressionConfig::default(),
-    )
-    .await
-    {
-        Ok(runtime) => Some(runtime),
-        Err(err) => {
-            warn!(error = %err, "learning runtime unavailable; falling back to runner-local feedback logs");
-            None
-        }
-    };
 
     // Seed playbooks if the store is empty (bootstrap chicken-and-egg).
     seed_playbooks_if_empty(&config.workdir).await;
@@ -315,8 +294,7 @@ pub async fn run(
 
     let mut tick_interval = interval(Duration::from_millis(100));
     let mut flush_interval = interval(Duration::from_secs(2));
-    let plan_deadline =
-        tokio::time::Instant::now() + Duration::from_secs(config.plan_timeout_secs);
+    let plan_deadline = tokio::time::Instant::now() + Duration::from_secs(config.plan_timeout_secs);
     let plan_timeout = tokio::time::sleep_until(plan_deadline);
     tokio::pin!(plan_timeout);
 
@@ -626,18 +604,12 @@ pub async fn run(
                     .max_retries
                     .min(gate_thresholds.suggested_max_retries(completion.rung));
 
-                // Emit learning events for the completed agent+gate cycle.
-                emit_feedback(
-                    &completion,
-                    &state,
-                    &config.workdir,
-                    &paths,
-                    learning_runtime.as_ref(),
-                    &tui,
-                    config,
+                update_gate_thresholds(
                     &mut gate_thresholds,
-                )
-                .await;
+                    &paths.gate_thresholds_json,
+                    completion.rung,
+                    completion.passed,
+                );
 
                 // Extension: on_gate hook.
                 fire_on_gate_hook(config, &completion, &tui).await;
@@ -689,6 +661,8 @@ pub async fn run(
                     state.mark_task_completed(&completion.plan_id, &completion.task_id);
                     state.task_completed();
                     let run_id = state.run_id().to_string();
+                    let agent_model = state.agent_model.clone();
+                    let agent_provider = state.agent_provider.clone();
                     emit_runner_event(
                         &paths,
                         &mut state,
@@ -700,6 +674,8 @@ pub async fn run(
                             TaskAttemptOutcome::Passed,
                             None,
                             completion.duration_ms,
+                            agent_model,
+                            agent_provider,
                         ),
                     );
                     tui.task_completed(&completion.plan_id, &completion.task_id, "passed");
@@ -845,6 +821,8 @@ pub async fn run(
                             ),
                         );
                         let run_id = state.run_id().to_string();
+                        let agent_model = state.agent_model.clone();
+                        let agent_provider = state.agent_provider.clone();
                         emit_runner_event(
                             &paths,
                             &mut state,
@@ -860,6 +838,8 @@ pub async fn run(
                                 },
                                 Some(failure_kind),
                                 completion.duration_ms,
+                                agent_model,
+                                agent_provider,
                             ),
                         );
                         let _ = executor.apply_event(
@@ -1362,20 +1342,21 @@ fn runner_event_to_feedback(event: &RunnerEvent) -> Option<crate::runtime_feedba
 
     match event {
         RunnerEvent::TaskAttemptCompleted {
-            attempt, outcome, ..
+            attempt,
+            outcome,
+            model,
+            provider,
+            ..
         } => {
             let succeeded = matches!(outcome, TaskAttemptOutcome::Passed);
-            // The runner-level event does not carry per-attempt usage;
-            // the dispatch layer overlays the real numbers when it is on
-            // the hot loop. For now this fills `model` / `provider` /
-            // tokens / cost with empty defaults — episodes still get
-            // written; the routing sink dampens its observation
-            // accordingly when the model slug is empty.
+            // Per-attempt usage is not stored on `RunnerEvent`; tokens /
+            // cost stay at zero here — attribution uses `model` /
+            // `provider` from dispatch (`RunState` at completion).
             let agent_outcome = AgentOutcome {
                 task_id: attempt.task_id.clone(),
                 plan_id: attempt.plan_id.clone(),
-                model: String::new(),
-                provider: String::new(),
+                model: model.clone(),
+                provider: provider.clone(),
                 output: String::new(),
                 tokens_in: 0,
                 tokens_out: 0,
@@ -1579,11 +1560,7 @@ fn restore_state_from_resume_snapshot(
         );
     }
 
-    state.tasks_completed = state
-        .completed_tasks
-        .values()
-        .map(Vec::len)
-        .sum::<usize>();
+    state.tasks_completed = state.completed_tasks.values().map(Vec::len).sum::<usize>();
 }
 
 // ─── Resume ─────────────────────────────────────────────────────────────
@@ -2163,6 +2140,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         Err(e) => {
                             error!(err = %e, "failed to spawn agent");
                             let message = format!("agent spawn failed: {e}");
+                            let agent_provider = ctx.state.agent_provider.clone();
                             emit_runner_event(
                                 ctx.paths,
                                 ctx.state,
@@ -2173,7 +2151,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                     attempt_ref.clone(),
                                     &agent_id,
                                     AgentDispatchOutcome::SpawnFailed,
-                                    Some(model_display),
+                                    Some(model_display.clone()),
                                     None,
                                     Some(message.clone()),
                                 ),
@@ -2189,6 +2167,8 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                     TaskAttemptOutcome::Failed,
                                     Some(RunnerFailureKind::Resource),
                                     0,
+                                    model_display,
+                                    agent_provider,
                                 ),
                             );
                             ctx.tui.error(&message);
@@ -2488,95 +2468,10 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
     }
 }
 
-// ─── Learning Emission ──────────────────────────────────────────────────
-
-/// Emit all runner-owned feedback after a gate cycle completes.
-async fn emit_feedback(
-    completion: &GateCompletion,
-    state: &RunState,
-    workdir: &Path,
-    paths: &PersistPaths,
-    learning_runtime: Option<&LearningRuntime>,
-    tui: &TuiBridge,
-    config: &RunConfig,
-    gate_thresholds: &mut GateThresholds,
-) {
-    let mut episode = build_episode(completion, state, config, workdir);
-    if config.cascade_router.is_some() {
-        // The direct runner observation below is authoritative when a
-        // cascade router is configured, so suppress the generic
-        // learning-runtime router update to avoid double counting.
-        episode.extra.insert(
-            "cascade_router_observed".to_string(),
-            serde_json::Value::Bool(true),
-        );
-    }
-    let efficiency_event = build_efficiency_event(completion, state);
-
-    if let Err(err) = persist::append_jsonl(&paths.episodes_jsonl, &episode) {
-        error!(error = %err, "failed to append runner episode");
-    } else {
-        tui.efficiency_event(
-            &completion.plan_id,
-            &completion.task_id,
-            "episode_logged",
-            1.0,
-        );
-    }
-
-    if let Err(err) = persist::append_jsonl(&paths.efficiency_jsonl, &efficiency_event) {
-        error!(error = %err, "failed to append runner efficiency event");
-    }
-
-    if let Some(runtime) = learning_runtime {
-        let mut input = CompletedRunInput::from_episode(episode.clone());
-        input.provider = Some(episode.backend.clone());
-        if let Err(err) = runtime
-            .record_runner_event(RunnerFeedbackEvent::CompletedRun {
-                input: Box::new(input),
-            })
-            .await
-        {
-            warn!(error = %err, "learning runtime rejected completed-run feedback");
-        }
-    }
-
-    let lifecycle = roko_neuro::RuntimeKnowledgeLifecycle::for_workdir(workdir);
-    match lifecycle.ingest_episode(&episode) {
-        Ok(record) => {
-            debug!(
-                record_id = %record.record_id,
-                episode_id = %record.episode_id,
-                "knowledge lifecycle ingested runner episode"
-            );
-        }
-        Err(err) => {
-            warn!(error = %err, "knowledge lifecycle ingestion failed");
-        }
-    }
-
-    // CascadeRouter observation: record gate outcome for learned model selection.
-    observe_cascade_router(config, state, completion, tui);
-
-    // Bandit feedback: record decision context and outcome.
-    observe_bandit_policy(config, state, completion, paths, tui);
-
-    // Update adaptive gate thresholds based on this verdict.
-    update_gate_thresholds(
-        gate_thresholds,
-        &paths.gate_thresholds_json,
-        completion.rung,
-        completion.passed,
-    );
-}
+// ─── Adaptive gate thresholds ────────────────────────────────────────────
 
 /// Update EMA-based adaptive gate thresholds for a given rung.
-fn update_gate_thresholds(
-    thresholds: &mut GateThresholds,
-    path: &Path,
-    rung: u32,
-    passed: bool,
-) {
+fn update_gate_thresholds(thresholds: &mut GateThresholds, path: &Path, rung: u32, passed: bool) {
     thresholds.observe(rung, passed);
     if let Err(err) = thresholds.save(path) {
         warn!(
@@ -2587,85 +2482,6 @@ fn update_gate_thresholds(
             "failed to persist adaptive gate thresholds"
         );
     }
-}
-
-/// Record gate outcome in the cascade router for learned model selection.
-fn observe_cascade_router(
-    config: &RunConfig,
-    state: &RunState,
-    completion: &GateCompletion,
-    tui: &TuiBridge,
-) {
-    let Some(router) = &config.cascade_router else {
-        return;
-    };
-    let model = &state.agent_model;
-    if model.is_empty() {
-        return;
-    }
-    let Some(model_idx) = router.model_index_for_slug(model) else {
-        debug!(model = %model, "cascade router: model not in slug list, skipping observation");
-        return;
-    };
-
-    let quality = if completion.passed { 1.0 } else { 0.0 };
-    let is_manual_override =
-        config.cli_model_override.is_some() || state.task_model_hint.is_some();
-    let dampened_quality = if is_manual_override {
-        0.3 * quality
-    } else {
-        quality
-    };
-    let normalized_cost = (state.cost_usd / 1.0).clamp(0.0, 1.0); // Normalize against $1 reference
-    let wall_secs = state.task_elapsed_ms() as f64 / 1000.0;
-    let normalized_latency = (wall_secs / 300.0).clamp(0.0, 1.0); // Normalize against 5min reference
-
-    if is_manual_override {
-        debug!(
-            model = %model,
-            dampening = 0.3,
-            force_backend = config.cli_model_override.is_some(),
-            task_model_hint = ?state.task_model_hint.as_deref(),
-            "manual override detected — recording dampened observation"
-        );
-    }
-
-    let ctx = RoutingContext {
-        task_category: TaskCategory::Implementation,
-        complexity: TaskComplexityBand::Standard,
-        iteration: state.iteration.saturating_sub(1),
-        role: AgentRole::Implementer,
-        crate_familiarity: 0.5,
-        has_prior_failure: state.iteration > 1,
-        conductor_load: 0.0,
-        active_agents: 1,
-        ready_queue_depth: 0,
-        max_queue_wait_hours: 0.0,
-        daimon_policy: roko_core::DaimonPolicy::default(),
-        thinking_level: None,
-        temperament: None,
-        previous_model: None,
-        plan_context_tokens: None,
-        tier_thresholds: None,
-    };
-    let weights = roko_core::config::schema::RewardWeights::default();
-    router.observe_multi_objective(
-        ctx.to_features(),
-        model_idx,
-        dampened_quality,
-        normalized_cost,
-        normalized_latency,
-        &weights,
-    );
-    debug!(
-        model = %model,
-        quality = dampened_quality,
-        cost = normalized_cost,
-        latency = normalized_latency,
-        "cascade router: recorded observation"
-    );
-
-    tui.cascade_router_updated(&router.snapshot_json());
 }
 
 fn parse_dispatch_role(role: &str) -> AgentRole {
@@ -2729,66 +2545,6 @@ fn knowledge_bias_weight(config: &RunConfig) -> f64 {
         })
         .unwrap_or(0.2)
         .clamp(0.0, 1.0)
-}
-
-/// Record bandit feedback for model-selection decisions.
-fn observe_bandit_policy(
-    config: &RunConfig,
-    state: &RunState,
-    completion: &GateCompletion,
-    _paths: &PersistPaths,
-    tui: &TuiBridge,
-) {
-    let Some(bandit) = &config.bandit_policy else {
-        return;
-    };
-    let model = &state.agent_model;
-    if model.is_empty() {
-        return;
-    }
-
-    let context = BanditContextFeatures::new(
-        BanditDecisionKind::ProviderModelRouting,
-        "implementation",
-        &completion.plan_id,
-        "implementer",
-    );
-    let observation = roko_learn::contextual_bandit::BanditRewardObservation {
-        action_id: format!("model:{model}"),
-        context_key: context.context_key(),
-        success: completion.passed,
-        quality: if completion.passed { 1.0 } else { 0.0 },
-        metrics: roko_learn::contextual_bandit::RewardMetrics {
-            latency_ms: Some(state.task_elapsed_ms()),
-            cost_usd: Some(state.cost_usd),
-            total_tokens: Some(state.tokens_in + state.tokens_out),
-            retry_count: state.iteration.saturating_sub(1),
-        },
-    };
-    let bounds = ActionSafetyBounds::default();
-
-    if let Ok(mut policy) = bandit.try_lock() {
-        if let Some(candidate) = policy.record_reward(observation, bounds) {
-            // Persist bandit decision to JSONL for offline analysis.
-            let bandit_log = config
-                .workdir
-                .join(".roko")
-                .join("learn")
-                .join("bandit-decisions.jsonl");
-            if let Err(err) = persist::append_jsonl(&bandit_log, &candidate) {
-                warn!(error = %err, "failed to append bandit decision");
-            }
-        }
-        debug!(model = %model, passed = completion.passed, "bandit policy: recorded reward");
-        tui.extension_hook(
-            &completion.plan_id,
-            &completion.task_id,
-            "bandit_reward",
-            completion.passed,
-        );
-    } else {
-        warn!("bandit policy lock contended, skipping feedback");
-    }
 }
 
 // ─── Extension Chain Hooks ───────────────────────────────────────────────
@@ -3052,7 +2808,9 @@ async fn run_dream_consolidation(config: &RunConfig) {
             playbooks = report.playbooks_created,
             "dream consolidation completed"
         ),
-        Ok(Ok(Err(err))) => warn!(error = %err, "dream consolidation failed — plan results unaffected"),
+        Ok(Ok(Err(err))) => {
+            warn!(error = %err, "dream consolidation failed — plan results unaffected")
+        }
         Ok(Err(join_err)) => warn!(error = %join_err, "dream consolidation worker aborted"),
         Err(_) => warn!("dream consolidation timed out after 120s — skipping"),
     }
@@ -3081,280 +2839,6 @@ fn register_agent_feed(
             created_at: chrono::Utc::now(),
         });
         tui.extension_hook(plan_id, task_id, "feed_registered", true);
-    }
-}
-
-/// Build the canonical episode for a completed agent+gate cycle.
-fn build_episode(
-    completion: &GateCompletion,
-    state: &RunState,
-    config: &RunConfig,
-    workdir: &Path,
-) -> Episode {
-    let agent_id = format!("{}/{}", completion.plan_id, completion.task_id);
-    let gate_verdicts: Vec<GateVerdict> = completion
-        .verdicts
-        .iter()
-        .map(|v| {
-            let mut gv = GateVerdict::new(&v.gate_name, v.passed);
-            if !v.summary.is_empty() {
-                gv = gv.with_signature(&v.summary);
-            }
-            gv
-        })
-        .collect();
-
-    let task_wall_ms = state.task_elapsed_ms();
-    let model = episode_model(state, config);
-    let provider = runtime_backend(state);
-    let task_branch = format_branch_name(&completion.plan_id);
-    let files_changed = match git_diff_names(workdir, &task_branch) {
-        Ok(files) => files,
-        Err(err) => {
-            debug!(
-                error = %err,
-                branch = %task_branch,
-                "could not get files changed"
-            );
-            Vec::new()
-        }
-    };
-    let mut ep = Episode::new(&agent_id, &completion.task_id);
-    ep.kind = "runner_task_gate".to_string();
-    ep.model = model.clone();
-    ep.backend = provider.clone();
-    ep.agent_template = "implementer".to_string();
-    ep.trigger_kind = format!("{:?}", completion.kind).to_ascii_lowercase();
-    ep.duration_secs = task_wall_ms as f64 / 1000.0;
-    ep.usage = Usage {
-        input_tokens: state.tokens_in,
-        output_tokens: state.tokens_out,
-        cache_read_tokens: state.cache_read_tokens,
-        cache_write_tokens: state.cache_write_tokens,
-        cost_usd: state.cost_usd,
-        wall_ms: task_wall_ms,
-        ..Usage::default()
-    };
-    ep.gate_verdicts = gate_verdicts;
-    ep.turns = u64::from(state.task_agent_calls);
-    ep.tokens_used = state.tokens_in + state.tokens_out;
-    ep.extra.insert(
-        "plan_id".to_string(),
-        serde_json::Value::String(completion.plan_id.clone()),
-    );
-    ep.extra.insert(
-        "run_id".to_string(),
-        serde_json::Value::String(state.run_id().to_string()),
-    );
-    ep.extra
-        .insert("model".to_string(), serde_json::Value::String(model));
-    ep.extra.insert(
-        "provider".to_string(),
-        serde_json::Value::String(provider),
-    );
-    ep.extra.insert(
-        "files_changed".to_string(),
-        serde_json::json!(files_changed),
-    );
-    ep.extra.insert(
-        "iteration".to_string(),
-        serde_json::json!(state.iteration.max(1)),
-    );
-    ep.extra
-        .insert("rung".to_string(), serde_json::json!(completion.rung));
-    ep.extra.insert(
-        "gate_kind".to_string(),
-        serde_json::Value::String(format!("{:?}", completion.kind).to_ascii_lowercase()),
-    );
-    ep.extra.insert(
-        "gate_duration_ms".to_string(),
-        serde_json::json!(completion.duration_ms),
-    );
-    if let Some(failure_kind) = completion.failure_kind {
-        ep.extra.insert(
-            "failure_kind".to_string(),
-            serde_json::Value::String(format!("{failure_kind:?}").to_ascii_lowercase()),
-        );
-        ep.extra.insert(
-            "retryable".to_string(),
-            serde_json::json!(failure_kind.is_retryable()),
-        );
-        ep.extra.insert(
-            "retry_status".to_string(),
-            serde_json::Value::String(
-                if completion.passed {
-                    "succeeded"
-                } else if failure_kind.is_retryable() {
-                    "scheduled"
-                } else {
-                    "not_retryable"
-                }
-                .to_string(),
-            ),
-        );
-        ep.extra.insert(
-            "retry_attempt".to_string(),
-            serde_json::json!(state.iteration.max(1)),
-        );
-        ep.extra.insert(
-            "retry_scheduled".to_string(),
-            serde_json::json!(!completion.passed && failure_kind.is_retryable()),
-        );
-    } else if completion.passed && state.iteration > 1 {
-        ep.extra.insert(
-            "retry_status".to_string(),
-            serde_json::Value::String("succeeded".to_string()),
-        );
-        ep.extra.insert(
-            "retry_attempt".to_string(),
-            serde_json::json!(state.iteration.max(1)),
-        );
-    }
-
-    if completion.passed {
-        ep = ep.succeeded();
-    } else {
-        ep = ep.failed(&completion.output);
-    }
-
-    ep.attach_all_fingerprints();
-    ep
-}
-
-/// Build the legacy raw efficiency event consumed by existing dashboards.
-fn build_efficiency_event(completion: &GateCompletion, state: &RunState) -> AgentEfficiencyEvent {
-    let model = runtime_model(state);
-    let task_wall_ms = state.task_elapsed_ms();
-
-    let gate_errors: Vec<String> = completion
-        .verdicts
-        .iter()
-        .filter(|v| !v.passed)
-        .map(|v| format!("{}: {}", v.gate_name, v.summary))
-        .collect();
-
-    AgentEfficiencyEvent {
-        agent_id: format!("{}/{}", completion.plan_id, completion.task_id),
-        role: "implementer".to_string(),
-        backend: runtime_backend(state),
-        model: model.clone(),
-        plan_id: completion.plan_id.clone(),
-        task_id: completion.task_id.clone(),
-        input_tokens: state.tokens_in,
-        output_tokens: state.tokens_out,
-        cache_read_tokens: state.cache_read_tokens,
-        cache_write_tokens: state.cache_write_tokens,
-        cost_usd: state.cost_usd,
-        wall_time_ms: task_wall_ms,
-        duration_ms: task_wall_ms,
-        iteration: state.iteration,
-        gate_passed: completion.passed,
-        outcome: if completion.passed {
-            "success"
-        } else {
-            "failure"
-        }
-        .to_string(),
-        gate_errors,
-        model_used: model,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        ..AgentEfficiencyEvent::default()
-    }
-}
-
-fn runtime_model(state: &RunState) -> String {
-    if state.agent_model.trim().is_empty() {
-        "unknown".to_string()
-    } else {
-        state.agent_model.clone()
-    }
-}
-
-fn runtime_backend(state: &RunState) -> String {
-    if state.agent_provider.trim().is_empty() {
-        "unknown".to_string()
-    } else {
-        state.agent_provider.clone()
-    }
-}
-
-fn episode_model(state: &RunState, config: &RunConfig) -> String {
-    if state.agent_model.trim().is_empty() {
-        if config.model.trim().is_empty() {
-            "unknown".to_string()
-        } else {
-            config.model.clone()
-        }
-    } else {
-        state.agent_model.clone()
-    }
-}
-
-fn git_diff_names(workdir: &Path, branch: &str) -> Result<Vec<String>> {
-    fn run_diff(workdir: &Path, args: &[&str]) -> Result<Vec<String>> {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(workdir)
-            .output()
-            .with_context(|| format!("running git {}", args.join(" ")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let details = if stderr.is_empty() { stdout } else { stderr };
-            if details.is_empty() {
-                return Err(anyhow::anyhow!("git {} failed", args.join(" ")));
-            }
-            return Err(anyhow::anyhow!("git {} failed: {}", args.join(" "), details));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect())
-    }
-
-    let mut files = Vec::new();
-    let mut saw_success = false;
-    let mut first_err: Option<anyhow::Error> = None;
-    let branch = branch.trim();
-
-    if !branch.is_empty() {
-        match run_diff(workdir, &["diff", "--name-only", "main", branch]) {
-            Ok(names) => {
-                saw_success = true;
-                for name in names {
-                    if !files.iter().any(|existing| existing == &name) {
-                        files.push(name);
-                    }
-                }
-            }
-            Err(err) => {
-                first_err = Some(err);
-            }
-        }
-    }
-
-    match run_diff(workdir, &["diff", "--name-only", "HEAD"]) {
-        Ok(names) => {
-            saw_success = true;
-            for name in names {
-                if !files.iter().any(|existing| existing == &name) {
-                    files.push(name);
-                }
-            }
-        }
-        Err(err) => {
-            if !saw_success {
-                first_err = Some(err);
-            }
-        }
-    }
-
-    if saw_success {
-        Ok(files)
-    } else {
-        Err(first_err.unwrap_or_else(|| anyhow::anyhow!("git diff produced no results")))
     }
 }
 
@@ -3637,4 +3121,3 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
         duration: state.elapsed(),
     }
 }
-

@@ -603,6 +603,10 @@ pub enum RunnerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure_kind: Option<RunnerFailureKind>,
         duration_ms: u64,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        model: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        provider: String,
     },
     #[serde(rename = "agent.dispatch.started")]
     AgentDispatchStarted {
@@ -828,6 +832,8 @@ impl RunnerEvent {
         outcome: TaskAttemptOutcome,
         failure_kind: Option<RunnerFailureKind>,
         duration_ms: u64,
+        model: impl Into<String>,
+        provider: impl Into<String>,
     ) -> Self {
         let stamp = EventStamp::now();
         Self::TaskAttemptCompleted {
@@ -838,6 +844,8 @@ impl RunnerEvent {
             outcome,
             failure_kind,
             duration_ms,
+            model: model.into(),
+            provider: provider.into(),
         }
     }
 
@@ -1331,11 +1339,7 @@ impl RunConfig {
                 cfg
             }),
         ));
-        let max_concurrent_tasks = roko_config
-            .runner
-            .max_concurrent_tasks
-            .unwrap_or(4)
-            .max(1);
+        let max_concurrent_tasks = roko_config.runner.max_concurrent_tasks.unwrap_or(4).max(1);
 
         Self {
             workdir,

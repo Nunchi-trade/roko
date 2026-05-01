@@ -71,6 +71,8 @@ async fn run_config_facades_receive_runner_events() {
         TaskAttemptOutcome::Passed,
         None,
         1234,
+        "claude-sonnet-4-6",
+        "claude_cli",
     );
     let completion = GateCompletion {
         kind: GateCompletionKind::Gate,
@@ -108,8 +110,8 @@ async fn run_config_facades_receive_runner_events() {
         outcome: roko_cli::dispatch::AgentOutcome {
             task_id: "t-e2e".into(),
             plan_id: "p-e2e".into(),
-            model: String::new(),
-            provider: String::new(),
+            model: "claude-sonnet-4-6".into(),
+            provider: "claude_cli".into(),
             output: String::new(),
             tokens_in: 0,
             tokens_out: 0,
