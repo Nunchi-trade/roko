@@ -1632,6 +1632,40 @@ fn build_agent_prompt(agent_id: &str, message: &str, context: Option<&Value>) ->
     prompt
 }
 
+fn validate_agent_url(url: &str) -> Result<(), ApiError> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| ApiError::bad_request("invalid URL"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => {
+            return Err(ApiError::bad_request(format!("unsupported scheme: {s}")));
+        }
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ApiError::bad_request("URL has no host"))?;
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(ApiError::bad_request("internal/private URLs not allowed"));
+    }
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if blocked_agent_endpoint_ip(ip) {
+            return Err(ApiError::bad_request("internal/private URLs not allowed"));
+        }
+    }
+
+    Ok(())
+}
+
+fn blocked_agent_endpoint_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local()
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Validate)]
 struct RegisterAgentRequest {
     #[validate(
@@ -1679,7 +1713,20 @@ struct RegisterAgentRequest {
 
 impl RequestPayload for RegisterAgentRequest {
     fn validate_payload(&self) -> Result<(), ApiError> {
-        validate_with_validator(self)
+        validate_with_validator(self)?;
+        if let Some(ref url) = self.rest_endpoint {
+            validate_agent_url(url)?;
+        }
+        if let Some(ref url) = self.websocket_endpoint {
+            validate_agent_url(url)?;
+        }
+        if let Some(ref url) = self.a2a_endpoint {
+            validate_agent_url(url)?;
+        }
+        if let Some(ref url) = self.mcp_endpoint {
+            validate_agent_url(url)?;
+        }
+        Ok(())
     }
 }
 
@@ -1708,6 +1755,15 @@ mod tests {
     use crate::events::ServerEvent;
     use crate::runtime::NoOpRuntime;
     use crate::state::{AgentEndpoints, AgentRegistrationRecord, AppState};
+
+    #[test]
+    fn validate_agent_url_rejects_internal_and_private_hosts() {
+        assert!(validate_agent_url("http://169.254.169.254/").is_err());
+        assert!(validate_agent_url("http://10.0.0.1/").is_err());
+        assert!(validate_agent_url("http://localhost/").is_err());
+        assert!(validate_agent_url("http://127.0.0.1/").is_err());
+        assert!(validate_agent_url("https://api.example.com/v1").is_ok());
+    }
 
     #[derive(Debug)]
     struct MockLogsServerState {
@@ -1855,7 +1911,7 @@ mod tests {
                 capabilities: vec!["research".into()],
                 domain_tags: vec!["roko".into()],
                 card_uri: None,
-                rest_endpoint: Some("http://127.0.0.1:9001".into()),
+                rest_endpoint: Some("https://example.com:9001".into()),
                 websocket_endpoint: None,
                 a2a_endpoint: None,
                 mcp_endpoint: None,
