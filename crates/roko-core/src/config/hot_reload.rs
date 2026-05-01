@@ -10,7 +10,6 @@
 //! | `[budget]` | Yes | Thresholds and degradation mode |
 //! | `[tools]` | Yes | Tool profile allow/deny lists |
 //! | `[learning]` | Yes | Learning subsystem toggles |
-//! | `[demurrage]` | Yes | Knowledge decay rates |
 //! | `[gates]` | Yes | Verify thresholds |
 //! | `[conductor]` | Yes | Conductor settings |
 //! | `[agent]` | **No** | Requires restart (model, provider) |
@@ -44,8 +43,6 @@ pub enum ConfigSection {
     Tools,
     /// `[learning]` — learning subsystem toggles.
     Learning,
-    /// `[demurrage]` — knowledge decay configuration.
-    Demurrage,
     /// `[gates]` — gate thresholds and pipeline settings.
     Gates,
     /// `[conductor]` — conductor meta-orchestrator settings.
@@ -76,7 +73,6 @@ impl ConfigSection {
             Self::Budget
                 | Self::Tools
                 | Self::Learning
-                | Self::Demurrage
                 | Self::Gates
                 | Self::Conductor
                 | Self::Routing
@@ -142,19 +138,6 @@ pub fn config_diff(old: &RokoConfig, new: &RokoConfig) -> Vec<ConfigChange> {
         changes.push(ConfigChange {
             section: ConfigSection::Learning,
             summary: "learning subsystem toggles changed".into(),
-        });
-    }
-
-    if old.demurrage != new.demurrage {
-        changes.push(ConfigChange {
-            section: ConfigSection::Demurrage,
-            summary: format!(
-                "demurrage: rate_per_hour {:.4} -> {:.4}, min_balance {:.3} -> {:.3}",
-                old.demurrage.rate_per_hour,
-                new.demurrage.rate_per_hour,
-                old.demurrage.min_balance,
-                new.demurrage.min_balance,
-            ),
         });
     }
 
@@ -236,7 +219,6 @@ pub fn apply_hot_reload(
                 ConfigSection::Budget => current.budget = new_config.budget.clone(),
                 ConfigSection::Tools => current.tools = new_config.tools.clone(),
                 ConfigSection::Learning => current.learning = new_config.learning.clone(),
-                ConfigSection::Demurrage => current.demurrage = new_config.demurrage.clone(),
                 ConfigSection::Gates => current.gates = new_config.gates.clone(),
                 ConfigSection::Conductor => current.conductor = new_config.conductor.clone(),
                 ConfigSection::Routing => current.routing = new_config.routing.clone(),
@@ -350,7 +332,6 @@ mod tests {
         assert!(ConfigSection::Budget.is_hot_reloadable());
         assert!(ConfigSection::Tools.is_hot_reloadable());
         assert!(ConfigSection::Learning.is_hot_reloadable());
-        assert!(ConfigSection::Demurrage.is_hot_reloadable());
         assert!(ConfigSection::Gates.is_hot_reloadable());
         assert!(ConfigSection::Conductor.is_hot_reloadable());
         assert!(ConfigSection::Routing.is_hot_reloadable());

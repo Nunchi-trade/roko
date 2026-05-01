@@ -891,52 +891,6 @@ replan_gate_attempts = 3
 use_lookahead_router = false
 lookahead_threshold = 0.7
 
-[demurrage]
-rate_per_hour = 0.01
-min_balance = 0.1
-freeze_threshold = 0.05
-thaw_balance = 0.6
-max_balance = 5.0
-gc_interval_secs = 0
-freeze_before_delete = true
-death_threshold = 0.01
-
-[demurrage.kind_rate_multipliers]
-
-[attention]
-max_tokens_per_layer = 4096
-utilization_target = 0.85
-auction_enabled = false
-task_reserve_tokens = 512
-
-[immune]
-quarantine_threshold = 0.8
-max_quarantined = 50
-auto_reject = false
-taint_levels = [
-    "low",
-    "medium",
-    "high",
-]
-
-[temporal]
-max_depth = 5
-epoch_secs = 3600
-enforce_allen_relations = true
-
-[goals]
-max_active = 10
-correctness_weight = 0.7
-completion_threshold = 0.95
-prune_threshold = 0.1
-
-[energy]
-pool_usd = 50.0
-per_task_cap_usd = 0.0
-metabolism_rate = 0.1
-
-[energy.tier_caps]
-
 [tui]
 refresh_rate_ms = 250
 
@@ -993,13 +947,6 @@ allow = []
 deny = []
 
 [tools.profiles]
-
-[oneirography]
-enabled = false
-provider = "disabled"
-variants = 3
-base_reserve = 0.01
-base_duration_seconds = 3600
 
 [chain]
 rpc_url = "http://127.0.0.1:8545"

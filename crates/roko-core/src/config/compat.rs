@@ -9,12 +9,11 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::schema::{
-    AgentConfig, AgentRoleToggles, AttentionConfig, BudgetConfig, CURRENT_SCHEMA_VERSION,
-    ChainConfig, ConductorConfig, CoreRunnerConfig, DemurrageConfig, DeployConfig, EnergyConfig,
-    GatesConfig, GeminiConfig, GithubWebhookConfig, GoalsConfig, ImmuneConfig, LearningConfig,
-    OneirographyConfig, PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RelayConfig,
-    RokoConfig, RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig,
-    TemporalConfig, ToolsConfig, TuiConfig, WatcherConfig, WebhooksConfig,
+    AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig,
+    ConductorConfig, CoreRunnerConfig, DeployConfig, GatesConfig, GeminiConfig,
+    GithubWebhookConfig, LearningConfig, PerplexityConfig, PipelineConfig, PrdConfig,
+    ProjectConfig, RelayConfig, RokoConfig, RoleOverride, RoutingConfig, SchedulerConfig,
+    ServeConfig, ServerConfig, ToolsConfig, TuiConfig, WatcherConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -111,7 +110,6 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         conductor: convert_conductor(m),
         watcher: WatcherConfig::default(),
         learning: convert_learning(m),
-        demurrage: DemurrageConfig::default(),
         tui: TuiConfig::default(),
         serve: ServeConfig::default(),
         scheduler: SchedulerConfig::default(),
@@ -125,15 +123,9 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         deploy: DeployConfig::default(),
         perplexity: PerplexityConfig::default(),
         gemini: GeminiConfig::default(),
-        attention: AttentionConfig::default(),
         chain: ChainConfig::default(),
         relay: RelayConfig::default(),
-        immune: ImmuneConfig::default(),
-        temporal: TemporalConfig::default(),
-        goals: GoalsConfig::default(),
-        energy: EnergyConfig::default(),
         tools: ToolsConfig::default(),
-        oneirography: OneirographyConfig::default(),
         runner: CoreRunnerConfig::default(),
         agents: Vec::new(),
     }

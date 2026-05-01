@@ -1,4 +1,4 @@
-//! Tool profile and oneirography configuration sections.
+//! Tool profile configuration sections.
 
 use std::collections::HashMap;
 
@@ -105,43 +105,5 @@ impl ToolsConfig {
         }
 
         true
-    }
-}
-
-// ---- [oneirography] ------------------------------------------------------
-
-/// Configuration for the oneirography (dream art) pipeline (DREAM-13).
-///
-/// Disabled by default. Opt-in via `[oneirography]` in roko.toml:
-/// ```toml
-/// [oneirography]
-/// enabled = true
-/// provider = "dall-e-3"
-/// variants = 3
-/// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct OneirographyConfig {
-    /// Whether dream art generation is enabled (default `false`).
-    pub enabled: bool,
-    /// Image generation provider identifier (e.g., `"dall-e-3"`, `"stable-diffusion"`).
-    pub provider: String,
-    /// Number of image variants to generate per dream cycle.
-    pub variants: usize,
-    /// Base reserve price for affect-reactive auctions.
-    pub base_reserve: f64,
-    /// Base auction duration in seconds.
-    pub base_duration_seconds: u64,
-}
-
-impl Default for OneirographyConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            provider: "disabled".to_string(),
-            variants: 3,
-            base_reserve: 0.01,
-            base_duration_seconds: 3600,
-        }
     }
 }

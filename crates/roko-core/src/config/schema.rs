@@ -75,18 +75,6 @@ pub struct RokoConfig {
     #[serde(default)]
     pub learning: LearningConfig,
     #[serde(default)]
-    pub demurrage: DemurrageConfig,
-    #[serde(default)]
-    pub attention: AttentionConfig,
-    #[serde(default)]
-    pub immune: ImmuneConfig,
-    #[serde(default)]
-    pub temporal: TemporalConfig,
-    #[serde(default)]
-    pub goals: GoalsConfig,
-    #[serde(default)]
-    pub energy: EnergyConfig,
-    #[serde(default)]
     pub tui: TuiConfig,
     #[serde(default)]
     pub serve: ServeConfig,
@@ -106,8 +94,6 @@ pub struct RokoConfig {
     pub gemini: GeminiConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
-    #[serde(default)]
-    pub oneirography: OneirographyConfig,
     #[serde(default)]
     pub chain: ChainConfig,
     #[serde(default)]
@@ -142,12 +128,6 @@ impl Default for RokoConfig {
             conductor: ConductorConfig::default(),
             watcher: WatcherConfig::default(),
             learning: LearningConfig::default(),
-            demurrage: DemurrageConfig::default(),
-            attention: AttentionConfig::default(),
-            immune: ImmuneConfig::default(),
-            temporal: TemporalConfig::default(),
-            goals: GoalsConfig::default(),
-            energy: EnergyConfig::default(),
             tui: TuiConfig::default(),
             serve: ServeConfig::default(),
             scheduler: SchedulerConfig::default(),
@@ -158,7 +138,6 @@ impl Default for RokoConfig {
             perplexity: PerplexityConfig::default(),
             gemini: GeminiConfig::default(),
             tools: ToolsConfig::default(),
-            oneirography: OneirographyConfig::default(),
             chain: ChainConfig::default(),
             relay: RelayConfig::default(),
             runner: CoreRunnerConfig::default(),
@@ -583,9 +562,6 @@ impl RokoConfig {
         if self.learning != proposed.learning {
             report.hot_reloaded.push("learning");
         }
-        if self.demurrage != proposed.demurrage {
-            report.hot_reloaded.push("demurrage");
-        }
         if self.scheduler != proposed.scheduler {
             report.hot_reloaded.push("scheduler");
         }
@@ -597,12 +573,6 @@ impl RokoConfig {
         }
         if self.conductor != proposed.conductor {
             report.hot_reloaded.push("conductor");
-        }
-        if self.attention != proposed.attention {
-            report.hot_reloaded.push("attention");
-        }
-        if self.goals != proposed.goals {
-            report.hot_reloaded.push("goals");
         }
 
         if self.agent != proposed.agent {
@@ -651,12 +621,6 @@ impl RokoConfig {
         Self::write_example_budget(&mut out, &cfg);
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
-        Self::write_example_demurrage(&mut out, &cfg);
-        Self::write_example_attention(&mut out, &cfg);
-        Self::write_example_immune(&mut out, &cfg);
-        Self::write_example_temporal(&mut out, &cfg);
-        Self::write_example_goals(&mut out, &cfg);
-        Self::write_example_energy(&mut out, &cfg);
         Self::write_example_tui_and_server(&mut out, &cfg);
         Self::write_example_scheduler(&mut out, &cfg);
         Self::write_example_webhooks(&mut out, &cfg);
@@ -846,84 +810,6 @@ impl RokoConfig {
             "dream_on_completion = {}\n",
             c.learning.dream_on_completion
         );
-    }
-    fn write_example_demurrage(out: &mut String, c: &Self) {
-        let _ = writeln!(out, "# -- Knowledge demurrage --");
-        let _ = writeln!(out, "[demurrage]");
-        let _ = writeln!(out, "rate_per_hour = {}", c.demurrage.rate_per_hour);
-        let _ = writeln!(out, "min_balance = {}", c.demurrage.min_balance);
-        let _ = writeln!(out, "freeze_threshold = {}", c.demurrage.freeze_threshold);
-        let _ = writeln!(out, "thaw_balance = {}", c.demurrage.thaw_balance);
-        let _ = writeln!(out, "max_balance = {}", c.demurrage.max_balance);
-        let _ = writeln!(out, "death_threshold = {}", c.demurrage.death_threshold);
-        let _ = writeln!(
-            out,
-            "freeze_before_delete = {}",
-            c.demurrage.freeze_before_delete
-        );
-        let _ = writeln!(out, "gc_interval_secs = {}\n", c.demurrage.gc_interval_secs);
-    }
-    fn write_example_attention(out: &mut String, c: &Self) {
-        let _ = writeln!(out, "# -- Attention budget allocation --");
-        let _ = writeln!(out, "[attention]");
-        let _ = writeln!(
-            out,
-            "max_tokens_per_layer = {}",
-            c.attention.max_tokens_per_layer
-        );
-        let _ = writeln!(
-            out,
-            "utilization_target = {}",
-            c.attention.utilization_target
-        );
-        let _ = writeln!(out, "auction_enabled = {}", c.attention.auction_enabled);
-        let _ = writeln!(
-            out,
-            "task_reserve_tokens = {}\n",
-            c.attention.task_reserve_tokens
-        );
-    }
-    fn write_example_immune(out: &mut String, c: &Self) {
-        let _ = writeln!(out, "# -- Anomaly detection / immune system --");
-        let _ = writeln!(out, "[immune]");
-        let _ = writeln!(
-            out,
-            "quarantine_threshold = {}",
-            c.immune.quarantine_threshold
-        );
-        let _ = writeln!(out, "max_quarantined = {}", c.immune.max_quarantined);
-        let _ = writeln!(out, "auto_reject = {}", c.immune.auto_reject);
-        let _ = writeln!(out, "taint_levels = {:?}\n", c.immune.taint_levels);
-    }
-    fn write_example_temporal(out: &mut String, c: &Self) {
-        let _ = writeln!(out, "# -- Temporal planning --");
-        let _ = writeln!(out, "[temporal]");
-        let _ = writeln!(out, "max_depth = {}", c.temporal.max_depth);
-        let _ = writeln!(out, "epoch_secs = {}", c.temporal.epoch_secs);
-        let _ = writeln!(
-            out,
-            "enforce_allen_relations = {}\n",
-            c.temporal.enforce_allen_relations
-        );
-    }
-    fn write_example_goals(out: &mut String, c: &Self) {
-        let _ = writeln!(out, "# -- Goal hierarchy --");
-        let _ = writeln!(out, "[goals]");
-        let _ = writeln!(out, "max_active = {}", c.goals.max_active);
-        let _ = writeln!(out, "correctness_weight = {}", c.goals.correctness_weight);
-        let _ = writeln!(
-            out,
-            "completion_threshold = {}",
-            c.goals.completion_threshold
-        );
-        let _ = writeln!(out, "prune_threshold = {}\n", c.goals.prune_threshold);
-    }
-    fn write_example_energy(out: &mut String, c: &Self) {
-        let _ = writeln!(out, "# -- Compute budget / energy --");
-        let _ = writeln!(out, "[energy]");
-        let _ = writeln!(out, "pool_usd = {}", c.energy.pool_usd);
-        let _ = writeln!(out, "per_task_cap_usd = {}", c.energy.per_task_cap_usd);
-        let _ = writeln!(out, "metabolism_rate = {}\n", c.energy.metabolism_rate);
     }
     fn write_example_tui_and_server(out: &mut String, c: &Self) {
         let _ = writeln!(out, "# -- TUI preferences --");
