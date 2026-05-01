@@ -347,7 +347,9 @@ const DISTILLATION_MODEL: &str = "claude-haiku-4-5";
 /// target are compiled as separate crates — `pub(crate)` would make the
 /// function invisible to the binary.
 pub fn distillation_model_caller(workdir: &Path) -> Arc<dyn ModelCaller> {
-    let mut config = roko_core::config::load_config(workdir).unwrap_or_default();
+    let mut config = roko_core::config::load_config(workdir)
+        .map(roko_core::config::ValidatedConfig::into_config)
+        .unwrap_or_default();
     config.apply_process_env();
     crate::config::merge_global_providers(&mut config);
     config.agent.default_model = DISTILLATION_MODEL.to_string();

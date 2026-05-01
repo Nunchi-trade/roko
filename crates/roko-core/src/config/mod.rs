@@ -93,18 +93,30 @@ pub enum LoadConfigError {
 
 /// Load the workspace configuration from `workdir/roko.toml`.
 ///
-/// Missing files fall back to `RokoConfig::default()` so callers can start a
-/// daemon in an uninitialized workspace.
+/// Missing files fall back to [`ValidatedConfig::default`] (wrapping
+/// [`RokoConfig::default`]) so callers can start a daemon in an
+/// uninitialized workspace. Callers that only care about the inner config
+/// should call [`ValidatedConfig::into_config`] on the returned wrapper.
 ///
 /// After parsing, two secret-resolution passes run automatically:
 ///   1. `${VAR}` interpolation — expands environment variable references in
 ///      provider config strings.
 ///   2. `*_file` resolution — reads secrets from file paths in `extra_headers`
 ///      whose keys end with `_file`.
-pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
+///
+/// Hard-rejection errors (unreadable/unparseable file, strict-validation
+/// failure) are returned as [`LoadConfigError`]. Soft-warning checks (e.g.
+/// outdated `config_version`) are surfaced via
+/// [`ValidatedConfig::diagnostics`] and do not fail the load.
+pub fn load_config(workdir: &Path) -> Result<ValidatedConfig, LoadConfigError> {
     let path = workdir.join("roko.toml");
     if !path.exists() {
-        return Ok(RokoConfig::default());
+        let mut validated = ValidatedConfig::from_config(RokoConfig::default());
+        validated.provenance.push(ConfigProvenance::default(
+            "roko.toml",
+            "missing file; using built-in defaults",
+        ));
+        return Ok(validated);
     }
 
     let text = std::fs::read_to_string(&path).map_err(|source| LoadConfigError::Read {
@@ -122,17 +134,35 @@ pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
         }
     })?;
 
-    let mut config: RokoConfig =
-        toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
-            path: path.clone(),
-            source,
-        })?;
+    let raw: RokoConfig = toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
+        path: path.clone(),
+        source,
+    })?;
 
-    // Secret resolution passes.
-    config.interpolate_env_vars();
-    config.resolve_file_secrets();
+    let mut migrated = raw.clone();
+    migrated.interpolate_env_vars();
+    migrated.resolve_file_secrets();
 
-    Ok(config)
+    let mut diagnostics = Vec::new();
+    if raw.config_version < schema::CURRENT_CONFIG_VERSION {
+        diagnostics.push(ConfigDiagnostic {
+            key: "config_version".to_string(),
+            message: format!(
+                "config_version={} is older than current {}; consider running a migration",
+                raw.config_version,
+                schema::CURRENT_CONFIG_VERSION,
+            ),
+        });
+    }
+
+    let provenance = vec![ConfigProvenance::file(path.clone(), "roko.toml")];
+
+    Ok(ValidatedConfig {
+        raw,
+        migrated,
+        diagnostics,
+        provenance,
+    })
 }
 
 #[cfg(test)]
@@ -146,13 +176,59 @@ mod load_config_tests {
         std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
 
         let err = load_config(dir.path()).expect_err("must reject dangerous shared override");
-        assert!(matches!(err, LoadConfigError::Validation { .. }), "got {err:?}");
+        assert!(
+            matches!(err, LoadConfigError::Validation { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn missing_roko_toml_returns_default() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = load_config(dir.path()).expect("default load ok");
+        let validated = load_config(dir.path()).expect("default load ok");
+        assert_eq!(validated.config(), &RokoConfig::default());
+        // Default path should still emit no soft warnings.
+        assert!(validated.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn clean_config_has_empty_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_text = format!(
+            "config_version = {}\nschema_version = {}\n",
+            schema::CURRENT_CONFIG_VERSION,
+            schema::CURRENT_SCHEMA_VERSION,
+        );
+        std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
+
+        let validated = load_config(dir.path()).expect("clean load ok");
+        assert!(
+            validated.diagnostics().is_empty(),
+            "unexpected diagnostics: {:?}",
+            validated.diagnostics()
+        );
+        assert!(!validated.provenance().is_empty(), "provenance missing");
+    }
+
+    #[test]
+    fn outdated_config_version_produces_soft_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Pin config_version to 1 to trip the soft-warning check.
+        let toml_text = "config_version = 1\n";
+        std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
+
+        let validated = load_config(dir.path()).expect("older config still loads");
+        let diagnostics = validated.diagnostics();
+        assert_eq!(diagnostics.len(), 1, "got {diagnostics:?}");
+        assert_eq!(diagnostics[0].key, "config_version");
+    }
+
+    #[test]
+    fn into_config_returns_inner_roko_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = load_config(dir.path())
+            .expect("default load ok")
+            .into_config();
         assert_eq!(cfg, RokoConfig::default());
     }
 }

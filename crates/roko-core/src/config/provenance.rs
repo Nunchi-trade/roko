@@ -105,7 +105,14 @@ pub struct ConfigDiagnostic {
 }
 
 /// Parsed config after migration and validation, with provenance retained.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `raw` holds the config as deserialized before any migration step; `migrated`
+/// is the authoritative post-migration value that callers consume via
+/// [`ValidatedConfig::config`] / [`ValidatedConfig::into_config`]. Today the
+/// two are identical because `load_config` does not perform schema migration;
+/// future migration passes should populate `migrated` separately and leave
+/// `raw` untouched for provenance/audit tooling.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ValidatedConfig {
     pub raw: RokoConfig,
     pub migrated: RokoConfig,
@@ -113,6 +120,56 @@ pub struct ValidatedConfig {
     pub diagnostics: Vec<ConfigDiagnostic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<ConfigProvenance>,
+}
+
+impl ValidatedConfig {
+    /// Wrap a fully-populated `RokoConfig` with empty diagnostics/provenance.
+    ///
+    /// Intended for callers (tests, synthesized configs) that construct a
+    /// config in-process and don't need a provenance trace.
+    #[must_use]
+    pub fn from_config(config: RokoConfig) -> Self {
+        Self {
+            raw: config.clone(),
+            migrated: config,
+            diagnostics: Vec::new(),
+            provenance: Vec::new(),
+        }
+    }
+
+    /// Access the authoritative (post-migration) config.
+    #[must_use]
+    pub fn config(&self) -> &RokoConfig {
+        &self.migrated
+    }
+
+    /// Consume the wrapper and return the post-migration `RokoConfig`.
+    ///
+    /// Prefer this over field access at call sites that don't need
+    /// provenance or diagnostics.
+    #[must_use]
+    pub fn into_config(self) -> RokoConfig {
+        self.migrated
+    }
+
+    /// Machine-readable provenance entries for each config key that was
+    /// resolved from a non-default source (file, env, CLI override, etc.).
+    #[must_use]
+    pub fn provenance(&self) -> &[ConfigProvenance] {
+        &self.provenance
+    }
+
+    /// Soft-warning diagnostics surfaced by the loader.
+    ///
+    /// Hard-rejection failures are returned as [`LoadConfigError`] and never
+    /// appear here. Callers that want to display warnings to the user (CLI,
+    /// TUI, dashboard) should iterate this slice.
+    ///
+    /// [`LoadConfigError`]: super::LoadConfigError
+    #[must_use]
+    pub fn diagnostics(&self) -> &[ConfigDiagnostic] {
+        &self.diagnostics
+    }
 }
 
 /// Runtime-ready config identities after resolution.

@@ -826,7 +826,8 @@ where
 async fn run_generated_plans(workdir: &Path, plans_root: &Path) -> Result<()> {
     let plans = crate::runner::load_plans(plans_root)?;
     let roko_config = roko_core::config::load_config(workdir)
-        .with_context(|| format!("load roko config from {}", workdir.display()))?;
+        .with_context(|| format!("load roko config from {}", workdir.display()))?
+        .into_config();
     let run_config = crate::runner::RunConfig::from_roko_config(
         workdir.to_path_buf(),
         plans_root.to_path_buf(),
