@@ -1248,7 +1248,10 @@ mod tests {
         // The secret should be gone from the custom event data.
         let json = serde_json::to_string(&scrubbed.events[0]).unwrap();
         assert!(!json.contains("sk-ant-api03"));
-        assert!(json.contains("[REDACTED]"));
+        // `LogScrubber` replaces api-key matches with the labeled variant
+        // `[REDACTED:API_KEY]` — match on the common `[REDACTED:` prefix so
+        // adding more labeled patterns later doesn't break this test.
+        assert!(json.contains("[REDACTED:"));
     }
 
     #[test]
@@ -1270,7 +1273,8 @@ mod tests {
         };
         let scrubbed = trace.scrubbed(&scrubber);
         assert!(!scrubbed.model.contains("sk-ant-api03"));
-        assert!(scrubbed.model.contains("[REDACTED]"));
+        // Same labeling as `scrubbed_redacts_custom_event_payload`.
+        assert!(scrubbed.model.contains("[REDACTED:"));
     }
 
     #[test]
