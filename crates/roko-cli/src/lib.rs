@@ -61,7 +61,7 @@ pub mod demo_cmd;
 pub mod demo_seed;
 pub mod deployment;
 pub mod dispatch;
-#[cfg(feature = "legacy-orchestrate")]
+#[cfg(feature = "legacy-direct-dispatch")]
 pub mod dispatch_direct;
 pub(crate) mod dispatch_helpers;
 pub mod dispatch_v2;
