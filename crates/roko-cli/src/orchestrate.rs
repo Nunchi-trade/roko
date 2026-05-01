@@ -15912,6 +15912,7 @@ impl PlanRunner {
             use parking_lot::RwLock;
             use roko_agent::OllamaLlmBackend;
             use roko_agent::dispatcher::{HandlerResolver, ToolDispatcher};
+            use roko_agent::task_runner::BudgetAction as RunnerBudgetAction;
             use roko_agent::tool_loop::{StopReason, ToolLoop};
             use roko_agent::translate::{OllamaTranslator, Translator};
             use roko_core::tool::{ToolContext, ToolHandler, ToolRegistry, VecToolRegistry};
@@ -15980,10 +15981,48 @@ impl PlanRunner {
             let external_actions = Arc::new(RwLock::new(Vec::new()));
             let tool_ctx = ToolContext::testing(&exec_dir)
                 .with_external_actions(Arc::clone(&external_actions));
+
+            // T5-39: per-task budget guardrail around the Ollama loop.
+            //
+            // `TaskRunner` is the wrong abstraction here because the Ollama
+            // path drives `ToolLoop` directly without an `Agent` impl, so
+            // build the same `RunnerBudgetGuardrail` the Claude branch uses
+            // and enforce the per-task cap on either side of the loop.
+            let mut runner_budget = RunnerBudgetGuardrail::new(
+                self.config.budget.max_task_usd,
+                self.config.budget.max_session_usd,
+                self.config.budget.max_plan_usd,
+                f64::from(self.config.budget.warn_at_percent) / 100.0,
+            );
+            let task_spend_pre = self.task_spent(plan_id, task);
+            let session_spend_pre: f64 = self.plan_costs.values().sum();
+            if matches!(
+                runner_budget.record_cost(task_spend_pre, "task"),
+                RunnerBudgetAction::Block,
+            ) {
+                return Err(anyhow!(
+                    "task {plan_id}/{task} budget exhausted before running ollama:{selected_model} (task spent ${task_spend_pre:.2} >= max ${:.2})",
+                    self.config.budget.max_task_usd
+                ));
+            }
+            let _ = runner_budget.record_cost(session_spend_pre, "session");
+
             let output = tool_loop
                 .run(&role_instruction, &task_text, &tools, &tool_ctx)
                 .await;
             let success = matches!(output.stop_reason, StopReason::Stop);
+
+            let run_cost_usd = f64::from(output.total_usage.cost_usd);
+            if matches!(
+                runner_budget.record_cost(run_cost_usd, "task"),
+                RunnerBudgetAction::Block,
+            ) {
+                return Err(anyhow!(
+                    "task {plan_id}/{task} budget exhausted while running ollama:{selected_model} (task spent ${:.2} after this run >= max ${:.2})",
+                    task_spend_pre + run_cost_usd,
+                    self.config.budget.max_task_usd,
+                ));
+            }
             let body_text = if success {
                 output.final_text.clone()
             } else {
