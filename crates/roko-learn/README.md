@@ -28,9 +28,6 @@ adaptive routing with budget enforcement.
 - `efficiency` / `aggregate` -- per-turn efficiency JSONL telemetry
 - `forensic_replay` -- debugging failed tasks (GATE-07)
 - `causal` -- Granger causality and PC algorithm for causal DAG discovery (TA-08)
-- `shapley` -- Shapley-value attribution for fair agent credit (P1-08)
-- `resonant_patterns` -- evolutionary pattern organisms with Lotka-Volterra dynamics (TA-09)
-- `kalman` -- online signal smoothing for oracle predictions (P2-10)
 - `bayesian_confidence` -- Beta-Binomial confidence updating (AS-07)
 - `adas` -- autocatalytic optimization (LEARN-08)
 - `conductor` -- learned intervention policy for conductor retries/aborts
