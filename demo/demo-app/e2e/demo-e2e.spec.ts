@@ -1,54 +1,16 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
+import {
+  gotoDemo,
+  waitForServe,
+  switchTab,
+  waitForTerminals,
+  clickPlay,
+  waitForProgress,
+} from './helpers';
 
 /**
  * End-to-end tests: verify scenarios actually execute commands, not just start.
  */
-
-async function gotoDemo(page: Page) {
-  await page.goto('/demo', { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(8000);
-}
-
-async function waitForServe(page: Page) {
-  await expect(
-    page.locator('.demo-serve-status').filter({ hasText: 'serve live' }),
-  ).toBeVisible({ timeout: 15000 });
-}
-
-async function switchTab(page: Page, idx: number) {
-  await page.locator('.demo-tab').nth(idx).click();
-  await page.waitForTimeout(3000);
-}
-
-async function waitForTerminals(page: Page, count: number) {
-  for (let i = 0; i < count; i++) {
-    await expect(page.locator('.demo-term-status').nth(i)).toHaveText('connected', { timeout: 15000 });
-  }
-}
-
-async function clickPlay(page: Page, usePipelineBtn = false) {
-  if (usePipelineBtn) {
-    const btn = page.locator('.pp-run-btn');
-    if (await btn.isVisible().catch(() => false) && !(await btn.isDisabled())) {
-      await btn.click();
-      return;
-    }
-  }
-  const overlay = page.locator('.demo-intro-overlay .demo-play-btn');
-  const bottom = page.locator('.demo-pb-btn.primary');
-  if (await overlay.isVisible().catch(() => false)) await overlay.click();
-  else if (await bottom.isVisible().catch(() => false)) await bottom.click();
-}
-
-async function waitForProgress(page: Page, timeoutMs = 45000): Promise<string> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const text = await page.locator('.demo-pb-cmd-preview').textContent() ?? '';
-    if (text !== 'press Play to begin' && text !== '') return text;
-    await page.waitForTimeout(500);
-  }
-  return await page.locator('.demo-pb-cmd-preview').textContent() ?? '';
-}
 
 test.describe('Scenario end-to-end', () => {
   test.setTimeout(300_000); // 5 minutes

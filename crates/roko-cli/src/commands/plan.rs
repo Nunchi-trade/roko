@@ -528,7 +528,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
         }
         PlanCmd::Generate { source, from_file } => {
             use roko_cli::agent_config::load_gateway_env;
-            use roko_cli::agent_exec::{run_agent_logged, AgentExecEpisode, AgentExecOpts};
+            use roko_cli::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
             let gw = load_gateway_env(&workdir);
@@ -599,7 +599,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
         }
         PlanCmd::Regenerate { plan_dir, dry_run } => {
             use roko_cli::agent_config::load_gateway_env;
-            use roko_cli::agent_exec::{run_agent_logged, AgentExecEpisode, AgentExecOpts};
+            use roko_cli::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
             let tasks_path = plan_dir.join("tasks.toml");

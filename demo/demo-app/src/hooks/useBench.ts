@@ -111,9 +111,10 @@ export function useBench() {
     setSuitesLoading(true);
     (async () => {
       try {
-        const s = await get<BenchSuite[]>('/api/bench/suites');
-        if (Array.isArray(s) && s.length > 0) setSuites(s);
-        else setSuites([]);
+        const raw = await get<{ suites: BenchSuite[] } | BenchSuite[]>('/api/bench/suites');
+        const s = Array.isArray(raw) ? raw : (raw?.suites ?? []);
+        // Listing endpoint returns summaries without tasks array — ensure it exists.
+        setSuites(s.map((suite) => ({ ...suite, tasks: suite.tasks ?? [] })));
       } catch {
         setSuites([]);
       } finally {
@@ -127,9 +128,15 @@ export function useBench() {
     setModelsLoading(true);
     (async () => {
       try {
-        const m = await get<BenchModel[]>('/api/bench/models');
-        if (Array.isArray(m) && m.length > 0) setModels(m);
-        else setModels([]);
+        const raw = await get<{ models: (string | BenchModel)[] } | BenchModel[]>('/api/bench/models');
+        const arr = Array.isArray(raw) ? raw : (raw?.models ?? []);
+        // Backend may return string[] (model slugs) instead of BenchModel objects.
+        const m: BenchModel[] = arr.map((item) =>
+          typeof item === 'string'
+            ? { id: item, name: item, provider: '', cost_per_1k_input: 0, cost_per_1k_output: 0, max_tokens: 0, context_window: 0 }
+            : item,
+        );
+        setModels(m);
       } catch {
         setModels([]);
       } finally {
@@ -143,9 +150,9 @@ export function useBench() {
     setHistoryLoading(true);
     (async () => {
       try {
-        const h = await get<BenchRun[]>('/api/bench/runs');
-        if (Array.isArray(h) && h.length > 0) setHistory(h);
-        else setHistory([]);
+        const raw = await get<{ runs: BenchRun[] } | BenchRun[]>('/api/bench/runs');
+        const h = Array.isArray(raw) ? raw : (raw?.runs ?? []);
+        setHistory(h);
       } catch {
         setHistory([]);
       } finally {
@@ -230,8 +237,8 @@ export function useBench() {
           ...f,
         ].slice(0, 100));
         // Refresh history
-        get<BenchRun[]>('/api/bench/runs')
-          .then((h) => { if (Array.isArray(h) && h.length > 0) setHistory(h); })
+        get<{ runs: BenchRun[] } | BenchRun[]>('/api/bench/runs')
+          .then((raw) => { const h = Array.isArray(raw) ? raw : (raw?.runs ?? []); setHistory(h); })
           .catch(() => {});
         break;
 
@@ -326,9 +333,9 @@ export function useBench() {
     setFeed([{ text: `Starting ${suite.name} with ${model}...`, type: 'info' as const, ts }]);
 
     try {
-      const res = await post<{ id: string }>('/api/bench/runs', {
+      const res = await post<{ id: string }>('/api/bench/run', {
         suite_id: suite.id,
-        config: {
+        overrides: {
           model,
           provider,
           temperature: config.temperature,
@@ -354,7 +361,7 @@ export function useBench() {
       setActiveRun({
         id: runId,
         progress: 0,
-        total: suite.tasks.length,
+        total: suite.tasks?.length || suite.task_count || 0,
         costSoFar: 0,
         results: [],
         status: 'running',
@@ -379,8 +386,9 @@ export function useBench() {
               };
             });
             // Refresh history
-            const h = await get<BenchRun[]>('/api/bench/runs');
-            if (Array.isArray(h) && h.length > 0) setHistory(h);
+            const rawH = await get<{ runs: BenchRun[] } | BenchRun[]>('/api/bench/runs');
+            const h = Array.isArray(rawH) ? rawH : (rawH?.runs ?? []);
+            setHistory(h);
           }
         } catch {
           // poll error, will retry

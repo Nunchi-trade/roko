@@ -565,11 +565,17 @@ impl AcpSession {
             "provider" => {
                 if let Some(s) = new_value.as_str() {
                     self.config_state.provider = s.to_owned();
-                    // If the current model doesn't belong to the new provider, pick the first one.
-                    let model_belongs = roko_config
-                        .models
-                        .get(&self.config_state.model)
-                        .is_some_and(|p| p.provider == s);
+                    // If the current model doesn't belong to the new (available) provider,
+                    // pick the first model for that provider.
+                    let provider_available = roko_config
+                        .providers
+                        .get(s)
+                        .is_some_and(|p| roko_config.is_provider_available(p));
+                    let model_belongs = provider_available
+                        && roko_config
+                            .models
+                            .get(&self.config_state.model)
+                            .is_some_and(|p| p.provider == s);
                     if !model_belongs
                         && let Some(first_key) = roko_config
                             .models
@@ -869,11 +875,12 @@ fn build_config_options(
         return build_config_options_static(state);
     }
 
-    // ── Provider options from [providers.*] in roko.toml ──
+    // ── Provider options from [providers.*] in roko.toml, filtered by credential availability ──
     let mut provider_options: Vec<ConfigOptionValue> = roko_config
         .providers
-        .keys()
-        .map(|key| ConfigOptionValue {
+        .iter()
+        .filter(|(_, provider)| roko_config.is_provider_available(provider))
+        .map(|(key, _)| ConfigOptionValue {
             value: key.clone(),
             name: capitalize_model_key(key),
             description: None,
@@ -881,11 +888,17 @@ fn build_config_options(
         .collect();
     provider_options.sort_by(|a, b| a.value.cmp(&b.value));
 
-    // ── Model options filtered by selected provider ──
+    // ── Model options filtered by selected provider (only if provider is available) ──
     let mut model_options: Vec<ConfigOptionValue> = roko_config
         .models
         .iter()
-        .filter(|(_, profile)| profile.provider == state.provider)
+        .filter(|(_, profile)| {
+            profile.provider == state.provider
+                && roko_config
+                    .providers
+                    .get(&profile.provider)
+                    .is_some_and(|p| roko_config.is_provider_available(p))
+        })
         .map(|(key, profile)| ConfigOptionValue {
             value: key.clone(),
             name: capitalize_model_key(key),

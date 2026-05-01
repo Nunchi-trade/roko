@@ -9,10 +9,19 @@ import { ImageAddon } from '@xterm/addon-image';
 import { rosedustTheme } from '../lib/rosedust-theme';
 import { WS_BASE } from '../lib/serve-url';
 
-const PROMPT_RE = /(?:^|\n)[^\n]*[❯%#>→➜➤›]\s*$|(?:^|\n)\$\s+$/;
+// Match common shell prompts. The key chars are: $ % # > ❯ → ➜ ➤ ›
+// Also matches bash's default `bash-5.2$ ` and zsh's `user@host% ` patterns.
+// Tested against the tail of a stripped output buffer (multiline).
+const PROMPT_RE = /[^\n]*[❯%#$>→➜➤›]\s*$/m;
 
 function stripAnsi(s: string): string {
-  return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  return s
+    .replace(/\x1b\[\?[0-9;]*[hl]/g, '')     // Private mode set/reset (e.g. ?2004h/l bracketed paste)
+    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')   // CSI sequences
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC sequences
+    .replace(/\x1b[()][A-B0-2]/g, '')         // Charset selection
+    .replace(/\x1b[DEHMN78]/g, '')            // Single-char escapes
+    .replace(/[\x00-\x08\x0e-\x1f]/g, '');   // Control chars (except \t \n \r)
 }
 
 export interface ExecResult {
@@ -217,21 +226,27 @@ export function useTerminal(sessionId?: string) {
 
     handle.waitForPrompt = async (timeout = 60000, signal?: AbortSignal): Promise<boolean> => {
       const start = Date.now();
-      await sleep(80);
+      await sleep(50);
       while (Date.now() - start < timeout) {
         if (signal?.aborted) return false;
-        const tail = stripAnsi(outBuf).slice(-300);
+        // Check a much larger window — long command output shouldn't hide the prompt
+        const tail = stripAnsi(outBuf).slice(-2000);
         if (PROMPT_RE.test(tail)) {
+          // Stability check: wait a short time and re-check.
+          // Allow up to 50 bytes of noise (partial PTY writes) — only require
+          // that the prompt still appears, not that the buffer stopped growing.
           const snapshot = outBuf.length;
-          await sleep(120);
+          await sleep(60);
           if (signal?.aborted) return false;
-          if (outBuf.length === snapshot) {
-            const recheck = stripAnsi(outBuf).slice(-300);
+          const growth = outBuf.length - snapshot;
+          if (growth <= 50) {
+            const recheck = stripAnsi(outBuf).slice(-2000);
             if (PROMPT_RE.test(recheck)) return true;
           }
         }
-        await sleep(30);
+        await sleep(20);
       }
+      console.warn('[useTerminal] waitForPrompt timed out after', timeout, 'ms. Buffer tail:', JSON.stringify(stripAnsi(outBuf).slice(-200)));
       return false;
     };
 
@@ -252,6 +267,9 @@ export function useTerminal(sessionId?: string) {
       // The printf produces an OSC escape that xterm.js intercepts and
       // swallows — nothing visible appears in the terminal.
       const wrapped = `${cmd}; __rk_ec=$?; printf '\\033]7777;D;%d;${marker}\\033\\\\' "$__rk_ec"; (exit $__rk_ec)`;
+      if (wrapped.length > 3000) {
+        console.warn(`[useTerminal] execCmd sending large command (${wrapped.length} chars): ${cmd.slice(0, 60)}...`);
+      }
       handle.sendRaw(wrapped + '\r');
       return new Promise<ExecResult>((resolve) => {
         let settled = false;
@@ -267,6 +285,7 @@ export function useTerminal(sessionId?: string) {
           if (!settled) {
             settled = true;
             oscListeners.delete(listener);
+            console.warn(`[useTerminal] execCmd timed out after ${timeout}ms: ${cmd.slice(0, 80)}`);
             resolve({ ok: false, exitCode: -1 });
           }
         }, timeout);
@@ -306,14 +325,18 @@ export function useTerminal(sessionId?: string) {
 
     function connectWs() {
       if (disposed) return;
-      const ws = new WebSocket(`${WS_BASE}/ws/terminal/${id}`);
+      const url = `${WS_BASE}/ws/terminal/${id}`;
+      console.log(`[useTerminal:${id}] connecting to ${url}`);
+      const ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
         if (disposed) { ws.close(); return; }
         handle.ws = ws;
-        handle.status = 'connected';
-        if (!disposed) setStatus('connected');
+        // Mark as 'connecting' until we detect a shell prompt — 'connected'
+        // means the PTY shell is actually ready, not just that the WS is open.
+        handle.status = 'connecting';
+        if (!disposed) setStatus('connecting');
         try {
           if (!disposed) {
             const dims = fitAddon.proposeDimensions();
@@ -324,6 +347,24 @@ export function useTerminal(sessionId?: string) {
         } catch {
           // Terminal may have been disposed between open and this callback
         }
+        // Wait for the shell to actually print its first prompt before
+        // declaring "connected". This prevents scenarios from starting
+        // before the PTY shell has finished loading .bashrc/.zshrc.
+        (async () => {
+          const shellReady = await handle.waitForPrompt(8000);
+          if (disposed) return;
+          if (shellReady) {
+            handle.status = 'connected';
+            if (!disposed) setStatus('connected');
+            console.log(`[useTerminal:${id}] shell ready (prompt detected)`);
+          } else {
+            // Prompt not found but WS is open — mark connected anyway
+            // so scenarios can attempt to proceed (they have their own checks).
+            handle.status = 'connected';
+            if (!disposed) setStatus('connected');
+            console.warn(`[useTerminal:${id}] shell prompt not detected within 8s, proceeding anyway. Buffer tail: ${JSON.stringify(stripAnsi(outBuf).slice(-200))}`);
+          }
+        })();
       };
 
       ws.onmessage = (e: MessageEvent) => {

@@ -340,7 +340,7 @@ export function useBenchRuns() {
       setActiveRun({
         id: runId,
         progress: 0,
-        total: suite.tasks.length,
+        total: suite.tasks?.length || suite.task_count || 0,
         costSoFar: 0,
         results: [],
         status: 'running',

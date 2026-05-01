@@ -15,6 +15,11 @@ interface UseBlockStreamResult {
 
 const MAX_BLOCKS = 20;
 
+/**
+ * Connects to mirage-rs via WebSocket and subscribes to newHeads.
+ * Only attempts connection after a successful HTTP pre-flight check
+ * to avoid spamming console errors when mirage-rs isn't running.
+ */
 export function useBlockStream(enabled = true): UseBlockStreamResult {
   const [blocks, setBlocks] = useState<BlockInfo[]>([]);
   const [connected, setConnected] = useState(false);
@@ -37,8 +42,39 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
   useEffect(() => {
     if (!enabled) return;
 
-    let attempt = 0;
     let disposed = false;
+    let attempt = 0;
+    const MAX_ATTEMPTS = 2; // Don't spam — 2 retries max
+
+    // Derive HTTP URL from WS URL for pre-flight check
+    const httpUrl = MIRAGE_WS_URL.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
+
+    async function preflight(): Promise<boolean> {
+      try {
+        const res = await fetch(httpUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
+          signal: AbortSignal.timeout(2000),
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    }
+
+    async function tryConnect() {
+      if (disposed) return;
+
+      // Pre-flight: check if mirage-rs is reachable via HTTP first
+      const reachable = await preflight();
+      if (!reachable) {
+        // Mirage not available — don't attempt WS connection at all
+        return;
+      }
+
+      connect();
+    }
 
     function connect() {
       if (disposed) return;
@@ -48,7 +84,6 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
 
         ws.onopen = () => {
           attempt = 0;
-          // Send eth_subscribe for newHeads
           ws.send(JSON.stringify({
             jsonrpc: '2.0',
             id: 1,
@@ -60,12 +95,10 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
         ws.onmessage = (evt) => {
           try {
             const msg = JSON.parse(evt.data);
-            // Subscription confirmation
             if (msg.id === 1 && msg.result) {
               setConnected(true);
               return;
             }
-            // Subscription event
             if (msg.method === 'eth_subscription' && msg.params?.result) {
               const head = msg.params.result;
               const block: BlockInfo = {
@@ -84,10 +117,10 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
         ws.onclose = () => {
           setConnected(false);
           wsRef.current = null;
-          if (!disposed && attempt < 5) {
-            const delay = Math.min(1000 * 2 ** attempt, 15000);
+          if (!disposed && attempt < MAX_ATTEMPTS) {
+            const delay = Math.min(2000 * 2 ** attempt, 10000);
             attempt++;
-            reconnectTimer.current = setTimeout(connect, delay);
+            reconnectTimer.current = setTimeout(tryConnect, delay);
           }
         };
 
@@ -95,12 +128,11 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
           ws.close();
         };
       } catch {
-        // WebSocket constructor can throw if URL is invalid
         setConnected(false);
       }
     }
 
-    connect();
+    tryConnect();
 
     return () => {
       disposed = true;

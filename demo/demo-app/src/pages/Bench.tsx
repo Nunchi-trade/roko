@@ -217,7 +217,7 @@ export default function Bench() {
   // Cost estimate
   const selectedModelInfo = models.find((m) => m.id === defaultModel);
   const estimatedCost = selectedSuite && selectedModelInfo
-    ? ((selectedModelInfo.cost_per_1k_input * 2 + selectedModelInfo.cost_per_1k_output * 3) * selectedSuite.tasks.length * 0.8)
+    ? ((selectedModelInfo.cost_per_1k_input * 2 + selectedModelInfo.cost_per_1k_output * 3) * (selectedSuite.tasks?.length || selectedSuite.task_count || 0) * 0.8)
     : null;
 
   return (
@@ -346,9 +346,9 @@ export default function Bench() {
                     <div className="bench-cost-calc">
                       {selectedSuite && (
                         <>
-                          <div className="cost-calc-row"><span className="cost-calc-label">Suite est.</span><span className="cost-calc-value">${selectedSuite.estimated_cost_usd.toFixed(2)}</span></div>
+                          {selectedSuite.estimated_cost_usd > 0 && <div className="cost-calc-row"><span className="cost-calc-label">Suite est.</span><span className="cost-calc-value">${selectedSuite.estimated_cost_usd.toFixed(2)}</span></div>}
                           {estimatedCost != null && <div className="cost-calc-row"><span className="cost-calc-label">Model est.</span><span className="cost-calc-value">${estimatedCost.toFixed(3)}</span></div>}
-                          <div className="cost-calc-row"><span className="cost-calc-label">Tasks</span><span className="cost-calc-value">{selectedSuite.tasks.length}</span></div>
+                          <div className="cost-calc-row"><span className="cost-calc-label">Tasks</span><span className="cost-calc-value">{selectedSuite.tasks?.length || selectedSuite.task_count || 0}</span></div>
                           <div className="cost-calc-row"><span className="cost-calc-label">Strategy</span><span className="cost-calc-value">{config.strategy.replace(/_/g, ' ')}</span></div>
                         </>
                       )}

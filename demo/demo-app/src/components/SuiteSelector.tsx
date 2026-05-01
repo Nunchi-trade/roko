@@ -37,7 +37,7 @@ export default function SuiteSelector({ suites, value, onChange }: SuiteSelector
 
           // Difficulty distribution
           const diffCounts = [0, 0, 0, 0, 0];
-          for (const t of s.tasks) {
+          for (const t of (s.tasks ?? [])) {
             if (t.difficulty >= 1 && t.difficulty <= 5) diffCounts[t.difficulty - 1]++;
           }
           const maxCount = Math.max(...diffCounts, 1);
@@ -50,12 +50,12 @@ export default function SuiteSelector({ suites, value, onChange }: SuiteSelector
               >
                 <div className="suite-card-top">
                   <span className="suite-card-name">{s.name}</span>
-                  <span className="suite-card-count">{s.tasks.length} tasks</span>
+                  <span className="suite-card-count">{s.tasks?.length || s.task_count || 0} tasks</span>
                 </div>
                 <p className="suite-card-desc">{s.description}</p>
                 <div className="suite-card-meta">
-                  <span className="suite-card-cost">~${s.estimated_cost_usd.toFixed(2)}</span>
-                  <DifficultyBar range={s.difficulty_range} />
+                  {(s.estimated_cost_usd ?? 0) > 0 && <span className="suite-card-cost">~${s.estimated_cost_usd.toFixed(2)}</span>}
+                  {s.difficulty_range && <DifficultyBar range={s.difficulty_range} />}
                 </div>
                 <div className="suite-card-dist">
                   {diffCounts.map((count, i) => (

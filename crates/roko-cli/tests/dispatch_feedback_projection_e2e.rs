@@ -254,9 +254,10 @@ async fn retry_attempt_includes_gate_feedback_in_assembled_prompt() {
     let plan = dispatcher.plan(&task, &dctx).expect("plan");
     assert!(plan.prompt.system_prompt.contains("Previous attempt"));
     assert!(plan.prompt.system_prompt.contains("E0432"));
-    assert!(plan
-        .prompt
-        .diagnostics
-        .included_sections
-        .contains(&"retry".to_string()));
+    assert!(
+        plan.prompt
+            .diagnostics
+            .included_sections
+            .contains(&"retry".to_string())
+    );
 }

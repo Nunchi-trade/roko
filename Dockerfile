@@ -25,17 +25,20 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && strip target/release/roko \
     && cp target/release/roko /tmp/roko
 
+# mirage-rs + agent-relay: optional (skip if trait API out of sync)
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    cargo build --release -p mirage-rs --features "binary,roko" \
-    && strip target/release/mirage-rs \
-    && cp target/release/mirage-rs /tmp/mirage-rs
+    (cargo build --release -p mirage-rs --features "binary,roko" \
+     && strip target/release/mirage-rs \
+     && cp target/release/mirage-rs /tmp/mirage-rs) \
+    || echo "WARN: mirage-rs build skipped (trait API mismatch)"
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    cargo build --release -p agent-relay \
-    && strip target/release/agent-relay \
-    && cp target/release/agent-relay /tmp/agent-relay
+    (cargo build --release -p agent-relay \
+     && strip target/release/agent-relay \
+     && cp target/release/agent-relay /tmp/agent-relay) \
+    || echo "WARN: agent-relay build skipped"
 
 # ---- Runtime ----
 FROM debian:bookworm-slim AS runtime
@@ -59,8 +62,10 @@ RUN curl -L https://foundry.paradigm.xyz | bash \
     && rm -rf /root/.foundry
 
 COPY --from=builder /tmp/roko /usr/local/bin/roko
-COPY --from=builder /tmp/mirage-rs /usr/local/bin/mirage-rs
-COPY --from=builder /tmp/agent-relay /usr/local/bin/agent-relay
+# Optional binaries (may not exist if build was skipped)
+RUN --mount=from=builder,source=/tmp,target=/builder-tmp \
+    cp /builder-tmp/mirage-rs /usr/local/bin/mirage-rs 2>/dev/null || true \
+    && cp /builder-tmp/agent-relay /usr/local/bin/agent-relay 2>/dev/null || true
 COPY --from=builder /app/roko.toml /workspace/roko.toml
 # Docker containers always bind 0.0.0.0 — acknowledge public risk in config
 RUN sed -i 's/acknowledge_public_risk = false/acknowledge_public_risk = true/' /workspace/roko.toml \
@@ -86,20 +91,22 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# Start agent-relay
-agent-relay &
-RELAY_PID=$!
+# Start agent-relay (if available)
+if command -v agent-relay &>/dev/null; then
+  agent-relay &
+  RELAY_PID=$!
+fi
 
-# Build mirage-rs args
-MIRAGE_ARGS="--bind 0.0.0.0 --port 8545"
-MIRAGE_ARGS="$MIRAGE_ARGS --block-interval-ms ${MIRAGE_BLOCK_INTERVAL_MS:-50}"
-MIRAGE_ARGS="$MIRAGE_ARGS --chain-id ${MIRAGE_CHAIN_ID:-88888}"
-MIRAGE_ARGS="$MIRAGE_ARGS --enable-hdc --enable-knowledge --enable-stigmergy"
-[ -n "$ETH_RPC_URL" ] && MIRAGE_ARGS="$MIRAGE_ARGS --rpc-url $ETH_RPC_URL"
-
-# Start mirage-rs
-mirage-rs $MIRAGE_ARGS &
-MIRAGE_PID=$!
+# Start mirage-rs (if available)
+if command -v mirage-rs &>/dev/null; then
+  MIRAGE_ARGS="--bind 0.0.0.0 --port 8545"
+  MIRAGE_ARGS="$MIRAGE_ARGS --block-interval-ms ${MIRAGE_BLOCK_INTERVAL_MS:-50}"
+  MIRAGE_ARGS="$MIRAGE_ARGS --chain-id ${MIRAGE_CHAIN_ID:-88888}"
+  MIRAGE_ARGS="$MIRAGE_ARGS --enable-hdc --enable-knowledge --enable-stigmergy"
+  [ -n "$ETH_RPC_URL" ] && MIRAGE_ARGS="$MIRAGE_ARGS --rpc-url $ETH_RPC_URL"
+  mirage-rs $MIRAGE_ARGS &
+  MIRAGE_PID=$!
+fi
 
 # Give services a moment to start
 sleep 1

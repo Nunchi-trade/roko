@@ -78,23 +78,49 @@ export function getRoko(): string {
 
 /**
  * Enter a workspace that was already created server-side via POST /api/workspaces.
- * Only needs to `cd` into the directory and resolve the roko binary.
+ * Waits for WS + shell prompt, resolves roko binary, cd into dir.
  *
- * Note: Does NOT clear the terminal afterwards — the scenario should control when
- * clearing is appropriate. Aggressive clearing caused blank terminal panes.
+ * Throws on failure so scenario runners get a clear error instead of
+ * silently proceeding against a broken terminal.
  */
 export async function enterWorkspace(
   handle: TerminalHandle,
   dir: string,
 ): Promise<boolean> {
-  const wsOk = await waitForOpen(handle);
-  if (!wsOk) return false;
-  const promptOk = await handle.waitForPrompt(5000);
-  if (!promptOk) return false;
+  // 1. Wait for WebSocket to be open
+  const wsOk = await waitForOpen(handle, 8000);
+  if (!wsOk) {
+    console.error('[enterWorkspace] WebSocket never opened for', handle.sessionId);
+    throw new Error(`Terminal WebSocket failed to connect (session: ${handle.sessionId})`);
+  }
+
+  // 2. Wait for shell prompt — the useTerminal hook now waits for this
+  //    during connection, but we double-check here with a generous timeout.
+  //    If the first check fails, send a blank line to nudge the shell.
+  let promptOk = await handle.waitForPrompt(6000);
+  if (!promptOk) {
+    console.warn('[enterWorkspace] First prompt check failed, sending blank line to nudge shell');
+    handle.sendRaw('\r');
+    promptOk = await handle.waitForPrompt(5000);
+  }
+  if (!promptOk) {
+    console.error('[enterWorkspace] Shell prompt never appeared for', handle.sessionId);
+    throw new Error(`Shell prompt not detected (session: ${handle.sessionId}). Terminal may be hung.`);
+  }
+
+  // 3. Resolve roko binary location
   await resolveRoko(handle);
-  await handle.execCmd(`cd "${dir}"`, 3000);
-  // Clear screen + output buffer so setup noise (resolveRoko, cd) is invisible.
+
+  // 4. cd into workspace
+  const cdResult = await handle.execCmd(`cd "${dir}"`, 5000);
+  if (!cdResult.ok && cdResult.exitCode !== -1) {
+    console.error('[enterWorkspace] cd failed:', dir, cdResult);
+    throw new Error(`Failed to cd into workspace: ${dir}`);
+  }
+
+  // 5. Clear screen so setup noise is invisible
   handle.clearTerminal();
+  console.debug('[enterWorkspace] ready:', dir, 'roko:', getRoko());
   return true;
 }
 
@@ -194,6 +220,13 @@ export async function showCmd(
 
   // Detect gates, cost, tokens from output
   const result = detectFromOutput(handle.outputBuffer, opts);
+
+  // Print a visible separator line directly in the xterm display
+  try {
+    handle.terminal.write('\r\n\x1b[38;5;132m' + '\u2500'.repeat(60) + '\x1b[0m\r\n');
+  } catch {
+    // terminal may be disposed
+  }
 
   // Mark the log entry as complete
   opts?.onLogComplete?.(cmd, ok);

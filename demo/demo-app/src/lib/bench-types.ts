@@ -42,8 +42,14 @@ export interface BenchSuite {
   name: string;
   description: string;
   tasks: BenchTask[];
+  task_count?: number;
   estimated_cost_usd: number;
   difficulty_range: [number, number];
+}
+
+/** Number of tasks in a suite, handling both full and summary shapes. */
+export function suiteTaskCount(suite: BenchSuite): number {
+  return suite.tasks?.length ?? suite.task_count ?? 0;
 }
 
 export interface BenchGateVerdict {

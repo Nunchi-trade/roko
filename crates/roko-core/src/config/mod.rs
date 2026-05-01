@@ -165,6 +165,36 @@ pub fn load_config(workdir: &Path) -> Result<ValidatedConfig, LoadConfigError> {
     })
 }
 
+/// Load configuration from an explicit file path.
+///
+/// Unlike [`load_config`] which constructs a path from a workdir,
+/// this loads directly from the given path. Missing files return an error
+/// (not a default) since the caller explicitly requested this path.
+pub fn load_config_from_path(path: &Path) -> Result<RokoConfig, LoadConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|source| LoadConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let strict_source = StrictConfigSource::shared(Some(path.to_path_buf()));
+    validate_strict_config_toml(&text, &strict_source).map_err(|source| {
+        LoadConfigError::Validation {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+
+    let mut config: RokoConfig =
+        toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    config.interpolate_env_vars();
+    config.resolve_file_secrets();
+    Ok(config)
+}
+
 #[cfg(test)]
 mod load_config_tests {
     use super::*;

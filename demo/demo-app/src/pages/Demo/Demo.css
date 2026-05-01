@@ -413,7 +413,29 @@
 .demo-cols-2 { grid-template-columns: 1fr 1fr; }
 .demo-cols-3 { grid-template-columns: 1fr 1fr 1fr; }
 .demo-cols-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
-.demo-cols-8 { grid-template-columns: 1fr 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.demo-cols-8 {
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: 1fr 1fr;
+  /* Ensure 8 tiny panes have enough height to be readable */
+  min-height: 400px;
+}
+
+/* Compact headers for 8-pane grids */
+.demo-cols-8 .demo-term-head {
+  height: 18px;
+  padding: 0 6px;
+  gap: 4px;
+}
+.demo-cols-8 .demo-term-label {
+  font-size: 9px;
+  letter-spacing: .08em;
+}
+.demo-cols-8 .demo-term-idx {
+  font-size: 9px;
+}
+.demo-cols-8 .demo-term-status {
+  font-size: 8px;
+}
 
 /* ── Individual terminal pane ── */
 

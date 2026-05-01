@@ -105,25 +105,44 @@ function rustSetupCommand(example: PipelineScenarioExample): string {
 }
 
 /**
- * Write a string to a file inside the terminal PTY using base64 to avoid
- * shell escaping issues with quotes, newlines, and special chars.
+ * Write a string to a file inside the terminal PTY.
+ *
+ * Uses a heredoc approach to avoid long single-line commands that can
+ * exceed PTY line buffer limits and break OSC sideband markers.
+ * The heredoc is sent as raw input to the shell.
  */
 async function writeFileViaPty(
-  handle: { execCmd(cmd: string, timeout?: number): Promise<unknown> },
+  handle: { execCmd(cmd: string, timeout?: number): Promise<unknown>; sendRaw(data: string): void; waitForPrompt(timeout?: number): Promise<boolean> },
   path: string,
   content: string,
 ): Promise<void> {
-  // btoa() only handles Latin1 — encode via TextEncoder for Unicode safety.
-  const bytes = new TextEncoder().encode(content);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  // For short content, use a simple command
+  if (content.length < 500) {
+    // Escape single quotes in content
+    const escaped = content.replace(/'/g, "'\\''");
+    await handle.execCmd(`printf '%s' '${escaped}' > '${path}'`, 8000);
+    return;
   }
-  const b64 = btoa(binary);
-  await handle.execCmd(
-    `echo '${b64}' | base64 -D > '${path}' 2>/dev/null || echo '${b64}' | base64 -d > '${path}'`,
-    5000,
-  );
+
+  // For longer content, use heredoc to avoid line buffer issues.
+  // The heredoc sends content line-by-line which the shell handles natively.
+  const marker = `ROKO_EOF_${Date.now().toString(36)}`;
+  handle.sendRaw(`cat > '${path}' << '${marker}'\r`);
+  // Small delay for the shell to enter heredoc mode
+  await new Promise(r => setTimeout(r, 50));
+
+  // Send content lines
+  const lines = content.split('\n');
+  for (const line of lines) {
+    handle.sendRaw(line + '\r');
+    // Tiny delay between lines to avoid flooding the PTY buffer
+    await new Promise(r => setTimeout(r, 5));
+  }
+
+  // Close heredoc
+  handle.sendRaw(marker + '\r');
+  // Wait for the shell to process the heredoc and return to prompt
+  await handle.waitForPrompt(10000);
 }
 
 /**
@@ -132,7 +151,7 @@ async function writeFileViaPty(
  * of dispatching LLM agents.
  */
 async function seedWorkspace(
-  handle: { execCmd(cmd: string, timeout?: number): Promise<unknown> },
+  handle: { execCmd(cmd: string, timeout?: number): Promise<unknown>; sendRaw(data: string): void; waitForPrompt(timeout?: number): Promise<boolean> },
   example: PipelineScenarioExample,
 ): Promise<void> {
   if (!example.seedPrd) return;
@@ -221,9 +240,9 @@ export const prdPipeline: Scenario = {
       });
       ctx.appendPipelineEvent(pipelineEvent('setup', `${example.setupDescription} This is setup, not the customer-facing demo step.`));
       logCommand('prepare workspace', 'Creates a small Rust CLI so the generated PRD and plan target real files.');
-      await main.execCmd(setupCmd, 10000);
+      await main.execCmd(setupCmd, 15000);
       await seedWorkspace(main, example);
-      await main.execCmd(`${ROKO} init 2>/dev/null; true`, 10000);
+      await main.execCmd(`${ROKO} init 2>/dev/null; true`, 15000);
       // Wipe all setup noise so the visible demo starts on a clean terminal.
       main.clearTerminal();
 

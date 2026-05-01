@@ -81,6 +81,9 @@ node_modules/
 # demo-app build output (embedded by rust-embed at compile time)
 demo/demo-app/dist/
 
+# Playwright per-run artifacts (keep tracked captures under pw-captures if desired)
+demo/demo-app/test-results/**/
+
 # Local-only visual iteration prompts and Playwright audit helpers.
 # Keep these out of GitHub; they are tailored to the current machine/demo pass.
 demo/demo-app/tools/

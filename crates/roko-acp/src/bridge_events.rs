@@ -48,10 +48,11 @@ use crate::{
     session::{AcpSession, CancelToken},
     transport::{StdioTransport, TransportError, TransportResult},
     types::{
-        ContentBlock, CostInfo, JsonRpcMessage, PermissionAction, PermissionDecision,
-        PermissionOptionKind, PermissionOutcome, PermissionResponse, PermissionToolCall, PlanEntry,
-        RequestPermissionParams, SESSION_BUSY, SessionCancelParams, SessionPromptParams,
-        SessionPromptResult, SessionUpdate, StopReason, ToolCallKind, ToolCallStatus, UsageInfo,
+        ContentBlock, CostInfo, INTERNAL_ERROR, JsonRpcMessage, PermissionAction,
+        PermissionDecision, PermissionOptionKind, PermissionOutcome, PermissionResponse,
+        PermissionToolCall, PlanEntry, RequestPermissionParams, SESSION_BUSY, SessionCancelParams,
+        SessionPromptParams, SessionPromptResult, SessionUpdate, StopReason, ToolCallKind,
+        ToolCallStatus, UsageInfo,
     },
 };
 
@@ -167,7 +168,10 @@ impl BridgeEventsError {
                 SESSION_BUSY,
                 format!("session '{session_id}' already has an active prompt"),
             )),
-            Self::Serialize(_) | Self::Transport(_) | Self::TaskJoin(_) | Self::Pipeline(_) => None,
+            Self::Serialize(e) => Some((INTERNAL_ERROR, format!("serialization error: {e}"))),
+            Self::Transport(e) => Some((INTERNAL_ERROR, format!("transport error: {e}"))),
+            Self::TaskJoin(e) => Some((INTERNAL_ERROR, format!("task failed: {e}"))),
+            Self::Pipeline(e) => Some((INTERNAL_ERROR, format!("pipeline error: {e}"))),
         }
     }
 }
@@ -823,7 +827,7 @@ where
                         send_session_update(transport, session_id, update).await?;
                         return Ok(StreamResult {
                             prompt_result: SessionPromptResult {
-                                stop_reason: StopReason::Refusal,
+                                stop_reason: StopReason::EndTurn,
                             },
                             assistant_text,
                             usage: None,
@@ -1216,9 +1220,9 @@ where
         );
 
         match provider_kind {
-            // ClaudeCli can't run as a subprocess inside ACP, so route Claude
-            // selections through the provider-backed Anthropic model caller path.
-            ProviderKind::ClaudeCli | ProviderKind::AnthropicApi => {
+            // AnthropicApi uses the dedicated Anthropic model caller path which
+            // synthesizes a config from ANTHROPIC_API_KEY if needed.
+            ProviderKind::AnthropicApi => {
                 run_anthropic_cognitive_task(
                     &session_id,
                     &messages,
@@ -1230,17 +1234,8 @@ where
                 )
                 .await
             }
-            ProviderKind::OpenAiCompat | ProviderKind::GeminiApi | ProviderKind::PerplexityApi => {
-                run_openai_compat_cognitive_task(
-                    &session_id,
-                    &messages,
-                    &model_key,
-                    &roko_config,
-                    cancel_token,
-                    event_sender,
-                )
-                .await
-            }
+            // All other providers (ClaudeCli, OpenAiCompat, etc.) go through
+            // ModelCallService which handles each provider kind natively.
             _ => {
                 run_openai_compat_cognitive_task(
                     &session_id,
@@ -1473,9 +1468,37 @@ fn anthropic_model_call_config(
     config.providers = roko_config.effective_providers();
     config.models = roko_config.effective_models();
 
-    let anthropic_provider_id = config.providers.iter().find_map(|(id, provider)| {
-        (provider.kind == ProviderKind::AnthropicApi).then(|| id.clone())
-    })?;
+    // 1. Prefer an existing AnthropicApi provider (NOT ClaudeCli — ACP IS the CLI subprocess).
+    let anthropic_provider_id = config
+        .providers
+        .iter()
+        .find_map(|(id, provider)| {
+            (provider.kind == ProviderKind::AnthropicApi).then(|| id.clone())
+        })
+        .or_else(|| {
+            // 2. Synthesize from ANTHROPIC_API_KEY if no AnthropicApi provider configured.
+            if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                let synth_id = "anthropic_api".to_string();
+                config.providers.insert(
+                    synth_id.clone(),
+                    roko_core::config::schema::ProviderConfig {
+                        kind: ProviderKind::AnthropicApi,
+                        api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+                        base_url: Some("https://api.anthropic.com".to_string()),
+                        command: None,
+                        args: None,
+                        timeout_ms: Some(120_000),
+                        ttft_timeout_ms: Some(15_000),
+                        connect_timeout_ms: Some(5_000),
+                        extra_headers: None,
+                        max_concurrent: None,
+                    },
+                );
+                Some(synth_id)
+            } else {
+                None
+            }
+        })?;
 
     let mut profile = config
         .models
@@ -2842,13 +2865,9 @@ fn map_event_to_update(event: CognitiveEvent) -> SessionUpdate {
 }
 
 fn dispatch_failure_update(message: String) -> SessionUpdate {
-    SessionUpdate::ToolCall {
-        tool_call_id: "model_dispatch".to_string(),
-        title: "Model dispatch failed".to_string(),
-        kind: ToolCallKind::Fetch,
-        status: ToolCallStatus::Failed,
-        content: vec![text_block(message)],
-        locations: None,
+    SessionUpdate::AgentMessageChunk {
+        content: text_block(message),
+        _meta: None,
     }
 }
 
@@ -2871,8 +2890,11 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut params = serde_json::to_value(update)?;
-    params["sessionId"] = serde_json::Value::String(session_id.to_string());
+    let update_value = serde_json::to_value(update)?;
+    let params = serde_json::json!({
+        "sessionId": session_id,
+        "update": update_value,
+    });
     transport
         .send_notification("session/update", params)
         .await
@@ -3369,14 +3391,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_session_update_emits_flat_payload() {
+    async fn send_session_update_emits_wrapped_payload() {
         let (client, server) = duplex(4096);
         let mut transport = StdioTransport::from_io(empty(), server);
         let mut reader = BufReader::new(client);
 
         send_session_update(
             &mut transport,
-            "sess_flat",
+            "sess_wrapped",
             SessionUpdate::AgentMessageChunk {
                 content: text_block("hello".to_owned()),
                 _meta: None,
@@ -3394,23 +3416,14 @@ mod tests {
             serde_json::from_str(&line).expect("deserialize notification");
 
         assert_eq!(notification.method, "session/update");
+        let params = notification.params.expect("params must be present");
+        assert_eq!(params["sessionId"], json!("sess_wrapped"));
+        // ACP spec requires updates nested under "update" key.
+        let update = &params["update"];
+        assert_eq!(update["sessionUpdate"], json!("agent_message_chunk"));
         assert_eq!(
-            notification.params,
-            Some(json!({
-                "sessionId": "sess_flat",
-                "sessionUpdate": "agent_message_chunk",
-                "content": {
-                    "type": "text",
-                    "text": "hello"
-                }
-            }))
-        );
-        assert!(
-            notification
-                .params
-                .as_ref()
-                .and_then(|params| params.get("update"))
-                .is_none()
+            update["content"],
+            json!({ "type": "text", "text": "hello" })
         );
     }
 
@@ -3468,16 +3481,13 @@ mod tests {
         let notification: JsonRpcNotification =
             serde_json::from_str(&line).expect("deserialize notification");
         assert_eq!(notification.method, "session/update");
+        let params = notification.params.expect("params must be present");
+        assert_eq!(params["sessionId"], json!("sess_test"));
+        let update = &params["update"];
+        assert_eq!(update["sessionUpdate"], json!("agent_message_chunk"));
         assert_eq!(
-            notification.params,
-            Some(json!({
-                "sessionId": "sess_test",
-                "sessionUpdate": "agent_message_chunk",
-                "content": {
-                    "type": "text",
-                    "text": "hello"
-                }
-            }))
+            update["content"],
+            json!({ "type": "text", "text": "hello" })
         );
     }
 
@@ -3508,7 +3518,7 @@ mod tests {
             stream_events_to_editor(&mut transport, "sess_failure", receiver, &cancel_token).await;
         let result = result.expect("failure should still return a prompt result");
 
-        assert_eq!(result.prompt_result.stop_reason, StopReason::Refusal);
+        assert_eq!(result.prompt_result.stop_reason, StopReason::EndTurn);
         assert_eq!(result.usage, None);
 
         let mut line = String::new();
@@ -3519,20 +3529,13 @@ mod tests {
         let notification: JsonRpcNotification =
             serde_json::from_str(&line).expect("deserialize notification");
         assert_eq!(notification.method, "session/update");
+        let params = notification.params.expect("params must be present");
+        assert_eq!(params["sessionId"], json!("sess_failure"));
+        let update = &params["update"];
+        assert_eq!(update["sessionUpdate"], json!("agent_message_chunk"));
         assert_eq!(
-            notification.params,
-            Some(json!({
-                "sessionId": "sess_failure",
-                "sessionUpdate": "tool_call",
-                "toolCallId": "model_dispatch",
-                "title": "Model dispatch failed",
-                "kind": "fetch",
-                "status": "failed",
-                "content": [{
-                    "type": "text",
-                    "text": "Error: provider returned 401"
-                }]
-            }))
+            update["content"],
+            json!({ "type": "text", "text": "Error: provider returned 401" })
         );
     }
 
