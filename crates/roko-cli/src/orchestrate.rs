@@ -17216,10 +17216,13 @@ impl PlanRunner {
         let build_system = BuildSystem::detect(exec_dir);
         RungCaps {
             has_lint_tool: gate_config.clippy_enabled && build_system != BuildSystem::Make,
-            has_symbol_manifest: false,
+            has_symbol_manifest: exec_dir.join("symbols.json").exists()
+                || exec_dir.join(".roko").join("symbols").exists(),
             has_generated_tests: generated_tests.is_some(),
-            has_property_tests: false,
-            has_integration_scenario: false,
+            has_property_tests: exec_dir.join("proptest-regressions").exists()
+                || exec_dir.join("tests").join("property").exists(),
+            has_integration_scenario: exec_dir.join("tests").join("integration").exists()
+                || exec_dir.join("integration-tests").exists(),
         }
     }
 
