@@ -21132,7 +21132,10 @@ depends_on = []
         let app = roko_serve::routes::build_router(
             Arc::clone(&state),
             &[],
-            roko_core::config::ServeAuthConfig::default(),
+            roko_core::config::ServeAuthConfig {
+                enabled: false,
+                ..roko_core::config::ServeAuthConfig::default()
+            },
         );
 
         runner

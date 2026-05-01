@@ -21,10 +21,16 @@ pub(crate) fn render_init_template(cloud: bool) -> Result<String> {
     if cloud {
         config.server.bind = "0.0.0.0".to_string();
     }
+    // The workspace template ships with auth turned off so a fresh `roko init`
+    // followed by `roko serve` keeps working without manually provisioning an
+    // API key. The library default flips to `true` (T3-22) so any deployment
+    // that does not explicitly opt out is secure-by-default.
+    config.serve.auth.enabled = false;
 
     let mut rendered = config
         .to_toml_pretty()
         .context("serialize default v2 roko.toml")?;
+    rendered = annotate_auth_disabled(&rendered);
     if !rendered.ends_with('\n') {
         rendered.push('\n');
     }
@@ -123,6 +129,22 @@ fn append_verification_gates(out: &mut String, profile: Option<&str>) {
                 "# Or rerun `roko init --profile rust` / `roko init --profile typescript`.\n",
             );
         }
+    }
+}
+
+/// Insert a leading comment in the rendered `[serve.auth]` section noting that
+/// `enabled = false` is a local-development override of the secure-by-default
+/// (T3-22). Returns the input unchanged if the expected anchor is missing
+/// (e.g. the schema serializer changed key ordering) so the template still
+/// renders.
+fn annotate_auth_disabled(rendered: &str) -> String {
+    const ANCHOR: &str = "[serve.auth]\nenabled = false";
+    const ANNOTATED: &str = "[serve.auth]\n# Disable auth for local development only — production deployments\n# should leave this unset (defaults to true) and provision an API key via\n# `serve.auth.api_key` or one or more `[[serve.auth.api_keys]]` entries.\nenabled = false";
+
+    if rendered.contains(ANCHOR) {
+        rendered.replacen(ANCHOR, ANNOTATED, 1)
+    } else {
+        rendered.to_string()
     }
 }
 

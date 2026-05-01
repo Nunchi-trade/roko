@@ -598,7 +598,14 @@ mod tests {
             .expect("AppState::new"),
         );
 
-        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let app = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        );
         let response = app
             .oneshot(
                 Request::builder()

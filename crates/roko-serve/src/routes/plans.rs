@@ -1506,7 +1506,14 @@ mod tests {
     #[tokio::test]
     async fn create_plan_route_returns_top_level_validation_error() {
         let (_dir, state) = test_state();
-        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let app = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        );
 
         let response = app
             .oneshot(

@@ -4023,4 +4023,21 @@ program = "echo"
         assert!(rendered.contains("Auto-register webhooks after deploy"));
         assert!(rendered.contains("[[serve.deploy.webhooks]]"));
     }
+
+    #[test]
+    fn default_toml_template_disables_auth_with_local_dev_comment() {
+        let rendered = Config::default_toml_template(false).unwrap();
+        assert!(
+            rendered.contains("[serve.auth]"),
+            "[serve.auth] table missing"
+        );
+        assert!(
+            rendered.contains("Disable auth for local development only"),
+            "expected local-development comment near [serve.auth].enabled"
+        );
+        assert!(
+            rendered.contains("enabled = false"),
+            "expected the rendered template to set serve.auth.enabled = false"
+        );
+    }
 }

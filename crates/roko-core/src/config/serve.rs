@@ -83,7 +83,10 @@ pub struct ServeAuthConfig {
 impl Default for ServeAuthConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            // Secure-by-default: `/api/*` requires an `X-Api-Key`. Local users
+            // can opt back out via `serve.auth.enabled = false` in `roko.toml`,
+            // which is what `roko init` writes for new workspaces.
+            enabled: true,
             api_key: String::new(),
             api_keys: Vec::new(),
             privy_app_id: None,
@@ -194,6 +197,11 @@ mod tests {
     #[test]
     fn default_auto_start_is_false() {
         assert!(!ServeConfig::default().auto_start);
+    }
+
+    #[test]
+    fn default_auth_is_enabled() {
+        assert!(ServeAuthConfig::default().enabled);
     }
 }
 

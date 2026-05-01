@@ -668,7 +668,14 @@ mod tests {
         .await
         .map_err(|err| anyhow!("failed to write cascade snapshot fixture: {err}"))?;
 
-        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let app = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        );
         let response = app
             .oneshot(
                 Request::builder()
@@ -756,7 +763,14 @@ mod tests {
         );
         state.store_roko_config(config);
 
-        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let app = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        );
 
         let cascade_response = app
             .clone()
@@ -937,16 +951,23 @@ mod tests {
     async fn cfactor_trend_returns_empty_array_when_missing() -> Result<(), Box<dyn Error>> {
         let (_dir, state) = test_state()?;
 
-        let response = build_router(Arc::clone(&state), &[], ServeAuthConfig::default())
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/c-factor/trend")
-                    .body(Body::empty())
-                    .map_err(|err| anyhow!("failed to build c-factor trend request: {err}"))?,
-            )
-            .await
-            .map_err(|err| anyhow!("c-factor trend request failed: {err}"))?;
+        let response = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        )
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/c-factor/trend")
+                .body(Body::empty())
+                .map_err(|err| anyhow!("failed to build c-factor trend request: {err}"))?,
+        )
+        .await
+        .map_err(|err| anyhow!("c-factor trend request failed: {err}"))?;
 
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1002,16 +1023,23 @@ mod tests {
         .await
         .map_err(|err| anyhow!("failed to write c-factor trend fixture: {err}"))?;
 
-        let response = build_router(Arc::clone(&state), &[], ServeAuthConfig::default())
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/c-factor/trend")
-                    .body(Body::empty())
-                    .map_err(|err| anyhow!("failed to build c-factor trend request: {err}"))?,
-            )
-            .await
-            .map_err(|err| anyhow!("c-factor trend request failed: {err}"))?;
+        let response = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        )
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/c-factor/trend")
+                .body(Body::empty())
+                .map_err(|err| anyhow!("failed to build c-factor trend request: {err}"))?,
+        )
+        .await
+        .map_err(|err| anyhow!("c-factor trend request failed: {err}"))?;
 
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)

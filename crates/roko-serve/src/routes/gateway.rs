@@ -1304,7 +1304,14 @@ mod tests {
                 .with_run_id("gateway-durable-test"),
         );
         let state = Arc::new(state);
-        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let app = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        );
 
         let response = app
             .oneshot(
@@ -1464,7 +1471,14 @@ mod tests {
     #[tokio::test]
     async fn complete_route_rejects_empty_body() {
         let (_dir, state) = test_state();
-        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let app = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        );
 
         let response = app
             .oneshot(
@@ -1503,7 +1517,14 @@ mod tests {
             AppState::new(workdir, Arc::new(NoOpRuntime), config, deploy_backend)
                 .expect("AppState::new"),
         );
-        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let app = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        );
 
         let response = app
             .oneshot(

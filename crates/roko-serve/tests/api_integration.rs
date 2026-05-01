@@ -82,7 +82,12 @@ fn test_app_state() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
         )
         .expect("AppState::new"),
     );
-    let auth = ServeAuthConfig::default();
+    // Library default flips to `enabled = true` (T3-22). These tests exercise
+    // routes without auth, so we explicitly disable it for the fixture.
+    let auth = ServeAuthConfig {
+        enabled: false,
+        ..ServeAuthConfig::default()
+    };
     let router = build_router(Arc::clone(&state), &[], auth);
     (dir, state, router)
 }
