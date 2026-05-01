@@ -77,15 +77,9 @@
 
 /// Active inference helpers for tier routing support.
 pub mod active_inference;
-/// Adaptive Design of AI Systems autocatalytic optimization (LEARN-08).
-pub mod adas;
-/// HDC-based adversarial signal detection and attack prototypes.
-pub mod adversarial;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
 pub mod aggregate;
 pub mod anomaly;
-/// Research-oriented bandit shells used to match the learning docs.
-pub mod bandit_research;
 pub mod bandits;
 pub mod baseline;
 /// Bayesian confidence updating using Beta-Binomial conjugate model (AS-07).
@@ -97,8 +91,6 @@ pub mod calibration_policy;
 /// Extracted submodules for cascade router types, helpers, and persistence.
 pub mod cascade;
 pub mod cascade_router;
-/// Causal discovery helpers for time-series and DAG extraction.
-pub mod causal;
 pub mod cfactor;
 /// Learned intervention policy for conductor retries and aborts.
 pub mod conductor;
@@ -110,7 +102,6 @@ pub mod costs_db;
 pub mod costs_log;
 /// Curriculum ordering helpers for task scheduling.
 pub mod curriculum;
-pub mod drift;
 pub mod efficiency;
 pub mod episode_logger;
 /// Cheap pre-processing of noisy gate failures into retry-ready diagnoses.
@@ -123,8 +114,6 @@ pub mod event_subscriber;
 pub mod events;
 /// Concrete feedback sink for workflow learning telemetry.
 pub mod feedback_service;
-/// Forensic replay API for debugging failed tasks (GATE-07).
-pub mod forensic_replay;
 pub mod hdc_clustering;
 /// HDC fingerprint helpers for episode memory.
 pub mod hdc_fingerprint;
@@ -150,10 +139,6 @@ pub mod provider_health;
 pub mod provider_model_outcome;
 pub mod quality_judge;
 pub mod regression;
-/// Typed reinforcement signal categories for the learning pipeline (AS-11).
-pub mod reinforce_kind;
-/// Research-to-runtime pipeline: Paper -> Claim -> Trial -> Ledger (LEARN-11).
-pub mod research_pipeline;
 /// Lookahead and calibration shells around the shipped cascade router.
 pub mod routing_extras;
 /// Append-only routing-decision audit log for explainability and dashboards.
