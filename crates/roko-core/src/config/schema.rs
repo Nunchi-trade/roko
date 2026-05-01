@@ -1612,8 +1612,15 @@ default_model = "claude-sonnet-4-6"
         let text = std::fs::read_to_string(path).expect("read roko.toml");
         let cfg = RokoConfig::from_toml(&text).expect("parse roko.toml");
         let models = cfg.effective_models();
-        let default_model = models.get("claude-sonnet-4-6").expect("default model");
-        assert_eq!(default_model.provider, "claude_cli");
+        // `effective_models` keys entries by the config key in `[models.<key>]`,
+        // so look up the configured default model by its key (not by slug).
+        let default_key = cfg.agent.default_model.as_str();
+        let default_model = models.get(default_key).expect("default model");
+        assert_eq!(default_model.slug, "claude-sonnet-4-6");
+        assert!(
+            !default_model.provider.is_empty(),
+            "default model must declare a provider"
+        );
     }
 
     #[test]
