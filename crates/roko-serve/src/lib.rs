@@ -169,12 +169,14 @@ impl ServerBuildConfig {
         }
     }
 
-    fn effective_addr(&self) -> String {
-        let bind = self
-            .bind
+    fn effective_bind(&self) -> &str {
+        self.bind
             .as_deref()
-            .unwrap_or(&self.roko_config.server.bind);
-        let port = self.port.unwrap_or_else(|| {
+            .unwrap_or(&self.roko_config.server.bind)
+    }
+
+    fn effective_port(&self) -> u16 {
+        self.port.unwrap_or_else(|| {
             // Prefer [serve].port when [server].port is still the default.
             if self.roko_config.server.port == 6677 {
                 self.roko_config
@@ -184,9 +186,41 @@ impl ServerBuildConfig {
             } else {
                 self.roko_config.server.port
             }
-        });
-        format!("{bind}:{port}")
+        })
     }
+
+    fn effective_addr(&self) -> String {
+        format!("{}:{}", self.effective_bind(), self.effective_port())
+    }
+}
+
+/// Resolve the bind socket when the `PORT` environment variable is in play.
+///
+/// Cloud platforms (Railway, Fly, etc.) set `PORT` to tell the server which
+/// port to listen on, but they intentionally do **not** dictate the bind
+/// address. Earlier behaviour silently rebound to `0.0.0.0`, which exposed
+/// the API surface of every local-dev workflow that happened to have `PORT`
+/// set in its shell. From T3-25 onwards we honour `PORT` for the port only;
+/// the bind comes from `[server].bind` in `roko.toml` (default
+/// `127.0.0.1`). Operators who actually want a public bind opt in by
+/// setting `bind = "0.0.0.0"` in their config (and clearing the existing
+/// `serve.acknowledge_public_risk` / `serve.auth.enabled` checks in
+/// [`validate_bind_safety`]).
+pub(crate) fn resolve_bind_with_port_env(
+    config_bind: &str,
+    cli_bind_override: Option<&str>,
+    config_port: u16,
+    cli_port_override: Option<u16>,
+    port_env: Option<&str>,
+) -> Result<(String, u16)> {
+    let resolved_port = match port_env {
+        Some(value) => value
+            .parse::<u16>()
+            .with_context(|| format!("PORT env var must be a valid u16 (got {value:?})"))?,
+        None => cli_port_override.unwrap_or(config_port),
+    };
+    let resolved_bind = cli_bind_override.unwrap_or(config_bind).to_string();
+    Ok((resolved_bind, resolved_port))
 }
 
 /// Builder for the HTTP server.
@@ -229,12 +263,24 @@ impl ServerBuilder {
     #[allow(clippy::missing_panics_doc)]
     pub async fn start_background(mut self) -> Result<(Arc<AppState>, JoinHandle<Result<()>>)> {
         // -- PORT env var override (Railway / cloud platforms) -------------
-        let addr = if let Ok(env_port) = std::env::var("PORT") {
-            let p: u16 = env_port
-                .parse()
-                .context("PORT env var must be a valid u16")?;
-            info!("PORT env var detected ({p}), binding to 0.0.0.0:{p}");
-            format!("0.0.0.0:{p}")
+        // The `PORT` env var lets the platform pick a port; it does NOT imply
+        // the operator wants a public bind. Per T3-25 we override only the
+        // port and keep the bind from config (default `127.0.0.1`). Setting
+        // `[server].bind = "0.0.0.0"` in `roko.toml` is the explicit opt-in.
+        let port_env = std::env::var("PORT").ok();
+        let addr = if let Some(value) = port_env.as_deref() {
+            let (bind, port) = resolve_bind_with_port_env(
+                &self.config.roko_config.server.bind,
+                self.config.bind.as_deref(),
+                self.config.roko_config.server.port,
+                self.config.port,
+                Some(value),
+            )?;
+            info!(
+                "PORT env var detected ({port}); binding to {bind}:{port} \
+                 (set `[server].bind = \"0.0.0.0\"` for a public bind)"
+            );
+            format!("{bind}:{port}")
         } else {
             self.addr.clone()
         };
@@ -1775,7 +1821,7 @@ async fn shutdown_signal(state: Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_app_state, serve_api_or_spa_fallback};
+    use super::{build_app_state, resolve_bind_with_port_env, serve_api_or_spa_fallback};
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header::CONTENT_TYPE};
@@ -1919,5 +1965,75 @@ mod tests {
             vec!["claude-sonnet-4-6".to_string()],
         );
         assert_eq!(reloaded.total_observations(), 1);
+    }
+
+    /// T3-25: a `PORT` env override must replace **only** the port, leaving
+    /// the configured bind (default `127.0.0.1`) intact. Cloud platforms set
+    /// `PORT` to choose a port; they do not (and should not) imply a public
+    /// bind.
+    #[test]
+    fn port_env_override_keeps_loopback_bind_by_default() {
+        let (bind, port) = resolve_bind_with_port_env(
+            "127.0.0.1", // server.bind default
+            None,        // no CLI --bind
+            6677,        // server.port default
+            None,        // no CLI --port
+            Some("8080"),
+        )
+        .expect("resolve");
+        assert_eq!(bind, "127.0.0.1");
+        assert_eq!(port, 8080);
+    }
+
+    /// Operators who explicitly set `[server].bind = "0.0.0.0"` get the
+    /// public bind they asked for, with the `PORT`-supplied port.
+    #[test]
+    fn port_env_override_respects_explicit_public_bind() {
+        let (bind, port) =
+            resolve_bind_with_port_env("0.0.0.0", None, 6677, None, Some("8080")).expect("resolve");
+        assert_eq!(bind, "0.0.0.0");
+        assert_eq!(port, 8080);
+    }
+
+    /// CLI overrides (the `bind`/`port` arguments threaded through
+    /// `ServerBuildConfig`) take precedence over both config and the `PORT`
+    /// env var's bind half — but `PORT` still wins for the port number when
+    /// it is set.
+    #[test]
+    fn port_env_override_respects_cli_bind_override() {
+        let (bind, port) =
+            resolve_bind_with_port_env("127.0.0.1", Some("10.0.0.5"), 6677, Some(7777), Some("80"))
+                .expect("resolve");
+        assert_eq!(bind, "10.0.0.5");
+        // PORT env still wins over the CLI port override (matches existing
+        // semantics — cloud platforms set PORT *because* they pick the port).
+        assert_eq!(port, 80);
+    }
+
+    /// Without `PORT`, both bind and port come from the CLI override (or
+    /// fall through to config defaults).
+    #[test]
+    fn no_port_env_falls_back_to_cli_or_config() {
+        let (bind, port) = resolve_bind_with_port_env("127.0.0.1", None, 6677, None, None)
+            .expect("resolve fallback");
+        assert_eq!(bind, "127.0.0.1");
+        assert_eq!(port, 6677);
+
+        let (bind, port) =
+            resolve_bind_with_port_env("127.0.0.1", Some("0.0.0.0"), 6677, Some(9999), None)
+                .expect("resolve overrides");
+        assert_eq!(bind, "0.0.0.0");
+        assert_eq!(port, 9999);
+    }
+
+    #[test]
+    fn invalid_port_env_returns_error() {
+        let err = resolve_bind_with_port_env("127.0.0.1", None, 6677, None, Some("not-a-port"))
+            .expect_err("non-numeric PORT must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PORT env var must be a valid u16"),
+            "unexpected error: {msg}"
+        );
     }
 }
