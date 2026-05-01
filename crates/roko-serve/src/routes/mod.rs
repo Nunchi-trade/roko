@@ -52,7 +52,7 @@ use super::state::AppState;
 use crate::adapters::SseAdapter;
 use crate::error::ApiError;
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -67,8 +67,14 @@ use governor::{Quota, RateLimiter};
 use roko_core::config::ServeAuthConfig;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
+
+/// Global request-body cap. Axum's default is 2 MiB; we raise it to 4 MiB so
+/// reasonably sized JSON payloads (PRDs, agent manifests, plan objects) still
+/// fit while keeping the cap small enough to bound memory pressure from a
+/// single hostile client. Webhook routes that accept opaque `Bytes` clamp
+/// further to 1 MiB locally.
+pub(crate) const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Default global rate limit applied to every route.
 ///
@@ -230,7 +236,7 @@ pub fn build_router(
     let rate_limiter = build_global_rate_limiter(DEFAULT_GLOBAL_RATE_PER_SEC);
 
     router
-        .layer(RequestBodyLimitLayer::new(32 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
         .layer(axum::middleware::from_fn_with_state(
             rate_limiter,
             rate_limit_middleware,
@@ -383,6 +389,40 @@ mod tests {
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["code"], "unauthorized");
+    }
+
+    /// Verify that `DefaultBodyLimit::max(4 MiB)` rejects a 4 MiB + 1 byte
+    /// body via axum's standard 413 path. We isolate the layer with a tiny
+    /// `Bytes`-extracting handler so the assertion holds independent of
+    /// route-specific parsing (which would otherwise mask the body cap).
+    #[tokio::test]
+    async fn body_size_limit_returns_413_for_oversized_payload() {
+        async fn echo_body(_: axum::body::Bytes) -> StatusCode {
+            StatusCode::OK
+        }
+
+        let app = axum::Router::new()
+            .route("/echo", axum::routing::post(echo_body))
+            .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES));
+
+        let oversized = vec![b'a'; DEFAULT_REQUEST_BODY_LIMIT_BYTES + 1];
+        let req = Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .body(Body::from(oversized))
+            .expect("build request");
+        let resp = app.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // Sanity-check that an in-budget body still goes through.
+        let in_budget = vec![b'a'; 1024];
+        let req = Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .body(Body::from(in_budget))
+            .expect("build request");
+        let resp = app.oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// Drive the rate-limit middleware directly with a tiny budget. We use

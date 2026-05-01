@@ -9,10 +9,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+
+/// Webhook payloads are JSON envelopes from third-party providers (GitHub,
+/// Slack). 1 MiB is an order of magnitude larger than any legitimate event
+/// these providers emit and is well below the 4 MiB global router cap, so
+/// the local override is intentionally restrictive (T3-24).
+pub(crate) const WEBHOOK_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 use hmac::{Hmac, Mac};
 use roko_core::signal_kinds;
 use roko_core::{Body, Engram, Kind, Provenance};
@@ -30,11 +36,14 @@ pub fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/webhooks/github", post(github_webhook))
         .route("/webhooks/slack", post(slack_webhook))
+        .layer(DefaultBodyLimit::max(WEBHOOK_BODY_LIMIT_BYTES))
 }
 
 /// Authenticated webhook ingress — arbitrary JSON payloads must not be accepted anonymously.
 pub fn authenticated_routes() -> Router<Arc<AppState>> {
-    Router::new().route("/webhooks/generic", post(generic_webhook))
+    Router::new()
+        .route("/webhooks/generic", post(generic_webhook))
+        .layer(DefaultBodyLimit::max(WEBHOOK_BODY_LIMIT_BYTES))
 }
 
 /// `POST /webhooks/github` — verify the GitHub signature, convert the payload
