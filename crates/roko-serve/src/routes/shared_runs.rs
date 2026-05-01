@@ -142,7 +142,13 @@ pub async fn create_share(
     Path(id): Path<String>,
     payload: Option<Json<CreateShareRequest>>,
 ) -> Response {
+    if let Err(err) = crate::error::validate_path_segment(&id, "run id") {
+        return err.into_response();
+    }
     let token = format!("{}-{:04x}", id, std::process::id() as u16);
+    if let Err(err) = crate::error::validate_path_segment(&token, "share token") {
+        return err.into_response();
+    }
     let requested_public = payload
         .as_ref()
         .map(|Json(request)| request.public)
@@ -268,6 +274,7 @@ pub async fn get_run_html(State(state): State<Arc<AppState>>, Path(id): Path<Str
 }
 
 fn load_transcript_record(state: &AppState, id: &str) -> Option<LoadedTranscript> {
+    crate::error::validate_path_segment(id, "share id").ok()?;
     let path = state
         .workdir
         .join(".roko")
@@ -871,6 +878,32 @@ pub fn public_routes() -> axum::Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_run_rejects_path_traversal() {
+        use std::sync::Arc;
+
+        use roko_core::config::schema::RokoConfig;
+
+        use crate::deploy::create_backend;
+        use crate::runtime::NoOpRuntime;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let state = AppState::new(
+            dir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            RokoConfig::default(),
+            deploy_backend,
+        )
+        .expect("AppState::new");
+
+        assert!(
+            load_transcript_record(&state, "../../etc/passwd").is_none(),
+            "path traversal id must not resolve"
+        );
+    }
 
     #[test]
     fn create_and_retrieve_share() {
