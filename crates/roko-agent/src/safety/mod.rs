@@ -253,7 +253,7 @@ impl SafetyLayer {
             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
             safety_budget: None,
             role: "default".into(),
-            contract: AgentContract::permissive("default"),
+            contract: AgentContract::restricted("default"),
             warrant: None,
             role_tools: HashMap::new(),
             role_overrides: HashMap::new(),
@@ -868,11 +868,11 @@ impl SafetyLayer {
             return match AgentContract::load_for_role(role) {
                 Ok(contract) => contract,
                 Err(ContractLoadError::MissingAsset { .. }) => {
-                    tracing::debug!(
+                    tracing::warn!(
                         %role,
-                        "no bundled contract for configured role; using permissive fallback"
+                        "missing safety contract YAML, using restricted defaults"
                     );
-                    AgentContract::permissive(role)
+                    AgentContract::restricted(role)
                 }
                 Err(err) => {
                     tracing::error!(
