@@ -299,6 +299,22 @@ fn mask_secret_fields(value: &mut Value) {
         "railway_api_token",
         "ROKO_DEPLOY_RAILWAY_API_TOKEN",
     );
+    mask_secret_field(value, &["chain"], "wallet_key", "ROKO_CHAIN_WALLET_KEY");
+    mask_secret_field(
+        value,
+        &["webhooks", "github"],
+        "secret",
+        "ROKO_WEBHOOKS_GITHUB_SECRET",
+    );
+    if let Some(providers) = value.get_mut("providers").and_then(|v| v.as_object_mut()) {
+        for (_name, provider) in providers.iter_mut() {
+            if let Some(obj) = provider.as_object_mut() {
+                if obj.contains_key("api_key") {
+                    obj.insert("api_key".to_string(), Value::String("****".to_string()));
+                }
+            }
+        }
+    }
 }
 
 fn mask_secret_field(value: &mut Value, path: &[&str], field: &str, env_var: &str) {
@@ -373,6 +389,31 @@ mod tests {
             value["deploy"]["railway_api_token_note"],
             "Set `ROKO_DEPLOY_RAILWAY_API_TOKEN` in the environment."
         );
+    }
+
+    #[test]
+    fn mask_secret_fields_redacts_extended_secrets() {
+        let mut value = serde_json::json!({
+            "chain": { "wallet_key": "0xdeadbeef" },
+            "webhooks": { "github": { "secret": "ghsecret" } },
+            "providers": {
+                "anthropic": { "api_key": "sk-ant-xxx" }
+            }
+        });
+
+        mask_secret_fields(&mut value);
+
+        assert_eq!(value["chain"]["wallet_key"], "***");
+        assert_eq!(
+            value["chain"]["wallet_key_note"],
+            "Set `ROKO_CHAIN_WALLET_KEY` in the environment."
+        );
+        assert_eq!(value["webhooks"]["github"]["secret"], "***");
+        assert_eq!(
+            value["webhooks"]["github"]["secret_note"],
+            "Set `ROKO_WEBHOOKS_GITHUB_SECRET` in the environment."
+        );
+        assert_eq!(value["providers"]["anthropic"]["api_key"], "****");
     }
 
     #[tokio::test]
