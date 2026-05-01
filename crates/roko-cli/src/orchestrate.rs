@@ -16862,6 +16862,21 @@ impl PlanRunner {
                 .observe(recorded.rung.as_index(), recorded.verdict.passed);
         }
 
+        // T1-14: Cross-rung anomaly detection. Per-rung observe() updates the
+        // EMA pass rate; observe_pipeline() runs Hotelling T² over the joint
+        // pass-rate vector and emits SPC alerts (CUSUM/EWMA/BOCPD).
+        let pass_rates: Vec<f64> = recorded_verdicts
+            .iter()
+            .map(|r| if r.verdict.passed { 1.0 } else { 0.0 })
+            .collect();
+        if !pass_rates.is_empty() {
+            self.adaptive_thresholds.observe_pipeline(&pass_rates);
+        }
+        let spc_alerts = self.adaptive_thresholds.drain_spc_alerts();
+        for (rung, alert) in &spc_alerts {
+            tracing::warn!(rung, ?alert, "gate SPC alert detected");
+        }
+
         // DAIM-08: Update crate confidence tracker from gate outcomes.
         // Extract the crate name from the plan_id (e.g. "roko-agent-fix" -> "roko-agent").
         let crate_name = extract_crate_name(plan_id);
