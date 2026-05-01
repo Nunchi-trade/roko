@@ -19,7 +19,7 @@
 //! - Plan execution (`roko plan run`): uses `ClaudeCliAgent` directly in
 //!   `orchestrate.rs`
 
-#![cfg(feature = "legacy-orchestrate")]
+#![cfg(feature = "legacy-direct-dispatch")]
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -32,11 +32,9 @@ pub use crate::dispatch_v2::{DispatchResult, ToolOutput};
 
 /// Dispatch a prompt using the detected auth method.
 ///
-/// **Deprecated** — use `ChatAgentSession` from `chat_session.rs` instead.
-#[deprecated(
-    since = "0.1.0",
-    note = "Use ChatAgentSession::send_turn_oneshot or send_turn_streaming instead"
-)]
+/// **Deprecated** — use `ChatAgentSession` from `chat_session.rs` (or the
+/// `ModelCallService` path that `WorkflowEngine` already uses) instead.
+#[deprecated = "Use ModelCallService. Will be removed once T5-36 lands."]
 pub async fn dispatch_prompt(auth: &AuthMethod, prompt: &str) -> Result<DispatchResult> {
     tracing::warn!(
         "dispatch_direct::dispatch_prompt called — this path is deprecated; \
@@ -62,10 +60,7 @@ pub async fn dispatch_prompt(auth: &AuthMethod, prompt: &str) -> Result<Dispatch
 /// and feedback recording for free.
 ///
 /// **Deprecated** — use `ChatAgentSession` from `chat_session.rs` instead.
-#[deprecated(
-    since = "0.1.0",
-    note = "Use ChatAgentSession::send_turn_oneshot or send_turn_streaming instead"
-)]
+#[deprecated = "Use ModelCallService. Will be removed once T5-36 lands."]
 pub async fn dispatch_via_model_call_service(prompt: &str) -> Result<DispatchResult> {
     tracing::warn!(
         "dispatch_direct::dispatch_via_model_call_service called — this path is deprecated; \

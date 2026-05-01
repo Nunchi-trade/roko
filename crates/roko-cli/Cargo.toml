@@ -13,7 +13,11 @@ workspace = true
 [features]
 ## Enable the legacy orchestrate.rs plan runner (the pre-WorkflowEngine path).
 default = []
-legacy-orchestrate = []
+legacy-orchestrate = ["legacy-direct-dispatch"]
+## Enable the legacy `dispatch_direct` module (raw single-shot dispatch, no
+## tools / system prompt / MCP). Deprecated; will be removed once T5-36
+## migrates the remaining callers to `ModelCallService`.
+legacy-direct-dispatch = []
 
 [[bin]]
 name = "roko"
