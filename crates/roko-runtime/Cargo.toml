@@ -22,6 +22,7 @@ chrono = { workspace = true }
 parking_lot = { workspace = true }
 roko-primitives = { path = "../roko-primitives" }
 roko-core = { path = "../roko-core" }
+roko-gate = { path = "../roko-gate" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal"] }
@@ -29,7 +30,6 @@ nix = { version = "0.29", features = ["signal"] }
 [dev-dependencies]
 tempfile = { workspace = true }
 roko-compose = { path = "../roko-compose" }
-roko-gate = { path = "../roko-gate" }
 roko-learn = { path = "../roko-learn" }
 
 [package.metadata.roko]

@@ -342,9 +342,7 @@ fn workflow_report_agent_role(report: &WorkflowRunReport) -> (Option<String>, Op
     first.unwrap_or((None, None))
 }
 
-pub fn workflow_report_outcome(
-    report: &WorkflowRunReport,
-) -> Option<roko_core::WorkflowOutcome> {
+pub fn workflow_report_outcome(report: &WorkflowRunReport) -> Option<roko_core::WorkflowOutcome> {
     report
         .events
         .iter()
@@ -1919,6 +1917,7 @@ async fn dispatch_agent(
             selected_model_override.clone(),
             prompt_text,
             strategy,
+            resolved_cli_model.clone(),
         )
         .await;
     } else if config.agent.command == "claude" {
@@ -1998,6 +1997,7 @@ async fn dispatch_agent(
             selected_model_override.clone(),
             prompt_text,
             strategy,
+            resolved_cli_model.clone(),
         )
         .await)
     } else if is_known_protocol_command(&config.agent.command) {
@@ -2995,7 +2995,11 @@ fn load_roko_config_models(workdir: &Path) -> Vec<String> {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    config.effective_models().keys().cloned().collect()
+    let mut keys = config.available_model_keys_for_cascade();
+    if keys.is_empty() {
+        keys = config.effective_models().keys().cloned().collect();
+    }
+    keys
 }
 
 #[cfg(test)]

@@ -50,6 +50,7 @@ pub mod claude_cli_agent;
 pub mod codex_agent;
 pub mod composition;
 pub mod cursor_agent;
+pub mod dispatch_resolver;
 pub mod dispatcher;
 pub mod exec;
 /// File-backed response cache for demo determinism.
@@ -104,6 +105,7 @@ pub use agent::{Agent, AgentResult};
 pub use chat_types::{ChatRequest, RequestOptions, ResponseFormat, ToolChoice};
 pub use claude_cli_agent::ClaudeCliAgent;
 pub use composition::{AgentComposition, CompositeAgent, MergeStrategy, SkillSelector};
+pub use dispatch_resolver::{DispatchResolver, DispatchResolverError};
 pub use exec::ExecAgent;
 pub use gateway_events::{AggregateStats, GatewayEvent, GatewayEventWriter, GatewayProjection};
 pub use gemini::{

@@ -6061,6 +6061,8 @@ dependencies = [
  "chrono",
  "criterion",
  "ed25519-dalek",
+ "futures-core",
+ "futures-util",
  "parking_lot",
  "proptest",
  "regex",

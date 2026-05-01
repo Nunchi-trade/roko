@@ -18,9 +18,10 @@ use roko_core::foundation::{
     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
     PromptAssembler, PromptSpec, ShellGateCommand, TokenBudget,
 };
+use roko_gate::GateRegistry;
 
 use crate::event_bus::emit_runtime_event;
-use crate::pipeline_state::PipelineInput;
+use crate::pipeline_state::{CommitOutcome, PipelineInput};
 
 /// Fallible result type used by the effect driver.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -334,9 +335,8 @@ impl EffectDriver {
 
     /// Create a git commit.
     ///
-    /// Returns `PipelineInput::CommitDone` when a commit is created, a noop hash
-    /// when there is nothing to commit, or `PipelineInput::CommitFailed` when
-    /// git fails.
+    /// Returns `PipelineInput::CommitFinished` with a typed outcome for created
+    /// commits, clean trees, and commit failures.
     pub async fn commit(&self, message: &str) -> PipelineInput {
         match tokio::process::Command::new("git")
             .args(["add", "-A"])
@@ -395,7 +395,9 @@ impl EffectDriver {
                     summary: format!("committed {hash}: {}", truncate_message(message, 72)),
                 });
 
-                PipelineInput::CommitDone { hash }
+                PipelineInput::CommitFinished {
+                    outcome: CommitOutcome::Created { hash },
+                }
             }
             Ok(output) => {
                 let output_text = command_failure_details(&output);
@@ -405,18 +407,14 @@ impl EffectDriver {
                         kind: "commit_noop".to_string(),
                         summary: "nothing to commit, working tree clean".to_string(),
                     });
-                    PipelineInput::CommitDone {
-                        hash: "noop".to_string(),
+                    PipelineInput::CommitFinished {
+                        outcome: CommitOutcome::NoChanges,
                     }
                 } else {
-                    PipelineInput::CommitFailed {
-                        error: format!("git commit failed: {output_text}"),
-                    }
+                    self.commit_error(format!("git commit failed: {output_text}"))
                 }
             }
-            Err(err) => PipelineInput::CommitFailed {
-                error: format!("git commit failed: {err}"),
-            },
+            Err(err) => self.commit_error(format!("git commit failed: {err}")),
         }
     }
 
@@ -426,7 +424,9 @@ impl EffectDriver {
             kind: "commit_error".to_string(),
             summary: error.clone(),
         });
-        PipelineInput::CommitFailed { error }
+        PipelineInput::CommitFinished {
+            outcome: CommitOutcome::Failed { error },
+        }
     }
 
     /// Serialize `state` to JSON and write it atomically to `path`.
@@ -635,24 +635,13 @@ async fn count_changed_files(workdir: &std::path::Path) -> u32 {
     }
 }
 
-/// Map a gate name to its rung index, mirroring GateService::rung_for_name in roko-gate.
+/// Resolve a gate name to its rung index through the shared gate registry.
 ///
 /// Rungs 0-4 are deterministic (compile, clippy, test, diff, fmt).
 /// Rung 5 is heuristic (custom/shell). Rung 6 is judge (LLM-based).
 /// Returns u8::MAX for unknown gate names so they sort last and get heuristic confidence.
-///
-/// TODO: expose this mapping from roko-gate as a public function so this duplicate is not needed.
 fn rung_for_gate_name(name: &str) -> u8 {
-    match name {
-        "compile" | "compile:cargo" => 0,
-        "clippy" | "clippy:cargo" => 1,
-        "test" | "test:cargo" => 2,
-        "diff" | "diff:git" => 3,
-        "fmt" | "fmt:cargo" | "format" => 4,
-        "custom" | "custom:shell" | "shell" => 5,
-        "judge" | "llm-judge" => 6,
-        _ => u8::MAX,
-    }
+    GateRegistry::new().rung_for_name(name).unwrap_or(u8::MAX)
 }
 
 /// Generate a short unique ID for agent instances.
@@ -852,6 +841,83 @@ mod tests {
                 .is_some_and(|temperature| { (temperature - 0.69).abs() < f32::EPSILON }),
             "expected modulated temperature, got {:?}",
             request.temperature
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_no_changes_returns_typed_no_changes() {
+        let services = EffectServices {
+            default_model: "mock-model".to_string(),
+            model_caller: Arc::new(RecordingModelCaller {
+                captured: Arc::new(Mutex::new(None)),
+            }),
+            prompt_assembler: Arc::new(StaticPromptAssembler),
+            feedback_sink: Arc::new(RecordingFeedbackSink),
+            gate_runner: Arc::new(UnusedGateRunner),
+            affect_policy: None,
+        };
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        init_clean_git_workdir(tempdir.path());
+        let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
+
+        let input = driver.commit("test commit").await;
+
+        assert!(matches!(
+            input,
+            PipelineInput::CommitFinished {
+                outcome: CommitOutcome::NoChanges
+            }
+        ));
+    }
+
+    #[test]
+    fn gate_rung_uses_gate_registry_with_unknown_fallback() {
+        let cases = [
+            ("compile", 0),
+            ("compile:cargo", 0),
+            ("clippy", 1),
+            ("clippy:cargo", 1),
+            ("test", 2),
+            ("test:cargo", 2),
+            ("diff", 3),
+            ("diff:git", 3),
+            ("fmt", 4),
+            ("fmt:cargo", 4),
+            ("format", 4),
+            ("custom", 5),
+            ("custom:shell", 5),
+            ("shell", 5),
+            ("judge", 6),
+            ("llm-judge", 6),
+        ];
+
+        for (name, rung) in cases {
+            assert_eq!(rung_for_gate_name(name), rung, "unexpected rung for {name}");
+        }
+        assert_eq!(rung_for_gate_name("nonexistent"), u8::MAX);
+    }
+
+    fn init_clean_git_workdir(workdir: &std::path::Path) {
+        run_git(workdir, &["init"]);
+        run_git(workdir, &["config", "user.email", "test@example.com"]);
+        run_git(workdir, &["config", "user.name", "Roko Test"]);
+        std::fs::write(workdir.join("tracked.txt"), "tracked\n").expect("write tracked file");
+        run_git(workdir, &["add", "tracked.txt"]);
+        run_git(workdir, &["commit", "-m", "initial"]);
+    }
+
+    fn run_git(workdir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workdir)
+            .output()
+            .expect("run git");
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

@@ -106,7 +106,7 @@ impl ModelChoice {
     }
 }
 
-// Compatibility shorthand expected by [`super::DispatchPlan`].
+// Compatibility shorthand expected by [`super::RunnerDispatchPlan`].
 impl ModelChoice {
     /// Reuse the public `forced` flag exposed via the dispatcher facade.
     #[must_use]

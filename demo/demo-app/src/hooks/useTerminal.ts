@@ -9,10 +9,15 @@ import { ImageAddon } from '@xterm/addon-image';
 import { rosedustTheme } from '../lib/rosedust-theme';
 import { WS_BASE } from '../lib/serve-url';
 
-const PROMPT_RE = /(?:^|\n)[^\n]*[❯%#]\s*$|(?:^|\n)\$\s+$/;
+const PROMPT_RE = /(?:^|\n)[^\n]*[❯%#>→➜➤›]\s*$|(?:^|\n)\$\s+$/;
 
 function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+}
+
+export interface ExecResult {
+  ok: boolean;
+  exitCode: number;
 }
 
 export interface TerminalHandle {
@@ -23,8 +28,8 @@ export interface TerminalHandle {
   status: 'connecting' | 'connected' | 'disconnected';
   /** Bounded output buffer for prompt detection and output scraping */
   outputBuffer: string;
-  /** Send a command instantly and wait for shell prompt */
-  execCmd(cmd: string, timeout?: number): Promise<boolean>;
+  /** Send a command and wait for completion via invisible OSC sideband. */
+  execCmd(cmd: string, timeout?: number): Promise<ExecResult>;
   /** Type a command char-by-char then wait for prompt */
   typeCmd(cmd: string, speed?: number, timeout?: number): Promise<boolean>;
   /** Wait for a shell prompt to appear in output buffer */
@@ -127,6 +132,25 @@ export function useTerminal(sessionId?: string) {
 
     term.open(el);
 
+    // ── OSC 7777 sideband: invisible command completion signaling ──
+    // Commands wrapped by execCmd emit OSC 7777;D;<exitCode>;<marker> which
+    // xterm.js intercepts here and never renders. This replaces the old
+    // __RKxxx__ echo-based markers that leaked visible junk into the terminal.
+    type OscListener = (exitCode: number, marker: string) => void;
+    const oscListeners = new Set<OscListener>();
+    const oscDisposable = term.parser.registerOscHandler(7777, (data) => {
+      // Format: "D;<exitCode>;<marker>"
+      const parts = data.split(';');
+      if (parts[0] === 'D' && parts.length >= 3) {
+        const exitCode = parseInt(parts[1], 10);
+        const marker = parts.slice(2).join(';');
+        for (const listener of oscListeners) {
+          listener(exitCode, marker);
+        }
+      }
+      return true; // swallow — never display
+    });
+
     // GPU-accelerated WebGL renderer with DOM fallback
     try {
       const webglAddon = new WebglAddon();
@@ -220,11 +244,33 @@ export function useTerminal(sessionId?: string) {
       return false;
     };
 
-    handle.execCmd = async (cmd: string, timeout = 30000): Promise<boolean> => {
-      const marker = `__RK${(++execSeq).toString(36)}${Date.now().toString(36)}__`;
+    handle.execCmd = async (cmd: string, timeout = 30000): Promise<ExecResult> => {
+      const marker = `rk${(++execSeq).toString(36)}${Date.now().toString(36)}`;
       outBuf = '';
-      handle.sendRaw(`${cmd}; echo ${marker}\r`);
-      return handle.waitForMarker(marker, timeout);
+      // Wrap command: run it, capture exit code, emit invisible OSC 7777
+      // sequence, then propagate the original exit code to the shell.
+      // The printf produces an OSC escape that xterm.js intercepts and
+      // swallows — nothing visible appears in the terminal.
+      const wrapped = `${cmd}; __rk_ec=$?; printf '\\033]7777;D;%d;${marker}\\033\\\\' "$__rk_ec"; (exit $__rk_ec)`;
+      handle.sendRaw(wrapped + '\r');
+      return new Promise<ExecResult>((resolve) => {
+        let settled = false;
+        const listener: OscListener = (exitCode, m) => {
+          if (m === marker && !settled) {
+            settled = true;
+            oscListeners.delete(listener);
+            resolve({ ok: exitCode === 0, exitCode });
+          }
+        };
+        oscListeners.add(listener);
+        setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            oscListeners.delete(listener);
+            resolve({ ok: false, exitCode: -1 });
+          }
+        }, timeout);
+      });
     };
 
     handle.typeCmd = async (cmd: string, charDelay = 12, timeout = 60000): Promise<boolean> => {
@@ -329,6 +375,8 @@ export function useTerminal(sessionId?: string) {
       ro.disconnect();
       onDataDisposable.dispose();
       onResizeDisposable.dispose();
+      oscDisposable.dispose();
+      oscListeners.clear();
       handle.ws?.close();
       term.dispose();
       handleRef.current = null;

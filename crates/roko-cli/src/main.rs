@@ -1500,6 +1500,12 @@ enum ConfigCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Print basic config health without modifying files.
+    Doctor {
+        /// Directory to resolve project config from (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
     /// Open $EDITOR on the chosen config file.
     Edit {
         /// Open the global config file.

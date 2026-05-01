@@ -1,12 +1,12 @@
 //! Auth auto-detection for the unified CLI experience.
 //!
 //! Probes available authentication methods in priority order:
-//! 1. `claude` CLI (logged in and reachable)
+//! 1. `claude` CLI (installed and reachable)
 //! 2. `ANTHROPIC_API_KEY` environment variable
-//! 3. `OPENAI_API_KEY` environment variable (OpenAI-compatible)
-//! 4. Falls back to `NeedsSetup`
+//! 3. `ZAI_API_KEY` environment variable (Zhipu/GLM, OpenAI-compatible)
+//! 4. `OPENAI_API_KEY` environment variable (OpenAI-compatible)
+//! 5. Falls back to `NeedsSetup`
 
-#[cfg(feature = "legacy-orchestrate")]
 use std::process::Command;
 
 /// Detected authentication method for agent dispatch.
@@ -58,13 +58,30 @@ impl AuthMethod {
 /// Detect the best available authentication method.
 ///
 /// Checks (in order):
-/// 1. API keys from environment (faster, more reliable than CLI probes)
-/// 2. `claude` CLI as fallback
+/// 1. `claude` CLI — matches `roko.toml` defaults (claude-sonnet via claude_cli)
+/// 2. `ANTHROPIC_API_KEY`
+/// 3. `ZAI_API_KEY` (Zhipu/GLM, OpenAI-compatible)
+/// 4. `OPENAI_API_KEY`
+/// 5. `NeedsSetup`
 ///
-/// API keys are preferred because CLI probes can succeed (`claude --version`)
-/// yet fail at dispatch time (login expired, rate limits, etc.).
+/// Claude CLI is checked first because it's the default provider in `roko.toml`
+/// and avoids auth mismatches when multiple env vars are present.
 pub fn detect_auth() -> AuthMethod {
-    // 1. Zhipu/GLM (OpenAI-compatible)
+    // 1. Claude CLI — lightweight probe via `claude --version`
+    if let Ok(output) = Command::new("claude").arg("--version").output() {
+        if output.status.success() {
+            return AuthMethod::ClaudeCli;
+        }
+    }
+
+    // 2. Anthropic API key
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        if !key.is_empty() {
+            return AuthMethod::AnthropicApi { key, model: None };
+        }
+    }
+
+    // 3. Zhipu/GLM (OpenAI-compatible)
     if let Ok(key) = std::env::var("ZAI_API_KEY") {
         if !key.is_empty() {
             let model = std::env::var("ZAI_MODEL").ok().filter(|s| !s.is_empty());
@@ -76,14 +93,7 @@ pub fn detect_auth() -> AuthMethod {
         }
     }
 
-    // 2. Anthropic API key
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        if !key.is_empty() {
-            return AuthMethod::AnthropicApi { key, model: None };
-        }
-    }
-
-    // 3. OpenAI-compatible
+    // 4. OpenAI-compatible
     if let Ok(key) = std::env::var("OPENAI_API_KEY") {
         if !key.is_empty() {
             let base_url = std::env::var("OPENAI_API_BASE")
@@ -94,14 +104,6 @@ pub fn detect_auth() -> AuthMethod {
                 base_url,
                 model: None,
             };
-        }
-    }
-
-    // 4. Claude CLI (legacy fallback — can succeed at version check but fail at dispatch)
-    #[cfg(feature = "legacy-orchestrate")]
-    if let Ok(output) = Command::new("claude").arg("--version").output() {
-        if output.status.success() {
-            return AuthMethod::ClaudeCli;
         }
     }
 

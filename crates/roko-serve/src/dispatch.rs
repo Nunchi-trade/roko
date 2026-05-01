@@ -2414,7 +2414,7 @@ fn record_cascade_router_observation_at(
     }
 
     let cascade_router = CascadeRouter::load_or_new(path, model_slugs);
-    if cascade_router.record_outcome(model_slug, success) {
+    if cascade_router.record_confidence_outcome(model_slug, success) {
         cascade_router
             .save(path)
             .with_context(|| format!("save {}", path.display()))?;

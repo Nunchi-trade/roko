@@ -1,7 +1,7 @@
 import './TerminalPreview.css';
 
 interface TerminalPreviewProps {
-  panes: 1 | 2 | 4;
+  panes: 1 | 2 | 4 | 8;
   labels: string[];
   accent?: string;
 }

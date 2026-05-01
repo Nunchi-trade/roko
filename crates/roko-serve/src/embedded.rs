@@ -47,20 +47,46 @@ fn disk_dist_dir() -> Option<&'static PathBuf> {
     .as_ref()
 }
 
+fn is_safe_relative_asset_path(path: &str) -> bool {
+    path.is_empty()
+        || (!path.contains("..")
+            && !path.starts_with('/')
+            && !path.starts_with('\\')
+            && !path.contains(':')) // Windows drive letters in requests
+}
+
 /// Try to read a file from disk, returning `(bytes, actual_path_served)`.
 fn read_from_disk(path: &str) -> Option<(Vec<u8>, String)> {
     let dir = disk_dist_dir()?;
 
     // Try exact path first
     if !path.is_empty() {
+        if !is_safe_relative_asset_path(path) {
+            return None;
+        }
         let full = dir.join(path);
         if full.is_file() {
-            return std::fs::read(&full).ok().map(|b| (b, path.to_string()));
+            let base = dir.canonicalize().ok()?;
+            let canon = full.canonicalize().ok()?;
+            if !canon.starts_with(&base) {
+                return None;
+            }
+            let rel = canon
+                .strip_prefix(&base)
+                .ok()?
+                .to_string_lossy()
+                .to_string();
+            return std::fs::read(&canon).ok().map(|b| (b, rel));
         }
     }
 
     // SPA fallback: serve index.html for client-side routes
     let index = dir.join("index.html");
+    let index = index.canonicalize().ok()?;
+    let base = dir.canonicalize().ok()?;
+    if !index.starts_with(&base) {
+        return None;
+    }
     std::fs::read(&index)
         .ok()
         .map(|b| (b, "index.html".to_string()))
@@ -69,6 +95,9 @@ fn read_from_disk(path: &str) -> Option<(Vec<u8>, String)> {
 /// Try to read from the embedded (compile-time) assets.
 fn read_from_embedded(path: &str) -> Option<(Vec<u8>, String)> {
     if !path.is_empty() {
+        if !is_safe_relative_asset_path(path) {
+            return None;
+        }
         if let Some(file) = EmbeddedAssets::get(path) {
             return Some((file.data.into_owned(), path.to_string()));
         }

@@ -95,14 +95,17 @@ pub fn share_run(
     // secrets are never written to disk or uploaded to GitHub Gist.
     let scrubbed_prompt = scrub_share_text(prompt);
     let scrubbed_report = RunReport {
-        output_text: report
-            .output_text
-            .as_deref()
-            .map(scrub_share_text),
+        output_text: report.output_text.as_deref().map(scrub_share_text),
         ..report.clone()
     };
-    let markdown =
-        render_markdown_transcript(&scrubbed_report, &scrubbed_prompt, agent, role, run_id, elapsed_s);
+    let markdown = render_markdown_transcript(
+        &scrubbed_report,
+        &scrubbed_prompt,
+        agent,
+        role,
+        run_id,
+        elapsed_s,
+    );
 
     // Save locally first (always)
     let shared_dir = workdir.join(".roko").join("shared");

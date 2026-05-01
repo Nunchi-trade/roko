@@ -17,6 +17,10 @@ contracts/lib/
 .git/
 .gitmodules
 
+# Claude / AI tooling
+.claude/
+**/.claude/
+
 # IDE / editor
 .vscode/
 .idea/

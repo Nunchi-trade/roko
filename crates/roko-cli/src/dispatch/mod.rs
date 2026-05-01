@@ -132,12 +132,12 @@ impl Dispatcher {
         &self,
         task: &TaskDef,
         ctx: &DispatchContext,
-    ) -> Result<DispatchPlan, DispatchError> {
+    ) -> Result<RunnerDispatchPlan, DispatchError> {
         let inputs = RoutingInputs::from_task(task, ctx);
         let choice = self.router.route(&inputs)?;
         let prompt_ctx = PromptContext::from_task(task, ctx);
         let assembled = self.prompt_assembler.assemble(task, &prompt_ctx)?;
-        Ok(DispatchPlan {
+        Ok(RunnerDispatchPlan {
             model: choice.model.clone(),
             forced: choice.forced(),
             prompt: assembled,
@@ -177,9 +177,9 @@ impl Dispatcher {
     }
 }
 
-/// Materialized dispatch plan — what `Dispatcher::plan` resolves to.
+/// Materialized runner dispatch plan — what `Dispatcher::plan` resolves to.
 #[derive(Debug, Clone)]
-pub struct DispatchPlan {
+pub struct RunnerDispatchPlan {
     /// Selected model + backend.
     pub model: ModelSpec,
     /// `true` if the model came from a `force_backend` override rather
@@ -201,7 +201,7 @@ pub trait AgentResultBridge: Send + Sync {
     /// Run the agent for `plan` and return a normalized outcome.
     async fn run_agent(
         &self,
-        plan: &DispatchPlan,
+        plan: &RunnerDispatchPlan,
         ctx: &DispatchContext,
     ) -> Result<AgentOutcome, anyhow::Error>;
 }
@@ -354,7 +354,7 @@ mod tests {
     impl AgentResultBridge for StubBridge {
         async fn run_agent(
             &self,
-            plan: &DispatchPlan,
+            plan: &RunnerDispatchPlan,
             ctx: &DispatchContext,
         ) -> Result<AgentOutcome, anyhow::Error> {
             Ok(AgentOutcome {

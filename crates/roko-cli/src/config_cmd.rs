@@ -7,12 +7,14 @@
 
 use crate::config::{
     AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
-    ResolvedConfig, RunnerLayer, ServeAuthLayer, ServeLayer, Source, ToolsLayer,
-    apply_layer_value, detect_clis, global_config_path, load_layered, resolve_paths,
+    ResolvedConfig, RunnerLayer, ServeAuthLayer, ServeLayer, Source, ToolsLayer, apply_layer_value,
+    detect_clis, global_config_path, load_layered, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::agent::ProviderKind;
-use roko_core::config::schema::{CURRENT_SCHEMA_VERSION, ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::config::schema::{
+    CURRENT_CONFIG_VERSION, CURRENT_SCHEMA_VERSION, ModelProfile, ProviderConfig, RokoConfig,
+};
 use roko_core::tool::{ToolFormat, profile_for_model};
 use roko_orchestrator::ExecutorConfig;
 use std::collections::BTreeSet;
@@ -236,6 +238,55 @@ pub fn cmd_path(workdir: &Path) -> Result<()> {
         println!("env    : {} (via ROKO_CONFIG)", env.display());
     }
     Ok(())
+}
+
+/// Print basic config health without mutating config files.
+pub fn cmd_doctor(workdir: &Path) -> Result<()> {
+    let paths = resolve_paths(workdir);
+    let config_path = doctor_config_path(&paths, workdir);
+    let config = match &config_path {
+        Some(path) => {
+            let text =
+                fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+            RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))?
+        }
+        None => RokoConfig::default(),
+    };
+
+    println!("config doctor");
+    match &config_path {
+        Some(path) => println!("config_path: {}", path.display()),
+        None => println!("config_path: (none; using defaults)"),
+    }
+    println!("config_version: {}", config.config_version);
+    println!("supported_config_version: {CURRENT_CONFIG_VERSION}");
+    println!("schema_version: {}", config.schema_version);
+    println!("supported_schema_version: {CURRENT_SCHEMA_VERSION}");
+    println!("providers: {}", config.effective_providers().len());
+    println!("models: {}", config.effective_models().len());
+    println!(
+        "dangerously_skip_permissions: {}",
+        config.runner.dangerously_skip_permissions
+    );
+
+    Ok(())
+}
+
+fn doctor_config_path(paths: &ConfigPaths, workdir: &Path) -> Option<PathBuf> {
+    if let Some(path) = &paths.project {
+        return Some(path.clone());
+    }
+
+    let direct = workdir.join("roko.toml");
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    if paths.global.is_file() {
+        return Some(paths.global.clone());
+    }
+
+    None
 }
 
 /// Scan the active config file for `${VAR}` references and validate them.

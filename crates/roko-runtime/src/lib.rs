@@ -57,6 +57,7 @@ pub mod pipeline_state;
 pub mod process;
 pub mod projection;
 pub mod resource;
+pub mod run_ledger;
 pub mod task_scheduler;
 pub mod theta_consumer;
 pub mod workflow_engine;
@@ -73,7 +74,8 @@ pub use lifecycle::{
     ToolsLoaded, Unvalidated, Validated,
 };
 pub use pipeline_state::{
-    Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig, WorkflowOutcome,
+    CommitOutcome, Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig,
+    WorkflowOutcome,
 };
 pub use projection::{RunSummary, RuntimeProjection};
 pub use roko_core::RuntimeEvent;
@@ -81,6 +83,10 @@ pub use roko_core::foundation::{
     ChatMessage, EventConsumer, FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner,
     GateVerdict, MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler,
     PromptSpec, ShellGateCommand, TokenUsage,
+};
+pub use run_ledger::{
+    AgentOutcome, ArtifactOutcome, CancellationOutcome, EffectErrorKind, EventPersistenceHealth,
+    GateRunOutcome, PhaseTransitionRecord, RunLedger,
 };
 pub use task_scheduler::{SchedulableTask, TaskScheduler, TaskStatus};
 pub use workflow_engine::{

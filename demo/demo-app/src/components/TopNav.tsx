@@ -29,7 +29,7 @@ interface IndicatorStyle {
 
 export default function TopNav() {
   const { get } = useApi();
-  const serverHealth = useServerHealth();
+  const { status: serverHealth } = useServerHealth();
   const [uptime, setUptime] = useState<number | null>(null);
   const [scrolled, setScrolled] = useState(false);
   const [indicator, setIndicator] = useState<IndicatorStyle | null>(null);

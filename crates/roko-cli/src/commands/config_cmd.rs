@@ -63,6 +63,10 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             config_cmd::cmd_path(&wd)
         }
+        ConfigCmd::Doctor { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            config_cmd::cmd_doctor(&wd)
+        }
         ConfigCmd::Edit {
             global,
             project,
@@ -292,6 +296,23 @@ pub(crate) async fn cmd_provider_list(workdir: &Path) -> Result<()> {
 
 pub(crate) fn cmd_provider_health(workdir: &Path) -> Result<()> {
     let config = load_roko_config(workdir)?;
+    let eff = config.effective_providers();
+    println!("credential coverage (process env or [agent.env]):");
+    let mut ids: Vec<&String> = eff.keys().collect();
+    ids.sort();
+    for id in ids {
+        let p = &eff[id];
+        let ok = config.is_provider_available(p);
+        let env = p.api_key_env.as_deref().unwrap_or("-");
+        println!(
+            "  {:<18} {:<8} api_key_env={}",
+            id,
+            if ok { "ok" } else { "MISSING" },
+            env
+        );
+    }
+    println!();
+
     let configured = configured_providers(&config);
     let health_path = provider_health_path(workdir);
     let latency_path = latency_stats_path(workdir);

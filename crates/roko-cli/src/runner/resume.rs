@@ -330,7 +330,10 @@ mod tests {
         // All three logs should be reported as Clean.
         assert_eq!(report.recovered_files.len(), 3);
         for f in &report.recovered_files {
-            assert!(matches!(f.recovery, JsonlRecoveryReport::Clean { lines: 0 }));
+            assert!(matches!(
+                f.recovery,
+                JsonlRecoveryReport::Clean { lines: 0 }
+            ));
         }
     }
 
@@ -368,7 +371,10 @@ mod tests {
         assert_eq!(report.drifted_tasks.len(), 1);
         assert_eq!(report.drifted_tasks[0].plan_id, "p1");
         assert_eq!(report.drifted_tasks[0].task_id, "a");
-        assert_eq!(report.drifted_tasks[0].old_fingerprint, expected_fingerprint);
+        assert_eq!(
+            report.drifted_tasks[0].old_fingerprint,
+            expected_fingerprint
+        );
     }
 
     #[test]

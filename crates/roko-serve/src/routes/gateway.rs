@@ -861,11 +861,14 @@ fn parse_agent_role(s: &str) -> AgentRole {
 async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> String {
     let config = state.load_roko_config();
     let effective_models = config.effective_models();
-    let mut model_slugs: Vec<String> = effective_models
-        .values()
-        .filter(|p| !p.is_embedding_model)
-        .map(|p| p.slug.clone())
-        .collect();
+    let mut model_slugs: Vec<String> = config.available_model_slugs_for_cascade();
+    if model_slugs.is_empty() {
+        model_slugs = effective_models
+            .values()
+            .filter(|p| !p.is_embedding_model)
+            .map(|p| p.slug.clone())
+            .collect();
+    }
     model_slugs.sort();
 
     if model_slugs.is_empty() {

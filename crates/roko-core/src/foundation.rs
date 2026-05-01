@@ -11,7 +11,9 @@
 use crate::runtime_event::RuntimeEvent;
 use crate::{Result, RokoError};
 use async_trait::async_trait;
+use futures_core::Stream;
 use std::path::PathBuf;
+use std::pin::Pin;
 
 // -- ModelCaller --
 
@@ -148,7 +150,7 @@ pub struct ModelCallResponse {
 }
 
 /// Token usage and cost from a model call.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -156,11 +158,88 @@ pub struct TokenUsage {
     pub cost_usd: f64,
 }
 
+/// Provider-agnostic stream event for model calls.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelStreamEvent {
+    /// Model dispatch has started for the selected model.
+    Started {
+        /// Selected model id.
+        model: String,
+    },
+    /// Incremental assistant text.
+    ContentDelta {
+        /// Text delta content.
+        text: String,
+    },
+    /// Token/cost usage became available.
+    Usage {
+        /// Usage observation for the call.
+        usage: TokenUsage,
+    },
+    /// Model call completed successfully.
+    Completed {
+        /// Provider stop reason when available.
+        stop_reason: Option<String>,
+    },
+    /// Model call failed.
+    Failed {
+        /// Failure message.
+        error: String,
+    },
+    /// Model call was cancelled.
+    Cancelled,
+    /// One dispatch attempt failed before a final fallback/error.
+    AttemptFailed {
+        /// Attempted model id.
+        model: String,
+        /// Failure message for this attempt.
+        error: String,
+    },
+}
+
+/// Boxed model stream returned by streaming adapters.
+pub type BoxModelStream = Pin<Box<dyn Stream<Item = ModelStreamEvent> + Send + 'static>>;
+
+/// Convert a complete call response into the shared stream shape.
+#[must_use]
+pub fn model_call_response_to_stream(response: ModelCallResponse) -> BoxModelStream {
+    Box::pin(futures_util::stream::iter(vec![
+        ModelStreamEvent::Started {
+            model: response.model.clone(),
+        },
+        ModelStreamEvent::ContentDelta {
+            text: response.content,
+        },
+        ModelStreamEvent::Usage {
+            usage: response.usage,
+        },
+        ModelStreamEvent::Completed {
+            stop_reason: response.stop_reason,
+        },
+    ]))
+}
+
+/// Convert a failed call result into the shared stream shape.
+#[must_use]
+pub fn model_call_failure_to_stream(error: impl ToString) -> BoxModelStream {
+    Box::pin(futures_util::stream::iter(vec![ModelStreamEvent::Failed {
+        error: error.to_string(),
+    }]))
+}
+
 /// Call an LLM model. Wraps provider selection, streaming, cost tracking.
 #[async_trait]
 pub trait ModelCaller: Send + Sync {
     /// Single-shot model call, returns complete response.
     async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+
+    /// Stream a model call through the shared provider-agnostic event shape.
+    async fn stream(&self, req: ModelCallRequest) -> Result<BoxModelStream> {
+        Ok(match self.call(req).await {
+            Ok(response) => model_call_response_to_stream(response),
+            Err(error) => model_call_failure_to_stream(error),
+        })
+    }
 }
 
 // -- PromptAssembler --
@@ -505,5 +584,86 @@ impl AffectPolicy for NoOpAffectPolicy {
 
     async fn persist(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+
+    #[derive(Clone)]
+    struct StubModelCaller {
+        response: std::result::Result<ModelCallResponse, String>,
+    }
+
+    #[async_trait]
+    impl ModelCaller for StubModelCaller {
+        async fn call(&self, _req: ModelCallRequest) -> Result<ModelCallResponse> {
+            self.response.clone().map_err(RokoError::invalid)
+        }
+    }
+
+    #[tokio::test]
+    async fn model_stream_maps_successful_call_response() {
+        let usage = TokenUsage {
+            input_tokens: 3,
+            output_tokens: 5,
+            total_tokens: 8,
+            cost_usd: 0.25,
+        };
+        let caller = StubModelCaller {
+            response: Ok(ModelCallResponse {
+                content: "hello".to_string(),
+                model: "model-a".to_string(),
+                usage: usage.clone(),
+                stop_reason: Some("end_turn".to_string()),
+                request_id: Some("req-1".to_string()),
+            }),
+        };
+
+        let events = caller
+            .stream(ModelCallRequest::default())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            events,
+            vec![
+                ModelStreamEvent::Started {
+                    model: "model-a".to_string()
+                },
+                ModelStreamEvent::ContentDelta {
+                    text: "hello".to_string()
+                },
+                ModelStreamEvent::Usage { usage },
+                ModelStreamEvent::Completed {
+                    stop_reason: Some("end_turn".to_string())
+                }
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_stream_maps_failed_call_response() {
+        let caller = StubModelCaller {
+            response: Err("provider unavailable".to_string()),
+        };
+
+        let events = caller
+            .stream(ModelCallRequest::default())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            events,
+            vec![ModelStreamEvent::Failed {
+                error: "invalid input: provider unavailable".to_string()
+            }]
+        );
     }
 }

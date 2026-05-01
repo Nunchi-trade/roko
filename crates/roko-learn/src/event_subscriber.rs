@@ -108,7 +108,7 @@ pub async fn run_learning_subscriber(
 
                 let success = gate_passed.unwrap_or(false);
                 health.record_success(&turn_ctx.provider);
-                let _ = router.record_outcome(&turn_ctx.model, success);
+                let _ = router.record_confidence_outcome(&turn_ctx.model, success);
 
                 let cost_record = create_cost_record(
                     Utc::now().to_rfc3339(),

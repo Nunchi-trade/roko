@@ -21,7 +21,7 @@
 //! same layout as the Ollama translator; only the inbound JSON pointer
 //! and the arguments decoding differ.
 
-use crate::usage::Usage;
+use crate::usage::{Usage, UsageObservation, UsageSource};
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult, ToolSource};
 
 use super::{BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError};
@@ -259,36 +259,43 @@ fn render_tool_with_source(source: &ToolSource, _t: &ToolDef) -> serde_json::Val
     }
 }
 
-/// Parse the OpenAI-compatible `usage` block into canonical [`Usage`].
+/// Parse the OpenAI-compatible `usage` block into canonical [`UsageObservation`].
 ///
 /// GLM-5.1 reports cached tokens under `prompt_tokens_details.cached_tokens`,
 /// while Kimi-K2.5 uses a top-level `cached_tokens` field.
 #[must_use]
-pub(crate) fn parse_usage(response: &serde_json::Value) -> Usage {
+pub(crate) fn parse_usage_observation(response: &serde_json::Value) -> UsageObservation {
     let Some(usage) = response.get("usage") else {
-        return Usage::default();
+        return UsageObservation {
+            source: UsageSource::Unknown,
+            ..Default::default()
+        };
     };
 
     let input_tokens = usage
         .get("prompt_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+        .and_then(serde_json::Value::as_u64);
     let output_tokens = usage
         .get("completion_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+        .and_then(serde_json::Value::as_u64);
     let cache_read_tokens = usage
         .pointer("/prompt_tokens_details/cached_tokens")
         .or_else(|| usage.get("cached_tokens"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+        .and_then(serde_json::Value::as_u64);
 
-    Usage {
-        input_tokens: u32::try_from(input_tokens).unwrap_or(u32::MAX),
-        output_tokens: u32::try_from(output_tokens).unwrap_or(u32::MAX),
-        cache_read_tokens: u32::try_from(cache_read_tokens).unwrap_or(u32::MAX),
+    UsageObservation {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        source: UsageSource::ProviderReported,
         ..Default::default()
     }
+}
+
+/// Parse the OpenAI-compatible `usage` block into legacy flat [`Usage`].
+#[must_use]
+pub(crate) fn parse_usage(response: &serde_json::Value) -> Usage {
+    parse_usage_observation(response).into()
 }
 
 #[must_use]
@@ -894,6 +901,48 @@ mod tests {
 
         assert_eq!(parse_usage(&glm).cache_read_tokens, 800);
         assert_eq!(parse_usage(&kimi).cache_read_tokens, 800);
+    }
+
+    #[test]
+    fn parse_usage_missing_usage_observation_unknown() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "No usage block here."
+                }
+            }]
+        });
+
+        let usage = parse_usage_observation(&raw);
+
+        assert_eq!(usage.source, UsageSource::Unknown);
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.cache_read_tokens, None);
+        assert_eq!(usage.cache_creation_tokens, None);
+        assert_eq!(usage.cost_usd, None);
+    }
+
+    #[test]
+    fn parse_usage_explicit_zero_usage_observation_provider_reported() {
+        let raw = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "prompt_tokens_details": {
+                    "cached_tokens": 0
+                }
+            }
+        });
+
+        let usage = parse_usage_observation(&raw);
+
+        assert_eq!(usage.source, UsageSource::ProviderReported);
+        assert_eq!(usage.input_tokens, Some(0));
+        assert_eq!(usage.output_tokens, Some(0));
+        assert_eq!(usage.cache_read_tokens, Some(0));
+        assert_eq!(usage.cache_creation_tokens, None);
+        assert_eq!(usage.cost_usd, None);
     }
 
     #[test]

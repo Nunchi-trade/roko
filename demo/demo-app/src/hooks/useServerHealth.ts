@@ -1,32 +1,31 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { SERVE_URL } from '../lib/serve-url';
 
 export type ServerStatus = 'connected' | 'disconnected' | 'checking';
 
 /**
- * Poll /health every `intervalMs` and track connection state.
- *
- * @deprecated Use `useServerStatus()` or `useServerConnected()` from
- *   `src/data/selectors.ts` instead. Health polling is now handled once
- *   in `src/app/bootstrap.ts` via `bootstrapTransport()`.
+ * Poll /health and track connection state.
+ * Returns status + a `checkNow()` for immediate re-check (e.g. on play press).
  */
-export function useServerHealth(intervalMs = 5000) {
+export function useServerHealth(intervalMs = 3000) {
   const [status, setStatus] = useState<ServerStatus>('checking');
+  const cancelledRef = useRef(false);
+
+  const check = useCallback(async () => {
+    try {
+      const res = await fetch(`${SERVE_URL}/health`, { signal: AbortSignal.timeout(2000) });
+      if (!cancelledRef.current) setStatus(res.ok ? 'connected' : 'disconnected');
+    } catch {
+      if (!cancelledRef.current) setStatus('disconnected');
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const res = await fetch(`${SERVE_URL}/health`, { signal: AbortSignal.timeout(2000) });
-        if (!cancelled) setStatus(res.ok ? 'connected' : 'disconnected');
-      } catch {
-        if (!cancelled) setStatus('disconnected');
-      }
-    };
+    cancelledRef.current = false;
     check();
     const id = setInterval(check, intervalMs);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [intervalMs]);
+    return () => { cancelledRef.current = true; clearInterval(id); };
+  }, [intervalMs, check]);
 
-  return status;
+  return { status, checkNow: check };
 }

@@ -11,4 +11,15 @@ function resolveServeUrl(preferSameOrigin = true): string {
 
 export const SERVE_URL = resolveServeUrl();
 export const ABSOLUTE_SERVE_URL = resolveServeUrl(false);
-export const WS_BASE = SERVE_URL.replace(/^http/, 'ws');
+export const WS_BASE = resolveServeUrl(false).replace(/^http/, 'ws');
+
+/** Mirage-rs WS endpoint for eth_subscribe. Configurable via VITE_MIRAGE_WS_URL. */
+function resolveMirageWs(): string {
+  const env = typeof import.meta !== 'undefined' ? (import.meta as any).env?.VITE_MIRAGE_WS_URL : undefined;
+  if (env) return env;
+  if (typeof window === 'undefined') return 'ws://localhost:8545';
+  const { hostname } = window.location;
+  return `ws://${hostname}:8545`;
+}
+
+export const MIRAGE_WS_URL = resolveMirageWs();

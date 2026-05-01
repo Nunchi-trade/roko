@@ -8,18 +8,21 @@
 
 use std::{
     collections::HashSet,
+    future::poll_fn,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
-use roko_agent::StreamChunk;
+use roko_agent::ModelCallService;
 use roko_agent::safety::{SafetyLayer, ViolationSeverity};
-use roko_agent::streaming::parse_sse_line;
 use roko_core::ContentHash;
 use roko_core::DaimonPolicy;
 use roko_core::agent::{AgentRole, ProviderKind, resolve_model};
 use roko_core::config::schema::{ModelProfile, RokoConfig};
+use roko_core::foundation::{
+    ChatMessage, MessageRole, ModelCallRequest, ModelCaller, ModelStreamEvent, TokenUsage,
+};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_dreams::{load_dream_routing_advice, relevant_pattern_summaries};
 use roko_learn::{
@@ -206,6 +209,8 @@ pub enum CognitiveEvent {
         stop_reason: StopReason,
         usage: Option<UsageInfo>,
     },
+    /// Prompt execution failed before normal completion.
+    Failure { message: String },
     /// Prompt execution stopped because the token budget was exhausted.
     MaxTokens,
 }
@@ -813,6 +818,17 @@ where
                             usage,
                         });
                     }
+                    CognitiveEvent::Failure { message } => {
+                        let update = dispatch_failure_update(message);
+                        send_session_update(transport, session_id, update).await?;
+                        return Ok(StreamResult {
+                            prompt_result: SessionPromptResult {
+                                stop_reason: StopReason::Refusal,
+                            },
+                            assistant_text,
+                            usage: None,
+                        });
+                    }
                     CognitiveEvent::MaxTokens => {
                         return Ok(StreamResult {
                             prompt_result: SessionPromptResult {
@@ -990,7 +1006,7 @@ where
     } else {
         String::new()
     };
-    let history_context = if should_resolve_context {
+    let _history_context = if should_resolve_context {
         session.build_history_context_for_cli()
     } else {
         String::new()
@@ -1200,34 +1216,21 @@ where
         );
 
         match provider_kind {
-            ProviderKind::ClaudeCli => {
-                // Build CLI prompt with history and file context prepended.
-                let mut full_prompt = String::new();
-                if !file_context.is_empty() {
-                    full_prompt.push_str(&file_context);
-                    full_prompt.push('\n');
-                }
-                if !history_context.is_empty() {
-                    full_prompt.push_str(&history_context);
-                }
-                full_prompt.push_str(&prompt_text);
-
-                run_claude_cognitive_task(
+            // ClaudeCli can't run as a subprocess inside ACP, so route Claude
+            // selections through the provider-backed Anthropic model caller path.
+            ProviderKind::ClaudeCli | ProviderKind::AnthropicApi => {
+                run_anthropic_cognitive_task(
                     &session_id,
-                    &full_prompt,
-                    &workdir,
+                    &messages,
+                    &model_key,
                     &resolved.slug,
-                    "bypassPermissions",
-                    &system_prompt,
+                    &roko_config,
                     cancel_token,
                     event_sender,
                 )
                 .await
             }
-            ProviderKind::OpenAiCompat
-            | ProviderKind::AnthropicApi
-            | ProviderKind::GeminiApi
-            | ProviderKind::PerplexityApi => {
+            ProviderKind::OpenAiCompat | ProviderKind::GeminiApi | ProviderKind::PerplexityApi => {
                 run_openai_compat_cognitive_task(
                     &session_id,
                     &messages,
@@ -1283,7 +1286,13 @@ where
                 currency: "USD".to_string(),
             }),
         };
-        let _ = send_session_update(transport, &session.session_id, update).await;
+        if let Err(error) = send_session_update(transport, &session.session_id, update).await {
+            warn!(
+                session_id = %session.session_id,
+                error = %error,
+                "failed to send ACP usage update"
+            );
+        }
     }
 
     let task_result = cognitive_task.await;
@@ -1394,7 +1403,14 @@ where
             session_id: session.session_id.clone(),
             session_name: Some(title),
         };
-        let _ = send_session_update(transport, &session.session_id, title_update).await;
+        if let Err(error) = send_session_update(transport, &session.session_id, title_update).await
+        {
+            warn!(
+                session_id = %session.session_id,
+                error = %error,
+                "failed to send ACP session title update"
+            );
+        }
     }
 
     // Push assistant turn after streaming completes (skip slash commands).
@@ -1408,44 +1424,276 @@ where
     stream_result.map(|sr| sr.prompt_result)
 }
 
-// ── Legacy Claude CLI dispatch ───────────────────────────────────────
+// ── Anthropic Messages API dispatch ──────────────────────────────────
 
-/// Handles legacy Claude CLI model selections without spawning a subprocess.
-///
-/// TODO(arch): Replace this compatibility shim with provider-backed
-/// `ModelCallService` dispatch for single-agent ACP prompts. WorkflowEngine
-/// already uses the shared provider abstraction through `run_with_workflow_engine`.
-#[allow(clippy::too_many_arguments)]
-async fn run_claude_cognitive_task(
-    _session_id: &str,
-    _prompt_text: &str,
-    _workdir: &Path,
-    _model: &str,
-    _permission_mode: &str,
-    _system_prompt: &str,
-    _cancel_token: CancelToken,
+/// Dispatches a prompt via the Anthropic adapter through the shared model stream contract.
+/// Used for ClaudeCli-configured and AnthropicApi-configured models in ACP.
+async fn run_anthropic_cognitive_task(
+    session_id: &str,
+    messages: &[serde_json::Value],
+    model_key: &str,
+    slug: &str,
+    roko_config: &RokoConfig,
+    cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
-    let _ = event_sender
-        .send(CognitiveEvent::TokenChunk(
-            "Claude CLI dispatch is disabled in this ACP path. Configure a provider-backed model or enable the WorkflowEngine path.".to_string(),
-        ))
+    let Some(model_call_config) = anthropic_model_call_config(roko_config, model_key, slug) else {
+        emit_dispatch_failure(
+            &event_sender,
+            "Error: Anthropic provider is not configured for ACP dispatch.".to_string(),
+        )
         .await;
-    let _ = event_sender
-        .send(CognitiveEvent::Complete {
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-        })
-        .await;
+        return Err(anyhow::anyhow!("Anthropic provider is not configured").into());
+    };
 
-    Err(anyhow::anyhow!("Claude CLI dispatch is disabled in this ACP path").into())
+    info!(
+        session_id,
+        model_key,
+        slug,
+        message_count = messages.len(),
+        "dispatching prompt via ModelCaller stream"
+    );
+
+    if cancel_token.is_cancelled() {
+        return Ok(());
+    }
+
+    let caller = ModelCallService::new(model_key.to_string()).with_config(model_call_config);
+    let request = model_call_request_from_acp_messages(model_key, messages);
+    stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)
+        .await
+}
+
+fn anthropic_model_call_config(
+    roko_config: &RokoConfig,
+    model_key: &str,
+    slug: &str,
+) -> Option<RokoConfig> {
+    let mut config = roko_config.clone();
+    config.providers = roko_config.effective_providers();
+    config.models = roko_config.effective_models();
+
+    let anthropic_provider_id = config.providers.iter().find_map(|(id, provider)| {
+        (provider.kind == ProviderKind::AnthropicApi).then(|| id.clone())
+    })?;
+
+    let mut profile = config
+        .models
+        .get(model_key)
+        .or_else(|| config.models.values().find(|profile| profile.slug == slug))
+        .cloned()
+        .unwrap_or_else(|| ModelProfile {
+            provider: anthropic_provider_id.clone(),
+            slug: slug.to_string(),
+            context_window: 200_000,
+            tool_format: "anthropic_blocks".to_string(),
+            ..Default::default()
+        });
+    profile.provider = anthropic_provider_id;
+    profile.slug = slug.to_string();
+    if profile.tool_format.trim().is_empty() {
+        profile.tool_format = "anthropic_blocks".to_string();
+    }
+
+    config.models.insert(model_key.to_string(), profile.clone());
+    config.models.entry(slug.to_string()).or_insert(profile);
+    Some(config)
+}
+
+fn model_call_request_from_acp_messages(
+    model_key: &str,
+    messages: &[serde_json::Value],
+) -> ModelCallRequest {
+    ModelCallRequest {
+        model: model_key.to_string(),
+        messages: messages
+            .iter()
+            .filter_map(model_call_chat_message_from_acp)
+            .collect(),
+        caller: Some("acp".to_string()),
+        ..Default::default()
+    }
+}
+
+fn model_call_chat_message_from_acp(message: &serde_json::Value) -> Option<ChatMessage> {
+    let role = match message.get("role").and_then(serde_json::Value::as_str)? {
+        "system" => MessageRole::System,
+        "assistant" => MessageRole::Assistant,
+        "user" => MessageRole::User,
+        _ => return None,
+    };
+    let content = message
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some(ChatMessage { role, content })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ModelStreamForward {
+    Continue,
+    Completed,
+}
+
+#[derive(Default)]
+struct ModelStreamForwardState {
+    usage: Option<UsageInfo>,
+}
+
+async fn stream_model_call_to_cognitive_events<C>(
+    session_id: &str,
+    caller: &C,
+    request: ModelCallRequest,
+    cancel_token: CancelToken,
+    event_sender: mpsc::Sender<CognitiveEvent>,
+) -> Result<()>
+where
+    C: ModelCaller + ?Sized,
+{
+    let stream_result = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => return Ok(()),
+        result = caller.stream(request) => result,
+    };
+
+    let mut stream = match stream_result {
+        Ok(stream) => stream,
+        Err(error) => {
+            emit_dispatch_failure(
+                &event_sender,
+                format!("Error: model stream failed: {error}"),
+            )
+            .await;
+            return Err(anyhow::anyhow!("model stream failed: {error}").into());
+        }
+    };
+    let mut state = ModelStreamForwardState::default();
+
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => return Ok(()),
+            event = poll_fn(|cx| stream.as_mut().poll_next(cx)) => event,
+        };
+
+        let Some(event) = event else {
+            break;
+        };
+
+        if forward_model_stream_event(session_id, &event_sender, &mut state, event).await?
+            == ModelStreamForward::Completed
+        {
+            return Ok(());
+        }
+    }
+
+    send_cognitive_event(
+        &event_sender,
+        CognitiveEvent::Complete {
+            stop_reason: StopReason::EndTurn,
+            usage: state.usage,
+        },
+    )
+    .await;
+    Ok(())
+}
+
+async fn forward_model_stream_event(
+    session_id: &str,
+    event_sender: &mpsc::Sender<CognitiveEvent>,
+    state: &mut ModelStreamForwardState,
+    event: ModelStreamEvent,
+) -> Result<ModelStreamForward> {
+    match event {
+        ModelStreamEvent::Started { model } => {
+            debug!(session_id, model, "model stream started");
+            Ok(ModelStreamForward::Continue)
+        }
+        ModelStreamEvent::ContentDelta { text } => {
+            if !text.is_empty() {
+                send_cognitive_event(event_sender, CognitiveEvent::TokenChunk(text)).await;
+            }
+            Ok(ModelStreamForward::Continue)
+        }
+        ModelStreamEvent::Usage { usage } => {
+            state.usage = Some(usage_info_from_model_usage(&usage));
+            Ok(ModelStreamForward::Continue)
+        }
+        ModelStreamEvent::Completed { stop_reason } => {
+            send_cognitive_event(
+                event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: acp_stop_reason_from_model(stop_reason.as_deref()),
+                    usage: state.usage.clone(),
+                },
+            )
+            .await;
+            Ok(ModelStreamForward::Completed)
+        }
+        ModelStreamEvent::Failed { error } => {
+            emit_dispatch_failure(event_sender, format!("Error: model stream failed: {error}"))
+                .await;
+            Err(anyhow::anyhow!("model stream failed: {error}").into())
+        }
+        ModelStreamEvent::Cancelled => {
+            send_cognitive_event(
+                event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::Cancelled,
+                    usage: state.usage.clone(),
+                },
+            )
+            .await;
+            Ok(ModelStreamForward::Completed)
+        }
+        ModelStreamEvent::AttemptFailed { model, error } => {
+            warn!(
+                session_id,
+                model,
+                error = %error,
+                "model stream attempt failed"
+            );
+            Ok(ModelStreamForward::Continue)
+        }
+    }
+}
+
+fn usage_info_from_model_usage(usage: &TokenUsage) -> UsageInfo {
+    UsageInfo {
+        total_tokens: if usage.total_tokens > 0 {
+            usage.total_tokens
+        } else {
+            usage.input_tokens + usage.output_tokens
+        },
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        thought_tokens: None,
+        cached_read_tokens: None,
+        cached_write_tokens: None,
+    }
+}
+
+fn acp_stop_reason_from_model(stop_reason: Option<&str>) -> StopReason {
+    match stop_reason
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "max_tokens" | "length" => StopReason::MaxTokens,
+        "cancelled" | "canceled" => StopReason::Cancelled,
+        "refusal" | "content_filter" => StopReason::Refusal,
+        _ => StopReason::EndTurn,
+    }
 }
 
 // ── OpenAI-compatible provider dispatch ──────────────────────────────
 
-/// Streams a prompt through an OpenAI-compatible provider (zhipu/GLM,
-/// moonshot/Kimi, OpenAI, Perplexity, Ollama, etc.) using the config
-/// from roko.toml. Accepts a pre-built messages array (with system prompt + history).
+/// Dispatches a prompt through the shared model stream contract for
+/// OpenAI-compatible provider selections (zhipu/GLM, moonshot/Kimi, OpenAI,
+/// Perplexity, Ollama, etc.). Accepts a pre-built messages array with system
+/// prompt and history.
 async fn run_openai_compat_cognitive_task(
     session_id: &str,
     messages: &[serde_json::Value],
@@ -1455,204 +1703,24 @@ async fn run_openai_compat_cognitive_task(
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
     let resolved = resolve_model(roko_config, model_key);
-    let provider_config = resolved.provider_config.as_ref();
-
-    let base_url = provider_config
-        .and_then(|p| p.base_url.as_deref())
-        .unwrap_or("https://api.openai.com/v1");
-
-    let api_key = provider_config
-        .and_then(|p| p.resolve_api_key())
-        .unwrap_or_default();
-
-    let timeout_ms = provider_config
-        .and_then(|p| p.timeout_ms)
-        .unwrap_or(120_000);
-
-    let slug = &resolved.slug;
 
     info!(
         session_id,
         model_key,
-        slug,
-        base_url,
-        has_api_key = !api_key.is_empty(),
-        "dispatching prompt via OpenAI-compat provider"
+        slug = %resolved.slug,
+        provider_kind = ?resolved.provider_kind,
+        message_count = messages.len(),
+        "dispatching prompt via ModelCaller stream"
     );
 
     if cancel_token.is_cancelled() {
         return Ok(());
     }
 
-    // Build the request body with pre-built messages array.
-    let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": slug,
-        "messages": messages,
-        "stream": true
-    });
-
-    let client = reqwest::Client::new();
-    let mut request = client
-        .post(&endpoint)
-        .timeout(std::time::Duration::from_millis(timeout_ms))
-        .header("Content-Type", "application/json");
-
-    if !api_key.is_empty() {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    // Inject any extra headers from the provider config.
-    if let Some(extra) = provider_config.and_then(|p| p.extra_headers.as_ref()) {
-        for (k, v) in extra {
-            request = request.header(k.as_str(), v.as_str());
-        }
-    }
-
-    let response = match request.json(&body).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(session_id, error = %e, "HTTP request to provider failed");
-            let _ = event_sender
-                .send(CognitiveEvent::TokenChunk(format!(
-                    "Error: failed to connect to {base_url}: {e}"
-                )))
-                .await;
-            let _ = event_sender
-                .send(CognitiveEvent::Complete {
-                    stop_reason: StopReason::EndTurn,
-                    usage: None,
-                })
-                .await;
-            return Err(anyhow::anyhow!("failed to connect to {base_url}: {e}").into());
-        }
-    };
-
-    let status = response.status();
-    if !status.is_success() {
-        let error_text = response.text().await.unwrap_or_default();
-        error!(session_id, %status, "provider returned error: {error_text}");
-        let _ = event_sender
-            .send(CognitiveEvent::TokenChunk(format!(
-                "Error ({status}): {error_text}"
-            )))
-            .await;
-        let _ = event_sender
-            .send(CognitiveEvent::Complete {
-                stop_reason: StopReason::EndTurn,
-                usage: None,
-            })
-            .await;
-        return Err(anyhow::anyhow!("provider returned {status}: {error_text}").into());
-    }
-
-    // Stream SSE chunks.
-    let mut response = response;
-    let mut pending = Vec::new();
-    let mut total_input = 0u64;
-    let mut total_output = 0u64;
-    let mut stream_error: Option<String> = None;
-
-    loop {
-        if cancel_token.is_cancelled() {
-            return Ok(());
-        }
-
-        let chunk = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => return Ok(()),
-            result = response.chunk() => result,
-        };
-
-        let chunk = match chunk {
-            Ok(Some(c)) => c,
-            Ok(None) => break,
-            Err(e) => {
-                warn!(session_id, error = %e, "error reading SSE chunk");
-                stream_error = Some(e.to_string());
-                break;
-            }
-        };
-
-        pending.extend_from_slice(&chunk);
-
-        // Process complete lines.
-        while let Some(newline_idx) = pending.iter().position(|b| *b == b'\n') {
-            let line_bytes: Vec<u8> = pending.drain(..=newline_idx).collect();
-            let line = String::from_utf8_lossy(&line_bytes);
-            let line = line.trim_end_matches(['\r', '\n']);
-
-            if let Some(stream_chunk) = parse_sse_line(line) {
-                match stream_chunk {
-                    StreamChunk::ContentDelta(text) => {
-                        if event_sender
-                            .send(CognitiveEvent::TokenChunk(text))
-                            .await
-                            .is_err()
-                        {
-                            return Ok(());
-                        }
-                    }
-                    StreamChunk::ReasoningDelta(text) => {
-                        if event_sender
-                            .send(CognitiveEvent::ThinkingChunk(text))
-                            .await
-                            .is_err()
-                        {
-                            return Ok(());
-                        }
-                    }
-                    StreamChunk::Usage(usage) => {
-                        total_input = u64::from(usage.input_tokens);
-                        total_output = u64::from(usage.output_tokens);
-                    }
-                    StreamChunk::Done(_) => {}
-                    StreamChunk::Error(e) => {
-                        warn!(session_id, error = %e, "stream error from provider");
-                        stream_error = Some(e.to_string());
-                    }
-                    StreamChunk::ToolCallDelta { .. } => {
-                        // Tool calls not yet surfaced via ACP for openai-compat.
-                    }
-                }
-            }
-        }
-    }
-
-    // Process remaining bytes.
-    if !pending.is_empty() {
-        let line = String::from_utf8_lossy(&pending);
-        let line = line.trim_end_matches(['\r', '\n']);
-        if let Some(StreamChunk::ContentDelta(text)) = parse_sse_line(line) {
-            let _ = event_sender.send(CognitiveEvent::TokenChunk(text)).await;
-        }
-    }
-
-    let usage = if total_input > 0 || total_output > 0 {
-        Some(UsageInfo {
-            total_tokens: total_input + total_output,
-            input_tokens: total_input,
-            output_tokens: total_output,
-            thought_tokens: None,
-            cached_read_tokens: None,
-            cached_write_tokens: None,
-        })
-    } else {
-        None
-    };
-
-    let _ = event_sender
-        .send(CognitiveEvent::Complete {
-            stop_reason: StopReason::EndTurn,
-            usage,
-        })
-        .await;
-
-    if let Some(error) = stream_error {
-        Err(anyhow::anyhow!("provider stream error: {error}").into())
-    } else {
-        Ok(())
-    }
+    let caller = ModelCallService::new(model_key.to_string()).with_config(roko_config.clone());
+    let request = model_call_request_from_acp_messages(model_key, messages);
+    stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)
+        .await
 }
 
 async fn emit_knowledge_card(
@@ -2765,9 +2833,32 @@ fn map_event_to_update(event: CognitiveEvent) -> SessionUpdate {
             locations: None,
         },
         CognitiveEvent::PlanUpdate { entries } => SessionUpdate::Plan { entries },
-        CognitiveEvent::Complete { .. } | CognitiveEvent::MaxTokens => {
+        CognitiveEvent::Complete { .. }
+        | CognitiveEvent::Failure { .. }
+        | CognitiveEvent::MaxTokens => {
             unreachable!("terminal cognitive events are handled before update mapping")
         }
+    }
+}
+
+fn dispatch_failure_update(message: String) -> SessionUpdate {
+    SessionUpdate::ToolCall {
+        tool_call_id: "model_dispatch".to_string(),
+        title: "Model dispatch failed".to_string(),
+        kind: ToolCallKind::Fetch,
+        status: ToolCallStatus::Failed,
+        content: vec![text_block(message)],
+        locations: None,
+    }
+}
+
+async fn emit_dispatch_failure(event_sender: &mpsc::Sender<CognitiveEvent>, message: String) {
+    send_cognitive_event(event_sender, CognitiveEvent::Failure { message }).await;
+}
+
+async fn send_cognitive_event(event_sender: &mpsc::Sender<CognitiveEvent>, event: CognitiveEvent) {
+    if event_sender.send(event).await.is_err() {
+        debug!("cognitive event receiver dropped before event could be delivered");
     }
 }
 
@@ -2780,11 +2871,8 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let update_value = serde_json::to_value(update)?;
-    let params = serde_json::json!({
-        "sessionId": session_id,
-        "update": update_value,
-    });
+    let mut params = serde_json::to_value(update)?;
+    params["sessionId"] = serde_json::Value::String(session_id.to_string());
     transport
         .send_notification("session/update", params)
         .await
@@ -3121,6 +3209,211 @@ mod tests {
         client.flush().await.expect("flush response");
     }
 
+    #[test]
+    fn model_call_request_from_acp_messages_preserves_roles() {
+        let request = model_call_request_from_acp_messages(
+            "claude-sonnet-4-6",
+            &[
+                json!({"role": "system", "content": "system text"}),
+                json!({"role": "user", "content": "hello"}),
+                json!({"role": "assistant", "content": "hi"}),
+                json!({"role": "unknown", "content": "skip"}),
+            ],
+        );
+
+        assert_eq!(request.model, "claude-sonnet-4-6");
+        assert_eq!(request.caller.as_deref(), Some("acp"));
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(request.messages[0].role, MessageRole::System);
+        assert_eq!(request.messages[0].content, "system text");
+        assert_eq!(request.messages[1].role, MessageRole::User);
+        assert_eq!(request.messages[1].content, "hello");
+        assert_eq!(request.messages[2].role, MessageRole::Assistant);
+        assert_eq!(request.messages[2].content, "hi");
+    }
+
+    #[test]
+    fn anthropic_model_call_config_routes_legacy_claude_to_anthropic_provider() {
+        let mut roko_config = RokoConfig::default();
+        roko_config.providers.insert(
+            "anthropic".to_string(),
+            roko_core::config::schema::ProviderConfig {
+                kind: ProviderKind::AnthropicApi,
+                base_url: Some("https://api.anthropic.com".to_string()),
+                api_key_env: Some("TEST_ANTHROPIC_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: Some(120_000),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+
+        let config =
+            anthropic_model_call_config(&roko_config, "claude-sonnet-4-6", "claude-sonnet-4-6")
+                .expect("anthropic provider config");
+        let resolved = resolve_model(&config, "claude-sonnet-4-6");
+
+        assert_eq!(resolved.provider_kind, ProviderKind::AnthropicApi);
+        assert_eq!(
+            resolved
+                .profile
+                .as_ref()
+                .map(|profile| profile.provider.as_str()),
+            Some("anthropic")
+        );
+    }
+
+    #[tokio::test]
+    async fn model_stream_failed_event_emits_failure_event() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let mut state = ModelStreamForwardState::default();
+
+        let error = forward_model_stream_event(
+            "sess_model_stream",
+            &sender,
+            &mut state,
+            ModelStreamEvent::Failed {
+                error: "provider failed".to_string(),
+            },
+        )
+        .await
+        .expect_err("failed stream event should error");
+
+        assert!(error.to_string().contains("provider failed"));
+        match receiver.recv().await.expect("failure event") {
+            CognitiveEvent::Failure { message } => {
+                assert_eq!(message, "Error: model stream failed: provider failed");
+            }
+            other => panic!("expected failure event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn model_stream_usage_and_completion_emit_typed_complete() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let mut state = ModelStreamForwardState::default();
+
+        let forwarded = forward_model_stream_event(
+            "sess_model_stream",
+            &sender,
+            &mut state,
+            ModelStreamEvent::Usage {
+                usage: TokenUsage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    total_tokens: 18,
+                    cost_usd: 0.0,
+                },
+            },
+        )
+        .await
+        .expect("usage event");
+        assert_eq!(forwarded, ModelStreamForward::Continue);
+
+        let forwarded = forward_model_stream_event(
+            "sess_model_stream",
+            &sender,
+            &mut state,
+            ModelStreamEvent::Completed {
+                stop_reason: Some("max_tokens".to_string()),
+            },
+        )
+        .await
+        .expect("completed event");
+        assert_eq!(forwarded, ModelStreamForward::Completed);
+
+        match receiver.recv().await.expect("completion event") {
+            CognitiveEvent::Complete { stop_reason, usage } => {
+                assert_eq!(stop_reason, StopReason::MaxTokens);
+                assert_eq!(
+                    usage,
+                    Some(UsageInfo {
+                        total_tokens: 18,
+                        input_tokens: 11,
+                        output_tokens: 7,
+                        thought_tokens: None,
+                        cached_read_tokens: None,
+                        cached_write_tokens: None,
+                    })
+                );
+            }
+            other => panic!("expected completion event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn model_stream_cancelled_event_emits_cancelled_complete() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let mut state = ModelStreamForwardState::default();
+
+        let forwarded = forward_model_stream_event(
+            "sess_model_stream",
+            &sender,
+            &mut state,
+            ModelStreamEvent::Cancelled,
+        )
+        .await
+        .expect("cancelled event");
+        assert_eq!(forwarded, ModelStreamForward::Completed);
+
+        match receiver.recv().await.expect("completion event") {
+            CognitiveEvent::Complete { stop_reason, usage } => {
+                assert_eq!(stop_reason, StopReason::Cancelled);
+                assert_eq!(usage, None);
+            }
+            other => panic!("expected completion event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_session_update_emits_flat_payload() {
+        let (client, server) = duplex(4096);
+        let mut transport = StdioTransport::from_io(empty(), server);
+        let mut reader = BufReader::new(client);
+
+        send_session_update(
+            &mut transport,
+            "sess_flat",
+            SessionUpdate::AgentMessageChunk {
+                content: text_block("hello".to_owned()),
+                _meta: None,
+            },
+        )
+        .await
+        .expect("send session update");
+
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read notification line");
+        let notification: JsonRpcNotification =
+            serde_json::from_str(&line).expect("deserialize notification");
+
+        assert_eq!(notification.method, "session/update");
+        assert_eq!(
+            notification.params,
+            Some(json!({
+                "sessionId": "sess_flat",
+                "sessionUpdate": "agent_message_chunk",
+                "content": {
+                    "type": "text",
+                    "text": "hello"
+                }
+            }))
+        );
+        assert!(
+            notification
+                .params
+                .as_ref()
+                .and_then(|params| params.get("update"))
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn stream_events_to_editor_emits_notifications_and_returns_completion() {
         let (client, server) = duplex(4096);
@@ -3179,13 +3472,66 @@ mod tests {
             notification.params,
             Some(json!({
                 "sessionId": "sess_test",
-                "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {
-                        "type": "text",
-                        "text": "hello"
-                    }
+                "sessionUpdate": "agent_message_chunk",
+                "content": {
+                    "type": "text",
+                    "text": "hello"
                 }
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_events_to_editor_emits_failure_status_without_normal_completion() {
+        let (client, server) = duplex(4096);
+        let mut transport = StdioTransport::from_io(empty(), server);
+        let mut reader = BufReader::new(client);
+        let cancel_token = CancelToken::new();
+        let (sender, receiver) = mpsc::channel(8);
+
+        sender
+            .send(CognitiveEvent::Failure {
+                message: "Error: provider returned 401".to_owned(),
+            })
+            .await
+            .expect("send failure");
+        sender
+            .send(CognitiveEvent::Complete {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            })
+            .await
+            .expect("send normal completion after failure");
+        drop(sender);
+
+        let result =
+            stream_events_to_editor(&mut transport, "sess_failure", receiver, &cancel_token).await;
+        let result = result.expect("failure should still return a prompt result");
+
+        assert_eq!(result.prompt_result.stop_reason, StopReason::Refusal);
+        assert_eq!(result.usage, None);
+
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read notification line");
+        let notification: JsonRpcNotification =
+            serde_json::from_str(&line).expect("deserialize notification");
+        assert_eq!(notification.method, "session/update");
+        assert_eq!(
+            notification.params,
+            Some(json!({
+                "sessionId": "sess_failure",
+                "sessionUpdate": "tool_call",
+                "toolCallId": "model_dispatch",
+                "title": "Model dispatch failed",
+                "kind": "fetch",
+                "status": "failed",
+                "content": [{
+                    "type": "text",
+                    "text": "Error: provider returned 401"
+                }]
             }))
         );
     }

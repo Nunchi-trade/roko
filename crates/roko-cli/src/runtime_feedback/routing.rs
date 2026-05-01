@@ -3,10 +3,11 @@
 //!
 //! ## Why this exists
 //!
-//! The router exposes `record_outcome(model_slug, success)` and
-//! `record_override_outcome(...)`. Until this sink existed those methods
-//! were called from ad-hoc helpers in the runner, leading to
-//! double-counting and missed observations. Now there is one path:
+//! The router exposes `record_confidence_outcome(model_slug, success)` for
+//! confidence-only updates and `record_override_outcome(...)` for contextual
+//! override learning. Until this sink existed those methods were called from
+//! ad-hoc helpers in the runner, leading to double-counting and missed
+//! observations. Now there is one path:
 //! `FeedbackEvent::TaskCompleted -> RoutingObservationSink::record(...)`.
 //!
 //! ## Override handling
@@ -70,13 +71,13 @@ impl FeedbackSink for RoutingObservationSink {
 
         // The `record_override_outcome` path expects a fully-built
         // `RoutingContext` (LinUCB feature vector). The runner does not
-        // yet compute those features end-to-end, so for now both paths
-        // record through `record_outcome`; the source tag is preserved
-        // in the per-sink event log so the downstream learning pass can
-        // dampen override observations once feature plumbing lands.
+        // yet compute those features end-to-end, so this path records a
+        // confidence-only observation and keeps contextual learning out of
+        // the update until feature plumbing lands.
         // See `.roko/GAPS.md`.
         let _ = model_source;
-        self.router.record_outcome(&outcome.model, *succeeded);
+        self.router
+            .record_confidence_outcome(&outcome.model, *succeeded);
         Ok(())
     }
 }

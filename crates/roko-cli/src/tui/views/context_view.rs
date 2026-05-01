@@ -544,10 +544,7 @@ fn render_cascade_router(
                     theme.muted()
                 };
                 Row::new(vec![
-                    Cell::from(truncate(
-                        &display_model(Some(slug.as_str())),
-                        20,
-                    )),
+                    Cell::from(truncate(&display_model(Some(slug.as_str())), 20)),
                     Cell::from(trials.to_string()),
                     Cell::from(successes.to_string()),
                     Cell::from(Span::styled(format!("{rate:.0}%"), rate_style)),

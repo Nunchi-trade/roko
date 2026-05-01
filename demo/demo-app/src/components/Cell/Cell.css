@@ -13,16 +13,16 @@
 /* ── Variants ── */
 
 .cell--surface {
-  background: var(--bg-mid);
+  background: color-mix(in srgb, var(--bg-mid) 88%, transparent);
 }
 
 .cell--raised {
-  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--bg-raised) 90%, transparent);
   box-shadow: var(--shadow-sm);
 }
 
 .cell--sunken {
-  background: var(--bg-deeper);
+  background: color-mix(in srgb, var(--bg-deeper) 92%, transparent);
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 

@@ -79,7 +79,9 @@ pub fn build_router(
     let roko_config = state.load_roko_config();
     let cors = middleware::cors_layer(cors_origins, roko_config.server.unsafe_public_cors);
     let terminal_enabled = roko_config.serve.terminal_enabled;
-    let terminal_requires_auth = terminal_enabled && !bind_is_loopback(&roko_config.server.bind);
+    let terminal_requires_auth = terminal_enabled
+        && !bind_is_loopback(&roko_config.server.bind)
+        && !roko_config.serve.acknowledge_public_risk;
 
     let api = Router::new()
         .merge(crate::openapi::routes())

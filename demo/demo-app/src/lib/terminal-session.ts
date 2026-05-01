@@ -48,15 +48,15 @@ export async function resolveRoko(handle: TerminalHandle): Promise<string> {
   if (rokoResolved) return resolvedRoko;
 
   handle.outputBuffer = '';
-  const ok = await handle.execCmd(
-    'command -v roko >/dev/null 2>&1 && echo __ROKO_PATH__ || { test -x ./target/release/roko && echo __ROKO_REL__ || { test -x ./target/debug/roko && echo __ROKO_DBG__ || echo __ROKO_NONE__; }; }',
+  const result = await handle.execCmd(
+    'command -v roko >/dev/null 2>&1 && echo RP || { test -x ./target/release/roko && echo RR || { test -x ./target/debug/roko && echo RD || echo RN; }; }',
     4000,
   );
-  if (ok) {
+  if (result.ok || result.exitCode >= 0) {
     const buf = handle.outputBuffer;
-    if (buf.includes('__ROKO_PATH__')) resolvedRoko = 'roko';
-    else if (buf.includes('__ROKO_REL__')) resolvedRoko = './target/release/roko';
-    else if (buf.includes('__ROKO_DBG__')) resolvedRoko = './target/debug/roko';
+    if (buf.includes('RP')) resolvedRoko = 'roko';
+    else if (buf.includes('RR')) resolvedRoko = './target/release/roko';
+    else if (buf.includes('RD')) resolvedRoko = './target/debug/roko';
     else resolvedRoko = 'roko';
   }
   rokoResolved = true;
@@ -93,9 +93,8 @@ export async function enterWorkspace(
   if (!promptOk) return false;
   await resolveRoko(handle);
   await handle.execCmd(`cd "${dir}"`, 3000);
-  // Only clear the output buffer (for prompt detection), not the visible terminal.
-  // Scenarios can call handle.clearTerminal() explicitly when they want a clean slate.
-  handle.outputBuffer = '';
+  // Clear screen + output buffer so setup noise (resolveRoko, cd) is invisible.
+  handle.clearTerminal();
   return true;
 }
 

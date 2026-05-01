@@ -98,6 +98,11 @@ impl Default for CancelToken {
 /// Default model key when roko.toml has no models configured.
 pub const FALLBACK_MODEL: &str = "sonnet";
 
+/// Default provider for serde deserialization of old sessions missing the field.
+fn default_provider() -> String {
+    "anthropic".to_owned()
+}
+
 /// Maximum number of conversation turns to retain.
 const MAX_HISTORY_TURNS: usize = 40;
 /// Maximum total characters across all history turns.
@@ -129,6 +134,9 @@ pub enum TurnRole {
 pub struct SessionConfigState {
     /// Active agent interaction mode.
     pub agent_mode: String,
+    /// Selected provider key (maps to `[providers.*]` in roko.toml).
+    #[serde(default = "default_provider")]
+    pub provider: String,
     /// Selected model key (maps to `[models.*]` in roko.toml).
     pub model: String,
     /// Effort level: low, medium, high, max.
@@ -153,6 +161,7 @@ impl Default for SessionConfigState {
     fn default() -> Self {
         Self {
             agent_mode: "code".to_owned(),
+            provider: "anthropic".to_owned(),
             model: FALLBACK_MODEL.to_owned(),
             effort: "medium".to_owned(),
             temperament: "balanced".to_owned(),
@@ -181,8 +190,16 @@ impl SessionConfigState {
                     .map(|s| s.as_str())
                     .unwrap_or(FALLBACK_MODEL)
             };
+        // Derive the default provider from the default model's profile.
+        let default_provider = config
+            .models
+            .get(default_model)
+            .map(|p| p.provider.clone())
+            .or_else(|| config.providers.keys().next().cloned())
+            .unwrap_or_else(|| "anthropic".to_owned());
         Self {
             agent_mode: "code".to_owned(),
+            provider: default_provider,
             model: default_model.to_owned(),
             effort: config.agent.default_effort.clone(),
             temperament: config.agent.temperament.label().to_owned(),
@@ -545,6 +562,26 @@ impl AcpSession {
         roko_config: &roko_core::config::schema::RokoConfig,
     ) {
         match option_id {
+            "provider" => {
+                if let Some(s) = new_value.as_str() {
+                    self.config_state.provider = s.to_owned();
+                    // If the current model doesn't belong to the new provider, pick the first one.
+                    let model_belongs = roko_config
+                        .models
+                        .get(&self.config_state.model)
+                        .is_some_and(|p| p.provider == s);
+                    if !model_belongs
+                        && let Some(first_key) = roko_config
+                            .models
+                            .iter()
+                            .filter(|(_, p)| p.provider == s)
+                            .map(|(k, _)| k.clone())
+                            .min()
+                    {
+                        self.config_state.model = first_key;
+                    }
+                }
+            }
             "model" => {
                 if let Some(s) = new_value.as_str() {
                     self.config_state.model = s.to_owned();
@@ -804,24 +841,71 @@ impl SessionManager {
     }
 }
 
-/// Build config options dynamically from roko.toml providers/models.
+/// Capitalize a model key for display: split on `-`, capitalize each segment, join with space.
+/// Numbers are kept as-is. `"gemini-2-5-pro"` → `"Gemini 2 5 Pro"`.
+fn capitalize_model_key(key: &str) -> String {
+    key.split('-')
+        .map(|seg| {
+            let mut chars = seg.chars();
+            match chars.next() {
+                Some(c) if c.is_ascii_alphabetic() => {
+                    let mut s = c.to_uppercase().to_string();
+                    s.extend(chars);
+                    s
+                }
+                _ => seg.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn build_config_options(
     state: &SessionConfigState,
     roko_config: &roko_core::config::schema::RokoConfig,
 ) -> Vec<ConfigOption> {
-    // Model options from [models.*] in roko.toml.
+    // If roko.toml has no providers/models, fall back to static defaults.
+    if roko_config.providers.is_empty() || roko_config.models.is_empty() {
+        return build_config_options_static(state);
+    }
+
+    // ── Provider options from [providers.*] in roko.toml ──
+    let mut provider_options: Vec<ConfigOptionValue> = roko_config
+        .providers
+        .keys()
+        .map(|key| ConfigOptionValue {
+            value: key.clone(),
+            name: capitalize_model_key(key),
+            description: None,
+        })
+        .collect();
+    provider_options.sort_by(|a, b| a.value.cmp(&b.value));
+
+    // ── Model options filtered by selected provider ──
     let mut model_options: Vec<ConfigOptionValue> = roko_config
         .models
         .iter()
+        .filter(|(_, profile)| profile.provider == state.provider)
         .map(|(key, profile)| ConfigOptionValue {
             value: key.clone(),
-            name: profile.slug.clone(),
-            description: Some(format!("via {}", profile.provider)),
+            name: capitalize_model_key(key),
+            description: Some(profile.slug.clone()),
         })
         .collect();
     model_options.sort_by(|a, b| a.value.cmp(&b.value));
 
     vec![
+        // 1. Provider
+        ConfigOption {
+            id: "provider".to_owned(),
+            name: "Provider".to_owned(),
+            option_type: ConfigOptionType::Select,
+            category: "model".to_owned(),
+            current_value: serde_json::Value::String(state.provider.clone()),
+            description: Some("LLM provider".to_owned()),
+            options: Some(provider_options),
+        },
+        // 2. Model (filtered by provider)
         ConfigOption {
             id: "model".to_owned(),
             name: "Model".to_owned(),
@@ -831,6 +915,7 @@ fn build_config_options(
             description: Some("Language model".to_owned()),
             options: Some(model_options),
         },
+        // 3. Thinking (effort)
         ConfigOption {
             id: "effort".to_owned(),
             name: "Thinking".to_owned(),
@@ -861,106 +946,12 @@ fn build_config_options(
                 },
             ]),
         },
-        ConfigOption {
-            id: "temperament".to_owned(),
-            name: "Temperament".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "other".to_owned(),
-            current_value: serde_json::Value::String(state.temperament.clone()),
-            description: Some("Agent risk appetite".to_owned()),
-            options: Some(vec![
-                ConfigOptionValue {
-                    value: "conservative".to_owned(),
-                    name: "Conservative".to_owned(),
-                    description: Some("Favor stronger models, safer routing".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "balanced".to_owned(),
-                    name: "Balanced".to_owned(),
-                    description: Some("Default heuristics".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "aggressive".to_owned(),
-                    name: "Aggressive".to_owned(),
-                    description: Some("Favor faster/cheaper execution".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "exploratory".to_owned(),
-                    name: "Exploratory".to_owned(),
-                    description: Some("Explore more alternatives".to_owned()),
-                },
-            ]),
-        },
-        ConfigOption {
-            id: "routing_mode".to_owned(),
-            name: "Routing".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "other".to_owned(),
-            current_value: serde_json::Value::String(state.routing_mode.clone()),
-            description: Some("Model routing strategy".to_owned()),
-            options: Some(vec![
-                ConfigOptionValue {
-                    value: "auto_override".to_owned(),
-                    name: "Auto".to_owned(),
-                    description: Some("Cascade router picks model".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "manual".to_owned(),
-                    name: "Manual".to_owned(),
-                    description: Some("Always use selected model".to_owned()),
-                },
-            ]),
-        },
-        ConfigOption {
-            id: "clippy".to_owned(),
-            name: "Clippy".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "other".to_owned(),
-            current_value: serde_json::Value::String(
-                if state.clippy_enabled { "on" } else { "off" }.to_owned(),
-            ),
-            description: Some("Run clippy gate after changes".to_owned()),
-            options: Some(vec![
-                ConfigOptionValue {
-                    value: "on".to_owned(),
-                    name: "On".to_owned(),
-                    description: Some("Clippy validation enabled".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "off".to_owned(),
-                    name: "Off".to_owned(),
-                    description: Some("Skip clippy".to_owned()),
-                },
-            ]),
-        },
-        ConfigOption {
-            id: "tests".to_owned(),
-            name: "Tests".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "other".to_owned(),
-            current_value: serde_json::Value::String(
-                if state.tests_enabled { "on" } else { "off" }.to_owned(),
-            ),
-            description: Some("Run test gate after changes".to_owned()),
-            options: Some(vec![
-                ConfigOptionValue {
-                    value: "on".to_owned(),
-                    name: "On".to_owned(),
-                    description: Some("Test validation enabled".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "off".to_owned(),
-                    name: "Off".to_owned(),
-                    description: Some("Skip tests".to_owned()),
-                },
-            ]),
-        },
-        // ── Workflow execution options ──
+        // 4. Workflow
         ConfigOption {
             id: "workflow".to_owned(),
             name: "Workflow".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "other".to_owned(),
+            category: "workflow".to_owned(),
             current_value: serde_json::Value::String(state.workflow.clone()),
             description: Some("Pipeline workflow for prompts".to_owned()),
             options: Some(vec![
@@ -993,58 +984,49 @@ fn build_config_options(
                 },
             ]),
         },
+        // 5. Clippy
         ConfigOption {
-            id: "review_strictness".to_owned(),
-            name: "Review".to_owned(),
+            id: "clippy".to_owned(),
+            name: "Clippy".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "other".to_owned(),
-            current_value: serde_json::Value::String(state.review_strictness.clone()),
-            description: Some("Review strictness level".to_owned()),
+            category: "gates".to_owned(),
+            current_value: serde_json::Value::String(
+                if state.clippy_enabled { "on" } else { "off" }.to_owned(),
+            ),
+            description: Some("Run clippy gate after changes".to_owned()),
             options: Some(vec![
                 ConfigOptionValue {
-                    value: "none".to_owned(),
-                    name: "None".to_owned(),
-                    description: Some("Skip all reviews".to_owned()),
+                    value: "on".to_owned(),
+                    name: "On".to_owned(),
+                    description: Some("Clippy validation enabled".to_owned()),
                 },
                 ConfigOptionValue {
-                    value: "quick".to_owned(),
-                    name: "Quick".to_owned(),
-                    description: Some("Single-pass quick review".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "standard".to_owned(),
-                    name: "Standard".to_owned(),
-                    description: Some("Architecture + correctness review".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "thorough".to_owned(),
-                    name: "Thorough".to_owned(),
-                    description: Some("Architecture + audit + docs review".to_owned()),
+                    value: "off".to_owned(),
+                    name: "Off".to_owned(),
+                    description: Some("Skip clippy".to_owned()),
                 },
             ]),
         },
+        // 6. Tests
         ConfigOption {
-            id: "max_iterations".to_owned(),
-            name: "Retries".to_owned(),
+            id: "tests".to_owned(),
+            name: "Tests".to_owned(),
             option_type: ConfigOptionType::Select,
-            category: "other".to_owned(),
-            current_value: serde_json::Value::String(state.max_iterations.to_string()),
-            description: Some("Max retry iterations on failure".to_owned()),
+            category: "gates".to_owned(),
+            current_value: serde_json::Value::String(
+                if state.tests_enabled { "on" } else { "off" }.to_owned(),
+            ),
+            description: Some("Run test gate after changes".to_owned()),
             options: Some(vec![
                 ConfigOptionValue {
-                    value: "1".to_owned(),
-                    name: "1".to_owned(),
-                    description: Some("No retries".to_owned()),
+                    value: "on".to_owned(),
+                    name: "On".to_owned(),
+                    description: Some("Test validation enabled".to_owned()),
                 },
                 ConfigOptionValue {
-                    value: "2".to_owned(),
-                    name: "2".to_owned(),
-                    description: Some("Standard (1 retry)".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "3".to_owned(),
-                    name: "3".to_owned(),
-                    description: Some("Persistent (2 retries)".to_owned()),
+                    value: "off".to_owned(),
+                    name: "Off".to_owned(),
+                    description: Some("Skip tests".to_owned()),
                 },
             ]),
         },
@@ -1053,19 +1035,143 @@ fn build_config_options(
 
 /// Fallback config options when no roko.toml is available.
 fn build_config_options_static(state: &SessionConfigState) -> Vec<ConfigOption> {
-    vec![ConfigOption {
-        id: "model".to_owned(),
-        name: "Model".to_owned(),
-        option_type: ConfigOptionType::Select,
-        category: "model".to_owned(),
-        current_value: serde_json::Value::String(state.model.clone()),
-        description: Some("Language model".to_owned()),
-        options: Some(vec![ConfigOptionValue {
-            value: "sonnet".to_owned(),
-            name: "Sonnet".to_owned(),
-            description: Some("Claude Sonnet".to_owned()),
-        }]),
-    }]
+    vec![
+        ConfigOption {
+            id: "provider".to_owned(),
+            name: "Provider".to_owned(),
+            option_type: ConfigOptionType::Select,
+            category: "model".to_owned(),
+            current_value: serde_json::Value::String(state.provider.clone()),
+            description: Some("LLM provider".to_owned()),
+            options: Some(vec![ConfigOptionValue {
+                value: "anthropic".to_owned(),
+                name: "Anthropic".to_owned(),
+                description: None,
+            }]),
+        },
+        ConfigOption {
+            id: "model".to_owned(),
+            name: "Model".to_owned(),
+            option_type: ConfigOptionType::Select,
+            category: "model".to_owned(),
+            current_value: serde_json::Value::String(state.model.clone()),
+            description: Some("Language model".to_owned()),
+            options: Some(vec![ConfigOptionValue {
+                value: "sonnet".to_owned(),
+                name: "Sonnet".to_owned(),
+                description: Some("claude-sonnet-4-6".to_owned()),
+            }]),
+        },
+        ConfigOption {
+            id: "effort".to_owned(),
+            name: "Thinking".to_owned(),
+            option_type: ConfigOptionType::Select,
+            category: "thought_level".to_owned(),
+            current_value: serde_json::Value::String(state.effort.clone()),
+            description: Some("Reasoning depth".to_owned()),
+            options: Some(vec![
+                ConfigOptionValue {
+                    value: "low".to_owned(),
+                    name: "Quick".to_owned(),
+                    description: Some("Minimal reasoning".to_owned()),
+                },
+                ConfigOptionValue {
+                    value: "medium".to_owned(),
+                    name: "Standard".to_owned(),
+                    description: Some("Balanced reasoning".to_owned()),
+                },
+                ConfigOptionValue {
+                    value: "high".to_owned(),
+                    name: "Deep".to_owned(),
+                    description: Some("Extended reasoning".to_owned()),
+                },
+                ConfigOptionValue {
+                    value: "max".to_owned(),
+                    name: "Max".to_owned(),
+                    description: Some("Full reasoning depth".to_owned()),
+                },
+            ]),
+        },
+        ConfigOption {
+            id: "workflow".to_owned(),
+            name: "Workflow".to_owned(),
+            option_type: ConfigOptionType::Select,
+            category: "workflow".to_owned(),
+            current_value: serde_json::Value::String(state.workflow.clone()),
+            description: Some("Pipeline workflow for prompts".to_owned()),
+            options: Some(vec![
+                ConfigOptionValue {
+                    value: "none".to_owned(),
+                    name: "None".to_owned(),
+                    description: Some("Single agent, no pipeline".to_owned()),
+                },
+                ConfigOptionValue {
+                    value: "express".to_owned(),
+                    name: "Express".to_owned(),
+                    description: Some("Implement → gate → commit".to_owned()),
+                },
+                ConfigOptionValue {
+                    value: "standard".to_owned(),
+                    name: "Standard".to_owned(),
+                    description: Some("Implement → gate → review → commit".to_owned()),
+                },
+                ConfigOptionValue {
+                    value: "full".to_owned(),
+                    name: "Full".to_owned(),
+                    description: Some("Strategy → implement → gate → review → commit".to_owned()),
+                },
+                ConfigOptionValue {
+                    value: "auto".to_owned(),
+                    name: "Auto".to_owned(),
+                    description: Some("Select based on complexity".to_owned()),
+                },
+            ]),
+        },
+        ConfigOption {
+            id: "clippy".to_owned(),
+            name: "Clippy".to_owned(),
+            option_type: ConfigOptionType::Select,
+            category: "gates".to_owned(),
+            current_value: serde_json::Value::String(
+                if state.clippy_enabled { "on" } else { "off" }.to_owned(),
+            ),
+            description: Some("Run clippy gate after changes".to_owned()),
+            options: Some(vec![
+                ConfigOptionValue {
+                    value: "on".to_owned(),
+                    name: "On".to_owned(),
+                    description: Some("Clippy validation enabled".to_owned()),
+                },
+                ConfigOptionValue {
+                    value: "off".to_owned(),
+                    name: "Off".to_owned(),
+                    description: Some("Skip clippy".to_owned()),
+                },
+            ]),
+        },
+        ConfigOption {
+            id: "tests".to_owned(),
+            name: "Tests".to_owned(),
+            option_type: ConfigOptionType::Select,
+            category: "gates".to_owned(),
+            current_value: serde_json::Value::String(
+                if state.tests_enabled { "on" } else { "off" }.to_owned(),
+            ),
+            description: Some("Run test gate after changes".to_owned()),
+            options: Some(vec![
+                ConfigOptionValue {
+                    value: "on".to_owned(),
+                    name: "On".to_owned(),
+                    description: Some("Test validation enabled".to_owned()),
+                },
+                ConfigOptionValue {
+                    value: "off".to_owned(),
+                    name: "Off".to_owned(),
+                    description: Some("Skip tests".to_owned()),
+                },
+            ]),
+        },
+    ]
 }
 
 /// Build the list of available slash commands.

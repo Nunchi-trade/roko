@@ -19,6 +19,7 @@ pub mod hot_reload;
 pub mod learning;
 pub mod presets;
 pub mod project;
+pub mod provenance;
 pub mod provider;
 pub mod routing;
 pub mod schema;
@@ -26,11 +27,24 @@ pub mod serve;
 pub mod subscriptions;
 pub mod tools;
 pub mod tui_cfg;
+pub mod validation;
 
 // Re-exports for ergonomic use.
 pub use crate::temperament::Temperament;
 pub use compat::from_mori_toml;
 pub use presets::Preset;
+pub use provenance::{
+    ConfigDiagnostic, ConfigProvenance, ConfigSource, ResolvedRuntimeConfig, ValidatedConfig,
+};
+pub use provider::{
+    BackendModelSlug, ConfigIdentityError, ModelAlias, ModelCapabilities, ModelCost,
+    ModelDefinition, ModelMetadataSource, ProviderAuth, ProviderCapabilities, ProviderDefinition,
+    ProviderId, ProviderTransport,
+};
+pub use validation::{
+    DangerousPermissionOverride, DangerousPermissionOverrideError, StrictConfigSource,
+    StrictConfigValidationError, validate_strict_config_toml,
+};
 // All section structs are re-exported from schema (which re-exports from submodules).
 pub use schema::{
     AgentBudget, AgentConfig, AgentDefinition, AgentMode, AgentRoleToggles, AgentThresholds,
@@ -68,6 +82,14 @@ pub enum LoadConfigError {
         /// Underlying parse error.
         source: toml::de::Error,
     },
+    /// Strict validation rejected a safety-sensitive setting.
+    #[error("validate {path}: {source}")]
+    Validation {
+        /// Config file path.
+        path: std::path::PathBuf,
+        /// Underlying validation error.
+        source: StrictConfigValidationError,
+    },
 }
 
 /// Load the workspace configuration from `workdir/roko.toml`.
@@ -90,6 +112,17 @@ pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
         path: path.clone(),
         source,
     })?;
+
+    // Reject safety-sensitive settings (e.g. runner.dangerously_skip_permissions=true)
+    // in shared config before deserializing, so callers can't silently inherit them.
+    let strict_source = StrictConfigSource::shared(Some(path.clone()));
+    validate_strict_config_toml(&text, &strict_source).map_err(|source| {
+        LoadConfigError::Validation {
+            path: path.clone(),
+            source,
+        }
+    })?;
+
     let mut config: RokoConfig =
         toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
             path: path.clone(),
@@ -101,4 +134,26 @@ pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
     config.resolve_file_secrets();
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod load_config_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_dangerously_skip_permissions_in_shared_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_text = "[runner]\ndangerously_skip_permissions = true\n";
+        std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
+
+        let err = load_config(dir.path()).expect_err("must reject dangerous shared override");
+        assert!(matches!(err, LoadConfigError::Validation { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn missing_roko_toml_returns_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = load_config(dir.path()).expect("default load ok");
+        assert_eq!(cfg, RokoConfig::default());
+    }
 }

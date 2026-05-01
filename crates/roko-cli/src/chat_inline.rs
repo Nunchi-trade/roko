@@ -11,14 +11,14 @@ use std::fs;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
-    Frame,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -26,8 +26,6 @@ use serde_json::json;
 use crate::auth;
 use crate::auth_detect::AuthMethod;
 use crate::chat::{self, extract_clean_text};
-#[cfg(feature = "legacy-orchestrate")]
-use crate::dispatch_direct;
 use crate::dispatch_v2::{DispatchResult, ToolOutput};
 use crate::inline::primitives::{CostMeter, StreamingState};
 use crate::inline::styled;
@@ -717,10 +715,37 @@ enum DispatchMode {
         is_sidecar: bool,
         serve_url: String,
     },
-    /// Direct in-process dispatch via [`AuthMethod`].
+    /// Deprecated direct fallback. Kept only to make stale paths fail visibly.
     Direct { auth: AuthMethod },
     /// Full agent session with system prompt, tools, MCP, safety.
     Session,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ChatInlineDispatchError {
+    #[error(
+        "interactive chat config load failed; refusing to fall back to deprecated dispatch_direct path: {source:#}"
+    )]
+    ConfigLoad {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error(
+        "interactive chat model resolution failed; refusing to fall back to deprecated dispatch_direct path: {source:#}"
+    )]
+    ModelSelection {
+        #[source]
+        source: crate::model_selection::Error,
+    },
+    #[error(
+        "ChatAgentSession initialization failed; refusing to fall back to deprecated dispatch_direct path: {source:#}"
+    )]
+    ChatSessionInit {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("direct inline dispatch is disabled; ChatAgentSession is required for chat turns")]
+    DirectDispatchDisabled,
 }
 
 /// A recorded conversation message.
@@ -764,8 +789,7 @@ struct ChatSession {
     /// Present only when `dispatch == DispatchMode::Session` and a turn is in
     /// flight. Events are forwarded here instead of being drained so that
     /// `MessageDelta` tokens reach the TUI viewport in real time.
-    streaming_event_rx:
-        Option<tokio::sync::mpsc::Receiver<roko_agent::AgentRuntimeEvent>>,
+    streaming_event_rx: Option<tokio::sync::mpsc::Receiver<roko_agent::AgentRuntimeEvent>>,
     /// Number of completed user→agent exchanges.
     turn_count: u32,
     /// When the current thinking phase began (for animated labels).
@@ -782,6 +806,8 @@ struct ChatSession {
     quiet: bool,
     /// Full agent session (present when dispatch == `DispatchMode::Session`).
     agent_session: Option<ChatAgentSession>,
+    /// When the last Ctrl-C was pressed (for double-tap exit).
+    last_ctrl_c: Option<Instant>,
 }
 
 // ---------------------------------------------------------------------------
@@ -889,9 +915,7 @@ fn load_last_session_summary() -> Option<(String, u32, f64, String)> {
     let content = std::fs::read_to_string(&path).ok()?;
     let snap: SessionSnapshot = serde_json::from_str(&content).ok()?;
     let saved_at = snap.saved_at;
-    let topic = snap
-        .first_user_message
-        .unwrap_or_default();
+    let topic = snap.first_user_message.unwrap_or_default();
     Some((saved_at, snap.turn_count, snap.total_cost, topic))
 }
 
@@ -935,7 +959,6 @@ fn clone_chat_agent_session(session: &ChatAgentSession) -> ChatAgentSession {
         mcp_config: session.mcp_config.clone(),
         session_id: session.session_id.clone(),
         api_history: session.api_history.clone(),
-        http_client: session.http_client.clone(),
         settings_json: session.settings_json.clone(),
         timeout: session.timeout,
         provider_base_url: session.provider_base_url.clone(),
@@ -943,9 +966,7 @@ fn clone_chat_agent_session(session: &ChatAgentSession) -> ChatAgentSession {
     }
 }
 
-fn turn_result_to_dispatch_result(
-    turn: crate::chat_session::TurnResult,
-) -> DispatchResult {
+fn turn_result_to_dispatch_result(turn: crate::chat_session::TurnResult) -> DispatchResult {
     DispatchResult {
         text: turn.text,
         model: turn.model,
@@ -1134,6 +1155,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
         compact: false,
         quiet: false,
         agent_session: None,
+        last_ctrl_c: None,
     };
 
     // Main event loop
@@ -1153,19 +1175,35 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                         }
                     }
                     Phase::Thinking | Phase::Streaming => {
-                        // Ctrl+C interrupts generation
+                        // Ctrl+C interrupts generation; double-tap exits
                         if key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
+                            let now = Instant::now();
+                            let double_tap = session.last_ctrl_c.map_or(false, |prev| {
+                                now.duration_since(prev) < Duration::from_millis(500)
+                            });
+                            session.last_ctrl_c = Some(now);
+
                             // Push partial output to scrollback
                             if !session.streaming.is_empty() {
                                 let text = session.streaming.take_buffer();
                                 push_agent_response(&mut term, &theme, &text, &session.agent_id)?;
                             }
+                            if double_tap {
+                                term.push_lines(&[styled::continuation(
+                                    &theme,
+                                    "",
+                                    "[exiting]",
+                                    None,
+                                )])?;
+                                session.phase = Phase::Done;
+                                break;
+                            }
                             term.push_lines(&[styled::continuation(
                                 &theme,
                                 "",
-                                "[interrupted]",
+                                "[interrupted — Ctrl-C again to exit]",
                                 None,
                             )])?;
                             session.phase = Phase::Input;
@@ -1360,14 +1398,53 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run the unified inline chat, preferring `ChatAgentSession` and falling
-/// back to direct dispatch when session setup fails.
+fn build_unified_inline_agent_session(
+    workdir: std::path::PathBuf,
+) -> std::result::Result<(ChatAgentSession, Option<String>, CostTable), ChatInlineDispatchError> {
+    let resolved = crate::config::load_layered(&workdir)
+        .map_err(|source| ChatInlineDispatchError::ConfigLoad { source })?;
+    let config = resolved.config;
+    let mut model_config = roko_core::config::schema::RokoConfig::default();
+    model_config.providers.extend(config.providers.clone());
+    model_config.models.extend(config.models.clone());
+    if let Some(model) = config.agent.model.clone() {
+        model_config.agent.default_model = model;
+    }
+    model_config.agent.default_effort = config.agent.effort.clone();
+    model_config.agent.bare_mode = config.agent.bare_mode;
+    model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
+    model_config.agent.fallback_model = config.agent.fallback_model.clone();
+    model_config.agent.tier_models = config.agent.tier_models.clone();
+    model_config.agent.env = Some(config.agent.env.clone());
+
+    let cost_table = CostTable::from_config(&model_config.models).with_defaults();
+    let role = {
+        let role = config.prompt.role.trim();
+        (!role.is_empty()).then(|| role.to_string())
+    };
+    let selection = crate::model_selection::resolve_effective_model(
+        None,
+        None,
+        role,
+        None,
+        &model_config,
+        None,
+    )
+    .map_err(|source| ChatInlineDispatchError::ModelSelection { source })?;
+    let agent_session = ChatAgentSession::new(&config, workdir, selection)
+        .map_err(|source| ChatInlineDispatchError::ChatSessionInit { source })?;
+    let system_message = Some(agent_session.system_prompt.clone());
+
+    Ok((agent_session, system_message, cost_table))
+}
+
+/// Run the unified inline chat through `ChatAgentSession`.
 ///
 /// This is the primary entry point for `roko` with no subcommand.
-/// Uses [`AuthMethod`] to dispatch prompts directly via Claude CLI or API.
+/// Session setup failures are returned instead of downgrading to direct dispatch.
 pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
     if !crate::inline::should_use_inline() {
-        // Fallback: non-TTY one-shot via dispatch_direct
+        // Non-TTY one-shot mode is handled by the unified one-shot entry point.
         eprintln!("hint: stdin is not a TTY — use `roko \"prompt\"` for one-shot mode");
         return Ok(());
     }
@@ -1431,87 +1508,11 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
     input.history = load_history();
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let (dispatch, agent_session, system_message, cost_table) =
-        match crate::config::load_layered(&workdir) {
-            Ok(resolved) => {
-                let config = resolved.config;
-                let mut model_config = roko_core::config::schema::RokoConfig::default();
-                model_config.providers.extend(config.providers.clone());
-                model_config.models.extend(config.models.clone());
-                if let Some(model) = config.agent.model.clone() {
-                    model_config.agent.default_model = model;
-                }
-                model_config.agent.default_effort = config.agent.effort.clone();
-                model_config.agent.bare_mode = config.agent.bare_mode;
-                model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
-                model_config.agent.fallback_model = config.agent.fallback_model.clone();
-                model_config.agent.tier_models = config.agent.tier_models.clone();
-                model_config.agent.env = Some(config.agent.env.clone());
-
-                let ct = CostTable::from_config(&model_config.models).with_defaults();
-
-                let role = {
-                    let role = config.prompt.role.trim();
-                    (!role.is_empty()).then(|| role.to_string())
-                };
-
-                match crate::model_selection::resolve_effective_model(
-                    None,
-                    None,
-                    role,
-                    None,
-                    &model_config,
-                    None,
-                ) {
-                    Ok(selection) => {
-                        match ChatAgentSession::new(&config, workdir.clone(), selection) {
-                            Ok(agent_session) => {
-                                let system_message =
-                                    Some(agent_session.system_prompt.clone());
-                                (
-                                    DispatchMode::Session,
-                                    Some(agent_session),
-                                    system_message,
-                                    ct,
-                                )
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = %error,
-                                    "ChatAgentSession init failed; using direct dispatch"
-                                );
-                                (
-                                    DispatchMode::Direct { auth: auth.clone() },
-                                    None,
-                                    None,
-                                    ct,
-                                )
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "failed to resolve interactive chat model; using direct dispatch"
-                        );
-                        (
-                            DispatchMode::Direct { auth: auth.clone() },
-                            None,
-                            None,
-                            ct,
-                        )
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "failed to load interactive chat config; using direct dispatch"
-                );
-                let ct = CostTable::from_config(&HashMap::new()).with_defaults();
-                (DispatchMode::Direct { auth: auth.clone() }, None, None, ct)
-            }
-        };
+    let (agent_session, system_message, cost_table) =
+        build_unified_inline_agent_session(workdir.clone()).map_err(|error| {
+            tracing::warn!("{error:#}");
+            error
+        })?;
 
     let mut session = ChatSession {
         phase: Phase::Input,
@@ -1522,7 +1523,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
         agent_id: "roko".to_string(),
         tick: 0,
         started_at: Instant::now(),
-        dispatch,
+        dispatch: DispatchMode::Session,
         response_rx: None,
         streaming_event_rx: None,
         turn_count: 0,
@@ -1532,7 +1533,8 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
         system_message,
         compact: false,
         quiet: false,
-        agent_session,
+        agent_session: Some(agent_session),
+        last_ctrl_c: None,
     };
 
     // Main event loop (identical structure to run_chat_inline)
@@ -1553,14 +1555,30 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                         if key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
+                            let now = Instant::now();
+                            let double_tap = session.last_ctrl_c.map_or(false, |prev| {
+                                now.duration_since(prev) < Duration::from_millis(500)
+                            });
+                            session.last_ctrl_c = Some(now);
+
                             if !session.streaming.is_empty() {
                                 let text = session.streaming.take_buffer();
                                 push_agent_response(&mut term, &theme, &text, &session.agent_id)?;
                             }
+                            if double_tap {
+                                term.push_lines(&[styled::continuation(
+                                    &theme,
+                                    "",
+                                    "[exiting]",
+                                    None,
+                                )])?;
+                                session.phase = Phase::Done;
+                                break;
+                            }
                             term.push_lines(&[styled::continuation(
                                 &theme,
                                 "",
-                                "[interrupted]",
+                                "[interrupted — Ctrl-C again to exit]",
                                 None,
                             )])?;
                             session.phase = Phase::Input;
@@ -1772,15 +1790,10 @@ fn dispatch_prompt(session: &mut ChatSession, prompt: &str) {
                     .await;
             });
         }
-        DispatchMode::Direct { auth } => {
-            let auth_clone = auth.clone();
-            tokio::spawn(async move {
-                #[cfg(feature = "legacy-orchestrate")]
-                let result = dispatch_direct::dispatch_prompt(&auth_clone, &text).await;
-                #[cfg(not(feature = "legacy-orchestrate"))]
-                let result = crate::dispatch_v2::dispatch_via_model_call_service(&text).await;
-                let _ = tx.send(result.map_err(|e| e.to_string())).await;
-            });
+        DispatchMode::Direct { .. } => {
+            let _ = tx.try_send(Err(
+                ChatInlineDispatchError::DirectDispatchDisabled.to_string()
+            ));
         }
         DispatchMode::Session => {
             let Some(agent_session) = session.agent_session.as_ref() else {
@@ -2016,7 +2029,13 @@ async fn handle_input_key(
             return Ok(true);
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if session.input.is_empty() {
+            let now = Instant::now();
+            let double_tap = session.last_ctrl_c.map_or(false, |prev| {
+                now.duration_since(prev) < Duration::from_millis(500)
+            });
+            session.last_ctrl_c = Some(now);
+
+            if session.input.is_empty() || double_tap {
                 session.phase = Phase::Done;
                 return Ok(true);
             }
@@ -2306,12 +2325,7 @@ fn handle_slash_command(
                 styled::continuation(theme, "/input-history", "show typed input history", None),
                 styled::continuation(theme, "/copy", "copy last response to clipboard", None),
                 styled::continuation(theme, "/compact", "toggle compact output", None),
-                styled::continuation(
-                    theme,
-                    "/quiet",
-                    "toggle per-turn usage summary",
-                    None,
-                ),
+                styled::continuation(theme, "/quiet", "toggle per-turn usage summary", None),
                 styled::continuation(theme, "/system <text>", "set system message", None),
                 styled::continuation(theme, "/reset", "clear conversation", None),
                 styled::continuation(theme, "/retry", "resend last message", None),
@@ -2798,13 +2812,62 @@ fn handle_slash_command(
                     }
                     DispatchMode::Session => {
                         if let Some(agent_session) = session.agent_session.as_mut() {
-                            agent_session.model = arg.to_string();
-                            term.push_lines(&[styled::continuation(
-                                theme,
-                                "model",
-                                &format!("switched to {arg}"),
-                                None,
-                            )])?;
+                            // Re-resolve model selection so provider/slug/kind
+                            // stay in sync with the new model string.
+                            let workdir = agent_session.workdir.clone();
+                            match crate::config_helpers::load_roko_config(&workdir) {
+                                Ok(config) => {
+                                    match crate::model_selection::resolve_effective_model(
+                                        Some(arg.to_string()),
+                                        None,
+                                        None,
+                                        None,
+                                        &config,
+                                        None,
+                                    ) {
+                                        Ok(selection) => {
+                                            let provider_cfg =
+                                                config.providers.get(&selection.provider_key);
+                                            agent_session.provider_base_url =
+                                                provider_cfg.and_then(|p| p.base_url.clone());
+                                            agent_session.provider_api_key_env =
+                                                provider_cfg.and_then(|p| p.api_key_env.clone());
+                                            let display = selection.display_line();
+                                            agent_session.model =
+                                                selection.effective_model_key.clone();
+                                            agent_session.model_selection = selection;
+                                            term.push_lines(&[styled::continuation(
+                                                theme,
+                                                "model",
+                                                &format!("switched → {display}"),
+                                                None,
+                                            )])?;
+                                        }
+                                        Err(e) => {
+                                            // Resolution failed — fall back to
+                                            // setting the model string only.
+                                            agent_session.model = arg.to_string();
+                                            term.push_lines(&[styled::continuation(
+                                                theme,
+                                                "model",
+                                                &format!(
+                                                    "switched to {arg} (resolution warning: {e})"
+                                                ),
+                                                None,
+                                            )])?;
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    agent_session.model = arg.to_string();
+                                    term.push_lines(&[styled::continuation(
+                                        theme,
+                                        "model",
+                                        &format!("switched to {arg}"),
+                                        None,
+                                    )])?;
+                                }
+                            }
                         } else {
                             term.push_lines(&[styled::continuation(
                                 theme,
@@ -4462,10 +4525,7 @@ fn push_tool_outputs(
             )
         };
         term.push_lines(&[Line::from(vec![
-            Span::styled(
-                format!("  {indicator} "),
-                indicator_style,
-            ),
+            Span::styled(format!("  {indicator} "), indicator_style),
             Span::styled(
                 format!("[{tool_label}]"),
                 Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
@@ -4665,6 +4725,62 @@ mod tests {
         assert_eq!(result.tool_outputs.len(), 1);
         assert_eq!(result.tool_outputs[0].tool_name.as_deref(), Some("Read"));
         assert_eq!(result.tool_outputs[0].content, "file contents here");
+    }
+
+    #[test]
+    fn chat_session_init_error_blocks_dispatch_direct_fallback() {
+        let err = ChatInlineDispatchError::ChatSessionInit {
+            source: anyhow::anyhow!("synthetic init failure"),
+        };
+        let message = err.to_string();
+
+        assert!(message.contains("ChatAgentSession initialization failed"));
+        assert!(message.contains("refusing to fall back"));
+        assert!(message.contains("dispatch_direct"));
+        assert!(message.contains("synthetic init failure"));
+    }
+
+    #[test]
+    fn direct_dispatch_mode_returns_visible_failure() {
+        let mut session = ChatSession {
+            phase: Phase::Input,
+            input: InputState::new(),
+            streaming: StreamingState::new(""),
+            cost: CostMeter::new(),
+            cost_table: CostTable {
+                models: HashMap::new(),
+            }
+            .with_defaults(),
+            agent_id: "roko".to_string(),
+            tick: 0,
+            started_at: Instant::now(),
+            dispatch: DispatchMode::Direct {
+                auth: AuthMethod::ClaudeCli,
+            },
+            response_rx: None,
+            streaming_event_rx: None,
+            turn_count: 0,
+            thinking_started: None,
+            conversation: Vec::new(),
+            last_prompt: None,
+            system_message: None,
+            compact: false,
+            quiet: false,
+            agent_session: None,
+            last_ctrl_c: None,
+        };
+
+        dispatch_prompt(&mut session, "hello");
+        let err = session
+            .response_rx
+            .as_mut()
+            .expect("response channel")
+            .try_recv()
+            .expect("direct failure result")
+            .expect_err("direct dispatch should fail");
+
+        assert!(err.contains("direct inline dispatch is disabled"));
+        assert!(err.contains("ChatAgentSession"));
     }
 
     #[test]

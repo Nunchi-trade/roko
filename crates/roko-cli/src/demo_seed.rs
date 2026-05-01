@@ -1579,11 +1579,7 @@ fn task_metric_sections_included(spec: &DemoTaskSpec) -> u32 {
 }
 
 fn task_metric_sections_dropped(spec: &DemoTaskSpec) -> u32 {
-    if spec.success {
-        0
-    } else {
-        1
-    }
+    if spec.success { 0 } else { 1 }
 }
 
 fn tool_calls_for_task(spec: &DemoTaskSpec, primary: bool) -> Vec<ToolCallMeta> {

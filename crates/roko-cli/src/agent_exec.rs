@@ -5,18 +5,18 @@
 //! safety scoping, resume threading, and learning-episode persistence.
 
 use std::path::Path;
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::agent_config::{command_from_config, model_from_config};
 use crate::agent_episode::build_capture_episode;
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
+use crate::learning_helpers::distillation_model_caller;
 use anyhow::{Context as _, Result};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
 use roko_core::{Body, Context, Engram, Kind};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
-use crate::learning_helpers::distillation_model_caller;
 
 /// Options for agent execution.
 pub struct AgentExecOpts<'a> {

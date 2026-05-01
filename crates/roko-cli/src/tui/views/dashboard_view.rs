@@ -824,7 +824,10 @@ fn render_sub_mcp(
         for (model, usage) in model_usage {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{:>12}: ", truncate(&display_model(Some(model.as_str())), 12)),
+                    format!(
+                        "{:>12}: ",
+                        truncate(&display_model(Some(model.as_str())), 12)
+                    ),
                     theme.muted(),
                 ),
                 Span::styled(format!("{} turns", usage.turns), theme.text()),

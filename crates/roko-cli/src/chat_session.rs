@@ -7,23 +7,28 @@ use std::fs;
 use std::io::{self, Read as _, Write as StdWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use futures::StreamExt;
 use roko_agent::AgentRuntimeEvent;
 use roko_agent::agent::{Agent, AgentResult};
 use roko_agent::claude_cli_agent::ClaudeCliAgent;
+use roko_agent::model_call_service::ModelCallService;
 use roko_agent::process::{GRACE_STDIN_CLOSE_MS, kill_tree, set_process_group};
 use roko_agent::provider::claude_cli::stream::parse_stream_line;
 use roko_agent::safety::contract::AgentContract;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
 use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
 use roko_core::agent::ProviderKind;
-use roko_core::foundation::{ChatMessage, MessageRole};
+use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::foundation::{
+    CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, ModelStreamEvent,
+    TokenUsage, caller,
+};
 use roko_core::{Body, Context, Engram, Kind, OperatingFrequency};
-use thiserror::Error;
 use serde_yaml_ng as serde_yaml;
+use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::signal;
@@ -77,9 +82,7 @@ pub enum SessionError {
     /// The key is looked up from the environment variable named
     /// `<PROVIDER>_API_KEY` (e.g. `ANTHROPIC_API_KEY`).  Set the variable
     /// or add the provider to `roko.toml` before retrying.
-    #[error(
-        "no API key for provider '{provider}': set {env_var} or configure it in roko.toml"
-    )]
+    #[error("no API key for provider '{provider}': set {env_var} or configure it in roko.toml")]
     ApiKeyMissing {
         /// Provider kind label (for example `anthropic_api`).
         provider: String,
@@ -323,8 +326,6 @@ pub struct ChatAgentSession {
     pub session_id: Option<String>,
     /// API message history for non-CLI providers.
     pub api_history: Vec<ChatMessage>,
-    /// Shared HTTP client for API providers.
-    pub http_client: reqwest::Client,
     /// Path to Claude CLI settings JSON file.
     pub settings_json: Option<PathBuf>,
     /// Per-turn timeout.
@@ -355,9 +356,7 @@ impl ChatAgentSession {
             (config.agent.timeout_ms > 0).then(|| Duration::from_millis(config.agent.timeout_ms));
         let model = model_selection.effective_model_key.clone();
 
-        let provider_cfg = config
-            .providers
-            .get(&model_selection.provider_key);
+        let provider_cfg = config.providers.get(&model_selection.provider_key);
         let provider_base_url = provider_cfg.and_then(|p| p.base_url.clone());
         let provider_api_key_env = provider_cfg.and_then(|p| p.api_key_env.clone());
 
@@ -371,7 +370,6 @@ impl ChatAgentSession {
             mcp_config,
             session_id: None,
             api_history: Vec::new(),
-            http_client: shared_http_client(),
             settings_json: None,
             timeout,
             provider_base_url,
@@ -444,11 +442,7 @@ impl ChatAgentSession {
     /// the provider.  Maps the well-known error categories (auth, rate-limit,
     /// network) to typed variants so callers can distinguish them without
     /// parsing error messages.
-    fn classify_http_error(
-        &self,
-        status: u16,
-        body: &str,
-    ) -> SessionError {
+    fn classify_http_error(&self, status: u16, body: &str) -> SessionError {
         let provider = self.model_selection.provider_kind.clone();
         match status {
             401 | 403 => SessionError::AuthError { provider, status },
@@ -476,157 +470,224 @@ impl ChatAgentSession {
         }
     }
 
+    fn api_provider_kind(&self) -> ProviderKind {
+        match self.model_selection.provider_kind.as_str() {
+            "anthropic_api" => ProviderKind::AnthropicApi,
+            "claude_cli" => ProviderKind::ClaudeCli,
+            "cursor_acp" => ProviderKind::CursorAcp,
+            "perplexity_api" => ProviderKind::PerplexityApi,
+            "gemini_api" => ProviderKind::GeminiApi,
+            "cerebras_api" => ProviderKind::CerebrasApi,
+            "openai_compat" => ProviderKind::OpenAiCompat,
+            _ => ProviderKind::OpenAiCompat,
+        }
+    }
+
+    fn api_provider_key(&self) -> String {
+        let key = self.model_selection.provider_key.trim();
+        if key.is_empty() {
+            self.api_provider_kind().label().to_string()
+        } else {
+            key.to_string()
+        }
+    }
+
+    fn api_timeout_ms(&self) -> Option<u64> {
+        self.timeout
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+            .or(Some(120_000))
+    }
+
+    fn model_call_model_key(&self) -> String {
+        let key = self.model_selection.effective_model_key.trim();
+        if key.is_empty() {
+            self.model_selection.backend_slug.clone()
+        } else {
+            key.to_string()
+        }
+    }
+
+    fn model_call_slug(&self) -> String {
+        let slug = self.model_selection.backend_slug.trim();
+        if slug.is_empty() {
+            self.model_call_model_key()
+        } else {
+            slug.to_string()
+        }
+    }
+
+    fn model_call_config(&self) -> RokoConfig {
+        let mut config =
+            crate::config_helpers::load_roko_config(&self.workdir).unwrap_or_else(|err| {
+                tracing::warn!(
+                    workdir = %self.workdir.display(),
+                    error = %err,
+                    "failed to load roko.toml for chat model call; using session provider selection"
+                );
+                RokoConfig::default()
+            });
+        crate::config::merge_global_providers(&mut config);
+
+        let provider_key = self.api_provider_key();
+        let provider_kind = self.api_provider_kind();
+        config
+            .providers
+            .entry(provider_key.clone())
+            .or_insert_with(|| ProviderConfig {
+                kind: provider_kind,
+                base_url: self.provider_base_url.clone(),
+                api_key_env: self
+                    .provider_api_key_env
+                    .clone()
+                    .or_else(|| Some(self.api_key_env_var())),
+                command: None,
+                args: None,
+                timeout_ms: self.api_timeout_ms(),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            });
+
+        let model_key = self.model_call_model_key();
+        let model_slug = self.model_call_slug();
+        config
+            .models
+            .entry(model_key)
+            .or_insert_with(|| ModelProfile {
+                provider: provider_key,
+                slug: model_slug,
+                max_output: Some(4096),
+                supports_tools: false,
+                ..Default::default()
+            });
+
+        config
+    }
+
+    fn model_call_request(&self, prompt: &str) -> ModelCallRequest {
+        let mut messages = self.api_history.clone();
+        messages.push(ChatMessage {
+            role: MessageRole::User,
+            content: prompt.to_string(),
+        });
+
+        ModelCallRequest {
+            model: self.model_call_model_key(),
+            system: (!self.system_prompt.is_empty()).then(|| self.system_prompt.clone()),
+            messages,
+            max_tokens: Some(4096),
+            temperature: None,
+            role: Some("chat".to_string()),
+            caller: Some(caller::CLI.to_string()),
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
+            budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
+            cache_policy: CachePolicy::Bypass,
+        }
+    }
+
     /// Send a single turn through a direct API provider (non-CLI path).
     ///
     /// This method owns the full conversation lifecycle for non-CLI providers:
     ///
-    /// 1. Resolve the API key from the environment.
-    /// 2. Prepend the system prompt to the messages array (if non-empty).
-    /// 3. Append the user message to `api_history` and build the full
-    ///    `messages` array.
-    /// 4. Dispatch to the appropriate provider endpoint based on
-    ///    `model_selection.provider_kind`:
-    ///    - `anthropic_api` → `POST /v1/messages` with `x-api-key` header
-    ///    - `openai_compat` and everything else → `POST /chat/completions`
-    ///      with `Authorization: Bearer <key>` header
-    /// 5. Parse the response, extract text and usage.
-    /// 6. Push an `Assistant` message onto `api_history`.
-    /// 7. Return a [`TurnResult`] with text, usage, and elapsed time.
+    /// 1. Resolve the API key before mutating history, preserving the previous
+    ///    missing-key behaviour.
+    /// 2. Build a shared [`ModelCallRequest`] from system prompt and history.
+    /// 3. Append the user message to `api_history` before dispatching so
+    ///    cancellations do not silently drop it.
+    /// 4. Dispatch through [`ModelCallService::stream`] instead of duplicating
+    ///    provider HTTP logic in the chat session.
+    /// 5. Push an `Assistant` message onto `api_history`.
+    /// 6. Return a [`TurnResult`] with text, usage, and elapsed time.
     ///
     /// # Errors
     ///
-    /// Returns [`SessionError::ApiKeyMissing`] when no key is found,
-    /// [`SessionError::AuthError`] on 401/403, [`SessionError::RateLimited`]
-    /// on 429, and [`SessionError::NetworkError`] for other HTTP failures.
+    /// Returns [`SessionError::ApiKeyMissing`] when no key is found and
+    /// [`SessionError::NetworkError`] for provider dispatch failures.
     pub async fn send_turn_api(
         &mut self,
         prompt: &str,
     ) -> std::result::Result<TurnResult, SessionError> {
         let started = Instant::now();
         let provider_kind = self.model_selection.provider_kind.clone();
-        let model_slug = self.model_selection.backend_slug.clone();
+        let model_slug = self.model_call_slug();
 
-        // Step 1 — Resolve API key.
-        let api_key = self.resolve_api_key()?;
+        // Resolve the key before mutating history so missing-key failures keep
+        // the same session semantics as the previous API path.
+        let _api_key = self.resolve_api_key()?;
+        let request = self.model_call_request(prompt);
 
-        // Step 2 — Build the messages array from history.
-        //
-        // Prepend the system prompt as the first message (if non-empty) only
-        // when the history is empty so it is not duplicated across turns.
-        let mut messages: Vec<serde_json::Value> = Vec::new();
-        if self.api_history.is_empty() && !self.system_prompt.is_empty() {
-            messages.push(serde_json::json!({
-                "role": "system",
-                "content": self.system_prompt,
-            }));
-        }
-        for msg in &self.api_history {
-            let role = match msg.role {
-                MessageRole::System => "system",
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-            };
-            messages.push(serde_json::json!({
-                "role": role,
-                "content": msg.content,
-            }));
-        }
-        // Append the new user message.
-        messages.push(serde_json::json!({
-            "role": "user",
-            "content": prompt,
-        }));
-
-        // Step 3 — Record the user turn in history before dispatching so that
-        // cancellations do not silently drop it.
         self.api_history.push(ChatMessage {
             role: MessageRole::User,
             content: prompt.to_string(),
         });
 
-        // Step 4 — Dispatch to the provider.
-        //
-        // The provider-specific request body and endpoint differ between
-        // Anthropic's Messages API and OpenAI-compatible providers.
-        let (response_text, input_tokens, output_tokens): (String, u64, u64) = if provider_kind
-            == ProviderKind::AnthropicApi.label()
-        {
-            // ── Anthropic Messages API ──────────────────────────────────────
-            let request_body = serde_json::json!({
-                "model": model_slug,
-                "max_tokens": 4096_u32,
-                "messages": messages,
-            });
-            let base = self
-                .provider_base_url
-                .as_deref()
-                .unwrap_or("https://api.anthropic.com");
-            let url = format!("{base}/v1/messages");
-            tracing::debug!(provider = %provider_kind, model = %model_slug, url = %url,
-                "send_turn_api: Anthropic Messages API");
-            let resp = self.http_client.post(&url)
-                .header("x-api-key", &api_key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&request_body)
-                .send().await
-                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: e.to_string() })?;
-            if !resp.status().is_success() {
-                let status = resp.status().as_u16();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(self.classify_http_error(status, &body));
-            }
-            let body_text = resp.text().await
-                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: e.to_string() })?;
-            let body_json: serde_json::Value = serde_json::from_str(&body_text)
-                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: format!("invalid JSON: {e}") })?;
-            let text = body_json.pointer("/content").and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|b| b.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join(""))
-                .unwrap_or_default();
-            let in_tok = body_json.pointer("/usage/input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let out_tok = body_json.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            (text, in_tok, out_tok)
-        } else {
-            // ── OpenAI-compatible providers ─────────────────────────────────
-            let base_url = self.provider_base_url.as_deref().unwrap_or("https://api.openai.com/v1");
-            let url = format!("{base_url}/chat/completions");
-            let request_body = serde_json::json!({
-                "model": model_slug,
-                "messages": messages,
-            });
-            tracing::debug!(provider = %provider_kind, model = %model_slug, url = %url,
-                "send_turn_api: OpenAI-compat");
-            let resp = self.http_client.post(&url)
-                .bearer_auth(&api_key)
-                .json(&request_body)
-                .send().await
-                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: e.to_string() })?;
-            if !resp.status().is_success() {
-                let status = resp.status().as_u16();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(self.classify_http_error(status, &body));
-            }
-            let body_text = resp.text().await
-                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: e.to_string() })?;
-            let body_json: serde_json::Value = serde_json::from_str(&body_text)
-                .map_err(|e| SessionError::NetworkError { provider: provider_kind.clone(), message: format!("invalid JSON: {e}") })?;
-            let text = body_json.pointer("/choices/0/message/content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let in_tok = body_json.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let out_tok = body_json.pointer("/usage/completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            (text, in_tok, out_tok)
-        };
+        let config = self.model_call_config();
+        let mut caller = ModelCallService::new(model_slug.clone()).with_config(config);
+        if let Some(mcp_config) = self.mcp_config.clone() {
+            caller = caller.with_mcp_config(mcp_config);
+        }
+        let mut stream =
+            caller
+                .stream(request)
+                .await
+                .map_err(|error| SessionError::NetworkError {
+                    provider: provider_kind.clone(),
+                    message: error.to_string(),
+                })?;
 
-        // Step 5 — Push the assistant reply into history.
+        let mut response_text = String::new();
+        let mut usage = TokenUsage::default();
+        let mut response_model = model_slug;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                ModelStreamEvent::Started { model } => {
+                    response_model = model;
+                }
+                ModelStreamEvent::ContentDelta { text } => {
+                    response_text.push_str(&text);
+                }
+                ModelStreamEvent::Usage {
+                    usage: observed_usage,
+                } => {
+                    usage = observed_usage;
+                }
+                ModelStreamEvent::Completed { .. } => {}
+                ModelStreamEvent::Cancelled => {
+                    return Ok(TurnResult::cancelled(started.elapsed()));
+                }
+                ModelStreamEvent::Failed { error } => {
+                    return Err(SessionError::NetworkError {
+                        provider: provider_kind,
+                        message: error,
+                    });
+                }
+                ModelStreamEvent::AttemptFailed { model, error } => {
+                    tracing::warn!(
+                        provider = %provider_kind,
+                        model = %model,
+                        error = %error,
+                        "chat model-call attempt failed before fallback"
+                    );
+                }
+            }
+        }
+
         self.api_history.push(ChatMessage {
             role: MessageRole::Assistant,
             content: response_text.clone(),
         });
 
-        // Step 6 — Return the turn result.
         Ok(TurnResult {
             text: response_text,
-            model: model_slug,
-            input_tokens,
-            output_tokens,
+            model: response_model,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
             tool_calls: Vec::new(),
             session_id: None,
             duration: started.elapsed(),
@@ -731,7 +792,11 @@ impl ChatAgentSession {
                 } else {
                     self.system_prompt.clone()
                 };
-                let tool_count = self.allowed_tools_csv.split(',').filter(|s| !s.is_empty()).count();
+                let tool_count = self
+                    .allowed_tools_csv
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .count();
                 let api_turns = self.api_history.len();
                 let lines = vec![
                     format!("context  session"),
@@ -752,13 +817,19 @@ impl ChatAgentSession {
                 } else {
                     let total = self.api_history.len();
                     let start = total.saturating_sub(20);
-                    let mut lines = vec![format!("history  {} messages (showing last {})", total, total - start)];
+                    let mut lines = vec![format!(
+                        "history  {} messages (showing last {})",
+                        total,
+                        total - start
+                    )];
                     for (i, msg) in self.api_history[start..].iter().enumerate() {
                         let turn_num = start + i + 1;
                         let role = format!("{:?}", msg.role).to_lowercase();
                         let preview = preview_text(&msg.content, 50);
                         let char_count = msg.content.chars().count();
-                        lines.push(format!("  #{turn_num} {role:<12} {preview}  [{char_count} chars]"));
+                        lines.push(format!(
+                            "  #{turn_num} {role:<12} {preview}  [{char_count} chars]"
+                        ));
                     }
                     SlashResult::Display(lines.join("\n"))
                 }
@@ -772,9 +843,13 @@ impl ChatAgentSession {
     /// This is kept as a helper so tests can inspect the configured agent
     /// without needing to spawn a turn.
     pub fn build_agent(&self) -> Result<ClaudeCliAgent> {
-        let mut agent = ClaudeCliAgent::new("claude", self.workdir.clone(), self.model.clone())
-            .with_effort(&self.effort)
-            .with_bare_mode(false);
+        let mut agent = ClaudeCliAgent::new(
+            "claude",
+            self.workdir.clone(),
+            self.model_selection.backend_slug.clone(),
+        )
+        .with_effort(&self.effort)
+        .with_bare_mode(false);
 
         if !self.system_prompt.is_empty() {
             agent = agent.with_system_prompt(&self.system_prompt);
@@ -969,7 +1044,6 @@ impl ChatAgentSession {
             mcp_config: self.mcp_config.clone(),
             session_id: self.session_id.clone(),
             api_history: self.api_history.clone(),
-            http_client: reqwest::Client::new(),
             settings_json: self.settings_json.clone(),
             timeout: self.timeout,
             provider_base_url: self.provider_base_url.clone(),
@@ -986,13 +1060,13 @@ fn build_streaming_command(session: &ChatAgentSession, program: &Path) -> TokioC
         .arg("--output-format")
         .arg("stream-json")
         .arg("--model")
-        .arg(&session.model)
+        .arg(&session.model_selection.backend_slug)
         .arg("--effort")
         .arg(&session.effort)
         .arg("--settings")
         .arg(roko_agent::claude_cli_agent::build_settings_json());
 
-    if session.model != "claude-haiku-4-5" {
+    if session.model_selection.backend_slug != "claude-haiku-4-5" {
         cmd.arg("--fallback-model").arg("claude-haiku-4-5");
     }
     if !session.system_prompt.is_empty() {
@@ -1059,9 +1133,7 @@ async fn send_turn_streaming_with_program(
                 is_error: false,
             })
             .await;
-        let _ = tx
-            .send(AgentRuntimeEvent::Exited { exit_code: None })
-            .await;
+        let _ = tx.send(AgentRuntimeEvent::Exited { exit_code: None }).await;
         drop(tx);
         return Ok(result);
     }
@@ -1679,11 +1751,6 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-fn shared_http_client() -> reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new).clone()
-}
-
 fn preview_text(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let mut preview: String = chars.by_ref().take(max_chars).collect();
@@ -1744,7 +1811,6 @@ mod tests {
             mcp_config: None,
             session_id: None,
             api_history: Vec::new(),
-            http_client: reqwest::Client::new(),
             settings_json: None,
             timeout: Some(Duration::from_secs(30)),
             provider_base_url: None,
@@ -1765,7 +1831,6 @@ mod tests {
             mcp_config: None,
             session_id: None,
             api_history: Vec::new(),
-            http_client: reqwest::Client::new(),
             settings_json: None,
             timeout: Some(Duration::from_secs(5)),
             provider_base_url: None,
@@ -1945,10 +2010,7 @@ mod tests {
     fn classify_http_error_429_is_rate_limited() {
         let session = test_session();
         let err = session.classify_http_error(429, "{}");
-        assert!(
-            matches!(err, SessionError::RateLimited { .. }),
-            "{err:?}"
-        );
+        assert!(matches!(err, SessionError::RateLimited { .. }), "{err:?}");
     }
 
     #[test]
@@ -1968,10 +2030,7 @@ mod tests {
     fn classify_http_error_500_is_network_error() {
         let session = test_session();
         let err = session.classify_http_error(500, "internal error");
-        assert!(
-            matches!(err, SessionError::NetworkError { .. }),
-            "{err:?}"
-        );
+        assert!(matches!(err, SessionError::NetworkError { .. }), "{err:?}");
     }
 
     #[tokio::test]
@@ -1988,10 +2047,7 @@ mod tests {
         }
 
         let err = session.send_turn_api("first message").await.unwrap_err();
-        assert!(
-            matches!(err, SessionError::ApiKeyMissing { .. }),
-            "{err:?}"
-        );
+        assert!(matches!(err, SessionError::ApiKeyMissing { .. }), "{err:?}");
 
         // Key resolution happens before history mutation, so history is empty.
         assert!(
@@ -2341,7 +2397,10 @@ sleep 5
                 assert!(text.contains("high"), "missing effort: {text}");
                 assert!(text.contains("3 configured"), "missing tool count: {text}");
                 assert!(text.contains("none"), "missing mcp status: {text}");
-                assert!(text.contains("You are helpful"), "missing system preview: {text}");
+                assert!(
+                    text.contains("You are helpful"),
+                    "missing system preview: {text}"
+                );
                 assert!(text.contains("/tmp/test"), "missing workdir: {text}");
             }
             other => panic!("expected Display, got {other:?}"),
@@ -2354,7 +2413,10 @@ sleep 5
         s.system_prompt = "x".repeat(300);
         match s.handle_slash_command("/context") {
             SlashResult::Display(text) => {
-                assert!(text.contains("... [300 chars]"), "expected truncation: {text}");
+                assert!(
+                    text.contains("... [300 chars]"),
+                    "expected truncation: {text}"
+                );
             }
             other => panic!("expected Display, got {other:?}"),
         }
@@ -2385,7 +2447,10 @@ sleep 5
         // api_history is empty by default
         match s.handle_slash_command("/history") {
             SlashResult::Display(text) => {
-                assert!(text.contains("no turns yet"), "expected empty message: {text}");
+                assert!(
+                    text.contains("no turns yet"),
+                    "expected empty message: {text}"
+                );
             }
             other => panic!("expected Display, got {other:?}"),
         }
@@ -2407,7 +2472,10 @@ sleep 5
             SlashResult::Display(text) => {
                 assert!(text.contains("#1"), "missing turn 1: {text}");
                 assert!(text.contains("#2"), "missing turn 2: {text}");
-                assert!(text.contains("hello from user"), "missing user text: {text}");
+                assert!(
+                    text.contains("hello from user"),
+                    "missing user text: {text}"
+                );
                 assert!(
                     text.contains("hello from assistant"),
                     "missing assistant text: {text}"
@@ -2433,7 +2501,10 @@ sleep 5
                 assert!(text.contains("25 messages"), "missing total count: {text}");
                 // First 5 should be cut off; #6 (index 5) is the first shown.
                 assert!(!text.contains("#1 "), "turn 1 should not be shown: {text}");
-                assert!(text.contains("#6 ") || text.contains("#25 "), "late turns should appear: {text}");
+                assert!(
+                    text.contains("#6 ") || text.contains("#25 "),
+                    "late turns should appear: {text}"
+                );
             }
             other => panic!("expected Display, got {other:?}"),
         }

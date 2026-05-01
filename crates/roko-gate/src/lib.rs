@@ -112,6 +112,8 @@ pub mod pelt;
 pub mod process_reward;
 pub mod property_test_gate;
 pub mod ratchet;
+/// Shared gate metadata, status conversion, and alias/rung resolution.
+pub mod registry;
 pub mod review_verdict;
 pub mod rung_dispatch;
 pub mod rung_selector;
@@ -166,6 +168,7 @@ pub use process_reward::{
     AggregateMethod, ProcessRewardModel, ReasoningStep, StepVerdict, TurnSnapshot,
 };
 pub use ratchet::GateRatchet;
+pub use registry::{GateKind, GateRegistry, GateSpec, GateStatus};
 pub use review_verdict::{
     ParsedReviewVerdict, ReviewParseSource, ReviewVerdict, ReviewVerdictContext,
     parse_structured_review_verdict,

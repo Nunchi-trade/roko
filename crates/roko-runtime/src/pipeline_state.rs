@@ -31,6 +31,66 @@ pub enum WorkflowOutcome {
     Cancelled,
 }
 
+/// Typed result of a commit effect.
+///
+/// This is the active state-machine contract for commit effects. The legacy
+/// `PipelineInput::CommitDone` and `PipelineInput::CommitFailed` variants remain
+/// as compatibility adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommitOutcome {
+    /// A git commit was created.
+    Created {
+        /// Created commit hash.
+        hash: String,
+    },
+    /// The commit effect found no changes to commit.
+    NoChanges,
+    /// Commit creation was intentionally rejected before running git commit.
+    Rejected {
+        /// Human-readable rejection reason.
+        reason: String,
+    },
+    /// Commit creation failed.
+    Failed {
+        /// Human-readable failure details.
+        error: String,
+    },
+}
+
+impl CommitOutcome {
+    /// Convert a legacy successful commit input into a typed outcome.
+    pub fn from_commit_done(hash: impl Into<String>) -> Self {
+        Self::Created { hash: hash.into() }
+    }
+
+    /// Convert a legacy failed commit input into a typed outcome.
+    pub fn from_commit_failed(error: impl Into<String>) -> Self {
+        Self::Failed {
+            error: error.into(),
+        }
+    }
+
+    /// Convert the current legacy pipeline commit inputs into a typed outcome.
+    pub fn from_pipeline_input(input: &PipelineInput) -> Option<Self> {
+        match input {
+            PipelineInput::CommitFinished { outcome } => Some(outcome.clone()),
+            PipelineInput::CommitDone { hash: legacy_hash } => {
+                Some(Self::from_commit_done(legacy_hash.clone()))
+            }
+            PipelineInput::CommitFailed { error } => Some(Self::from_commit_failed(error.clone())),
+            _ => None,
+        }
+    }
+
+    /// Return the created commit hash, if this outcome actually created a commit.
+    pub fn created_hash(&self) -> Option<&str> {
+        match self {
+            Self::Created { hash } => Some(hash),
+            Self::NoChanges | Self::Rejected { .. } | Self::Failed { .. } => None,
+        }
+    }
+}
+
 /// Configuration for the pipeline. Determines which phases are active.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -465,12 +525,17 @@ pub enum PipelineInput {
         /// Findings that should guide the next implementation pass.
         findings: Vec<String>,
     },
-    /// Commit done.
+    /// Commit finished with a typed outcome.
+    CommitFinished {
+        /// Typed commit result from the effect driver.
+        outcome: CommitOutcome,
+    },
+    /// Legacy commit-done input.
     CommitDone {
         /// Commit hash created by the effect driver.
         hash: String,
     },
-    /// Commit failed.
+    /// Legacy commit-failed input.
     CommitFailed {
         /// Commit failure details from the effect driver.
         error: String,
@@ -723,20 +788,14 @@ impl PipelineStateV2 {
                 self.request_review_revision(vec![format!("Unclear review outcome: {summary}")])
             }
 
-            (Phase::Committing, PipelineInput::CommitDone { hash }) => {
-                self.commit_hash = Some(hash.clone());
-                self.phase = Phase::Complete;
-                PipelineOutput::Done {
-                    outcome: WorkflowOutcome::Success {
-                        commit_hash: Some(hash),
-                    },
-                }
+            (Phase::Committing, PipelineInput::CommitFinished { outcome }) => {
+                self.finish_commit(outcome)
+            }
+            (Phase::Committing, PipelineInput::CommitDone { hash: legacy_hash }) => {
+                self.finish_commit(CommitOutcome::from_commit_done(legacy_hash))
             }
             (Phase::Committing, PipelineInput::CommitFailed { error }) => {
-                self.phase = Phase::Halted {
-                    reason: error.clone(),
-                };
-                PipelineOutput::Halt { reason: error }
+                self.finish_commit(CommitOutcome::from_commit_failed(error))
             }
 
             (_, PipelineInput::UserCancel) => {
@@ -758,6 +817,33 @@ impl PipelineStateV2 {
                     std::mem::discriminant(&input),
                     phase
                 );
+                self.phase = Phase::Halted {
+                    reason: reason.clone(),
+                };
+                PipelineOutput::Halt { reason }
+            }
+        }
+    }
+
+    fn finish_commit(&mut self, outcome: CommitOutcome) -> PipelineOutput {
+        match outcome {
+            CommitOutcome::Created { hash } => {
+                self.commit_hash = Some(hash.clone());
+                self.phase = Phase::Complete;
+                PipelineOutput::Done {
+                    outcome: WorkflowOutcome::Success {
+                        commit_hash: Some(hash),
+                    },
+                }
+            }
+            CommitOutcome::NoChanges => {
+                self.commit_hash = None;
+                self.phase = Phase::Complete;
+                PipelineOutput::Done {
+                    outcome: WorkflowOutcome::Success { commit_hash: None },
+                }
+            }
+            CommitOutcome::Rejected { reason } | CommitOutcome::Failed { error: reason } => {
                 self.phase = Phase::Halted {
                     reason: reason.clone(),
                 };
@@ -805,7 +891,9 @@ mod tests {
         let out = sm.step(PipelineInput::GatesPassed);
         assert!(matches!(out, PipelineOutput::Commit));
 
-        let out = sm.step(PipelineInput::CommitDone { hash: "abc".into() });
+        let out = sm.step(PipelineInput::CommitFinished {
+            outcome: CommitOutcome::Created { hash: "abc".into() },
+        });
         assert!(matches!(out, PipelineOutput::Done { .. }));
         assert_eq!(sm.phase, Phase::Complete);
     }
@@ -1105,5 +1193,64 @@ role = "implementer"
         assert_eq!(checkpoint.phase, Phase::Complete);
         assert_eq!(original.autofix_attempts, 0);
         assert!(checkpoint.autofix_attempts > 0);
+    }
+
+    #[test]
+    fn commit_outcome_created_carries_hash() {
+        let outcome = CommitOutcome::from_pipeline_input(&PipelineInput::CommitDone {
+            hash: "abc123".into(),
+        });
+
+        assert_eq!(
+            outcome,
+            Some(CommitOutcome::Created {
+                hash: "abc123".into()
+            })
+        );
+        assert_eq!(
+            outcome.as_ref().and_then(CommitOutcome::created_hash),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn commit_outcome_no_changes_has_no_hash() {
+        let outcome = CommitOutcome::NoChanges;
+
+        assert_eq!(outcome.created_hash(), None);
+    }
+
+    #[test]
+    fn commit_no_changes_is_not_created_commit() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "fix bug".into());
+        sm.phase = Phase::Committing;
+
+        let out = sm.step(PipelineInput::CommitFinished {
+            outcome: CommitOutcome::NoChanges,
+        });
+
+        assert!(matches!(
+            out,
+            PipelineOutput::Done {
+                outcome: WorkflowOutcome::Success { commit_hash: None }
+            }
+        ));
+        assert_eq!(sm.phase, Phase::Complete);
+        assert_eq!(sm.commit_hash, None);
+    }
+
+    #[test]
+    fn commit_outcome_failed_converts_from_legacy_commit_failed() {
+        let outcome = CommitOutcome::from_pipeline_input(&PipelineInput::CommitFailed {
+            error: "git commit failed".into(),
+        });
+
+        assert_eq!(
+            outcome,
+            Some(CommitOutcome::Failed {
+                error: "git commit failed".into()
+            })
+        );
+        assert_eq!(outcome.as_ref().and_then(CommitOutcome::created_hash), None);
     }
 }

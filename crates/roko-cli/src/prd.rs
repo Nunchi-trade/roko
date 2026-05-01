@@ -34,6 +34,82 @@ use roko_learn::episode_logger::{Episode, EpisodeLogger};
 pub use roko_learn::runtime_feedback::{ArtifactValidationReport, GenerationOutcome};
 use roko_runtime::event_bus::{PublishOrigin, RokoEvent, global_event_bus};
 
+/// Typed artifact result projected from the current PRD/plan generation outcome.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArtifactOutcome {
+    Valid {
+        artifact_type: String,
+        path: PathBuf,
+        report: ArtifactValidationReport,
+    },
+    Invalid {
+        artifact_type: String,
+        path: Option<PathBuf>,
+        report: Option<ArtifactValidationReport>,
+    },
+    NotProduced {
+        artifact_type: String,
+        reason: String,
+    },
+    ValidationUnavailable {
+        artifact_type: String,
+        path: Option<PathBuf>,
+        reason: String,
+    },
+}
+
+impl ArtifactOutcome {
+    /// Adapt the legacy `GenerationOutcome` booleans without changing generation behavior.
+    #[must_use]
+    pub fn from_generation_outcome(
+        artifact_type: impl Into<String>,
+        path: Option<PathBuf>,
+        outcome: &GenerationOutcome,
+    ) -> Self {
+        let artifact_type = artifact_type.into();
+        if !outcome.process_success {
+            return Self::NotProduced {
+                artifact_type,
+                reason: "generation process failed".to_string(),
+            };
+        }
+
+        if !outcome.artifact_valid {
+            return Self::Invalid {
+                artifact_type,
+                path,
+                report: outcome.validation_report.clone(),
+            };
+        }
+
+        let Some(path) = path else {
+            return Self::NotProduced {
+                artifact_type,
+                reason: "generation process succeeded but no artifact path was provided"
+                    .to_string(),
+            };
+        };
+
+        match &outcome.validation_report {
+            Some(report) => Self::Valid {
+                artifact_type,
+                path,
+                report: report.clone(),
+            },
+            None => Self::ValidationUnavailable {
+                artifact_type,
+                path: Some(path),
+                reason: "artifact validation report was not available".to_string(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid { .. })
+    }
+}
+
 fn tier_rank(tier: &str) -> u8 {
     match tier {
         "mechanical" => 0,
@@ -957,9 +1033,7 @@ async fn generate_plan_from_prd_with_outcome(
         if dry_run {
             if changed.is_empty() {
                 artifact_valid = false;
-                eprintln!(
-                    "warning: dry-run plan generation did not produce any tasks.toml files"
-                );
+                eprintln!("warning: dry-run plan generation did not produce any tasks.toml files");
             } else {
                 for path in &changed {
                     if let Err(err) = dry_run_fs::validate_and_print_preview(path) {
@@ -994,9 +1068,7 @@ async fn generate_plan_from_prd_with_outcome(
                     artifact_valid = false;
                     eprintln!(
                         "warning: artifact validation found {} error(s) and {} warning(s) for {}",
-                        report.totals.errors,
-                        report.totals.warnings,
-                        slug
+                        report.totals.errors, report.totals.warnings, slug
                     );
                 }
                 validation_report = serde_json::to_value(&report).ok();
@@ -1019,7 +1091,12 @@ async fn generate_plan_from_prd_with_outcome(
             validation_report,
         };
 
-        Ok((workspace_plans_dir(&workdir), task_count, estimated_complexity, outcome))
+        Ok((
+            workspace_plans_dir(&workdir),
+            task_count,
+            estimated_complexity,
+            outcome,
+        ))
     }
     .await;
 
@@ -1338,9 +1415,7 @@ impl PrdArtifactReport {
         if self.artifact_valid {
             println!("PRD artifact validation: PASSED ({warnings} warnings)");
         } else {
-            println!(
-                "PRD artifact validation: FAILED ({errors} errors, {warnings} warnings)"
-            );
+            println!("PRD artifact validation: FAILED ({errors} errors, {warnings} warnings)");
         }
     }
 }
@@ -1484,12 +1559,7 @@ pub fn validate_prd_grounding(
     }
 
     // R4_B03b: "new crate X" proposals that duplicate existing workspace members.
-    let new_crate_patterns = [
-        "new crate: ",
-        "new crate `",
-        "create crate ",
-        "add crate ",
-    ];
+    let new_crate_patterns = ["new crate: ", "new crate `", "create crate ", "add crate "];
     for line in grounding_text.lines() {
         let line_lower = line.to_lowercase();
         for pat in &new_crate_patterns {
@@ -1597,6 +1667,99 @@ mod tests {
         assert_eq!(partial.status_label(), "partial_success");
         assert!(!failure.fully_successful());
         assert_eq!(failure.status_label(), "failure");
+    }
+
+    #[test]
+    fn artifact_outcome_valid_requires_process_artifact_path_and_report() {
+        let outcome = GenerationOutcome {
+            process_success: true,
+            artifact_valid: true,
+            validation_report: Some(serde_json::json!({"totals": {"errors": 0}})),
+        };
+        let path = PathBuf::from(".roko/plans/demo");
+
+        let artifact =
+            ArtifactOutcome::from_generation_outcome("prd-plan", Some(path.clone()), &outcome);
+
+        assert_eq!(
+            artifact,
+            ArtifactOutcome::Valid {
+                artifact_type: "prd-plan".to_string(),
+                path,
+                report: serde_json::json!({"totals": {"errors": 0}}),
+            }
+        );
+        assert!(artifact.is_valid());
+    }
+
+    #[test]
+    fn artifact_outcome_invalid_is_not_success() {
+        let outcome = GenerationOutcome {
+            process_success: true,
+            artifact_valid: false,
+            validation_report: Some(serde_json::json!({"totals": {"errors": 2}})),
+        };
+        let path = PathBuf::from(".roko/plans/demo");
+
+        let artifact =
+            ArtifactOutcome::from_generation_outcome("prd-plan", Some(path.clone()), &outcome);
+
+        assert_eq!(
+            artifact,
+            ArtifactOutcome::Invalid {
+                artifact_type: "prd-plan".to_string(),
+                path: Some(path),
+                report: Some(serde_json::json!({"totals": {"errors": 2}})),
+            }
+        );
+        assert!(!artifact.is_valid());
+    }
+
+    #[test]
+    fn artifact_outcome_process_failure_is_not_produced() {
+        let outcome = GenerationOutcome {
+            process_success: false,
+            artifact_valid: true,
+            validation_report: Some(serde_json::json!({"ignored": true})),
+        };
+
+        let artifact = ArtifactOutcome::from_generation_outcome(
+            "prd-plan",
+            Some(PathBuf::from(".roko/plans/demo")),
+            &outcome,
+        );
+
+        assert_eq!(
+            artifact,
+            ArtifactOutcome::NotProduced {
+                artifact_type: "prd-plan".to_string(),
+                reason: "generation process failed".to_string(),
+            }
+        );
+        assert!(!artifact.is_valid());
+    }
+
+    #[test]
+    fn artifact_outcome_validation_unavailable_is_not_success() {
+        let outcome = GenerationOutcome {
+            process_success: true,
+            artifact_valid: true,
+            validation_report: None,
+        };
+        let path = PathBuf::from(".roko/plans/demo");
+
+        let artifact =
+            ArtifactOutcome::from_generation_outcome("prd-plan", Some(path.clone()), &outcome);
+
+        assert_eq!(
+            artifact,
+            ArtifactOutcome::ValidationUnavailable {
+                artifact_type: "prd-plan".to_string(),
+                path: Some(path),
+                reason: "artifact validation report was not available".to_string(),
+            }
+        );
+        assert!(!artifact.is_valid());
     }
 
     #[test]
@@ -1719,10 +1882,16 @@ mod tests {
     fn check_grounding_section_rejects_missing_section() {
         let content = "---\nid: prd-demo\n---\n# Demo\n\n## Requirements\n\nSome req.\n";
         let report = check_grounding_section(content, "demo", true);
-        assert!(!report.artifact_valid, "missing section must set artifact_valid=false");
         assert!(
-            report.issues.iter().any(|i| i.severity == PrdValidationSeverity::Error
-                && i.category == "missing_section"),
+            !report.artifact_valid,
+            "missing section must set artifact_valid=false"
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.severity == PrdValidationSeverity::Error
+                    && i.category == "missing_section"),
             "expected missing_section error"
         );
     }
@@ -1760,10 +1929,16 @@ mod tests {
         let content = "# Demo\n\n## Repository Grounding\n\nnew crate: roko-core\n";
         let members = vec!["roko-core".to_string()];
         let report = validate_prd_grounding(content, "demo", Path::new("/tmp"), &members, true);
-        assert!(!report.artifact_valid, "duplicate crate must set artifact_valid=false");
         assert!(
-            report.issues.iter().any(|i| i.category == "duplicate_crate"
-                && i.severity == PrdValidationSeverity::Error)
+            !report.artifact_valid,
+            "duplicate crate must set artifact_valid=false"
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == "duplicate_crate"
+                    && i.severity == PrdValidationSeverity::Error)
         );
     }
 
@@ -1772,11 +1947,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let content = "# Demo\n\n## Repository Grounding\n\n**Source files**:\n- crates/roko-cli/src/no_such_file.rs — does not exist\n";
         let report = validate_prd_grounding(content, "demo", tmp.path(), &[], true);
-        assert!(!report.artifact_valid, "nonexistent file ref must set artifact_valid=false");
         assert!(
-            report.issues.iter().any(|i| i.category == "missing_file_ref"
-                && i.severity == PrdValidationSeverity::Error)
+            !report.artifact_valid,
+            "nonexistent file ref must set artifact_valid=false"
         );
+        assert!(report.issues.iter().any(
+            |i| i.category == "missing_file_ref" && i.severity == PrdValidationSeverity::Error
+        ));
     }
 
     #[test]
@@ -1790,7 +1967,10 @@ mod tests {
         let report = validate_prd_grounding(content, "demo", tmp.path(), &[], true);
         assert!(report.artifact_valid, "existing file ref must pass");
         assert!(
-            !report.issues.iter().any(|i| i.category == "missing_file_ref"),
+            !report
+                .issues
+                .iter()
+                .any(|i| i.category == "missing_file_ref"),
             "no missing_file_ref issues expected"
         );
     }
@@ -1803,7 +1983,8 @@ mod tests {
 
     #[test]
     fn extract_prd_section_extracts_body() {
-        let content = "# Title\n\n## Repository Grounding\n\nCrates: roko-core.\n\n## References\n\nRef 1.\n";
+        let content =
+            "# Title\n\n## Repository Grounding\n\nCrates: roko-core.\n\n## References\n\nRef 1.\n";
         let body = extract_prd_section(content, "repository grounding").unwrap();
         assert!(body.contains("Crates: roko-core."), "body: {body}");
         assert!(!body.contains("## References"), "must stop at next heading");

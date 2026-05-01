@@ -109,7 +109,7 @@ function rustSetupCommand(example: PipelineScenarioExample): string {
  * shell escaping issues with quotes, newlines, and special chars.
  */
 async function writeFileViaPty(
-  handle: { execCmd(cmd: string, timeout?: number): Promise<boolean> },
+  handle: { execCmd(cmd: string, timeout?: number): Promise<unknown> },
   path: string,
   content: string,
 ): Promise<void> {
@@ -132,7 +132,7 @@ async function writeFileViaPty(
  * of dispatching LLM agents.
  */
 async function seedWorkspace(
-  handle: { execCmd(cmd: string, timeout?: number): Promise<boolean> },
+  handle: { execCmd(cmd: string, timeout?: number): Promise<unknown> },
   example: PipelineScenarioExample,
 ): Promise<void> {
   if (!example.seedPrd) return;
@@ -224,6 +224,7 @@ export const prdPipeline: Scenario = {
       await main.execCmd(setupCmd, 10000);
       await seedWorkspace(main, example);
       await main.execCmd(`${ROKO} init 2>/dev/null; true`, 10000);
+      // Wipe all setup noise so the visible demo starts on a clean terminal.
       main.clearTerminal();
 
       // ── Step 1: prd idea ────────────────────────────────────
@@ -237,7 +238,11 @@ export const prdPipeline: Scenario = {
         currentCommand: ideaCmd,
       });
       ctx.appendPipelineEvent(pipelineEvent('idea', 'Idea captured into .roko/prd/ideas.md.'));
-      await showCmd(main, ideaCmd, { timeout: 45000, onLog: logCommand, onLogComplete: logCommandComplete, playback });
+      const ideaResult = await showCmd(main, ideaCmd, { timeout: 45000, onLog: logCommand, onLogComplete: logCommandComplete, playback });
+      if (!ideaResult.ok) {
+        failPipeline(ctx, 'failed', 'prd idea command failed', 'prd idea returned a non-zero exit code.');
+        return;
+      }
       await refreshWorkflowSnapshot(ctx, dir, 'idea', 'Captured idea is visible to the workflow projection', ideaCmd);
       setMetric('tokens', 'idea');
 

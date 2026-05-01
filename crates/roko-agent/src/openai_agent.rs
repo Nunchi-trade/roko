@@ -19,7 +19,7 @@ use crate::agent::{Agent, AgentResult};
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
-use crate::translate::openai::parse_usage;
+use crate::translate::openai::parse_usage_observation;
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
@@ -219,10 +219,9 @@ impl Agent for OpenAiAgent {
             }
         };
 
-        // Pull usage if present.
-        let usage = parse_usage(&parsed);
-
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut usage_obs = parse_usage_observation(&parsed);
+        usage_obs.wall_ms = wall_ms;
 
         let out_signal = input
             .derive(Kind::AgentOutput, Body::text(&content))
@@ -231,13 +230,7 @@ impl Agent for OpenAiAgent {
             .tag("model", &self.model)
             .build();
 
-        AgentResult::ok(out_signal).with_usage(Usage {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_read_tokens: usage.cache_read_tokens,
-            wall_ms,
-            ..Default::default()
-        })
+        AgentResult::ok(out_signal).with_usage_obs(usage_obs)
     }
 
     fn name(&self) -> &str {
@@ -374,6 +367,55 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.usage.input_tokens, 42);
         assert_eq!(result.usage.output_tokens, 17);
+        let usage_obs = result.usage_obs.expect("usage observation");
+        assert_eq!(
+            usage_obs.source,
+            crate::usage::UsageSource::ProviderReported
+        );
+        assert_eq!(usage_obs.input_tokens, Some(42));
+        assert_eq!(usage_obs.output_tokens, Some(17));
+    }
+
+    #[tokio::test]
+    async fn missing_usage_is_preserved_as_unknown_observation() {
+        let body = serde_json::json!({
+            "id": "chatcmpl-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string();
+        let (mock, _) = MockPoster::ok(body);
+        let agent = agent_with("sk-test", "gpt-4o", Box::new(mock));
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+
+        assert!(result.success);
+        assert_eq!(result.usage.input_tokens, 0);
+        assert_eq!(result.usage.output_tokens, 0);
+        let usage_obs = result.usage_obs.expect("usage observation");
+        assert_eq!(usage_obs.source, crate::usage::UsageSource::Unknown);
+        assert_eq!(usage_obs.input_tokens, None);
+        assert_eq!(usage_obs.output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn explicit_zero_usage_is_provider_reported() {
+        let (mock, _) = MockPoster::ok(canned_ok("ok", 0, 0));
+        let agent = agent_with("sk-test", "gpt-4o", Box::new(mock));
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+
+        assert!(result.success);
+        assert_eq!(result.usage.input_tokens, 0);
+        assert_eq!(result.usage.output_tokens, 0);
+        let usage_obs = result.usage_obs.expect("usage observation");
+        assert_eq!(
+            usage_obs.source,
+            crate::usage::UsageSource::ProviderReported
+        );
+        assert_eq!(usage_obs.input_tokens, Some(0));
+        assert_eq!(usage_obs.output_tokens, Some(0));
     }
 
     #[tokio::test]

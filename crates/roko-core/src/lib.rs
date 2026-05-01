@@ -83,6 +83,7 @@ pub mod dashboard_snapshot;
 pub mod datum;
 pub mod decay;
 pub mod demurrage;
+pub mod dispatch_plan;
 /// Domain profiles for agent specialization: gate defaults, tool sets, context templates.
 pub mod domain_profile;
 pub mod engram;
@@ -149,6 +150,7 @@ pub mod task;
 pub mod temperament;
 pub mod tool;
 pub mod traits;
+pub mod usage;
 pub mod verdict;
 
 pub use affect::{BehavioralState, DaimonPolicy, EmotionalTag, PadVector};
@@ -189,6 +191,11 @@ pub use context::Context;
 pub use datum::Datum;
 pub use decay::Decay;
 pub use demurrage::Demurrage;
+pub use dispatch_plan::{
+    DispatchAttempt, DispatchAttemptKind, DispatchAuthStatus, DispatchCaller, DispatchError,
+    DispatchPlan, DispatchRequest, DispatchRequirement, FallbackPolicy, TransportAuth,
+    TransportPlan,
+};
 pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
@@ -198,10 +205,11 @@ pub use forensic::{
     ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,
 };
 pub use foundation::{
-    ChatMessage as FoundationChatMessage, Effect, EffectExecutor, EffectOutcome, EventConsumer,
-    FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner, GateVerdict, MessageRole,
-    ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec,
-    ShellGateCommand, TokenUsage,
+    BoxModelStream, ChatMessage as FoundationChatMessage, Effect, EffectExecutor, EffectOutcome,
+    EventConsumer, FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner, GateVerdict,
+    MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, ModelStreamEvent,
+    PromptAssembler, PromptSpec, ShellGateCommand, TokenUsage, model_call_failure_to_stream,
+    model_call_response_to_stream,
 };
 pub use hash::ContentHash;
 pub use heartbeat::{
@@ -257,6 +265,7 @@ pub use task::{
     GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight,
     TaskDomain, TaskMeta, TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
 };
+pub use usage::{UsageObservation, UsageSource};
 // Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
 // `roko_core::tool::FailureKind`.

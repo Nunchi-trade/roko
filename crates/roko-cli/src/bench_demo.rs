@@ -597,11 +597,7 @@ async fn run_task_real(workdir: &Path, task: &BenchTask, mode: &str) -> Result<B
             let input_tokens = report.usage.map(|u| u.input_tokens).unwrap_or(0);
             let output_tokens = report.usage.map(|u| u.output_tokens).unwrap_or(0);
             let gates_total = report.gate_verdicts.len() as u32;
-            let gates_passed = report
-                .gate_verdicts
-                .iter()
-                .filter(|(_, ok)| *ok)
-                .count() as u32;
+            let gates_passed = report.gate_verdicts.iter().filter(|(_, ok)| *ok).count() as u32;
 
             Ok(BenchResult {
                 task_id: task.id.clone(),

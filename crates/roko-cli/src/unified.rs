@@ -93,7 +93,8 @@ pub async fn cmd_unified_chat(
 /// Called for `roko "fix the bug"` (positional prompt, no subcommand).
 ///
 /// Uses `ChatAgentSession` for full system prompt, tools, MCP, and safety
-/// settings. Falls back to raw dispatch if session initialization fails.
+/// settings. Session initialization failures are user-visible errors; production
+/// one-shot dispatch must not downgrade to deprecated raw dispatch.
 pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
     let auth = detect_auth();
     if matches!(auth, AuthMethod::NeedsSetup) {
@@ -112,44 +113,10 @@ pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
     let mut session = match build_oneshot_session(&config, &auth, workdir.clone()) {
         Ok(session) => session,
         Err(e) => {
-            tracing::warn!("ChatAgentSession init failed ({e:#}), falling back to dispatch_direct");
-            // Fallback: raw dispatch (no system prompt, no tools, no MCP)
-            #[cfg(feature = "legacy-orchestrate")]
-            {
-                let result = {
-                    #[allow(deprecated)]
-                    {
-                        match crate::dispatch_v2::dispatch_via_model_call_service(prompt).await {
-                            Ok(r) => r,
-                            Err(e2) => {
-                                tracing::debug!(
-                                    "ModelCallService also failed ({e2:#}), using raw dispatch"
-                                );
-                                crate::dispatch_direct::dispatch_prompt(&auth, prompt).await?
-                            }
-                        }
-                    }
-                };
-                for tool_output in &result.tool_outputs {
-                    let label = tool_output.tool_name.as_deref().unwrap_or("tool");
-                    eprintln!(
-                        "[{label}] {}",
-                        tool_output.content.lines().next().unwrap_or("")
-                    );
-                }
-                println!("{}", result.text);
-                if !quiet {
-                    eprintln!(
-                        "\n[{} | {} in / {} out tokens]",
-                        result.model, result.input_tokens, result.output_tokens,
-                    );
-                }
-                return Ok(0);
-            }
-            #[cfg(not(feature = "legacy-orchestrate"))]
-            {
-                return Err(e);
-            }
+            let blocked = DispatchDirectFallbackBlocked::ChatSessionInit { source: e };
+            tracing::warn!("{blocked:#}");
+            eprintln!("error: {blocked:#}");
+            return Ok(1);
         }
     };
 
@@ -247,6 +214,17 @@ fn load_auto_start_config(config: &crate::config::Config) -> bool {
     config.serve.auto_start
 }
 
+#[derive(Debug, thiserror::Error)]
+enum DispatchDirectFallbackBlocked {
+    #[error(
+        "ChatAgentSession initialization failed; refusing to fall back to deprecated dispatch_direct path: {source:#}"
+    )]
+    ChatSessionInit {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
 fn build_oneshot_session(
     config: &crate::config::Config,
     auth: &AuthMethod,
@@ -318,5 +296,18 @@ mod tests {
         assert!(!load_auto_start_config(&config));
         config.serve.auto_start = true;
         assert!(load_auto_start_config(&config));
+    }
+
+    #[test]
+    fn dispatch_direct_fallback_blocked_error_names_raw_path() {
+        let err = DispatchDirectFallbackBlocked::ChatSessionInit {
+            source: anyhow::anyhow!("synthetic session init failure"),
+        };
+        let message = err.to_string();
+
+        assert!(message.contains("ChatAgentSession initialization failed"));
+        assert!(message.contains("refusing to fall back"));
+        assert!(message.contains("dispatch_direct"));
+        assert!(message.contains("synthetic session init failure"));
     }
 }

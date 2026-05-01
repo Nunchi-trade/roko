@@ -358,6 +358,7 @@ pub enum StopReason {
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ContentBlock {
     /// A plain text content block.
+    #[serde(alias = "content")]
     Text {
         /// Text body.
         text: String,
@@ -947,7 +948,39 @@ mod tests {
     }
 
     #[test]
-    fn session_update_agent_message_chunk_round_trip() {
+    fn content_block_text_serializes_canonical_wire_format() {
+        let block = ContentBlock::Text {
+            text: "hello".to_string(),
+        };
+
+        let serialized = serde_json::to_value(&block).expect("serialize content block");
+        assert_eq!(
+            serialized,
+            json!({
+                "type": "text",
+                "text": "hello"
+            })
+        );
+    }
+
+    #[test]
+    fn content_block_text_accepts_legacy_content_alias_inbound() {
+        let block: ContentBlock = serde_json::from_value(json!({
+            "type": "content",
+            "text": "hello"
+        }))
+        .expect("deserialize legacy content block alias");
+
+        assert_eq!(
+            block,
+            ContentBlock::Text {
+                text: "hello".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn content_block_session_update_agent_message_chunk_round_trip() {
         let update = SessionUpdate::AgentMessageChunk {
             content: ContentBlock::Text {
                 text: "hello".to_string(),

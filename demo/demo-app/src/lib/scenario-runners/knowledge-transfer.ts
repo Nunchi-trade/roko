@@ -104,6 +104,7 @@ export const knowledgeTransfer: Scenario = {
       `echo "Knowledge store synced from Alpha"`,
       10000,
     );
+    beta.clearTerminal();
 
     const betaTracker = trackMetrics(beta, {
       onCost: c => setMetric('cost', c),

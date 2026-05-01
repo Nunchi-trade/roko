@@ -98,7 +98,7 @@ fn model_slugs_with_availability_marks_configured_and_successful_models() {
         "claude-opus-4".to_string(),
     ]);
 
-    assert!(cascade.record_outcome("claude-haiku-3-5", true));
+    assert!(cascade.record_confidence_outcome("claude-haiku-3-5", true));
 
     let configured = vec!["claude-sonnet-4-5".to_string()];
     let availability = cascade.model_slugs_with_availability(&configured);
@@ -1302,16 +1302,35 @@ fn ucb_stage_uses_trained_linucb() {
 }
 
 #[test]
-fn record_outcome_updates_model_statistics() {
+fn record_confidence_outcome_updates_model_statistics_without_linucb_observations() {
     let cascade = CascadeRouter::new(test_slugs());
 
-    assert!(cascade.record_outcome("claude-sonnet-4-5", true));
-    // record_outcome only updates confidence stats, NOT the LinUCB
-    // bandit, so the LinUCB observation counter stays at 0.
+    assert!(cascade.record_confidence_outcome("claude-sonnet-4-5", true));
+    // record_confidence_outcome only updates confidence stats, NOT the
+    // LinUCB bandit, so the LinUCB observation counter stays at 0.
     assert_eq!(cascade.total_observations(), 0);
 
     let stats = cascade.confidence_snapshot();
     assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
+}
+
+#[test]
+fn override_without_context_records_confidence_only() {
+    let cascade = CascadeRouter::new(test_slugs());
+
+    assert!(
+        roko_agent::model_call_service::ForceBackendOverrideRecorder::record_override_outcome(
+            &cascade,
+            "claude-sonnet-4-5",
+            true,
+        )
+    );
+
+    assert_eq!(cascade.total_observations(), 0);
+    assert_eq!(
+        cascade.confidence_snapshot().get("claude-sonnet-4-5"),
+        Some(&(1, 1))
+    );
 }
 
 #[test]

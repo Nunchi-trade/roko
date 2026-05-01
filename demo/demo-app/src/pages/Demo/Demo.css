@@ -13,7 +13,7 @@
   height: calc(100vh - 48px);
   max-height: calc(100vh - 48px);
   overflow: hidden;
-  background: var(--bg-void);
+  background: transparent;
 }
 
 
@@ -26,7 +26,9 @@
   height: 36px;
   gap: var(--sp-2);
   border-bottom: 1px solid var(--glass-border);
-  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--bg-raised) 85%, transparent);
+  backdrop-filter: blur(12px) saturate(150%);
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
   flex-shrink: 0;
   transition: box-shadow var(--duration-smooth);
 }
@@ -71,12 +73,12 @@
 
 .demo-tab-list-wrapper::before {
   left: 0;
-  background: linear-gradient(90deg, var(--bg-raised) 0%, transparent 100%);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--bg-raised) 85%, transparent) 0%, transparent 100%);
 }
 
 .demo-tab-list-wrapper::after {
   right: 0;
-  background: linear-gradient(-90deg, var(--bg-raised) 0%, transparent 100%);
+  background: linear-gradient(-90deg, color-mix(in srgb, var(--bg-raised) 85%, transparent) 0%, transparent 100%);
 }
 
 .demo-tab-list-wrapper.scroll-left::before,
@@ -378,7 +380,7 @@
   min-width: 0;
   display: flex;
   position: relative;
-  background: var(--bg-void);
+  background: transparent;
 }
 
 /* Scanline overlay */
@@ -402,7 +404,7 @@
   gap: 1px;
   flex: 1;
   min-height: 0;
-  background: var(--glass-border);
+  background: color-mix(in srgb, var(--glass-border) 60%, transparent);
   /* Smooth morphing between 1-col and 2-col layouts */
   transition: grid-template-columns 400ms var(--ease-snappy);
 }
@@ -411,6 +413,7 @@
 .demo-cols-2 { grid-template-columns: 1fr 1fr; }
 .demo-cols-3 { grid-template-columns: 1fr 1fr 1fr; }
 .demo-cols-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.demo-cols-8 { grid-template-columns: 1fr 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }
 
 /* ── Individual terminal pane ── */
 
@@ -698,7 +701,9 @@
   overflow-x: hidden;
   padding: 6px;
   gap: 6px;
-  background: var(--bg-deeper, var(--bg-void));
+  background: color-mix(in srgb, var(--bg-deeper) 88%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   min-height: 0;
   min-width: 0;
 }
@@ -733,8 +738,9 @@
   min-height: 0;
   min-width: 0;
   background:
-    linear-gradient(180deg, color-mix(in srgb, var(--bg-raised) 95%, transparent), color-mix(in srgb, var(--bg-void) 98%, transparent)),
-    var(--bg-void);
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-raised) 82%, transparent), color-mix(in srgb, var(--bg-void) 85%, transparent));
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 @media (max-width: 900px) {

@@ -133,12 +133,7 @@ impl Default for RoutingContext {
 
 impl roko_agent::model_call_service::ForceBackendOverrideRecorder for CascadeRouter {
     fn record_override_outcome(&self, model_slug: &str, success: bool) -> bool {
-        CascadeRouter::record_override_outcome(
-            self,
-            model_slug,
-            &RoutingContext::default(),
-            success,
-        )
+        CascadeRouter::record_confidence_outcome(self, model_slug, success)
     }
 }
 
@@ -1034,8 +1029,11 @@ impl CascadeRouter {
         true
     }
 
-    /// Record a binary outcome for `model_slug` without a full routing context.
-    pub fn record_outcome(&self, model_slug: &str, success: bool) -> bool {
+    /// Record a binary confidence-only outcome for `model_slug`.
+    ///
+    /// This path intentionally does not update the contextual `LinUCB` bandit
+    /// because the caller has not supplied a real [`RoutingContext`].
+    pub fn record_confidence_outcome(&self, model_slug: &str, success: bool) -> bool {
         let Some(model_idx) = self.model_index_for_slug(model_slug) else {
             return false;
         };
@@ -1051,6 +1049,19 @@ impl CascadeRouter {
             entry.successes += 1;
         }
         true
+    }
+
+    /// Deprecated alias for callers that have not migrated to the
+    /// confidence-only API name yet.
+    ///
+    /// Follow-up packet: migrate remaining non-`roko-learn` callers to
+    /// `record_confidence_outcome` and remove this wrapper.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use record_confidence_outcome; this path does not update contextual LinUCB observations"
+    )]
+    pub fn record_outcome(&self, model_slug: &str, success: bool) -> bool {
+        self.record_confidence_outcome(model_slug, success)
     }
 
     /// Record a force_backend override outcome for learning (UX34).

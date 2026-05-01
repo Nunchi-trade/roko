@@ -125,7 +125,7 @@ impl AgentBackend {
     #[must_use]
     pub fn from_model(slug: &str) -> Self {
         let slug = slug.trim();
-        if slug.starts_with("claude-") {
+        if slug.starts_with("claude-") || matches!(slug, "sonnet" | "opus" | "haiku") {
             Self::Claude
         } else if slug.starts_with("ollama/") || slug.starts_with("llama") {
             Self::Ollama

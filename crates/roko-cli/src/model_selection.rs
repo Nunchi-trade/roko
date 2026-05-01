@@ -104,9 +104,7 @@ impl EffectiveModelSelection {
 pub enum Error {
     /// The caller provided an empty model string for a required input.
     #[error("{selection_source} received an empty model value")]
-    EmptyModel {
-        selection_source: SelectionSource,
-    },
+    EmptyModel { selection_source: SelectionSource },
     /// The selected model points at a provider key that is not configured.
     #[error(
         "{selection_source} selected model '{model}', but provider '{provider_key}' is not configured"
@@ -148,7 +146,14 @@ pub fn resolve_effective_model(
     config: &RokoConfig,
     cli_provider: Option<String>,
 ) -> Result<EffectiveModelSelection, Error> {
-    let candidate = select_candidate(cli_model, task_hint, role, cascade_router, config, cli_provider)?;
+    let candidate = select_candidate(
+        cli_model,
+        task_hint,
+        role,
+        cascade_router,
+        config,
+        cli_provider,
+    )?;
     let source = candidate.source;
     let requested_model = candidate.model;
     let resolved = resolve_model(config, &requested_model);
@@ -192,9 +197,15 @@ pub fn resolve_effective_model_key(
     context: &str,
 ) -> anyhow::Result<String> {
     let config = load_roko_config(workdir)?;
-    let selection =
-        resolve_effective_model(cli_model, None, role.map(str::to_string), None, &config, None)
-            .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
+    let selection = resolve_effective_model(
+        cli_model,
+        None,
+        role.map(str::to_string),
+        None,
+        &config,
+        None,
+    )
+    .map_err(|err| anyhow::anyhow!("resolve model selection for {context}: {err}"))?;
     selection.print_stderr();
     Ok(selection.effective_model_key)
 }
@@ -488,9 +499,15 @@ mod tests {
             .roles
             .insert("architect".to_string(), role_model("claude-opus-4-6"));
 
-        let selection =
-            resolve_effective_model(None, None, Some("architect".to_string()), None, &config, None)
-                .expect("selection");
+        let selection = resolve_effective_model(
+            None,
+            None,
+            Some("architect".to_string()),
+            None,
+            &config,
+            None,
+        )
+        .expect("selection");
 
         assert_eq!(selection.source, SelectionSource::RoleConfig);
         assert_eq!(
@@ -507,9 +524,8 @@ mod tests {
         let config = RokoConfig::default();
         let router = cascade_router("claude-haiku-4-5");
 
-        let selection =
-            resolve_effective_model(None, None, None, Some(&router), &config, None)
-                .expect("selection");
+        let selection = resolve_effective_model(None, None, None, Some(&router), &config, None)
+            .expect("selection");
 
         assert_eq!(selection.source, SelectionSource::CascadeRouter);
         assert_eq!(

@@ -27,9 +27,9 @@ use std::time::Instant;
 type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
 type KnowledgeStoreQuery = dyn Fn(&str, usize) -> Result<Vec<serde_json::Value>> + Send + Sync;
 
-/// Records explicit model override outcomes for cascade-router learning.
+/// Records explicit model override outcomes when no routing context is available.
 pub trait ForceBackendOverrideRecorder: Send + Sync {
-    /// Record the outcome for a forced model slug.
+    /// Record a confidence-only outcome for a forced model slug.
     fn record_override_outcome(&self, model_slug: &str, success: bool) -> bool;
 }
 
@@ -694,18 +694,43 @@ fn append_knowledge_to_system_prompt(
 }
 
 fn request_prompt(messages: &[ChatMessage]) -> (Option<String>, String) {
-    let mut system_prompt = None;
+    let mut system_prompt: Option<String> = None;
     let mut user_content = String::new();
+    let conversational_turns = messages
+        .iter()
+        .filter(|msg| !matches!(msg.role, MessageRole::System))
+        .count();
+    let single_plain_user_turn = conversational_turns == 1
+        && messages
+            .iter()
+            .any(|msg| matches!(msg.role, MessageRole::User));
 
     for msg in messages {
         match msg.role {
             MessageRole::System => {
-                system_prompt = Some(msg.content.clone());
+                system_prompt = Some(match system_prompt {
+                    Some(existing) if !existing.trim().is_empty() => {
+                        format!("{existing}\n\n{}", msg.content)
+                    }
+                    _ => msg.content.clone(),
+                });
             }
-            MessageRole::User | MessageRole::Assistant => {
+            MessageRole::User => {
                 if !user_content.is_empty() {
                     user_content.push_str("\n\n");
                 }
+                if single_plain_user_turn {
+                    user_content.push_str(&msg.content);
+                } else {
+                    user_content.push_str("User:\n");
+                    user_content.push_str(&msg.content);
+                }
+            }
+            MessageRole::Assistant => {
+                if !user_content.is_empty() {
+                    user_content.push_str("\n\n");
+                }
+                user_content.push_str("Assistant:\n");
                 user_content.push_str(&msg.content);
             }
         }
@@ -1621,8 +1646,11 @@ impl ModelCaller for ModelCallService {
 mod tests {
     use super::*;
     use crate::task_runner::ModelPricing;
+    use futures::StreamExt;
+    use roko_core::{
+        ModelStreamEvent, model_call_failure_to_stream, model_call_response_to_stream,
+    };
     use roko_learn::cascade_router::CascadeRouter;
-    use roko_learn::model_router::RoutingContext;
     use tempfile::tempdir;
 
     struct TestCascadeRecorder {
@@ -1631,8 +1659,7 @@ mod tests {
 
     impl ForceBackendOverrideRecorder for TestCascadeRecorder {
         fn record_override_outcome(&self, model_slug: &str, success: bool) -> bool {
-            self.router
-                .record_override_outcome(model_slug, &RoutingContext::default(), success)
+            self.router.record_confidence_outcome(model_slug, success)
         }
     }
 
@@ -1656,6 +1683,97 @@ mod tests {
             routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         }
+    }
+
+    #[test]
+    fn request_prompt_keeps_single_user_turn_plain() {
+        let (system, prompt) = request_prompt(&[ChatMessage {
+            role: MessageRole::User,
+            content: "hello".to_string(),
+        }]);
+
+        assert_eq!(system, None);
+        assert_eq!(prompt, "hello");
+    }
+
+    #[test]
+    fn request_prompt_preserves_roles_for_history() {
+        let (system, prompt) = request_prompt(&[
+            ChatMessage {
+                role: MessageRole::System,
+                content: "system one".to_string(),
+            },
+            ChatMessage {
+                role: MessageRole::System,
+                content: "system two".to_string(),
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: "first".to_string(),
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "second".to_string(),
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: "third".to_string(),
+            },
+        ]);
+
+        assert_eq!(system.as_deref(), Some("system one\n\nsystem two"));
+        assert_eq!(prompt, "User:\nfirst\n\nAssistant:\nsecond\n\nUser:\nthird");
+    }
+
+    #[tokio::test]
+    async fn model_stream_adapter_maps_successful_response() {
+        let usage = TokenUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            total_tokens: 3,
+            cost_usd: 0.01,
+        };
+        let response = ModelCallResponse {
+            content: "ok".to_string(),
+            model: "model-a".to_string(),
+            usage: usage.clone(),
+            stop_reason: Some("end_turn".to_string()),
+            request_id: Some("req-1".to_string()),
+        };
+
+        let events = model_call_response_to_stream(response)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            events,
+            vec![
+                ModelStreamEvent::Started {
+                    model: "model-a".to_string()
+                },
+                ModelStreamEvent::ContentDelta {
+                    text: "ok".to_string()
+                },
+                ModelStreamEvent::Usage { usage },
+                ModelStreamEvent::Completed {
+                    stop_reason: Some("end_turn".to_string())
+                }
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_stream_adapter_maps_failure_response() {
+        let events = model_call_failure_to_stream("provider failed")
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            events,
+            vec![ModelStreamEvent::Failed {
+                error: "provider failed".to_string()
+            }]
+        );
     }
 
     #[tokio::test]

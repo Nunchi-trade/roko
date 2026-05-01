@@ -17,6 +17,7 @@ import PrdPipelinePanel from './PrdPipelinePanel';
 import KnowledgeFlowPanel from './KnowledgeFlowPanel';
 import EfficiencyBar from './EfficiencyBar';
 import ChainIntelPanel from './ChainIntelPanel';
+import ISFRPanel from './ISFRPanel';
 import RevealWhen from './RevealWhen';
 import { ConfidenceMeter, ModelSlot, CrystallizeTransition } from './inference';
 import { AgentHandoff } from './agent';
@@ -242,6 +243,31 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
             positions={ciPositions}
             metrics={ciMetrics}
             mirageConnected={chainConnected}
+          />
+        </RevealWhen>
+
+        <RevealWhen visible={logEntries.length > 0} mode="clip">
+          <Pane title="LOG" flat>
+            <CommandLog entries={logEntries} maxHeight="140px" />
+          </Pane>
+        </RevealWhen>
+      </>
+    );
+  }
+
+  if (scenarioId === 'isfr-agents') {
+    return (
+      <>
+        <RevealWhen visible={timelineSteps.length > 0} mode="slide-up">
+          <Pane title="TIMELINE" flat>
+            <Timeline steps={timelineSteps} />
+          </Pane>
+        </RevealWhen>
+
+        <RevealWhen visible={ciInsights.length > 0 || chainConnected} mode="scale">
+          <ISFRPanel
+            insights={ciInsights}
+            connected={chainConnected}
           />
         </RevealWhen>
 

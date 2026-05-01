@@ -14,15 +14,16 @@ import { chat } from './chat';
 import { knowledgeTransfer } from './knowledge-transfer';
 import { chainIntelligence } from './chain-intelligence';
 import { mirage } from './mirage';
+import { isfrAgents } from './isfr-agents';
 
 export {
   prdPipeline, prdResearchLoop, race, gateRetry, providers, providerRace,
   explore, knowledgeAccumulation, dreamConsolidation, chat, knowledgeTransfer,
-  chainIntelligence, mirage,
+  chainIntelligence, mirage, isfrAgents,
 };
 
 export const allScenarios: Scenario[] = [
   prdPipeline, prdResearchLoop, race, gateRetry, providers, providerRace,
   explore, knowledgeAccumulation, dreamConsolidation, chat, knowledgeTransfer,
-  chainIntelligence, mirage,
+  chainIntelligence, mirage, isfrAgents,
 ];

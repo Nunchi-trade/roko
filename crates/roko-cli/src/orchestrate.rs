@@ -187,7 +187,6 @@ use crate::heartbeat::{
     HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
     persist_heartbeat_snapshot,
 };
-use crate::model_selection::resolve_effective_model;
 use crate::knowledge_helpers::{
     apply_neuro_gate_hints, build_knowledge_routing_advice, build_strategy_fragment_context,
     build_success_knowledge_entry, knowledge_routing_boost, query_anti_knowledge_patterns,
@@ -200,6 +199,7 @@ use crate::learning_helpers::{
     load_recent_signals, playbook_query_context, publish_turn_learning_feedback,
     render_prior_experience, warn_if_distillation_disabled,
 };
+use crate::model_selection::resolve_effective_model;
 use crate::plan::plans_dir;
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt};
 use crate::snapshot_migrate;
@@ -3264,12 +3264,9 @@ fn gate_verdict_signature(verdict: &Verdict) -> Option<String> {
 /// Returns true if the stored gate verdict looks like a stub or placeholder.
 fn is_stub_gate_verdict(verdict: &GateVerdict) -> bool {
     verdict.gate.contains("stub")
-        || verdict
-            .signature
-            .as_deref()
-            .is_some_and(|signature| {
-                signature.contains("not yet implemented") || signature.contains("stub-")
-            })
+        || verdict.signature.as_deref().is_some_and(|signature| {
+            signature.contains("not yet implemented") || signature.contains("stub-")
+        })
 }
 
 /// Decide whether positive learning should be withheld for this success.
@@ -4304,8 +4301,15 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let configured_model_keys: Vec<String> =
-            roko_config.effective_models().keys().cloned().collect();
+        let mut configured_model_keys: Vec<String> = roko_config.available_model_keys_for_cascade();
+        if configured_model_keys.is_empty() {
+            configured_model_keys = roko_config.effective_models().keys().cloned().collect();
+            if !configured_model_keys.is_empty() {
+                tracing::warn!(
+                    "no models have provider credentials; using full configured model list (some dispatches may fail until API keys are set)"
+                );
+            }
+        }
         let mut learning = if configured_model_keys.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
@@ -4529,8 +4533,15 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let configured_model_keys: Vec<String> =
-            roko_config.effective_models().keys().cloned().collect();
+        let mut configured_model_keys: Vec<String> = roko_config.available_model_keys_for_cascade();
+        if configured_model_keys.is_empty() {
+            configured_model_keys = roko_config.effective_models().keys().cloned().collect();
+            if !configured_model_keys.is_empty() {
+                tracing::warn!(
+                    "no models have provider credentials; using full configured model list (some dispatches may fail until API keys are set)"
+                );
+            }
+        }
         let mut learning = if configured_model_keys.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
@@ -4741,8 +4752,15 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let configured_model_keys: Vec<String> =
-            roko_config.effective_models().keys().cloned().collect();
+        let mut configured_model_keys: Vec<String> = roko_config.available_model_keys_for_cascade();
+        if configured_model_keys.is_empty() {
+            configured_model_keys = roko_config.effective_models().keys().cloned().collect();
+            if !configured_model_keys.is_empty() {
+                tracing::warn!(
+                    "no models have provider credentials; using full configured model list (some dispatches may fail until API keys are set)"
+                );
+            }
+        }
         let mut learning = if configured_model_keys.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
@@ -5847,9 +5865,8 @@ impl PlanRunner {
             if line.trim().is_empty() {
                 continue;
             }
-            let event = serde_json::from_str(&line).with_context(|| {
-                format!("parse {} line {}", path.display(), line_no + 1)
-            })?;
+            let event = serde_json::from_str(&line)
+                .with_context(|| format!("parse {} line {}", path.display(), line_no + 1))?;
             events.push(event);
         }
         Ok(events)
@@ -5896,8 +5913,7 @@ impl PlanRunner {
             for event in self.efficiency_events.drain(..) {
                 serde_json::to_writer(&mut writer, &event)
                     .with_context(|| format!("write {}", efficiency_path.display()))?;
-                writeln!(writer)
-                    .with_context(|| format!("write {}", efficiency_path.display()))?;
+                writeln!(writer).with_context(|| format!("write {}", efficiency_path.display()))?;
             }
             writer
                 .flush()
@@ -10378,9 +10394,7 @@ impl PlanRunner {
                     .iter()
                     .find(|task| task.id == task_id)
             })
-            .map(|task| {
-                task.effective_model(&current_model, Some(&self.config.agent.tier_models))
-            })
+            .map(|task| task.effective_model(&current_model, Some(&self.config.agent.tier_models)))
             .unwrap_or_else(|| current_model.clone())
     }
 
@@ -10934,8 +10948,7 @@ impl PlanRunner {
                 cascade_router_observed = true;
             } else {
                 let model = self.effective_model();
-                if let Some(model_idx) =
-                    self.learning.cascade_router().model_index_for_slug(&model)
+                if let Some(model_idx) = self.learning.cascade_router().model_index_for_slug(&model)
                 {
                     let task_tier = task_def
                         .as_ref()
@@ -11161,17 +11174,18 @@ impl PlanRunner {
         }
 
         // Emit efficiency event for this agent turn.
-        let attempt_id = self.emit_efficiency_event(
-            plan_id,
-            task_id,
-            "Implementer",
-            &model,
-            frequency,
-            result,
-            wall_ms,
-            true,
-        )
-        .await;
+        let attempt_id = self
+            .emit_efficiency_event(
+                plan_id,
+                task_id,
+                "Implementer",
+                &model,
+                frequency,
+                result,
+                wall_ms,
+                true,
+            )
+            .await;
 
         let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
         if plan_spent >= self.config.budget.max_plan_usd {
@@ -13245,8 +13259,8 @@ impl PlanRunner {
             .map(str::to_owned)
             .unwrap_or_else(|| self.effective_model());
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
-            tracker.last_attempt_id =
-                result.map(|agent_result| format!("{plan_id}:{task_id}:{}", agent_result.output.id));
+            tracker.last_attempt_id = result
+                .map(|agent_result| format!("{plan_id}:{task_id}:{}", agent_result.output.id));
         }
         let prompt_text = task_text
             .map(str::to_owned)
@@ -14634,14 +14648,18 @@ impl PlanRunner {
         // ── Build prompt: surgical (from TaskDef) or generic ────────
         // Also collect attribution keys for context feedback after the agent runs.
         let mut attribution_keys: Vec<(String, String)> = Vec::new();
-        let (task_text, mut selected_model) = if let Some(override_prompt) = prompt_override {
+        let (task_text, selected_model) = if let Some(override_prompt) = prompt_override {
             let model = explicit_model_override
                 .clone()
                 .or_else(|| self.config.agent.model.clone())
-                .unwrap_or_else(|| "claude-sonnet-4-6".into());
+                .unwrap_or_else(|| orchestrate_default_model(&self.config));
             (override_prompt, model)
         } else if let Some(ref td) = task_def {
             let prompt = td.build_prompt(plan_id, &self.workdir);
+            let model = explicit_model_override
+                .clone()
+                .or_else(|| self.config.agent.model.clone())
+                .unwrap_or_else(|| orchestrate_default_model(&self.config));
             tracing::info!(
                 "[orchestrate] Task {} tier={} max_loc={:?} context={} verify={}",
                 td.id,
@@ -14650,14 +14668,14 @@ impl PlanRunner {
                 td.context.is_some(),
                 td.verify.len(),
             );
-            prompt
+            (prompt, model)
         } else {
             let text =
                 format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
             let model = explicit_model_override
                 .clone()
                 .or_else(|| self.config.agent.model.clone())
-                .unwrap_or_else(|| "claude-opus-4-6".into());
+                .unwrap_or_else(|| orchestrate_default_model(&self.config));
             (text, model)
         };
 
@@ -14690,17 +14708,18 @@ impl PlanRunner {
         );
         let mut selected_model = match base_selection {
             Ok(ref sel) => {
-                tracing::info!(
-                    "[orchestrate] base model selection: {}",
-                    sel.display_line()
-                );
+                tracing::info!("[orchestrate] base model selection: {}", sel.display_line());
                 sel.effective_model_key.clone()
             }
             Err(ref err) => {
                 tracing::warn!(
                     "[orchestrate] model selection error ({err}), falling back to project default"
                 );
-                let dm = roko_config_for_selection.agent.default_model.trim().to_string();
+                let dm = roko_config_for_selection
+                    .agent
+                    .default_model
+                    .trim()
+                    .to_string();
                 if dm.is_empty() {
                     RokoConfig::default().agent.default_model
                 } else {
@@ -15003,41 +15022,42 @@ impl PlanRunner {
                     }
                 }
             }
-        // ── Lookahead router post-filter (optional tier downgrade) ───
-        //
-        // When enabled and calibration data exists, check if a cheaper model
-        // has a high enough estimated success probability to justify a
-        // tier downgrade. This is the inline equivalent of
-        // `LookaheadRouter::route_with_lookahead()`.
-        if self.learning_config.use_lookahead_router
-            && !self.router_calibration.is_empty()
-            && task_def.is_some()
-        {
-            use roko_learn::routing_extras;
+            // ── Lookahead router post-filter (optional tier downgrade) ───
+            //
+            // When enabled and calibration data exists, check if a cheaper model
+            // has a high enough estimated success probability to justify a
+            // tier downgrade. This is the inline equivalent of
+            // `LookaheadRouter::route_with_lookahead()`.
+            if self.learning_config.use_lookahead_router
+                && !self.router_calibration.is_empty()
+                && task_def.is_some()
+            {
+                use roko_learn::routing_extras;
 
-            let baseline_tier = routing_extras::tier_rank(&selected_model);
-            // Only attempt downgrade from Standard (1) or Premium (2) tiers.
-            if baseline_tier > 0 {
-                let threshold = self.learning_config.lookahead_threshold;
-                let model_slugs = self.learning.cascade_router().model_slugs().to_vec();
-                for candidate_slug in &model_slugs {
-                    let candidate_tier = routing_extras::tier_rank(candidate_slug);
-                    if candidate_tier >= baseline_tier {
-                        continue;
-                    }
-                    if let Some(cal) = self.router_calibration.calibration(candidate_slug) {
-                        let success_prob = routing_extras::estimate_model_success(cal);
-                        if success_prob > threshold {
-                            tracing::info!(
-                                original_model = %selected_model,
-                                downgraded_model = %candidate_slug,
-                                success_prob = success_prob,
-                                threshold = threshold,
-                                "[orchestrate] lookahead router downgraded model tier"
-                            );
-                            selected_model = candidate_slug.clone();
-                            routing_reason = "lookahead_downgrade".to_string();
-                            break;
+                let baseline_tier = routing_extras::tier_rank(&selected_model);
+                // Only attempt downgrade from Standard (1) or Premium (2) tiers.
+                if baseline_tier > 0 {
+                    let threshold = self.learning_config.lookahead_threshold;
+                    let model_slugs = self.learning.cascade_router().model_slugs().to_vec();
+                    for candidate_slug in &model_slugs {
+                        let candidate_tier = routing_extras::tier_rank(candidate_slug);
+                        if candidate_tier >= baseline_tier {
+                            continue;
+                        }
+                        if let Some(cal) = self.router_calibration.calibration(candidate_slug) {
+                            let success_prob = routing_extras::estimate_model_success(cal);
+                            if success_prob > threshold {
+                                tracing::info!(
+                                    original_model = %selected_model,
+                                    downgraded_model = %candidate_slug,
+                                    success_prob = success_prob,
+                                    threshold = threshold,
+                                    "[orchestrate] lookahead router downgraded model tier"
+                                );
+                                selected_model = candidate_slug.clone();
+                                routing_reason = "lookahead_downgrade".to_string();
+                                break;
+                            }
                         }
                     }
                 }
@@ -15060,7 +15080,16 @@ impl PlanRunner {
             }
             BudgetAction::RouteToCheaper => {
                 selected_model = mechanical_tier_model(&self.config)
-                    .unwrap_or_else(|| "claude-haiku-4-5".into());
+                    .filter(|m| roko_config.provider_available_for_model_key(m))
+                    .or_else(|| {
+                        let m = roko_config.routing.fast_task_model.trim();
+                        if !m.is_empty() && roko_config.provider_available_for_model_key(m) {
+                            Some(m.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| orchestrate_default_model(&self.config));
                 routing_reason = "budget_pressure_guardrail".to_string();
             }
             BudgetAction::Warn { percent_used, .. } => {
@@ -15117,7 +15146,14 @@ impl PlanRunner {
                 .agent
                 .fallback_model
                 .clone()
-                .unwrap_or_else(|| "claude-sonnet-4-6".into());
+                .filter(|m| roko_config.provider_available_for_model_key(m))
+                .or_else(|| {
+                    let d = orchestrate_default_model(&self.config);
+                    roko_config
+                        .provider_available_for_model_key(&d)
+                        .then_some(d)
+                })
+                .unwrap_or_else(|| selected_model.clone());
             tracing::warn!(
                 unhealthy_model = %selected_model,
                 unhealthy_provider = %selected_provider,
@@ -15129,6 +15165,27 @@ impl PlanRunner {
         } else {
             selected_model
         };
+
+        if !roko_config.provider_available_for_model_key(&selected_model) {
+            let resolved = resolve_model(&roko_config, &selected_model);
+            let provider_hint = resolved
+                .profile
+                .as_ref()
+                .map(|p| p.provider.as_str())
+                .unwrap_or("unknown");
+            let env_hint = roko_config
+                .effective_providers()
+                .get(provider_hint)
+                .and_then(|p| p.api_key_env.as_deref())
+                .unwrap_or("(no api_key_env in config)");
+            return Err(anyhow!(
+                "model '{}' requires provider '{}' but credential for {} is not set in the environment or [agent.env]. Providers with credentials: {:?}",
+                selected_model,
+                provider_hint,
+                env_hint,
+                roko_config.available_provider_ids()
+            ));
+        }
 
         if self.approval_tx.is_some() && claude_skip_permissions_for_role(role) {
             let approval_id = format!(
@@ -19222,6 +19279,15 @@ fn titleize_diagnosis_label(value: &str) -> String {
         .join(" ")
 }
 
+fn orchestrate_default_model(cfg: &Config) -> String {
+    let dm = cfg.agent.default_model.trim();
+    if dm.is_empty() {
+        RokoConfig::default().agent.default_model.clone()
+    } else {
+        dm.to_string()
+    }
+}
+
 fn mechanical_tier_model(config: &Config) -> Option<String> {
     config.agent.tier_models.get("mechanical").cloned()
 }
@@ -20397,7 +20463,10 @@ title = "Test task"
 
     #[test]
     fn stub_gate_verdict_detection_matches_gate_name_and_signature() {
-        assert!(is_stub_gate_verdict(&GateVerdict::new("stub-llm-judge", true)));
+        assert!(is_stub_gate_verdict(&GateVerdict::new(
+            "stub-llm-judge",
+            true
+        )));
         assert!(is_stub_gate_verdict(
             &GateVerdict::new("judge", true).with_signature("stub-not-yet-implemented")
         ));
@@ -20410,8 +20479,8 @@ title = "Test task"
     #[test]
     fn positive_learning_withhold_reason_blocks_stub_and_missing_gates() {
         let real_gate = GateVerdict::new("compile", true);
-        let stub_gate = GateVerdict::new("stub-llm-judge", true)
-            .with_signature("stub-not-yet-implemented");
+        let stub_gate =
+            GateVerdict::new("stub-llm-judge", true).with_signature("stub-not-yet-implemented");
 
         assert_eq!(
             positive_learning_withhold_reason(true, std::slice::from_ref(&real_gate)),

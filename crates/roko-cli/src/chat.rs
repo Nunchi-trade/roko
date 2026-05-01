@@ -345,11 +345,7 @@ pub async fn run_direct_provider_chat(
     println!("\nbye.");
 
     let ended_at = Utc::now();
-    let session_id = format!(
-        "{}-{}",
-        started_at.format("%Y-%m-%dT%H-%M-%S"),
-        agent_id
-    );
+    let session_id = format!("{}-{}", started_at.format("%Y-%m-%dT%H-%M-%S"), agent_id);
     let summary = SessionSummary {
         session_id,
         agent_id: agent_id.to_string(),
@@ -887,12 +883,14 @@ mod tests {
     fn find_model_for_provider_prefers_default_model() {
         let mut config = roko_core::config::schema::RokoConfig::default();
         config.agent.default_model = "default-model".to_string();
-        config
-            .models
-            .insert("default-model".to_string(), model("anthropic_api", "default-model"));
-        config
-            .models
-            .insert("fallback-model".to_string(), model("anthropic_api", "fallback-model"));
+        config.models.insert(
+            "default-model".to_string(),
+            model("anthropic_api", "default-model"),
+        );
+        config.models.insert(
+            "fallback-model".to_string(),
+            model("anthropic_api", "fallback-model"),
+        );
 
         assert_eq!(
             find_model_for_provider(&config, "anthropic_api"),
@@ -904,12 +902,14 @@ mod tests {
     fn find_model_for_provider_scans_for_matching_provider() {
         let mut config = roko_core::config::schema::RokoConfig::default();
         config.agent.default_model = "unrelated".to_string();
-        config
-            .models
-            .insert("anthropic-model".to_string(), model("anthropic_api", "anthropic-model"));
-        config
-            .models
-            .insert("openai-model".to_string(), model("openai_compat", "openai-model"));
+        config.models.insert(
+            "anthropic-model".to_string(),
+            model("anthropic_api", "anthropic-model"),
+        );
+        config.models.insert(
+            "openai-model".to_string(),
+            model("openai_compat", "openai-model"),
+        );
 
         assert_eq!(
             find_model_for_provider(&config, "openai_compat"),

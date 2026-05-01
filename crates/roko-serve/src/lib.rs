@@ -76,6 +76,7 @@ pub use state_hub_compat::{SharedStateHub, StateHub};
 
 pub mod adapters;
 pub mod bench;
+pub mod command_events;
 pub mod config_watcher;
 pub mod deploy;
 pub mod dispatch;
@@ -758,6 +759,24 @@ async fn serve_api_or_spa_fallback(req: axum::extract::Request) -> axum::respons
     crate::embedded::serve_embedded(req).await
 }
 
+fn log_provider_credential_status(config: &RokoConfig) {
+    let available = config.available_provider_ids();
+    let mut missing: Vec<String> = config
+        .effective_providers()
+        .iter()
+        .filter(|(_, p)| !config.is_provider_available(p))
+        .map(|(id, _)| id.clone())
+        .collect();
+    missing.sort();
+    info!(providers = ?available, "providers with API credentials (or CLI backends)");
+    if !missing.is_empty() {
+        warn!(
+            providers = ?missing,
+            "providers missing credentials — models on these providers cannot dispatch until env vars or [agent.env] are set"
+        );
+    }
+}
+
 fn build_app_state(
     workdir: PathBuf,
     runtime: Arc<dyn CliRuntime>,
@@ -783,6 +802,7 @@ fn build_app_state(
             }
         }
     }
+    log_provider_credential_status(&roko_config);
     let deploy_backend = create_deploy_backend(&roko_config);
     let state = AppState::new(workdir, runtime, roko_config, deploy_backend)?;
 
@@ -790,12 +810,20 @@ fn build_app_state(
     // persisted bandit state instead of rebuilding it on the first request.
     {
         let config = state.load_roko_config();
-        let mut model_slugs: Vec<String> = config
-            .effective_models()
-            .values()
-            .filter(|profile| !profile.is_embedding_model)
-            .map(|profile| profile.slug.clone())
-            .collect();
+        let mut model_slugs: Vec<String> = config.available_model_slugs_for_cascade();
+        if model_slugs.is_empty() {
+            model_slugs = config
+                .effective_models()
+                .values()
+                .filter(|profile| !profile.is_embedding_model)
+                .map(|profile| profile.slug.clone())
+                .collect();
+            if !model_slugs.is_empty() {
+                warn!(
+                    "no models have provider credentials; CascadeRouter using full slug list (some routes may fail until keys are set)"
+                );
+            }
+        }
         model_slugs.sort();
 
         if !model_slugs.is_empty() {

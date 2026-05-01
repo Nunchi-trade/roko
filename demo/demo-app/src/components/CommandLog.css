@@ -15,7 +15,7 @@
   left: 0;
   right: 0;
   height: 24px;
-  background: linear-gradient(to bottom, var(--bg-raised), transparent);
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--bg-raised) 80%, transparent), transparent);
   opacity: 0;
   pointer-events: none;
   z-index: 2;

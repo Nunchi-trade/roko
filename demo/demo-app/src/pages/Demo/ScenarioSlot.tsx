@@ -37,7 +37,7 @@ import ScenarioPreview from '../../components/ScenarioPreview';
 import SidebarRenderer from '../../components/SidebarRenderer';
 import DemoStatusBar from '../../components/DemoStatusBar';
 import type { ToastOptions } from '../../components/Toast';
-import DemoCompletionOverlay from './DemoCompletionOverlay';
+// DemoCompletionOverlay removed — too intrusive for demo flow
 import TerminalPaneWithHandle, { type TerminalPaneState } from './TerminalPaneWithHandle';
 
 // ── Helpers ────────────────────────────────────────────────
@@ -122,6 +122,7 @@ interface ScenarioSlotProps {
   active: boolean;
   playbackMode: 'auto' | 'step';
   serverHealth: 'connected' | 'checking' | 'disconnected';
+  checkServeHealth: () => Promise<void>;
   defaultModel: string | null;
   learningStats: ReturnType<typeof import('../../hooks/useLearningStats').useLearningStats>;
   handoffs: ReturnType<typeof import('../../hooks/useAgentHandoffs').useAgentHandoffs>['handoffs'];
@@ -141,11 +142,12 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     active,
     playbackMode,
     serverHealth,
+    checkServeHealth,
     defaultModel,
     learningStats,
     handoffs,
     activeHandoff,
-    ensureWorkspace,
+    ensureWorkspace: _ensureWorkspace,
     createWorkspace: createWs,
     toast,
     onStateChange,
@@ -174,7 +176,8 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
   const [phaseFlash, setPhaseFlash] = useState(false);
   const [scenarioComplete, setScenarioComplete] = useState(false);
   const [showBurst, setShowBurst] = useState(false);
-  const [showCompletionOverlay, setShowCompletionOverlay] = useState(false);
+  // Completion overlay disabled — kept as no-op to avoid breaking timer cleanup
+  const setShowCompletionOverlay = (_v: boolean) => {}; // eslint-disable-line @typescript-eslint/no-unused-vars
   const completionOverlayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const completionAutoDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -648,6 +651,8 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
   // ── Lifecycle handlers ─────────────────────────────────────
   const handlePlay = useCallback(async () => {
     if (runningRef.current) return;
+    // Immediate health re-check on play press — don't rely on stale poll
+    await checkServeHealth();
     if (serverHealth !== 'connected') {
       setProgressLabel('Serve');
       setProgressText(`roko serve is ${serverHealth}; waiting for ${SERVE_URL}/health`);
@@ -716,7 +721,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       setProgressLabel('Workspace');
       setProgressText(`creating live workspace for ${scenario.title}`);
       markStart('workspace-create');
-      const ws = await ensureWorkspace(`roko-${scenario.id}`);
+      const ws = await createWs(`roko-${scenario.id}`);
       markEnd('workspace-create');
       const wsMs = measure('workspace-create');
       if (wsMs !== null) {
@@ -763,7 +768,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     runningRef.current = false;
     setIsRunning(false);
     setIsPaused(false);
-  }, [scenario, serverHealth, buildContext, waitForTerminalReadiness, getReadyTerminalEntries, ensureWorkspace, scenarioIdx, onComplete, toast, clearCompletionTimers, resetSidebarState]);
+  }, [scenario, serverHealth, checkServeHealth, buildContext, waitForTerminalReadiness, getReadyTerminalEntries, createWs, scenarioIdx, onComplete, toast, clearCompletionTimers, resetSidebarState]);
 
   const handlePauseResume = useCallback(() => {
     pausedRef.current = !isPaused;
@@ -774,20 +779,8 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     playback.advanceStep();
   }, [playback]);
 
-  const dismissCompletionOverlay = useCallback(() => {
-    setShowCompletionOverlay(false);
-    if (completionAutoDismissTimer.current) clearTimeout(completionAutoDismissTimer.current);
-  }, []);
-
-  const handleNextScenario = useCallback(() => {
-    dismissCompletionOverlay();
-    onNextScenario(scenarioIdx);
-  }, [dismissCompletionOverlay, onNextScenario, scenarioIdx]);
-
-  const handleRunAgain = useCallback(() => {
-    dismissCompletionOverlay();
-    setTimeout(() => handlePlay(), 150);
-  }, [dismissCompletionOverlay, handlePlay]);
+  // Completion overlay and related handlers removed
+  void onNextScenario; // keep prop used
 
   const handleReset = useCallback(() => {
     abortRef.current?.abort();
@@ -836,7 +829,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     [gates],
   );
 
-  const gridCols = scenario.panes === 4 ? 2 : scenario.panes;
+  const gridCols = scenario.panes;
 
   // ── Render ─────────────────────────────────────────────────
   return (
@@ -887,17 +880,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
             </div>
           )}
 
-          {showCompletionOverlay && (
-            <DemoCompletionOverlay
-              title={scenario.title}
-              stats={stats}
-              gates={gates}
-              onDismiss={dismissCompletionOverlay}
-              onRunAgain={handleRunAgain}
-              onNextScenario={handleNextScenario}
-              hasNext={true}
-            />
-          )}
+          {/* Completion overlay removed — too intrusive for demo flow */}
 
           {(showIntro || introDismissing) && (
             <ScenarioPreview

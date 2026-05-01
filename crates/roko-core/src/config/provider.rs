@@ -1,12 +1,254 @@
 //! Provider and model profile configuration sections.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::agent::ProviderKind;
 
 use super::agent::{default_context_window, default_tool_format, default_true};
+use super::provenance::ConfigProvenance;
+
+// ---- provider/model identity --------------------------------------------
+
+/// Error returned by provider/model identity constructors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigIdentityError {
+    kind: &'static str,
+}
+
+impl ConfigIdentityError {
+    const fn empty(kind: &'static str) -> Self {
+        Self { kind }
+    }
+}
+
+impl fmt::Display for ConfigIdentityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} must not be empty", self.kind)
+    }
+}
+
+impl std::error::Error for ConfigIdentityError {}
+
+macro_rules! config_identity {
+    ($name:ident, $kind:literal) => {
+        #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn try_new(value: impl Into<String>) -> Result<Self, ConfigIdentityError> {
+                let value = value.into();
+                if value.trim().is_empty() {
+                    return Err(ConfigIdentityError::empty($kind));
+                }
+                Ok(Self(value))
+            }
+
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            #[must_use]
+            pub fn into_inner(self) -> String {
+                self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = ConfigIdentityError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::try_new(value)
+            }
+        }
+
+        impl TryFrom<&str> for $name {
+            type Error = ConfigIdentityError;
+
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                Self::try_new(value)
+            }
+        }
+    };
+}
+
+config_identity!(ProviderId, "provider id");
+config_identity!(ModelAlias, "model alias");
+config_identity!(BackendModelSlug, "backend model slug");
+
+/// Explicit transport used to communicate with a provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ProviderTransport {
+    Http { base_url: String },
+    Cli { command: String, args: Vec<String> },
+    Acp { command: String, args: Vec<String> },
+    Local,
+}
+
+/// Explicit authentication policy for a provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ProviderAuth {
+    EnvVar { name: String },
+    StaticSecretRef { name: String },
+    None { local_only: bool },
+}
+
+/// Provider-level capability flags used by resolved provider definitions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCapabilities {
+    pub supports_streaming: bool,
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+    pub supports_web_search: bool,
+    pub supports_mcp_tools: bool,
+}
+
+/// Resolved provider definition with identity, transport, auth, and provenance.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderDefinition {
+    pub id: ProviderId,
+    pub display_name: String,
+    pub kind: ProviderKind,
+    pub transport: ProviderTransport,
+    pub auth: ProviderAuth,
+    pub capabilities: ProviderCapabilities,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<ConfigProvenance>,
+}
+
+/// Source of model metadata in a resolved model definition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMetadataSource {
+    Config,
+    ProviderDiscovery,
+    HealthProbe,
+    Migration,
+    BuiltInFallback,
+}
+
+/// Model-level capability flags used by resolved model definitions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCapabilities {
+    pub supports_tools: bool,
+    pub supports_thinking: bool,
+    pub supports_vision: bool,
+    pub supports_web_search: bool,
+    pub supports_mcp_tools: bool,
+    pub supports_partial: bool,
+    pub supports_grounding: bool,
+    pub supports_code_execution: bool,
+    pub supports_caching: bool,
+}
+
+/// Token and request pricing metadata for a resolved model.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelCost {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_request: Option<f64>,
+}
+
+/// Resolved model definition with local alias and provider wire slug separated.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelDefinition {
+    pub alias: ModelAlias,
+    pub provider_id: ProviderId,
+    pub backend_slug: BackendModelSlug,
+    pub capabilities: ModelCapabilities,
+    pub cost: ModelCost,
+    pub metadata_source: ModelMetadataSource,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<ConfigProvenance>,
+}
+
+#[cfg(test)]
+mod provider_identity_tests {
+    use super::*;
+    use crate::config::ConfigProvenance;
+
+    #[test]
+    fn provider_identity_rejects_empty_ids() {
+        assert!(ProviderId::try_new("").is_err());
+        assert!(ProviderId::try_new("   ").is_err());
+        assert!(ModelAlias::try_new("").is_err());
+        assert!(BackendModelSlug::try_new("\t").is_err());
+    }
+
+    #[test]
+    fn provider_identity_constructs_provider_and_model_definitions() {
+        let provider_id = ProviderId::try_new("anthropic").expect("provider id");
+        let alias = ModelAlias::try_new("claude-sonnet").expect("model alias");
+        let backend_slug =
+            BackendModelSlug::try_new("claude-3-7-sonnet-latest").expect("backend slug");
+        let provenance = vec![ConfigProvenance::file(
+            "roko.toml",
+            "providers.anthropic.kind",
+        )];
+
+        let provider = ProviderDefinition {
+            id: provider_id.clone(),
+            display_name: "Anthropic".to_string(),
+            kind: ProviderKind::AnthropicApi,
+            transport: ProviderTransport::Http {
+                base_url: "https://api.anthropic.com".to_string(),
+            },
+            auth: ProviderAuth::EnvVar {
+                name: "ANTHROPIC_API_KEY".to_string(),
+            },
+            capabilities: ProviderCapabilities {
+                supports_streaming: true,
+                supports_tools: true,
+                supports_vision: true,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+            },
+            provenance: provenance.clone(),
+        };
+        let model = ModelDefinition {
+            alias: alias.clone(),
+            provider_id,
+            backend_slug,
+            capabilities: ModelCapabilities {
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: true,
+                ..ModelCapabilities::default()
+            },
+            cost: ModelCost {
+                input_per_m: Some(3.0),
+                output_per_m: Some(15.0),
+                ..ModelCost::default()
+            },
+            metadata_source: ModelMetadataSource::Config,
+            provenance,
+        };
+
+        assert_eq!(provider.id.as_str(), "anthropic");
+        assert_eq!(provider.kind, ProviderKind::AnthropicApi);
+        assert!(matches!(provider.transport, ProviderTransport::Http { .. }));
+        assert_eq!(model.alias, alias);
+        assert_eq!(model.metadata_source, ModelMetadataSource::Config);
+    }
+}
 
 // ---- [providers.*] -------------------------------------------------------
 

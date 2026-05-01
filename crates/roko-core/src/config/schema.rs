@@ -429,6 +429,90 @@ impl RokoConfig {
         self.apply_env(&|key| std::env::var(key).ok());
     }
 
+    // ---- provider credential availability --------------------------------
+
+    /// Returns `true` when this provider entry is ready for outbound use.
+    ///
+    /// CLI / ACP providers rely on machine-local auth and are always treated as
+    /// available. HTTP-family providers need a non-empty `api_key_env` name with
+    /// a value in the process environment or in [`AgentConfig::env`].
+    #[must_use]
+    pub fn is_provider_available(&self, provider: &ProviderConfig) -> bool {
+        if matches!(
+            provider.kind,
+            ProviderKind::ClaudeCli | ProviderKind::CursorAcp
+        ) {
+            return true;
+        }
+        match provider.api_key_env.as_ref().map(|s| s.trim()) {
+            None => false,
+            Some("") => true,
+            Some(name) => std::env::var(name).is_ok() || self.agent_env_value(name).is_some(),
+        }
+    }
+
+    /// `true` when the resolved provider for `model_key` has credentials.
+    #[must_use]
+    pub fn provider_available_for_model_key(&self, model_key: &str) -> bool {
+        let resolved = crate::agent::resolve_model(self, model_key);
+        let providers = self.effective_providers();
+        if let Some(profile) = resolved.profile.as_ref() {
+            return providers
+                .get(&profile.provider)
+                .map(|p| self.is_provider_available(p))
+                .unwrap_or(false);
+        }
+        providers
+            .values()
+            .filter(|p| p.kind == resolved.provider_kind)
+            .any(|p| self.is_provider_available(p))
+    }
+
+    /// Provider registry ids that have credentials configured.
+    #[must_use]
+    pub fn available_provider_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .effective_providers()
+            .iter()
+            .filter(|(_, p)| self.is_provider_available(p))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// `[models.*]` keys (from [`Self::effective_models`]) usable for cascade init.
+    #[must_use]
+    pub fn available_model_keys_for_cascade(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .effective_models()
+            .into_iter()
+            .filter(|(k, profile)| {
+                !profile.is_embedding_model && self.provider_available_for_model_key(k)
+            })
+            .map(|(k, _)| k)
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Backend slugs for routers keyed by API slug lists.
+    #[must_use]
+    pub fn available_model_slugs_for_cascade(&self) -> Vec<String> {
+        let mut slugs: Vec<String> = self
+            .effective_models()
+            .into_iter()
+            .filter(|(k, profile)| {
+                !profile.is_embedding_model && self.provider_available_for_model_key(k)
+            })
+            .map(|(_, profile)| profile.slug.clone())
+            .collect();
+        slugs.sort();
+        slugs.dedup();
+        slugs
+    }
+
     // ---- secret resolution -----------------------------------------------
 
     /// Interpolate `${VAR}` patterns in provider config strings.
@@ -1902,5 +1986,25 @@ default_model = "claude-sonnet-4-6"
         let toml = "[providers.bad]\nkind = \"not_a_real_kind\"\n";
         let err = toml::from_str::<RokoConfig>(toml).expect_err("should fail");
         assert_error_contains(err, &["kind", "unknown variant", "not_a_real_kind"]);
+    }
+
+    #[test]
+    fn provider_availability_respects_agent_env_table() {
+        let mut cfg = RokoConfig::default();
+        let p = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: Some("https://api.openai.com/v1".into()),
+            api_key_env: Some("OPENAI_API_KEY".into()),
+            command: None,
+            args: None,
+            timeout_ms: None,
+            ttft_timeout_ms: None,
+            connect_timeout_ms: None,
+            extra_headers: None,
+            max_concurrent: None,
+        };
+        assert!(!cfg.is_provider_available(&p));
+        cfg.agent.env = Some(vec![("OPENAI_API_KEY".into(), "sk-test".into())]);
+        assert!(cfg.is_provider_available(&p));
     }
 }

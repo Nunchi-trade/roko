@@ -10,6 +10,8 @@ import { useLearningStats } from '../../hooks/useLearningStats';
 import { useAgentHandoffs } from '../../hooks/useAgentHandoffs';
 import { PulseIcon, SpinnerIcon, CrossIcon } from '../../components/icons/AnimatedIcons';
 import type { TerminalHandle } from '../../hooks/useTerminal';
+import ConfigWidget from '../../components/ConfigWidget';
+import BlockTicker from '../../components/BlockTicker';
 import ScenarioSlot, { type ScenarioSlotHandle, type SlotStateReport } from './ScenarioSlot';
 import BottomTerminalPane from './BottomTerminalPane';
 import '@xterm/xterm/css/xterm.css';
@@ -33,6 +35,7 @@ const TAB_CATEGORY: Record<string, string> = {
   'knowledge-transfer': 'learning',
   'chain-intelligence': 'chain',
   'mirage': 'chain',
+  'isfr-agents': 'chain',
 };
 
 /** Color values per category (used for the sliding indicator) */
@@ -74,7 +77,7 @@ export default function Demo() {
   const [tabScrollState, setTabScrollState] = useState({ left: false, right: false });
 
   // Shared hooks (called once, passed as props)
-  const serverHealth = useServerHealth();
+  const { status: serverHealth, checkNow: checkServeHealth } = useServerHealth();
   const { defaultModel } = useRokoConfig();
   const { ensureWorkspace, createWorkspace } = useWorkspace();
   const learningStats = useLearningStats();
@@ -338,6 +341,9 @@ export default function Demo() {
         </div>
       </div>
 
+      {/* ── Block ticker (live chain blocks) ── */}
+      <BlockTicker />
+
       {/* ── Scenario slots (lazy-mounted, never unmounted) ── */}
       {SCENARIOS.map((s, i) => {
         if (!activated.has(i)) return null;
@@ -350,6 +356,7 @@ export default function Demo() {
             active={activeIdx === i}
             playbackMode={playbackMode}
             serverHealth={serverHealth}
+            checkServeHealth={checkServeHealth}
             defaultModel={defaultModel}
             learningStats={learningStats}
             handoffs={handoffs}
@@ -386,6 +393,9 @@ export default function Demo() {
           />
         )}
       </div>
+
+      {/* ── Config widget (bottom-right pill) ── */}
+      <ConfigWidget />
     </div>
   );
 }

@@ -1014,7 +1014,9 @@ pub struct LearningLayer {
 impl LearningLayer {
     pub fn merge(self, overlay: Self) -> Self {
         Self {
-            replan_on_gate_failure: overlay.replan_on_gate_failure.or(self.replan_on_gate_failure),
+            replan_on_gate_failure: overlay
+                .replan_on_gate_failure
+                .or(self.replan_on_gate_failure),
             replan_max_per_plan: overlay.replan_max_per_plan.or(self.replan_max_per_plan),
             replan_gate_attempts: overlay.replan_gate_attempts.or(self.replan_gate_attempts),
             auto_playbook_refresh: overlay.auto_playbook_refresh.or(self.auto_playbook_refresh),
@@ -1351,17 +1353,37 @@ pub struct ProviderLayer {
 impl ProviderLayer {
     #[must_use]
     pub fn merge(self, overlay: Self) -> Self {
-        Self {
-            kind: overlay.kind.or(self.kind),
-            base_url: overlay.base_url.or(self.base_url),
-            api_key_env: overlay.api_key_env.or(self.api_key_env),
-            command: overlay.command.or(self.command),
-            args: overlay.args.or(self.args),
-            timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
-            ttft_timeout_ms: overlay.ttft_timeout_ms.or(self.ttft_timeout_ms),
-            connect_timeout_ms: overlay.connect_timeout_ms.or(self.connect_timeout_ms),
-            extra_headers: overlay.extra_headers.or(self.extra_headers),
-            max_concurrent: overlay.max_concurrent.or(self.max_concurrent),
+        // If the overlay changes `kind`, don't inherit kind-specific fields
+        // (api_key_env, base_url, command, args) from the base — they belong
+        // to a different provider type and would cause misrouting.
+        let kind_changed = overlay.kind.is_some() && overlay.kind != self.kind;
+        if kind_changed {
+            Self {
+                kind: overlay.kind,
+                base_url: overlay.base_url,
+                api_key_env: overlay.api_key_env,
+                command: overlay.command,
+                args: overlay.args,
+                // Timeouts are kind-agnostic, safe to inherit
+                timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
+                ttft_timeout_ms: overlay.ttft_timeout_ms.or(self.ttft_timeout_ms),
+                connect_timeout_ms: overlay.connect_timeout_ms.or(self.connect_timeout_ms),
+                extra_headers: overlay.extra_headers.or(self.extra_headers),
+                max_concurrent: overlay.max_concurrent.or(self.max_concurrent),
+            }
+        } else {
+            Self {
+                kind: overlay.kind.or(self.kind),
+                base_url: overlay.base_url.or(self.base_url),
+                api_key_env: overlay.api_key_env.or(self.api_key_env),
+                command: overlay.command.or(self.command),
+                args: overlay.args.or(self.args),
+                timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
+                ttft_timeout_ms: overlay.ttft_timeout_ms.or(self.ttft_timeout_ms),
+                connect_timeout_ms: overlay.connect_timeout_ms.or(self.connect_timeout_ms),
+                extra_headers: overlay.extra_headers.or(self.extra_headers),
+                max_concurrent: overlay.max_concurrent.or(self.max_concurrent),
+            }
         }
     }
 
@@ -1596,7 +1618,7 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
             let agent = layer.agent.get_or_insert_with(AgentLayer::default);
             agent.args = Some(parse_string_list(value, "parse JSON array for agent.args")?);
         }
-        ["agent", "model"] => {
+        ["agent", "model"] | ["agent", "default_model"] => {
             let agent = layer.agent.get_or_insert_with(AgentLayer::default);
             agent.model = Some(value.into());
         }
@@ -2291,7 +2313,11 @@ pub struct AgentLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     /// Preferred model slug.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "default_model"
+    )]
     pub model: Option<String>,
     /// Claude effort level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2470,9 +2496,7 @@ impl RunnerLayer {
     pub fn resolve(self) -> RunnerConfig {
         let defaults = RunnerConfig::default();
         RunnerConfig {
-            plan_timeout_secs: self
-                .plan_timeout_secs
-                .unwrap_or(defaults.plan_timeout_secs),
+            plan_timeout_secs: self.plan_timeout_secs.unwrap_or(defaults.plan_timeout_secs),
         }
     }
 }
@@ -3513,7 +3537,10 @@ auto_plan = true
             cfg.serve.deploy.environment
         );
         assert_eq!(parsed.serve.deploy.webhooks, cfg.serve.deploy.webhooks);
-        assert_eq!(parsed.runner.plan_timeout_secs, cfg.runner.plan_timeout_secs);
+        assert_eq!(
+            parsed.runner.plan_timeout_secs,
+            cfg.runner.plan_timeout_secs
+        );
     }
 
     #[test]

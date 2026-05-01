@@ -69,7 +69,7 @@ export interface Scenario {
   id: string;
   title: string;
   subtitle: string;
-  panes: 1 | 2 | 4;
+  panes: 1 | 2 | 4 | 8;
   labels: string[];
   panel: boolean;
   promptBar: boolean;

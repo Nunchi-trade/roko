@@ -382,18 +382,13 @@ async fn spawn_mock_provider_server(
             body.get("messages").and_then(Value::as_array).is_some(),
             "request body must include messages"
         );
-        assert_eq!(
-            body.get("stream").and_then(Value::as_bool),
-            Some(true),
-            "request must stream"
-        );
 
         tokio::time::sleep(response_delay).await;
 
         if let Some(response) = response {
-            let body = mock_sse_body(&response);
+            let body = mock_chat_body(&response, &expected_model);
             let response_bytes = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -462,31 +457,28 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<(String, Value)> {
     Ok((request_line, json))
 }
 
-fn mock_sse_body(response: &MockResponse) -> String {
-    let content = json!({
+fn mock_chat_body(response: &MockResponse, model: &str) -> String {
+    json!({
+        "id": "chatcmpl-test",
+        "model": model,
         "choices": [{
-            "delta": {
+            "index": 0,
+            "message": {
+                "role": "assistant",
                 "content": response.text
-            }
-        }]
-    });
-    let finish = json!({
-        "choices": [{
-            "delta": {},
+            },
             "finish_reason": "stop"
-        }]
-    });
-    let usage = json!({
+        }],
         "usage": {
             "prompt_tokens": response.input_tokens,
             "completion_tokens": response.output_tokens,
+            "total_tokens": response.input_tokens + response.output_tokens,
             "prompt_tokens_details": {
                 "cached_tokens": 0
             }
         }
-    });
-
-    format!("data: {content}\n\ndata: {finish}\n\ndata: {usage}\n\ndata: [DONE]\n\n")
+    })
+    .to_string()
 }
 
 async fn collect_notifications(client_output: DuplexStream) -> Result<Vec<JsonRpcNotification>> {
@@ -520,9 +512,7 @@ fn usage_from_notifications(notifications: &[JsonRpcNotification]) -> (Option<u6
         let Some(params) = notification.params.as_ref() else {
             continue;
         };
-        let Some(update) = params.get("update") else {
-            continue;
-        };
+        let update = params.get("update").unwrap_or(params);
         if update.get("sessionUpdate").and_then(Value::as_str) != Some("usage_update") {
             continue;
         }

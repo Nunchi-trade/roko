@@ -16,12 +16,13 @@ use roko_core::runtime_event::RuntimeEventEnvelope;
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::CancelToken;
-use crate::effect_driver::{EffectDriver, EffectServices, Result};
+use crate::effect_driver::{EffectDriver, EffectServices, Result, WorkflowFeedbackTotals};
 use crate::event_bus::emit_runtime_event;
 pub use crate::pipeline_state::WorkflowOutcome;
 use crate::pipeline_state::{
     Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig,
 };
+use crate::run_ledger::{EffectErrorKind, RunLedger};
 
 /// Configuration for a workflow run.
 #[derive(Debug, Clone)]
@@ -151,9 +152,16 @@ impl WorkflowEngine {
     ) -> Result<WorkflowRunReport> {
         let run_id = generate_run_id();
         let started_at = Instant::now();
+        let started_at_ms = now_millis();
         let event_start_seq = crate::event_bus::runtime_event_bus::<RuntimeEvent>().total_emitted();
 
         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+        let mut ledger = RunLedger::new(
+            run_id.clone(),
+            config.prompt.clone(),
+            config.workflow.clone(),
+            started_at_ms,
+        );
 
         let driver = EffectDriver::new(
             EffectServices {
@@ -178,6 +186,8 @@ impl WorkflowEngine {
 
         loop {
             if token.is_cancelled() {
+                let cancel_phase = pipeline.phase.clone();
+                ledger.record_cancellation_requested(cancel_phase, now_millis());
                 let cancel_output = pipeline.step(PipelineInput::UserCancel);
                 if let PipelineOutput::Done { outcome } = cancel_output {
                     self.emit(RuntimeEvent::WorkflowCompleted {
@@ -191,9 +201,8 @@ impl WorkflowEngine {
                         warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
                     }
                     self.persist_affect_policy().await;
-                    return Ok(self.build_run_report(
-                        &config,
-                        &run_id,
+                    return Ok(self.build_run_report_from_ledger(
+                        &ledger,
                         &outcome,
                         started_at,
                         event_start_seq,
@@ -201,26 +210,71 @@ impl WorkflowEngine {
                 }
             }
 
-            let old_phase = pipeline.phase.label();
+            let old_phase = pipeline.phase.clone();
+            let old_phase_label = old_phase.label();
 
             let input = match &output {
                 PipelineOutput::SpawnStrategist { prompt } => {
-                    strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                    let before = driver.workflow_feedback_totals().await;
+                    let raw_input = driver.spawn_agent("strategist", prompt, None).await;
+                    let after = driver.workflow_feedback_totals().await;
+                    record_agent_input(
+                        &mut ledger,
+                        "strategist",
+                        &self.services.default_model,
+                        &before,
+                        &after,
+                        &raw_input,
+                    );
+                    strategy_input(raw_input)
                 }
                 PipelineOutput::SpawnImplementer { prompt, context } => {
-                    driver
+                    let before = driver.workflow_feedback_totals().await;
+                    let input = driver
                         .spawn_agent("implementer", prompt, context.as_deref())
-                        .await
+                        .await;
+                    let after = driver.workflow_feedback_totals().await;
+                    record_agent_input(
+                        &mut ledger,
+                        "implementer",
+                        &self.services.default_model,
+                        &before,
+                        &after,
+                        &input,
+                    );
+                    input
                 }
                 PipelineOutput::SpawnAutoFixer { error_output } => {
-                    driver
+                    let before = driver.workflow_feedback_totals().await;
+                    let input = driver
                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
-                        .await
+                        .await;
+                    let after = driver.workflow_feedback_totals().await;
+                    record_agent_input(
+                        &mut ledger,
+                        "autofix",
+                        &self.services.default_model,
+                        &before,
+                        &after,
+                        &input,
+                    );
+                    input
                 }
                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
-                    driver
+                    let before = driver.workflow_feedback_totals().await;
+                    let raw_input = driver
                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
-                        .await
+                        .await;
+                    let after = driver.workflow_feedback_totals().await;
+                    record_agent_input(
+                        &mut ledger,
+                        "reviewer",
+                        &self.services.default_model,
+                        &before,
+                        &after,
+                        &raw_input,
+                    );
+                    raw_input
                 }),
                 PipelineOutput::RunGates => {
                     self.emit(RuntimeEvent::GateStarted {
@@ -228,13 +282,17 @@ impl WorkflowEngine {
                         gate_name: "pipeline".to_string(),
                         rung: 0,
                     });
-                    driver
+                    let input = driver
                         .run_gates(&config.enabled_gates, &config.shell_gates)
-                        .await
+                        .await;
+                    record_gate_input(&mut ledger, &config.enabled_gates, &input);
+                    input
                 }
                 PipelineOutput::Commit => {
                     let message = commit_message(&config);
-                    driver.commit(&message).await
+                    let input = driver.commit(&message).await;
+                    record_commit_input(&mut ledger, &input);
+                    input
                 }
                 PipelineOutput::Done { outcome } => {
                     self.emit(RuntimeEvent::WorkflowCompleted {
@@ -249,9 +307,8 @@ impl WorkflowEngine {
                         warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
                     }
                     self.persist_affect_policy().await;
-                    return Ok(self.build_run_report(
-                        &config,
-                        &run_id,
+                    return Ok(self.build_run_report_from_ledger(
+                        &ledger,
                         outcome,
                         started_at,
                         event_start_seq,
@@ -273,9 +330,8 @@ impl WorkflowEngine {
                         warn!(run_id = %run_id, error = %err, "failed to record workflow feedback; continuing");
                     }
                     self.persist_affect_policy().await;
-                    return Ok(self.build_run_report(
-                        &config,
-                        &run_id,
+                    return Ok(self.build_run_report_from_ledger(
+                        &ledger,
                         &outcome,
                         started_at,
                         event_start_seq,
@@ -284,10 +340,12 @@ impl WorkflowEngine {
             };
 
             output = pipeline.step(input);
-            let new_phase = pipeline.phase.label();
+            let new_phase = pipeline.phase.clone();
+            let new_phase_label = new_phase.label();
 
-            if old_phase != new_phase {
-                self.emit_phase_transition(&run_id, old_phase, new_phase);
+            if old_phase_label != new_phase_label {
+                ledger.record_phase_transition(old_phase, new_phase, now_millis());
+                self.emit_phase_transition(&run_id, old_phase_label, new_phase_label);
             }
         }
     }
@@ -514,6 +572,21 @@ impl WorkflowEngine {
         )
     }
 
+    fn build_run_report_from_ledger(
+        &self,
+        ledger: &RunLedger,
+        outcome: &WorkflowOutcome,
+        started_at: Instant,
+        event_start_seq: u64,
+    ) -> WorkflowRunReport {
+        let events = collect_run_events(&ledger.run_id, event_start_seq);
+        ledger.to_report_compat(
+            matches!(outcome, WorkflowOutcome::Success { .. }),
+            started_at.elapsed().as_secs_f64(),
+            events,
+        )
+    }
+
     async fn persist_affect_policy(&self) {
         if let Some(ref affect) = self.services.affect_policy {
             let policy = affect.lock().await;
@@ -555,6 +628,9 @@ impl WorkflowEngine {
     }
 }
 
+// Compatibility helper for legacy report/event projections. `run_with_cancel`
+// builds report truth from `RunLedger` and only uses collected events for the
+// report's legacy `events` field.
 fn collect_run_events(run_id: &str, event_start_seq: u64) -> Vec<RuntimeEventEnvelope> {
     crate::event_bus::runtime_event_bus::<RuntimeEvent>()
         .replay_from(event_start_seq)
@@ -571,6 +647,8 @@ fn collect_run_events(run_id: &str, event_start_seq: u64) -> Vec<RuntimeEventEnv
         .collect()
 }
 
+// Compatibility-only builder retained for resume/checkpoint tests until resume
+// is migrated to `RunLedger`.
 fn report_from_events(
     run_id: &str,
     success: bool,
@@ -881,6 +959,57 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+fn record_agent_input(
+    ledger: &mut RunLedger,
+    role: &str,
+    requested_model: &str,
+    before: &WorkflowFeedbackTotals,
+    after: &WorkflowFeedbackTotals,
+    input: &PipelineInput,
+) {
+    match input {
+        PipelineInput::AgentCompleted {
+            output,
+            files_changed,
+        } => {
+            let final_model = after
+                .primary_model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+                .unwrap_or(requested_model);
+            ledger.record_agent_completed(
+                role,
+                output,
+                *files_changed,
+                requested_model,
+                final_model,
+                None,
+                roko_core::foundation::TokenUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: after.total_tokens.saturating_sub(before.total_tokens),
+                    cost_usd: (after.total_cost_usd - before.total_cost_usd).max(0.0),
+                },
+            );
+        }
+        PipelineInput::AgentFailed { error } => {
+            ledger.record_agent_failed(role, EffectErrorKind::Unknown, error);
+        }
+        _ => {}
+    }
+}
+
+fn record_gate_input(_ledger: &mut RunLedger, _enabled_gates: &[String], _input: &PipelineInput) {
+    // Gate verdict details are not exposed to WorkflowEngine yet; recording the
+    // collapsed pipeline input here would invent missing duration/verdict data.
+}
+
+fn record_commit_input(ledger: &mut RunLedger, input: &PipelineInput) {
+    if let Some(outcome) = crate::pipeline_state::CommitOutcome::from_pipeline_input(input) {
+        ledger.record_commit(outcome);
+    }
+}
+
 fn resumed_output(pipeline: &mut PipelineStateV2) -> PipelineOutput {
     match &pipeline.phase {
         Phase::Pending => pipeline.step(PipelineInput::Start),
@@ -946,6 +1075,14 @@ fn workflow_feedback_outcome(outcome: &WorkflowOutcome) -> &'static str {
 
 fn duration_millis(start: Instant) -> u64 {
     let millis = start.elapsed().as_millis();
+    u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn now_millis() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
     u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
@@ -1419,6 +1556,68 @@ mod tests {
         assert_eq!(result.agent_turns, 1);
         assert_eq!(result.model, "mock");
         assert!(result.run_id.starts_with("run_"));
+    }
+
+    #[test]
+    fn workflow_report_uses_ledger_when_events_empty() {
+        let mut ledger = RunLedger::new(
+            "run-ledger-empty-events",
+            "fix the bug",
+            WorkflowConfig::express(),
+            1_700_000_000_000,
+        );
+        ledger.record_agent_completed(
+            "implementer",
+            "done",
+            1,
+            "requested",
+            "actual",
+            None,
+            TokenUsage {
+                input_tokens: 7,
+                output_tokens: 11,
+                total_tokens: 18,
+                cost_usd: 0.03,
+            },
+        );
+
+        let report = ledger.to_report_compat(true, 0.25, Vec::new());
+
+        assert!(report.success);
+        assert_eq!(report.model, "actual");
+        assert_eq!(report.provider, None);
+        assert_eq!(report.output, "done");
+        assert_eq!(report.agent_turns, 1);
+        assert_eq!(report.token_usage, 18);
+        assert_eq!(report.cost, Some(0.03));
+        assert!(report.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn workflow_report_preserves_compat_for_pre_cancelled_run() {
+        let (config, _tempdir) = workflow_config();
+        let engine = WorkflowEngine::new(mock_services());
+        let token = CancelToken::new();
+        token.cancel();
+
+        let report = engine
+            .run_with_cancel(config, token)
+            .await
+            .expect("cancelled workflow should return a report");
+
+        assert!(!report.success);
+        assert_eq!(report.model, "unconfigured");
+        assert_eq!(report.output, "workflow did not produce agent output");
+        assert_eq!(report.agent_turns, 0);
+        assert_eq!(report.token_usage, 0);
+        assert!(report.gates.is_empty());
+        assert!(report.events.iter().any(|event| matches!(
+            event.payload,
+            RuntimeEvent::WorkflowCompleted {
+                outcome: roko_core::runtime_event::WorkflowOutcome::Cancelled,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
