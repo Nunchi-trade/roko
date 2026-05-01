@@ -155,7 +155,6 @@ fn thorough() -> RokoConfig {
             express_mode: false,
             max_auto_fix_attempts: 5,
             auto_fix_model: "claude-sonnet-4-6".into(),
-            warm_implementers_per_plan: 2,
             ..ConductorConfig::default()
         },
         learning: LearningConfig {

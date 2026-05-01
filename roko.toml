@@ -861,18 +861,8 @@ max_agents = 8
 max_parallel_plans = 1
 parallel_enabled = false
 express_mode = false
-auto_advance_batch = true
-auto_merge_on_complete = false
-pre_plan = false
 max_auto_fix_attempts = 3
 auto_fix_model = "claude-haiku-4-5"
-warm_implementers_per_plan = 1
-
-[conductor.enabled_roles]
-architect = true
-auditor = true
-scribe = true
-critic = true
 
 [conductor.watchers]
 

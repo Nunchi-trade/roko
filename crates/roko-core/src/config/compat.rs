@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::schema::{
-    AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig,
-    ConductorConfig, CoreRunnerConfig, DeployConfig, GatesConfig, GeminiConfig,
-    GithubWebhookConfig, LearningConfig, PerplexityConfig, PipelineConfig, PrdConfig,
-    ProjectConfig, RelayConfig, RokoConfig, RoleOverride, RoutingConfig, SchedulerConfig,
-    ServeConfig, ServerConfig, ToolsConfig, TuiConfig, WatcherConfig, WebhooksConfig,
+    AgentConfig, BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig, ConductorConfig,
+    CoreRunnerConfig, DeployConfig, GatesConfig, GeminiConfig, GithubWebhookConfig, LearningConfig,
+    PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RelayConfig, RokoConfig,
+    RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, ToolsConfig,
+    TuiConfig, WatcherConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -28,7 +28,6 @@ struct MoriConfig {
     codex_default_model: Option<String>,
     cursor_default_model: Option<String>,
     claude_default_model: Option<String>,
-    conductor_model: Option<String>,
     role_models: HashMap<String, String>,
     auto_fix_model: Option<String>,
     fallback_model: Option<String>,
@@ -58,17 +57,7 @@ struct MoriConfig {
     max_parallel_plans: Option<usize>,
     parallel_enabled: Option<bool>,
     express_mode: Option<bool>,
-    auto_advance_batch: Option<bool>,
-    auto_merge_on_complete: Option<bool>,
-    pre_plan: Option<bool>,
     max_auto_fix_attempts: Option<u32>,
-    warm_implementers_per_plan: Option<usize>,
-
-    // -- role toggles --
-    architect_enabled: Option<bool>,
-    auditor_enabled: Option<bool>,
-    scribe_enabled: Option<bool>,
-    critic_enabled: Option<bool>,
 
     // -- project --
     fresh_base_branch: Option<String>,
@@ -225,21 +214,8 @@ fn convert_conductor(m: &MoriConfig) -> ConductorConfig {
         max_parallel_plans: m.max_parallel_plans.unwrap_or(d.max_parallel_plans),
         parallel_enabled: m.parallel_enabled.unwrap_or(d.parallel_enabled),
         express_mode: m.express_mode.unwrap_or(d.express_mode),
-        auto_advance_batch: m.auto_advance_batch.unwrap_or(d.auto_advance_batch),
-        auto_merge_on_complete: m.auto_merge_on_complete.unwrap_or(d.auto_merge_on_complete),
-        pre_plan: m.pre_plan.unwrap_or(d.pre_plan),
         max_auto_fix_attempts: m.max_auto_fix_attempts.unwrap_or(d.max_auto_fix_attempts),
         auto_fix_model: m.auto_fix_model.clone().unwrap_or(d.auto_fix_model),
-        conductor_model: m.conductor_model.clone(),
-        warm_implementers_per_plan: m
-            .warm_implementers_per_plan
-            .unwrap_or(d.warm_implementers_per_plan),
-        enabled_roles: AgentRoleToggles {
-            architect: m.architect_enabled.unwrap_or(true),
-            auditor: m.auditor_enabled.unwrap_or(true),
-            scribe: m.scribe_enabled.unwrap_or(true),
-            critic: m.critic_enabled.unwrap_or(true),
-        },
         watchers: d.watchers,
     }
 }
@@ -296,14 +272,9 @@ mod tests {
 codex_default_model = "gpt-5.4-mini"
 claude_default_model = "claude-haiku-4-5"
 cursor_default_model = "composer-2-fast"
-conductor_model = "claude-sonnet-4-6"
 "#;
         let cfg = from_mori_toml(toml).expect("parse");
         assert_eq!(cfg.agent.default_model, "gpt-5.4-mini");
-        assert_eq!(
-            cfg.conductor.conductor_model.as_deref(),
-            Some("claude-sonnet-4-6")
-        );
         // Backend defaults stored in per-role map.
         assert_eq!(
             cfg.agent
@@ -352,20 +323,11 @@ max_iterations = 5
 max_agents = 16
 parallel_enabled = true
 express_mode = true
-architect_enabled = false
-critic_enabled = false
-auto_advance_batch = false
 "#;
         let cfg = from_mori_toml(toml).expect("parse");
         assert_eq!(cfg.conductor.max_agents, 16);
         assert!(cfg.conductor.parallel_enabled);
         assert!(cfg.conductor.express_mode);
-        assert!(!cfg.conductor.enabled_roles.architect);
-        assert!(!cfg.conductor.enabled_roles.critic);
-        assert!(!cfg.conductor.auto_advance_batch);
-        // defaults
-        assert!(cfg.conductor.enabled_roles.auditor);
-        assert!(cfg.conductor.enabled_roles.scribe);
     }
 
     #[test]

@@ -757,17 +757,6 @@ impl RokoConfig {
         let _ = writeln!(out, "express_mode = {}", c.conductor.express_mode);
         let _ = writeln!(
             out,
-            "auto_advance_batch = {}",
-            c.conductor.auto_advance_batch
-        );
-        let _ = writeln!(
-            out,
-            "auto_merge_on_complete = {}",
-            c.conductor.auto_merge_on_complete
-        );
-        let _ = writeln!(out, "pre_plan = {}", c.conductor.pre_plan);
-        let _ = writeln!(
-            out,
             "max_auto_fix_attempts = {}\n",
             c.conductor.max_auto_fix_attempts
         );
@@ -1015,7 +1004,6 @@ pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
 // ---- Conductor (not extracted, stays in schema) --------------------------
 
 /// Conductor (meta-orchestrator) settings.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConductorConfig {
     #[serde(default = "default_max_agents")]
@@ -1026,22 +1014,10 @@ pub struct ConductorConfig {
     pub parallel_enabled: bool,
     #[serde(default)]
     pub express_mode: bool,
-    #[serde(default = "default_true")]
-    pub auto_advance_batch: bool,
-    #[serde(default)]
-    pub auto_merge_on_complete: bool,
-    #[serde(default)]
-    pub pre_plan: bool,
     #[serde(default = "default_max_auto_fix")]
     pub max_auto_fix_attempts: u32,
     #[serde(default = "default_auto_fix_model")]
     pub auto_fix_model: String,
-    #[serde(default)]
-    pub conductor_model: Option<String>,
-    #[serde(default = "default_warm_impl")]
-    pub warm_implementers_per_plan: usize,
-    #[serde(default)]
-    pub enabled_roles: AgentRoleToggles,
     /// Per-watcher threshold overrides for the conductor anomaly ensemble.
     #[serde(default)]
     pub watchers: WatcherThresholds,
@@ -1058,9 +1034,6 @@ const fn default_max_auto_fix() -> u32 {
 fn default_auto_fix_model() -> String {
     "claude-haiku-4-5".into()
 }
-const fn default_warm_impl() -> usize {
-    1
-}
 
 impl Default for ConductorConfig {
     fn default() -> Self {
@@ -1069,14 +1042,8 @@ impl Default for ConductorConfig {
             max_parallel_plans: default_max_parallel_plans(),
             parallel_enabled: false,
             express_mode: false,
-            auto_advance_batch: true,
-            auto_merge_on_complete: false,
-            pre_plan: false,
             max_auto_fix_attempts: default_max_auto_fix(),
             auto_fix_model: default_auto_fix_model(),
-            conductor_model: None,
-            warm_implementers_per_plan: default_warm_impl(),
-            enabled_roles: AgentRoleToggles::default(),
             watchers: WatcherThresholds::default(),
         }
     }
@@ -1227,29 +1194,6 @@ pub struct TimeOverrunConfig {
 
 const fn default_time_overrun_alert_ratio() -> f64 {
     0.80
-}
-
-#[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentRoleToggles {
-    #[serde(default = "default_true")]
-    pub architect: bool,
-    #[serde(default = "default_true")]
-    pub auditor: bool,
-    #[serde(default = "default_true")]
-    pub scribe: bool,
-    #[serde(default = "default_true")]
-    pub critic: bool,
-}
-impl Default for AgentRoleToggles {
-    fn default() -> Self {
-        Self {
-            architect: true,
-            auditor: true,
-            scribe: true,
-            critic: true,
-        }
-    }
 }
 
 /// Agent definition for multi-agent startup via `roko up`.
