@@ -27,6 +27,8 @@ demo.
 
 - **Dockerfile:** root `Dockerfile`
 - **Railway config:** root `railway.toml`
+- **Runtime app config:** `docker/railway.roko.toml`, copied to
+  `/workspace/roko.toml`
 - **Healthcheck:** `/health`
 - **Public port:** Railway `$PORT`
 - **Internal chain URL:** `http://127.0.0.1:8545`
@@ -34,6 +36,11 @@ demo.
 - **Startup script:** `docker/start-railway.sh`
 - **State:** `/workspace/.roko`, or `RAILWAY_VOLUME_MOUNT_PATH` symlinked to
   `/workspace/.roko` when Railway mounts a volume elsewhere
+
+The Railway image does not mutate the repository `roko.toml` during the build.
+Cloud-specific choices such as public bind, API-provider dispatch, local chain
+URL, and permission defaults live in `docker/railway.roko.toml` so they can be
+reviewed directly.
 
 ### Multi-service layout
 

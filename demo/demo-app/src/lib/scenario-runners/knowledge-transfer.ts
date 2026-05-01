@@ -38,9 +38,6 @@ export const knowledgeTransfer: Scenario = {
       enterWorkspace(beta, dirB),
     ]);
 
-    // Beta shows waiting state while Alpha builds
-    await beta.execCmd('echo "Waiting for Agent Alpha to finish..."', 5000);
-
     // -- Phase 2: Alpha builds User API (cold start) --
     await playback.waitForStep();
     timeline.setActive(1);
@@ -99,8 +96,7 @@ export const knowledgeTransfer: Scenario = {
     // Sync knowledge from Alpha workspace to Beta so the playbook store is available
     await beta.execCmd(
       `cp -r ${dirA}/.roko/neuro ${dirB}/.roko/neuro 2>/dev/null; ` +
-      `cp -r ${dirA}/.roko/learn ${dirB}/.roko/learn 2>/dev/null; ` +
-      `echo "Knowledge store synced from Alpha"`,
+      `cp -r ${dirA}/.roko/learn ${dirB}/.roko/learn 2>/dev/null; true`,
       10000,
     );
     beta.clearTerminal();

@@ -6,10 +6,10 @@ watchPatterns = [
   "crates/**",
   "demo/demo-app/**",
   "docker/start-railway.sh",
+  "docker/railway.roko.toml",
   "Dockerfile",
   "Cargo.toml",
   "Cargo.lock",
-  "roko.toml",
 ]
 
 [deploy]

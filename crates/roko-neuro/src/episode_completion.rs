@@ -13,8 +13,6 @@ use tokio::task;
 
 use crate::{DistillationBackend, Distiller, KnowledgeStore};
 
-const GATEWAY_DISTILLATION_MODEL: &str = "claude-haiku-4-5";
-
 /// Spawn background distillation for one completed episode.
 ///
 /// The work is intentionally detached from the caller so episode
@@ -42,9 +40,11 @@ async fn distill_episode(
         return Ok(());
     };
 
+    // Use an empty model string so the ModelCaller resolves via its own
+    // default — this respects whatever model the workspace has configured
+    // instead of hardcoding a specific provider.
     let distiller = Distiller::with_backend(Arc::new(GatewayDistillationBackend::new(
-        model_caller,
-        GATEWAY_DISTILLATION_MODEL,
+        model_caller, "",
     )));
 
     let episodes = [episode];

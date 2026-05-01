@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { MIRAGE_WS_URL } from '../lib/serve-url';
+import { MIRAGE_WS_URL, SERVE_URL } from '../lib/serve-url';
 
 export interface BlockInfo {
   number: number;
@@ -45,9 +45,51 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
     let disposed = false;
     let attempt = 0;
     const MAX_ATTEMPTS = 2; // Don't spam — 2 retries max
+    const directMirageWs = MIRAGE_WS_URL;
+
+    async function pollViaServe() {
+      try {
+        const res = await fetch(`${SERVE_URL}/api/chain/status`, {
+          signal: AbortSignal.timeout(2000),
+        });
+        if (!res.ok) {
+          setConnected(false);
+          return;
+        }
+        const status = await res.json() as { block_number?: number };
+        const number = Number(status.block_number ?? 0);
+        if (!Number.isFinite(number) || number <= 0) {
+          setConnected(false);
+          return;
+        }
+        setConnected(true);
+        const block: BlockInfo = {
+          number,
+          hash: '',
+          timestamp: Date.now(),
+        };
+        setBlocks(prev => {
+          if (prev[prev.length - 1]?.number === number) return prev;
+          return [...prev, block].slice(-MAX_BLOCKS);
+        });
+      } catch {
+        setConnected(false);
+      }
+    }
+
+    if (!directMirageWs) {
+      pollViaServe();
+      reconnectTimer.current = setInterval(pollViaServe, 2000) as unknown as ReturnType<typeof setTimeout>;
+      return () => {
+        disposed = true;
+        clearInterval(reconnectTimer.current);
+      };
+    }
+
+    const wsUrl: string = directMirageWs;
 
     // Derive HTTP URL from WS URL for pre-flight check
-    const httpUrl = MIRAGE_WS_URL.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
+    const httpUrl = wsUrl.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
 
     async function preflight(): Promise<boolean> {
       try {
@@ -79,7 +121,7 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
     function connect() {
       if (disposed) return;
       try {
-        const ws = new WebSocket(MIRAGE_WS_URL);
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         ws.onopen = () => {

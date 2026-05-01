@@ -210,6 +210,7 @@ impl ToolDispatcher {
 
         // 1. Validate args.
         if let Err(e) = validate(&call, self.registry.as_ref()) {
+            tracing::warn!(tool = %call.name, error = %e, "FAILED at validation");
             Self::emit_audit(
                 ctx,
                 &call,
@@ -329,7 +330,9 @@ impl ToolDispatcher {
         // 3b. Safety checks — if a SafetyLayer is attached, run all
         //     pre-execution policies. First failure short-circuits.
         if let Some(ref safety) = self.safety {
-            if let Err(e) = safety.check_pre_execution(&call, ctx) {
+            let pre_result = safety.check_pre_execution(&call, ctx);
+            if let Err(e) = pre_result {
+                tracing::warn!(tool = %call.name, error = %e, "FAILED at safety pre-execution");
                 Self::emit_audit(
                     ctx,
                     &call,
@@ -344,6 +347,7 @@ impl ToolDispatcher {
                 return ToolResult::err(e);
             }
             if let Err(e) = safety.check_contract(&call, ctx) {
+                tracing::warn!(tool = %call.name, error = %e, "FAILED at contract check");
                 Self::emit_audit(
                     ctx,
                     &call,
@@ -410,8 +414,10 @@ impl ToolDispatcher {
             }
         }
         // 4. Resolve handler.
-        let Some(handler) = self.resolver.resolve(&call.name) else {
+        let handler_resolved = self.resolver.resolve(&call.name);
+        let Some(handler) = handler_resolved else {
             let err = ToolError::Other(format!("no handler: {}", call.name));
+            tracing::warn!(tool = %call.name, "FAILED at handler resolution — no handler found");
             Self::emit_audit(
                 ctx,
                 &call,

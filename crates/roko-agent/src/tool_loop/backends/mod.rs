@@ -46,16 +46,19 @@ pub fn create_openai_compat_backend(
     poster: Arc<dyn HttpPoster>,
 ) -> Result<Arc<dyn LlmBackend>, AgentCreationError> {
     match provider.kind {
-        ProviderKind::OpenAiCompat => Ok(Arc::new(
-            OpenAiCompatBackend::new(resolve_api_key(provider)?, model.slug.clone())
+        ProviderKind::OpenAiCompat => {
+            let api_key = resolve_api_key(provider)?;
+            let backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
                 .with_provider_id(model.provider.clone())
                 .with_base_url(base_url_for_tool_loop(provider))
                 .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
                 .with_max_tokens(max_tokens_for_model(model))
                 .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                 .with_extra_body_params(build_extra_body_params(provider, model))
-                .with_poster(Box::new(SharedHttpPoster { inner: poster })),
-        )),
+                .with_skip_session_fields(true)
+                .with_poster(Box::new(SharedHttpPoster { inner: poster }));
+            Ok(Arc::new(backend))
+        }
         ProviderKind::AnthropicApi => {
             crate::provider::anthropic_api::tool_loop::create_tool_loop_backend(
                 provider,
@@ -83,6 +86,7 @@ pub fn create_openai_compat_backend(
                     .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
                     .with_max_tokens(max_tokens_for_model(model))
                     .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
+                    .with_skip_session_fields(true)
                     .with_poster(Box::new(SharedHttpPoster { inner: poster })),
             ))
         }

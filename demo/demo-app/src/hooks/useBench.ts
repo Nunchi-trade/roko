@@ -152,7 +152,7 @@ export function useBench() {
       try {
         const raw = await get<{ runs: BenchRun[] } | BenchRun[]>('/api/bench/runs');
         const h = Array.isArray(raw) ? raw : (raw?.runs ?? []);
-        setHistory(h);
+        setHistory(h.filter((r) => r.config));
       } catch {
         setHistory([]);
       } finally {
@@ -238,7 +238,7 @@ export function useBench() {
         ].slice(0, 100));
         // Refresh history
         get<{ runs: BenchRun[] } | BenchRun[]>('/api/bench/runs')
-          .then((raw) => { const h = Array.isArray(raw) ? raw : (raw?.runs ?? []); setHistory(h); })
+          .then((raw) => { const h = Array.isArray(raw) ? raw : (raw?.runs ?? []); setHistory(h.filter((r) => r.config)); })
           .catch(() => {});
         break;
 
@@ -388,7 +388,7 @@ export function useBench() {
             // Refresh history
             const rawH = await get<{ runs: BenchRun[] } | BenchRun[]>('/api/bench/runs');
             const h = Array.isArray(rawH) ? rawH : (rawH?.runs ?? []);
-            setHistory(h);
+            setHistory(h.filter((r) => r.config));
           }
         } catch {
           // poll error, will retry

@@ -25,7 +25,7 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
-governor = "0.10"
+governor = { version = "0.10", default-features = false, features = ["std"] }
 url = "2"
 regex = "1"
 parking_lot = { workspace = true }

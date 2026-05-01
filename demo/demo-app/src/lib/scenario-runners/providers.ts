@@ -8,7 +8,7 @@ export const providers: Scenario = {
   title: 'Providers',
   subtitle: 'One prompt, four providers, simultaneously. Provider-agnostic by design.',
   panes: 4,
-  labels: ['zhipu (glm-4)', 'openai (gpt-5.4-mini)', 'anthropic (haiku)', 'moonshot (v1)'],
+  labels: ['zhipu', 'openai', 'anthropic', 'moonshot'],
   panel: true,
   promptBar: false,
   category: 'comparison',
@@ -17,10 +17,10 @@ export const providers: Scenario = {
   accent: 'amber',
   icon: 'grid',
   steps: [
-    { label: 'Zhipu GLM-4', sublabel: 'dispatch' },
-    { label: 'OpenAI GPT-5.4-Mini', sublabel: 'dispatch' },
-    { label: 'Anthropic Haiku', sublabel: 'dispatch' },
-    { label: 'Moonshot v1', sublabel: 'dispatch' },
+    { label: 'Zhipu', sublabel: 'dispatch' },
+    { label: 'OpenAI', sublabel: 'dispatch' },
+    { label: 'Anthropic', sublabel: 'dispatch' },
+    { label: 'Moonshot', sublabel: 'dispatch' },
   ],
   async run(ctx) {
     const { entries, playback, timeline, logCommand, logCommandComplete, workspaceDir } = ctx;

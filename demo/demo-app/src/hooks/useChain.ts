@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { MIRAGE_EVENTS_WS_URL } from '../lib/serve-url';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,8 +65,6 @@ type WsMessage = WsConnectedMsg | WsChannelMsg;
 // Config
 // ---------------------------------------------------------------------------
 
-const MIRAGE_HOST = 'localhost:8545';
-const WS_URL = `ws://${MIRAGE_HOST}/api/ws?insights=true&pheromones=true&agents=true`;
 const MAX_INSIGHTS = 200;
 const MAX_PHEROMONES = 200;
 
@@ -92,13 +91,19 @@ export function useChainWs(enabled = true): ChainWsState {
   const mountedRef = useRef(true);
 
   const connect = useCallback(() => {
+    if (!MIRAGE_EVENTS_WS_URL) {
+      setConnected(false);
+      setError(null);
+      return;
+    }
+
     // Clean up any existing connection
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
 
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(MIRAGE_EVENTS_WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {

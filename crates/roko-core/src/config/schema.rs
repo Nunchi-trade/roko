@@ -205,6 +205,18 @@ impl RokoConfig {
                     },
                 );
             }
+            // Ensure ClaudeCli providers always have a command — the adapter
+            // requires it and users commonly omit it from config.
+            let claude_command = self
+                .agent
+                .command
+                .clone()
+                .unwrap_or_else(|| "claude".to_string());
+            for pc in providers.values_mut() {
+                if pc.kind == ProviderKind::ClaudeCli && pc.command.is_none() {
+                    pc.command = Some(claude_command.clone());
+                }
+            }
             return providers;
         }
 
@@ -1616,7 +1628,7 @@ default_model = "claude-sonnet-4-6"
         // so look up the configured default model by its key (not by slug).
         let default_key = cfg.agent.default_model.as_str();
         let default_model = models.get(default_key).expect("default model");
-        assert_eq!(default_model.slug, "claude-sonnet-4-6");
+        assert_eq!(default_model.slug, "glm-5.1");
         assert!(
             !default_model.provider.is_empty(),
             "default model must declare a provider"

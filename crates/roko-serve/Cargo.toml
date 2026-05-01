@@ -42,7 +42,7 @@ axum = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
-governor = "0.10"
+governor = { version = "0.10", default-features = false, features = ["std"] }
 hmac = { workspace = true }
 regex = { workspace = true }
 jsonwebtoken = { workspace = true }

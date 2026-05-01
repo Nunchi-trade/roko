@@ -40,6 +40,14 @@ run_as_app() {
   exec "$@"
 }
 
+app_cmd() {
+  if [ "$(id -u)" = "0" ]; then
+    gosu "${APP_USER}" "$@"
+  else
+    "$@"
+  fi
+}
+
 setup_state() {
   local state_root="${ROKO_STATE_ROOT:-${WORKDIR}/.roko}"
 
@@ -65,6 +73,32 @@ setup_state() {
   if [ "$(id -u)" = "0" ]; then
     chown -R "${APP_USER}:${APP_USER}" "${state_root}" "${WORKDIR}" 2>/dev/null || true
   fi
+}
+
+setup_git_workspace() {
+  local ignore_file="${WORKDIR}/.gitignore"
+
+  if [ ! -f "${ignore_file}" ]; then
+    cat >"${ignore_file}" <<'EOF'
+.roko/
+demo-dist/
+EOF
+    if [ "$(id -u)" = "0" ]; then
+      chown "${APP_USER}:${APP_USER}" "${ignore_file}" 2>/dev/null || true
+    fi
+  fi
+
+  app_cmd git config --global user.email "${GIT_AUTHOR_EMAIL:-roko-demo@example.local}" || true
+  app_cmd git config --global user.name "${GIT_AUTHOR_NAME:-Roko Demo}" || true
+
+  if ! app_cmd git -C "${WORKDIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    app_cmd git -C "${WORKDIR}" init >/dev/null
+  fi
+
+  app_cmd git -C "${WORKDIR}" config user.email "${GIT_AUTHOR_EMAIL:-roko-demo@example.local}"
+  app_cmd git -C "${WORKDIR}" config user.name "${GIT_AUTHOR_NAME:-Roko Demo}"
+  app_cmd git -C "${WORKDIR}" add .gitignore roko.toml >/dev/null 2>&1 || true
+  app_cmd git -C "${WORKDIR}" commit -m "workspace init" --allow-empty >/dev/null 2>&1 || true
 }
 
 start_child() {
@@ -141,11 +175,13 @@ require_cmd curl
 require_cmd roko
 require_cmd mirage-rs
 require_cmd agent-relay
+require_cmd git
 if [ "$(id -u)" = "0" ]; then
   require_cmd gosu
 fi
 
 setup_state
+setup_git_workspace
 
 log "public roko endpoint: ${PUBLIC_BIND}:${PUBLIC_PORT}"
 log "internal mirage endpoint: ${MIRAGE_HOST}:${MIRAGE_PORT}"

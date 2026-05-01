@@ -77,16 +77,9 @@ COPY --from=builder /tmp/roko /usr/local/bin/roko
 COPY --from=builder /tmp/mirage-rs /usr/local/bin/mirage-rs
 COPY --from=builder /tmp/agent-relay /usr/local/bin/agent-relay
 COPY docker/start-railway.sh /usr/local/bin/start-railway
-COPY --from=builder /app/roko.toml /workspace/roko.toml
+COPY docker/railway.roko.toml /workspace/roko.toml
 
-# Docker/Railway containers intentionally bind the public HTTP server to
-# 0.0.0.0. Use API providers by default because the Claude CLI is not installed
-# in this image.
-RUN sed -i 's/acknowledge_public_risk = false/acknowledge_public_risk = true/' /workspace/roko.toml \
-    && sed -i '/^\[providers\.anthropic\]$/,/^\[/ { s/kind = "claude_cli"/kind = "anthropic_api"/; /^command = /d; }' /workspace/roko.toml \
-    && sed -i '/^\[providers\.claude_cli\]$/,/^\[/ { s/kind = "claude_cli"/kind = "anthropic_api"/; }' /workspace/roko.toml \
-    && sed -i '/^\[agent\]$/,/^\[/ { s/^command = "claude"/# command = "claude"/; }' /workspace/roko.toml \
-    && chmod +x /usr/local/bin/start-railway \
+RUN chmod +x /usr/local/bin/start-railway \
     && useradd --create-home --shell /bin/bash --uid 1000 roko \
     && mkdir -p \
         /workspace/.roko/dreams \

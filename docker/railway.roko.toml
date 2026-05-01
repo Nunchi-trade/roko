@@ -1,0 +1,109 @@
+config_version = 2
+schema_version = 2
+
+[project]
+name = "roko-railway"
+root = "."
+fresh_base_branch = "main"
+
+[agent]
+default_model = "glm51"
+default_backend = "zhipu"
+default_effort = "medium"
+context_limit_k = 200
+bare_mode = true
+command = "false"
+mode = "persistent"
+
+[providers.zhipu]
+kind = "openai_compat"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.openai]
+kind = "openai_compat"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.anthropic]
+kind = "anthropic_api"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[models.glm51]
+provider = "zhipu"
+slug = "glm-5.1"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+tool_format = "openai_json"
+
+[models.gpt54-mini]
+provider = "openai"
+slug = "gpt-5.4-mini"
+context_window = 128000
+supports_tools = true
+supports_thinking = false
+supports_vision = true
+tool_format = "openai_json"
+
+[models.sonnet]
+provider = "anthropic"
+slug = "claude-sonnet-4-6"
+context_window = 200000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+tool_format = "openai_json"
+
+[serve]
+share_ttl_days = 7
+terminal_enabled = true
+auto_orchestrate = true
+auto_start = false
+acknowledge_public_risk = true
+
+[serve.auth]
+enabled = false
+api_key = ""
+
+[serve.deploy]
+provider = "railway"
+environment = [
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "ZAI_API_KEY",
+  "GITHUB_TOKEN",
+  "GITHUB_WEBHOOK_SECRET",
+  "SLACK_BOT_TOKEN",
+  "SLACK_SIGNING_SECRET",
+]
+
+[server]
+bind = "0.0.0.0"
+port = 6677
+cors_origins = []
+unsafe_public_cors = false
+
+[chain]
+rpc_url = "http://127.0.0.1:8545"
+chain_id = 31337
+wallet_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+agent_registry = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
+bounty_market = "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+
+[relay]
+heartbeat_interval_secs = 30
+
+[runner]
+dangerously_skip_permissions = false

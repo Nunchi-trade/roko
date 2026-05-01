@@ -7,7 +7,7 @@ export const providerRace: Scenario = {
   title: 'Provider Race',
   subtitle: '4 providers race on the same prompt. First to pass gates wins.',
   panes: 4,
-  labels: ['anthropic (haiku)', 'openai (gpt-5.4-mini)', 'gemini (flash)', 'moonshot (v1)'],
+  labels: ['provider 1', 'provider 2', 'provider 3', 'provider 4'],
   panel: true,
   promptBar: false,
   category: 'comparison',
@@ -25,8 +25,7 @@ export const providerRace: Scenario = {
   async run(ctx) {
     const { entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, workspaceDir } = ctx;
     const providerNames = ['anthropic', 'openai', 'gemini', 'moonshot'];
-    const providerModels = ['haiku', 'gpt-5.4-mini', 'flash', 'v1'];
-    const providerLabels = ['anthropic (haiku)', 'openai (gpt-5.4-mini)', 'gemini (flash)', 'moonshot (v1)'];
+    const providerLabels = providerNames.map(name => name);
     const costs: (string | null)[] = [null, null, null, null];
     const tokens: (string | null)[] = [null, null, null, null];
     const finishOrder: number[] = [];
@@ -91,7 +90,6 @@ export const providerRace: Scenario = {
 
     type RaceResult = {
       provider: string;
-      model: string;
       label: string;
       ok: boolean;
       elapsed: number;
@@ -127,7 +125,6 @@ export const providerRace: Scenario = {
 
         return {
           provider: providerNames[index],
-          model: providerModels[index],
           label: providerLabels[index],
           ...result,
         };
@@ -153,7 +150,7 @@ export const providerRace: Scenario = {
     setMetric('model', `winner: ${winner.provider}`);
     logCommand(
       'winner',
-      `${winner.provider} (${winner.model}) finished first in ${winner.elapsed.toFixed(1)}s — cost: ${winner.cost ?? 'unknown'}`,
+      `${winner.provider} finished first in ${winner.elapsed.toFixed(1)}s — cost: ${winner.cost ?? 'unknown'}`,
     );
 
     await playback.waitForStep();

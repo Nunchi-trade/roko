@@ -32,10 +32,13 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/bench/run", post(start_bench_run))
         .route("/bench/run/{id}", get(get_bench_run))
+        .route("/bench/runs/{id}", get(get_bench_run))
         .route("/bench/run/{id}/status", get(bench_run_status))
         .route("/bench/run/{id}", delete(delete_bench_run))
+        .route("/bench/runs/{id}", delete(delete_bench_run))
         .route("/bench/runs", get(list_bench_runs))
         .route("/bench/runs/compare", get(compare_bench_runs))
+        .route("/bench/cost-summary", get(cost_summary))
         .route("/bench/suites", get(list_suites))
         .route("/bench/suites/{id}", get(get_suite))
         .route("/bench/suites", post(upload_suite))
@@ -602,6 +605,38 @@ async fn export_bench_run(
         .map_err(|e| ApiError::internal(format!("failed to load run: {e}")))?
         .ok_or_else(|| ApiError::not_found("bench run not found"))?;
     Ok(Json(serde_json::to_value(run).unwrap_or_default()))
+}
+
+/// `GET /api/bench/cost-summary` -- aggregate cost by model across all runs.
+async fn cost_summary(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let entries = bench::load_index_entries(&state.workdir).await;
+    let mut model_stats: std::collections::HashMap<String, (f64, u64, u64)> =
+        std::collections::HashMap::new();
+
+    for entry in &entries {
+        if let Ok(Some(run)) = bench::load_bench_run(&state.workdir, &entry.id).await {
+            for result in &run.results {
+                let stat = model_stats.entry(result.model.clone()).or_default();
+                stat.0 += result.cost_usd;
+                stat.1 += result.tokens_in + result.tokens_out;
+                stat.2 += 1;
+            }
+        }
+    }
+
+    let models: Vec<Value> = model_stats
+        .into_iter()
+        .map(|(model, (cost_usd, tokens, tasks))| {
+            json!({
+                "model": model,
+                "cost_usd": cost_usd,
+                "tokens": tokens,
+                "tasks": tasks,
+            })
+        })
+        .collect();
+
+    Json(json!({ "models": models }))
 }
 
 /// `GET /api/bench/events` -- SSE stream filtered to bench events.

@@ -179,9 +179,22 @@ impl EffectDriver {
             model: self.services.default_model.clone(),
         });
 
+        tracing::info!(
+            run_id = %self.run_id,
+            role,
+            model = %self.services.default_model,
+            "EffectDriver: calling model_caller"
+        );
         let start = Instant::now();
         let result = self.services.model_caller.call(request).await;
         let latency_ms = duration_millis(start);
+        tracing::info!(
+            run_id = %self.run_id,
+            role,
+            latency_ms,
+            success = result.is_ok(),
+            "EffectDriver: model_caller returned"
+        );
 
         match result {
             Ok(response) => {

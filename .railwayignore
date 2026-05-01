@@ -1,0 +1,74 @@
+# Keep `railway up` upload context small and deterministic.
+#
+# Railway also respects .gitignore, but this file is explicit because this
+# workspace often contains large local runner archives, Rust build products,
+# Docker state, and demo artifacts.
+
+# VCS / local metadata
+.git/
+.gitmodules
+.DS_Store
+.vscode/
+.idea/
+.claude/
+**/.claude/
+*.iml
+*.swp
+*.swo
+*~
+
+# Rust build artifacts and local cache dirs
+target/
+**/target/
+**/*.rs.bk
+**/Cargo.lock.orig
+**/rust-toolchain.toml.orig
+.roko-local-target/
+.codex-target/
+.cargo-target/
+
+# Local Roko state and runner/audit workspaces
+.roko/
+**/.roko/
+tmp/
+
+# Secrets and local env files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Node artifacts
+node_modules/
+**/node_modules/
+*.tsbuildinfo
+.next/
+dist/
+demo/demo-app/dist/
+demo/demo-app/pw-captures/
+demo/demo-app/test-results/
+demo/demo-app/tools/
+
+# Python and ML caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.fastembed_cache/
+**/.fastembed_cache/
+.cache/
+**/.cache/
+
+# Foundry and demo runtime outputs
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+demo/.runtime/
+
+# Docker local overrides
+docker/.env
+docker/*.override.yml

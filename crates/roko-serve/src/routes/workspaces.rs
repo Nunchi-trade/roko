@@ -30,6 +30,30 @@ fn default_prefix() -> String {
     "roko-ws".to_string()
 }
 
+fn run_git(dir: &std::path::Path, args: &[&str]) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|err| format!("spawn git {}: {err}", args.join(" ")))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!("git {} failed: {stderr}", args.join(" ")))
+    }
+}
+
+fn init_git_repo(dir: &std::path::Path) -> Result<(), String> {
+    run_git(dir, &["init"])?;
+    run_git(dir, &["config", "user.email", "roko-demo@example.local"])?;
+    run_git(dir, &["config", "user.name", "Roko Demo"])?;
+    run_git(dir, &["add", "-A"])?;
+    run_git(dir, &["commit", "-m", "workspace init", "--allow-empty"])?;
+    Ok(())
+}
+
 /// Response body for `POST /api/workspaces`.
 #[derive(Debug, Serialize)]
 pub struct CreateWorkspaceResponse {
@@ -99,22 +123,18 @@ async fn create_workspace(
     // Optionally initialise a git repo (same pattern as scaffold_bench_workdir).
     if body.git_init {
         let dir_clone = dir.clone();
-        tokio::task::spawn_blocking(move || {
-            for args in [
-                &["init"][..],
-                &["add", "-A"][..],
-                &["commit", "-m", "workspace init", "--allow-empty"][..],
-            ] {
-                let _ = std::process::Command::new("git")
-                    .args(args)
-                    .current_dir(&dir_clone)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
-        })
-        .await
-        .ok();
+        let git_result = tokio::task::spawn_blocking(move || init_git_repo(&dir_clone))
+            .await
+            .map_err(|err| format!("join git init task: {err}"))
+            .and_then(|result| result);
+
+        if let Err(e) = git_result {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            return Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("init git repo: {e}") })),
+            ));
+        }
     }
 
     let info = WorkspaceInfo {

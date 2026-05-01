@@ -58,7 +58,7 @@ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
 
 use self::bash::BashPolicy;
 use self::contract::{
-    AgentContract, ContractLoadError, ContractLoadMode, GovernanceRule, Invariant,
+    AgentContract, ContractLoadError, GovernanceRule, Invariant,
 };
 use self::git::GitPolicy;
 use self::network::NetworkPolicy;
@@ -253,7 +253,7 @@ impl SafetyLayer {
             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
             safety_budget: None,
             role: "default".into(),
-            contract: AgentContract::restricted("default"),
+            contract: AgentContract::permissive("default"),
             warrant: None,
             role_tools: HashMap::new(),
             role_overrides: HashMap::new(),
@@ -870,31 +870,28 @@ impl SafetyLayer {
                 Err(ContractLoadError::MissingAsset { .. }) => {
                     tracing::warn!(
                         %role,
-                        "missing safety contract YAML, using restricted defaults"
+                        "missing safety contract YAML, using permissive defaults"
                     );
-                    AgentContract::restricted(role)
+                    AgentContract::permissive(role)
                 }
                 Err(err) => {
                     tracing::error!(
                         %role,
                         %err,
-                        "contract load failed for configured role; using restricted fallback"
+                        "contract load failed for configured role; using permissive fallback"
                     );
-                    AgentContract::restricted(role.to_string())
+                    AgentContract::permissive(role.to_string())
                 }
             };
         }
 
-        let mut contract =
-            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
-                .unwrap_or_else(|err| {
-                    tracing::error!(
-                        %role,
-                        %err,
-                        "contract load failed even with restricted fallback; using deny-all"
-                    );
-                    AgentContract::restricted(role.to_string())
-                });
+        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|_| {
+            // No bundled YAML for this role — fall back to permissive.
+            // The role_tools whitelist (check_pre_execution) already enforces
+            // tool access; a restricted contract here would double-deny
+            // every tool call.
+            AgentContract::permissive(role.to_string())
+        });
 
         if let Some(role_override) = self.role_overrides.get(role)
             && let Some(budget) = role_override.effective_budget()

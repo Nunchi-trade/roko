@@ -45,7 +45,6 @@ export const isfrAgents: Scenario = {
     await Promise.all(entries.map(e => enterWorkspace(e, dir)));
 
     // Verify chain connection on the first pane
-    await aaveScout.execCmd(`echo "Connecting to mirage-rs fork..."`, 3000);
     const blockCheck = await showCmd(aaveScout, castBlockNumber(), {
       playback,
       timeout: 15000,
@@ -60,17 +59,6 @@ export const isfrAgents: Scenario = {
     }
     setMetric('chain', 'connected');
     setGate('chain-fork', 'pass');
-
-    // Show waiting state on downstream panes
-    await Promise.all([
-      compoundScout.execCmd('echo "Ready to scout Compound V3..."', 2000),
-      ethenaScout.execCmd('echo "Ready to scout Ethena sUSDe..."', 2000),
-      stakingScout.execCmd('echo "Ready to scout ETH staking..."', 2000),
-      lendingAgg.execCmd('echo "Waiting for scout data..."', 2000),
-      structuredAgg.execCmd('echo "Waiting for scout data..."', 2000),
-      calculator.execCmd('echo "Waiting for aggregated rates..."', 2000),
-      validator.execCmd('echo "Waiting for ISFR computation..."', 2000),
-    ]);
 
     if (signal.aborted) return;
 

@@ -339,9 +339,10 @@ pub(crate) fn apply_concluded_experiment_overrides(learning: &LearningRuntime, w
 
 // ─── Distillation hooks ──────────────────────────────────────────────────
 
-const DISTILLATION_MODEL: &str = "claude-haiku-4-5";
-
 /// Build a [`ModelCaller`] configured for episode distillation.
+///
+/// Uses the workspace's configured default model so distillation works in
+/// environments that don't have Anthropic providers (e.g. Zhipu-only deploys).
 ///
 /// This is `pub` (not `pub(crate)`) because the binary target and the library
 /// target are compiled as separate crates — `pub(crate)` would make the
@@ -352,8 +353,8 @@ pub fn distillation_model_caller(workdir: &Path) -> Arc<dyn ModelCaller> {
         .unwrap_or_default();
     config.apply_process_env();
     crate::config::merge_global_providers(&mut config);
-    config.agent.default_model = DISTILLATION_MODEL.to_string();
-    Arc::new(ModelCallService::new(DISTILLATION_MODEL.to_string()).with_config(config))
+    let model = config.agent.default_model.clone();
+    Arc::new(ModelCallService::new(model).with_config(config))
 }
 
 pub(crate) fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
