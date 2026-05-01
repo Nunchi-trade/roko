@@ -11,8 +11,6 @@
 //!    - `EpisodeSink` → durable `.roko/episodes.jsonl`
 //!    - `RoutingObservationSink` → `CascadeRouter::record_outcome`
 //!    - `KnowledgeIngestionSink` → `.roko/learn/knowledge-candidates.jsonl`
-//!    - `ConductorObservationSink` → `.roko/conductor/observations.jsonl`
-//!    - `DreamTriggerSink` → `.roko/learn/dream_triggers.jsonl`
 //! 4. The runner publishes a `ProjectionEvent` to `Projection` and the
 //!    CLI progress projection renders it into a structured progress
 //!    line.
@@ -32,8 +30,7 @@ use roko_cli::projection::{CliProgressPrinter, DashboardProjection};
 use roko_cli::runner::projection::{Projection, RawRuntimeEvent};
 use roko_cli::runner::types::RunnerEvent;
 use roko_cli::runtime_feedback::{
-    ConductorObservationSink, DreamTriggerSink, EpisodeSink, FeedbackEvent, FeedbackFacade,
-    KnowledgeIngestionSink, RoutingObservationSink,
+    EpisodeSink, FeedbackEvent, FeedbackFacade, KnowledgeIngestionSink, RoutingObservationSink,
 };
 use roko_cli::task_parser::TaskDef;
 use roko_learn::cascade_router::CascadeRouter;
@@ -112,11 +109,8 @@ async fn dispatch_feeds_feedback_facade_and_projection() {
     let workdir = tempdir().expect("tempdir");
     let roko_dir = workdir.path().join(".roko");
     std::fs::create_dir_all(roko_dir.join("learn")).unwrap();
-    std::fs::create_dir_all(roko_dir.join("conductor")).unwrap();
     let episodes_path = roko_dir.join("episodes.jsonl");
     let knowledge_path = roko_dir.join("learn/knowledge-candidates.jsonl");
-    let conductor_path = roko_dir.join("conductor/observations.jsonl");
-    let dream_path = roko_dir.join("learn/dream_triggers.jsonl");
 
     // ── 1. Dispatch ────────────────────────────────────────────────────
     let dispatcher = Dispatcher::new(None, PromptAssembler::minimal(), WarmPool::new(2));
@@ -137,11 +131,7 @@ async fn dispatch_feeds_feedback_facade_and_projection() {
     let facade = FeedbackFacade::new()
         .with_sink(Arc::new(EpisodeSink::at(&episodes_path)))
         .with_sink(Arc::new(RoutingObservationSink::new(router.clone())))
-        .with_sink(Arc::new(KnowledgeIngestionSink::at(&knowledge_path)))
-        .with_sink(Arc::new(ConductorObservationSink::at(&conductor_path)))
-        .with_sink(Arc::new(
-            DreamTriggerSink::at(&dream_path).with_idle_threshold(2),
-        ));
+        .with_sink(Arc::new(KnowledgeIngestionSink::at(&knowledge_path)));
 
     facade
         .on_event(&FeedbackEvent::TaskCompleted {
@@ -186,19 +176,11 @@ async fn dispatch_feeds_feedback_facade_and_projection() {
     assert!(knowledge.contains("\"kind\":\"success\""));
     assert!(knowledge.contains("\"kind\":\"gate_falsifier\""));
 
-    let conductor = tokio::fs::read_to_string(&conductor_path).await.unwrap();
-    assert!(conductor.contains("\"kind\":\"gate_failed\""));
-
-    let dreams = tokio::fs::read_to_string(&dream_path).await.unwrap();
-    assert!(dreams.contains("\"kind\":\"plan_completed\""));
-
     let stats = facade.stats();
     let names: Vec<&str> = stats.per_sink.iter().map(|s| s.name).collect();
     assert!(names.contains(&"episodes"));
     assert!(names.contains(&"routing"));
     assert!(names.contains(&"knowledge"));
-    assert!(names.contains(&"conductor"));
-    assert!(names.contains(&"dreams"));
 
     // ── 4. Projection — render via CLI printer + dashboard bridge ──────
     let projection = Arc::new(Projection::new("run-e2e"));
@@ -272,10 +254,9 @@ async fn retry_attempt_includes_gate_feedback_in_assembled_prompt() {
     let plan = dispatcher.plan(&task, &dctx).expect("plan");
     assert!(plan.prompt.system_prompt.contains("Previous attempt"));
     assert!(plan.prompt.system_prompt.contains("E0432"));
-    assert!(
-        plan.prompt
-            .diagnostics
-            .included_sections
-            .contains(&"retry".to_string())
-    );
+    assert!(plan
+        .prompt
+        .diagnostics
+        .included_sections
+        .contains(&"retry".to_string()));
 }

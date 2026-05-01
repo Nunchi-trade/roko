@@ -1,5 +1,5 @@
 //! Runtime feedback — single facade that fans runner events out to every
-//! learning, knowledge, conductor, and dream sink.
+//! learning and knowledge sink.
 //!
 //! ## Architectural role
 //!
@@ -26,19 +26,15 @@
 //! event distribution. Errors surface through tracing and a per-sink
 //! counter so observability can flag stuck subsystems.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
-pub mod conductor;
-pub mod dreams;
 pub mod episodes;
 pub mod knowledge;
 pub mod routing;
 
-pub use conductor::ConductorObservationSink;
-pub use dreams::DreamTriggerSink;
 pub use episodes::EpisodeSink;
 pub use knowledge::KnowledgeIngestionSink;
 pub use routing::RoutingObservationSink;

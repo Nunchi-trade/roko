@@ -366,15 +366,9 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 .join(".roko")
                 .join("learn")
                 .join(roko_neuro::admission::DEFAULT_KNOWLEDGE_CANDIDATES_FILE);
-            let conductor_path = wd
-                .join(".roko")
-                .join("conductor")
-                .join("observations.jsonl");
-            let dream_path = wd.join(".roko").join("learn").join("dream_triggers.jsonl");
             // Best-effort directory creation — the sinks' own
             // `create_dir_all` will retry on first append.
             let _ = std::fs::create_dir_all(wd.join(".roko").join("learn"));
-            let _ = std::fs::create_dir_all(wd.join(".roko").join("conductor"));
             let feedback_facade = std::sync::Arc::new(
                 roko_cli::runtime_feedback::FeedbackFacade::new()
                     .with_sink(std::sync::Arc::new(
@@ -387,12 +381,6 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     ))
                     .with_sink(std::sync::Arc::new(
                         roko_cli::runtime_feedback::KnowledgeIngestionSink::at(&knowledge_path),
-                    ))
-                    .with_sink(std::sync::Arc::new(
-                        roko_cli::runtime_feedback::ConductorObservationSink::at(&conductor_path),
-                    ))
-                    .with_sink(std::sync::Arc::new(
-                        roko_cli::runtime_feedback::DreamTriggerSink::at(&dream_path),
                     )),
             );
 
@@ -535,7 +523,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
         }
         PlanCmd::Generate { source, from_file } => {
             use roko_cli::agent_config::load_gateway_env;
-            use roko_cli::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
+            use roko_cli::agent_exec::{run_agent_logged, AgentExecEpisode, AgentExecOpts};
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
             let gw = load_gateway_env(&workdir);
@@ -606,7 +594,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
         }
         PlanCmd::Regenerate { plan_dir, dry_run } => {
             use roko_cli::agent_config::load_gateway_env;
-            use roko_cli::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
+            use roko_cli::agent_exec::{run_agent_logged, AgentExecEpisode, AgentExecOpts};
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
             let tasks_path = plan_dir.join("tasks.toml");
