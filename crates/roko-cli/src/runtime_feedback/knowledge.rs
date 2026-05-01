@@ -19,7 +19,7 @@
 //! The knowledge subsystem is large and its full ingestion API is not
 //! stabilized. This sink is the runtime seam — it lets the runner
 //! produce candidates today without blocking on the store evolution.
-//! The `.roko/learn/knowledge_candidates.jsonl` file is consumed by an
+//! The `.roko/learn/knowledge-candidates.jsonl` file is consumed by an
 //! offline reinforcement pass; see `.roko/GAPS.md` for the remaining
 //! wiring work.
 

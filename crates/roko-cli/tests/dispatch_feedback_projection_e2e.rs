@@ -10,7 +10,7 @@
 //!    `FeedbackFacade`, which fans out to:
 //!    - `EpisodeSink` → durable `.roko/episodes.jsonl`
 //!    - `RoutingObservationSink` → `CascadeRouter::record_outcome`
-//!    - `KnowledgeIngestionSink` → `.roko/learn/knowledge_candidates.jsonl`
+//!    - `KnowledgeIngestionSink` → `.roko/learn/knowledge-candidates.jsonl`
 //!    - `ConductorObservationSink` → `.roko/conductor/observations.jsonl`
 //!    - `DreamTriggerSink` → `.roko/learn/dream_triggers.jsonl`
 //! 4. The runner publishes a `ProjectionEvent` to `Projection` and the
@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use roko_cli::dispatch::{
-    AgentOutcome, AgentResultBridge, DispatchContext, DispatchPlan, Dispatcher, ModelChoiceSource,
-    PromptAssembler, WarmPool,
+    AgentOutcome, AgentResultBridge, DispatchContext, Dispatcher, ModelChoiceSource,
+    PromptAssembler, RunnerDispatchPlan, WarmPool,
 };
 use roko_cli::projection::{CliProgressPrinter, DashboardProjection};
 use roko_cli::runner::projection::{Projection, RawRuntimeEvent};
@@ -88,7 +88,7 @@ struct StubBridge;
 impl AgentResultBridge for StubBridge {
     async fn run_agent(
         &self,
-        plan: &DispatchPlan,
+        plan: &RunnerDispatchPlan,
         ctx: &DispatchContext,
     ) -> Result<AgentOutcome, anyhow::Error> {
         Ok(AgentOutcome {
@@ -114,7 +114,7 @@ async fn dispatch_feeds_feedback_facade_and_projection() {
     std::fs::create_dir_all(roko_dir.join("learn")).unwrap();
     std::fs::create_dir_all(roko_dir.join("conductor")).unwrap();
     let episodes_path = roko_dir.join("episodes.jsonl");
-    let knowledge_path = roko_dir.join("learn/knowledge_candidates.jsonl");
+    let knowledge_path = roko_dir.join("learn/knowledge-candidates.jsonl");
     let conductor_path = roko_dir.join("conductor/observations.jsonl");
     let dream_path = roko_dir.join("learn/dream_triggers.jsonl");
 

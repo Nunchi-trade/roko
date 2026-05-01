@@ -372,7 +372,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let knowledge_path = wd
                 .join(".roko")
                 .join("learn")
-                .join("knowledge_candidates.jsonl");
+                .join(roko_neuro::admission::DEFAULT_KNOWLEDGE_CANDIDATES_FILE);
             let conductor_path = wd
                 .join(".roko")
                 .join("conductor")
