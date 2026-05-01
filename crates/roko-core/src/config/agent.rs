@@ -65,17 +65,11 @@ pub struct AgentConfig {
     /// Per-role overrides keyed by role label (e.g. `"implementer"`, `"architect"`).
     #[serde(default)]
     pub roles: HashMap<String, RoleOverride>,
-    /// RoleProfile/PromptPolicy manifest paths loaded before agent dispatch.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub policy_manifests: Vec<String>,
 
-    /// Configuration for the Data LLM used in CaMeL dual-LLM isolation.
-    ///
-    /// When configured, content tagged with `Taint::ExternalFetch` or
-    /// `Taint::ThirdPartyPlugin` is routed through this model with tool
-    /// calls stripped. The Data LLM processes untrusted content and returns
-    /// schema-constrained structured output that is safe for the Control
-    /// LLM to consume.
+    /// Reserved for future CaMeL dual-LLM isolation. The DataLlmConfig
+    /// type and DataLlmRouter implementation are substantial enough to
+    /// keep around, but no production dispatch path currently consults
+    /// this field. See audit T2-21 / 39-config-schema-phantom-fields.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_llm: Option<DataLlmConfig>,
 
@@ -86,10 +80,6 @@ pub struct AgentConfig {
     /// Extensions loaded for all agents (can be overridden per-role).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
-
-    /// Domain profile name (e.g. `"coding"`, `"research"`, `"chain"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub domain: Option<String>,
 }
 
 /// Agent execution mode controlling lifecycle.
@@ -143,11 +133,9 @@ impl Default for AgentConfig {
             tier_models: HashMap::new(),
             fallback_model: None,
             roles: HashMap::new(),
-            policy_manifests: Vec::new(),
             data_llm: None,
             mode: AgentMode::default(),
             extensions: Vec::new(),
-            domain: None,
         }
     }
 }

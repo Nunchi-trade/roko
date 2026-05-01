@@ -700,7 +700,6 @@ impl RokoConfig {
         let _ = writeln!(out, "default_effort = \"{}\"", c.agent.default_effort);
         let _ = writeln!(out, "temperament = \"{}\"", c.agent.temperament);
         let _ = writeln!(out, "context_limit_k = {}", c.agent.context_limit_k);
-        let _ = writeln!(out, "# policy_manifests = [\".roko/roles/manifest.toml\"]");
         let _ = writeln!(out, "bare_mode = {}\n", c.agent.bare_mode);
         let _ = writeln!(out, "# Per-role overrides (repeat for each role):");
         let _ = writeln!(out, "# [agent.roles.implementer]");
