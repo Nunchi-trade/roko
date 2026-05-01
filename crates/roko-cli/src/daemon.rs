@@ -317,7 +317,7 @@ pub async fn daemon_start(workdir: &Path, foreground: bool, port: u16) -> Result
         return Ok(());
     }
 
-    let core_config = load_config(workdir)?;
+    let core_config = load_config(workdir)?.into_config();
     let cli_config = load_layered(workdir)?.config;
     let dream_settings = cli_config.dreams.clone();
     let agent_settings = cli_config.agent.clone();

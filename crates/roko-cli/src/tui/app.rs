@@ -3715,7 +3715,9 @@ mod tests {
 
         app.dispatch_action(TuiAction::ConfigSave);
 
-        let mut reloaded = roko_core::config::load_config(dir.path()).unwrap();
+        let mut reloaded = roko_core::config::load_config(dir.path())
+            .unwrap()
+            .into_config();
         reloaded.apply_process_env();
 
         assert!(app.tui_state.config_pending.is_empty());

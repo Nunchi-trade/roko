@@ -389,7 +389,9 @@ fn resolve_workflow_model_selection(
         config.prompt.role.clone_from(role);
     }
 
-    let mut model_config = roko_core::config::load_config(workdir).unwrap_or_default();
+    let mut model_config = roko_core::config::load_config(workdir)
+        .map(roko_core::config::ValidatedConfig::into_config)
+        .unwrap_or_default();
     model_config.apply_process_env();
     crate::config::merge_global_providers(&mut model_config);
     model_config.providers.extend(config.providers.clone());
@@ -1825,7 +1827,8 @@ async fn dispatch_agent(
 ) -> Result<DispatchOutcome> {
     // TODO(gateway): migrate to ModelCallService.
     let mut routing_config = roko_core::config::load_config(workdir)
-        .with_context(|| format!("load routing config from {}", workdir.display()))?;
+        .with_context(|| format!("load routing config from {}", workdir.display()))?
+        .into_config();
     routing_config.apply_process_env();
     crate::config::merge_global_providers(&mut routing_config);
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
@@ -2394,7 +2397,7 @@ fn build_chain_resolver(
     use roko_chain::alloy_impl::AlloyChainClient;
     use std::sync::Arc;
 
-    let roko_config = roko_core::config::load_config(workdir).ok()?;
+    let roko_config = roko_core::config::load_config(workdir).ok()?.into_config();
     let rpc_url = roko_config.chain.rpc_url.as_deref()?;
 
     let client: Arc<dyn roko_chain::ChainClient> = match AlloyChainClient::http(rpc_url) {
@@ -2712,7 +2715,8 @@ fn resolved_model(config: &Config) -> String {
     }
     // Check routing config for configured default model before returning an empty model for
     // non-Claude commands.
-    if let Ok(mut rc) = roko_core::config::load_config(std::path::Path::new(".")) {
+    if let Ok(validated) = roko_core::config::load_config(std::path::Path::new(".")) {
+        let mut rc = validated.into_config();
         rc.apply_process_env();
         crate::config::merge_global_providers(&mut rc);
         if !rc.agent.default_model.is_empty() {

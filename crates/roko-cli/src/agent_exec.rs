@@ -93,7 +93,8 @@ async fn run_agent_capture_impl(
 ) -> Result<(i32, String)> {
     let started = Instant::now();
     let mut routing_config = roko_core::config::load_config(opts.workdir)
-        .with_context(|| format!("load routing config from {}", opts.workdir.display()))?;
+        .with_context(|| format!("load routing config from {}", opts.workdir.display()))?
+        .into_config();
     routing_config.apply_process_env();
     let routing_enabled = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
