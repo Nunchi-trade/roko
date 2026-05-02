@@ -423,6 +423,7 @@ mod tests {
     use super::*;
     use roko_core::agent::ProviderKind;
     use roko_core::config::schema::ProviderConfig;
+    use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -885,7 +886,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(1_500),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: Some(1),

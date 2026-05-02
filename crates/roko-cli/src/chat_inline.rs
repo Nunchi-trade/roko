@@ -35,6 +35,7 @@ use crate::tui::Theme;
 
 use crate::chat_session::{ChatAgentSession, SlashResult};
 use chrono;
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_learn::cost_table::CostTable;
 
 // ---------------------------------------------------------------------------

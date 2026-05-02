@@ -48,6 +48,8 @@ use roko_core::Temperament;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::tool::{ToolDef, ToolRegistry};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -783,7 +785,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(1_500),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: None,
@@ -837,7 +839,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(300_000),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: None,
@@ -1255,7 +1257,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(1_500),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: Some(3),

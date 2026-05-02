@@ -3,6 +3,8 @@ use crate::cursor_agent::{CursorAgent, DEFAULT_BASE_URL};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use serde_json::Value;
 
 /// Adapter for the Cursor ACP HTTP fallback.
@@ -206,7 +208,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,

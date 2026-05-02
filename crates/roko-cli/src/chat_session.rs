@@ -22,6 +22,7 @@ use roko_compose::system_prompt_builder::SystemPromptBuilder;
 use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::foundation::{
     CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, ModelStreamEvent,
     TokenUsage, caller,
@@ -543,7 +544,7 @@ impl ChatAgentSession {
                 command: None,
                 args: None,
                 timeout_ms: self.api_timeout_ms(),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: None,

@@ -72,6 +72,10 @@ pub struct OpenAiCompatLlmBackend {
     /// messages that carry `tool_calls`. Strict providers (e.g. Cerebras)
     /// reject empty-string content alongside tool calls.
     normalize_tool_call_content: bool,
+    /// Time-to-first-token timeout in milliseconds for streaming requests.
+    /// When set, the first `response.chunk()` call is wrapped with
+    /// `tokio::time::timeout` so slow providers fail fast.
+    ttft_timeout_ms: Option<u64>,
 }
 
 impl OpenAiCompatLlmBackend {
@@ -96,6 +100,7 @@ impl OpenAiCompatLlmBackend {
             skip_session_fields: false,
             disable_parallel_tool_calls: false,
             normalize_tool_call_content: false,
+            ttft_timeout_ms: None,
         }
     }
 
@@ -186,6 +191,17 @@ impl OpenAiCompatLlmBackend {
     #[must_use]
     pub const fn with_normalize_tool_call_content(mut self, normalize: bool) -> Self {
         self.normalize_tool_call_content = normalize;
+        self
+    }
+
+    /// Set the time-to-first-token timeout for streaming requests.
+    ///
+    /// When set, `send_turn_streaming` wraps the first `response.chunk()`
+    /// call with `tokio::time::timeout` so slow providers fail fast instead
+    /// of hanging until the full request timeout expires.
+    #[must_use]
+    pub const fn with_ttft_timeout_ms(mut self, ms: Option<u64>) -> Self {
+        self.ttft_timeout_ms = ms;
         self
     }
 
@@ -424,9 +440,37 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         let mut pending = Vec::new();
         let mut accumulator = StreamAccumulator::new();
         let mut metadata = StreamResponseMetadata::default();
+        let mut first_chunk = true;
 
         loop {
-            let chunk = response.chunk().await.map_err(|e| {
+            let chunk_fut = response.chunk();
+            let chunk = if first_chunk {
+                // Apply TTFT timeout only to the first body chunk. This
+                // measures the real time-to-first-token: from HTTP headers
+                // received until the provider starts streaming content.
+                first_chunk = false;
+                if let Some(ttft_ms) = self.ttft_timeout_ms {
+                    tokio::time::timeout(Duration::from_millis(ttft_ms), chunk_fut)
+                        .await
+                        .map_err(|_| {
+                            let message = format!(
+                                "TTFT timeout: no streaming data within {ttft_ms}ms"
+                            );
+                            tracing::warn!(
+                                endpoint = %self.endpoint(),
+                                ttft_timeout_ms = ttft_ms,
+                                "TTFT timeout — no first chunk within deadline"
+                            );
+                            let _ = event_tx.send(StreamChunk::Error(message.clone()));
+                            LlmError::Network(message)
+                        })?
+                } else {
+                    chunk_fut.await
+                }
+            } else {
+                chunk_fut.await
+            }
+            .map_err(|e| {
                 let message = format!("read chunk failed: {e}");
                 let _ = event_tx.send(StreamChunk::Error(message.clone()));
                 LlmError::Network(message)
@@ -1273,5 +1317,71 @@ mod tests {
             Ok(other) => panic!("unexpected response variant: {other:?}"),
             Err(e) => panic!("request failed: {e:?}"),
         }
+    }
+
+    /// Verify TTFT timeout fires when the server sends HTTP headers but delays
+    /// the first body chunk beyond the deadline.
+    #[tokio::test]
+    async fn streaming_ttft_timeout_fires_on_slow_first_chunk() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("listener addr");
+
+        // Server: send response headers immediately, then sleep longer than
+        // the TTFT timeout before sending any body data.
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let _ = read_http_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write response headers");
+            stream.flush().expect("flush response headers");
+            // Delay first chunk beyond the 100ms TTFT timeout.
+            thread::sleep(StdDuration::from_millis(2000));
+            let _ = stream.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n");
+        });
+
+        let backend = OpenAiCompatLlmBackend::new("test-key", "test-model")
+            .with_base_url(&format!("http://{addr}/v1/"))
+            .with_ttft_timeout_ms(Some(100)); // 100ms TTFT — server delays 2s
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let started = Instant::now();
+
+        let result = backend
+            .send_turn_streaming(
+                &[serde_json::json!({ "role": "user", "content": "hello" })],
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+                tx,
+            )
+            .await;
+
+        let elapsed = started.elapsed();
+
+        // Should fail with TTFT timeout, not wait the full 2 seconds.
+        assert!(result.is_err(), "expected TTFT timeout error, got {result:?}");
+        let err = result.unwrap_err();
+        assert!(
+            format!("{err:?}").contains("TTFT timeout"),
+            "error should mention TTFT: {err:?}"
+        );
+        assert!(
+            elapsed < StdDuration::from_millis(1500),
+            "should timeout quickly (~100ms), not wait for delayed body (took {}ms)",
+            elapsed.as_millis()
+        );
+
+        // The error channel should have the TTFT error event.
+        let mut got_error = false;
+        while let Ok(chunk) = rx.try_recv() {
+            if matches!(chunk, StreamChunk::Error(_)) {
+                got_error = true;
+            }
+        }
+        assert!(got_error, "expected StreamChunk::Error for TTFT timeout");
+
+        server.join().expect("server thread");
     }
 }

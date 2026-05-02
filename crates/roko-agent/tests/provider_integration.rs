@@ -10,6 +10,7 @@ use roko_agent::openai_agent::OpenAiAgent;
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::{Body, Context, Engram, Kind};
 use serde_json::Value;
 use std::io::{Read, Write};
@@ -60,7 +61,7 @@ fn zai_provider_config(base_url: impl Into<String>) -> ProviderConfig {
         command: None,
         args: None,
         timeout_ms: Some(1_500),
-        ttft_timeout_ms: Some(15_000),
+        ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
         connect_timeout_ms: Some(5_000),
         extra_headers: None,
         max_concurrent: None,
@@ -114,7 +115,7 @@ fn ollama_provider_config(base_url: impl Into<String>) -> ProviderConfig {
         command: None,
         args: None,
         timeout_ms: Some(1_500),
-        ttft_timeout_ms: Some(15_000),
+        ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
         connect_timeout_ms: Some(5_000),
         extra_headers: None,
         max_concurrent: None,

@@ -13,7 +13,9 @@ use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{
     ModelProfile, ProviderConfig, ProviderRouting, RokoConfig, SubscriptionConfig,
 };
-use roko_core::config::{ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig};
+use roko_core::config::{
+    DEFAULT_TTFT_TIMEOUT_MS, ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig,
+};
 use roko_daimon::StrategySpaceDefinition;
 use roko_orchestrator::ExecutorConfig;
 
@@ -1395,7 +1397,7 @@ impl ProviderLayer {
             command: self.command,
             args: self.args,
             timeout_ms: self.timeout_ms.or(Some(120_000)),
-            ttft_timeout_ms: self.ttft_timeout_ms.or(Some(15_000)),
+            ttft_timeout_ms: self.ttft_timeout_ms.or(Some(DEFAULT_TTFT_TIMEOUT_MS)),
             connect_timeout_ms: self.connect_timeout_ms.or(Some(5_000)),
             extra_headers: self.extra_headers,
             max_concurrent: self.max_concurrent,

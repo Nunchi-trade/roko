@@ -1,0 +1,38 @@
+# Dev compose: bind-mounts locally-built binaries into the runtime image.
+# Usage:
+#   cargo build --release -p roko-cli -p mirage-rs -p agent-relay
+#   docker compose -f docker-compose.dev.yml up
+#
+# After rebuilding Rust:
+#   docker compose -f docker-compose.dev.yml restart roko
+#
+# Frontend changes (demo-app) are instant via Vite HMR at :5173 — no Docker needed.
+
+services:
+  roko:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    volumes:
+      # Bind-mount locally-compiled binaries (skip Docker rebuild)
+      - ./target/release/roko:/usr/local/bin/roko:ro
+      - ./target/release/mirage-rs:/usr/local/bin/mirage-rs:ro
+      - ./target/release/agent-relay:/usr/local/bin/agent-relay:ro
+      # Persist state across restarts
+      - ./.roko:/workspace/.roko
+      # Use local roko.toml
+      - ./docker/railway.roko.toml:/workspace/roko.toml:ro
+    ports:
+      - "6677:6677"
+    environment:
+      - ZHIPU_API_KEY
+      - ZHIPU_BASE_URL
+      - OPENAI_API_KEY
+      - ANTHROPIC_API_KEY
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6677/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

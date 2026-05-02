@@ -12,6 +12,7 @@ use roko_agent::provider::{AgentOptions, ProviderAdapter, ProviderError, create_
 use roko_agent::translate::{BackendResponse, GeminiTranslator, RenderedResults, Translator};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::tool::ToolResult;
 use roko_core::{Body, Context, Engram, Kind};
 use roko_learn::costs_db::CostTable;
@@ -186,7 +187,7 @@ fn gemini_provider(base_url: impl Into<String>) -> ProviderConfig {
         command: None,
         args: None,
         timeout_ms: Some(1_500),
-        ttft_timeout_ms: Some(15_000),
+        ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
         connect_timeout_ms: Some(5_000),
         extra_headers: None,
         max_concurrent: None,

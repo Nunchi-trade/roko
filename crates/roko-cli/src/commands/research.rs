@@ -1,6 +1,7 @@
 //! research command handlers.
 #![allow(unused_imports)]
 
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use crate::*;
 
 pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
@@ -238,7 +239,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                             command: None,
                             args: None,
                             timeout_ms: Some(timeout_ms),
-                            ttft_timeout_ms: Some(15_000),
+                            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                             connect_timeout_ms: Some(5_000),
                             extra_headers: None,
                             max_concurrent: None,
@@ -868,7 +869,7 @@ pub(crate) fn with_perplexity_research_model(
             command: None,
             args: None,
             timeout_ms: Some(timeout_ms),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,

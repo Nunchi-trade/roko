@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use crate::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
+use crate::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_capture_logged, run_agent_logged};
 use crate::task_parser::TasksFile;
 use crate::workspace_paths::{
     drafts_dir, ideas_path, plans_dir as workspace_plans_dir, prd_dir, published_dir,
@@ -727,6 +727,12 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
     let dst = published_dir(workdir).join(format!("{slug}.md"));
 
     let mut content = std::fs::read_to_string(&src)?;
+    if !has_substantive_markdown_content(&content) {
+        return Err(anyhow!(
+            "draft has no substantive content; cannot promote. \
+             Re-run `roko prd draft edit {slug}` to populate it first."
+        ));
+    }
     content = content.replace("status: draft", "status: published");
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     // Update the 'updated' field if present
@@ -976,12 +982,15 @@ async fn generate_plan_from_prd_with_outcome(
             .unwrap_or_default();
 
         let task_prompt = format!(
-            "Read the PRD at {path} and generate implementation plan directories \
-             under .roko/plans/. Each REQ-XXX requirement becomes one or more tasks. \
+            "Read the PRD at {path} and generate an implementation plan. \
+             Each REQ-XXX requirement becomes one or more tasks. \
              Each acceptance criterion becomes a task verification command. \
              Search the codebase first to understand what already exists. \
-             Create plan.md and tasks.toml files directly, including per-task mcp_servers \
-             when a task needs a specific MCP server.\n\n\
+             Do NOT create files directly. Instead, output the plan content \
+             as follows:\n\n\
+             1. Output a fenced block tagged `toml` containing the tasks.toml content.\n\
+             2. Optionally output a fenced block tagged `plan.md` containing the plan narrative.\n\n\
+             Include per-task mcp_servers when a task needs a specific MCP server.\n\n\
              {template_guidance}\n\
              PRD content:\n{content}{prd_context_suffix}",
             path = prd_path.display(),
@@ -991,7 +1000,7 @@ async fn generate_plan_from_prd_with_outcome(
         );
 
         let task_id = format!("prd:plan:{slug}");
-        let exit_code = run_agent_logged(
+        let (exit_code, output) = run_agent_capture_logged(
             AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: workdir_ref,
@@ -1012,6 +1021,30 @@ async fn generate_plan_from_prd_with_outcome(
             return Err(anyhow!(
                 "plan generation agent failed with exit code {exit_code}"
             ));
+        }
+
+        // Write files from agent output (strategist can't write files directly).
+        // Try fenced ```toml block first, then fall back to ```tasks.toml.
+        let toml_content = extract_fenced_block(&output, "toml")
+            .or_else(|| extract_fenced_block(&output, "tasks.toml"));
+        if let Some(toml_content) = toml_content {
+            let plan_dir = plans_root.join(slug);
+            std::fs::create_dir_all(&plan_dir)
+                .with_context(|| format!("create plan dir {}", plan_dir.display()))?;
+            std::fs::write(plan_dir.join("tasks.toml"), toml_content)
+                .with_context(|| format!("write tasks.toml to {}", plan_dir.display()))?;
+            if let Some(plan_md) = extract_fenced_block(&output, "plan.md")
+                .or_else(|| extract_fenced_block(&output, "markdown"))
+                .or_else(|| extract_fenced_block(&output, "md"))
+            {
+                std::fs::write(plan_dir.join("plan.md"), plan_md)
+                    .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
+            }
+        } else if !output.trim().is_empty() {
+            eprintln!(
+                "warning: agent output did not contain a fenced ```toml block; \
+                 plan files not extracted from output"
+            );
         }
 
         let generated_changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);
@@ -1307,6 +1340,42 @@ fn strip_markdown_code_fence(output: &str) -> &str {
         return trimmed;
     };
     &inner[..closing]
+}
+
+/// Extract the contents of a fenced code block tagged with `tag` from agent output.
+///
+/// Looks for `` ```tag `` or `` ```<tag> `` and returns the inner content.
+/// Handles nested fences by matching the closing `` ``` `` that sits alone
+/// on a line (possibly with trailing whitespace).
+fn extract_fenced_block<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let fence_plain = format!("```{tag}");
+    let fence_angle = format!("```<{tag}>");
+    let start = text
+        .find(&fence_plain)
+        .or_else(|| text.find(&fence_angle))?;
+    let after_fence = &text[start..];
+    let newline = after_fence.find('\n')? + 1;
+    let inner = &after_fence[newline..];
+
+    // Find a closing ``` that is alone on a line (not followed by more text
+    // like ```toml or ```python — those are nested openers).
+    let mut search_from = 0;
+    loop {
+        let candidate = inner[search_from..].find("\n```")?;
+        let abs = search_from + candidate;
+        let after_ticks = abs + 4; // position after \n```
+        // Closing fence: either end-of-string, or next char is \n or whitespace-then-\n
+        let rest = &inner[after_ticks..];
+        if rest.is_empty() || rest.starts_with('\n') || rest.trim_start().starts_with('\n') || rest.trim_start().is_empty() {
+            let content = inner[..abs].trim();
+            return if content.is_empty() {
+                None
+            } else {
+                Some(&inner[..abs])
+            };
+        }
+        search_from = after_ticks;
+    }
 }
 
 /// Slugify a title.
@@ -1789,7 +1858,7 @@ mod tests {
         let draft = drafts_dir(tmp.path()).join("test.md");
         std::fs::write(
             &draft,
-            "---\nstatus: draft\nupdated: 2020-01-01\n---\n# Test\n",
+            "---\nstatus: draft\nupdated: 2020-01-01\n---\n# Test\n\nThis PRD describes a real feature with substantive content.\n",
         )
         .unwrap();
         cmd_promote(tmp.path(), "test", false).await.unwrap();
@@ -1818,6 +1887,70 @@ mod tests {
         .unwrap();
 
         assert!(outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn promote_rejects_empty_draft() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_dirs(tmp.path()).unwrap();
+        let draft = drafts_dir(tmp.path()).join("empty.md");
+        std::fs::write(&draft, "---\nstatus: draft\n---\n# Empty\n").unwrap();
+        let err = cmd_promote(tmp.path(), "empty", false)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no substantive content"),
+            "got: {err}"
+        );
+        assert!(draft.exists(), "draft should not be deleted on reject");
+    }
+
+    #[test]
+    fn extract_fenced_block_finds_toml() {
+        let text = "Some text\n```toml\n[tasks]\nname = \"test\"\n```\nMore text";
+        let block = extract_fenced_block(text, "toml").unwrap();
+        assert!(block.contains("[tasks]"));
+        assert!(block.contains("name = \"test\""));
+    }
+
+    #[test]
+    fn extract_fenced_block_returns_none_for_missing() {
+        assert!(extract_fenced_block("no blocks here", "toml").is_none());
+    }
+
+    #[test]
+    fn extract_fenced_block_skips_nested_fences() {
+        // Agent output might include code samples with their own fences
+        let text = "Here is the plan:\n```toml\n[[tasks]]\nid = \"T1\"\n\
+                    # Example bash:\n```bash\necho hello\n```\n\
+                    verify = \"cargo test\"\n```\nDone.";
+        let block = extract_fenced_block(text, "toml").unwrap();
+        assert!(block.contains("id = \"T1\""), "should contain task");
+        assert!(
+            block.contains("```bash"),
+            "should include the nested fence"
+        );
+    }
+
+    #[test]
+    fn extract_fenced_block_handles_angle_bracket_tag() {
+        let text = "Output:\n```<plan.md>\n# My Plan\n\nSteps here.\n```\n";
+        let block = extract_fenced_block(text, "plan.md").unwrap();
+        assert!(block.contains("# My Plan"));
+    }
+
+    #[test]
+    fn extract_fenced_block_returns_none_for_empty_block() {
+        let text = "```toml\n\n```\n";
+        assert!(extract_fenced_block(text, "toml").is_none());
+    }
+
+    #[test]
+    fn extract_fenced_block_multiple_blocks_gets_first() {
+        let text = "```toml\nfirst = true\n```\n\n```toml\nsecond = true\n```\n";
+        let block = extract_fenced_block(text, "toml").unwrap();
+        assert!(block.contains("first = true"));
+        assert!(!block.contains("second = true"));
     }
 
     #[test]

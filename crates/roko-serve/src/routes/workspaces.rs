@@ -114,10 +114,28 @@ async fn create_workspace(
         ));
     }
 
-    // Copy roko.toml from the server workspace so provider config is available.
-    let server_toml = state.workdir.join("roko.toml");
-    if tokio::fs::try_exists(&server_toml).await.unwrap_or(false) {
-        let _ = tokio::fs::copy(&server_toml, dir.join("roko.toml")).await;
+    // Write the server's resolved config to the workspace so provider config,
+    // env-var overrides, and secret interpolation are all captured.
+    {
+        let config = state.load_roko_config();
+        match toml::to_string_pretty(&*config) {
+            Ok(text) => {
+                if let Err(e) = tokio::fs::write(dir.join("roko.toml"), text).await {
+                    let _ = tokio::fs::remove_dir_all(&dir).await;
+                    return Err((
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("write roko.toml: {e}") })),
+                    ));
+                }
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+                return Err((
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("serialize config: {e}") })),
+                ));
+            }
+        }
     }
 
     // Optionally initialise a git repo (same pattern as scaffold_bench_workdir).

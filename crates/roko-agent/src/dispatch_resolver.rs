@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use roko_core::agent::{ProviderKind, ResolvedModel, resolve_model};
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::{
     DispatchAttempt, DispatchAttemptKind, DispatchAuthStatus, DispatchError, DispatchPlan,
     DispatchRequest, DispatchRequirement, FallbackPolicy, TransportAuth, TransportPlan,
@@ -349,7 +351,7 @@ mod dispatch_resolver_tests {
                 command: Some("claude".to_string()),
                 args: None,
                 timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: None,
@@ -361,7 +363,7 @@ mod dispatch_resolver_tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: None,

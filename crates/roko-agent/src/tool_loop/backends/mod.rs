@@ -5,6 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 
 use crate::http::{HttpPostError, HttpPoster};
 use crate::provider::AgentCreationError;
@@ -56,6 +58,7 @@ pub fn create_openai_compat_backend(
                 .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                 .with_extra_body_params(build_extra_body_params(provider, model))
                 .with_skip_session_fields(true)
+                .with_ttft_timeout_ms(provider.ttft_timeout_ms)
                 .with_poster(Box::new(SharedHttpPoster { inner: poster }));
             Ok(Arc::new(backend))
         }
@@ -87,6 +90,7 @@ pub fn create_openai_compat_backend(
                     .with_max_tokens(max_tokens_for_model(model))
                     .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                     .with_skip_session_fields(true)
+                    .with_ttft_timeout_ms(provider.ttft_timeout_ms)
                     .with_poster(Box::new(SharedHttpPoster { inner: poster })),
             ))
         }
@@ -114,6 +118,7 @@ pub fn create_openai_compat_backend(
                     .with_skip_session_fields(true)
                     .with_disable_parallel_tool_calls(true)
                     .with_normalize_tool_call_content(true)
+                    .with_ttft_timeout_ms(provider.ttft_timeout_ms)
                     .with_poster(Box::new(SharedHttpPoster { inner: poster })),
             ))
         }
@@ -234,7 +239,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(90_000),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: Some(HashMap::from([(
                 "X-Test-Header".to_string(),
@@ -410,7 +415,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(90_000),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,

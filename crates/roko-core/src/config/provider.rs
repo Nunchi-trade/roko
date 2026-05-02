@@ -304,8 +304,14 @@ pub(crate) const fn default_provider_timeout_ms() -> Option<u64> {
     Some(120_000)
 }
 
+/// Default TTFT (time-to-first-token) timeout in milliseconds.
+///
+/// Used as the single source of truth for TTFT across all providers and
+/// backends.  Import this constant instead of hardcoding `15_000`.
+pub const DEFAULT_TTFT_TIMEOUT_MS: u64 = 15_000;
+
 pub(crate) const fn default_provider_ttft_timeout_ms() -> Option<u64> {
-    Some(15_000)
+    Some(DEFAULT_TTFT_TIMEOUT_MS)
 }
 
 pub(crate) const fn default_provider_connect_timeout_ms() -> Option<u64> {

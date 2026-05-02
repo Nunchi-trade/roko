@@ -20,6 +20,7 @@ use roko_core::ContentHash;
 use roko_core::DaimonPolicy;
 use roko_core::agent::{AgentRole, ProviderKind, resolve_model};
 use roko_core::config::schema::{ModelProfile, RokoConfig};
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::foundation::{
     ChatMessage, MessageRole, ModelCallRequest, ModelCaller, ModelStreamEvent, TokenUsage,
 };
@@ -1488,7 +1489,7 @@ fn anthropic_model_call_config(
                         command: None,
                         args: None,
                         timeout_ms: Some(120_000),
-                        ttft_timeout_ms: Some(15_000),
+                        ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                         connect_timeout_ms: Some(5_000),
                         extra_headers: None,
                         max_concurrent: None,
@@ -3266,7 +3267,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: None,

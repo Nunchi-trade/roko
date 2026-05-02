@@ -993,6 +993,7 @@ impl std::fmt::Display for AgentRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_TTFT_TIMEOUT_MS;
     use crate::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 
     #[test]
@@ -1233,7 +1234,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: Some(8),

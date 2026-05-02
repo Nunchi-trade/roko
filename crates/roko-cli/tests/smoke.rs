@@ -14,6 +14,7 @@ use roko_cli::prompting::{PromptBuildOptions, build_role_system_prompt};
 use roko_compose::TaskContext;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::{AgentRole, Body, Context, Engram, Kind};
 use tempfile::TempDir;
 
@@ -239,7 +240,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"mcp-ok"}}}}'
         command: Some(script.display().to_string()),
         args: Some(vec!["--provider-flag".to_string()]),
         timeout_ms: Some(5_000),
-        ttft_timeout_ms: Some(15_000),
+        ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
         connect_timeout_ms: Some(5_000),
         extra_headers: None,
         max_concurrent: None,

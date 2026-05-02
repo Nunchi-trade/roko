@@ -427,33 +427,17 @@ impl ServerBuilder {
     }
 }
 
-/// Load [`RokoConfig`] from the workdir's `roko.toml`, falling back to the
-/// global `~/.roko/config.toml` if no project config exists.
+/// Load [`RokoConfig`] from the workdir using the unified core loader.
+///
+/// Delegates to [`roko_core::config::load_config`] so that serve gets the
+/// same config resolution as the CLI: env-var interpolation, `${VAR}`
+/// expansion, file-secret resolution, and `ROKO__*` process env overrides.
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let project_path = workdir.join("roko.toml");
-    if project_path.exists() {
-        let text = std::fs::read_to_string(&project_path)
-            .with_context(|| format!("read {}", project_path.display()))?;
-        return toml::from_str(&text).with_context(|| format!("parse {}", project_path.display()));
-    }
-
-    // No project config — try global ~/.roko/config.toml.
-    if let Ok(home) = std::env::var("HOME") {
-        let global_path = PathBuf::from(&home).join(".roko").join("config.toml");
-        if global_path.exists() {
-            let text = std::fs::read_to_string(&global_path)
-                .with_context(|| format!("read {}", global_path.display()))?;
-            info!("using global config: {}", global_path.display());
-            return toml::from_str(&text)
-                .with_context(|| format!("parse {}", global_path.display()));
-        }
-    }
-
-    warn!(
-        "no roko.toml found at {} and no global config; using defaults",
-        project_path.display()
-    );
-    Ok(RokoConfig::default())
+    let validated = roko_core_crate::config::load_config(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut config = validated.into_config();
+    config.apply_process_env();
+    Ok(config)
 }
 
 /// Start the HTTP server.

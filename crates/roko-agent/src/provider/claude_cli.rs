@@ -10,6 +10,8 @@ use crate::claude_cli_agent::{ClaudeCliAgent, build_settings_json};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -220,7 +222,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
                 "provider-value".to_string(),
             ]),
             timeout_ms: Some(2_500),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
@@ -320,7 +322,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"worktree-ok"}}}}
             command: Some(script.display().to_string()),
             args: None,
             timeout_ms: Some(1_000),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
@@ -374,7 +376,7 @@ printf '%s\n' '{"type":"content_block_delta","delta":{"text":"late"}}'
             command: Some(script.display().to_string()),
             args: None,
             timeout_ms: Some(1_000),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,

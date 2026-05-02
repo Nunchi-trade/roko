@@ -464,15 +464,11 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     std::fs::write(&target, content)?;
                     println!("📄 Draft written to {}", target.display());
                 } else if exit_code != 0 {
-                    eprintln!(
-                        "Agent failed (exit {exit_code}). Scaffold preserved at {}",
-                        target.display()
-                    );
+                    let _ = std::fs::remove_file(&target);
+                    eprintln!("Agent failed (exit {exit_code}) — no draft created.");
                 } else {
-                    eprintln!(
-                        "Agent returned empty output. Scaffold preserved at {}",
-                        target.display()
-                    );
+                    let _ = std::fs::remove_file(&target);
+                    eprintln!("Agent returned empty output — no draft created.");
                 }
                 let workspace_members: Vec<String> = if exit_code == 0 {
                     let crates_dir = workdir.join("crates");
