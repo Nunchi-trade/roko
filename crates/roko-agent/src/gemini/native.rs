@@ -29,7 +29,9 @@ use super::wire::{
     serialize_generate_content_request,
 };
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
+
+const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_REQUEST_TIMEOUT_MS;
 
 pub(crate) fn system_instruction_from_segments(segments: Vec<String>) -> Option<Content> {
     let segments: Vec<String> = segments

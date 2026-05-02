@@ -17,6 +17,7 @@ pub mod compat;
 pub mod gates;
 pub mod hot_reload;
 pub mod learning;
+pub mod loader;
 pub mod presets;
 pub mod project;
 pub mod provenance;

@@ -22,6 +22,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::translate::openai::parse_usage_observation;
 use crate::usage::Usage;
 use async_trait::async_trait;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -29,9 +30,6 @@ use std::time::Instant;
 
 /// Default `OpenAI` base URL.
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-
-/// Default per-request timeout in milliseconds.
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 /// A non-streaming `OpenAI` chat-completions backend.
 ///
@@ -65,7 +63,7 @@ impl OpenAiAgent {
             api_key: api_key.into(),
             model,
             base_url: DEFAULT_BASE_URL.to_string(),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             name,
             extra_headers: Vec::new(),
             poster: Box::new(ReqwestPoster::new()),

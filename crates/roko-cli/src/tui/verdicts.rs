@@ -10,8 +10,8 @@ use roko_core::{ContentHash, Context, Engram, FailureEntry, Kind, Query, Store, 
 use roko_fs::FileSubstrate;
 use tokio::runtime::{Builder, Runtime};
 
-const DEFAULT_BUCKET_SECS: u64 = 3_600;
-const DEFAULT_BUCKET_COUNT: usize = 24;
+const DEFAULT_BUCKET_SECS: u64 = roko_core::defaults::DEFAULT_VERDICT_BUCKET_SECS;
+const DEFAULT_BUCKET_COUNT: usize = roko_core::defaults::DEFAULT_VERDICT_BUCKET_COUNT;
 const FAILURE_CAP: usize = 50;
 
 /// Incremental lower-bound cursor for verdict substrate queries.

@@ -466,7 +466,7 @@ fn load_effective_roko_config(
         load_roko_config_file(&workdir.join(".roko").join("roko.toml"))?.unwrap_or_default()
     };
 
-    crate::config::merge_global_providers(&mut config);
+    roko_core::config::loader::merge_global_into(&mut config);
     config.apply_process_env();
     Ok(config)
 }

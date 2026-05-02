@@ -5,9 +5,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::agent::Agent;
-use crate::claude_agent::{
-    AnthropicTool, DEFAULT_ANTHROPIC_VERSION, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS,
-};
+use crate::claude_agent::{AnthropicTool, DEFAULT_ANTHROPIC_VERSION, DEFAULT_BASE_URL};
+use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 use crate::dispatcher::HandlerResolver;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::openai_compat::tool_registry_for_options;
@@ -111,7 +110,7 @@ fn create_tool_loop_backend_with_api_key(
             model
                 .max_output
                 .and_then(|value| u32::try_from(value).ok())
-                .unwrap_or(DEFAULT_MAX_TOKENS),
+                .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
         )
         .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
         .with_poster(poster);
@@ -242,7 +241,7 @@ impl AnthropicMessagesBackend {
             model,
             base_url: DEFAULT_BASE_URL.to_string(),
             timeout_ms: 120_000,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             extra_headers: Vec::new(),
             provider_semaphores: None,
             poster: Box::new(ReqwestPoster::new()),

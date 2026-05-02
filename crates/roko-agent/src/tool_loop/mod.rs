@@ -541,12 +541,47 @@ impl ToolLoop {
             if calls.is_empty() {
                 self.clear_checkpoint_file();
                 let final_text = response.extract_text();
+                let finish_reason_raw = response.extract_finish_reason_raw();
+                let hit_length_limit = finish_reason_raw
+                    .as_deref()
+                    .is_some_and(|r| r == "length" || r == "max_tokens");
+                tracing::info!(
+                    iterations,
+                    final_text_len = final_text.len(),
+                    final_text_empty = final_text.trim().is_empty(),
+                    finish_reason = ?finish_reason_raw,
+                    input_tokens = turn_usage.input_tokens,
+                    output_tokens = turn_usage.output_tokens,
+                    "tool_loop: stop — no tool calls, returning final text"
+                );
+                if final_text.trim().is_empty() && hit_length_limit {
+                    tracing::error!(
+                        iterations,
+                        output_tokens = turn_usage.output_tokens,
+                        "tool_loop: model hit output token limit (finish_reason=length) \
+                         and produced no final text — increase max_output for this model"
+                    );
+                } else if final_text.trim().is_empty() {
+                    tracing::warn!(
+                        iterations,
+                        "tool_loop: final text is empty — model may have returned \
+                         content in an unexpected format"
+                    );
+                }
+
+                let stop_reason = if hit_length_limit {
+                    StopReason::BackendError(
+                        "model hit output token limit (finish_reason=length)".to_string(),
+                    )
+                } else {
+                    StopReason::Stop
+                };
                 return ToolLoopOutput {
                     final_text,
                     iterations,
                     tool_calls: all_calls,
                     total_usage,
-                    stop_reason: StopReason::Stop,
+                    stop_reason,
                     checkpoint: None,
                 };
             }
@@ -557,6 +592,13 @@ impl ToolLoop {
             }
 
             // Dispatch tool calls (§36.41 parallel/serial batching).
+            let call_names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+            tracing::info!(
+                iteration = iterations,
+                num_calls = calls.len(),
+                tools = ?call_names,
+                "tool_loop: dispatching tool calls"
+            );
             let current_calls = calls.clone();
             let results = self.dispatcher.dispatch_batch(calls, ctx).await;
             all_calls.extend(current_calls.clone());

@@ -982,10 +982,12 @@ async fn generate_plan_from_prd_with_outcome(
             .unwrap_or_default();
 
         let task_prompt = format!(
-            "Read the PRD at {path} and generate an implementation plan. \
+            "Generate an implementation plan from the PRD below.\n\n\
+             IMPORTANT: The PRD content is included inline — do NOT read {path} \
+             again. You may read up to 5 codebase files to understand existing \
+             structure, but then you MUST produce your output.\n\n\
              Each REQ-XXX requirement becomes one or more tasks. \
-             Each acceptance criterion becomes a task verification command. \
-             Search the codebase first to understand what already exists. \
+             Each acceptance criterion becomes a task verification command.\n\n\
              Do NOT create files directly. Instead, output the plan content \
              as follows:\n\n\
              1. Output a fenced block tagged `toml` containing the tasks.toml content.\n\
@@ -1017,9 +1019,28 @@ async fn generate_plan_from_prd_with_outcome(
             },
         )
         .await?;
+        tracing::info!(
+            exit_code,
+            output_len = output.len(),
+            output_trimmed_len = output.trim().len(),
+            "prd plan: agent returned"
+        );
         if exit_code != 0 {
+            eprintln!(
+                "error: plan generation agent failed (exit {exit_code}, output {} bytes)",
+                output.len()
+            );
             return Err(anyhow!(
                 "plan generation agent failed with exit code {exit_code}"
+            ));
+        }
+        if output.trim().is_empty() {
+            eprintln!(
+                "error: plan generation agent returned empty output — \
+                 the model may not support the required output format"
+            );
+            return Err(anyhow!(
+                "plan generation agent returned empty output for {slug}"
             ));
         }
 
@@ -1027,37 +1048,59 @@ async fn generate_plan_from_prd_with_outcome(
         // Try fenced ```toml block first, then fall back to ```tasks.toml.
         let toml_content = extract_fenced_block(&output, "toml")
             .or_else(|| extract_fenced_block(&output, "tasks.toml"));
+        tracing::info!(
+            has_toml_block = toml_content.is_some(),
+            toml_block_len = toml_content.map(|s| s.len()).unwrap_or(0),
+            "prd plan: fenced block extraction"
+        );
         if let Some(toml_content) = toml_content {
             let plan_dir = plans_root.join(slug);
             std::fs::create_dir_all(&plan_dir)
                 .with_context(|| format!("create plan dir {}", plan_dir.display()))?;
             std::fs::write(plan_dir.join("tasks.toml"), toml_content)
                 .with_context(|| format!("write tasks.toml to {}", plan_dir.display()))?;
+            println!(
+                "📋 Wrote tasks.toml ({} bytes) to {}",
+                toml_content.len(),
+                plan_dir.display()
+            );
             if let Some(plan_md) = extract_fenced_block(&output, "plan.md")
                 .or_else(|| extract_fenced_block(&output, "markdown"))
                 .or_else(|| extract_fenced_block(&output, "md"))
             {
                 std::fs::write(plan_dir.join("plan.md"), plan_md)
                     .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
+                println!(
+                    "📋 Wrote plan.md ({} bytes) to {}",
+                    plan_md.len(),
+                    plan_dir.display()
+                );
             }
-        } else if !output.trim().is_empty() {
+        } else {
+            // Show a preview of what the agent actually returned so the user
+            // can diagnose formatting issues.
+            let preview: String = output.chars().take(500).collect();
             eprintln!(
-                "warning: agent output did not contain a fenced ```toml block; \
-                 plan files not extracted from output"
+                "warning: agent output ({} bytes) did not contain a fenced ```toml block.\n\
+                 Plan files not extracted. Output preview:\n---\n{preview}\n---",
+                output.len()
             );
         }
 
         let generated_changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);
 
         if !dry_run {
-            regenerate_old_format_plans(
+            if let Err(e) = regenerate_old_format_plans(
                 workdir_ref,
                 model.or_else(|| resolved.config.agent.model.as_deref()),
                 Some(resolved.config.agent.effort.as_str()),
                 &resolved.config.agent.env,
                 &plans_root,
             )
-            .await?;
+            .await
+            {
+                eprintln!("warning: old-format plan regeneration failed (non-fatal): {e}");
+            }
         }
 
         let changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);

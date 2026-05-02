@@ -214,6 +214,23 @@ impl BackendResponse {
         }
     }
 
+    /// Extract the raw finish reason string from this response.
+    ///
+    /// Returns `None` when the finish reason is missing or cannot be read.
+    /// Used by the tool loop to detect token-budget exhaustion (`"length"`).
+    #[must_use]
+    pub fn extract_finish_reason_raw(&self) -> Option<String> {
+        match self {
+            Self::Json(v) => v
+                .pointer("/choices/0/finish_reason")
+                .and_then(|x| x.as_str())
+                .or_else(|| v.pointer("/finish_reason").and_then(|x| x.as_str()))
+                .map(String::from),
+            Self::Text(_) => None,
+            Self::StreamJson(_) => None,
+        }
+    }
+
     /// Extract tool execution outputs from stream-json events.
     ///
     /// Returns a list of `(tool_name, content)` pairs. Only meaningful for

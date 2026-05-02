@@ -16,10 +16,9 @@ use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::FinishReason;
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
 use crate::usage::Usage;
+use roko_core::defaults::{DEFAULT_PROVIDER_RPM, DEFAULT_REQUEST_TIMEOUT_MS};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-const DEFAULT_PROVIDER_RPM: u32 = 60;
 
 #[derive(Debug, Clone, Default)]
 struct StreamResponseMetadata {
@@ -90,7 +89,7 @@ impl OpenAiCompatLlmBackend {
             provider_id: model.clone(),
             model,
             base_url: DEFAULT_BASE_URL.to_string(),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             max_tokens: None,
             extra_headers: Vec::new(),
             extra_body_params: Map::new(),

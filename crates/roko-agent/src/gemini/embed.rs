@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 /// Default Gemini embedding model.
 const DEFAULT_MODEL: &str = "gemini-embedding-2-preview";
 /// Default per-request timeout in milliseconds.
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_TIMEOUT_MS: u64 = roko_core::defaults::DEFAULT_EMBED_TIMEOUT_MS;
 
 fn compat_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');

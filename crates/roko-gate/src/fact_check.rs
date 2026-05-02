@@ -75,7 +75,9 @@ pub struct FactCheckGate {
 
 impl FactCheckGate {
     /// Default confidence threshold (70 % of claims must be verified).
-    pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.7;
+    ///
+    /// Sourced from [`roko_core::defaults::DEFAULT_MIN_CONFIDENCE`].
+    pub const DEFAULT_MIN_CONFIDENCE: f64 = roko_core::defaults::DEFAULT_MIN_CONFIDENCE;
 
     /// Construct a gate with the given oracle and minimum confidence.
     ///

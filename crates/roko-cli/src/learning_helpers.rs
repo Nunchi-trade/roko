@@ -21,8 +21,8 @@ use tokio::io::AsyncWriteExt;
 
 use crate::task_parser;
 
-/// Constant mirrored from orchestrate.rs for efficiency signal tail.
-const EFFICIENCY_SIGNAL_TAIL: usize = 256;
+/// Efficiency signal tail — imported from the central defaults module.
+const EFFICIENCY_SIGNAL_TAIL: usize = roko_core::defaults::DEFAULT_EFFICIENCY_SIGNAL_TAIL;
 
 // ─── TurnLearningFeedback ────────────────────────────────────────────────
 
@@ -348,11 +348,8 @@ pub(crate) fn apply_concluded_experiment_overrides(learning: &LearningRuntime, w
 /// target are compiled as separate crates — `pub(crate)` would make the
 /// function invisible to the binary.
 pub fn distillation_model_caller(workdir: &Path) -> Arc<dyn ModelCaller> {
-    let mut config = roko_core::config::load_config(workdir)
-        .map(roko_core::config::ValidatedConfig::into_config)
+    let config = roko_core::config::loader::load_config_unified(workdir)
         .unwrap_or_default();
-    config.apply_process_env();
-    crate::config::merge_global_providers(&mut config);
     let model = config.agent.default_model.clone();
     Arc::new(ModelCallService::new(model).with_config(config))
 }

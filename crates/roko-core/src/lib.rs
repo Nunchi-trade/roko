@@ -82,6 +82,9 @@ pub mod context;
 pub mod dashboard_snapshot;
 pub mod datum;
 pub mod decay;
+/// Central constants — import from here instead of hardcoding magic numbers.
+pub mod defaults;
+
 pub mod demurrage;
 pub mod dispatch_plan;
 /// Domain profiles for agent specialization: gate defaults, tool sets, context templates.
@@ -99,6 +102,8 @@ pub mod hash;
 pub mod heartbeat;
 /// Cognitive immune system -- quarantine, anomaly detection, incident linking.
 pub mod immune;
+/// Atomic file I/O utilities for crash-safe state persistence.
+pub mod io;
 /// Marketplace job types shared between serve, TUI, and CLI.
 pub mod job;
 pub mod kind;

@@ -289,7 +289,8 @@ impl ModelCallService {
                 .map(|message| message.content.chars().count() as u64)
                 .sum::<u64>();
         let estimated_input_tokens = total_chars / 4;
-        let max_output_tokens = u64::from(req.max_tokens.unwrap_or(2048));
+        let max_output_tokens =
+            u64::from(req.max_tokens.unwrap_or(roko_core::defaults::DEFAULT_FALLBACK_MAX_OUTPUT_TOKENS));
         let usage_estimate = Usage {
             input_tokens: estimated_input_tokens.min(u64::from(u32::MAX)) as u32,
             output_tokens: max_output_tokens.min(u64::from(u32::MAX)) as u32,

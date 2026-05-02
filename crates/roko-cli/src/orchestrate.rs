@@ -220,12 +220,13 @@ use crate::gate_runner::{
 const AUTOSAVE_INTERVAL: usize = 5;
 const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
 const WATCHER_INTERVAL_SECS: u64 = 30;
-const WATCHER_SIGNAL_TAIL: usize = 200;
+const WATCHER_SIGNAL_TAIL: usize = roko_core::defaults::DEFAULT_WATCHER_SIGNAL_TAIL;
 const MAX_CONDUCTOR_ACTIVITY_HISTORY: usize = 32;
 const CONDUCTOR_HEARTBEAT_TIMEOUT_MS: i64 = 180_000;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
-const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 3;
-const PRE_AGENT_REMEDIATION_OUTPUT_TAIL: usize = 4000;
+const SHUTDOWN_DRAIN_GRACE_SECS: u64 = roko_core::defaults::DEFAULT_SHUTDOWN_DRAIN_SECS;
+const PRE_AGENT_REMEDIATION_OUTPUT_TAIL: usize =
+    roko_core::defaults::DEFAULT_PRE_AGENT_REMEDIATION_OUTPUT_TAIL;
 
 /// Whether this domain requires git operations (worktrees, changed-files, commits).
 fn domain_uses_git(domain: &TaskDomain) -> bool {
@@ -856,14 +857,8 @@ fn sync_file_if_present(path: &Path) -> Result<()> {
 }
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let path = workdir.join("roko.toml");
-    if !path.exists() {
-        return Ok(RokoConfig::default());
-    }
-
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
+    roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn frequency_label(frequency: OperatingFrequency) -> &'static str {

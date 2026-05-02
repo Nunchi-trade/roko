@@ -155,9 +155,32 @@ async fn run_agent_capture_impl(
     let prompt = Engram::builder(Kind::Prompt)
         .body(Body::text(opts.prompt))
         .build();
+    tracing::info!(
+        model = %model,
+        role = ?opts.role,
+        provider = %resolved.provider_kind.label(),
+        prompt_len = opts.prompt.len(),
+        "agent_exec: dispatching prompt"
+    );
     let result = agent.run(&prompt, &Context::now()).await;
 
     let rendered = result.output.body.as_text().unwrap_or("").to_string();
+    let elapsed_ms = started.elapsed().as_millis();
+    tracing::info!(
+        model = %model,
+        success = result.success,
+        output_len = rendered.len(),
+        output_empty = rendered.trim().is_empty(),
+        elapsed_ms = elapsed_ms,
+        "agent_exec: agent returned"
+    );
+    if rendered.trim().is_empty() {
+        tracing::warn!(
+            model = %model,
+            role = ?opts.role,
+            "agent_exec: agent returned empty output text"
+        );
+    }
     if echo_output && !rendered.is_empty() {
         print!("{rendered}");
     }

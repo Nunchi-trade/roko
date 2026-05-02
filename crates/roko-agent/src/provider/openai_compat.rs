@@ -22,7 +22,8 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::Agent;
-use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
+use crate::codex_agent::CodexAgent;
+use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 use crate::dispatcher::HandlerResolver;
 use crate::http::ReqwestPoster;
 use crate::mcp::{DynamicToolRegistry, McpConfig, discover_mcp_tools};
@@ -233,7 +234,7 @@ pub(crate) fn max_tokens_for_model(model: &ModelProfile) -> u32 {
     model
         .max_output
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(DEFAULT_MAX_TOKENS)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
 }
 
 fn parse_allowed_tools_csv(csv: Option<&str>) -> Option<HashSet<&str>> {
@@ -375,7 +376,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             let backend = create_openai_compat_backend(&tool_loop_provider, model, poster)?;
 
             let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-                .with_max_iterations(tool_loop_max_iterations(50))
+                .with_max_iterations(tool_loop_max_iterations(25))
                 .with_context_token_limit(
                     usize::try_from(model.context_window).unwrap_or(usize::MAX),
                 );

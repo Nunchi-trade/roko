@@ -122,7 +122,7 @@ pub struct ClaudeUsage {
 
 /// Limit on tool output bytes propagated through the runner; longer payloads
 /// are truncated with an ellipsis marker so downstream buffers stay bounded.
-const TOOL_OUTPUT_TRUNCATE_AT: usize = 4096;
+const TOOL_OUTPUT_TRUNCATE_AT: usize = roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT;
 
 /// Parse a single line of `--output-format stream-json` into zero or more
 /// provider-neutral [`AgentRuntimeEvent`]s.

@@ -11,9 +11,13 @@ use super::action::ExecutorAction;
 use super::plan_state::PlanState;
 
 /// Maximum auto-fix iterations before declaring failure.
-const MAX_AUTO_FIX_ITERATIONS: u32 = 5;
+///
+/// Sourced from [`roko_core::defaults::DEFAULT_MAX_AUTO_FIX_ITERATIONS`].
+const MAX_AUTO_FIX_ITERATIONS: u32 = roko_core::defaults::DEFAULT_MAX_AUTO_FIX_ITERATIONS;
 
 /// Maximum merge attempts before declaring failure.
+///
+/// No exact match in `roko_core::defaults` — kept local.
 const MAX_MERGE_ATTEMPTS: u32 = 3;
 
 // ─── TransitionError ────────────────────────────────────────────────────

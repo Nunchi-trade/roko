@@ -299,16 +299,8 @@ fn find_roko_dir(target_file: &std::path::Path) -> Result<PathBuf> {
 /// Load `roko.toml` configuration.
 fn load_roko_config(roko_dir: &std::path::Path) -> Result<roko_core::config::schema::RokoConfig> {
     let project_root = roko_dir.parent().unwrap_or(roko_dir);
-    let config_path = project_root.join("roko.toml");
-
-    if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path).context("failed to read roko.toml")?;
-        let config: roko_core::config::schema::RokoConfig =
-            toml::from_str(&raw).context("failed to parse roko.toml")?;
-        Ok(config)
-    } else {
-        Ok(roko_core::config::schema::RokoConfig::default())
-    }
+    roko_core::config::loader::load_config_unified(project_root)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]

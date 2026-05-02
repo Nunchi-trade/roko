@@ -18,6 +18,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::translate::claude::{inject_cache_markers, inject_cache_markers_into_content};
 use crate::usage::{UsageObservation, UsageSource};
 use async_trait::async_trait;
+use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -30,9 +31,6 @@ pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Default Anthropic API version header.
 pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
-
-/// Maximum output tokens requested per call (default).
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 // ─── Anthropic wire types (minimal subset) ─────────────────────────────────
 
@@ -204,7 +202,7 @@ impl ClaudeAgent {
             base_url: DEFAULT_BASE_URL.to_owned(),
             timeout_ms: 120_000,
             name,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
             system_prompt: None,
             tools: None,

@@ -84,7 +84,8 @@ static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
 static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
 static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
-const DEFAULT_PROVIDER_MAX_CONCURRENT: usize = 10;
+const DEFAULT_PROVIDER_MAX_CONCURRENT: usize =
+    roko_core::defaults::DEFAULT_PROVIDER_MAX_CONCURRENT as usize;
 pub const PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX: &str = "pplx.search_options=";
 
 /// Process-wide shared HTTP client with pooled connections.

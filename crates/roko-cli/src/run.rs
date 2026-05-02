@@ -389,11 +389,8 @@ fn resolve_workflow_model_selection(
         config.prompt.role.clone_from(role);
     }
 
-    let mut model_config = roko_core::config::load_config(workdir)
-        .map(roko_core::config::ValidatedConfig::into_config)
+    let mut model_config = roko_core::config::loader::load_config_unified(workdir)
         .unwrap_or_default();
-    model_config.apply_process_env();
-    crate::config::merge_global_providers(&mut model_config);
     model_config.providers.extend(config.providers.clone());
     model_config.models.extend(config.models.clone());
     model_config.agent.command = Some(config.agent.command.clone());
@@ -1826,11 +1823,8 @@ async fn dispatch_agent(
     strategy: Option<BenchStrategy>,
 ) -> Result<DispatchOutcome> {
     // TODO(gateway): migrate to ModelCallService.
-    let mut routing_config = roko_core::config::load_config(workdir)
-        .with_context(|| format!("load routing config from {}", workdir.display()))?
-        .into_config();
-    routing_config.apply_process_env();
-    crate::config::merge_global_providers(&mut routing_config);
+    let routing_config = roko_core::config::loader::load_config_unified(workdir)
+        .with_context(|| format!("load routing config from {}", workdir.display()))?;
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
     let use_provider_routing = has_routing && config.agent.command == "claude";
     // Use the model already applied to config by resolve_config_for_workdir
@@ -2715,10 +2709,7 @@ fn resolved_model(config: &Config) -> String {
     }
     // Check routing config for configured default model before returning an empty model for
     // non-Claude commands.
-    if let Ok(validated) = roko_core::config::load_config(std::path::Path::new(".")) {
-        let mut rc = validated.into_config();
-        rc.apply_process_env();
-        crate::config::merge_global_providers(&mut rc);
+    if let Ok(rc) = roko_core::config::loader::load_config_unified(std::path::Path::new(".")) {
         if !rc.agent.default_model.is_empty() {
             return rc.agent.default_model;
         }
@@ -2990,12 +2981,7 @@ fn parse_build_system(s: &str) -> Result<BuildSystem, String> {
 /// initialization. Returns an empty vec if the config is missing or has
 /// no models.
 fn load_roko_config_models(workdir: &Path) -> Vec<String> {
-    let path = workdir.join("roko.toml");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
-    let config = match roko_core::config::RokoConfig::from_toml(&text) {
+    let config = match roko_core::config::loader::load_config_unified(workdir) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };

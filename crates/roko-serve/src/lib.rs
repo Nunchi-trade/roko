@@ -429,15 +429,13 @@ impl ServerBuilder {
 
 /// Load [`RokoConfig`] from the workdir using the unified core loader.
 ///
-/// Delegates to [`roko_core::config::load_config`] so that serve gets the
-/// same config resolution as the CLI: env-var interpolation, `${VAR}`
-/// expansion, file-secret resolution, and `ROKO__*` process env overrides.
+/// Delegates to [`roko_core::config::loader::load_config_unified`] so that
+/// serve gets the same config resolution as the CLI: global merge, env-var
+/// interpolation, `${VAR}` expansion, file-secret resolution, and `ROKO__*`
+/// process env overrides.
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let validated = roko_core_crate::config::load_config(workdir)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut config = validated.into_config();
-    config.apply_process_env();
-    Ok(config)
+    roko_core_crate::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Start the HTTP server.

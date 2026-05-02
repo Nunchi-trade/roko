@@ -1,7 +1,8 @@
 pub mod tool_loop;
 
 use crate::Agent;
-use crate::claude_agent::{ClaudeAgent, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS};
+use crate::claude_agent::{ClaudeAgent, DEFAULT_BASE_URL};
+use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
@@ -49,7 +50,7 @@ impl ProviderAdapter for AnthropicApiAdapter {
         let max_tokens = model
             .max_output
             .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
 
         if model.supports_tools {
             return tool_loop::create_tool_loop_agent(api_key, provider, model, options);

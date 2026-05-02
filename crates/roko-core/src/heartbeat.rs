@@ -5,10 +5,15 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Default interval in seconds between heartbeats.
-pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+///
+/// Re-exported from [`crate::defaults::DEFAULT_HEARTBEAT_INTERVAL_SECS`].
+pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 =
+    crate::defaults::DEFAULT_HEARTBEAT_INTERVAL_SECS;
 
 /// Maximum number of heartbeats retained in the ring buffer.
-pub const HEARTBEAT_RING_CAPACITY: usize = 500;
+///
+/// Re-exported from [`crate::defaults::DEFAULT_HEARTBEAT_RING_CAPACITY`].
+pub const HEARTBEAT_RING_CAPACITY: usize = crate::defaults::DEFAULT_HEARTBEAT_RING_CAPACITY;
 
 /// Payload sent by a heartbeat emitter.
 #[derive(Debug, Clone, Serialize, Deserialize)]

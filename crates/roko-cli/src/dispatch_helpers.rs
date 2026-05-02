@@ -29,7 +29,8 @@ use crate::task_parser;
 /// Maximum output size stored in task outputs and episode context (32 KB).
 const MAX_OUTPUT_BYTES: usize = 32_768;
 /// Number of output lines to include in task failure logs.
-pub(crate) const TASK_FAILURE_OUTPUT_TAIL_LINES: usize = 20;
+pub(crate) const TASK_FAILURE_OUTPUT_TAIL_LINES: usize =
+    roko_core::defaults::DEFAULT_TASK_FAILURE_OUTPUT_TAIL_LINES;
 
 // ─── Prompt budget ───────────────────────────────────────────────────────
 

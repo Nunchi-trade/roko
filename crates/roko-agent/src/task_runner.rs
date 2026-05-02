@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
-const DEFAULT_EVENT_BUS_CAPACITY: usize = 32;
+const DEFAULT_EVENT_BUS_CAPACITY: usize = roko_core::defaults::DEFAULT_EVENT_BUS_CAPACITY;
 const PROMPT_LOOP_WINDOW: usize = 20;
 const PROMPT_LOOP_THRESHOLD: usize = 5;
 

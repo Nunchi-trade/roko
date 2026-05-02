@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 /// Default embedding model.
 const DEFAULT_MODEL: &str = "pplx-embed-v1-4b";
 /// Default per-request timeout in milliseconds (30 s is sufficient for embeddings).
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_TIMEOUT_MS: u64 = roko_core::defaults::DEFAULT_EMBED_TIMEOUT_MS;
 
 /// Error type for embedding calls.
 #[derive(Debug, thiserror::Error)]

@@ -23,6 +23,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::ProviderSemaphores;
 use crate::usage::Usage;
 use async_trait::async_trait;
+use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -35,9 +36,6 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
 /// Default model slug used when the caller omits one.
 pub const DEFAULT_MODEL: &str = "gpt-5-codex";
-
-/// Maximum output tokens requested per call (default).
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 // ─── OpenAI Chat Completions wire types (minimal subset) ───────────────────
 
@@ -171,7 +169,7 @@ impl CodexAgent {
             name,
             base_url: DEFAULT_BASE_URL.to_owned(),
             timeout_ms: 120_000,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             extra_headers: Vec::new(),
             extra_body_params: Map::new(),
             poster: Arc::new(ReqwestPoster::new()),

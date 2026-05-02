@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 
 /// Default number of failed merge attempts before a request is considered
 /// permanently failed (callers can still manually re-enqueue).
-pub const DEFAULT_MAX_MERGE_RETRIES: u32 = 5;
+///
+/// Sourced from [`roko_core::defaults::DEFAULT_MAX_MERGE_RETRIES`].
+pub const DEFAULT_MAX_MERGE_RETRIES: u32 = roko_core::defaults::DEFAULT_MAX_MERGE_RETRIES;
 
 /// Maximum number of retries before a request is considered permanently
 /// failed (callers can still manually re-enqueue).

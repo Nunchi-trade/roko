@@ -527,7 +527,6 @@ impl ChatAgentSession {
                 );
                 RokoConfig::default()
             });
-        crate::config::merge_global_providers(&mut config);
 
         let provider_key = self.api_provider_key();
         let provider_kind = self.api_provider_kind();

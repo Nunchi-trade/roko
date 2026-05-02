@@ -25,7 +25,9 @@
 extern crate self as roko_cli;
 
 /// Canonical default port for the shipping `roko-serve` control plane.
-pub const DEFAULT_SERVE_PORT: u16 = 6677;
+///
+/// Re-exported from [`roko_core::defaults::DEFAULT_SERVE_PORT`].
+pub const DEFAULT_SERVE_PORT: u16 = roko_core::defaults::DEFAULT_SERVE_PORT;
 /// Canonical default base URL for CLI and TUI calls into `roko-serve`.
 pub const DEFAULT_SERVE_URL: &str = "http://localhost:6677";
 

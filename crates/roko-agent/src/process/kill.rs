@@ -15,10 +15,10 @@ use super::group::kill_process_group;
 use super::registry::register_spawned_descendants;
 
 /// Default grace period before SIGTERM (milliseconds).
-pub const GRACE_STDIN_CLOSE_MS: u64 = 1200;
+pub const GRACE_STDIN_CLOSE_MS: u64 = roko_core::defaults::DEFAULT_GRACE_STDIN_CLOSE_MS;
 
 /// Grace period between SIGTERM and SIGKILL (milliseconds).
-pub const GRACE_SIGTERM_MS: u64 = 800;
+pub const GRACE_SIGTERM_MS: u64 = roko_core::defaults::DEFAULT_GRACE_SIGTERM_MS;
 
 /// Kill a child process and its entire process group using escalation.
 ///

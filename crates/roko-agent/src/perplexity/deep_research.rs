@@ -16,12 +16,17 @@ use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
+use roko_core::defaults::{
+    DEFAULT_DEEP_RESEARCH_MAX_POLL_ATTEMPTS, DEFAULT_DEEP_RESEARCH_POLL_INTERVAL_MS,
+    DEFAULT_EMBED_TIMEOUT_MS,
+};
+
 /// Default polling interval between status checks.
-const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_POLL_INTERVAL_MS: u64 = DEFAULT_DEEP_RESEARCH_POLL_INTERVAL_MS;
 /// Default maximum number of polling attempts (120 × 5 s = 10 minutes).
-const DEFAULT_MAX_POLL_ATTEMPTS: u32 = 120;
+const DEFAULT_MAX_POLL_ATTEMPTS: u32 = DEFAULT_DEEP_RESEARCH_MAX_POLL_ATTEMPTS;
 /// Default HTTP request timeout for submit/poll calls.
-const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = DEFAULT_EMBED_TIMEOUT_MS;
 
 /// Async polling agent for Perplexity's `sonar-deep-research` model.
 ///

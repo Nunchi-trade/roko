@@ -49,16 +49,24 @@ export async function resolveRoko(handle: TerminalHandle): Promise<string> {
   if (rokoResolved) return resolvedRoko;
 
   handle.outputBuffer = '';
+  // Emit absolute paths so the binary remains reachable after `cd` into a workspace.
   const result = await handle.execCmd(
-    'command -v roko >/dev/null 2>&1 && echo RP || { test -x ./target/release/roko && echo RR || { test -x ./target/debug/roko && echo RD || echo RN; }; }',
+    'command -v roko >/dev/null 2>&1 && echo RP || { test -x ./target/release/roko && echo "RR:$PWD/target/release/roko" || { test -x ./target/debug/roko && echo "RD:$PWD/target/debug/roko" || echo RN; }; }',
     4000,
   );
   if (result.ok || result.exitCode >= 0) {
     const buf = handle.outputBuffer;
-    if (buf.includes('RP')) resolvedRoko = 'roko';
-    else if (buf.includes('RR')) resolvedRoko = './target/release/roko';
-    else if (buf.includes('RD')) resolvedRoko = './target/debug/roko';
-    else resolvedRoko = 'roko';
+    if (buf.includes('RP')) {
+      resolvedRoko = 'roko';
+    } else if (buf.includes('RR:')) {
+      const m = buf.match(/RR:(\S+)/);
+      resolvedRoko = m ? m[1] : './target/release/roko';
+    } else if (buf.includes('RD:')) {
+      const m = buf.match(/RD:(\S+)/);
+      resolvedRoko = m ? m[1] : './target/debug/roko';
+    } else {
+      resolvedRoko = 'roko';
+    }
   }
   rokoResolved = true;
   return resolvedRoko;

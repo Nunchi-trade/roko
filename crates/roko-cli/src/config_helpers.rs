@@ -119,14 +119,8 @@ pub(crate) fn replan_ledger_path(workdir: &Path) -> PathBuf {
 // ── Config loading ────────────────────────────────────────────────────
 
 pub(crate) fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let path = workdir.join("roko.toml");
-    if !path.exists() {
-        return Ok(RokoConfig::default());
-    }
-
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
+    roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 pub(crate) fn runtime_learning_config(workdir: &Path) -> RuntimeLearningConfig {

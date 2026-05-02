@@ -75,13 +75,8 @@ pub fn cmd_list(workdir: &Path, json: bool) -> Result<()> {
 }
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let path = workdir.join("roko.toml");
-    if !path.exists() {
-        return Ok(RokoConfig::default());
-    }
-
-    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn file_watcher_row(workdir: &Path, path: &WatcherPathConfig) -> FileWatcherRow {

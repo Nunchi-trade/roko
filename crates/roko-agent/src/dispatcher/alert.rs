@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Default failure-rate threshold (25%).
-const DEFAULT_FAILURE_THRESHOLD: f64 = 0.25;
+const DEFAULT_FAILURE_THRESHOLD: f64 = roko_core::defaults::DEFAULT_FAILURE_THRESHOLD;
 
 /// Minimum number of calls before alerts can fire.
-const DEFAULT_MIN_CALLS: u64 = 50;
+const DEFAULT_MIN_CALLS: u64 = roko_core::defaults::DEFAULT_ALERT_MIN_CALLS as u64;
 
 // ─── AlertSeverity ───────────────────────────────────────────────────────
 

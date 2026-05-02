@@ -247,13 +247,8 @@ fn write_subscription_file(path: &Path, config: &SubscriptionConfig) -> Result<(
 }
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let path = workdir.join("roko.toml");
-    if !path.exists() {
-        return Ok(RokoConfig::default());
-    }
-
-    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]

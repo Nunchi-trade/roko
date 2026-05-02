@@ -58,8 +58,7 @@ use self::timeout::with_timeout;
 use self::truncate::truncate_result;
 use self::validate::validate;
 
-/// Default cap on per-tool-result content bytes (§36.43).
-pub const DEFAULT_MAX_RESULT_BYTES: usize = 16_384;
+pub use roko_core::defaults::DEFAULT_MAX_RESULT_BYTES;
 
 /// Pluggable handler lookup: maps a canonical tool name to a
 /// [`ToolHandler`] instance.

@@ -4,15 +4,15 @@
 //! this module drops the oldest tool-result messages while preserving
 //! the system prompt, user prompt, and the most recent results.
 
-/// Default context token limit.  Callers should set this to ~80% of the
-/// model's actual context window so the LLM has room to reply.
-pub const DEFAULT_CONTEXT_TOKEN_LIMIT: usize = 102_400;
+use roko_core::defaults::{DEFAULT_HEAD_KEEP, DEFAULT_TAIL_KEEP};
+
+pub use roko_core::defaults::DEFAULT_CONTEXT_TOKEN_LIMIT;
 
 /// Number of messages always kept at the start (system + user).
-const HEAD_KEEP: usize = 2;
+const HEAD_KEEP: usize = DEFAULT_HEAD_KEEP;
 
 /// Number of messages always kept at the tail (most recent context).
-const TAIL_KEEP: usize = 3;
+const TAIL_KEEP: usize = DEFAULT_TAIL_KEEP;
 
 /// Rough estimate of token count: total JSON bytes / 4.
 ///

@@ -301,21 +301,23 @@ pub struct ProviderConfig {
 }
 
 pub(crate) const fn default_provider_timeout_ms() -> Option<u64> {
-    Some(120_000)
+    Some(crate::defaults::DEFAULT_REQUEST_TIMEOUT_MS)
 }
 
 /// Default TTFT (time-to-first-token) timeout in milliseconds.
 ///
 /// Used as the single source of truth for TTFT across all providers and
 /// backends.  Import this constant instead of hardcoding `15_000`.
-pub const DEFAULT_TTFT_TIMEOUT_MS: u64 = 15_000;
+///
+/// Re-exported from [`crate::defaults::DEFAULT_TTFT_TIMEOUT_MS`].
+pub const DEFAULT_TTFT_TIMEOUT_MS: u64 = crate::defaults::DEFAULT_TTFT_TIMEOUT_MS;
 
 pub(crate) const fn default_provider_ttft_timeout_ms() -> Option<u64> {
-    Some(DEFAULT_TTFT_TIMEOUT_MS)
+    Some(crate::defaults::DEFAULT_TTFT_TIMEOUT_MS)
 }
 
 pub(crate) const fn default_provider_connect_timeout_ms() -> Option<u64> {
-    Some(5_000)
+    Some(crate::defaults::DEFAULT_CONNECT_TIMEOUT_MS)
 }
 
 impl ProviderConfig {

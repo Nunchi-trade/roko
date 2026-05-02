@@ -29,7 +29,9 @@ use thiserror::Error;
 use tokio::process::Command;
 
 /// Locks older than this are considered stale (§15.7).
-const STALE_LOCK_SECS: u64 = 60;
+///
+/// Sourced from [`roko_core::defaults::DEFAULT_STALE_LOCK_SECS`].
+const STALE_LOCK_SECS: u64 = roko_core::defaults::DEFAULT_STALE_LOCK_SECS;
 
 /// Configuration handed to [`WorktreeManager::new`].
 #[derive(Debug, Clone)]

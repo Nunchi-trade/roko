@@ -82,7 +82,9 @@ impl LlmJudgeGate {
     ///
     /// Mirrors Mori's default. Configurable via
     /// [`LlmJudgeGate::with_max_diff_bytes`].
-    pub const DEFAULT_MAX_DIFF_BYTES: usize = 30 * 1024;
+    ///
+    /// Sourced from [`roko_core::defaults::DEFAULT_MAX_DIFF_BYTES`].
+    pub const DEFAULT_MAX_DIFF_BYTES: usize = roko_core::defaults::DEFAULT_MAX_DIFF_BYTES;
 
     /// Construct a judge gate that passes iff the oracle returns at least
     /// `min_score`. `min_score` is clamped to `[0, 1]`.

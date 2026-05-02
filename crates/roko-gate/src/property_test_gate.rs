@@ -30,10 +30,18 @@ use tokio::time::timeout;
 pub const COUNTEREXAMPLE_DIGEST_LIMIT: usize = 2048;
 
 /// Default per-test case count (matches proptest's built-in default).
-pub const DEFAULT_PROPTEST_CASES: u32 = 256;
+///
+/// Sourced from [`roko_core::defaults::DEFAULT_PROPTEST_CASES`].
+#[allow(clippy::cast_possible_truncation)] // Value is small (256), fits in u32.
+pub const DEFAULT_PROPTEST_CASES: u32 =
+    roko_core::defaults::DEFAULT_PROPTEST_CASES as u32;
 
 /// Default shrink iteration ceiling (matches proptest's built-in default).
-pub const DEFAULT_MAX_SHRINK_ITERS: u32 = 2048;
+///
+/// Sourced from [`roko_core::defaults::DEFAULT_MAX_SHRINK_ITERS`].
+#[allow(clippy::cast_possible_truncation)] // Value is small (4096), fits in u32.
+pub const DEFAULT_MAX_SHRINK_ITERS: u32 =
+    roko_core::defaults::DEFAULT_MAX_SHRINK_ITERS as u32;
 
 /// Rung 4 gate: run property/invariant tests and capture counterexamples.
 ///

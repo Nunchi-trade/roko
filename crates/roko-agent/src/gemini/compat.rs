@@ -1,14 +1,15 @@
 //! Gemini OpenAI-compatible chat agent.
 
 use crate::agent::{Agent, AgentResult};
-use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
+use crate::codex_agent::CodexAgent;
 use crate::provider::AgentOptions;
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::{Context, Engram};
 use serde_json::{Map, Value};
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_REQUEST_TIMEOUT_MS;
 
 fn compat_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
@@ -23,7 +24,7 @@ fn resolved_max_tokens(model: &ModelProfile) -> u32 {
     model
         .max_output
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(DEFAULT_MAX_TOKENS)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
 }
 
 fn resolved_name(options: &AgentOptions, default_name: String) -> String {

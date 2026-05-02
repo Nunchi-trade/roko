@@ -1518,9 +1518,8 @@ fn build_unified_inline_agent_session(
 
     // Load RokoConfig from roko.toml (respects user's default_model, default_backend, etc.)
     // instead of starting from RokoConfig::default() which has hardcoded fallbacks.
-    let mut model_config = crate::config_helpers::load_roko_config(&workdir)
+    let model_config = crate::config_helpers::load_roko_config(&workdir)
         .unwrap_or_default();
-    crate::config::merge_global_providers(&mut model_config);
 
     let cost_table = CostTable::from_config(&model_config.models).with_defaults();
     let role = {

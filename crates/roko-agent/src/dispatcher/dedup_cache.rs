@@ -9,15 +9,16 @@
 //! prompt hash + user message hash + tool set hash). Entries expire after
 //! a configurable TTL.
 
+use roko_core::defaults::{DEFAULT_DEDUP_CACHE_TTL_SECS, DEFAULT_MAX_DEDUP_ENTRIES};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 /// Default TTL for dedup entries (10 minutes).
-pub const DEFAULT_DEDUP_TTL: Duration = Duration::from_secs(600);
+pub const DEFAULT_DEDUP_TTL: Duration = Duration::from_secs(DEFAULT_DEDUP_CACHE_TTL_SECS);
 
 /// Maximum dedup entries before eviction.
-const MAX_DEDUP_ENTRIES: usize = 512;
+const MAX_DEDUP_ENTRIES: usize = DEFAULT_MAX_DEDUP_ENTRIES;
 
 /// A key identifying a unique dispatch request.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

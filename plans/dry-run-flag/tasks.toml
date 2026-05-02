@@ -1,26 +1,69 @@
 [meta]
 plan = "dry-run-flag"
-total = 6
+total = 10
 done = 0
 status = "ready"
 max_parallel = 3
 
-# ─────────────────────────────────────────────────────────────────────────────
-# T1 — Add `dry_run: bool` to Command::Run + update dispatch arm
-#
-# Adds the clap `--dry-run` flag to the `Run` variant in the CLI enum and
-# threads it through to `cmd_run(...)` in the dispatch match arm.
-# ─────────────────────────────────────────────────────────────────────────────
 [[task]]
 id = "T1"
-title = "Add dry_run field to Command::Run and thread to cmd_run"
-description = "Add `#[arg(long)] dry_run: bool` to the `Run` variant in `Command`; update the dispatch match arm to destructure and pass it."
+title = "Add DryRunPreview and DryRunGate structs to roko-cli"
+description = "Create the serialisable output types for dry-run preview in a new dry_run.rs module within roko-cli"
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-haiku-4-5"
+max_loc = 40
+files = ["crates/roko-cli/src/dry_run.rs", "crates/roko-cli/src/lib.rs"]
+allowed_tools = ["read_file", "write_file", "edit_file"]
+denied_tools = []
+mcp_servers = ["filesystem"]
+depends_on = []
+role = "implementer"
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/lib.rs", lines = "1-50", why = "Check existing module declarations to add dry_run module" },
+    { path = "crates/roko-cli/Cargo.toml", lines = "1-30", why = "Check if serde is already a dependency" },
+]
+symbols = [
+    "DryRunPreview — serialisable preview struct with engine, model, phases, gates, prompt info, config_hash, secrets_ok, warnings fields",
+    "DryRunGate — serialisable gate descriptor with name, kind, workdir fields",
+]
+anti_patterns = [
+    "Do NOT add business logic to these structs — they are pure data containers.",
+    "Do NOT depend on roko-runtime types in these structs; use only String/primitive types.",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pub struct DryRunPreview' crates/roko-cli/src/dry_run.rs"
+fail_msg = "DryRunPreview struct not found"
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pub struct DryRunGate' crates/roko-cli/src/dry_run.rs"
+fail_msg = "DryRunGate struct not found"
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'mod dry_run' crates/roko-cli/src/lib.rs"
+fail_msg = "dry_run module not declared in lib.rs"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "roko-cli does not compile after adding dry_run module"
+
+[[task]]
+id = "T2"
+title = "Add dry_run field to Command::Run in main.rs"
+description = "Add the --dry-run clap flag to the Run variant of the CLI command enum"
 status = "ready"
 tier = "mechanical"
 model_hint = "claude-haiku-4-5"
 max_loc = 15
 files = ["crates/roko-cli/src/main.rs"]
-allowed_tools = ["read_file", "edit_file", "grep"]
+allowed_tools = ["read_file", "edit_file"]
 denied_tools = []
 mcp_servers = ["filesystem"]
 depends_on = []
@@ -28,115 +71,37 @@ role = "implementer"
 
 [task.context]
 read_files = [
-    { path = "crates/roko-cli/src/main.rs", lines = "326-354", why = "Command::Run variant — add dry_run field here after `pipeline`" },
-    { path = "crates/roko-cli/src/main.rs", lines = "2087-2110", why = "Dispatch match arm — destructure dry_run and pass to cmd_run" },
+    { path = "crates/roko-cli/src/main.rs", lines = "1-120", why = "Find the Command enum and Run variant to add the dry_run field" },
 ]
 symbols = [
-    "Command::Run — existing variant with fields: prompt, workdir, serve, share, engine, max_retries, pipeline",
-    "cmd_run — pub(crate) async fn in commands/util.rs, called from the match arm at line 2096",
+    "Command::Run — clap subcommand variant with prompt, workdir, serve, share, engine, max_retries, pipeline fields",
 ]
 anti_patterns = [
-    "Do NOT add `dry_run` as a global flag. It MUST be local to the `Run` variant only.",
-    "Do NOT modify commands/util.rs in this task — that is T4's responsibility.",
-    "Do NOT add a short alias (e.g. `-d`) — use `#[arg(long)]` only, long name `dry-run` (clap converts `_` → `-`).",
+    "Do NOT add --dry-run as a global flag; it must be local to the Run variant only.",
+    "Do NOT add a short alias like -d; only the long form --dry-run.",
+    "Do NOT modify any other subcommand variants.",
 ]
 
 [[task.verify]]
 phase = "structural"
-command = "grep -n 'dry_run' crates/roko-cli/src/main.rs | grep -q 'Run'"
-fail_msg = "dry_run field not found in Command::Run variant"
-
-[[task.verify]]
-phase = "structural"
-command = "grep -n 'dry_run' crates/roko-cli/src/main.rs | grep -q 'cmd_run'"
-fail_msg = "dry_run not threaded to cmd_run in dispatch arm"
+command = "grep -n 'dry_run' crates/roko-cli/src/main.rs | grep -v '//' | head -5"
+fail_msg = "dry_run field not found in main.rs"
 
 [[task.verify]]
 phase = "compile"
-command = "cargo check -p roko-cli --no-deps 2>&1 | grep -v 'warning' | head -20"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "roko-cli does not compile after adding dry_run flag"
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T2 — Add dry_run field to WorkflowRunConfig and fix all struct literal sites
-#
-# Adds `pub dry_run: bool` to `WorkflowRunConfig`. Every struct-literal
-# construction site must add `dry_run: false` to compile.
-# Sites: workflow_engine.rs (struct def + 4 test literals),
-#        shared_runs.rs, runner.rs (roko-acp), run.rs (see T4 for the live site).
-# ─────────────────────────────────────────────────────────────────────────────
-[[task]]
-id = "T2"
-title = "Add dry_run: bool to WorkflowRunConfig and fix all construction sites"
-description = "Add the field to the struct definition and add `dry_run: false` to every existing struct literal so the workspace still compiles."
-status = "ready"
-tier = "focused"
-model_hint = "claude-sonnet-4-6"
-max_loc = 20
-files = [
-    "crates/roko-runtime/src/workflow_engine.rs",
-    "crates/roko-serve/src/routes/shared_runs.rs",
-    "crates/roko-acp/src/runner.rs",
-]
-allowed_tools = ["read_file", "edit_file", "grep"]
-denied_tools = []
-mcp_servers = ["filesystem"]
-depends_on = []
-role = "implementer"
-
-[task.context]
-read_files = [
-    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "27-43", why = "WorkflowRunConfig struct definition — add `pub dry_run: bool` after `commit_prefix`" },
-    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1137-1147", why = "Test: commit_message_uses_prefix_when_present — add dry_run: false" },
-    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1319-1332", why = "Test: WorkflowRunConfig literal — add dry_run: false" },
-    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1727-1750", why = "Test helpers workflow_config() and standard_workflow_config() — add dry_run: false to each" },
-    { path = "crates/roko-serve/src/routes/shared_runs.rs", lines = "475-490", why = "shared_runs WorkflowRunConfig literal — add dry_run: false" },
-    { path = "crates/roko-acp/src/runner.rs", lines = "470-490", why = "ACP runner WorkflowRunConfig literal — add dry_run: false" },
-]
-symbols = [
-    "WorkflowRunConfig — pub struct with fields: prompt, workdir, workflow, enabled_gates, shell_gates, commit_prefix",
-]
-anti_patterns = [
-    "Do NOT add a Default impl to WorkflowRunConfig — just add the field with `pub dry_run: bool`.",
-    "Do NOT modify crates/roko-cli/src/run.rs — the live construction site there is updated by T4.",
-    "Add exactly `dry_run: false,` to each existing struct literal. Do NOT add `dry_run: true` anywhere.",
-]
-
-[[task.verify]]
-phase = "structural"
-command = "grep -n 'dry_run' crates/roko-runtime/src/workflow_engine.rs | grep -q 'pub dry_run'"
-fail_msg = "dry_run field not found in WorkflowRunConfig struct"
-
-[[task.verify]]
-phase = "compile"
-command = "cargo check -p roko-runtime --no-deps 2>&1 | grep 'error' | head -10"
-
-[[task.verify]]
-phase = "compile"
-command = "cargo check -p roko-serve --no-deps 2>&1 | grep 'error' | head -10"
-
-[[task.verify]]
-phase = "compile"
-command = "cargo check -p roko-acp --no-deps 2>&1 | grep 'error' | head -10"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T3 — Add DryRunPreview, DryRunGate, and build_dry_run_preview() to run.rs
-#
-# Defines the output structs and the pure function that resolves everything
-# needed for a dry run (model, provider, phases, gates, config hash, secrets)
-# and returns a DryRunPreview. Also adds print_dry_run_preview() for human
-# output and workflow_config_phases() helper.
-# ─────────────────────────────────────────────────────────────────────────────
 [[task]]
 id = "T3"
-title = "Add DryRunPreview, DryRunGate, build_dry_run_preview, print_dry_run_preview to run.rs"
-description = "New types and functions for dry-run output. No existing code is modified."
+title = "Add dry_run field to WorkflowRunConfig in roko-runtime"
+description = "Add a dry_run: bool field to WorkflowRunConfig with default false so existing callers are unaffected"
 status = "ready"
-tier = "focused"
-model_hint = "claude-sonnet-4-6"
-max_loc = 100
-files = ["crates/roko-cli/src/run.rs"]
-allowed_tools = ["read_file", "edit_file", "grep"]
+tier = "mechanical"
+model_hint = "claude-haiku-4-5"
+max_loc = 15
+files = ["crates/roko-runtime/src/workflow_engine.rs"]
+allowed_tools = ["read_file", "edit_file"]
 denied_tools = []
 mcp_servers = ["filesystem"]
 depends_on = []
@@ -144,361 +109,327 @@ role = "implementer"
 
 [task.context]
 read_files = [
-    { path = "crates/roko-cli/src/run.rs", lines = "1-62", why = "Imports — understand available types before adding new code" },
-    { path = "crates/roko-cli/src/run.rs", lines = "368-426", why = "CliOverrides struct + resolve_workflow_model_selection() — build_dry_run_preview calls this" },
-    { path = "crates/roko-cli/src/run.rs", lines = "498-526", why = "workflow_enabled_gate_names() and workflow_shell_gate_commands() — understand GateConfig variants" },
-    { path = "crates/roko-cli/src/config.rs", lines = "848-880", why = "GateConfig enum variants (Shell, Compile, Clippy, Test) — needed for DryRunGate.kind + workdir" },
-    { path = "crates/roko-runtime/src/pipeline_state.rs", lines = "94-165", why = "WorkflowConfig struct (has_strategy, has_review) — used by workflow_config_phases()" },
+    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1-100", why = "Find WorkflowRunConfig struct definition and its construction sites" },
 ]
 symbols = [
-    "resolve_workflow_model_selection — fn(workdir: &Path, overrides: &CliOverrides) -> anyhow::Result<(Config, RokoConfig, EffectiveModelSelection)>",
-    "EffectiveModelSelection — has fields: effective_model_key: String, provider_key: String",
-    "GateConfig — enum Shell { program, args, timeout_ms }, Compile { build_system }, Clippy { build_system }, Test { build_system }",
-    "WorkflowConfig — has_strategy: bool, has_review: bool",
-    "CliOverrides — pub struct { model, role, provider }",
-    "Config — loaded via load_layered(); has .gates: Vec<GateConfig>",
+    "WorkflowRunConfig — config struct with prompt, workdir, workflow, enabled_gates, shell_gates, commit_prefix fields",
 ]
 anti_patterns = [
-    "Do NOT call build_dry_run_preview() from anywhere in this task — only define it.",
-    "Do NOT modify any existing function signatures.",
-    "Do NOT add external crate deps. Use only what is already imported in run.rs.",
-    "The config_hash field in DryRunPreview can be a simple hex string computed from the TOML path + model name — do not add sha2 or md5 dependencies.",
-    "For secrets_ok: check env var ANTHROPIC_API_KEY (and OPENAI_API_KEY as fallback) with std::env::var.",
+    "Do NOT change the default behaviour; dry_run must default to false.",
+    "Do NOT modify the WorkflowEngine::run() method body yet — only the config struct.",
+    "Ensure all existing construction sites of WorkflowRunConfig still compile (add dry_run: false).",
 ]
 
-# Spec for code to add (append after line ~526, before the run_workflow_engine_report_with_hub fn):
-#
-# /// One gate descriptor for a dry-run preview.
-# #[derive(Debug, Clone, serde::Serialize)]
-# pub struct DryRunGate {
-#     pub name: String,
-#     pub kind: String,
-#     pub workdir: String,
-# }
-#
-# /// Structured output emitted by `--dry-run`.
-# #[derive(Debug, Clone, serde::Serialize)]
-# pub struct DryRunPreview {
-#     pub engine: String,
-#     pub model: String,
-#     pub provider: Option<String>,
-#     pub pipeline_template: String,
-#     pub phases: Vec<String>,
-#     pub gates: Vec<DryRunGate>,
-#     pub estimated_prompt_tokens: Option<u64>,
-#     pub system_prompt_preview: String,
-#     pub config_hash: String,
-#     pub secrets_ok: bool,
-#     pub warnings: Vec<String>,
-# }
-#
-# pub fn workflow_config_phases(wc: &WorkflowConfig) -> Vec<String> {
-#     let mut phases = Vec::new();
-#     if wc.has_strategy { phases.push("strategy".to_string()); }
-#     phases.push("implement".to_string());
-#     phases.push("gate".to_string());
-#     if wc.has_review { phases.push("review".to_string()); }
-#     phases.push("commit".to_string());
-#     phases
-# }
-#
-# pub fn build_dry_run_preview(
-#     engine: &str,
-#     template: &str,
-#     config: &Config,
-#     overrides: &CliOverrides,
-#     workdir: &std::path::Path,
-# ) -> anyhow::Result<DryRunPreview> {
-#     let (_, _, selection) = resolve_workflow_model_selection(workdir, overrides)?;
-#     let workflow = resolve_workflow_config(template, &Default::default());
-#     let phases = workflow_config_phases(&workflow);
-#     let gates = gates_to_dry_run(config, workdir);
-#     let secrets_ok = std::env::var("ANTHROPIC_API_KEY").is_ok()
-#         || std::env::var("OPENAI_API_KEY").is_ok();
-#     let config_hash = format!("{:x}", simple_hash(&format!("{}:{}", selection.effective_model_key, template)));
-#     Ok(DryRunPreview {
-#         engine: engine.to_string(),
-#         model: selection.effective_model_key,
-#         provider: Some(selection.provider_key).filter(|s| !s.is_empty()),
-#         pipeline_template: template.to_string(),
-#         phases,
-#         gates,
-#         estimated_prompt_tokens: None,
-#         system_prompt_preview: String::new(),
-#         config_hash,
-#         secrets_ok,
-#         warnings: Vec::new(),
-#     })
-# }
-#
-# fn gates_to_dry_run(config: &Config, workdir: &std::path::Path) -> Vec<DryRunGate> { ... }
-# fn simple_hash(s: &str) -> u64 { std::collections::hash_map::DefaultHasher ... }
-# pub fn print_dry_run_preview(preview: &DryRunPreview) { ... }
-
 [[task.verify]]
 phase = "structural"
-command = "grep -n 'pub struct DryRunPreview' crates/roko-cli/src/run.rs"
-fail_msg = "DryRunPreview struct not found in run.rs"
-
-[[task.verify]]
-phase = "structural"
-command = "grep -n 'pub struct DryRunGate' crates/roko-cli/src/run.rs"
-fail_msg = "DryRunGate struct not found in run.rs"
-
-[[task.verify]]
-phase = "structural"
-command = "grep -n 'pub fn build_dry_run_preview' crates/roko-cli/src/run.rs"
-fail_msg = "build_dry_run_preview fn not found in run.rs"
-
-[[task.verify]]
-phase = "structural"
-command = "grep -n 'pub fn workflow_config_phases' crates/roko-cli/src/run.rs"
-fail_msg = "workflow_config_phases fn not found in run.rs"
+command = "grep -n 'dry_run' crates/roko-runtime/src/workflow_engine.rs | head -5"
+fail_msg = "dry_run field not found in WorkflowRunConfig"
 
 [[task.verify]]
 phase = "compile"
-command = "cargo check -p roko-cli --no-deps 2>&1 | grep '^error' | head -10"
+command = "cargo check -p roko-runtime 2>&1 | tail -5"
+fail_msg = "roko-runtime does not compile after adding dry_run field"
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T4 — Thread dry_run through cmd_run; add early-exit V2 branch; update WorkflowRunConfig
-#
-# 1. Add `dry_run: bool` to cmd_run signature in commands/util.rs.
-# 2. Insert early-exit V2 branch: if dry_run, call build_dry_run_preview(),
-#    print (human or JSON), return EXIT_SUCCESS or EXIT_SYSTEM_ERROR.
-# 3. Add `dry_run: bool` param to run_workflow_engine_report_with_hub() and
-#    run_workflow_engine_with_services() in run.rs; set WorkflowRunConfig::dry_run.
-# ─────────────────────────────────────────────────────────────────────────────
 [[task]]
 id = "T4"
-title = "Thread dry_run through cmd_run and run_workflow_engine_report_with_hub; add V2 early-exit"
-description = "Wire dry_run from CLI dispatch into the V2 engine path. The early-exit branch handles dry_run without creating a WorkflowEngine."
+title = "Thread dry_run flag from CLI to WorkflowRunConfig"
+description = "Wire the dry_run bool from the CLI Run variant through CliOverrides into the WorkflowRunConfig construction in run.rs"
+status = "ready"
+tier = "focused"
+model_hint = "claude-sonnet-4-6"
+max_loc = 40
+files = ["crates/roko-cli/src/run.rs"]
+allowed_tools = ["read_file", "edit_file"]
+denied_tools = []
+mcp_servers = ["filesystem"]
+depends_on = ["T2", "T3"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/run.rs", lines = "1-80", why = "Understand how CLI args flow into WorkflowRunConfig and where to thread dry_run" },
+]
+symbols = [
+    "CliOverrides — struct that bridges CLI args to runtime config",
+    "run.rs::run_once or equivalent entry — function that constructs WorkflowRunConfig from CLI args",
+]
+anti_patterns = [
+    "Do NOT change the behaviour when dry_run is false — this must be a pure pass-through.",
+    "Do NOT add preview logic here — only thread the flag value.",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -n 'dry_run' crates/roko-cli/src/run.rs | head -10"
+fail_msg = "dry_run not referenced in run.rs"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "roko-cli does not compile after threading dry_run"
+
+[[task]]
+id = "T5"
+title = "Implement build_dry_run_preview function"
+description = "Create the core function that resolves config, model, prompt, and gates to produce a DryRunPreview without side-effects"
+status = "ready"
+tier = "integrative"
+model_hint = "claude-sonnet-4-6"
+max_loc = 120
+files = ["crates/roko-cli/src/dry_run.rs"]
+allowed_tools = ["read_file", "edit_file"]
+denied_tools = []
+mcp_servers = ["filesystem"]
+depends_on = ["T1", "T3"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/dry_run.rs", lines = "1-60", why = "See the DryRunPreview struct from T1 to implement the builder function" },
+    { path = "crates/roko-cli/src/run.rs", lines = "1-120", why = "Understand how config loading, model resolution, and prompt assembly are called in the real run path" },
+    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1-150", why = "Understand WorkflowRunConfig and how to extract phase/gate info" },
+]
+symbols = [
+    "DryRunPreview — output struct with engine, model, provider, pipeline_template, phases, gates, estimated_prompt_tokens, system_prompt_preview, config_hash, secrets_ok, warnings",
+    "WorkflowRunConfig — input config with prompt, workdir, workflow, enabled_gates, dry_run",
+    "WorkflowConfig — workflow template (express/standard/full) with phase definitions",
+]
+anti_patterns = [
+    "Do NOT call ModelCaller::call() or any LLM dispatch method.",
+    "Do NOT call GateRunner::run_gate() or any gate execution method.",
+    "Do NOT write to .roko/ or any filesystem path — read-only operations only.",
+    "Do NOT update cascade router scores or any persistent learning state.",
+    "Truncate system_prompt_preview to first 500 characters only.",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'fn build_dry_run_preview' crates/roko-cli/src/dry_run.rs"
+fail_msg = "build_dry_run_preview function not found"
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'DryRunPreview' crates/roko-cli/src/dry_run.rs"
+fail_msg = "DryRunPreview not used in dry_run.rs"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "roko-cli does not compile with build_dry_run_preview"
+
+[[task]]
+id = "T6"
+title = "Add early-exit dry-run branch in WorkflowEngine::run()"
+description = "When dry_run is true, call build_dry_run_preview and return instead of dispatching EffectDriver"
+status = "ready"
+tier = "focused"
+model_hint = "claude-sonnet-4-6"
+max_loc = 40
+files = ["crates/roko-runtime/src/workflow_engine.rs"]
+allowed_tools = ["read_file", "edit_file"]
+denied_tools = []
+mcp_servers = ["filesystem"]
+depends_on = ["T3", "T5"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1-200", why = "Find the WorkflowEngine::run() method and the point where EffectDriver::execute() is called" },
+]
+symbols = [
+    "WorkflowEngine::run() — main async method that drives the workflow loop",
+    "EffectDriver::execute() — the live dispatch method that must be skipped in dry-run",
+]
+anti_patterns = [
+    "Do NOT modify the non-dry-run code path at all.",
+    "The dry-run branch must return early BEFORE any EffectDriver construction or dispatch.",
+    "Do NOT write any signals or episodes in the dry-run path.",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -n 'dry_run' crates/roko-runtime/src/workflow_engine.rs | grep -v 'pub dry_run' | head -5"
+fail_msg = "dry_run check not found in workflow_engine logic"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-runtime 2>&1 | tail -5"
+fail_msg = "roko-runtime does not compile with dry-run early exit"
+
+[[task]]
+id = "T7"
+title = "Add dry-run early-exit branch in run.rs for both engine variants"
+description = "In the CLI run.rs, check dry_run flag before dispatching to either the v2 or legacy engine path, and print the preview output"
 status = "ready"
 tier = "focused"
 model_hint = "claude-sonnet-4-6"
 max_loc = 50
-files = [
-    "crates/roko-cli/src/commands/util.rs",
-    "crates/roko-cli/src/run.rs",
-]
-allowed_tools = ["read_file", "edit_file", "grep"]
+files = ["crates/roko-cli/src/run.rs"]
+allowed_tools = ["read_file", "edit_file"]
 denied_tools = []
 mcp_servers = ["filesystem"]
-depends_on = ["T1", "T2", "T3"]
-role = "implementer"
+depends_on = ["T4", "T5", "T6"]
 
 [task.context]
 read_files = [
-    { path = "crates/roko-cli/src/commands/util.rs", lines = "221-353", why = "cmd_run function — add dry_run param, insert early-exit branch before V2 engine block" },
-    { path = "crates/roko-cli/src/run.rs", lines = "589-617", why = "run_workflow_engine_report_with_hub — add dry_run param, pass to run_workflow_engine_with_services" },
-    { path = "crates/roko-cli/src/run.rs", lines = "619-670", why = "run_workflow_engine_with_services — add dry_run param, set in WorkflowRunConfig at line ~642" },
-    { path = "crates/roko-cli/src/main.rs", lines = "2087-2110", why = "Dispatch arm after T1 — cmd_run call needs the new dry_run arg" },
+    { path = "crates/roko-cli/src/run.rs", lines = "1-200", why = "Understand the full run flow including both engine variants and where to insert the dry-run early exit" },
 ]
 symbols = [
-    "cmd_run — pub(crate) async fn cmd_run(cli, workdir, prompt, serve, share, engine, max_retries, pipeline) -> Result<i32>",
-    "run_workflow_engine_report_with_hub — pub async fn(prompt, workdir, workflow_template, enabled_gates, shell_gates, external_hub, overrides) -> anyhow::Result<WorkflowRunReport>",
-    "build_dry_run_preview — pub fn(engine, template, config, overrides, workdir) -> anyhow::Result<DryRunPreview> [added by T3]",
-    "print_dry_run_preview — pub fn(preview: &DryRunPreview) [added by T3]",
-    "EXIT_SUCCESS — const i32 = 0 (in main.rs, available via the crate)",
-    "EXIT_SYSTEM_ERROR — const i32 = 2 (in main.rs)",
+    "EngineVariant::V2 — the v2 WorkflowEngine path",
+    "EngineVariant::Legacy — the legacy run_once path",
+    "build_dry_run_preview() — function that produces the DryRunPreview",
 ]
 anti_patterns = [
-    "Do NOT put the dry-run early-exit INSIDE the run_workflow_engine_* functions — it belongs in cmd_run before the V2 block.",
-    "Do NOT skip passing dry_run into run_workflow_engine_with_services and WorkflowRunConfig — T5 needs it there.",
-    "Do NOT change the legacy engine path. The early-exit only applies when engine == V2.",
-    "EXIT_SUCCESS and EXIT_SYSTEM_ERROR are defined as constants in main.rs, not in commands/util.rs. Use the numeric literals 0 and 2 directly in commands/util.rs or re-declare them as local constants.",
+    "Do NOT dispatch to any LLM in the dry-run branch.",
+    "Both engine variants must produce a DryRunPreview with the correct engine label.",
+    "When --json is set, output must be valid JSON via serde_json.",
+    "When --json is absent, output must be human-readable formatted text.",
+    "Exit code 0 for success, exit code 2 for config errors — never exit code 1 in dry-run.",
 ]
 
-# Pseudocode for the early-exit block in cmd_run (after config is loaded, inside V2 block):
-#
-#   if dry_run {
-#       let template = pipeline.as_deref().unwrap_or("standard");
-#       match roko_cli::run::build_dry_run_preview("v2", template, &config, &overrides, &workdir) {
-#           Ok(preview) => {
-#               if cli.json {
-#                   println!("{}", serde_json::to_string_pretty(&preview).unwrap_or_default());
-#               } else {
-#                   roko_cli::run::print_dry_run_preview(&preview);
-#               }
-#               return Ok(0);
-#           }
-#           Err(e) => {
-#               eprintln!("dry-run error: {e:#}");
-#               return Ok(2);
-#           }
-#       }
-#   }
-
 [[task.verify]]
 phase = "structural"
-command = "grep -n 'dry_run' crates/roko-cli/src/commands/util.rs | head -5"
-fail_msg = "dry_run not found in commands/util.rs"
-
-[[task.verify]]
-phase = "structural"
-command = "grep -n 'dry_run' crates/roko-cli/src/run.rs | grep -q 'WorkflowRunConfig'"
-fail_msg = "dry_run not set in WorkflowRunConfig in run.rs"
+command = "grep -n 'dry_run' crates/roko-cli/src/run.rs | head -10"
+fail_msg = "dry_run handling not found in run.rs"
 
 [[task.verify]]
 phase = "compile"
-command = "cargo check -p roko-cli --no-deps 2>&1 | grep '^error' | head -10"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "roko-cli does not compile with dry-run branch in run.rs"
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T5 — Add dry-run early-return guard in WorkflowEngine::run_with_cancel
-#
-# When config.dry_run is true, return a stub WorkflowRunReport immediately
-# without constructing EffectDriver, PipelineStateV2, or the run loop.
-# This satisfies REQ-DRY-002 for callers that go through the engine directly
-# (HTTP control plane, ACP server) rather than through cmd_run.
-# ─────────────────────────────────────────────────────────────────────────────
 [[task]]
-id = "T5"
-title = "Add dry-run early-return guard in WorkflowEngine::run_with_cancel"
-description = "Insert a guard at the top of run_with_cancel: if config.dry_run, return a stub WorkflowRunReport without dispatching any agents or gates."
+id = "T8"
+title = "Add unit test: dry_run_no_model_call_invoked"
+description = "Test that a mock ModelCaller that panics on call does not panic when dry_run is true"
 status = "ready"
 tier = "focused"
 model_hint = "claude-sonnet-4-6"
-max_loc = 25
+max_loc = 45
 files = ["crates/roko-runtime/src/workflow_engine.rs"]
-allowed_tools = ["read_file", "edit_file", "grep"]
+allowed_tools = ["read_file", "edit_file"]
 denied_tools = []
 mcp_servers = ["filesystem"]
-depends_on = ["T2"]
-role = "implementer"
+depends_on = ["T6"]
 
 [task.context]
 read_files = [
-    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "44-98", why = "WorkflowResult and WorkflowRunReport structs — understand all required fields to fill" },
-    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "148-180", why = "run_with_cancel — insert early-return at the top, AFTER generate_run_id() but BEFORE PipelineStateV2::new()" },
+    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1-50", why = "Check existing test module and imports" },
 ]
 symbols = [
-    "WorkflowRunReport — fields: run_id, success, model, provider, prompt_summary, output, agent_turns, token_usage, cost, duration_secs, gates, events, checkpoint_path",
-    "generate_run_id — local fn that returns String",
-    "now_millis — local fn that returns u64",
+    "WorkflowEngine — the engine under test",
+    "ModelCaller — trait with call() method that must be mocked",
 ]
 anti_patterns = [
-    "Do NOT modify PipelineStateV2, EffectDriver, or RunLedger constructors.",
-    "The guard MUST come before `PipelineStateV2::new(...)` is called.",
-    "Do NOT add any imports — all types needed are already in scope.",
-    "The stub report should have: success=true, model=empty, output='[dry-run: no dispatch]', agent_turns=0, token_usage=0, cost=None, gates=vec![], events=vec![], checkpoint_path=None.",
+    "The mock ModelCaller::call() must panic!/unreachable! to prove it is never invoked.",
+    "Do NOT use a real API key or model in this test.",
 ]
 
 [[task.verify]]
 phase = "structural"
-command = "grep -n 'dry_run' crates/roko-runtime/src/workflow_engine.rs | grep -q 'config.dry_run'"
-fail_msg = "dry-run guard not found in run_with_cancel"
-
-[[task.verify]]
-phase = "structural"
-command = "grep -n 'dry.run.*no dispatch' crates/roko-runtime/src/workflow_engine.rs"
-fail_msg = "stub output message not found in dry-run guard"
+command = "grep -q 'dry_run_no_model_call_invoked' crates/roko-runtime/src/workflow_engine.rs"
+fail_msg = "Test dry_run_no_model_call_invoked not found"
 
 [[task.verify]]
 phase = "compile"
-command = "cargo check -p roko-runtime --no-deps 2>&1 | grep '^error' | head -10"
+command = "cargo check -p roko-runtime 2>&1 | tail -5"
+fail_msg = "roko-runtime does not compile with new test"
 
 [[task.verify]]
 phase = "test"
-command = "cargo test -p roko-runtime -- commit_message_uses_prefix_when_present 2>&1 | tail -5"
+command = "cargo test -p roko-runtime -- dry_run_no_model_call_invoked 2>&1 | tail -10"
+fail_msg = "Test dry_run_no_model_call_invoked does not pass"
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T6 — Unit tests for dry-run preview logic
-#
-# Three tests as specified in the acceptance criteria:
-# 1. dry_run_no_model_call_invoked: MockModelCaller that panics, engine.run()
-#    with dry_run=true must NOT panic.
-# 2. dry_run_phase_list_standard: workflow_config_phases(standard) == [...].
-# 3. dry_run_phase_list_full: workflow_config_phases(full) == [...].
-# ─────────────────────────────────────────────────────────────────────────────
 [[task]]
-id = "T6"
-title = "Add unit tests dry_run_no_model_call_invoked, dry_run_phase_list_standard, dry_run_phase_list_full"
-description = "Add the three acceptance-criteria tests. Tests 2 and 3 live in roko-cli; test 1 lives in roko-runtime alongside the existing MockModelCaller."
+id = "T9"
+title = "Add unit tests for dry-run phase enumeration"
+description = "Add tests verifying DryRunPreview.phases matches expected phase lists for standard and full workflow templates"
 status = "ready"
 tier = "focused"
 model_hint = "claude-sonnet-4-6"
-max_loc = 70
-files = [
-    "crates/roko-runtime/src/workflow_engine.rs",
-    "crates/roko-cli/src/run.rs",
-]
-allowed_tools = ["read_file", "edit_file", "grep"]
+max_loc = 50
+files = ["crates/roko-cli/src/dry_run.rs"]
+allowed_tools = ["read_file", "edit_file"]
 denied_tools = []
 mcp_servers = ["filesystem"]
-depends_on = ["T3", "T4", "T5"]
-role = "implementer"
+depends_on = ["T5"]
 
 [task.context]
 read_files = [
-    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1150-1320", why = "MockModelCaller and existing test infra — add dry_run_no_model_call_invoked here using same mock" },
-    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1725-1760", why = "workflow_config() / standard_workflow_config() test helpers — understand how to build WorkflowRunConfig in tests" },
-    { path = "crates/roko-cli/src/run.rs", lines = "1-62", why = "Imports for run.rs test module" },
-    { path = "crates/roko-runtime/src/pipeline_state.rs", lines = "131-165", why = "WorkflowConfig::standard() and WorkflowConfig::full() — used in phase-list tests" },
+    { path = "crates/roko-cli/src/dry_run.rs", lines = "1-80", why = "See DryRunPreview struct and build_dry_run_preview function to write accurate tests" },
 ]
 symbols = [
-    "workflow_config_phases — pub fn(wc: &WorkflowConfig) -> Vec<String> [added by T3]",
-    "WorkflowConfig::standard() — has_strategy:false, has_review:true",
-    "WorkflowConfig::full() — has_strategy:true, has_review:true",
-    "WorkflowConfig::express() — has_strategy:false, has_review:false",
-    "MockModelCaller — struct in workflow_engine.rs tests; panics on call()",
+    "DryRunPreview.phases — Vec<String> listing workflow phases in order",
+    "WorkflowConfig::standard() — should yield phases [implement, gate, review, commit]",
+    "WorkflowConfig::full() — should yield phases [strategy, implement, gate, review, commit]",
 ]
 anti_patterns = [
-    "Test dry_run_no_model_call_invoked MUST use the existing MockModelCaller (or a similar panic-on-call mock) in workflow_engine.rs tests.",
-    "Do NOT create a new test file — append to the existing #[cfg(test)] modules.",
-    "Do NOT add tokio::test to sync tests — use #[test] for phase-list tests (they are pure/sync).",
-    "For dry_run_no_model_call_invoked: set WorkflowRunConfig { dry_run: true, ... } and verify engine.run() returns Ok(_) without panic.",
+    "Do NOT test against real LLM dispatch; use minimal mock config.",
+    "Phase lists must be exact matches, not subset checks.",
 ]
 
-# Test pseudocode:
-#
-# // In workflow_engine.rs #[cfg(test)]
-# #[tokio::test]
-# async fn dry_run_no_model_call_invoked() {
-#     let (mut config, _dir) = workflow_config();
-#     config.dry_run = true;
-#     // build engine with panic-on-call MockModelCaller ...
-#     let result = engine.run(config).await;
-#     assert!(result.is_ok()); // must not panic
-# }
-#
-# // In run.rs #[cfg(test)]
-# #[test]
-# fn dry_run_phase_list_standard() {
-#     let phases = workflow_config_phases(&WorkflowConfig::standard());
-#     assert_eq!(phases, vec!["implement", "gate", "review", "commit"]);
-# }
-#
-# #[test]
-# fn dry_run_phase_list_full() {
-#     let phases = workflow_config_phases(&WorkflowConfig::full());
-#     assert_eq!(phases, vec!["strategy", "implement", "gate", "review", "commit"]);
-# }
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'dry_run_phase_list_standard' crates/roko-cli/src/dry_run.rs"
+fail_msg = "Test dry_run_phase_list_standard not found"
 
 [[task.verify]]
 phase = "structural"
-command = "grep -n 'dry_run_no_model_call_invoked' crates/roko-runtime/src/workflow_engine.rs"
-fail_msg = "dry_run_no_model_call_invoked test not found"
-
-[[task.verify]]
-phase = "structural"
-command = "grep -n 'dry_run_phase_list_standard' crates/roko-cli/src/run.rs"
-fail_msg = "dry_run_phase_list_standard test not found in run.rs"
-
-[[task.verify]]
-phase = "structural"
-command = "grep -n 'dry_run_phase_list_full' crates/roko-cli/src/run.rs"
-fail_msg = "dry_run_phase_list_full test not found in run.rs"
-
-[[task.verify]]
-phase = "test"
-command = "cargo test -p roko-runtime -- dry_run_no_model_call_invoked 2>&1 | tail -5"
-
-[[task.verify]]
-phase = "test"
-command = "cargo test -p roko-cli -- dry_run_phase_list 2>&1 | tail -5"
+command = "grep -q 'dry_run_phase_list_full' crates/roko-cli/src/dry_run.rs"
+fail_msg = "Test dry_run_phase_list_full not found"
 
 [[task.verify]]
 phase = "compile"
-command = "cargo clippy -p roko-cli -p roko-runtime --no-deps -- -D warnings 2>&1 | grep '^error' | head -10"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "roko-cli does not compile with phase enumeration tests"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-cli -- dry_run_phase_list 2>&1 | tail -10"
+fail_msg = "Phase enumeration tests do not pass"
+
+[[task]]
+id = "T10"
+title = "Run clippy and final integration verification"
+description = "Run clippy on all modified crates and verify the full acceptance criteria from the PRD"
+status = "ready"
+tier = "focused"
+model_hint = "claude-sonnet-4-6"
+max_loc = 20
+files = ["crates/roko-cli/src/main.rs", "crates/roko-cli/src/run.rs", "crates/roko-cli/src/dry_run.rs", "crates/roko-runtime/src/workflow_engine.rs"]
+allowed_tools = ["read_file", "edit_file"]
+denied_tools = []
+mcp_servers = ["filesystem"]
+depends_on = ["T7", "T8", "T9"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/main.rs", lines = "1-30", why = "Verify dry_run flag is in Run variant" },
+    { path = "crates/roko-cli/src/dry_run.rs", lines = "1-30", why = "Verify DryRunPreview struct exists" },
+    { path = "crates/roko-runtime/src/workflow_engine.rs", lines = "1-30", why = "Verify dry_run field and early-exit branch" },
+]
+symbols = [
+    "Command::Run.dry_run — the CLI flag",
+    "WorkflowRunConfig.dry_run — the runtime config field",
+    "DryRunPreview — the output struct",
+]
+anti_patterns = [
+    "Do NOT add new features in this task — only fix clippy warnings or compilation errors.",
+    "Do NOT suppress clippy warnings with #[allow] unless truly unavoidable.",
+]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo clippy -p roko-cli -p roko-runtime --no-deps -- -D warnings 2>&1 | tail -10"
+fail_msg = "Clippy warnings remain in modified crates"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-cli -p roko-runtime -- dry_run 2>&1 | tail -15"
+fail_msg = "Dry-run related tests do not pass"
+
+[[task.verify]]
+phase = "structural"
+command = "grep -n 'dry_run' crates/roko-cli/src/main.rs | head -3"
+fail_msg = "dry_run flag missing from main.rs"
+
+[[task.verify]]
+phase = "structural"
+command = "grep -n 'dry_run' crates/roko-runtime/src/workflow_engine.rs | head -3"
+fail_msg = "dry_run field missing from WorkflowRunConfig"

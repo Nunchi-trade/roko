@@ -39,78 +39,23 @@ impl AcpConfig {
         &self.log_file
     }
 
-    /// Load the workspace `RokoConfig`, searching multiple sources in priority order:
-    /// 1. Explicit `--config` path
-    /// 2. `ROKO_CONFIG` env var
-    /// 3. Parent-walk from workdir looking for `roko.toml`
-    /// 4. `ROKO_WORKDIR` env var
-    /// 5. [`roko_core::config::load_config`] on workdir (defaults + provenance when missing)
-    pub fn load_roko_config(&self) -> roko_core::config::schema::RokoConfig {
-        // 1. Explicit config path (--config flag)
-        if let Some(ref path) = self.config_path {
-            return Self::load_from_path(path);
-        }
-
-        // 2. ROKO_CONFIG env var
-        if let Ok(env_path) = std::env::var("ROKO_CONFIG") {
-            return Self::load_from_path(&PathBuf::from(env_path));
-        }
-
-        // 3. Walk up from workdir looking for roko.toml
-        let mut dir = self.workdir.clone();
-        loop {
-            let candidate = dir.join("roko.toml");
-            if candidate.exists() {
-                return Self::load_from_path(&candidate);
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-
-        // 4. ROKO_WORKDIR env var
-        if let Ok(workdir) = std::env::var("ROKO_WORKDIR") {
-            let candidate = PathBuf::from(&workdir).join("roko.toml");
-            if candidate.exists() {
-                return Self::load_from_path(&candidate);
-            }
-        }
-
-        // 5. Fall back to workdir-based load (validated defaults when file is absent)
-        tracing::warn!("no roko.toml found in search paths; using load_config(workdir) defaults");
-        match roko_core::config::load_config(&self.workdir) {
-            Ok(validated) => validated.into_config(),
-            Err(e) => {
-                tracing::warn!(error = %e, "load_config failed; using built-in defaults");
-                roko_core::config::schema::RokoConfig::default()
-            }
-        }
-    }
-
-    /// Load and parse a specific `roko.toml` file path, falling back to defaults on error.
+    /// Load the workspace `RokoConfig`.
     ///
-    /// Uses the lenient loader that skips strict safety validation (e.g.
-    /// `dangerously_skip_permissions`) since ACP doesn't enforce permission
-    /// semantics — it only needs provider/model configuration.
-    fn load_from_path(path: &Path) -> roko_core::config::schema::RokoConfig {
-        match roko_core::config::load_config_from_path_lenient(path) {
-            Ok(config) => {
-                tracing::info!(
-                    path = %path.display(),
-                    providers = config.providers.len(),
-                    "loaded roko.toml configuration"
-                );
-                config
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "failed to load roko.toml, using defaults"
-                );
-                roko_core::config::schema::RokoConfig::default()
-            }
+    /// If an explicit `--config` path is set, loads from that path (lenient,
+    /// with global merge). Otherwise delegates to the unified loader which
+    /// handles `ROKO_CONFIG` env var, ancestor walk, global merge, env
+    /// overrides, and secret resolution.
+    pub fn load_roko_config(&self) -> roko_core::config::schema::RokoConfig {
+        // If explicit config path is set, use it
+        if let Some(ref path) = self.config_path
+            && let Ok(config) = roko_core::config::load_config_from_path_lenient(path)
+        {
+            let mut config = config;
+            roko_core::config::loader::merge_global_into(&mut config);
+            return config;
         }
+        // Otherwise use unified loader (handles ROKO_CONFIG, ancestor walk, global merge)
+        roko_core::config::loader::load_config_unified(&self.workdir).unwrap_or_default()
     }
 }
 
