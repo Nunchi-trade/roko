@@ -131,7 +131,7 @@ pub struct SubscriptionSummary {
 use crate::config::RepoRegistry;
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
-use roko_core::config::load_config;
+use roko_core::config::loader::load_config_unified;
 use roko_serve::{self, deploy, dispatch, dreams, feedback, fswatcher, scheduler, state::AppState};
 
 /// State of the headless daemon.
@@ -317,7 +317,7 @@ pub async fn daemon_start(workdir: &Path, foreground: bool, port: u16) -> Result
         return Ok(());
     }
 
-    let core_config = load_config(workdir)?.into_config();
+    let core_config = load_config_unified(workdir)?;
     let cli_config = load_layered(workdir)?.config;
     let dream_settings = cli_config.dreams.clone();
     let agent_settings = cli_config.agent.clone();

@@ -1408,7 +1408,7 @@ fn default_static_table(model_slugs: &[String]) -> HashMap<ModelTier, String> {
 
     table.insert(
         ModelTier::Fast,
-        pick_static_slug(model_slugs, &["claude-haiku-3-5"]),
+        pick_static_slug(model_slugs, &["claude-haiku-4-5"]),
     );
     table.insert(
         ModelTier::Standard,
@@ -1419,15 +1419,15 @@ fn default_static_table(model_slugs: &[String]) -> HashMap<ModelTier, String> {
     );
     table.insert(
         ModelTier::Premium,
-        pick_static_slug(model_slugs, &["claude-opus-4"]),
+        pick_static_slug(model_slugs, &["claude-opus-4-6"]),
     );
     table
 }
 
 fn pick_static_from_candidates(candidate_slugs: &[String], tier: ModelTier) -> String {
     let candidates = match tier {
-        ModelTier::Fast => &["claude-haiku-3-5"][..],
-        ModelTier::Premium => &["claude-opus-4"][..],
+        ModelTier::Fast => &["claude-haiku-4-5"][..],
+        ModelTier::Premium => &["claude-opus-4-6"][..],
         _ => &["glm-5.1", "claude-sonnet-4-6", "claude-sonnet-4-5"][..],
     };
 
@@ -1497,9 +1497,9 @@ mod tests {
 
     fn test_slugs() -> Vec<String> {
         vec![
-            "claude-haiku-3-5".to_string(),
+            "claude-haiku-4-5".to_string(),
             "claude-sonnet-4-5".to_string(),
-            "claude-opus-4".to_string(),
+            "claude-opus-4-6".to_string(),
         ]
     }
 
@@ -1645,10 +1645,10 @@ mod tests {
 
         let mut ctx = default_ctx();
         ctx.complexity = TaskComplexityBand::Fast;
-        assert_eq!(router.select_model(&ctx).slug, "claude-haiku-3-5");
+        assert_eq!(router.select_model(&ctx).slug, "claude-haiku-4-5");
 
         ctx.complexity = TaskComplexityBand::Complex;
-        assert_eq!(router.select_model(&ctx).slug, "claude-opus-4");
+        assert_eq!(router.select_model(&ctx).slug, "claude-opus-4-6");
     }
 
     // ── Test 10: alpha decay starts at ~1.0 ─────────────────────────────
@@ -1920,8 +1920,8 @@ mod tests {
         // Train heavily: sonnet always gets reward 1.0, others get 0.0.
         for _ in 0..80 {
             router.update(&ctx, "claude-sonnet-4-5", 1.0);
-            router.update(&ctx, "claude-haiku-3-5", 0.0);
-            router.update(&ctx, "claude-opus-4", 0.0);
+            router.update(&ctx, "claude-haiku-4-5", 0.0);
+            router.update(&ctx, "claude-opus-4-6", 0.0);
         }
 
         // Now past cold-start threshold, should pick sonnet.
@@ -1992,7 +1992,7 @@ mod tests {
         let router = LinUCBRouter::new(test_slugs()).with_persist_path(&path);
         let ctx = default_ctx();
         router.update(&ctx, "claude-sonnet-4-5", 0.9);
-        router.update(&ctx, "claude-haiku-3-5", 0.3);
+        router.update(&ctx, "claude-haiku-4-5", 0.3);
         router.save().expect("save");
 
         let loaded = LinUCBRouter::load(&path, test_slugs()).expect("load");
@@ -2075,7 +2075,7 @@ mod tests {
         let same = ctx.to_features_for_model(Some("claude-sonnet-4-5"));
         assert!((same[17] - 1.0).abs() < f64::EPSILON);
 
-        let different = ctx.to_features_for_model(Some("claude-opus-4"));
+        let different = ctx.to_features_for_model(Some("claude-opus-4-6"));
         assert!((different[17] - 0.0).abs() < f64::EPSILON);
     }
 

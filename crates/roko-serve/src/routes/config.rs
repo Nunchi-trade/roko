@@ -9,9 +9,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use roko_core::config::LoadConfigError;
 use roko_core::config::hot_reload;
+use roko_core::config::loader::load_config_unified;
 use roko_core::config::schema::RokoConfig;
-use roko_core::config::{LoadConfigError, load_config};
 
 use crate::error::ApiError;
 use crate::events::ServerEvent;
@@ -149,7 +150,7 @@ fn map_load_config_error(err: LoadConfigError) -> ApiError {
 /// Returns [`LoadConfigError::Read`] when `roko.toml` cannot be read and
 /// [`LoadConfigError::Parse`] when the file contents are not valid config.
 pub fn reload_config_from_disk(state: &AppState) -> Result<Vec<String>, LoadConfigError> {
-    let new_config = load_config(&state.workdir)?.into_config();
+    let new_config = load_config_unified(&state.workdir)?;
     let mut warnings = validate_references(&new_config);
 
     // Compute diff and apply only hot-reloadable sections.

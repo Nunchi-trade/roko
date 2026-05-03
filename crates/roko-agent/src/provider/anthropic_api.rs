@@ -2,12 +2,12 @@ pub mod tool_loop;
 
 use crate::Agent;
 use crate::claude_agent::{ClaudeAgent, DEFAULT_BASE_URL};
-use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use roko_core::agent::ProviderKind;
-use roko_core::config::schema::{ModelProfile, ProviderConfig};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
+use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 use serde_json::Value;
 
 /// Adapter for the Anthropic Messages API.

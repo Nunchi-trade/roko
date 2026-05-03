@@ -1507,6 +1507,8 @@ pub struct ModelProfileLayer {
     pub search_context_size: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_per_request: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<roko_core::ModelTier>,
 }
 
 impl ModelProfileLayer {
@@ -1554,6 +1556,7 @@ impl ModelProfileLayer {
             is_embedding_model: overlay.is_embedding_model.or(self.is_embedding_model),
             search_context_size: overlay.search_context_size.or(self.search_context_size),
             cost_per_request: overlay.cost_per_request.or(self.cost_per_request),
+            tier: overlay.tier.or(self.tier),
         }
     }
 
@@ -1591,6 +1594,7 @@ impl ModelProfileLayer {
             is_embedding_model: self.is_embedding_model.unwrap_or(false),
             search_context_size: self.search_context_size,
             cost_per_request: self.cost_per_request,
+            tier: self.tier,
         })
     }
 }

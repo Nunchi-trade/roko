@@ -75,8 +75,7 @@ pub fn cmd_list(workdir: &Path, json: bool) -> Result<()> {
 }
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn file_watcher_row(workdir: &Path, path: &WatcherPathConfig) -> FileWatcherRow {

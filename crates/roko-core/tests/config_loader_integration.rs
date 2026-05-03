@@ -80,10 +80,7 @@ api_key_env = "TEST_KEY"
     let config = load_config_with_options(dir.path(), &opts).unwrap();
     assert!(config.providers.contains_key("test-provider"));
     let prov = &config.providers["test-provider"];
-    assert_eq!(
-        prov.base_url.as_deref(),
-        Some("https://api.test.com/v1")
-    );
+    assert_eq!(prov.base_url.as_deref(), Some("https://api.test.com/v1"));
 }
 
 #[test]
@@ -119,6 +116,57 @@ supports_tools = true
     assert_eq!(model.slug, "my-model-v1");
     assert_eq!(model.context_window, 128_000);
     assert!(model.supports_tools);
+}
+
+// ── Model tier ─────────────────────────────────────────────────────────
+
+#[test]
+fn load_reads_model_tier_from_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("roko.toml"),
+        r#"
+config_version = 2
+schema_version = 2
+
+[providers.prov]
+kind = "openai_compat"
+base_url = "https://api.test.com/v1"
+
+[models.fast-model]
+provider = "prov"
+slug = "fast-v1"
+tier = "fast"
+context_window = 8192
+
+[models.premium-model]
+provider = "prov"
+slug = "premium-v1"
+tier = "premium"
+context_window = 200000
+
+[models.no-tier-model]
+provider = "prov"
+slug = "default-v1"
+context_window = 128000
+"#,
+    )
+    .unwrap();
+
+    let opts = LoadOptions {
+        merge_global: false,
+        apply_env_overrides: false,
+        strict_validation: false,
+    };
+    let config = load_config_with_options(dir.path(), &opts).unwrap();
+
+    use roko_core::agent::ModelTier;
+    assert_eq!(config.models["fast-model"].tier, Some(ModelTier::Fast));
+    assert_eq!(
+        config.models["premium-model"].tier,
+        Some(ModelTier::Premium)
+    );
+    assert_eq!(config.models["no-tier-model"].tier, None);
 }
 
 // ── Serialization roundtrip ─────────────────────────────────────────────
@@ -266,7 +314,10 @@ fn strict_rejects_dangerous_permissions() {
     .unwrap();
 
     let result = load_config_with_options(dir.path(), &LoadOptions::strict());
-    assert!(result.is_err(), "strict mode should reject dangerous permissions");
+    assert!(
+        result.is_err(),
+        "strict mode should reject dangerous permissions"
+    );
 }
 
 #[test]
@@ -301,9 +352,17 @@ fn atomic_write_creates_and_overwrites() {
     let content = read_optional(&path).unwrap();
     assert_eq!(content.as_deref(), Some("{\"v\":2}"));
 
-    // No .tmp file remains
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-    assert!(!tmp.exists(), "temp file should be cleaned up");
+    // No .tmp.* siblings remain after a successful write.
+    let siblings: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("state.json.tmp.")
+        })
+        .collect();
+    assert!(siblings.is_empty(), "temp file should be cleaned up");
 }
 
 #[test]
@@ -313,10 +372,7 @@ fn atomic_write_creates_parent_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("deep").join("nested").join("file.txt");
     atomic_write(&path, b"nested content").unwrap();
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        "nested content"
-    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "nested content");
 }
 
 #[test]
@@ -335,7 +391,9 @@ async fn atomic_write_async_works() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("async.json");
 
-    atomic_write_async(&path, b"{\"async\":true}").await.unwrap();
+    atomic_write_async(&path, b"{\"async\":true}")
+        .await
+        .unwrap();
     let content = read_optional_async(&path).await.unwrap();
     assert_eq!(content.as_deref(), Some("{\"async\":true}"));
 }
@@ -352,7 +410,7 @@ fn defaults_values_are_consistent() {
     assert!(DEFAULT_EMBED_TIMEOUT_MS < DEFAULT_REQUEST_TIMEOUT_MS);
 
     // Retry backoff is ordered
-    assert!(DEFAULT_RETRY_INITIAL_BACKOFF_MS < DEFAULT_RETRY_MAX_BACKOFF_MS);
+    assert!(DEFAULT_RETRY_BASE_DELAY_MS < DEFAULT_RETRY_MAX_BACKOFF_MS);
     assert!(DEFAULT_RETRY_ATTEMPTS >= 1);
 
     // Token budgets are sane
@@ -389,8 +447,8 @@ fn project_roko_toml_loads_through_unified_loader() {
         apply_env_overrides: false,
         strict_validation: false,
     };
-    let config = load_config_with_options(&workspace_root, &opts)
-        .expect("project roko.toml must load");
+    let config =
+        load_config_with_options(&workspace_root, &opts).expect("project roko.toml must load");
 
     // Project should have providers configured
     assert!(
@@ -422,7 +480,7 @@ fn retry_policy_from_defaults() {
 
     let policy = RetryPolicy::new(
         DEFAULT_RETRY_ATTEMPTS,
-        DEFAULT_RETRY_INITIAL_BACKOFF_MS,
+        DEFAULT_RETRY_BASE_DELAY_MS,
         DEFAULT_RETRY_MAX_BACKOFF_MS,
         true, // jitter
     );
@@ -433,7 +491,7 @@ fn retry_policy_from_defaults() {
     assert!(!policy.should_retry(2)); // 3 attempts total
 
     let delay = policy.delay_for(0);
-    // With jitter, delay should be between 250ms and 500ms
-    assert!(delay.as_millis() >= 250);
-    assert!(delay.as_millis() <= 500);
+    // With jitter, delay should be between 500ms and 1000ms (base_delay = 1000)
+    assert!(delay.as_millis() >= 500);
+    assert!(delay.as_millis() <= 1_000);
 }

@@ -710,7 +710,7 @@ mod tests {
         let store_path = dir.path().join("model-experiments.json");
         let router_path = dir.path().join("cascade-router.json");
         let router = CascadeRouter::new(vec![
-            "claude-haiku-3-5".to_string(),
+            "claude-haiku-4-5".to_string(),
             "claude-sonnet-4-5".to_string(),
             "model-a".to_string(),
             "model-b".to_string(),
@@ -731,7 +731,7 @@ mod tests {
         let reloaded = CascadeRouter::load_or_new(
             &router_path,
             vec![
-                "claude-haiku-3-5".to_string(),
+                "claude-haiku-4-5".to_string(),
                 "claude-sonnet-4-5".to_string(),
                 "model-a".to_string(),
                 "model-b".to_string(),

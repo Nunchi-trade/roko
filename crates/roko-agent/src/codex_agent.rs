@@ -420,8 +420,8 @@ impl Agent for CodexAgent {
 mod tests {
     use super::*;
     use roko_core::agent::ProviderKind;
-    use roko_core::config::schema::ProviderConfig;
     use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
+    use roko_core::config::schema::ProviderConfig;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};

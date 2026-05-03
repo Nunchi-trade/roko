@@ -294,9 +294,7 @@ impl PromptAssembler {
                 Arc::new(WorkdirPlaybookSource {
                     cache: Some(Arc::clone(&cache)),
                 }),
-                Arc::new(SectionEffectivenessSource {
-                    cache: Some(cache),
-                }),
+                Arc::new(SectionEffectivenessSource { cache: Some(cache) }),
             ],
         }
     }
@@ -870,7 +868,10 @@ fn collect_neuro_knowledge_cached(
             }
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.confidence.total_cmp(&a.1.confidence)));
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.confidence.total_cmp(&a.1.confidence))
+    });
     scored.truncate(5);
 
     if scored.is_empty() {

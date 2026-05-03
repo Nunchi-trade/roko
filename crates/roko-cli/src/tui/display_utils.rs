@@ -73,7 +73,7 @@ mod tests {
         assert_eq!(display_model(Some("")), "unknown");
         assert_eq!(display_model(Some("-")), "unknown");
         assert_eq!(display_model(Some("unknown-model")), "unknown");
-        assert_eq!(display_model(Some("claude-opus-4")), "o4");
+        assert_eq!(display_model(Some("claude-opus-4-6")), "o4-6");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 const DEFAULT_FAILURE_THRESHOLD: f64 = roko_core::defaults::DEFAULT_FAILURE_THRESHOLD;
 
 /// Minimum number of calls before alerts can fire.
-const DEFAULT_MIN_CALLS: u64 = roko_core::defaults::DEFAULT_ALERT_MIN_CALLS as u64;
+const DEFAULT_MIN_CALLS: u64 = roko_core::defaults::DEFAULT_ALERT_MIN_CALLS;
 
 // ─── AlertSeverity ───────────────────────────────────────────────────────
 

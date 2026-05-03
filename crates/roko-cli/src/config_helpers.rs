@@ -119,8 +119,7 @@ pub(crate) fn replan_ledger_path(workdir: &Path) -> PathBuf {
 // ── Config loading ────────────────────────────────────────────────────
 
 pub(crate) fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 pub(crate) fn runtime_learning_config(workdir: &Path) -> RuntimeLearningConfig {

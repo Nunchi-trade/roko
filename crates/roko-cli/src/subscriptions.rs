@@ -247,8 +247,7 @@ fn write_subscription_file(path: &Path, config: &SubscriptionConfig) -> Result<(
 }
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]

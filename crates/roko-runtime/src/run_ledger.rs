@@ -369,7 +369,6 @@ pub enum EventPersistenceHealth {
     },
 }
 
-
 /// Typed effect error category.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectErrorKind {

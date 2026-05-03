@@ -3731,10 +3731,7 @@ mod tests {
 
         app.dispatch_action(TuiAction::ConfigSave);
 
-        let mut reloaded = roko_core::config::load_config(dir.path())
-            .unwrap()
-            .into_config();
-        reloaded.apply_process_env();
+        let reloaded = roko_core::config::loader::load_config_unified(dir.path()).unwrap();
 
         assert!(app.tui_state.config_pending.is_empty());
         assert_eq!(reloaded.agent.default_model, "claude-opus-4-6");

@@ -9,8 +9,8 @@ use crate::task_runner::CostTable;
 use async_trait::async_trait;
 use chrono::Utc;
 use roko_core::agent::ProviderKind;
-use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
+use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::foundation::{
     CachePolicy, ChatMessage, FeedbackEvent, FeedbackSink, GatewayError, MessageRole,
     ModelCallRequest, ModelCallResponse, ModelCaller, TokenBudget, TokenUsage,
@@ -289,8 +289,10 @@ impl ModelCallService {
                 .map(|message| message.content.chars().count() as u64)
                 .sum::<u64>();
         let estimated_input_tokens = total_chars / 4;
-        let max_output_tokens =
-            u64::from(req.max_tokens.unwrap_or(roko_core::defaults::DEFAULT_FALLBACK_MAX_OUTPUT_TOKENS));
+        let max_output_tokens = u64::from(
+            req.max_tokens
+                .unwrap_or(roko_core::defaults::DEFAULT_FALLBACK_MAX_OUTPUT_TOKENS),
+        );
         let usage_estimate = Usage {
             input_tokens: estimated_input_tokens.min(u64::from(u32::MAX)) as u32,
             output_tokens: max_output_tokens.min(u64::from(u32::MAX)) as u32,
@@ -2172,7 +2174,7 @@ mod tests {
     fn thinking_cap_ignores_non_thinking_models() {
         let cap = ThinkingCapCell::new(16_384);
 
-        let result = cap.apply("claude-sonnet-4", None);
+        let result = cap.apply("claude-sonnet-4-6", None);
 
         assert_eq!(result.thinking_budget, None);
         assert!(!result.was_capped);
@@ -2182,7 +2184,7 @@ mod tests {
     fn thinking_cap_caps_opus() {
         let cap = ThinkingCapCell::new(16_384);
 
-        let result = cap.apply("claude-opus-4", None);
+        let result = cap.apply("claude-opus-4-6", None);
 
         assert_eq!(result.thinking_budget, Some(16_384));
         assert!(result.was_capped);
@@ -2193,7 +2195,7 @@ mod tests {
     fn thinking_cap_respects_lower_explicit() {
         let cap = ThinkingCapCell::new(16_384);
 
-        let result = cap.apply("claude-opus-4", Some(4096));
+        let result = cap.apply("claude-opus-4-6", Some(4096));
 
         assert_eq!(result.thinking_budget, Some(4096));
         assert!(!result.was_capped);

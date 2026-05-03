@@ -27,8 +27,8 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 
 const SEED: u64 = 60_060;
-const FAST_SLUG: &str = "claude-haiku-3-5";
-const PREMIUM_SLUG: &str = "claude-opus-4";
+const FAST_SLUG: &str = "claude-haiku-4-5";
+const PREMIUM_SLUG: &str = "claude-opus-4-6";
 const TRAINING_ROUNDS: usize = 20;
 
 fn scaled_test_timeout_ms(ms: u64) -> u64 {

@@ -450,9 +450,11 @@ pub async fn run_with_workflow_engine(
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> anyhow::Result<WorkflowRunReport> {
     let runtime_run_id = Arc::new(Mutex::new(None));
-    let roko_config = roko_core::config::load_config(workdir)
-        .map(roko_core::config::ValidatedConfig::into_config)
-        .unwrap_or_default();
+    let roko_config = roko_core::config::loader::load_config_with_options(
+        workdir,
+        &roko_core::config::loader::LoadOptions::acp(),
+    )
+    .unwrap_or_default();
     let services = ServiceFactory::build(ServiceConfig {
         workdir: workdir.to_path_buf(),
         roko_dir: workdir.join(".roko"),

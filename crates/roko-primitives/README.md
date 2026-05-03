@@ -121,7 +121,7 @@ assert_eq!(model, Some("claude-opus-4-6"));
 | T0 | any | `None` (no call) |
 | T1 | any | `"claude-haiku-4-5"` |
 | T2 | >= 0.3 | `"claude-opus-4-6"` |
-| T2 | < 0.3 | `"claude-sonnet-4"` |
+| T2 | < 0.3 | `"claude-sonnet-4-6"` |
 
 `TierRouter` is a zero-sized unit struct. `select_model` is a pure function with no state and no allocations. All model selection in the workspace flows through this one function.
 

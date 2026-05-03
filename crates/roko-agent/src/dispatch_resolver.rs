@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 
 use roko_core::agent::{ProviderKind, ResolvedModel, resolve_model};
-use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
+use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::{
     DispatchAttempt, DispatchAttemptKind, DispatchAuthStatus, DispatchError, DispatchPlan,
     DispatchRequest, DispatchRequirement, FallbackPolicy, TransportAuth, TransportPlan,

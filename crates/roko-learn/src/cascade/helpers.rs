@@ -53,11 +53,15 @@ pub(crate) fn default_role_model_table(model_slugs: &[String]) -> HashMap<AgentR
         }
         let slug = match role.model_tier() {
             ModelTier::Fast => {
-                pick_static_slug(model_slugs, &["gemini-2.5-flash-lite", "claude-haiku-3-5"])
+                pick_static_slug(model_slugs, &["gemini-2.5-flash-lite", "claude-haiku-4-5"])
             }
             ModelTier::Premium => pick_static_slug(
                 model_slugs,
-                &["claude-opus-4", "gemini-3.1-pro-preview", "gemini-2.5-pro"],
+                &[
+                    "claude-opus-4-6",
+                    "gemini-3.1-pro-preview",
+                    "gemini-2.5-pro",
+                ],
             ),
             // Standard and forward-compat
             _ => pick_static_slug(
@@ -117,17 +121,29 @@ pub(crate) const fn default_latency_sla(tier: ModelTier) -> u64 {
     }
 }
 
-/// Map a model slug to an approximate tier for SLA purposes.
-pub(crate) fn slug_to_tier(slug: &str) -> ModelTier {
-    if slug.contains("gemini-2.5-flash-lite")
-        || slug.contains("gemini-3.1-flash-lite-preview")
-        || slug.contains("haiku")
-    {
+/// Resolve a model's tier using a config-sourced tier map with heuristic fallback.
+///
+/// When `tier_map` contains the slug, returns the config-sourced tier.
+/// Otherwise falls back to [`slug_to_tier_heuristic`].
+///
+/// The tier map is built from `ModelProfile.tier` fields at `CascadeRouter`
+/// construction time via [`CascadeRouter::with_model_tiers`].
+pub(crate) fn slug_to_tier(slug: &str, tier_map: &HashMap<String, ModelTier>) -> ModelTier {
+    if let Some(&tier) = tier_map.get(slug) {
+        return tier;
+    }
+    slug_to_tier_heuristic(slug)
+}
+
+/// Substring-based tier heuristic (legacy fallback).
+///
+/// Intentionally conservative — only matches well-known patterns.
+/// For precise routing, set the `tier` field in `roko.toml` model profiles
+/// and call [`CascadeRouter::with_model_tiers`] at construction.
+pub(crate) fn slug_to_tier_heuristic(slug: &str) -> ModelTier {
+    if slug.contains("flash-lite") || slug.contains("haiku") {
         ModelTier::Fast
-    } else if slug.contains("gemini-3.1-pro-preview")
-        || slug.contains("opus")
-        || slug.contains("premium")
-    {
+    } else if slug.contains("opus") || slug.contains("-pro-preview") {
         ModelTier::Premium
     } else {
         ModelTier::Standard
@@ -138,8 +154,9 @@ pub(crate) fn slug_to_tier(slug: &str) -> ModelTier {
 pub(crate) fn fallback_chain_for_model(
     model_slugs: &[String],
     primary_slug: &str,
+    tier_map: &HashMap<String, ModelTier>,
 ) -> Vec<ModelSpec> {
-    let primary_tier = slug_to_tier(primary_slug);
+    let primary_tier = slug_to_tier(primary_slug, tier_map);
 
     if matches!(primary_tier, ModelTier::Fast) {
         return Vec::new();
@@ -153,13 +170,13 @@ pub(crate) fn fallback_chain_for_model(
         }
 
         let bucket = match primary_tier {
-            ModelTier::Standard => match slug_to_tier(slug) {
+            ModelTier::Standard => match slug_to_tier(slug, tier_map) {
                 ModelTier::Fast => 0,
                 ModelTier::Standard => 1,
                 ModelTier::Premium => 2,
                 _ => 1,
             },
-            ModelTier::Premium => match slug_to_tier(slug) {
+            ModelTier::Premium => match slug_to_tier(slug, tier_map) {
                 ModelTier::Standard => 0,
                 ModelTier::Fast => 1,
                 ModelTier::Premium => 2,
@@ -178,12 +195,13 @@ pub(crate) fn fallback_chain_for_model(
 pub(crate) fn context_overflow_fallback_for_model(
     model_slugs: &[String],
     primary_slug: &str,
+    tier_map: &HashMap<String, ModelTier>,
 ) -> Option<ModelSpec> {
-    let primary_rank = model_tier_rank(slug_to_tier(primary_slug));
+    let primary_rank = model_tier_rank(slug_to_tier(primary_slug, tier_map));
 
     model_slugs
         .iter()
-        .find(|slug| model_tier_rank(slug_to_tier(slug)) > primary_rank)
+        .find(|slug| model_tier_rank(slug_to_tier(slug, tier_map)) > primary_rank)
         .map(ModelSpec::from_slug)
 }
 
@@ -364,14 +382,18 @@ pub(crate) fn thinking_filtered_candidates(
     }
 }
 
-pub(crate) fn pick_tier_extreme(candidates: &[String], prefer_strongest: bool) -> Option<String> {
+pub(crate) fn pick_tier_extreme(
+    candidates: &[String],
+    prefer_strongest: bool,
+    tier_map: &HashMap<String, ModelTier>,
+) -> Option<String> {
     let mut iter = candidates.iter();
     let first = iter.next()?.clone();
     let mut best = first;
-    let mut best_rank = model_tier_rank(slug_to_tier(&best));
+    let mut best_rank = model_tier_rank(slug_to_tier(&best, tier_map));
 
     for slug in iter {
-        let rank = model_tier_rank(slug_to_tier(slug));
+        let rank = model_tier_rank(slug_to_tier(slug, tier_map));
         let better = if prefer_strongest {
             rank > best_rank
         } else {
@@ -528,7 +550,7 @@ pub(crate) fn pareto_adjusted_alpha(base_alpha: f64, slug: &str, frontier: &[Str
     }
 }
 
-pub(crate) fn pareto_cost_proxy(slug: &str) -> f64 {
+pub(crate) fn pareto_cost_proxy(slug: &str, tier_map: &HashMap<String, ModelTier>) -> f64 {
     match slug_family(slug) {
         Some("gemini-3.1-flash-lite-preview") => 0.9,
         Some("gemini-3-flash-preview") => 1.5,
@@ -536,7 +558,7 @@ pub(crate) fn pareto_cost_proxy(slug: &str) -> f64 {
         Some("sonnet") => 3.0,
         Some("opus") => 9.0,
         Some("kimi-k2") => 2.5,
-        _ => match slug_to_tier(slug) {
+        _ => match slug_to_tier(slug, tier_map) {
             ModelTier::Fast => 1.0,
             ModelTier::Premium => 9.0,
             _ => 3.0,
@@ -544,8 +566,8 @@ pub(crate) fn pareto_cost_proxy(slug: &str) -> f64 {
     }
 }
 
-pub(crate) fn pareto_latency_proxy(slug: &str) -> f64 {
-    default_latency_sla(slug_to_tier(slug)) as f64
+pub(crate) fn pareto_latency_proxy(slug: &str, tier_map: &HashMap<String, ModelTier>) -> f64 {
+    default_latency_sla(slug_to_tier(slug, tier_map)) as f64
 }
 
 pub(crate) fn is_free_tier_gemini_model(slug: &str) -> bool {

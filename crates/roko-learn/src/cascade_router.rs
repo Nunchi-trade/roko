@@ -90,6 +90,12 @@ pub struct CascadeRouter {
     role_table: Mutex<HashMap<AgentRole, String>>,
     /// Ordered list of model slugs tracked by the router.
     model_slugs: Vec<String>,
+    /// Config-sourced tier map: slug → ModelTier from `roko.toml`.
+    ///
+    /// Used by [`Self::tier_for_slug`] to resolve tiers from config before
+    /// falling back to substring heuristics. Populated from `ModelProfile.tier`
+    /// fields at construction time.
+    tier_map: HashMap<String, ModelTier>,
     /// Active stage and recorded stage-transition history.
     stage_tracking: Mutex<StageTracking>,
     /// Optional free-tier Gemini runner used for shadow evaluation.
@@ -153,6 +159,7 @@ impl CascadeRouter {
             confidence_stats: Mutex::new(HashMap::new()),
             pareto_frontier: Mutex::new(ParetoFrontierState::default()),
             role_table: Mutex::new(default_role_model_table(&model_slugs)),
+            tier_map: HashMap::new(),
             model_slugs,
             stage_tracking: Mutex::new(StageTracking {
                 current: CascadeStage::Static,
@@ -160,6 +167,38 @@ impl CascadeRouter {
             }),
             free_tier_shadow_runner: None,
         }
+    }
+
+    /// Set config-sourced tier assignments (builder pattern).
+    ///
+    /// Pass the `models` map from `RokoConfig` so the router uses explicit
+    /// `tier` fields instead of substring heuristics.
+    #[must_use]
+    pub fn with_model_tiers(
+        mut self,
+        models: &HashMap<String, roko_core::config::ModelProfile>,
+    ) -> Self {
+        self.tier_map = models
+            .values()
+            .filter_map(|p| p.tier.map(|t| (p.slug.clone(), t)))
+            .collect();
+        self
+    }
+
+    /// Set config-sourced tier assignments (mutable version).
+    ///
+    /// Use this when the router is already constructed (e.g. after
+    /// `LearningRuntime::open`) and you want to inject config tiers.
+    pub fn set_model_tiers(&mut self, models: &HashMap<String, roko_core::config::ModelProfile>) {
+        self.tier_map = models
+            .values()
+            .filter_map(|p| p.tier.map(|t| (p.slug.clone(), t)))
+            .collect();
+    }
+
+    /// Resolve a model's tier, preferring config over heuristic.
+    pub fn tier_for_slug(&self, slug: &str) -> ModelTier {
+        slug_to_tier(slug, &self.tier_map)
     }
 
     /// Override the static role table (builder pattern).
@@ -367,10 +406,10 @@ impl CascadeRouter {
             .first()
             .cloned()
             .expect("CascadeRouter: need at least one model");
-        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
+        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug, &self.tier_map));
 
         for slug in self.model_slugs.iter().skip(1) {
-            let rank = model_tier_rank(slug_to_tier(slug));
+            let rank = model_tier_rank(slug_to_tier(slug, &self.tier_map));
             if rank > best_rank {
                 best_rank = rank;
                 best_slug.clone_from(slug);
@@ -388,10 +427,10 @@ impl CascadeRouter {
             .first()
             .cloned()
             .expect("CascadeRouter: need at least one model");
-        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
+        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug, &self.tier_map));
 
         for slug in self.model_slugs.iter().skip(1) {
-            let rank = model_tier_rank(slug_to_tier(slug));
+            let rank = model_tier_rank(slug_to_tier(slug, &self.tier_map));
             if rank < best_rank {
                 best_rank = rank;
                 best_slug.clone_from(slug);
@@ -408,10 +447,10 @@ impl CascadeRouter {
             .first()
             .cloned()
             .unwrap_or_else(|| self.strongest_model().slug);
-        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
+        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug, &self.tier_map));
 
         for slug in candidates.iter().skip(1) {
-            let rank = model_tier_rank(slug_to_tier(slug));
+            let rank = model_tier_rank(slug_to_tier(slug, &self.tier_map));
             if rank > best_rank {
                 best_rank = rank;
                 best_slug.clone_from(slug);
@@ -428,10 +467,10 @@ impl CascadeRouter {
             .first()
             .cloned()
             .unwrap_or_else(|| self.cheapest_model().slug);
-        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
+        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug, &self.tier_map));
 
         for slug in candidates.iter().skip(1) {
-            let rank = model_tier_rank(slug_to_tier(slug));
+            let rank = model_tier_rank(slug_to_tier(slug, &self.tier_map));
             if rank < best_rank {
                 best_rank = rank;
                 best_slug.clone_from(slug);
@@ -447,10 +486,10 @@ impl CascadeRouter {
         candidates: &[String],
         primary: ModelSpec,
     ) -> CascadeModel {
-        let tier = slug_to_tier(&primary.slug);
-        route.fallback_chain = fallback_chain_for_model(candidates, &primary.slug);
+        let tier = slug_to_tier(&primary.slug, &self.tier_map);
+        route.fallback_chain = fallback_chain_for_model(candidates, &primary.slug, &self.tier_map);
         route.context_overflow_fallback =
-            context_overflow_fallback_for_model(candidates, &primary.slug);
+            context_overflow_fallback_for_model(candidates, &primary.slug, &self.tier_map);
         route.latency_sla_ms = default_latency_sla(tier);
         route.primary = primary;
         route
@@ -467,11 +506,11 @@ impl CascadeRouter {
             return model;
         }
 
-        let current_rank = model_tier_rank(slug_to_tier(&model.slug));
+        let current_rank = model_tier_rank(slug_to_tier(&model.slug, &self.tier_map));
         let target_rank = target_tier_rank(current_rank, shift);
         candidates
             .iter()
-            .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
+            .find(|slug| model_tier_rank(slug_to_tier(slug, &self.tier_map)) == target_rank)
             .map(ModelSpec::from_slug)
             .unwrap_or(model)
     }
@@ -487,11 +526,11 @@ impl CascadeRouter {
             return model;
         }
 
-        let current_rank = model_tier_rank(slug_to_tier(&model.slug));
+        let current_rank = model_tier_rank(slug_to_tier(&model.slug, &self.tier_map));
         let target_rank = target_tier_rank(current_rank, shift);
         candidates
             .iter()
-            .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
+            .find(|slug| model_tier_rank(slug_to_tier(slug, &self.tier_map)) == target_rank)
             .map(ModelSpec::from_slug)
             .unwrap_or(model)
     }
@@ -507,11 +546,11 @@ impl CascadeRouter {
             return model;
         }
 
-        let current_rank = model_tier_rank(slug_to_tier(&model.slug));
+        let current_rank = model_tier_rank(slug_to_tier(&model.slug, &self.tier_map));
         let target_rank = target_tier_rank(current_rank, shift);
         candidates
             .iter()
-            .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
+            .find(|slug| model_tier_rank(slug_to_tier(slug, &self.tier_map)) == target_rank)
             .map(ModelSpec::from_slug)
             .unwrap_or(model)
     }
@@ -741,7 +780,7 @@ impl CascadeRouter {
             }
 
             if bias.prefer_cheaper {
-                *score *= routing_tier_bias_factor(slug_to_tier(slug));
+                *score *= routing_tier_bias_factor(slug_to_tier(slug, &self.tier_map));
             }
         }
     }
@@ -753,7 +792,7 @@ impl CascadeRouter {
         }
 
         for (slug, score) in candidates.iter_mut() {
-            *score *= cost_pressure_factor(slug_to_tier(slug));
+            *score *= cost_pressure_factor(slug_to_tier(slug, &self.tier_map));
         }
     }
 
@@ -1119,7 +1158,7 @@ impl CascadeRouter {
                 quality,
                 0.0,
                 shadow_result.usage.wall_ms as f64,
-                default_latency_sla(slug_to_tier(free_model)) as f64,
+                default_latency_sla(slug_to_tier(free_model, &self.tier_map)) as f64,
             )
         } else {
             0.0
@@ -1713,15 +1752,19 @@ impl CascadeRouter {
         agent_id: Option<&str>,
     ) -> CascadeModel {
         if let Some(thinking_selected) = match thinking_preference(ctx) {
-            ThinkingPreference::PreferThinking => {
-                pick_tier_extreme(&thinking_filtered_candidates(&self.model_slugs, ctx), true)
-            }
-            ThinkingPreference::PreferNonThinking => {
-                pick_tier_extreme(&thinking_filtered_candidates(&self.model_slugs, ctx), false)
-            }
+            ThinkingPreference::PreferThinking => pick_tier_extreme(
+                &thinking_filtered_candidates(&self.model_slugs, ctx),
+                true,
+                &self.tier_map,
+            ),
+            ThinkingPreference::PreferNonThinking => pick_tier_extreme(
+                &thinking_filtered_candidates(&self.model_slugs, ctx),
+                false,
+                &self.tier_map,
+            ),
             ThinkingPreference::Neutral => None,
         } {
-            let tier = slug_to_tier(&thinking_selected);
+            let tier = slug_to_tier(&thinking_selected, &self.tier_map);
             let route = CascadeModel {
                 primary: ModelSpec::from_slug(thinking_selected),
                 fallback_chain: Vec::new(),
@@ -1762,14 +1805,15 @@ impl CascadeRouter {
                 .cloned()
                 .unwrap_or(default_slug)
         };
-        let tier = slug_to_tier(&slug);
+        let tier = slug_to_tier(&slug, &self.tier_map);
 
         let route = CascadeModel {
             primary: ModelSpec::from_slug(&slug),
-            fallback_chain: fallback_chain_for_model(&self.model_slugs, &slug),
+            fallback_chain: fallback_chain_for_model(&self.model_slugs, &slug, &self.tier_map),
             context_overflow_fallback: context_overflow_fallback_for_model(
                 &self.model_slugs,
                 &slug,
+                &self.tier_map,
             ),
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Static,
@@ -1779,16 +1823,20 @@ impl CascadeRouter {
 
     fn route_static_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
         if let Some(thinking_selected) = match thinking_preference(ctx) {
-            ThinkingPreference::PreferThinking => {
-                pick_tier_extreme(&thinking_filtered_candidates(candidates, ctx), true)
-            }
-            ThinkingPreference::PreferNonThinking => {
-                pick_tier_extreme(&thinking_filtered_candidates(candidates, ctx), false)
-            }
+            ThinkingPreference::PreferThinking => pick_tier_extreme(
+                &thinking_filtered_candidates(candidates, ctx),
+                true,
+                &self.tier_map,
+            ),
+            ThinkingPreference::PreferNonThinking => pick_tier_extreme(
+                &thinking_filtered_candidates(candidates, ctx),
+                false,
+                &self.tier_map,
+            ),
             ThinkingPreference::Neutral => None,
         } {
             let selected = ModelSpec::from_slug(thinking_selected);
-            let tier = slug_to_tier(&selected.slug);
+            let tier = slug_to_tier(&selected.slug, &self.tier_map);
 
             return CascadeModel {
                 primary: selected,
@@ -1813,10 +1861,12 @@ impl CascadeRouter {
             slug
         } else {
             let tier_candidates: &[&str] = match ctx.role.model_tier() {
-                ModelTier::Fast => &["gemini-2.5-flash-lite", "claude-haiku-3-5"],
-                ModelTier::Premium => {
-                    &["claude-opus-4", "gemini-3.1-pro-preview", "gemini-2.5-pro"]
-                }
+                ModelTier::Fast => &["gemini-2.5-flash-lite", "claude-haiku-4-5"],
+                ModelTier::Premium => &[
+                    "claude-opus-4-6",
+                    "gemini-3.1-pro-preview",
+                    "gemini-2.5-pro",
+                ],
                 _ => &[
                     "gemini-2.5-flash",
                     "gemini-2.5-pro",
@@ -1829,10 +1879,10 @@ impl CascadeRouter {
             pick_available_static_slug(candidates, tier_candidates)
         };
         let selected = ModelSpec::from_slug(selected_slug);
-        let tier = slug_to_tier(&selected.slug);
-        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let tier = slug_to_tier(&selected.slug, &self.tier_map);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug, &self.tier_map);
         let context_overflow_fallback =
-            context_overflow_fallback_for_model(candidates, &selected.slug);
+            context_overflow_fallback_for_model(candidates, &selected.slug, &self.tier_map);
 
         CascadeModel {
             primary: selected,
@@ -1863,14 +1913,15 @@ impl CascadeRouter {
         let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
         let scores = self.confidence_scores(&thinking_candidates, ctx);
         let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
-        let tier = slug_to_tier(&best_slug);
+        let tier = slug_to_tier(&best_slug, &self.tier_map);
 
         let route = CascadeModel {
             primary: ModelSpec::from_slug(&best_slug),
-            fallback_chain: fallback_chain_for_model(&self.model_slugs, &best_slug),
+            fallback_chain: fallback_chain_for_model(&self.model_slugs, &best_slug, &self.tier_map),
             context_overflow_fallback: context_overflow_fallback_for_model(
                 &self.model_slugs,
                 &best_slug,
+                &self.tier_map,
             ),
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Confidence,
@@ -1888,10 +1939,10 @@ impl CascadeRouter {
         let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
 
         let selected = ModelSpec::from_slug(best_slug);
-        let tier = slug_to_tier(&selected.slug);
-        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let tier = slug_to_tier(&selected.slug, &self.tier_map);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug, &self.tier_map);
         let context_overflow_fallback =
-            context_overflow_fallback_for_model(candidates, &selected.slug);
+            context_overflow_fallback_for_model(candidates, &selected.slug, &self.tier_map);
 
         CascadeModel {
             primary: selected,
@@ -1921,13 +1972,18 @@ impl CascadeRouter {
     ) -> CascadeModel {
         let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
         let model = self.select_ucb_model(ctx, &thinking_candidates);
-        let tier = slug_to_tier(&model.slug);
+        let tier = slug_to_tier(&model.slug, &self.tier_map);
         let route = CascadeModel {
             primary: model.clone(),
-            fallback_chain: fallback_chain_for_model(&self.model_slugs, &model.slug),
+            fallback_chain: fallback_chain_for_model(
+                &self.model_slugs,
+                &model.slug,
+                &self.tier_map,
+            ),
             context_overflow_fallback: context_overflow_fallback_for_model(
                 &self.model_slugs,
                 &model.slug,
+                &self.tier_map,
             ),
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Ucb,
@@ -1939,10 +1995,10 @@ impl CascadeRouter {
         let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
         let model = self.select_ucb_model(ctx, &thinking_candidates);
         let selected = model;
-        let tier = slug_to_tier(&selected.slug);
-        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let tier = slug_to_tier(&selected.slug, &self.tier_map);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug, &self.tier_map);
         let context_overflow_fallback =
-            context_overflow_fallback_for_model(candidates, &selected.slug);
+            context_overflow_fallback_for_model(candidates, &selected.slug, &self.tier_map);
 
         CascadeModel {
             primary: selected,
@@ -2035,7 +2091,7 @@ impl CascadeRouter {
                 let s = stats.get(slug).cloned().unwrap_or_default();
                 let base_score = if s.trials == 0 { 0.5 } else { s.upper_bound() };
                 let tier_bonus = if low_confidence {
-                    low_confidence_tier_bonus(slug_to_tier(slug))
+                    low_confidence_tier_bonus(slug_to_tier(slug, &self.tier_map))
                 } else {
                     0.0
                 };
@@ -2166,12 +2222,13 @@ impl CascadeRouter {
                         ModelObservation {
                             pass_rate: model_stats.pass_rate(),
                             cost_per_success: model_stats.cost_per_success().unwrap_or_else(|| {
-                                pareto_cost_proxy(slug) / model_stats.pass_rate().max(0.01)
+                                pareto_cost_proxy(slug, &self.tier_map)
+                                    / model_stats.pass_rate().max(0.01)
                             }),
                             avg_latency_ms: if model_stats.perplexity_requests > 0 {
                                 model_stats.avg_search_latency_ms()
                             } else {
-                                pareto_latency_proxy(slug)
+                                pareto_latency_proxy(slug, &self.tier_map)
                             },
                             reliability: if model_stats.trials > 0 {
                                 model_stats.pass_rate().max(0.5)

@@ -43,9 +43,8 @@ async fn distill_episode(
     // Use an empty model string so the ModelCaller resolves via its own
     // default — this respects whatever model the workspace has configured
     // instead of hardcoding a specific provider.
-    let distiller = Distiller::with_backend(Arc::new(GatewayDistillationBackend::new(
-        model_caller, "",
-    )));
+    let distiller =
+        Distiller::with_backend(Arc::new(GatewayDistillationBackend::new(model_caller, "")));
 
     let episodes = [episode];
     let entries = distiller

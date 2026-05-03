@@ -1544,7 +1544,7 @@ fn start_state_snapshot_saver(state: Arc<AppState>) -> JoinHandle<()> {
 /// `AppState.ephemeral_workspaces` whose `created_at` is older than 1 hour,
 /// deleting the corresponding filesystem directories.
 fn start_workspace_gc(state: Arc<AppState>) -> JoinHandle<()> {
-    const INTERVAL_SECS: u64 = 5 * 60;
+    const INTERVAL_SECS: u64 = roko_core::defaults::DEFAULT_WORKSPACE_GC_INTERVAL_SECS;
     const MAX_AGE_SECS: u64 = 3600;
 
     tokio::spawn(async move {

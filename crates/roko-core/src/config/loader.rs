@@ -15,9 +15,9 @@
 
 use std::path::{Path, PathBuf};
 
+use super::LoadConfigError;
 use super::provenance::{ConfigDiagnostic, ConfigProvenance, ValidatedConfig};
 use super::schema::RokoConfig;
-use super::LoadConfigError;
 
 // ─── Load options ───────────────────────────────────────────────────────
 
@@ -44,13 +44,13 @@ impl Default for LoadOptions {
 
 impl LoadOptions {
     /// Options for ACP / Zed integration: lenient, with global merge.
+    ///
+    /// Currently identical to `Default`, but kept as a named constructor so
+    /// ACP-specific divergences (e.g. workspace-scoped overrides) can be
+    /// added without touching every callsite.
     #[must_use]
     pub fn acp() -> Self {
-        Self {
-            merge_global: true,
-            apply_env_overrides: true,
-            strict_validation: false,
-        }
+        Self::default()
     }
 
     /// Options for strict / inherited config loading.
@@ -78,49 +78,132 @@ pub fn load_config_with_options(
     workdir: &Path,
     opts: &LoadOptions,
 ) -> Result<RokoConfig, LoadConfigError> {
-    // 1. Find the config file.
     let path = find_config_path(workdir);
-
-    // 2. Load base config (returns default if missing).
-    let mut config = load_base_config(&path)?;
-
-    // 3. Optionally apply strict validation on the raw text.
-    if opts.strict_validation {
-        if let Some(ref p) = path {
-            validate_strict(p)?;
-        }
-    }
-
-    // 4. Merge global config (providers, models, agent defaults).
-    if opts.merge_global {
-        merge_global_into(&mut config);
-    }
-
-    // 5. Apply ROKO__* env var overrides.
-    if opts.apply_env_overrides {
-        config.apply_process_env();
-    }
-
-    // 6. Resolve secrets (${VAR} interpolation + *_file reading).
-    config.interpolate_env_vars();
-    config.resolve_file_secrets();
-
-    Ok(config)
+    load_from_resolved_path(&path, opts)
 }
 
 /// Load config with full provenance tracking (for CLI `load_layered` compatibility).
 ///
 /// Returns a [`ValidatedConfig`] with diagnostics and provenance info.
 pub fn load_config_validated(workdir: &Path) -> Result<ValidatedConfig, LoadConfigError> {
-    let path = find_config_path(workdir);
-    let mut config = load_base_config(&path)?;
+    load_config_validated_with_options(workdir, &LoadOptions::default())
+}
 
-    merge_global_into(&mut config);
-    config.apply_process_env();
+/// Load config with provenance tracking and custom options.
+///
+/// Returns a [`ValidatedConfig`] where `raw` is the parsed-only config
+/// (before env overrides and secret interpolation) and `migrated` is the
+/// fully resolved config.
+pub fn load_config_validated_with_options(
+    workdir: &Path,
+    opts: &LoadOptions,
+) -> Result<ValidatedConfig, LoadConfigError> {
+    let path = find_config_path(workdir);
+
+    // Parse + validate (no env overrides or secret resolution yet).
+    let raw = parse_from_resolved_path(&path, opts)?;
+
+    // Apply runtime mutations (global merge, env overrides, secrets).
+    let mut migrated = raw.clone();
+    if opts.merge_global {
+        merge_global_into(&mut migrated);
+    }
+    if opts.apply_env_overrides {
+        migrated.apply_process_env();
+    }
+    migrated.interpolate_env_vars();
+    migrated.resolve_file_secrets();
+
+    let diagnostics = collect_diagnostics(&migrated);
+
+    let provenance = match &path {
+        Some(p) => vec![ConfigProvenance::file(p.clone(), "roko.toml")],
+        None => vec![ConfigProvenance::default(
+            "roko.toml",
+            "missing file; using built-in defaults",
+        )],
+    };
+
+    Ok(ValidatedConfig {
+        raw,
+        migrated,
+        diagnostics,
+        provenance,
+    })
+}
+
+/// Parse config from an already-resolved path (read + validate + parse only).
+///
+/// Does NOT apply global merge, env overrides, or secret interpolation.
+/// Use this when you need the raw parsed config before mutations.
+fn parse_from_resolved_path(
+    path: &Option<PathBuf>,
+    opts: &LoadOptions,
+) -> Result<RokoConfig, LoadConfigError> {
+    // 1. Read the raw text once (returns default if no file).
+    let raw_text = match path {
+        Some(p) => Some(
+            std::fs::read_to_string(p).map_err(|source| LoadConfigError::Read {
+                path: p.clone(),
+                source,
+            })?,
+        ),
+        None => None,
+    };
+
+    // 2. Optionally apply strict validation on the raw text.
+    if opts.strict_validation {
+        if let (Some(p), Some(text)) = (path, &raw_text) {
+            let strict_source = super::validation::StrictConfigSource::shared(Some(p.clone()));
+            super::validation::validate_strict_config_toml(text, &strict_source).map_err(
+                |source| LoadConfigError::Validation {
+                    path: p.clone(),
+                    source,
+                },
+            )?;
+        }
+    }
+
+    // 3. Parse (or use defaults if no file).
+    match (&path, raw_text) {
+        (Some(p), Some(text)) => toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
+            path: p.clone(),
+            source,
+        }),
+        _ => Ok(RokoConfig::default()),
+    }
+}
+
+/// Internal: load config from an already-resolved path with full processing.
+///
+/// All public functions resolve the path once via [`find_config_path`] then
+/// delegate here, avoiding double discovery and double file reads.
+fn load_from_resolved_path(
+    path: &Option<PathBuf>,
+    opts: &LoadOptions,
+) -> Result<RokoConfig, LoadConfigError> {
+    let mut config = parse_from_resolved_path(path, opts)?;
+
+    // Apply runtime mutations.
+    if opts.merge_global {
+        merge_global_into(&mut config);
+    }
+    if opts.apply_env_overrides {
+        config.apply_process_env();
+    }
     config.interpolate_env_vars();
     config.resolve_file_secrets();
 
+    Ok(config)
+}
+
+/// Collect semantic diagnostics from a fully-loaded config.
+///
+/// Checks: outdated config version, orphaned model→provider references,
+/// duplicate model slugs.
+fn collect_diagnostics(config: &RokoConfig) -> Vec<ConfigDiagnostic> {
     let mut diagnostics = Vec::new();
+
     if config.config_version < super::schema::CURRENT_CONFIG_VERSION {
         diagnostics.push(ConfigDiagnostic {
             key: "config_version".to_string(),
@@ -167,28 +250,15 @@ pub fn load_config_validated(workdir: &Path) -> Result<ValidatedConfig, LoadConf
         }
     }
 
-    let provenance = match &path {
-        Some(p) => vec![ConfigProvenance::file(p.clone(), "roko.toml")],
-        None => vec![ConfigProvenance::default(
-            "roko.toml",
-            "missing file; using built-in defaults",
-        )],
-    };
-
-    Ok(ValidatedConfig {
-        raw: config.clone(),
-        migrated: config,
-        diagnostics,
-        provenance,
-    })
+    diagnostics
 }
 
 /// Serialize the effective (fully-resolved) config as TOML.
 ///
 /// Useful for workspace creation (write resolved config, not blind copy)
 /// and debugging (`roko config show --effective`).
-pub fn serialize_effective(config: &RokoConfig) -> Result<String, String> {
-    toml::to_string_pretty(config).map_err(|e| e.to_string())
+pub fn serialize_effective(config: &RokoConfig) -> Result<String, toml::ser::Error> {
+    toml::to_string_pretty(config)
 }
 
 // ─── Path discovery ─────────────────────────────────────────────────────
@@ -197,7 +267,6 @@ pub fn serialize_effective(config: &RokoConfig) -> Result<String, String> {
 ///
 /// 1. `ROKO_CONFIG` env var (explicit path override)
 /// 2. Ancestor walk from `workdir` (find nearest `roko.toml`)
-/// 3. `workdir/roko.toml` (direct path)
 ///
 /// Returns `None` if no config file is found (defaults will be used).
 fn find_config_path(workdir: &Path) -> Option<PathBuf> {
@@ -213,18 +282,8 @@ fn find_config_path(workdir: &Path) -> Option<PathBuf> {
         );
     }
 
-    // 2. Ancestor walk from workdir.
-    if let Some(found) = discover_project_config(workdir) {
-        return Some(found);
-    }
-
-    // 3. Direct workdir/roko.toml.
-    let direct = workdir.join("roko.toml");
-    if direct.is_file() {
-        return Some(direct);
-    }
-
-    None
+    // 2. Ancestor walk from workdir (also checks workdir itself).
+    discover_project_config(workdir)
 }
 
 /// Walk up from `start` looking for `roko.toml`. Returns the first hit.
@@ -282,40 +341,6 @@ pub fn global_config_path() -> PathBuf {
 }
 
 // ─── Internal helpers ───────────────────────────────────────────────────
-
-/// Load base config from a path, returning defaults if no file found.
-fn load_base_config(path: &Option<PathBuf>) -> Result<RokoConfig, LoadConfigError> {
-    let Some(path) = path else {
-        return Ok(RokoConfig::default());
-    };
-
-    let text = std::fs::read_to_string(path).map_err(|source| LoadConfigError::Read {
-        path: path.clone(),
-        source,
-    })?;
-
-    toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
-        path: path.clone(),
-        source,
-    })
-}
-
-/// Run strict safety validation on the raw TOML text.
-fn validate_strict(path: &Path) -> Result<(), LoadConfigError> {
-    let text = std::fs::read_to_string(path).map_err(|source| LoadConfigError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    let strict_source =
-        super::validation::StrictConfigSource::shared(Some(path.to_path_buf()));
-    super::validation::validate_strict_config_toml(&text, &strict_source).map_err(|source| {
-        LoadConfigError::Validation {
-            path: path.to_path_buf(),
-            source,
-        }
-    })
-}
 
 /// Merge providers, models, and agent defaults from the global config.
 ///

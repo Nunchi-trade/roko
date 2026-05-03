@@ -5,6 +5,7 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Atomically write `data` to `path` by writing to a `.tmp` sibling, then
 /// renaming.  Safe when `path` and the temp file are on the same filesystem
@@ -30,13 +31,12 @@ pub async fn atomic_write_async(path: &Path, data: &[u8]) -> io::Result<()> {
     }
     let tmp = tmp_path(path);
     tokio::fs::write(&tmp, data).await?;
-    tokio::fs::rename(&tmp, path).await.inspect_err(|_| {
-        // Schedule cleanup but don't block on it.
-        let tmp_clone = tmp.clone();
-        tokio::spawn(async move {
-            let _ = tokio::fs::remove_file(&tmp_clone).await;
-        });
-    })
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        // Clean up the temp file on rename failure.
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Atomically write string data to `path`.
@@ -84,10 +84,19 @@ pub fn read_optional_bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-/// Compute the temporary file path for atomic writes.
+/// Process-global monotonic counter to prevent tmp-file collisions between
+/// concurrent writers targeting the same destination path.
+static TMP_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// Compute a unique temporary file path for atomic writes.
+///
+/// Format: `<path>.tmp.<pid>.<counter>` — unique per-process and per-call,
+/// so concurrent writers to the same destination never collide.
 fn tmp_path(path: &Path) -> std::path::PathBuf {
+    let pid = std::process::id();
+    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".tmp.{pid}.{seq}"));
     std::path::PathBuf::from(tmp)
 }
 
@@ -126,8 +135,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         atomic_write(&path, b"data").unwrap();
-        let tmp = tmp_path(&path);
-        assert!(!tmp.exists(), "temp file should be cleaned up");
+        // No .tmp.* siblings should remain after a successful write.
+        let siblings: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("test.txt.tmp."))
+            .collect();
+        assert!(siblings.is_empty(), "temp file should be cleaned up");
     }
 
     #[test]

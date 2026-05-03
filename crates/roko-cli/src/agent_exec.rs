@@ -92,10 +92,8 @@ async fn run_agent_capture_impl(
     episode: Option<AgentExecEpisode<'_>>,
 ) -> Result<(i32, String)> {
     let started = Instant::now();
-    let mut routing_config = roko_core::config::load_config(opts.workdir)
-        .with_context(|| format!("load routing config from {}", opts.workdir.display()))?
-        .into_config();
-    routing_config.apply_process_env();
+    let routing_config = roko_core::config::loader::load_config_unified(opts.workdir)
+        .with_context(|| format!("load routing config from {}", opts.workdir.display()))?;
     let routing_enabled = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
     // Fail fast if the agent command is still the test-only default.

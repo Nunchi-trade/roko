@@ -547,7 +547,7 @@ mod tests {
             },
         );
         confidence_stats.insert(
-            "claude-haiku-3-5".to_string(),
+            "claude-haiku-4-5".to_string(),
             router_state::PersistedModelStatsData {
                 trials: 30,
                 successes: 20,
@@ -557,8 +557,8 @@ mod tests {
         router_state::CascadeSnapshotData {
             model_slugs: vec![
                 "claude-sonnet-4-5".to_string(),
-                "claude-haiku-3-5".to_string(),
-                "claude-opus-4".to_string(),
+                "claude-haiku-4-5".to_string(),
+                "claude-opus-4-6".to_string(),
             ],
             confidence_stats,
         }
@@ -732,10 +732,10 @@ mod tests {
         tokio::fs::write(
             &cascade_path,
             serde_json::json!({
-                "model_slugs": ["claude-sonnet-4-5", "claude-haiku-3-5"],
+                "model_slugs": ["claude-sonnet-4-5", "claude-haiku-4-5"],
                 "confidence_stats": {
                     "claude-sonnet-4-5": { "trials": 50, "successes": 30 },
-                    "claude-haiku-3-5": { "trials": 10, "successes": 8 },
+                    "claude-haiku-4-5": { "trials": 10, "successes": 8 },
                     "claude-opus-4-6": { "trials": 4, "successes": 0 }
                 }
             })
@@ -812,7 +812,7 @@ mod tests {
         assert_eq!(sonnet["available"], true);
         let haiku = models
             .iter()
-            .find(|model| model["model_slug"] == "claude-haiku-3-5")
+            .find(|model| model["model_slug"] == "claude-haiku-4-5")
             .expect("unconfigured model should be present");
         assert_eq!(haiku["available"], false);
 

@@ -788,9 +788,7 @@ impl AgentDispatcherV2 {
                 .as_text()
                 .unwrap_or("agent failed without text output")
                 .to_string();
-            let _ = event_tx
-                .send(AgentRuntimeEvent::Error { message })
-                .await;
+            let _ = event_tx.send(AgentRuntimeEvent::Error { message }).await;
         }
         let _ = event_tx
             .send(AgentRuntimeEvent::TurnCompleted {
@@ -832,12 +830,13 @@ impl AgentDispatcherV2 {
         if let Some(tools) = mcp_tools {
             options.pre_discovered_mcp_tools = Some(tools);
         }
-        let agent = create_agent_for_model(&self.config, &request.model_key, options).map_err(
-            |err| DispatchV2Error::AgentCreation {
-                model_key: request.model_key.clone(),
-                message: err.to_string(),
-            },
-        )?;
+        let agent =
+            create_agent_for_model(&self.config, &request.model_key, options).map_err(|err| {
+                DispatchV2Error::AgentCreation {
+                    model_key: request.model_key.clone(),
+                    message: err.to_string(),
+                }
+            })?;
 
         let input = Engram::builder(Kind::Prompt)
             .body(Body::text(request.prompt.clone()))

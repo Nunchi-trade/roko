@@ -277,7 +277,9 @@ fn render_tool_with_source(source: &ToolSource, _t: &ToolDef) -> serde_json::Val
             },
         }),
         // Builtin/Mcp/Plugin handled by callers; this is unreachable for them.
-        _ => serde_json::json!({ "type": "function", "function": { "name": sanitize_tool_name(&_t.name) } }),
+        _ => {
+            serde_json::json!({ "type": "function", "function": { "name": sanitize_tool_name(&_t.name) } })
+        }
     }
 }
 
@@ -1100,9 +1102,11 @@ mod tests {
         let wire_name = rendered["function"]["name"].as_str().unwrap();
         assert_eq!(wire_name, "chain__DOT__swap");
         // Verify the wire name passes OpenAI validation.
-        assert!(wire_name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-'));
+        assert!(
+            wire_name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        );
 
         // Simulate the model calling back with the sanitized name.
         let resp = BackendResponse::Json(serde_json::json!({

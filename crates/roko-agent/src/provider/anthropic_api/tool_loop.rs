@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 
 use crate::agent::Agent;
 use crate::claude_agent::{AnthropicTool, DEFAULT_ANTHROPIC_VERSION, DEFAULT_BASE_URL};
-use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 use crate::dispatcher::HandlerResolver;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::openai_compat::tool_registry_for_options;
@@ -19,6 +18,7 @@ use crate::translate::{
     BackendResponse, RenderedResults, RenderedTools, SessionState, Translator, TranslatorError,
 };
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 pub(super) fn create_tool_loop_agent(

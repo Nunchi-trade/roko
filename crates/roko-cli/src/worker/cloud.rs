@@ -450,9 +450,8 @@ pub async fn run_code_implementer_cloud(
         git_clone(&execution.repo_url(), &workspace, &execution.github_token).await?;
         git_checkout_new_branch(&workspace, &execution.branch_name()).await?;
 
-        let roko_config = roko_core::config::load_config(&workspace)
-            .with_context(|| format!("load roko config from {}", workspace.display()))?
-            .into_config();
+        let roko_config = roko_core::config::loader::load_config_unified(&workspace)
+            .with_context(|| format!("load roko config from {}", workspace.display()))?;
         let plans = crate::runner::load_plans(&plan_dir)?;
         let run_config = crate::runner::RunConfig::from_roko_config(
             workspace.clone(),

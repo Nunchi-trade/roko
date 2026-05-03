@@ -40,19 +40,16 @@ pub const DEFAULT_MAX_TOOL_ITERATIONS: usize = 50;
 /// Token limit for message pruning / context management.
 pub const DEFAULT_CONTEXT_TOKEN_LIMIT: usize = 102_400;
 
-/// Characters per token heuristic (default for Claude).
-pub const DEFAULT_CHARS_PER_TOKEN: f64 = 3.5;
-
 // ── Retry ───────────────────────────────────────────────────────────────
 
 /// Default retry attempts for LLM calls.
 pub const DEFAULT_RETRY_ATTEMPTS: u32 = 3;
 
-/// Initial backoff delay for retries (milliseconds).
-pub const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 500;
+/// Base backoff delay for retries (milliseconds).
+pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 1_000;
 
 /// Maximum backoff delay for retries (milliseconds).
-pub const DEFAULT_RETRY_MAX_BACKOFF_MS: u64 = 30_000;
+pub const DEFAULT_RETRY_MAX_BACKOFF_MS: u64 = 60_000;
 
 /// Default max merge retries in the orchestrator.
 pub const DEFAULT_MAX_MERGE_RETRIES: u32 = 5;
@@ -74,9 +71,6 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024;
 /// Maximum file read size (10 MB).
 pub const DEFAULT_MAX_FILE_READ_BYTES: usize = 10 * 1024 * 1024;
 
-/// Maximum file write size (10 MB).
-pub const DEFAULT_MAX_FILE_WRITE_BYTES: usize = 10 * 1024 * 1024;
-
 /// Maximum glob results before truncation.
 pub const DEFAULT_MAX_GLOB_RESULTS: usize = 1_000;
 
@@ -84,7 +78,7 @@ pub const DEFAULT_MAX_GLOB_RESULTS: usize = 1_000;
 pub const DEFAULT_MAX_CONCURRENT_TOOLS: usize = 8;
 
 /// Maximum concurrent requests per provider.
-pub const DEFAULT_PROVIDER_MAX_CONCURRENT: u32 = 10;
+pub const DEFAULT_PROVIDER_MAX_CONCURRENT: usize = 10;
 
 /// Maximum diff bytes for LLM judge gate.
 pub const DEFAULT_MAX_DIFF_BYTES: usize = 30 * 1024;
@@ -113,10 +107,10 @@ pub const DEFAULT_MAX_CACHE_ENTRIES: usize = 256;
 pub const DEFAULT_WORKSPACE_GC_INTERVAL_SECS: u64 = 300;
 
 /// Pointer GC: max age in turns before eviction.
-pub const DEFAULT_POINTER_MAX_AGE_TURNS: usize = 10;
+pub const DEFAULT_POINTER_MAX_AGE_TURNS: u32 = 10;
 
 /// Pointer GC: max total bytes before eviction.
-pub const DEFAULT_POINTER_MAX_TOTAL_BYTES: usize = 10 * 1024 * 1024;
+pub const DEFAULT_POINTER_MAX_TOTAL_BYTES: u64 = 10 * 1024 * 1024;
 
 // ── Message pruning ─────────────────────────────────────────────────────
 
@@ -152,7 +146,7 @@ pub const DEFAULT_HEARTBEAT_RING_CAPACITY: usize = 500;
 pub const DEFAULT_FAILURE_THRESHOLD: f64 = 0.25;
 
 /// Minimum calls before anomaly alerting kicks in.
-pub const DEFAULT_ALERT_MIN_CALLS: usize = 50;
+pub const DEFAULT_ALERT_MIN_CALLS: u64 = 50;
 
 // ── Event bus ───────────────────────────────────────────────────────────
 
@@ -188,10 +182,10 @@ pub const DEFAULT_PRE_AGENT_REMEDIATION_OUTPUT_TAIL: usize = 4_000;
 // ── Gate & verification ─────────────────────────────────────────────────
 
 /// Default proptest cases.
-pub const DEFAULT_PROPTEST_CASES: usize = 256;
+pub const DEFAULT_PROPTEST_CASES: u32 = 256;
 
 /// Default max shrink iterations for proptest.
-pub const DEFAULT_MAX_SHRINK_ITERS: usize = 2_048;
+pub const DEFAULT_MAX_SHRINK_ITERS: u32 = 2_048;
 
 /// Default minimum confidence for fact checking.
 pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.7;
@@ -237,7 +231,7 @@ mod tests {
 
     #[test]
     fn retry_backoff_ordering() {
-        assert!(DEFAULT_RETRY_INITIAL_BACKOFF_MS < DEFAULT_RETRY_MAX_BACKOFF_MS);
+        assert!(DEFAULT_RETRY_BASE_DELAY_MS < DEFAULT_RETRY_MAX_BACKOFF_MS);
     }
 
     #[test]

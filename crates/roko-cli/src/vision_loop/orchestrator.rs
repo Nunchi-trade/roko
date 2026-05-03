@@ -299,8 +299,7 @@ fn find_roko_dir(target_file: &std::path::Path) -> Result<PathBuf> {
 /// Load `roko.toml` configuration.
 fn load_roko_config(roko_dir: &std::path::Path) -> Result<roko_core::config::schema::RokoConfig> {
     let project_root = roko_dir.parent().unwrap_or(roko_dir);
-    roko_core::config::loader::load_config_unified(project_root)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    roko_core::config::loader::load_config_unified(project_root).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]

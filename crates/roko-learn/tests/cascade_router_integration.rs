@@ -30,8 +30,8 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 
 const SEED: u64 = 34_034;
-const CHEAP_SLUG: &str = "claude-haiku-3-5";
-const EXPENSIVE_SLUG: &str = "claude-opus-4";
+const CHEAP_SLUG: &str = "claude-haiku-4-5";
+const EXPENSIVE_SLUG: &str = "claude-opus-4-6";
 const TURN_COUNT: usize = 60;
 
 fn scaled_test_timeout_ms(ms: u64) -> u64 {

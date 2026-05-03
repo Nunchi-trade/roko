@@ -66,10 +66,8 @@ pub struct DreamAgentConfig {
 impl DreamAgentConfig {
     fn build_agent(&self, workdir: &Path) -> Result<DreamReviewAgent> {
         // TODO(gateway): remove direct construction once all callers provide a ModelCaller.
-        let mut routing_config = roko_core::config::load_config(workdir)
-            .with_context(|| format!("load routing config from {}", workdir.display()))?
-            .into_config();
-        routing_config.apply_process_env();
+        let routing_config = roko_core::config::loader::load_config_unified(workdir)
+            .with_context(|| format!("load routing config from {}", workdir.display()))?;
         let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
         if has_routing {
@@ -139,10 +137,8 @@ impl DreamAgentConfig {
             return Ok(model);
         }
 
-        let mut routing_config = roko_core::config::load_config(workdir)
-            .with_context(|| format!("load routing config from {}", workdir.display()))?
-            .into_config();
-        routing_config.apply_process_env();
+        let routing_config = roko_core::config::loader::load_config_unified(workdir)
+            .with_context(|| format!("load routing config from {}", workdir.display()))?;
         if !routing_config.agent.default_model.trim().is_empty() {
             return Ok(routing_config.agent.default_model);
         }

@@ -55,8 +55,8 @@ pub use prompt_cache::PromptCache;
 pub use warm_pool::{WarmPool, WarmPoolStats};
 
 pub use crate::dispatch_v2::AgentDispatchRequest;
-use crate::dispatch_v2::{AgentDispatcherV2, CliProviderConfig, ProviderDispatchResolver};
 use crate::dispatch_v2::ProviderRuntime;
+use crate::dispatch_v2::{AgentDispatcherV2, CliProviderConfig, ProviderDispatchResolver};
 use crate::task_parser::TaskDef;
 
 // ─── Per-call value objects ────────────────────────────────────────────
@@ -283,7 +283,10 @@ pub fn spawn_agent_result_bridge(
 ) {
     tokio::spawn(async move {
         let dispatcher = AgentDispatcherV2::new(roko_config);
-        if let Err(err) = dispatcher.run_agent_streaming(request, event_tx.clone()).await {
+        if let Err(err) = dispatcher
+            .run_agent_streaming(request, event_tx.clone())
+            .await
+        {
             let _ = event_tx
                 .send(AgentRuntimeEvent::Error {
                     message: err.to_string(),

@@ -26,7 +26,9 @@ use crate::pipeline_state::{CommitOutcome, PipelineInput};
 /// Fallible result type used by the effect driver.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
+/// Effect driver uses the fallback token budget (smaller than the global default)
+/// because modulated dispatch often scales output down from a conservative base.
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = roko_core::defaults::DEFAULT_FALLBACK_MAX_OUTPUT_TOKENS;
 const MIN_TURN_LIMIT_FACTOR: f32 = 0.25;
 const MAX_TURN_LIMIT_FACTOR: f32 = 2.0;
 const BASE_TEMPERATURE: f32 = 0.2;

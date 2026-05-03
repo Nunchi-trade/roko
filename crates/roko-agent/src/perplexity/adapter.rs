@@ -21,9 +21,9 @@ use crate::tool_loop::ToolLoop;
 use crate::translate::{OpenAiTranslator, Translator};
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
-use roko_core::config::schema::{ModelProfile, ProviderConfig};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
+use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::Value;
 use std::sync::Arc;

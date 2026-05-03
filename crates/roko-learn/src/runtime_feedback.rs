@@ -1530,6 +1530,18 @@ impl LearningRuntime {
         &self.cascade_router
     }
 
+    /// Inject config-sourced model tiers into the cascade router.
+    ///
+    /// Call this after construction when the `RokoConfig` is available,
+    /// so the router uses explicit `tier` fields from `roko.toml` instead
+    /// of substring heuristics.
+    pub fn set_model_tiers(
+        &mut self,
+        models: &std::collections::HashMap<String, roko_core::config::ModelProfile>,
+    ) {
+        self.cascade_router.set_model_tiers(models);
+    }
+
     /// Borrow context pack cache.
     #[must_use]
     pub const fn context_pack_cache(&self) -> &ContextPackCache {

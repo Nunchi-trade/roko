@@ -447,6 +447,13 @@ pub struct ModelProfile {
     /// Per-request fee in USD on top of token costs (Perplexity pricing model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_per_request: Option<f64>,
+    /// Capability tier for model routing (Fast/Standard/Premium).
+    ///
+    /// When set, the cascade router and conductor can route by tier
+    /// without slug-substring guessing. `None` means the router must
+    /// fall back to heuristic detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<crate::agent::ModelTier>,
 }
 
 // ---- Gemini config -------------------------------------------------------

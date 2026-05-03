@@ -26,9 +26,9 @@ use tempfile::tempdir;
 
 fn test_slugs() -> Vec<String> {
     vec![
-        "claude-haiku-3-5".to_string(),
+        "claude-haiku-4-5".to_string(),
         "claude-sonnet-4-5".to_string(),
-        "claude-opus-4".to_string(),
+        "claude-opus-4-6".to_string(),
     ]
 }
 
@@ -93,12 +93,12 @@ fn starts_in_static_stage() {
 #[test]
 fn model_slugs_with_availability_marks_configured_and_successful_models() {
     let cascade = CascadeRouter::new(vec![
-        "claude-haiku-3-5".to_string(),
+        "claude-haiku-4-5".to_string(),
         "claude-sonnet-4-5".to_string(),
-        "claude-opus-4".to_string(),
+        "claude-opus-4-6".to_string(),
     ]);
 
-    assert!(cascade.record_confidence_outcome("claude-haiku-3-5", true));
+    assert!(cascade.record_confidence_outcome("claude-haiku-4-5", true));
 
     let configured = vec!["claude-sonnet-4-5".to_string()];
     let availability = cascade.model_slugs_with_availability(&configured);
@@ -106,9 +106,9 @@ fn model_slugs_with_availability_marks_configured_and_successful_models() {
     assert_eq!(
         availability,
         vec![
-            ("claude-haiku-3-5".to_string(), true),
+            ("claude-haiku-4-5".to_string(), true),
             ("claude-sonnet-4-5".to_string(), true),
-            ("claude-opus-4".to_string(), false),
+            ("claude-opus-4-6".to_string(), false),
         ]
     );
 }
@@ -135,11 +135,11 @@ fn static_stage_fallback_chain_for_standard() {
     let result = cascade.route(&ctx);
 
     assert_eq!(result.fallback_chain.len(), 2);
-    assert_eq!(result.fallback_chain[0].slug, "claude-haiku-3-5");
-    assert_eq!(result.fallback_chain[1].slug, "claude-opus-4");
+    assert_eq!(result.fallback_chain[0].slug, "claude-haiku-4-5");
+    assert_eq!(result.fallback_chain[1].slug, "claude-opus-4-6");
     assert_eq!(
         result.context_overflow_fallback.as_ref().unwrap().slug,
-        "claude-opus-4"
+        "claude-opus-4-6"
     );
 }
 
@@ -153,9 +153,9 @@ fn append_routing_log_records_candidates() {
     let logger = RoutingLogger::open_creating(&path)
         .expect("logger")
         .with_model_providers(HashMap::from([
-            ("claude-haiku-3-5".to_string(), "anthropic".to_string()),
+            ("claude-haiku-4-5".to_string(), "anthropic".to_string()),
             ("claude-sonnet-4-5".to_string(), "anthropic".to_string()),
-            ("claude-opus-4".to_string(), "anthropic".to_string()),
+            ("claude-opus-4-6".to_string(), "anthropic".to_string()),
         ]));
     let meta = RoutingDecisionMeta {
         trace_id: "trace-123".to_string(),
@@ -318,11 +318,11 @@ fn confidence_stage_prefers_high_success_model() {
     // Build up observations: sonnet mostly succeeds, haiku mostly fails.
     for i in 0..80 {
         if i < 25 {
-            cascade.record_observation(&ctx, "claude-haiku-3-5", 0.2, false);
+            cascade.record_observation(&ctx, "claude-haiku-4-5", 0.2, false);
         } else if i < 50 {
             cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.9, true);
         } else if i < 65 {
-            cascade.record_observation(&ctx, "claude-haiku-3-5", 0.2, false);
+            cascade.record_observation(&ctx, "claude-haiku-4-5", 0.2, false);
         } else {
             cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.9, true);
         }
@@ -350,13 +350,13 @@ fn low_affect_confidence_prefers_opus_over_sonnet() {
         cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.9, true);
     }
     for _ in 0..15 {
-        cascade.record_observation(&ctx, "claude-opus-4", 0.9, true);
+        cascade.record_observation(&ctx, "claude-opus-4-6", 0.9, true);
     }
     for _ in 0..5 {
         cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.1, false);
     }
     for _ in 0..5 {
-        cascade.record_observation(&ctx, "claude-opus-4", 0.1, false);
+        cascade.record_observation(&ctx, "claude-opus-4-6", 0.1, false);
     }
 
     assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
@@ -364,7 +364,7 @@ fn low_affect_confidence_prefers_opus_over_sonnet() {
     ctx.daimon_policy.affect_confidence = 0.2;
     let low_confidence = cascade.route(&ctx);
     assert_eq!(
-        low_confidence.primary.slug, "claude-opus-4",
+        low_confidence.primary.slug, "claude-opus-4-6",
         "low affect confidence should bias toward the stronger premium model"
     );
 
@@ -372,7 +372,7 @@ fn low_affect_confidence_prefers_opus_over_sonnet() {
     let high_confidence = cascade.route(&ctx);
     // High confidence allows routing to cheaper models
     assert!(
-        ["claude-haiku-3-5", "claude-sonnet-4-5"].contains(&high_confidence.primary.slug.as_str()),
+        ["claude-haiku-4-5", "claude-sonnet-4-5"].contains(&high_confidence.primary.slug.as_str()),
         "high confidence should allow cheaper model, got: {}",
         high_confidence.primary.slug
     );
@@ -385,11 +385,11 @@ fn behavioral_state_biases_static_routing() {
 
     ctx.daimon_policy.behavioral_state = BehavioralState::Struggling;
     let struggling = cascade.route(&ctx);
-    assert_eq!(struggling.primary.slug, "claude-opus-4");
+    assert_eq!(struggling.primary.slug, "claude-opus-4-6");
 
     ctx.daimon_policy.behavioral_state = BehavioralState::Coasting;
     let coasting = cascade.route(&ctx);
-    assert_eq!(coasting.primary.slug, "claude-haiku-3-5");
+    assert_eq!(coasting.primary.slug, "claude-haiku-4-5");
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn conductor_load_biases_static_routing_toward_cheaper_models() {
     ctx.ready_queue_depth = 3;
 
     let routed = cascade.route(&ctx);
-    assert_eq!(routed.primary.slug, "claude-haiku-3-5");
+    assert_eq!(routed.primary.slug, "claude-haiku-4-5");
 }
 
 #[test]
@@ -416,7 +416,7 @@ fn critical_conductor_load_can_drop_two_tiers() {
     ctx.max_queue_wait_hours = 2.0;
 
     let routed = cascade.route(&ctx);
-    assert_eq!(routed.primary.slug, "claude-haiku-3-5");
+    assert_eq!(routed.primary.slug, "claude-haiku-4-5");
 }
 
 #[test]
@@ -482,7 +482,7 @@ fn routing_hysteresis_switches_at_threshold() {
 fn cascade_health_aware_excludes_unhealthy_provider_models() {
     let cascade = CascadeRouter::new(vec![
         "claude-sonnet-4-5".to_string(),
-        "claude-opus-4".to_string(),
+        "claude-opus-4-6".to_string(),
     ]);
     let ctx = default_ctx();
 
@@ -500,11 +500,11 @@ fn cascade_health_aware_excludes_unhealthy_provider_models() {
 
     let mut model_providers = HashMap::new();
     model_providers.insert("claude-sonnet-4-5".to_string(), "anthropic".to_string());
-    model_providers.insert("claude-opus-4".to_string(), "openai".to_string());
+    model_providers.insert("claude-opus-4-6".to_string(), "openai".to_string());
 
     let routed = cascade.route_with_health(&ctx, &health, &model_providers);
     assert_eq!(
-        routed.primary.slug, "claude-opus-4",
+        routed.primary.slug, "claude-opus-4-6",
         "unhealthy providers should be excluded from cascade selection"
     );
 }
@@ -538,7 +538,7 @@ fn frequency_routing_uses_expected_policy() {
     let delta = cascade
         .select_for_frequency(OperatingFrequency::Delta, Some(&ctx), None, None)
         .expect("delta should route");
-    assert_eq!(delta.slug, "claude-opus-4");
+    assert_eq!(delta.slug, "claude-opus-4-6");
 }
 
 #[test]
@@ -559,7 +559,7 @@ fn high_cfactor_prefers_cheapest_model() {
         )
         .expect("theta should route");
 
-    assert_eq!(selected.slug, "claude-haiku-3-5");
+    assert_eq!(selected.slug, "claude-haiku-4-5");
 }
 
 #[test]
@@ -580,13 +580,13 @@ fn low_cfactor_prefers_strongest_model() {
         )
         .expect("theta should route");
 
-    assert_eq!(selected.slug, "claude-opus-4");
+    assert_eq!(selected.slug, "claude-opus-4-6");
 }
 
 #[test]
 fn strongest_model_falls_back_to_best_available_slug() {
     let cascade = CascadeRouter::new(vec![
-        "claude-haiku-3-5".to_string(),
+        "claude-haiku-4-5".to_string(),
         "claude-sonnet-4-5".to_string(),
     ]);
 
@@ -603,8 +603,8 @@ fn observation_count_tracks_correctly() {
     assert_eq!(cascade.total_observations(), 0);
 
     cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
-    cascade.record_observation(&ctx, "claude-haiku-3-5", 0.3, false);
-    cascade.record_observation(&ctx, "claude-opus-4", 0.9, true);
+    cascade.record_observation(&ctx, "claude-haiku-4-5", 0.3, false);
+    cascade.record_observation(&ctx, "claude-opus-4-6", 0.9, true);
 
     assert_eq!(cascade.total_observations(), 3);
 }
@@ -618,11 +618,11 @@ fn confidence_snapshot_accurate() {
 
     cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
     cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.5, false);
-    cascade.record_observation(&ctx, "claude-haiku-3-5", 0.9, true);
+    cascade.record_observation(&ctx, "claude-haiku-4-5", 0.9, true);
 
     let snap = cascade.confidence_snapshot();
     assert_eq!(snap.get("claude-sonnet-4-5"), Some(&(2, 1)));
-    assert_eq!(snap.get("claude-haiku-3-5"), Some(&(1, 1)));
+    assert_eq!(snap.get("claude-haiku-4-5"), Some(&(1, 1)));
 }
 
 // ── Test 11: latency SLA varies by tier ─────────────────────────────
@@ -702,9 +702,9 @@ fn premium_role_gets_opus() {
     ctx.role = AgentRole::Architect; // Premium tier
 
     let result = cascade.route(&ctx);
-    assert_eq!(result.primary.slug, "claude-opus-4");
+    assert_eq!(result.primary.slug, "claude-opus-4-6");
     assert_eq!(result.fallback_chain[0].slug, "claude-sonnet-4-5");
-    assert_eq!(result.fallback_chain[1].slug, "claude-haiku-3-5");
+    assert_eq!(result.fallback_chain[1].slug, "claude-haiku-4-5");
     assert_eq!(result.context_overflow_fallback, None);
 }
 
@@ -740,7 +740,7 @@ fn error_specific_fallback_routes_by_error_type() {
             roko_core::agent::ModelSpec::from_slug("claude-sonnet-4-5"),
             roko_core::agent::ModelSpec::from_slug("ollama/llama3"),
         ],
-        context_overflow_fallback: Some(roko_core::agent::ModelSpec::from_slug("claude-opus-4")),
+        context_overflow_fallback: Some(roko_core::agent::ModelSpec::from_slug("claude-opus-4-6")),
         latency_sla_ms: 30_000,
         stage: CascadeStage::Static,
     };
@@ -750,7 +750,7 @@ fn error_specific_fallback_routes_by_error_type() {
             .fallback_for_error(&ProviderError::ContextOverflow)
             .unwrap()
             .slug,
-        "claude-opus-4"
+        "claude-opus-4-6"
     );
     assert_eq!(
         cascade
@@ -906,13 +906,13 @@ fn cascade_gemini_prefers_opus_for_premium_when_available() {
         "gemini-2.5-flash".to_string(),
         "gemini-2.5-pro".to_string(),
         "gemini-3.1-pro-preview".to_string(),
-        "claude-opus-4".to_string(),
+        "claude-opus-4-6".to_string(),
     ]);
     let mut ctx = default_ctx();
     ctx.role = AgentRole::Architect;
 
     let result = cascade.route(&ctx);
-    assert_eq!(result.primary.slug, "claude-opus-4");
+    assert_eq!(result.primary.slug, "claude-opus-4-6");
 }
 
 #[test]
@@ -976,7 +976,7 @@ fn conservative_temperament_biases_static_routing_toward_stronger_tiers() {
     let ctx = default_ctx().with_temperament(Temperament::Conservative);
 
     let result = cascade.route(&ctx);
-    assert_eq!(result.primary.slug, "claude-opus-4");
+    assert_eq!(result.primary.slug, "claude-opus-4-6");
 }
 
 #[test]
@@ -985,7 +985,7 @@ fn aggressive_temperament_biases_static_routing_toward_cheaper_tiers() {
     let ctx = default_ctx().with_temperament(Temperament::Aggressive);
 
     let result = cascade.route(&ctx);
-    assert_eq!(result.primary.slug, "claude-haiku-3-5");
+    assert_eq!(result.primary.slug, "claude-haiku-4-5");
 }
 
 #[tokio::test]
@@ -1287,18 +1287,18 @@ fn ucb_stage_uses_trained_linucb() {
 
     // Train haiku as the best arm with many observations.
     for _ in 0..250 {
-        cascade.record_observation(&ctx, "claude-haiku-3-5", 1.0, true);
+        cascade.record_observation(&ctx, "claude-haiku-4-5", 1.0, true);
         // Give some data to other arms too so LinUCB has seen them.
         if cascade.total_observations() % 10 == 0 {
             cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.1, false);
-            cascade.record_observation(&ctx, "claude-opus-4", 0.1, false);
+            cascade.record_observation(&ctx, "claude-opus-4-6", 0.1, false);
         }
     }
 
     assert_eq!(cascade.current_stage(), CascadeStage::Ucb);
     let result = cascade.route(&ctx);
     // LinUCB should prefer the highly-rewarded arm
-    assert_eq!(result.primary.slug, "claude-haiku-3-5");
+    assert_eq!(result.primary.slug, "claude-haiku-4-5");
 }
 
 #[test]
@@ -1414,7 +1414,7 @@ fn cascade_perplexity_researcher_routes_to_sonar_pro() {
     let slugs = vec![
         "sonar-pro".to_string(),
         "sonar".to_string(),
-        "claude-haiku-3-5".to_string(),
+        "claude-haiku-4-5".to_string(),
         "claude-sonnet-4-5".to_string(),
     ];
     let cascade = CascadeRouter::new(slugs);
@@ -1431,7 +1431,7 @@ fn cascade_perplexity_researcher_routes_to_sonar_pro() {
 fn cascade_perplexity_research_category_biases_any_role() {
     let slugs = vec![
         "sonar-pro".to_string(),
-        "claude-haiku-3-5".to_string(),
+        "claude-haiku-4-5".to_string(),
         "claude-sonnet-4-5".to_string(),
     ];
     let cascade = CascadeRouter::new(slugs);
@@ -1466,7 +1466,7 @@ fn pareto_pruning_reduces_alpha_for_dominated_models() {
             < f64::EPSILON
     );
     assert!(
-        (pareto_adjusted_alpha(base_alpha, "claude-haiku-3-5", &frontier) - base_alpha * 0.1).abs()
+        (pareto_adjusted_alpha(base_alpha, "claude-haiku-4-5", &frontier) - base_alpha * 0.1).abs()
             < f64::EPSILON
     );
 }
@@ -1474,7 +1474,7 @@ fn pareto_pruning_reduces_alpha_for_dominated_models() {
 #[test]
 fn pareto_frontier_refreshes_every_50_observations() {
     let cascade = CascadeRouter::new(vec![
-        "claude-haiku-3-5".to_string(),
+        "claude-haiku-4-5".to_string(),
         "claude-sonnet-4-5".to_string(),
     ]);
     let ctx = default_ctx();
@@ -1485,11 +1485,11 @@ fn pareto_frontier_refreshes_every_50_observations() {
 
     assert_eq!(cascade.pareto_frontier_bucket(), 1);
     let frontier = cascade.pareto_frontier_slugs();
-    assert!(frontier.contains(&"claude-haiku-3-5".to_string()));
+    assert!(frontier.contains(&"claude-haiku-4-5".to_string()));
     assert!(frontier.contains(&"claude-sonnet-4-5".to_string()));
 
     for _ in 0..50 {
-        cascade.record_observation(&ctx, "claude-haiku-3-5", 0.0, false);
+        cascade.record_observation(&ctx, "claude-haiku-4-5", 0.0, false);
     }
 
     assert_eq!(cascade.pareto_frontier_bucket(), 2);
@@ -1498,13 +1498,13 @@ fn pareto_frontier_refreshes_every_50_observations() {
     // Haiku remains on the frontier despite 0% pass rate because it has
     // a latency advantage (Fast tier = 10s vs Standard tier = 30s),
     // meaning sonnet does not dominate on all four objectives.
-    assert!(frontier.contains(&"claude-haiku-3-5".to_string()));
+    assert!(frontier.contains(&"claude-haiku-4-5".to_string()));
 }
 
 #[test]
 fn filter_unhealthy_retains_least_unhealthy_candidate() {
     let cascade = CascadeRouter::new(vec![
-        "claude-haiku-3-5".to_string(),
+        "claude-haiku-4-5".to_string(),
         "claude-sonnet-4-5".to_string(),
     ]);
     let health = ProviderHealthRegistry::new();
@@ -1515,24 +1515,24 @@ fn filter_unhealthy_retains_least_unhealthy_candidate() {
         health.record_failure("bad-b", ErrorClass::Timeout);
     }
     let mut providers = HashMap::new();
-    providers.insert("claude-haiku-3-5".to_string(), "bad-a".to_string());
+    providers.insert("claude-haiku-4-5".to_string(), "bad-a".to_string());
     providers.insert("claude-sonnet-4-5".to_string(), "bad-b".to_string());
 
     let filtered = cascade.filter_unhealthy(
-        &["claude-haiku-3-5".into(), "claude-sonnet-4-5".into()],
+        &["claude-haiku-4-5".into(), "claude-sonnet-4-5".into()],
         &health,
         &providers,
     );
-    assert_eq!(filtered, vec!["claude-haiku-3-5".to_string()]);
+    assert_eq!(filtered, vec!["claude-haiku-4-5".to_string()]);
 }
 
 #[test]
 fn apply_cost_pressure_prefers_cheaper_models() {
     let cascade = CascadeRouter::new(test_slugs());
     let mut scores = vec![
-        ("claude-opus-4".to_string(), 1.0),
+        ("claude-opus-4-6".to_string(), 1.0),
         ("claude-sonnet-4-5".to_string(), 1.0),
-        ("claude-haiku-3-5".to_string(), 1.0),
+        ("claude-haiku-4-5".to_string(), 1.0),
     ];
 
     cascade.apply_cost_pressure(&mut scores, true);
@@ -1580,11 +1580,11 @@ fn feedback_updates_confidence_stats() {
 fn feedback_from_prediction_computes_residual() {
     let cascade = CascadeRouter::new(test_slugs());
 
-    cascade.feedback_from_prediction("claude-haiku-3-5", 0.9, true);
-    cascade.feedback_from_prediction("claude-haiku-3-5", 0.9, false);
+    cascade.feedback_from_prediction("claude-haiku-4-5", 0.9, true);
+    cascade.feedback_from_prediction("claude-haiku-4-5", 0.9, false);
 
     let stats = cascade.confidence_snapshot();
-    assert_eq!(stats.get("claude-haiku-3-5"), Some(&(2, 1)));
+    assert_eq!(stats.get("claude-haiku-4-5"), Some(&(2, 1)));
 }
 
 #[test]

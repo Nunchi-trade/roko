@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
-use roko_core::config::schema::{ModelProfile, ProviderConfig};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
+use roko_core::config::schema::{ModelProfile, ProviderConfig};
 
 use crate::http::{HttpPostError, HttpPoster};
 use crate::provider::AgentCreationError;

@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use crate::{EmotionalProvenance, KnowledgeEntry, KnowledgeKind, ValidationArc};
 
-const DEFAULT_MODEL: &str = "claude-haiku-3-5";
+const DEFAULT_MODEL: &str = "claude-haiku-4-5";
 const DEFAULT_MAX_TOKENS: u32 = 2_048;
 const DEFAULT_CONFIDENCE: f64 = 0.75;
 const DISTILLER_SOURCE: &str = "distiller";

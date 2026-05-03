@@ -452,9 +452,8 @@ impl LlmBackend for OpenAiCompatLlmBackend {
                     tokio::time::timeout(Duration::from_millis(ttft_ms), chunk_fut)
                         .await
                         .map_err(|_| {
-                            let message = format!(
-                                "TTFT timeout: no streaming data within {ttft_ms}ms"
-                            );
+                            let message =
+                                format!("TTFT timeout: no streaming data within {ttft_ms}ms");
                             tracing::warn!(
                                 endpoint = %self.endpoint(),
                                 ttft_timeout_ms = ttft_ms,
@@ -1338,7 +1337,8 @@ mod tests {
             stream.flush().expect("flush response headers");
             // Delay first chunk beyond the 100ms TTFT timeout.
             thread::sleep(StdDuration::from_millis(2000));
-            let _ = stream.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n");
+            let _ =
+                stream.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n");
         });
 
         let backend = OpenAiCompatLlmBackend::new("test-key", "test-model")
@@ -1360,7 +1360,10 @@ mod tests {
         let elapsed = started.elapsed();
 
         // Should fail with TTFT timeout, not wait the full 2 seconds.
-        assert!(result.is_err(), "expected TTFT timeout error, got {result:?}");
+        assert!(
+            result.is_err(),
+            "expected TTFT timeout error, got {result:?}"
+        );
         let err = result.unwrap_err();
         assert!(
             format!("{err:?}").contains("TTFT timeout"),

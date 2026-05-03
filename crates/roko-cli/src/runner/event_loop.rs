@@ -963,7 +963,14 @@ pub async fn run(
         }
 
         if all_plans_terminal(&executor, &plans) {
-            save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
+            save_snapshot(
+                config,
+                &executor,
+                &paths,
+                &mut state,
+                &merge_queue,
+                &snapshot_writer,
+            );
             let outcome = if build_report(&executor, &plans, &state).all_succeeded() {
                 RunOutcome::Succeeded
             } else {
@@ -2253,7 +2260,8 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         bare_mode: false,
                         dangerously_skip_permissions: ctx.config.dangerously_skip_permissions,
                     };
-                    ctx.factory.spawn_shared_agent_bridge(request, ctx.agent_tx.clone());
+                    ctx.factory
+                        .spawn_shared_agent_bridge(request, ctx.agent_tx.clone());
                     emit_runner_event(
                         ctx.paths,
                         ctx.state,

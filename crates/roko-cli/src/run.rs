@@ -389,8 +389,8 @@ fn resolve_workflow_model_selection(
         config.prompt.role.clone_from(role);
     }
 
-    let mut model_config = roko_core::config::loader::load_config_unified(workdir)
-        .unwrap_or_default();
+    let mut model_config =
+        roko_core::config::loader::load_config_unified(workdir).unwrap_or_default();
     model_config.providers.extend(config.providers.clone());
     model_config.models.extend(config.models.clone());
     model_config.agent.command = Some(config.agent.command.clone());
@@ -2391,7 +2391,7 @@ fn build_chain_resolver(
     use roko_chain::alloy_impl::AlloyChainClient;
     use std::sync::Arc;
 
-    let roko_config = roko_core::config::load_config(workdir).ok()?.into_config();
+    let roko_config = roko_core::config::loader::load_config_unified(workdir).ok()?;
     let rpc_url = roko_config.chain.rpc_url.as_deref()?;
 
     let client: Arc<dyn roko_chain::ChainClient> = match AlloyChainClient::http(rpc_url) {

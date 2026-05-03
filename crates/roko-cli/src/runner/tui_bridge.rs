@@ -156,10 +156,7 @@ impl TuiBridge {
     }
 
     /// Experiment winners refreshed.
-    pub fn experiment_winners_updated(
-        &self,
-        winners: Vec<roko_core::ExperimentWinnerSummary>,
-    ) {
+    pub fn experiment_winners_updated(&self, winners: Vec<roko_core::ExperimentWinnerSummary>) {
         self.sender
             .publish(DashboardEvent::ExperimentWinnersUpdated { winners });
     }

@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Default interval in seconds between heartbeats.
 ///
 /// Re-exported from [`crate::defaults::DEFAULT_HEARTBEAT_INTERVAL_SECS`].
-pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 =
-    crate::defaults::DEFAULT_HEARTBEAT_INTERVAL_SECS;
+pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = crate::defaults::DEFAULT_HEARTBEAT_INTERVAL_SECS;
 
 /// Maximum number of heartbeats retained in the ring buffer.
 ///

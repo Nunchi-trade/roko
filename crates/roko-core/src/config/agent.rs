@@ -193,7 +193,7 @@ pub struct RoutingOverrides {
 ///
 /// ```toml
 /// [agent.data_llm]
-/// model = "claude-haiku-3-5"
+/// model = "claude-haiku-4-5"
 /// max_tokens = 4096
 /// temperature = 0.0
 /// strip_tool_calls = true
@@ -236,7 +236,7 @@ pub struct DataLlmConfig {
 }
 
 fn default_data_llm_model() -> String {
-    "claude-haiku-3-5".into()
+    "claude-haiku-4-5".into()
 }
 
 const fn default_data_llm_max_tokens() -> u64 {

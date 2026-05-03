@@ -21,7 +21,9 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use crate::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_capture_logged, run_agent_logged};
+use crate::agent_exec::{
+    AgentExecEpisode, AgentExecOpts, run_agent_capture_logged, run_agent_logged,
+};
 use crate::task_parser::TasksFile;
 use crate::workspace_paths::{
     drafts_dir, ideas_path, plans_dir as workspace_plans_dir, prd_dir, published_dir,
@@ -831,9 +833,8 @@ where
 
 async fn run_generated_plans(workdir: &Path, plans_root: &Path) -> Result<()> {
     let plans = crate::runner::load_plans(plans_root)?;
-    let roko_config = roko_core::config::load_config(workdir)
-        .with_context(|| format!("load roko config from {}", workdir.display()))?
-        .into_config();
+    let roko_config = roko_core::config::loader::load_config_unified(workdir)
+        .with_context(|| format!("load roko config from {}", workdir.display()))?;
     let run_config = crate::runner::RunConfig::from_roko_config(
         workdir.to_path_buf(),
         plans_root.to_path_buf(),
@@ -1409,7 +1410,11 @@ fn extract_fenced_block<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
         let after_ticks = abs + 4; // position after \n```
         // Closing fence: either end-of-string, or next char is \n or whitespace-then-\n
         let rest = &inner[after_ticks..];
-        if rest.is_empty() || rest.starts_with('\n') || rest.trim_start().starts_with('\n') || rest.trim_start().is_empty() {
+        if rest.is_empty()
+            || rest.starts_with('\n')
+            || rest.trim_start().starts_with('\n')
+            || rest.trim_start().is_empty()
+        {
             let content = inner[..abs].trim();
             return if content.is_empty() {
                 None
@@ -1938,9 +1943,7 @@ mod tests {
         ensure_dirs(tmp.path()).unwrap();
         let draft = drafts_dir(tmp.path()).join("empty.md");
         std::fs::write(&draft, "---\nstatus: draft\n---\n# Empty\n").unwrap();
-        let err = cmd_promote(tmp.path(), "empty", false)
-            .await
-            .unwrap_err();
+        let err = cmd_promote(tmp.path(), "empty", false).await.unwrap_err();
         assert!(
             err.to_string().contains("no substantive content"),
             "got: {err}"
@@ -1969,10 +1972,7 @@ mod tests {
                     verify = \"cargo test\"\n```\nDone.";
         let block = extract_fenced_block(text, "toml").unwrap();
         assert!(block.contains("id = \"T1\""), "should contain task");
-        assert!(
-            block.contains("```bash"),
-            "should include the nested fence"
-        );
+        assert!(block.contains("```bash"), "should include the nested fence");
     }
 
     #[test]

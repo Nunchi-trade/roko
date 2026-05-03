@@ -38,9 +38,9 @@ pub use provenance::{
     ConfigDiagnostic, ConfigProvenance, ConfigSource, ResolvedRuntimeConfig, ValidatedConfig,
 };
 pub use provider::{
-    BackendModelSlug, ConfigIdentityError, ModelAlias, ModelCapabilities, ModelCost,
-    ModelDefinition, ModelMetadataSource, ProviderAuth, ProviderCapabilities, ProviderDefinition,
-    ProviderId, ProviderTransport, DEFAULT_TTFT_TIMEOUT_MS,
+    BackendModelSlug, ConfigIdentityError, DEFAULT_TTFT_TIMEOUT_MS, ModelAlias, ModelCapabilities,
+    ModelCost, ModelDefinition, ModelMetadataSource, ProviderAuth, ProviderCapabilities,
+    ProviderDefinition, ProviderId, ProviderTransport,
 };
 pub use validation::{
     DangerousPermissionOverride, DangerousPermissionOverrideError, StrictConfigSource,
@@ -94,35 +94,21 @@ pub enum LoadConfigError {
 
 /// Load the workspace configuration from `workdir/roko.toml`.
 ///
-/// Uses local trust semantics: the project's own `roko.toml` is treated
-/// as explicitly controlled by the user, so safety-sensitive settings
-/// like `dangerously_skip_permissions = true` are permitted.
-///
-/// For validating configs that may be inherited from untrusted sources
-/// (ancestor directories, team repos), use [`load_config_strict`].
-///
-/// Missing files fall back to [`ValidatedConfig::default`] (wrapping
-/// [`RokoConfig::default`]) so callers can start in an uninitialized
-/// workspace.
-///
-/// After parsing, two secret-resolution passes run automatically:
-///   1. `${VAR}` interpolation — expands environment variable references in
-///      provider config strings.
-///   2. `*_file` resolution — reads secrets from file paths in `extra_headers`
-///      whose keys end with `_file`.
-///
-/// Soft-warning checks (e.g. outdated `config_version`) are surfaced via
-/// [`ValidatedConfig::diagnostics`] and do not fail the load.
+/// **Deprecated**: Use [`loader::load_config_unified`] or
+/// [`loader::load_config_validated`] instead. This function skips ancestor
+/// walk, global config merge, `ROKO_CONFIG` env var, and `ROKO__*` overrides.
+#[deprecated(note = "use roko_core::config::loader::load_config_validated() instead")]
 pub fn load_config(workdir: &Path) -> Result<ValidatedConfig, LoadConfigError> {
     load_config_impl(workdir, ConfigTrust::Local)
 }
 
 /// Load the workspace configuration with strict safety validation.
 ///
-/// Identical to [`load_config`] except that safety-sensitive settings
-/// (e.g. `dangerously_skip_permissions = true`) are rejected. Use this
-/// when loading configs from potentially untrusted sources like ancestor
-/// directory inheritance or team-shared repos.
+/// **Deprecated**: Use [`loader::load_config_with_options`] with
+/// [`loader::LoadOptions::strict()`] instead.
+#[deprecated(
+    note = "use roko_core::config::loader::load_config_with_options(workdir, &LoadOptions::strict()) instead"
+)]
 pub fn load_config_strict(workdir: &Path) -> Result<ValidatedConfig, LoadConfigError> {
     load_config_impl(workdir, ConfigTrust::Shared)
 }
@@ -198,59 +184,8 @@ fn load_config_impl(
     })
 }
 
-/// Load configuration from an explicit file path.
-///
-/// Unlike [`load_config`] which constructs a path from a workdir,
-/// this loads directly from the given path. Missing files return an error
-/// (not a default) since the caller explicitly requested this path.
-pub fn load_config_from_path(path: &Path) -> Result<RokoConfig, LoadConfigError> {
-    let text = std::fs::read_to_string(path).map_err(|source| LoadConfigError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    let strict_source = StrictConfigSource::shared(Some(path.to_path_buf()));
-    validate_strict_config_toml(&text, &strict_source).map_err(|source| {
-        LoadConfigError::Validation {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?;
-
-    let mut config: RokoConfig =
-        toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-    config.interpolate_env_vars();
-    config.resolve_file_secrets();
-    Ok(config)
-}
-
-/// Load configuration from an explicit file path without strict safety validation.
-///
-/// This skips the `dangerously_skip_permissions` check, making it suitable for
-/// contexts (like ACP) that don't enforce permission semantics and just need
-/// provider/model configuration.
-pub fn load_config_from_path_lenient(path: &Path) -> Result<RokoConfig, LoadConfigError> {
-    let text = std::fs::read_to_string(path).map_err(|source| LoadConfigError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    let mut config: RokoConfig =
-        toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-    config.interpolate_env_vars();
-    config.resolve_file_secrets();
-    Ok(config)
-}
-
 #[cfg(test)]
+#[allow(deprecated)] // Tests exercise the deprecated load_config/load_config_strict API
 mod load_config_tests {
     use super::*;
 
@@ -331,8 +266,7 @@ mod load_config_tests {
     #[test]
     fn toml_serialize_roundtrip_default_config() {
         let original = RokoConfig::default();
-        let serialized =
-            toml::to_string_pretty(&original).expect("serialize RokoConfig to TOML");
+        let serialized = toml::to_string_pretty(&original).expect("serialize RokoConfig to TOML");
         let deserialized: RokoConfig =
             toml::from_str(&serialized).expect("deserialize RokoConfig from TOML");
         assert_eq!(original, deserialized, "roundtrip mismatch");
@@ -368,8 +302,7 @@ mod load_config_tests {
             },
         );
         config.runner.dangerously_skip_permissions = true;
-        let serialized =
-            toml::to_string_pretty(&config).expect("serialize config with providers");
+        let serialized = toml::to_string_pretty(&config).expect("serialize config with providers");
         let deserialized: RokoConfig =
             toml::from_str(&serialized).expect("deserialize config with providers");
         assert_eq!(config, deserialized, "roundtrip mismatch with providers");
@@ -392,8 +325,7 @@ mod load_config_tests {
                 "project config should have providers"
             );
             // Verify it serializes back to valid TOML.
-            let serialized =
-                toml::to_string_pretty(config).expect("serialize project config");
+            let serialized = toml::to_string_pretty(config).expect("serialize project config");
             let _: RokoConfig =
                 toml::from_str(&serialized).expect("re-parse serialized project config");
         }

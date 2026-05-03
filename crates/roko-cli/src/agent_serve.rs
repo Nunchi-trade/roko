@@ -557,8 +557,7 @@ fn extract_prompt(request: &ChatRequest) -> Option<String> {
 }
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Run `roko agent ...`.

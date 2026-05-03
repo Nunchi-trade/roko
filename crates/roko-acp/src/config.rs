@@ -46,16 +46,18 @@ impl AcpConfig {
     /// handles `ROKO_CONFIG` env var, ancestor walk, global merge, env
     /// overrides, and secret resolution.
     pub fn load_roko_config(&self) -> roko_core::config::schema::RokoConfig {
-        // If explicit config path is set, use it
-        if let Some(ref path) = self.config_path
-            && let Ok(config) = roko_core::config::load_config_from_path_lenient(path)
-        {
-            let mut config = config;
-            roko_core::config::loader::merge_global_into(&mut config);
-            return config;
-        }
-        // Otherwise use unified loader (handles ROKO_CONFIG, ancestor walk, global merge)
-        roko_core::config::loader::load_config_unified(&self.workdir).unwrap_or_default()
+        // If explicit config path is set, load from its parent directory.
+        // Otherwise use unified loader (handles ROKO_CONFIG, ancestor walk, global merge).
+        let workdir = self
+            .config_path
+            .as_deref()
+            .and_then(|p| p.parent())
+            .unwrap_or(&self.workdir);
+        roko_core::config::loader::load_config_with_options(
+            workdir,
+            &roko_core::config::loader::LoadOptions::acp(),
+        )
+        .unwrap_or_default()
     }
 }
 

@@ -1,8 +1,8 @@
 //! research command handlers.
 #![allow(unused_imports)]
 
-use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use crate::*;
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 
 pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
@@ -222,6 +222,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                         is_embedding_model: false,
                         search_context_size: None,
                         cost_per_request: None,
+                        tier: None,
                     });
                     model_profile.supports_grounding = true;
                     model_profile.tool_format = "gemini_native".to_string();
@@ -854,6 +855,7 @@ pub(crate) fn with_perplexity_research_model(
         is_embedding_model: false,
         search_context_size: None,
         cost_per_request: None,
+        tier: None,
     });
     model_profile.supports_search = true;
     model_profile.supports_citations = true;

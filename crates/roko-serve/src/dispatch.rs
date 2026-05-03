@@ -2874,9 +2874,9 @@ filter = { path = "src/*.rs" }
     #[test]
     fn anomaly_dispatch_model_downgrade_prefers_configured_fallback() {
         let mut config = RokoConfig::default();
-        config.agent.fallback_model = Some("claude-haiku-3-5".to_string());
+        config.agent.fallback_model = Some("claude-haiku-4-5".to_string());
 
-        let downgraded = downgrade_model_slug("claude-opus-4", &config);
-        assert_eq!(downgraded.as_deref(), Some("claude-haiku-3-5"));
+        let downgraded = downgrade_model_slug("claude-opus-4-6", &config);
+        assert_eq!(downgraded.as_deref(), Some("claude-haiku-4-5"));
     }
 }

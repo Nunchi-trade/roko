@@ -46,10 +46,10 @@ use crate::mock::MockAgent;
 use crate::{Agent, ExecAgent};
 use roko_core::Temperament;
 use roko_core::agent::{ProviderKind, resolve_model};
-use roko_core::config::schema::RokoConfig;
-use roko_core::config::schema::{ModelProfile, ProviderConfig};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
+use roko_core::config::schema::RokoConfig;
+use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use roko_core::tool::{ToolDef, ToolRegistry};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -84,8 +84,7 @@ static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
 static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
 static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
-const DEFAULT_PROVIDER_MAX_CONCURRENT: usize =
-    roko_core::defaults::DEFAULT_PROVIDER_MAX_CONCURRENT as usize;
+const DEFAULT_PROVIDER_MAX_CONCURRENT: usize = roko_core::defaults::DEFAULT_PROVIDER_MAX_CONCURRENT;
 pub const PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX: &str = "pplx.search_options=";
 
 /// Process-wide shared HTTP client with pooled connections.
@@ -480,8 +479,7 @@ impl ProviderSemaphores {
         for (id, config) in configs {
             let permits = config
                 .max_concurrent
-                .unwrap_or(DEFAULT_PROVIDER_MAX_CONCURRENT as u32)
-                .max(1) as usize;
+                .map_or(DEFAULT_PROVIDER_MAX_CONCURRENT, |n| n.max(1) as usize);
             semaphores.insert(id.clone(), Arc::new(Semaphore::new(permits)));
         }
 

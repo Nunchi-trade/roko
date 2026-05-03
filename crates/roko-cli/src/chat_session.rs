@@ -21,8 +21,8 @@ use roko_agent::safety::contract::AgentContract;
 use roko_compose::system_prompt_builder::SystemPromptBuilder;
 use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
 use roko_core::agent::ProviderKind;
-use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
+use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::foundation::{
     CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, ModelStreamEvent,
     TokenUsage, caller,

@@ -2034,7 +2034,7 @@ mod tests {
     #[test]
     fn importance_score_rewards_novel_difficult_episodes() {
         let mut routine = Episode::new("agent-a", "task-a");
-        routine.model = "claude-haiku-3-5".to_string();
+        routine.model = "claude-haiku-4-5".to_string();
         routine.agent_template = "implementer".to_string();
         routine.success = true;
         routine.usage.input_tokens = 120;
@@ -2042,7 +2042,7 @@ mod tests {
         routine.duration_secs = 12.0;
 
         let mut novel = Episode::new("agent-b", "task-b");
-        novel.model = "claude-opus-4".to_string();
+        novel.model = "claude-opus-4-6".to_string();
         novel.agent_template = "architect".to_string();
         novel.success = false;
         novel.usage.input_tokens = 1_600;
@@ -2068,11 +2068,11 @@ mod tests {
     #[test]
     fn prioritize_by_importance_orders_high_signal_first() {
         let mut low = Episode::new("agent-a", "task-a");
-        low.model = "claude-haiku-3-5".to_string();
+        low.model = "claude-haiku-4-5".to_string();
         low.agent_template = "implementer".to_string();
 
         let mut high = Episode::new("agent-b", "task-b");
-        high.model = "claude-opus-4".to_string();
+        high.model = "claude-opus-4-6".to_string();
         high.agent_template = "architect".to_string();
         high.success = false;
         high.usage.input_tokens = 2_000;

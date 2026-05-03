@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use roko_agent::AgentRuntimeEvent;
 use roko_agent::mcp::{McpConfig, discover_mcp_tools};
 use roko_agent::provider::ProviderSemaphores;
-use roko_agent::AgentRuntimeEvent;
 use roko_core::config::schema::RokoConfig;
 use roko_core::tool::ToolDef;
 use tokio::sync::mpsc;
@@ -60,10 +60,7 @@ impl SharedAgentFactory {
             Some(path) => match McpConfig::load(path) {
                 Ok(mcp_config) => match discover_mcp_tools(&mcp_config).await {
                     Ok(tools) => {
-                        tracing::info!(
-                            tool_count = tools.len(),
-                            "factory: MCP tools discovered"
-                        );
+                        tracing::info!(tool_count = tools.len(), "factory: MCP tools discovered");
                         Some(Arc::new(tools))
                     }
                     Err(err) => {
@@ -89,11 +86,7 @@ impl SharedAgentFactory {
             Some(cache) => PromptAssembler::with_cache(cache),
             None => PromptAssembler::new(),
         };
-        let dispatcher = Dispatcher::new(
-            cascade_router,
-            prompt_assembler,
-            WarmPool::new(0),
-        );
+        let dispatcher = Dispatcher::new(cascade_router, prompt_assembler, WarmPool::new(0));
         let resolver = ProviderDispatchResolver::new(Arc::clone(&config));
 
         Self {

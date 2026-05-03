@@ -15,7 +15,7 @@
 //!
 //! ```toml
 //! [agent.data_llm]
-//! model = "claude-haiku-3-5"
+//! model = "claude-haiku-4-5"
 //! max_tokens = 4096
 //! temperature = 0.0
 //! strip_tool_calls = true
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn data_llm_config_round_trips_through_serde() {
         let config = DataLlmConfig {
-            model: "claude-haiku-3-5".into(),
+            model: "claude-haiku-4-5".into(),
             max_tokens: 4096,
             temperature: 0.0,
             strip_tool_calls: true,
@@ -417,7 +417,7 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         let decoded: DataLlmConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.model, "claude-haiku-3-5");
+        assert_eq!(decoded.model, "claude-haiku-4-5");
         assert_eq!(decoded.max_tokens, 4096);
         assert!(decoded.output_schema.is_some());
     }
@@ -426,7 +426,7 @@ mod tests {
     fn audit_entry_round_trips() {
         let entry = DataLlmAuditEntry {
             taint: Taint::ExternalFetch("https://example.com".into()),
-            model: "claude-haiku-3-5".into(),
+            model: "claude-haiku-4-5".into(),
             patterns_removed: 2,
             output_valid: true,
             timestamp_ms: 1713600000000,

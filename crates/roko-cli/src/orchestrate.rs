@@ -857,8 +857,7 @@ fn sync_file_if_present(path: &Path) -> Result<()> {
 }
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn frequency_label(frequency: OperatingFrequency) -> &'static str {
@@ -4314,6 +4313,7 @@ impl PlanRunner {
                 .await
                 .map_err(|e| anyhow!("init learning runtime: {e}"))?
         };
+        learning.set_model_tiers(&roko_config.models);
         install_episode_distillation_hook(&mut learning, workdir);
         apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
@@ -4546,6 +4546,7 @@ impl PlanRunner {
                 .await
                 .map_err(|e| anyhow!("init learning runtime: {e}"))?
         };
+        learning.set_model_tiers(&roko_config.models);
         install_episode_distillation_hook(&mut learning, workdir);
         apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
@@ -4765,6 +4766,7 @@ impl PlanRunner {
                 .await
                 .map_err(|e| anyhow!("init learning runtime: {e}"))?
         };
+        learning.set_model_tiers(&roko_config.models);
         install_episode_distillation_hook(&mut learning, workdir);
         apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
@@ -21884,11 +21886,11 @@ depends_on = []
         let mut tracker = TaskTracker::new(tf, dir.path().to_path_buf());
 
         tracker
-            .set_task_model_hint("T1", Some("claude-opus-4".to_string()))
+            .set_task_model_hint("T1", Some("claude-opus-4-6".to_string()))
             .unwrap();
 
         let rendered = std::fs::read_to_string(&tasks_path).unwrap();
-        assert!(rendered.contains(r#"model_hint = "claude-opus-4""#));
+        assert!(rendered.contains(r#"model_hint = "claude-opus-4-6""#));
         assert_eq!(
             tracker
                 .tasks_file
@@ -21896,7 +21898,7 @@ depends_on = []
                 .iter()
                 .find(|task| task.id == "T1")
                 .and_then(|task| task.model_hint.as_deref()),
-            Some("claude-opus-4")
+            Some("claude-opus-4-6")
         );
     }
 

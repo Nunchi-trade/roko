@@ -13,9 +13,9 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use roko_agent::ModelCallService;
 use roko_core::agent::{AgentRole, ModelTier, resolve_model};
-use roko_core::config::schema::{ModelProfile, RokoConfig};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
+use roko_core::config::schema::{ModelProfile, RokoConfig};
 use roko_core::foundation::{
     CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, caller,
 };

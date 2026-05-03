@@ -348,8 +348,7 @@ pub(crate) fn apply_concluded_experiment_overrides(learning: &LearningRuntime, w
 /// target are compiled as separate crates — `pub(crate)` would make the
 /// function invisible to the binary.
 pub fn distillation_model_caller(workdir: &Path) -> Arc<dyn ModelCaller> {
-    let config = roko_core::config::loader::load_config_unified(workdir)
-        .unwrap_or_default();
+    let config = roko_core::config::loader::load_config_unified(workdir).unwrap_or_default();
     let model = config.agent.default_model.clone();
     Arc::new(ModelCallService::new(model).with_config(config))
 }
