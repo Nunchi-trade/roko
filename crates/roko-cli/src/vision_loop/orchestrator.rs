@@ -82,11 +82,16 @@ impl LoopOrchestrator {
             self.config.wait_ms,
         );
         let checkpoint = CheckpointManager::new(&roko_dir, &self.run_id, &file_ext).await?;
+        let project_root = roko_dir
+            .parent()
+            .unwrap_or(roko_dir.as_path())
+            .to_path_buf();
         let evaluator = VisionEvaluator::new(
             roko_config,
             self.config.model_key.clone(),
             self.config.goal.clone(),
             file_ext.clone(),
+            project_root,
         )?;
 
         // 5. Save original file.

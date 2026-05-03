@@ -1,10 +1,25 @@
 //! Vision evaluator: multimodal LLM call + response parsing.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
 use anyhow::{Context, Result, bail};
-use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_agent::{
+    AgentResult,
+    provider::{AgentOptions, create_agent_for_model},
+};
+use roko_core::agent::resolve_model;
 use roko_core::chat_types::{ChatMessage, ContentBlock, ImageUrl, MessageContent};
 use roko_core::config::schema::RokoConfig;
+use roko_core::foundation::{FeedbackEvent, FeedbackSink};
 use roko_core::{Body, Engram, Kind};
+use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::feedback_service::FeedbackService;
+
+use crate::learning_helpers::{
+    capture_runtime_model_slugs, provider_id_for_model, record_persisted_provider_health,
+};
 
 use super::prompt;
 use super::{Evaluation, IterationRecord};
@@ -15,6 +30,7 @@ pub struct VisionEvaluator {
     model_key: String,
     goal: String,
     file_ext: String,
+    workdir: PathBuf,
 }
 
 impl VisionEvaluator {
@@ -23,6 +39,7 @@ impl VisionEvaluator {
         model_key: Option<String>,
         goal: String,
         file_ext: String,
+        workdir: PathBuf,
     ) -> Result<Self> {
         let model_key = match model_key {
             Some(key) => key,
@@ -45,6 +62,7 @@ impl VisionEvaluator {
             model_key,
             goal,
             file_ext,
+            workdir,
         })
     }
 
@@ -83,26 +101,127 @@ impl VisionEvaluator {
             .body(Body::text(&full_prompt))
             .build();
 
+        let started = Instant::now();
         let result = agent.run(&input, &roko_core::Context::now()).await;
-
-        if !result.success {
-            let msg = result
-                .output
-                .body
-                .as_text()
-                .unwrap_or("unknown error")
-                .to_string();
-            bail!("vision model call failed: {msg}");
-        }
+        let latency_ms = started.elapsed().as_millis() as u64;
 
         let raw_output = result.output.body.as_text().unwrap_or("").to_string();
+        let evaluation = if result.success {
+            parse_evaluation(&raw_output)
+        } else {
+            let msg = if raw_output.trim().is_empty() {
+                "unknown error".to_string()
+            } else {
+                raw_output
+            };
+            Err(anyhow::anyhow!("vision model call failed: {msg}"))
+        };
 
-        parse_evaluation(&raw_output)
+        self.record_model_call_feedback(&result, latency_ms, evaluation.is_ok())
+            .await;
+
+        evaluation
     }
 
     /// The model key being used.
     pub fn model_key(&self) -> &str {
         &self.model_key
+    }
+
+    async fn record_model_call_feedback(
+        &self,
+        result: &AgentResult,
+        latency_ms: u64,
+        learning_success: bool,
+    ) {
+        let resolved = resolve_model(&self.config, &self.model_key);
+        let model_slug = resolved.slug;
+        let provider_id = provider_id_for_model(&self.config, &self.model_key)
+            .or_else(|| {
+                resolved
+                    .profile
+                    .as_ref()
+                    .map(|profile| profile.provider.clone())
+            })
+            .unwrap_or_else(|| resolved.provider_kind.label().to_string());
+
+        let cascade_path = self
+            .workdir
+            .join(".roko")
+            .join("learn")
+            .join("cascade-router.json");
+        let cascade_model_slugs = capture_runtime_model_slugs(&self.config, &model_slug);
+        let cascade_router = (!cascade_model_slugs.is_empty()).then(|| {
+            Arc::new(CascadeRouter::load_or_new(
+                &cascade_path,
+                cascade_model_slugs,
+            ))
+        });
+        let mut feedback_service = FeedbackService::from_roko_dir(&self.workdir.join(".roko"));
+        if let Some(router) = &cascade_router {
+            feedback_service = feedback_service.with_cascade_router(Arc::clone(router));
+        }
+
+        let turn_tokens =
+            u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
+        if let Err(error) = feedback_service
+            .record(FeedbackEvent::ModelCall {
+                run_id: None,
+                request_id: Some(format!(
+                    "vision-evaluator-{}",
+                    chrono::Utc::now().timestamp_millis()
+                )),
+                prompt_section_ids: Vec::new(),
+                knowledge_ids: Vec::new(),
+                model: Some(model_slug.clone()),
+                provider: Some(provider_id.clone()),
+                token_usage: Some(turn_tokens),
+                cost: Some(f64::from(result.usage.cost_usd)),
+                role: "vision_evaluator".to_string(),
+                input_tokens: u64::from(result.usage.input_tokens),
+                output_tokens: u64::from(result.usage.output_tokens),
+                cost_usd: f64::from(result.usage.cost_usd),
+                latency_ms,
+                success: learning_success,
+            })
+            .await
+        {
+            tracing::warn!(
+                provider = %provider_id,
+                model = %model_slug,
+                error = %error,
+                "failed to record vision evaluator feedback"
+            );
+        }
+
+        if let Err(error) =
+            record_persisted_provider_health(&self.workdir, &provider_id, result.success)
+        {
+            tracing::warn!(
+                provider = %provider_id,
+                model = %model_slug,
+                error = %error,
+                "failed to persist vision evaluator provider health"
+            );
+        }
+
+        if let Err(error) = feedback_service.flush_async().await {
+            tracing::warn!(
+                provider = %provider_id,
+                model = %model_slug,
+                error = %error,
+                "failed to flush vision evaluator feedback"
+            );
+        }
+        if let Some(router) = &cascade_router
+            && let Err(error) = router.save(&cascade_path)
+        {
+            tracing::warn!(
+                path = %cascade_path.display(),
+                error = %error,
+                "failed to persist vision evaluator cascade observation"
+            );
+        }
     }
 }
 
@@ -217,7 +336,26 @@ pub fn build_multimodal_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::config::schema::ModelProfile;
+    use roko_core::agent::ProviderKind;
+    use roko_core::config::schema::{ModelProfile, ProviderConfig};
+    use roko_core::defaults::{
+        DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS,
+    };
+    use tempfile::tempdir;
+
+    fn write_fake_claude_script(tmp: &tempfile::TempDir, body: &str) -> PathBuf {
+        let script = tmp.path().join("claude-fake.sh");
+        std::fs::write(&script, body).expect("write fake claude script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).expect("chmod");
+        }
+        script
+    }
 
     #[test]
     fn strip_json_fences_strips_json_block() {
@@ -347,5 +485,82 @@ mod tests {
             }
             _ => panic!("expected user message with blocks"),
         }
+    }
+
+    #[tokio::test]
+    async fn evaluate_records_feedback_and_provider_health() {
+        let tmp = tempdir().expect("tempdir");
+        let script = write_fake_claude_script(
+            &tmp,
+            r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"content_block_delta","delta":{"text":"{\"score\":8.5,\"notes\":\"ok\",\"improved_code\":\"<div>better</div>\"}"}}'
+"#,
+        );
+
+        let mut config = RokoConfig::default();
+        config.providers.clear();
+        config.models.clear();
+        config.agent.default_model = "vision-model".to_string();
+        config.providers.insert(
+            "vision-cli".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::ClaudeCli,
+                base_url: None,
+                api_key_env: None,
+                command: Some(script.display().to_string()),
+                args: None,
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        config.models.insert(
+            "vision-model".to_string(),
+            ModelProfile {
+                provider: "vision-cli".to_string(),
+                slug: "claude-sonnet-4-6".to_string(),
+                supports_vision: true,
+                ..Default::default()
+            },
+        );
+
+        let evaluator = VisionEvaluator::new(
+            config,
+            Some("vision-model".to_string()),
+            "make it clearer".to_string(),
+            "tsx".to_string(),
+            tmp.path().to_path_buf(),
+        )
+        .expect("evaluator");
+
+        let eval = evaluator
+            .evaluate("<div>before</div>", "data:image/png;base64,abc", &[], None)
+            .await
+            .expect("evaluate");
+
+        assert!((eval.score - 8.5).abs() < f64::EPSILON);
+        assert_eq!(eval.improved_code, "<div>better</div>");
+
+        let efficiency_path = tmp.path().join(".roko/learn/efficiency.jsonl");
+        let efficiency = std::fs::read_to_string(&efficiency_path).expect("read efficiency");
+        assert!(efficiency.contains(r#""kind":"model_call""#));
+        assert!(efficiency.contains(r#""role":"vision_evaluator""#));
+        assert!(efficiency.contains(r#""model":"claude-sonnet-4-6""#));
+        assert!(efficiency.contains(r#""provider":"vision-cli""#));
+        assert!(efficiency.contains(r#""success":true"#));
+
+        let provider_health =
+            std::fs::read_to_string(tmp.path().join(".roko/learn/provider-health.json"))
+                .expect("read provider health");
+        assert!(provider_health.contains("vision-cli"));
+
+        let cascade_router =
+            std::fs::read_to_string(tmp.path().join(".roko/learn/cascade-router.json"))
+                .expect("read cascade router");
+        assert!(cascade_router.contains("claude-sonnet-4-6"));
     }
 }
