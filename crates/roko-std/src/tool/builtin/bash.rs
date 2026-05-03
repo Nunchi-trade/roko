@@ -28,7 +28,21 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Exec,
         ToolPermission::executes(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "The shell command to execute via `bash -c`."
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "description": "Optional wall-clock timeout in milliseconds (default: 120000)."
+            }
+        },
+        "required": ["command"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(false)
     .with_timeout_ms(120_000)

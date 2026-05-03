@@ -75,6 +75,7 @@ fn ctx(workdir: std::path::PathBuf) -> DispatchContext {
         budget_remaining_usd: 5.0,
         attempt: 0,
         gate_feedback: None,
+        routing_context: None,
     }
 }
 
@@ -140,6 +141,7 @@ async fn dispatch_feeds_feedback_facade_and_projection() {
             outcome: outcome.clone(),
             model_source: ModelChoiceSource::TaskHint,
             succeeded: true,
+            routing_context: None,
         })
         .await
         .expect("fanout task completed");

@@ -119,9 +119,10 @@ async fn dispatch_claude_cli(prompt: &str) -> Result<DispatchResult> {
                         .and_then(|c| c.as_str())
                         .or_else(|| event.get("output").and_then(|o| o.as_str()));
                     if let Some(content) = content.filter(|s| !s.is_empty()) {
-                        // Truncate very large outputs (like mori's 4KB limit)
-                        let truncated = if content.len() > 4096 {
-                            let mut end = 4096;
+                        let truncated = if content.len()
+                            > roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT
+                        {
+                            let mut end = roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT;
                             while !content.is_char_boundary(end) {
                                 end -= 1;
                             }

@@ -680,11 +680,11 @@ mod tests {
     #[test]
     fn attempt_correlation_summary_counts_only_attempted_events() {
         let mut success = roko_learn::efficiency::AgentEfficiencyEvent::default();
-        success.attempt_id = "attempt-1".into();
+        success.task_id = "task-1".into();
         success.gate_passed = true;
 
         let mut failure = roko_learn::efficiency::AgentEfficiencyEvent::default();
-        failure.attempt_id = "attempt-2".into();
+        failure.task_id = "task-2".into();
         failure.gate_passed = false;
 
         let mut unlabeled = roko_learn::efficiency::AgentEfficiencyEvent::default();
@@ -695,7 +695,7 @@ mod tests {
 
         assert_eq!(
             summary.as_deref(),
-            Some("  Attempt correlation: 2 events with attempt_id, 1 gate failures linked")
+            Some("  Attempt correlation: 2 events with task_id, 1 gate failures linked")
         );
     }
 

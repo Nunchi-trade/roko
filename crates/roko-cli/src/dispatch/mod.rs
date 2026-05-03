@@ -43,6 +43,7 @@ use roko_agent::AgentRuntimeEvent;
 use roko_core::agent::ModelSpec;
 use roko_core::config::schema::RokoConfig;
 use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::model_router::RoutingContext;
 use tokio::sync::mpsc;
 
 pub use factory::SharedAgentFactory;
@@ -85,6 +86,9 @@ pub struct DispatchContext {
     pub attempt: u32,
     /// Optional structured feedback from a previous gate failure.
     pub gate_feedback: Option<GateFeedback>,
+    /// Routing context for the CascadeRouter. Built at the dispatch site
+    /// from task + runner state, threaded through to `RoutingInputs`.
+    pub routing_context: Option<RoutingContext>,
 }
 
 // ─── Dispatcher facade ─────────────────────────────────────────────────
@@ -345,6 +349,7 @@ mod tests {
             budget_remaining_usd: 5.0,
             attempt: 0,
             gate_feedback: None,
+            routing_context: None,
         }
     }
 

@@ -140,15 +140,23 @@ impl AgentBackend {
     /// Rules (derived from `apps/mori/src/agent/roles.rs::from_model`):
     /// - `claude-*` → Claude
     /// - `composer-*`, `cursor-*`, `sonnet-*`, `opus-*`, `haiku-*`,
-    ///   `gemini-*`, `auto`, `*-high`, `*-xhigh-fast` → Cursor
+    ///   `auto`, `*-high`, `*-xhigh-fast` → Cursor
     /// - `ollama/*` or `llama*` → Ollama
     /// - `sonar*` or `perplexity/*` → Perplexity
     /// - everything else → Codex (default GPT routing)
+    ///
+    /// # Deprecation
+    ///
+    /// This heuristic is a legacy fallback. Production code should resolve
+    /// models via [`resolve_model()`] which reads provider from config.
+    /// `from_model()` is only hit when a slug isn't in config at all.
     #[must_use]
     pub fn from_model(slug: &str) -> Self {
         let slug = slug.trim();
         if slug.starts_with("claude-") || matches!(slug, "sonnet" | "opus" | "haiku") {
             Self::Claude
+        } else if slug.starts_with("gemini-") || slug.starts_with("gemini/") {
+            Self::Codex // OpenAI-compat; Gemini models route through the unified backend
         } else if slug.starts_with("ollama/") || slug.starts_with("llama") {
             Self::Ollama
         } else if slug.starts_with("sonar") || slug.starts_with("perplexity/") {
@@ -183,7 +191,6 @@ fn is_cursor_slug(slug: &str) -> bool {
         || slug.starts_with("sonnet-")
         || slug.starts_with("opus-")
         || slug.starts_with("haiku-")
-        || slug.starts_with("gemini-")
         || slug == "gpt-5.2"
         || slug.ends_with("-high")
         || slug.ends_with("-xhigh-fast")
@@ -1303,7 +1310,8 @@ mod tests {
         assert_eq!(resolved.model_key, "glm-5-1");
         assert_eq!(resolved.slug, "glm-5.1");
         assert_eq!(resolved.provider_kind, ProviderKind::OpenAiCompat);
-        assert_eq!(resolved.backend, AgentBackend::Codex);
+        // Config-authoritative: provider kind OpenAiCompat → AgentBackend::OpenAi
+        assert_eq!(resolved.backend, AgentBackend::OpenAi);
         assert!(resolved.provider_config.is_some());
         assert!(resolved.profile.is_some());
     }

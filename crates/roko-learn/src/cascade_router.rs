@@ -1718,14 +1718,34 @@ impl CascadeRouter {
     }
 
     /// Load a cascade router from a persisted JSON file, or create a new one.
+    ///
+    /// When the file exists but cannot be parsed, the corrupted file is
+    /// backed up to `<path>.corrupted` and a warning is emitted before
+    /// creating a fresh router.
     pub fn load_or_new(path: &Path, model_slugs: Vec<String>) -> Self {
-        let snapshot = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<CascadeSnapshot>(&s).ok());
+        let raw = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => return Self::new(model_slugs),
+        };
 
-        match snapshot {
-            Some(snapshot) => Self::from_snapshot(snapshot, model_slugs),
-            None => Self::new(model_slugs),
+        match serde_json::from_str::<CascadeSnapshot>(&raw) {
+            Ok(snapshot) => Self::from_snapshot(snapshot, model_slugs),
+            Err(err) => {
+                let backup = path.with_extension("json.corrupted");
+                tracing::warn!(
+                    path = %path.display(),
+                    backup = %backup.display(),
+                    %err,
+                    "cascade router state corrupted — backing up and resetting"
+                );
+                if let Err(backup_err) = std::fs::copy(path, &backup) {
+                    tracing::error!(
+                        %backup_err,
+                        "failed to backup corrupted cascade router file"
+                    );
+                }
+                Self::new(model_slugs)
+            }
         }
     }
 

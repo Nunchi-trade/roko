@@ -21,6 +21,7 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::dispatch::model_routing::tier_to_complexity;
 use crate::dispatch::{
     AgentDispatchRequest, DispatchContext, GateFeedback as DispatchGateFeedback, PromptCache,
     ResolvedAgentRuntime, SharedAgentFactory,
@@ -995,6 +996,13 @@ pub async fn run(
         run_dream_consolidation_if_enabled(config).await;
     }
 
+    // ── Post-run episode compaction ──────────────────────────────────
+    //
+    // Compact the episode log using the default retention policy.  This
+    // runs after the main loop so it does not contend with the episode
+    // sink appending new entries.
+    compact_episodes_if_needed(&paths.episodes_jsonl).await;
+
     Ok(report)
 }
 
@@ -1368,7 +1376,7 @@ fn emit_runner_event_with_facades(
 
     // ── Translate to FeedbackEvent and fan out (fire-and-forget) ────────
     if let Some(facade) = feedback_facade {
-        if let Some(feedback) = runner_event_to_feedback(&event) {
+        if let Some(feedback) = runner_event_to_feedback(&event, &state.routing_context) {
             let facade = Arc::clone(facade);
             tokio::spawn(async move {
                 if let Err(err) = facade.on_event(&feedback).await {
@@ -1386,7 +1394,14 @@ fn emit_runner_event_with_facades(
 /// Translate a [`RunnerEvent`] into a [`FeedbackEvent`] when the runner
 /// has enough information for one. Returns `None` for variants that do
 /// not map to the feedback layer (e.g. `RunStarted`, `ResumeMarker`).
-fn runner_event_to_feedback(event: &RunnerEvent) -> Option<crate::runtime_feedback::FeedbackEvent> {
+///
+/// `routing_ctx` is the dispatch-time routing context stored on
+/// [`RunState`] — threaded here so `TaskCompleted` events carry the
+/// real feature vector for the CascadeRouter's bandit.
+fn runner_event_to_feedback(
+    event: &RunnerEvent,
+    routing_ctx: &Option<roko_learn::model_router::RoutingContext>,
+) -> Option<crate::runtime_feedback::FeedbackEvent> {
     use crate::dispatch::{AgentOutcome, ModelChoiceSource};
     use crate::runtime_feedback::FeedbackEvent;
 
@@ -1421,6 +1436,7 @@ fn runner_event_to_feedback(event: &RunnerEvent) -> Option<crate::runtime_feedba
                 outcome: agent_outcome,
                 model_source: ModelChoiceSource::Default,
                 succeeded,
+                routing_context: routing_ctx.clone(),
             })
         }
         RunnerEvent::GateCompleted {
@@ -2002,6 +2018,28 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 "knowledge store consulted for routing"
             );
             let gate_feedback = DispatchGateFeedback::from_raw(&previous_gate_output);
+            let routing_context = {
+                use roko_core::{BehavioralState, DaimonPolicy};
+                use roko_learn::model_router::RoutingContext;
+                RoutingContext {
+                    task_category,
+                    complexity: tier_to_complexity(&task_def.tier),
+                    iteration: attempt_num.saturating_sub(1),
+                    role: role_enum,
+                    crate_familiarity: 0.5,
+                    has_prior_failure: attempt_num > 1,
+                    conductor_load: 0.0,
+                    active_agents: 0,
+                    ready_queue_depth: 0,
+                    max_queue_wait_hours: 0.0,
+                    daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
+                    thinking_level: None,
+                    temperament: None,
+                    previous_model: None,
+                    plan_context_tokens: None,
+                    tier_thresholds: None,
+                }
+            };
             let dispatch_ctx = DispatchContext {
                 plan_id: plan_id.clone(),
                 role: role.to_string(),
@@ -2015,8 +2053,10 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 },
                 attempt: attempt_num.saturating_sub(1),
                 gate_feedback,
+                routing_context: Some(routing_context),
             };
             ctx.state.task_model_hint = task_def.model_hint.clone();
+            ctx.state.routing_context = dispatch_ctx.routing_context.clone();
             let dispatcher = ctx.factory.dispatcher();
             let mut dispatch_plan = match dispatcher.plan(task_def, &dispatch_ctx) {
                 Ok(plan) => plan,
@@ -2759,6 +2799,38 @@ async fn shutdown_subsystems(config: &RunConfig, tui: &TuiBridge) {
         } else {
             info!("cascade router state persisted");
             tui.cascade_router_updated(&router.snapshot_json());
+        }
+    }
+}
+
+/// Compact the episode log if it exceeds the retention threshold.
+///
+/// Uses the default [`RetentionPolicy`] (200 episodes, 90 days).
+/// Errors are logged but never propagated — compaction is best-effort.
+async fn compact_episodes_if_needed(episodes_path: &std::path::Path) {
+    use roko_learn::episode_logger::{EpisodeLogger, RetentionPolicy};
+
+    if !episodes_path.exists() {
+        return;
+    }
+
+    let logger = EpisodeLogger::new(episodes_path.to_path_buf());
+    let policy = RetentionPolicy::default();
+    let now = chrono::Utc::now();
+
+    match logger.compact(now, &policy).await {
+        Ok(stats) if stats.removed > 0 => {
+            info!(
+                before = stats.before,
+                after = stats.after,
+                removed = stats.removed,
+                bytes_reclaimed = stats.bytes_reclaimed,
+                "episode log compacted"
+            );
+        }
+        Ok(_) => {} // nothing to compact
+        Err(err) => {
+            warn!(error = %err, "episode compaction failed (best-effort)");
         }
     }
 }

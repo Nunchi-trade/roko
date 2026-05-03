@@ -42,8 +42,9 @@ pub fn handle_agent_event(event: &AgentEvent, state: &mut RunState, tui: &TuiBri
 
         AgentEvent::ToolOutput { id: _, output } => {
             // Truncate tool output in the accumulated buffer.
-            let truncated = if output.len() > 4096 {
-                &output[..4096]
+            let limit = roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT;
+            let truncated = if output.len() > limit {
+                &output[..limit]
             } else {
                 output.as_str()
             };

@@ -653,8 +653,10 @@ pub fn extract_clean_text(raw: &str) -> String {
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or("tool");
                         // Include tool output inline, truncated for sanity
-                        let truncated = if content.len() > 4096 {
-                            let mut end = 4096;
+                        let truncated = if content.len()
+                            > roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT
+                        {
+                            let mut end = roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT;
                             while !content.is_char_boundary(end) {
                                 end -= 1;
                             }

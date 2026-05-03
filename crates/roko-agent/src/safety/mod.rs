@@ -866,6 +866,13 @@ impl SafetyLayer {
         // restricted contract when the YAML is missing or malformed.
         // This is fail-closed by design: an unknown role gets zero
         // capabilities until an explicit contract is shipped.
+        //
+        // Exception: when the role has TOML-configured tools in
+        // `self.role_tools`, the restricted fallback clears its
+        // `allowed_tools` so the TOML role-tools whitelist (checked
+        // earlier in `check_pre_execution`) is the binding constraint.
+        // This prevents the contract deny-all from overriding explicit
+        // operator configuration.
         let mut contract = AgentContract::load_for_role_with_mode(
             role,
             contract::ContractLoadMode::RestrictedFallback,
@@ -879,6 +886,21 @@ impl SafetyLayer {
             );
             AgentContract::restricted(role)
         });
+
+        // When the restricted fallback produced a deny-all allowlist but
+        // the operator explicitly configured this role in TOML (either via
+        // a tools whitelist or any role override), defer tool-access
+        // control to the TOML role-tools whitelist instead of the
+        // contract's empty allowlist.  An operator-defined role without
+        // a tools list is intentionally permissive.
+        if contract
+            .allowed_tools
+            .as_ref()
+            .is_some_and(|t| t.is_empty())
+            && (self.role_tools.contains_key(role) || self.role_overrides.contains_key(role))
+        {
+            contract.allowed_tools = None;
+        }
 
         if let Some(role_override) = self.role_overrides.get(role)
             && let Some(budget) = role_override.effective_budget()

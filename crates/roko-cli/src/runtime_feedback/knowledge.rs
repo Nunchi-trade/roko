@@ -279,6 +279,7 @@ mod tests {
             outcome: outcome(),
             model_source: ModelChoiceSource::Router,
             succeeded: true,
+            routing_context: None,
         })
         .await
         .unwrap();
@@ -298,6 +299,7 @@ mod tests {
             outcome: outcome(),
             model_source: ModelChoiceSource::Router,
             succeeded: false,
+            routing_context: None,
         })
         .await
         .unwrap();
@@ -316,6 +318,7 @@ mod tests {
             outcome: outcome(),
             model_source: ModelChoiceSource::Router,
             succeeded: true,
+            routing_context: None,
         })
         .await
         .unwrap();

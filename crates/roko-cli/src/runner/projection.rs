@@ -30,7 +30,8 @@ const PROJECTION_CHANNEL_CAPACITY: usize = 1024;
 /// Maximum events retained in the bounded dashboard snapshot.
 const DASHBOARD_MAX_EVENTS: usize = 200;
 /// Maximum bytes preserved for tool / agent output payload previews.
-pub const PROJECTION_OUTPUT_PREVIEW_BYTES: usize = 4096;
+pub const PROJECTION_OUTPUT_PREVIEW_BYTES: usize =
+    roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT;
 
 /// One normalized event delivered through the projection facade.
 #[derive(Debug, Clone, Serialize, Deserialize)]

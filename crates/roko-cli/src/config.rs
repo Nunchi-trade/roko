@@ -3412,7 +3412,8 @@ plan_timeout_secs = 1200
         assert!(cfg.executor.use_worktrees);
         assert_eq!(cfg.runner.plan_timeout_secs, 1_200);
         assert!(!cfg.serve.terminal_enabled);
-        assert!(!cfg.serve.auth.enabled);
+        // Secure-by-default: auth is enabled even with no explicit [serve] config.
+        assert!(cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
         assert_eq!(cfg.serve.deploy.provider, "railway");
         assert_eq!(
@@ -3758,7 +3759,8 @@ base_url = "https://api.z.ai/api/paas/v4"
         assert!(cfg.gates.is_empty());
         assert_eq!(cfg.runner.plan_timeout_secs, 3_600);
         assert!(!cfg.serve.terminal_enabled);
-        assert!(!cfg.serve.auth.enabled);
+        // Secure-by-default: auth is enabled by default.
+        assert!(cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
     }
 

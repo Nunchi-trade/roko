@@ -39,6 +39,8 @@ pub use episodes::EpisodeSink;
 pub use knowledge::{KnowledgeIngestionSink, KnowledgeIngestor, NeuroKnowledgeIngestor};
 pub use routing::RoutingObservationSink;
 
+use roko_learn::model_router::RoutingContext;
+
 use crate::dispatch::{AgentOutcome, ModelChoiceSource};
 
 // ─── Event vocabulary ──────────────────────────────────────────────────
@@ -66,6 +68,9 @@ pub enum FeedbackEvent {
         outcome: AgentOutcome,
         model_source: ModelChoiceSource,
         succeeded: bool,
+        /// The dispatch-time routing context, when available. Enables the
+        /// routing sink to feed real task features into the LinUCB bandit.
+        routing_context: Option<RoutingContext>,
     },
     /// A gate verdict landed for a task.
     GateOutcome {

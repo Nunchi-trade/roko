@@ -120,6 +120,7 @@ mod tests {
             outcome: outcome(),
             model_source: ModelChoiceSource::Router,
             succeeded: true,
+            routing_context: None,
         };
         sink.on_event(&event).await.unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();

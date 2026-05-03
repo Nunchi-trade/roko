@@ -522,7 +522,10 @@ mod tests {
     #[test]
     fn cascade_router_is_consulted_when_no_explicit_selection_exists() {
         let config = RokoConfig::default();
-        let router = cascade_router("claude-haiku-4-5");
+        // Use claude-sonnet-4-6 because cold-start static routing for the
+        // Standard tier selects from ["glm-5.1", "claude-sonnet-4-6", ...] and
+        // only returns a slug present in the router's model_slugs.
+        let router = cascade_router("claude-sonnet-4-6");
 
         let selection = resolve_effective_model(None, None, None, Some(&router), &config, None)
             .expect("selection");
@@ -530,9 +533,9 @@ mod tests {
         assert_eq!(selection.source, SelectionSource::CascadeRouter);
         assert_eq!(
             selection.requested_model.as_deref(),
-            Some("claude-haiku-4-5")
+            Some("claude-sonnet-4-6")
         );
-        assert_eq!(selection.effective_model_key, "claude-haiku-4-5");
+        assert_eq!(selection.effective_model_key, "claude-sonnet-4-6");
         assert_eq!(selection.provider_key, "claude_cli");
         assert!(selection.reason.contains("cascade router"));
     }

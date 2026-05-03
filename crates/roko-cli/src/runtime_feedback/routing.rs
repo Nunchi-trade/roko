@@ -68,6 +68,7 @@ impl FeedbackSink for RoutingObservationSink {
             outcome,
             model_source,
             succeeded,
+            routing_context,
             ..
         } = event
         else {
@@ -87,11 +88,10 @@ impl FeedbackSink for RoutingObservationSink {
             return Ok(());
         };
 
-        // FeedbackEvent does not yet carry the original dispatch
-        // RoutingContext (task category / complexity / role / queue
-        // pressure). Use stable defaults so the LinUCB feature vector
-        // is well-formed; richer plumbing is tracked separately.
-        let ctx = build_runner_feedback_context(&outcome.model);
+        let ctx = match routing_context {
+            Some(ctx) => ctx.clone(),
+            None => build_fallback_routing_context(&outcome.model),
+        };
 
         if *succeeded {
             // Quality is the binary success signal; cost / latency
@@ -116,13 +116,12 @@ impl FeedbackSink for RoutingObservationSink {
     }
 }
 
-/// Build a stable [`RoutingContext`] for runner-feedback observations.
+/// Build a fallback [`RoutingContext`] for observations that lack
+/// dispatch-time context.
 ///
-/// The runner feedback path does not yet propagate the original
-/// dispatch RoutingContext through `FeedbackEvent`, so this helper
-/// returns a deterministic minimum context with the model marked as
-/// `previous_model` for cache-affinity learning.
-fn build_runner_feedback_context(model: &str) -> RoutingContext {
+/// Used when `routing_context` is `None` (backward compat with older
+/// code paths that don't carry context through `FeedbackEvent`).
+fn build_fallback_routing_context(model: &str) -> RoutingContext {
     RoutingContext {
         task_category: TaskCategory::Implementation,
         complexity: TaskComplexityBand::Standard,
@@ -172,6 +171,27 @@ mod tests {
         ]))
     }
 
+    fn test_routing_context() -> RoutingContext {
+        RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Complex,
+            iteration: 2,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.8,
+            has_prior_failure: true,
+            conductor_load: 0.3,
+            active_agents: 2,
+            ready_queue_depth: 5,
+            max_queue_wait_hours: 0.1,
+            daimon_policy: DaimonPolicy::new(0.7, BehavioralState::Engaged),
+            thinking_level: None,
+            temperament: None,
+            previous_model: Some("claude-sonnet-4-6".into()),
+            plan_context_tokens: None,
+            tier_thresholds: None,
+        }
+    }
+
     #[tokio::test]
     async fn success_drives_observe_multi_objective_for_known_model() {
         let r = router();
@@ -182,6 +202,7 @@ mod tests {
             outcome: outcome(true),
             model_source: ModelChoiceSource::Router,
             succeeded: true,
+            routing_context: None,
         };
         sink.on_event(&event).await.unwrap();
         let snap = r.confidence_snapshot();
@@ -207,6 +228,7 @@ mod tests {
             outcome: outcome(false),
             model_source: ModelChoiceSource::Override,
             succeeded: false,
+            routing_context: None,
         };
         sink.on_event(&event).await.unwrap();
         let (trials, successes) = r
@@ -235,6 +257,7 @@ mod tests {
             outcome: bad_outcome,
             model_source: ModelChoiceSource::Router,
             succeeded: true,
+            routing_context: None,
         };
         sink.on_event(&event).await.unwrap();
         assert!(
@@ -252,5 +275,53 @@ mod tests {
         };
         assert!(!sink.interested(&event));
         sink.on_event(&event).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn real_routing_context_feeds_bandit() {
+        let r = router();
+        let sink = RoutingObservationSink::new(r.clone());
+        let ctx = test_routing_context();
+        let event = FeedbackEvent::TaskCompleted {
+            plan_id: "p".into(),
+            task_id: "t".into(),
+            outcome: outcome(true),
+            model_source: ModelChoiceSource::Router,
+            succeeded: true,
+            routing_context: Some(ctx),
+        };
+        sink.on_event(&event).await.unwrap();
+        assert!(
+            r.total_observations() >= 1,
+            "observe_multi_objective must use the real RoutingContext features",
+        );
+        let snap = r.confidence_snapshot();
+        let (trials, successes) = snap
+            .get("claude-sonnet-4-6")
+            .copied()
+            .expect("snapshot for the observed slug");
+        assert_eq!(trials, 1);
+        assert_eq!(successes, 1);
+    }
+
+    #[tokio::test]
+    async fn none_context_falls_back_to_defaults() {
+        // When routing_context is None, the sink should still work using
+        // the hardcoded default context (backward compat).
+        let r = router();
+        let sink = RoutingObservationSink::new(r.clone());
+        let event = FeedbackEvent::TaskCompleted {
+            plan_id: "p".into(),
+            task_id: "t".into(),
+            outcome: outcome(true),
+            model_source: ModelChoiceSource::Router,
+            succeeded: true,
+            routing_context: None,
+        };
+        sink.on_event(&event).await.unwrap();
+        assert!(
+            r.total_observations() >= 1,
+            "fallback context must still drive observe_multi_objective",
+        );
     }
 }

@@ -652,7 +652,11 @@ mod tests {
     #[tokio::test]
     async fn run_doctor_passes_bootstrapped_workspace_without_serve_probe() {
         let temp = tempdir().unwrap();
-        write_project_config(temp.path(), Config::default());
+        let mut config = Config::default();
+        // Disable auth so doctor doesn't fail on empty api_key (secure-by-default
+        // enables auth, but doctor flags enabled-without-key as a failure).
+        config.serve.auth.enabled = false;
+        write_project_config(temp.path(), config);
         bootstrap_layout(temp.path()).await;
 
         let report = run_doctor(&DoctorOptions {

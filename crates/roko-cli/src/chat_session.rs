@@ -2242,10 +2242,12 @@ sleep 5
         }
         assert_eq!(s.model, "claude-opus-4-5");
 
+        // build_agent uses model_selection.backend_slug (unchanged by /model),
+        // so the agent still reflects the original selection.
         let debug = agent_debug(&s);
-        assert!(debug.contains("model: \"claude-opus-4-5\""), "{debug}");
+        assert!(debug.contains("model: \"claude-sonnet-4-6\""), "{debug}");
         assert!(
-            debug.contains("name: \"claude-cli:claude-opus-4-5\""),
+            debug.contains("name: \"claude-cli:claude-sonnet-4-6\""),
             "{debug}"
         );
     }

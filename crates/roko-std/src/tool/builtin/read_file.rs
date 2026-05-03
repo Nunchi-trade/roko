@@ -26,7 +26,25 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Read,
         ToolPermission::read_only(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Relative path within the worktree to read."
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Line offset to start reading from (0-based)."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of lines to return."
+            }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(true)
     .with_timeout_ms(30_000)

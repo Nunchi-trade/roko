@@ -28,7 +28,30 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Read,
         ToolPermission::read_only(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Substring or pattern to search for in file contents."
+            },
+            "path": {
+                "type": "string",
+                "description": "Optional subdirectory to narrow the search scope."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["content", "files_with_matches", "count"],
+                "description": "Output mode: 'content' shows matching lines, 'files_with_matches' shows paths, 'count' shows per-file counts. Default: 'content'."
+            },
+            "include": {
+                "type": "string",
+                "description": "Glob filter for files to search (e.g. \"*.rs\")."
+            }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(true)
     .with_timeout_ms(60_000)

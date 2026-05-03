@@ -1408,7 +1408,7 @@ title = "Add crate ROKO-CORE"
                 .iter()
                 .filter(|diag| diag.rule_id == "PLAN_033")
                 .count(),
-            1
+            2
         );
         assert!(
             diagnostics.iter().any(|diag| {
@@ -1466,7 +1466,7 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
             validate_plans_dir_with_workdir(root.join("plans").as_path(), None, Some(root))
                 .unwrap();
 
-        assert_eq!(report.totals.errors, 3);
+        assert_eq!(report.totals.errors, 4);
         assert!(report.plans.iter().any(|plan| {
             plan.diagnostics
                 .iter()

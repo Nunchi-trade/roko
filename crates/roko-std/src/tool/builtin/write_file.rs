@@ -27,7 +27,21 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Write,
         ToolPermission::writes(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Relative path within the worktree to write."
+            },
+            "content": {
+                "type": "string",
+                "description": "The full file content to write."
+            }
+        },
+        "required": ["path", "content"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(false)
     .with_timeout_ms(30_000)

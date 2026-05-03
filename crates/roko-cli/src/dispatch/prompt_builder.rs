@@ -149,7 +149,10 @@ impl GateFeedback {
             compile_errors,
             test_failures,
             clippy_warnings,
-            raw_output: raw.chars().take(4096).collect(),
+            raw_output: raw
+                .chars()
+                .take(roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT)
+                .collect(),
         })
     }
 }
@@ -1196,6 +1199,7 @@ mod tests {
             budget_remaining_usd: 5.0,
             attempt: 0,
             gate_feedback: None,
+            routing_context: None,
         }
     }
 

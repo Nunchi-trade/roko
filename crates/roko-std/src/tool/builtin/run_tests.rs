@@ -27,7 +27,25 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Exec,
         ToolPermission::executes(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "build": {
+                "type": "string",
+                "enum": ["cargo", "npm", "go", "pytest", "forge", "make"],
+                "description": "Build system to use for running tests (default: 'cargo')."
+            },
+            "filter": {
+                "type": "string",
+                "description": "Test name filter / pattern to run a subset of tests."
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "description": "Optional timeout override in milliseconds."
+            }
+        },
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(false)
     .with_timeout_ms(600_000)

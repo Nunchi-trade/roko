@@ -88,7 +88,17 @@ impl Drop for SnapshotWriter {
         // Drop the sender to close the channel, then join the writer thread.
         self.tx.take();
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            if let Err(panic_payload) = handle.join() {
+                let msg = panic_payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic");
+                error!(
+                    panic = %msg,
+                    "snapshot-writer thread panicked — recent snapshots may be lost"
+                );
+            }
         }
     }
 }

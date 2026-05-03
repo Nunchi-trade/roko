@@ -25,7 +25,17 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Meta,
         ToolPermission::default(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "plan": {
+                "type": "string",
+                "description": "The drafted implementation plan text to submit for approval."
+            }
+        },
+        "required": ["plan"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(true)
     .with_timeout_ms(5_000)

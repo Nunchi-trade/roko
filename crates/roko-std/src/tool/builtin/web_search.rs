@@ -48,7 +48,21 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Network,
         ToolPermission::networked(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query to send to the search provider."
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "Maximum number of results to return (default: 5)."
+            }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(true)
     .with_timeout_ms(30_000)

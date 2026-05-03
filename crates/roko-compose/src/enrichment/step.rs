@@ -10,6 +10,9 @@ use std::fmt;
 ///
 /// Determines which model family to use for default model selection.
 /// Callers must construct this explicitly (no `Default` impl).
+///
+/// Prefer deriving via `LlmBackend::from(AgentBackend)` or
+/// `LlmBackend::from(ProviderKind)` instead of ad-hoc substring matching.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LlmBackend {
     /// Anthropic Claude models.
@@ -20,6 +23,26 @@ pub enum LlmBackend {
     Cursor,
     /// Local models via Ollama (Gemma, Llama, Qwen, etc.).
     Ollama,
+}
+
+impl From<roko_core::agent::AgentBackend> for LlmBackend {
+    fn from(backend: roko_core::agent::AgentBackend) -> Self {
+        use roko_core::agent::AgentBackend;
+        match backend {
+            AgentBackend::Claude => Self::Claude,
+            AgentBackend::Codex | AgentBackend::OpenAi | AgentBackend::Cerebras => Self::Codex,
+            AgentBackend::Cursor => Self::Cursor,
+            AgentBackend::Ollama => Self::Ollama,
+            AgentBackend::Perplexity => Self::Codex,
+            _ => Self::Codex,
+        }
+    }
+}
+
+impl From<roko_core::agent::ProviderKind> for LlmBackend {
+    fn from(kind: roko_core::agent::ProviderKind) -> Self {
+        Self::from(kind.to_backend())
+    }
 }
 
 /// An individual enrichment step in the pipeline.

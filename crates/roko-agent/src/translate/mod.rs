@@ -183,8 +183,11 @@ impl BackendResponse {
                                     ev.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
                                 buf.push_str(&format!("\n[{tool_name}]\n"));
                                 // Truncate very large outputs
-                                if content.len() > 4096 {
-                                    let mut end = 4096;
+                                if content.len()
+                                    > roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT
+                                {
+                                    let mut end =
+                                        roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT;
                                     while !content.is_char_boundary(end) {
                                         end -= 1;
                                     }
@@ -251,16 +254,16 @@ impl BackendResponse {
                 .or_else(|| ev.get("output").and_then(|o| o.as_str()));
             if let Some(content) = content.filter(|s| !s.is_empty()) {
                 let tool_name = ev.get("tool").and_then(|t| t.as_str()).map(String::from);
-                // Truncate very large outputs
-                let truncated = if content.len() > 4096 {
-                    let mut end = 4096;
-                    while !content.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    format!("{}...[truncated]", &content[..end])
-                } else {
-                    content.to_string()
-                };
+                let truncated =
+                    if content.len() > roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT {
+                        let mut end = roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT;
+                        while !content.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...[truncated]", &content[..end])
+                    } else {
+                        content.to_string()
+                    };
                 outputs.push((tool_name, truncated));
             }
         }

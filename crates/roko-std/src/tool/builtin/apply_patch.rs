@@ -33,7 +33,21 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Write,
         ToolPermission::writes(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Relative path to the file to patch."
+            },
+            "patch": {
+                "type": "string",
+                "description": "Unified-diff patch content (single file). Context lines must match exactly."
+            }
+        },
+        "required": ["path", "patch"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(false)
     .with_timeout_ms(60_000)

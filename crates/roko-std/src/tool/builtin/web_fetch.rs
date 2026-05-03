@@ -35,7 +35,22 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Network,
         ToolPermission::networked(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "The URL to fetch (HTTP or HTTPS)."
+            },
+            "headers": {
+                "type": "object",
+                "description": "Optional HTTP headers to include.",
+                "additionalProperties": { "type": "string" }
+            }
+        },
+        "required": ["url"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(true)
     .with_timeout_ms(30_000)

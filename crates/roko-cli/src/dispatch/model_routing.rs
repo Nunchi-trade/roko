@@ -25,7 +25,9 @@
 use std::sync::Arc;
 
 use roko_core::agent::ModelSpec;
+use roko_core::task::TaskComplexityBand;
 use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::model_router::RoutingContext;
 
 use super::DispatchContext;
 use super::outcome::DispatchError;
@@ -56,6 +58,9 @@ pub struct RoutingInputs {
     pub attempt: u32,
     /// Role label.
     pub role: String,
+    /// Full routing context for the CascadeRouter. When `Some`, the router
+    /// calls `CascadeRouter::route()` instead of falling back to the default.
+    pub routing_context: Option<RoutingContext>,
 }
 
 impl RoutingInputs {
@@ -70,6 +75,7 @@ impl RoutingInputs {
             budget_remaining_usd: ctx.budget_remaining_usd,
             attempt: ctx.attempt,
             role: ctx.role.clone(),
+            routing_context: ctx.routing_context.clone(),
         }
     }
 }
@@ -175,21 +181,33 @@ impl ModelRouter {
                 source: ModelChoiceSource::TaskHint,
             });
         }
-        if let Some(_router) = self.cascade.as_ref() {
-            // The full cascade router needs a `RoutingContext` (LinUCB
-            // feature vector). The runner is not yet computing those
-            // features end-to-end (see `.roko/GAPS.md`). For now,
-            // surface the deterministic default and let the runner-side
-            // wiring upgrade this call when the feature pipeline lands.
+        if let Some(router) = self.cascade.as_ref() {
+            if let Some(ctx) = &inputs.routing_context {
+                let cascade_model = router.route(ctx);
+                return Ok(ModelChoice {
+                    model: cascade_model.primary,
+                    source: ModelChoiceSource::Router,
+                });
+            }
+            // No RoutingContext → degrade to default (CI, smoke tests).
             return Ok(ModelChoice {
                 model: ModelSpec::from_slug(&self.default_slug),
-                source: ModelChoiceSource::Router,
+                source: ModelChoiceSource::Default,
             });
         }
         Ok(ModelChoice {
             model: ModelSpec::from_slug(&self.default_slug),
             source: ModelChoiceSource::Default,
         })
+    }
+}
+
+/// Map a task tier string to a [`TaskComplexityBand`].
+pub(crate) fn tier_to_complexity(tier: &str) -> TaskComplexityBand {
+    match tier {
+        "focused" | "quick" | "trivial" => TaskComplexityBand::Fast,
+        "deep" | "architectural" | "complex" => TaskComplexityBand::Complex,
+        _ => TaskComplexityBand::Standard,
     }
 }
 
@@ -239,6 +257,7 @@ mod tests {
             budget_remaining_usd: 5.0,
             attempt: 0,
             gate_feedback: None,
+            routing_context: None,
         }
     }
 
@@ -275,5 +294,77 @@ mod tests {
         let choice = router.route(&inputs).unwrap();
         assert_eq!(choice.model.slug, "custom-default");
         assert_eq!(choice.source, ModelChoiceSource::Default);
+    }
+
+    fn routing_context() -> RoutingContext {
+        use roko_core::task::TaskCategory;
+        use roko_core::{AgentRole, BehavioralState, DaimonPolicy};
+
+        RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 0,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            conductor_load: 0.0,
+            active_agents: 0,
+            ready_queue_depth: 0,
+            max_queue_wait_hours: 0.0,
+            daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
+            thinking_level: None,
+            temperament: None,
+            previous_model: None,
+            plan_context_tokens: None,
+            tier_thresholds: None,
+        }
+    }
+
+    #[test]
+    fn cascade_router_called_when_context_present() {
+        let cascade = Arc::new(CascadeRouter::new(vec![
+            "claude-sonnet-4-6".into(),
+            "gpt-5".into(),
+        ]));
+        let router = ModelRouter::new(Some(cascade));
+        let mut inputs = RoutingInputs::from_task(&task(), &ctx());
+        inputs.routing_context = Some(routing_context());
+        let choice = router.route(&inputs).unwrap();
+        assert_eq!(choice.source, ModelChoiceSource::Router);
+        // CascadeRouter picks from the configured slugs.
+        assert!(
+            choice.model.slug == "claude-sonnet-4-6" || choice.model.slug == "gpt-5",
+            "expected one of the configured slugs, got {:?}",
+            choice.model.slug,
+        );
+    }
+
+    #[test]
+    fn no_context_degrades_to_default() {
+        let cascade = Arc::new(CascadeRouter::new(vec![
+            "claude-sonnet-4-6".into(),
+            "gpt-5".into(),
+        ]));
+        let router = ModelRouter::new(Some(cascade)).with_default_slug("fallback-model");
+        let inputs = RoutingInputs::from_task(&task(), &ctx());
+        // routing_context is None via from_task()
+        let choice = router.route(&inputs).unwrap();
+        assert_eq!(choice.model.slug, "fallback-model");
+        assert_eq!(choice.source, ModelChoiceSource::Default);
+    }
+
+    #[test]
+    fn tier_to_complexity_mapping() {
+        assert_eq!(tier_to_complexity("focused"), TaskComplexityBand::Fast);
+        assert_eq!(tier_to_complexity("quick"), TaskComplexityBand::Fast);
+        assert_eq!(tier_to_complexity("trivial"), TaskComplexityBand::Fast);
+        assert_eq!(tier_to_complexity("deep"), TaskComplexityBand::Complex);
+        assert_eq!(
+            tier_to_complexity("architectural"),
+            TaskComplexityBand::Complex
+        );
+        assert_eq!(tier_to_complexity("complex"), TaskComplexityBand::Complex);
+        assert_eq!(tier_to_complexity("standard"), TaskComplexityBand::Standard);
+        assert_eq!(tier_to_complexity("anything"), TaskComplexityBand::Standard);
     }
 }

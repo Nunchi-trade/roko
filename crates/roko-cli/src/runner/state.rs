@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use std::time::Instant;
 
+use roko_learn::model_router::RoutingContext;
+
 use super::types::{
     AgentDispatchOutcome, PlanLifecycleStatus, RetryAction, RunnerEvent, RunnerFailureKind,
     RunnerLifecycleProjection, RunnerRunStatus, TaskAttemptLifecycle, TaskAttemptOutcome,
@@ -112,6 +114,12 @@ pub struct RunState {
     /// run. Populated once at startup so `run-state.json` snapshots
     /// always carry the data the strict resume validator needs.
     pub task_fingerprints: Vec<super::persist::TaskDefFingerprint>,
+
+    // ─── Routing ─────────────────────────────────────────────────────
+    /// Dispatch-time routing context for the current task. Stored here
+    /// so `FeedbackEvent::TaskCompleted` can carry the real feature
+    /// vector to the CascadeRouter's bandit.
+    pub routing_context: Option<RoutingContext>,
 }
 
 impl RunState {
@@ -155,6 +163,7 @@ impl RunState {
             task_started_at: Instant::now(),
             replan_contexts: HashMap::new(),
             task_fingerprints: Vec::new(),
+            routing_context: None,
         }
     }
 
@@ -389,6 +398,7 @@ impl RunState {
         self.gate_output.clear();
         self.iteration = 0;
         self.task_started_at = Instant::now();
+        self.routing_context = None;
     }
 
     /// Record a completed task, rolling per-task stats into totals.
