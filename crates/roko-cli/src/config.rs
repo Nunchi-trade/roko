@@ -2717,36 +2717,7 @@ pub struct ConfigPaths {
 /// path so that `init` writes to the right place.
 #[must_use]
 pub fn global_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let canonical = PathBuf::from(&home).join(".roko").join("config.toml");
-
-    if canonical.exists() {
-        return canonical;
-    }
-
-    // Legacy: $XDG_CONFIG_HOME/roko/config.toml or ~/.config/roko/config.toml
-    let legacy = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            PathBuf::from(xdg).join("roko").join("config.toml")
-        } else {
-            PathBuf::from(&home)
-                .join(".config")
-                .join("roko")
-                .join("config.toml")
-        }
-    } else {
-        PathBuf::from(&home)
-            .join(".config")
-            .join("roko")
-            .join("config.toml")
-    };
-
-    if legacy.exists() {
-        return legacy;
-    }
-
-    // Neither exists — return canonical for new installs.
-    canonical
+    roko_core::config::loader::global_config_path()
 }
 
 /// Merge providers and models from the global config into `config`.
@@ -2755,55 +2726,13 @@ pub fn global_config_path() -> PathBuf {
 /// gets inserted. This lets project `roko.toml` files override specific
 /// entries while inheriting the rest from `~/.roko/config.toml`.
 pub fn merge_global_providers(config: &mut roko_core::config::schema::RokoConfig) {
-    let global_path = global_config_path();
-    if !global_path.exists() {
-        return;
-    }
-    let text = match std::fs::read_to_string(&global_path) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(path = %global_path.display(), error = %e, "failed to read global config");
-            return;
-        }
-    };
-    let global = match roko_core::config::schema::RokoConfig::from_toml(&text) {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::warn!(path = %global_path.display(), error = %e, "failed to parse global config");
-            return;
-        }
-    };
-    for (name, provider) in global.providers {
-        config.providers.entry(name).or_insert(provider);
-    }
-    for (name, model) in global.models {
-        config.models.entry(name).or_insert(model);
-    }
-    // Merge agent defaults when the project config doesn't set them.
-    if config.agent.default_model.is_empty() && !global.agent.default_model.is_empty() {
-        config.agent.default_model = global.agent.default_model;
-    }
-    if config.agent.default_backend.is_empty() && !global.agent.default_backend.is_empty() {
-        config.agent.default_backend = global.agent.default_backend;
-    }
+    roko_core::config::loader::merge_global_into(config);
 }
 
 /// Walk up from `start` looking for `roko.toml`. Returns the first hit.
 #[must_use]
 pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
-    let mut cur = start
-        .canonicalize()
-        .ok()
-        .unwrap_or_else(|| start.to_path_buf());
-    loop {
-        let candidate = cur.join("roko.toml");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !cur.pop() {
-            return None;
-        }
-    }
+    roko_core::config::loader::discover_project_config(start)
 }
 
 /// Compute the paths used to resolve config for `workdir`.
