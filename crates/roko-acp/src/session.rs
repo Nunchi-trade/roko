@@ -636,6 +636,57 @@ impl AcpSession {
         }
         self.config_options = build_config_options(&self.config_state, roko_config);
     }
+
+    /// Reconcile persisted provider/model selections with the current config.
+    pub fn revalidate_config_state(&mut self, roko_config: &roko_core::config::schema::RokoConfig) {
+        let provider_valid = !self.config_state.provider.is_empty()
+            && roko_config
+                .providers
+                .contains_key(&self.config_state.provider);
+        if !provider_valid {
+            let replacement = SessionConfigState::from_roko_config(roko_config);
+            if self.config_state.provider != replacement.provider
+                || self.config_state.model != replacement.model
+            {
+                tracing::info!(
+                    old_provider = %self.config_state.provider,
+                    old_model = %self.config_state.model,
+                    new_provider = %replacement.provider,
+                    new_model = %replacement.model,
+                    "persisted ACP provider/model no longer valid, resetting to config defaults"
+                );
+            }
+            self.config_state.provider = replacement.provider;
+            self.config_state.model = replacement.model;
+            self.config_options = build_config_options(&self.config_state, roko_config);
+            return;
+        }
+
+        let model_valid = roko_config
+            .models
+            .get(&self.config_state.model)
+            .is_some_and(|profile| profile.provider == self.config_state.provider);
+        if !model_valid {
+            let replacement_model = roko_config
+                .models
+                .iter()
+                .filter(|(_, profile)| profile.provider == self.config_state.provider)
+                .map(|(key, _)| key.clone())
+                .min()
+                .unwrap_or_default();
+            if self.config_state.model != replacement_model {
+                tracing::info!(
+                    provider = %self.config_state.provider,
+                    old_model = %self.config_state.model,
+                    new_model = %replacement_model,
+                    "persisted ACP model no longer valid, resetting for provider"
+                );
+            }
+            self.config_state.model = replacement_model;
+        }
+
+        self.config_options = build_config_options(&self.config_state, roko_config);
+    }
 }
 
 /// Errors produced by [`SessionManager`].
@@ -766,6 +817,7 @@ impl SessionManager {
             .join(format!("{session_id}.json"));
         let data = std::fs::read_to_string(&path).ok()?;
         let mut session: AcpSession = serde_json::from_str(&data).ok()?;
+        session.revalidate_config_state(&self.roko_config);
         session.cached_conventions = AcpSession::load_conventions(&self.workdir);
         session.always_allowed = AcpSession::load_workspace_trust(&self.workdir);
         Some(session)
@@ -1393,6 +1445,37 @@ mod tests {
             .unwrap_or_default()
     }
 
+    fn config_with_provider_model(
+        provider_key: &str,
+        model_key: &str,
+    ) -> roko_core::config::schema::RokoConfig {
+        roko_core::config::schema::RokoConfig::from_toml(&format!(
+            r#"
+config_version = 2
+schema_version = 2
+
+[providers.{provider_key}]
+kind = "openai_compat"
+base_url = "https://example.test/v1"
+api_key_env = ""
+
+[models.{model_key}]
+provider = "{provider_key}"
+slug = "{model_key}-slug"
+context_window = 8192
+"#
+        ))
+        .expect("test config should parse")
+    }
+
+    fn write_persisted_session(workdir: &std::path::Path, session: &AcpSession) {
+        let sessions_dir = workdir.join(".roko").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let path = sessions_dir.join(format!("{}.json", session.session_id));
+        let json = serde_json::to_string_pretty(session).expect("serialize session");
+        std::fs::write(path, json).expect("write session");
+    }
+
     #[test]
     fn empty_config_does_not_offer_static_provider_or_model() {
         let session =
@@ -1432,6 +1515,58 @@ mod tests {
         assert!(session.config_state.model.is_empty());
         assert!(option_values(&options, "provider").is_empty());
         assert!(option_values(&options, "model").is_empty());
+    }
+
+    #[test]
+    fn load_session_resets_stale_persisted_provider_and_model() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let current_config = config_with_provider_model("current-provider", "current-model");
+        let mut stale_session = AcpSession::new(session_params("stale-provider"));
+        stale_session.session_id = "sess_stale_provider".to_owned();
+        stale_session.config_state.provider = "removed-provider".to_owned();
+        stale_session.config_state.model = "removed-model".to_owned();
+        write_persisted_session(tmp.path(), &stale_session);
+
+        let mut manager = SessionManager::new(tmp.path().to_path_buf(), current_config);
+        manager
+            .load_session("sess_stale_provider")
+            .expect("session should load");
+        let loaded = manager
+            .get_session("sess_stale_provider")
+            .expect("session should be in memory");
+
+        assert_eq!(loaded.config_state.provider, "current-provider");
+        assert_eq!(loaded.config_state.model, "current-model");
+        assert_eq!(
+            option_values(&loaded.config_options(), "provider"),
+            vec!["current-provider".to_owned()]
+        );
+        assert_eq!(
+            option_values(&loaded.config_options(), "model"),
+            vec!["current-model".to_owned()]
+        );
+    }
+
+    #[test]
+    fn load_session_resets_stale_persisted_model_for_valid_provider() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let current_config = config_with_provider_model("current-provider", "current-model");
+        let mut stale_session = AcpSession::new(session_params("stale-model"));
+        stale_session.session_id = "sess_stale_model".to_owned();
+        stale_session.config_state.provider = "current-provider".to_owned();
+        stale_session.config_state.model = "removed-model".to_owned();
+        write_persisted_session(tmp.path(), &stale_session);
+
+        let mut manager = SessionManager::new(tmp.path().to_path_buf(), current_config);
+        manager
+            .load_session("sess_stale_model")
+            .expect("session should load");
+        let loaded = manager
+            .get_session("sess_stale_model")
+            .expect("session should be in memory");
+
+        assert_eq!(loaded.config_state.provider, "current-provider");
+        assert_eq!(loaded.config_state.model, "current-model");
     }
 
     #[test]
