@@ -10,6 +10,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context as _, Result as AnyhowResult};
 use roko_agent::AgentRuntimeEvent;
@@ -18,9 +19,14 @@ use roko_agent::provider::{AgentOptions, ProviderSemaphores};
 use roko_agent::{Agent, AgentResult, create_agent_for_model};
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::foundation::{FeedbackEvent, FeedbackSink};
 use roko_core::{Body, Context, Engram, Kind};
+use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::feedback_service::FeedbackService;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+
+use crate::learning_helpers::{capture_runtime_model_slugs, record_persisted_provider_health};
 
 /// A single tool execution output captured from a dispatch response.
 #[derive(Debug, Clone)]
@@ -764,7 +770,17 @@ impl AgentDispatcherV2 {
         let input = Engram::builder(Kind::Prompt)
             .body(Body::text(request.prompt.clone()))
             .build();
+        let started = Instant::now();
         let result = created.agent.run(&input, &Context::now()).await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        record_agent_dispatch_feedback(
+            &self.config,
+            &request,
+            &created.target,
+            &result,
+            latency_ms,
+        )
+        .await;
         let events = dispatch_events_from_result(&request, &created.target, &result);
         Ok(AgentResultDispatch {
             target: created.target,
@@ -810,10 +826,12 @@ impl AgentDispatcherV2 {
         let input = Engram::builder(Kind::Prompt)
             .body(Body::text(request.prompt.clone()))
             .build();
+        let started = Instant::now();
         let result = created
             .agent
             .run_streaming(&input, &Context::now(), chunk_tx)
             .await;
+        let latency_ms = started.elapsed().as_millis() as u64;
 
         // Wait for forwarder to drain remaining chunks.
         let _ = forwarder.await;
@@ -853,6 +871,15 @@ impl AgentDispatcherV2 {
             })
             .await;
 
+        record_agent_dispatch_feedback(
+            &self.config,
+            &request,
+            &created.target,
+            &result,
+            latency_ms,
+        )
+        .await;
+
         Ok(result)
     }
 
@@ -889,7 +916,10 @@ impl AgentDispatcherV2 {
         let input = Engram::builder(Kind::Prompt)
             .body(Body::text(request.prompt.clone()))
             .build();
+        let started = Instant::now();
         let result = agent.run(&input, &Context::now()).await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        record_agent_dispatch_feedback(&self.config, &request, &target, &result, latency_ms).await;
         let events = dispatch_events_from_result(&request, &target, &result);
         Ok(AgentResultDispatch {
             target,
@@ -917,6 +947,91 @@ impl AgentDispatcherV2 {
             name: request.agent_id.clone(),
             ..Default::default()
         }
+    }
+}
+
+async fn record_agent_dispatch_feedback(
+    config: &RokoConfig,
+    request: &AgentDispatchRequest,
+    target: &ProviderDispatchSpec,
+    result: &AgentResult,
+    latency_ms: u64,
+) {
+    let cascade_path = request
+        .workdir
+        .join(".roko")
+        .join("learn")
+        .join("cascade-router.json");
+    let cascade_model_slugs = capture_runtime_model_slugs(config, &target.model_slug);
+    let cascade_router = (!cascade_model_slugs.is_empty()).then(|| {
+        Arc::new(CascadeRouter::load_or_new(
+            &cascade_path,
+            cascade_model_slugs,
+        ))
+    });
+    let mut feedback_service = FeedbackService::from_roko_dir(&request.workdir.join(".roko"));
+    if let Some(router) = &cascade_router {
+        feedback_service = feedback_service.with_cascade_router(Arc::clone(router));
+    }
+
+    let turn_tokens = u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
+    if let Err(error) = feedback_service
+        .record(FeedbackEvent::ModelCall {
+            run_id: None,
+            request_id: Some(format!("dispatch-v2-{}", request.agent_id)),
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
+            model: Some(target.model_slug.clone()),
+            provider: Some(target.provider_id.clone()),
+            token_usage: Some(turn_tokens),
+            cost: Some(f64::from(result.usage.cost_usd)),
+            role: "dispatch_v2".to_string(),
+            input_tokens: u64::from(result.usage.input_tokens),
+            output_tokens: u64::from(result.usage.output_tokens),
+            cost_usd: f64::from(result.usage.cost_usd),
+            latency_ms,
+            success: result.success,
+        })
+        .await
+    {
+        tracing::warn!(
+            provider = %target.provider_id,
+            model = %target.model_slug,
+            agent_id = %request.agent_id,
+            error = %error,
+            "failed to record dispatch-v2 feedback"
+        );
+    }
+
+    if let Err(error) =
+        record_persisted_provider_health(&request.workdir, &target.provider_id, result.success)
+    {
+        tracing::warn!(
+            provider = %target.provider_id,
+            model = %target.model_slug,
+            agent_id = %request.agent_id,
+            error = %error,
+            "failed to persist dispatch-v2 provider health"
+        );
+    }
+
+    if let Err(error) = feedback_service.flush_async().await {
+        tracing::warn!(
+            provider = %target.provider_id,
+            model = %target.model_slug,
+            agent_id = %request.agent_id,
+            error = %error,
+            "failed to flush dispatch-v2 feedback"
+        );
+    }
+    if let Some(router) = &cascade_router
+        && let Err(error) = router.save(&cascade_path)
+    {
+        tracing::warn!(
+            path = %cascade_path.display(),
+            error = %error,
+            "failed to persist dispatch-v2 cascade observation"
+        );
     }
 }
 
@@ -1233,6 +1348,24 @@ impl Error for DispatchV2Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::defaults::{
+        DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS,
+    };
+    use tempfile::tempdir;
+
+    fn write_fake_claude_script(tmp: &tempfile::TempDir, body: &str) -> PathBuf {
+        let script = tmp.path().join("claude-fake.sh");
+        std::fs::write(&script, body).expect("write fake claude script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).expect("chmod");
+        }
+        script
+    }
 
     #[test]
     fn legacy_runner_program_detects_codex_only_by_executable_name() {
@@ -1263,5 +1396,93 @@ mod tests {
         assert_eq!(invocation.protocol, CliProtocol::CodexExecJson);
         assert!(invocation.args.iter().any(|arg| arg == "--model"));
         assert_eq!(invocation.stdin, "system\n\n---\n\nimplement it");
+    }
+
+    #[tokio::test]
+    async fn run_agent_result_bridge_records_feedback_and_provider_health() {
+        let tmp = tempdir().expect("tempdir");
+        let script = write_fake_claude_script(
+            &tmp,
+            r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"content_block_delta","delta":{"text":"dispatch-ok"}}'
+"#,
+        );
+
+        let mut config = RokoConfig::default();
+        config.providers.clear();
+        config.models.clear();
+        config.agent.default_model = "dispatch-model".to_string();
+        config.providers.insert(
+            "dispatch-cli".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::ClaudeCli,
+                base_url: None,
+                api_key_env: None,
+                command: Some(script.display().to_string()),
+                args: None,
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        config.models.insert(
+            "dispatch-model".to_string(),
+            ModelProfile {
+                provider: "dispatch-cli".to_string(),
+                slug: "claude-sonnet-4-6".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let request = AgentDispatchRequest {
+            model_key: "dispatch-model".to_string(),
+            prompt: "do work".to_string(),
+            system_prompt: "system".to_string(),
+            workdir: tmp.path().to_path_buf(),
+            agent_id: "dispatch-agent".to_string(),
+            command: None,
+            timeout_ms: Some(5_000),
+            mcp_config: None,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            effort: None,
+            tools: None,
+            bare_mode: false,
+            dangerously_skip_permissions: false,
+        };
+        let dispatcher = AgentDispatcherV2::new(Arc::new(config));
+
+        let dispatch = dispatcher
+            .run_agent_result_bridge(request)
+            .await
+            .expect("dispatch");
+
+        assert!(dispatch.result.success);
+        assert_eq!(
+            dispatch.result.output.body.as_text().unwrap_or(""),
+            "dispatch-ok"
+        );
+
+        let efficiency_path = tmp.path().join(".roko/learn/efficiency.jsonl");
+        let efficiency = std::fs::read_to_string(&efficiency_path).expect("read efficiency");
+        assert!(efficiency.contains(r#""kind":"model_call""#));
+        assert!(efficiency.contains(r#""role":"dispatch_v2""#));
+        assert!(efficiency.contains(r#""model":"claude-sonnet-4-6""#));
+        assert!(efficiency.contains(r#""provider":"dispatch-cli""#));
+        assert!(efficiency.contains(r#""success":true"#));
+
+        let provider_health =
+            std::fs::read_to_string(tmp.path().join(".roko/learn/provider-health.json"))
+                .expect("read provider health");
+        assert!(provider_health.contains("dispatch-cli"));
+
+        let cascade_router =
+            std::fs::read_to_string(tmp.path().join(".roko/learn/cascade-router.json"))
+                .expect("read cascade router");
+        assert!(cascade_router.contains("claude-sonnet-4-6"));
     }
 }
