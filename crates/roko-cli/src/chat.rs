@@ -8,7 +8,8 @@
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
@@ -250,14 +251,35 @@ pub async fn run_direct_provider_chat(
     config: &roko_core::config::schema::RokoConfig,
     workdir: &Path,
 ) -> Result<()> {
+    use crate::learning_helpers::{capture_runtime_model_slugs, record_persisted_provider_health};
     use roko_agent::provider::{AgentOptions, create_agent_for_model};
+    use roko_core::agent::resolve_model;
+    use roko_core::foundation::{FeedbackEvent, FeedbackSink};
     use roko_core::{Body, Context, Engram, Kind};
+    use roko_learn::cascade_router::CascadeRouter;
+    use roko_learn::feedback_service::FeedbackService;
 
     let model_key = find_model_for_provider(config, provider_name).ok_or_else(|| {
         anyhow::anyhow!(
             "no model configured for provider '{provider_name}'; add a [[models]] entry with provider = \"{provider_name}\" in roko.toml"
         )
     })?;
+    let model_slug = resolve_model(config, &model_key).slug;
+    let cascade_path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("cascade-router.json");
+    let cascade_model_slugs = capture_runtime_model_slugs(config, &model_slug);
+    let cascade_router = (!cascade_model_slugs.is_empty()).then(|| {
+        Arc::new(CascadeRouter::load_or_new(
+            &cascade_path,
+            cascade_model_slugs,
+        ))
+    });
+    let mut feedback_service = FeedbackService::from_roko_dir(&workdir.join(".roko"));
+    if let Some(router) = &cascade_router {
+        feedback_service = feedback_service.with_cascade_router(Arc::clone(router));
+    }
 
     let options = AgentOptions {
         name: agent_id.to_string(),
@@ -318,9 +340,49 @@ pub async fn run_direct_provider_chat(
         print!("{indicator} ");
         std::io::stdout().flush().context("flush indicator")?;
 
+        let turn_started = Instant::now();
         let result = agent.run(&engram, &ctx).await;
+        let latency_ms = turn_started.elapsed().as_millis() as u64;
         total_tokens +=
             u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
+        let turn_tokens =
+            u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
+
+        if let Err(error) = feedback_service
+            .record(FeedbackEvent::ModelCall {
+                run_id: None,
+                request_id: Some(format!("direct-chat-{agent_id}-{turn_count}")),
+                prompt_section_ids: Vec::new(),
+                knowledge_ids: Vec::new(),
+                model: Some(model_slug.clone()),
+                provider: Some(provider_name.to_string()),
+                token_usage: Some(turn_tokens),
+                cost: Some(f64::from(result.usage.cost_usd)),
+                role: "chat_direct".to_string(),
+                input_tokens: u64::from(result.usage.input_tokens),
+                output_tokens: u64::from(result.usage.output_tokens),
+                cost_usd: f64::from(result.usage.cost_usd),
+                latency_ms,
+                success: result.success,
+            })
+            .await
+        {
+            tracing::warn!(
+                provider = %provider_name,
+                model = %model_slug,
+                error = %error,
+                "failed to record direct provider chat feedback"
+            );
+        }
+        if let Err(error) = record_persisted_provider_health(workdir, provider_name, result.success)
+        {
+            tracing::warn!(
+                provider = %provider_name,
+                model = %model_slug,
+                error = %error,
+                "failed to persist direct provider chat health"
+            );
+        }
 
         print!("\r\x1b[K");
 
@@ -345,6 +407,23 @@ pub async fn run_direct_provider_chat(
     println!("\nbye.");
 
     let ended_at = Utc::now();
+    if let Err(error) = feedback_service.flush_async().await {
+        tracing::warn!(
+            provider = %provider_name,
+            model = %model_slug,
+            error = %error,
+            "failed to flush direct provider chat feedback"
+        );
+    }
+    if let Some(router) = &cascade_router
+        && let Err(error) = router.save(&cascade_path)
+    {
+        tracing::warn!(
+            path = %cascade_path.display(),
+            error = %error,
+            "failed to persist direct provider chat cascade observation"
+        );
+    }
     let session_id = format!("{}-{}", started_at.format("%Y-%m-%dT%H-%M-%S"), agent_id);
     let summary = SessionSummary {
         session_id,
