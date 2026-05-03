@@ -46,17 +46,11 @@ impl AcpConfig {
     /// handles `ROKO_CONFIG` env var, ancestor walk, global merge, env
     /// overrides, and secret resolution.
     pub fn load_roko_config(&self) -> roko_core::config::schema::RokoConfig {
-        // If explicit config path is set, load from its parent directory.
-        // Otherwise use unified loader (handles ROKO_CONFIG, ancestor walk, global merge).
-        let workdir = self
-            .config_path
-            .as_deref()
-            .and_then(|p| p.parent())
-            .unwrap_or(&self.workdir);
-        roko_core::config::loader::load_config_with_options(
-            workdir,
-            &roko_core::config::loader::LoadOptions::acp(),
-        )
+        let opts = roko_core::config::loader::LoadOptions::acp();
+        match self.config_path.as_deref() {
+            Some(path) => roko_core::config::loader::load_config_file(path, &opts),
+            None => roko_core::config::loader::load_config_with_options(&self.workdir, &opts),
+        }
         .unwrap_or_default()
     }
 }
@@ -69,5 +63,51 @@ impl Default for AcpConfig {
             config_path: None,
             log_file: PathBuf::from(".roko/acp.log"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_roko_config_uses_explicit_config_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("roko.toml"),
+            r#"
+config_version = 2
+schema_version = 2
+
+[providers.parent-provider]
+kind = "openai_compat"
+base_url = "https://parent.example/v1"
+"#,
+        )
+        .expect("write parent roko.toml");
+        let explicit_path = dir.path().join("editor-config.toml");
+        std::fs::write(
+            &explicit_path,
+            r#"
+config_version = 2
+schema_version = 2
+
+[providers.explicit-provider]
+kind = "openai_compat"
+base_url = "https://explicit.example/v1"
+"#,
+        )
+        .expect("write explicit config");
+
+        let acp_config = AcpConfig::new(
+            dir.path(),
+            "default",
+            Some(explicit_path),
+            dir.path().join("acp.log"),
+        );
+        let config = acp_config.load_roko_config();
+
+        assert!(config.providers.contains_key("explicit-provider"));
+        assert!(!config.providers.contains_key("parent-provider"));
     }
 }

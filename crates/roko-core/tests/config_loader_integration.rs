@@ -4,8 +4,8 @@
 //! env var overrides, secret resolution, validation, and serialization roundtrip.
 
 use roko_core::config::loader::{
-    LoadOptions, discover_project_config, load_config_validated, load_config_with_options,
-    serialize_effective,
+    LoadOptions, discover_project_config, load_config_file, load_config_validated,
+    load_config_with_options, serialize_effective,
 };
 use roko_core::config::schema::RokoConfig;
 use std::path::PathBuf;
@@ -81,6 +81,46 @@ api_key_env = "TEST_KEY"
     assert!(config.providers.contains_key("test-provider"));
     let prov = &config.providers["test-provider"];
     assert_eq!(prov.base_url.as_deref(), Some("https://api.test.com/v1"));
+}
+
+#[test]
+fn load_config_file_uses_exact_nonstandard_path() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("roko.toml"),
+        r#"
+config_version = 2
+schema_version = 2
+
+[providers.parent-provider]
+kind = "openai_compat"
+base_url = "https://parent.example/v1"
+"#,
+    )
+    .unwrap();
+    let explicit_path = dir.path().join("explicit-acp.toml");
+    std::fs::write(
+        &explicit_path,
+        r#"
+config_version = 2
+schema_version = 2
+
+[providers.explicit-provider]
+kind = "openai_compat"
+base_url = "https://explicit.example/v1"
+"#,
+    )
+    .unwrap();
+
+    let opts = LoadOptions {
+        merge_global: false,
+        apply_env_overrides: false,
+        strict_validation: false,
+    };
+    let config = load_config_file(&explicit_path, &opts).unwrap();
+
+    assert!(config.providers.contains_key("explicit-provider"));
+    assert!(!config.providers.contains_key("parent-provider"));
 }
 
 #[test]

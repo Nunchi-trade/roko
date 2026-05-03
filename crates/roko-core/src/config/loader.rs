@@ -82,6 +82,15 @@ pub fn load_config_with_options(
     load_from_resolved_path(&path, opts)
 }
 
+/// Load config from one explicit file path.
+///
+/// This bypasses `ROKO_CONFIG` and ancestor discovery but still applies the
+/// processing requested by [`LoadOptions`]: optional global merge, `ROKO__*`
+/// env overrides, interpolation, file secrets, and strict validation.
+pub fn load_config_file(path: &Path, opts: &LoadOptions) -> Result<RokoConfig, LoadConfigError> {
+    load_from_resolved_path(&Some(path.to_path_buf()), opts)
+}
+
 /// Load config with full provenance tracking (for CLI `load_layered` compatibility).
 ///
 /// Returns a [`ValidatedConfig`] with diagnostics and provenance info.
