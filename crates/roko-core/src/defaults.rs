@@ -214,6 +214,20 @@ pub const DEFAULT_DEEP_RESEARCH_MAX_POLL_ATTEMPTS: u32 = 120;
 /// Default provider requests-per-minute limit.
 pub const DEFAULT_PROVIDER_RPM: u32 = 60;
 
+// ── Model slugs ────────────────────────────────────────────────────────
+
+/// Default model for the "deep" / architectural tier.
+pub const MODEL_DEEP: &str = "claude-opus-4-6";
+
+/// Default model for the "focused" / standard implementation tier.
+pub const MODEL_FOCUSED: &str = "claude-sonnet-4-6";
+
+/// Default model for the "mechanical" / fast tier.
+pub const MODEL_FAST: &str = "claude-haiku-4-5";
+
+/// Escalation ladder (mechanical → focused → deep).
+pub const MODEL_ESCALATION_LADDER: [&str; 3] = [MODEL_FAST, MODEL_FOCUSED, MODEL_DEEP];
+
 #[cfg(test)]
 mod tests {
     use super::*;

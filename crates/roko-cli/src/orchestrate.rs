@@ -64,7 +64,7 @@ use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
-    AgentRole, Body, Budget, Compose, ContentHash, Context, Decay, Engram, Kind,
+    AgentRole, Body, Budget, Compose, ContentHash, Context, Decay, Engram, EngramBuilder, Kind,
     OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Store,
     TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, ToolRegistry, Verdict, Verify,
     score_model_for_task,
@@ -5381,7 +5381,7 @@ impl PlanRunner {
                     .tier_models
                     .get("architectural")
                     .cloned()
-                    .unwrap_or_else(|| "claude-opus-4-6".into());
+                    .unwrap_or_else(|| roko_core::defaults::MODEL_DEEP.into());
                 self.replan_plan(&plan_id, &task_id, &failure_summary, &architectural_model)
                     .await
             }
@@ -5747,19 +5747,27 @@ impl PlanRunner {
             );
         }
 
-        // Kill the entire process group to catch grandchild processes.
-        // We temporarily ignore SIGTERM for ourselves so we survive the
-        // group-wide signal and can finish cleanup (persist state, etc.).
+        // Kill grandchild processes spawned by agents (e.g., Claude CLI
+        // subprocesses). §13.4: Only send SIGTERM to our own process group
+        // — if we're not the process group leader, skip the group signal to
+        // avoid killing parent processes (e.g., when roko runs inside an IDE
+        // or shell script).
         #[cfg(unix)]
         {
             #[allow(unsafe_code)]
             unsafe {
-                // Ignore SIGTERM for ourselves before sending to the group.
-                libc::signal(libc::SIGTERM, libc::SIG_IGN);
-                libc::kill(0, libc::SIGTERM);
-                // Restore default SIGTERM disposition after a short delay so
-                // a subsequent Ctrl-C / kill still works.
-                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                let our_pid = libc::getpid();
+                let our_pgid = libc::getpgrp();
+                if our_pid == our_pgid {
+                    // We own the process group — safe to signal it.
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    libc::kill(0, libc::SIGTERM);
+                    libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                } else {
+                    tracing::debug!(
+                        "[orchestrate] skipping group SIGTERM (pid={our_pid} != pgid={our_pgid})"
+                    );
+                }
             }
         }
 
@@ -7508,6 +7516,7 @@ impl PlanRunner {
         // Maximum iterations to prevent infinite loops.
         let max_iterations = 1000;
         let mut iteration = 0;
+        let mut hit_iteration_limit = false;
         let mut heartbeat_clock = HeartbeatClock::new();
         let mut last_progress_print = std::time::Instant::now();
 
@@ -7515,6 +7524,7 @@ impl PlanRunner {
             iteration += 1;
             if iteration > max_iterations {
                 tracing::error!("[orchestrate] hit max iterations ({max_iterations}), stopping");
+                hit_iteration_limit = true;
                 break;
             }
 
@@ -7811,6 +7821,17 @@ impl PlanRunner {
         // Final save before returning.
         if let Err(e) = self.save_state() {
             tracing::error!("[orchestrate] final save failed: {e}");
+        }
+
+        // §13.1: Hitting the iteration limit is an error — the run did not
+        // complete organically. State is preserved for `--resume` but the
+        // caller must know this was not a clean termination.
+        if hit_iteration_limit {
+            anyhow::bail!(
+                "orchestration loop hit max iterations ({max_iterations}); \
+                 {tasks_completed} tasks completed, {tasks_failed} failed — \
+                 state saved for --resume"
+            );
         }
 
         Ok(OrchestrationReport {
@@ -9944,7 +9965,7 @@ impl PlanRunner {
                     .model
                     .clone()
                     .filter(|model| !model.trim().is_empty())
-                    .unwrap_or_else(|| "claude-opus-4-6".into());
+                    .unwrap_or_else(|| roko_core::defaults::MODEL_DEEP.into());
                 (p, m)
             };
 
@@ -10034,15 +10055,47 @@ impl PlanRunner {
                     let prompt_text = cfg.prompt.clone();
                     let system_prompt = cfg.system_prompt.clone();
                     let model = cfg.model.clone();
-                    let dispatch = run_prepared_agent(cfg).instrument(span).await;
-                    ParallelTaskResult {
-                        task_id,
-                        exec_dir,
-                        prompt_text,
-                        system_prompt,
-                        model,
-                        backend_id: dispatch.backend_id,
-                        result: dispatch.result,
+                    // §13.2: Catch panics so JoinError never swallows a task
+                    // result — a panicked agent dispatch becomes a failed task
+                    // with context, not a silent disappearance.
+                    let dispatch_result =
+                        std::panic::AssertUnwindSafe(run_prepared_agent(cfg).instrument(span));
+                    match futures::FutureExt::catch_unwind(dispatch_result).await {
+                        Ok(dispatch) => ParallelTaskResult {
+                            task_id,
+                            exec_dir,
+                            prompt_text,
+                            system_prompt,
+                            model,
+                            backend_id: dispatch.backend_id,
+                            result: dispatch.result,
+                        },
+                        Err(panic_payload) => {
+                            let msg = match panic_payload.downcast_ref::<&str>() {
+                                Some(s) => (*s).to_string(),
+                                None => panic_payload
+                                    .downcast_ref::<String>()
+                                    .cloned()
+                                    .unwrap_or_else(|| "unknown panic".to_string()),
+                            };
+                            tracing::error!(
+                                task_id = %task_id,
+                                "agent task panicked: {msg}"
+                            );
+                            let output = EngramBuilder::new(Kind::AgentOutput)
+                                .body(Body::text(format!("task panicked: {msg}")))
+                                .content_hash(ContentHash::null())
+                                .build();
+                            ParallelTaskResult {
+                                task_id,
+                                exec_dir,
+                                prompt_text,
+                                system_prompt,
+                                model,
+                                backend_id: "panic".to_string(),
+                                result: AgentResult::fail(output),
+                            }
+                        }
                     }
                 });
             }
@@ -10348,7 +10401,7 @@ impl PlanRunner {
             .as_deref()
             .filter(|model| !model.trim().is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| "claude-sonnet-4-6".into())
+            .unwrap_or_else(|| roko_core::defaults::MODEL_FOCUSED.into())
     }
 
     /// Record a custody chain entry for an agent dispatch.
@@ -11824,7 +11877,7 @@ impl PlanRunner {
             .tier_models
             .get("architectural")
             .cloned()
-            .unwrap_or_else(|| "claude-opus-4-6".into());
+            .unwrap_or_else(|| roko_core::defaults::MODEL_DEEP.into());
 
         let strategy = task_def
             .as_ref()
@@ -12935,14 +12988,14 @@ impl PlanRunner {
                 .tier_models
                 .get("focused")
                 .cloned()
-                .unwrap_or_else(|| "claude-sonnet-4-6".into())
+                .unwrap_or_else(|| roko_core::defaults::MODEL_FOCUSED.into())
         } else if current_model.contains("sonnet") {
             self.config
                 .agent
                 .tier_models
                 .get("architectural")
                 .cloned()
-                .unwrap_or_else(|| "claude-opus-4-6".into())
+                .unwrap_or_else(|| roko_core::defaults::MODEL_DEEP.into())
         } else {
             self.config
                 .agent
@@ -13738,8 +13791,8 @@ impl PlanRunner {
             .get(fix_tier)
             .cloned()
             .unwrap_or_else(|| match fix_tier {
-                "mechanical" => "claude-haiku-4-5".into(),
-                _ => "claude-sonnet-4-6".into(),
+                "mechanical" => roko_core::defaults::MODEL_FAST.into(),
+                _ => roko_core::defaults::MODEL_FOCUSED.into(),
             });
 
         let mut fix_prompt = if let Some(td) = task_def {
@@ -14226,7 +14279,7 @@ impl PlanRunner {
     /// Used for any role not handled by a dedicated phase handler.
     async fn handle_generic_agent(&mut self, plan_id: &str, role: AgentRole, task: &str) {
         let max_retries = 3u32;
-        let escalation_models = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"];
+        let escalation_models = roko_core::defaults::MODEL_ESCALATION_LADDER;
         let mut last_error = String::new();
         let mut succeeded = false;
         let started = std::time::Instant::now();
@@ -17642,7 +17695,7 @@ impl PlanRunner {
                 .agent
                 .model
                 .as_deref()
-                .unwrap_or("claude-sonnet-4-20250514")
+                .unwrap_or(roko_core::defaults::MODEL_FOCUSED)
                 .to_string();
             config.llm_judge_oracle = Some(Arc::new(AgentJudgeOracle {
                 command: self.config.agent.command.clone(),

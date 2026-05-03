@@ -151,7 +151,7 @@ impl ModelRouter {
     pub fn new(cascade: Option<Arc<CascadeRouter>>) -> Self {
         Self {
             cascade,
-            default_slug: "claude-sonnet-4-6".to_string(),
+            default_slug: roko_core::defaults::MODEL_FOCUSED.to_string(),
         }
     }
 
