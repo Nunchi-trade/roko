@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
-use roko_core::agent::{ProviderKind, resolve_model};
+use roko_core::agent::resolve_model;
 use roko_core::config::schema::{ProviderConfig, RokoConfig};
 use roko_learn::cascade_router::CascadeRouter;
 use thiserror::Error;
@@ -119,7 +119,7 @@ pub enum Error {
     },
     /// The selected model could not be backed by any configured provider.
     #[error(
-        "{selection_source} selected unknown model '{model}', and no configured provider matches kind '{provider_kind}'"
+        "{selection_source} selected unknown model '{model}' (inferred kind '{provider_kind}'); add an explicit [models.*] entry for this model"
     )]
     UnknownModel {
         /// Which precedence step selected the model.
@@ -358,37 +358,11 @@ fn select_provider<'a>(
         return Ok((provider_key.to_string(), provider));
     }
 
-    let Some((provider_key, provider)) = provider_for_kind(providers, resolved.provider_kind)
-    else {
-        return Err(Error::UnknownModel {
-            selection_source: source,
-            model: model.to_string(),
-            provider_kind: resolved.provider_kind.label().to_string(),
-        });
-    };
-
-    Ok((provider_key, provider))
-}
-
-fn provider_for_kind<'a>(
-    providers: &'a HashMap<String, ProviderConfig>,
-    kind: ProviderKind,
-) -> Option<(String, &'a ProviderConfig)> {
-    let exact_key = kind.label();
-    if let Some(provider) = providers.get(exact_key) {
-        if provider.kind == kind {
-            return Some((exact_key.to_string(), provider));
-        }
-    }
-
-    let mut matches = providers
-        .iter()
-        .filter_map(|(key, provider)| (provider.kind == kind).then_some((key.as_str(), provider)))
-        .collect::<Vec<_>>();
-    matches.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    matches
-        .first()
-        .map(|&(key, provider)| (key.to_string(), provider))
+    Err(Error::UnknownModel {
+        selection_source: source,
+        model: model.to_string(),
+        provider_kind: resolved.provider_kind.label().to_string(),
+    })
 }
 
 fn build_reason(
@@ -408,7 +382,8 @@ fn build_reason(
 mod tests {
     use super::*;
 
-    use roko_core::config::schema::{ModelProfile, RokoConfig, RoleOverride};
+    use roko_core::agent::ProviderKind;
+    use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig, RoleOverride};
     use roko_learn::cascade_router::CascadeRouter;
 
     fn role_model(model: &str) -> RoleOverride {
@@ -426,13 +401,43 @@ mod tests {
         }
     }
 
+    fn claude_provider() -> ProviderConfig {
+        ProviderConfig {
+            kind: ProviderKind::ClaudeCli,
+            base_url: None,
+            api_key_env: None,
+            command: Some("claude".to_string()),
+            args: None,
+            timeout_ms: None,
+            ttft_timeout_ms: None,
+            connect_timeout_ms: None,
+            extra_headers: None,
+            max_concurrent: None,
+        }
+    }
+
+    fn config_with_claude_models() -> RokoConfig {
+        let mut config = RokoConfig::default();
+        config.providers.clear();
+        config.models.clear();
+        config
+            .providers
+            .insert("claude_cli".to_string(), claude_provider());
+        for slug in ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"] {
+            config
+                .models
+                .insert(slug.to_string(), explicit_profile("claude_cli", slug));
+        }
+        config
+    }
+
     fn cascade_router(model: &str) -> CascadeRouter {
         CascadeRouter::new(vec![model.to_string()])
     }
 
     #[test]
     fn cli_override_wins_over_everything() {
-        let mut config = RokoConfig::default();
+        let mut config = config_with_claude_models();
         config.agent.default_model = "claude-opus-4-6".to_string();
         config
             .agent
@@ -464,7 +469,7 @@ mod tests {
 
     #[test]
     fn task_hint_wins_when_no_cli_override() {
-        let mut config = RokoConfig::default();
+        let mut config = config_with_claude_models();
         config
             .agent
             .roles
@@ -493,7 +498,7 @@ mod tests {
 
     #[test]
     fn role_default_used_as_fallback() {
-        let mut config = RokoConfig::default();
+        let mut config = config_with_claude_models();
         config
             .agent
             .roles
@@ -521,7 +526,7 @@ mod tests {
 
     #[test]
     fn cascade_router_is_consulted_when_no_explicit_selection_exists() {
-        let config = RokoConfig::default();
+        let config = config_with_claude_models();
         // Use claude-sonnet-4-6 because cold-start static routing for the
         // Standard tier selects from ["glm-5.1", "claude-sonnet-4-6", ...] and
         // only returns a slug present in the router's model_slugs.
@@ -542,7 +547,7 @@ mod tests {
 
     #[test]
     fn config_default_is_used_when_cascade_is_absent() {
-        let mut config = RokoConfig::default();
+        let mut config = config_with_claude_models();
         config.agent.default_model = "claude-opus-4-6".to_string();
 
         let selection =
@@ -560,7 +565,7 @@ mod tests {
 
     #[test]
     fn builtin_fallback_is_used_when_config_has_no_default() {
-        let mut config = RokoConfig::default();
+        let mut config = config_with_claude_models();
         config.agent.default_model.clear();
         let builtin_default = RokoConfig::default().agent.default_model;
 
@@ -579,7 +584,7 @@ mod tests {
 
     #[test]
     fn display_line_and_json_are_canonical() {
-        let mut config = RokoConfig::default();
+        let mut config = config_with_claude_models();
         config.agent.default_model = "claude-opus-4-6".to_string();
 
         let selection =
@@ -625,9 +630,47 @@ mod tests {
         )
         .expect_err("selection should fail");
 
-        assert!(
-            err.to_string()
-                .contains("no configured provider matches kind")
+        assert!(err.to_string().contains("add an explicit [models.*]"));
+    }
+
+    #[test]
+    fn unknown_model_slug_does_not_route_by_provider_kind() {
+        let mut config = RokoConfig::default();
+        config.models.clear();
+        config.providers.clear();
+        config.providers.insert(
+            "openai_compat".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: None,
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
+                extra_headers: None,
+                max_concurrent: None,
+            },
         );
+
+        let err = resolve_effective_model(
+            Some("gpt-new-unconfigured".to_string()),
+            None,
+            None,
+            None,
+            &config,
+            None,
+        )
+        .expect_err("selection should fail");
+
+        assert!(matches!(
+            &err,
+            Error::UnknownModel {
+                provider_kind,
+                ..
+            } if provider_kind == "openai_compat"
+        ));
+        assert!(err.to_string().contains("explicit [models.*]"));
     }
 }
