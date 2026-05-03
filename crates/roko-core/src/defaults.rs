@@ -71,6 +71,10 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024;
 /// Maximum file read size (10 MB).
 pub const DEFAULT_MAX_FILE_READ_BYTES: usize = 10 * 1024 * 1024;
 
+/// Maximum file write size (5 MB). Prevents agents from writing unbounded
+/// content that could exhaust disk or hit OS limits.
+pub const DEFAULT_MAX_FILE_WRITE_BYTES: usize = 5 * 1024 * 1024;
+
 /// Maximum glob results before truncation.
 pub const DEFAULT_MAX_GLOB_RESULTS: usize = 1_000;
 

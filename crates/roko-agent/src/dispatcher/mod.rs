@@ -58,6 +58,7 @@ use self::timeout::with_timeout;
 use self::truncate::truncate_result;
 use self::validate::validate;
 
+use roko_core::defaults::DEFAULT_MAX_CONCURRENT_TOOLS;
 pub use roko_core::defaults::DEFAULT_MAX_RESULT_BYTES;
 
 /// Pluggable handler lookup: maps a canonical tool name to a
@@ -462,24 +463,28 @@ impl ToolDispatcher {
 
     /// Dispatch a batch of tool calls, grouping by concurrency policy.
     ///
-    /// Parallel-safe tools run via `futures::future::join_all`; serial
-    /// tools run sequentially. The returned vec has parallel results
-    /// first (in the order they completed, not input order), then
-    /// serial results (in input order).
+    /// Parallel-safe tools run concurrently (bounded to
+    /// [`MAX_PARALLEL_TOOL_CALLS`]); serial tools run sequentially.
+    /// Returns parallel results first (completion order), then serial
+    /// results (input order).
     pub async fn dispatch_batch(
         &self,
         calls: Vec<ToolCall>,
         ctx: &ToolContext,
     ) -> Vec<(ToolCall, ToolResult)> {
+        use futures::stream::StreamExt;
+
         let (parallel, serial) = partition_by_concurrency(calls, self.registry.as_ref());
 
-        // Parallel bucket: fan out with join_all.
-        let par_futs = parallel.into_iter().map(|call| async {
+        // Parallel bucket: bounded concurrency to avoid spawning hundreds
+        // of concurrent I/O operations (§12.11).
+        let par_stream = futures::stream::iter(parallel.into_iter().map(|call| async {
             let name = call.clone();
             let res = self.dispatch(call, ctx).await;
             (name, res)
-        });
-        let mut out = futures::future::join_all(par_futs).await;
+        }))
+        .buffer_unordered(DEFAULT_MAX_CONCURRENT_TOOLS);
+        let mut out: Vec<(ToolCall, ToolResult)> = par_stream.collect().await;
 
         // Serial bucket: sequential loop so calls observe each other's side effects.
         for call in serial {
