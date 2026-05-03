@@ -165,6 +165,17 @@ pub fn create_agent_for_model(
 
     let (provider_config, profile) = match (provider_config, profile) {
         (Some(pc), Some(mp)) => (pc, mp),
+        (None, Some(mp)) => {
+            tracing::warn!(
+                model_key = model_key,
+                provider = %mp.provider,
+                "configured model references missing provider"
+            );
+            return Err(AgentCreationError::MissingConfig(format!(
+                "model `{model_key}` references provider `{}` but that provider is not configured",
+                mp.provider
+            )));
+        }
         _ if legacy_command.is_some_and(is_known_protocol_command) => {
             let command = legacy_command.unwrap_or("unknown");
             tracing::warn!(
@@ -1193,6 +1204,32 @@ mod tests {
         };
         assert!(message.contains("explicit [providers] and [models]"));
         assert!(message.contains("claude"));
+    }
+
+    #[test]
+    fn create_agent_for_model_rejects_model_profile_with_missing_provider() {
+        let mut config = RokoConfig::default();
+        config.providers.clear();
+        config.models.clear();
+        config.models.insert(
+            "custom-model".to_string(),
+            ModelProfile {
+                provider: "missing-provider".to_string(),
+                slug: "custom-slug".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let result = create_agent_for_model(&config, "custom-model", AgentOptions::default());
+
+        let Err(error) = result else {
+            panic!("expected missing provider config error");
+        };
+        let AgentCreationError::MissingConfig(message) = error else {
+            panic!("expected missing config error, got {error}");
+        };
+        assert!(message.contains("custom-model"));
+        assert!(message.contains("missing-provider"));
     }
 
     #[tokio::test(start_paused = true)]
