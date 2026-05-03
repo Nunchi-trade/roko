@@ -555,32 +555,47 @@ impl AcpSession {
         match option_id {
             "provider" => {
                 if let Some(s) = new_value.as_str() {
+                    if !roko_config.providers.contains_key(s) {
+                        tracing::warn!(
+                            provider = %s,
+                            "ignoring ACP provider selection that is not in current config"
+                        );
+                        self.config_options = build_config_options(&self.config_state, roko_config);
+                        return;
+                    }
                     self.config_state.provider = s.to_owned();
-                    // If the current model doesn't belong to the new (available) provider,
+                    // If the current model doesn't belong to the new provider,
                     // pick the first model for that provider.
-                    let provider_available = roko_config
-                        .providers
-                        .get(s)
-                        .is_some_and(|p| roko_config.is_provider_available(p));
-                    let model_belongs = provider_available
-                        && roko_config
-                            .models
-                            .get(&self.config_state.model)
-                            .is_some_and(|p| p.provider == s);
-                    if !model_belongs
-                        && let Some(first_key) = roko_config
+                    let model_belongs = roko_config
+                        .models
+                        .get(&self.config_state.model)
+                        .is_some_and(|p| p.provider == s);
+                    if !model_belongs {
+                        self.config_state.model = roko_config
                             .models
                             .iter()
                             .filter(|(_, p)| p.provider == s)
                             .map(|(k, _)| k.clone())
                             .min()
-                    {
-                        self.config_state.model = first_key;
+                            .unwrap_or_default();
                     }
                 }
             }
             "model" => {
                 if let Some(s) = new_value.as_str() {
+                    let model_valid = roko_config
+                        .models
+                        .get(s)
+                        .is_some_and(|profile| profile.provider == self.config_state.provider);
+                    if !model_valid {
+                        tracing::warn!(
+                            model = %s,
+                            provider = %self.config_state.provider,
+                            "ignoring ACP model selection that is not valid for selected provider"
+                        );
+                        self.config_options = build_config_options(&self.config_state, roko_config);
+                        return;
+                    }
                     self.config_state.model = s.to_owned();
                 }
             }
@@ -1507,6 +1522,39 @@ context_window = 8192
         .expect("test config should parse")
     }
 
+    fn config_with_two_providers() -> roko_core::config::schema::RokoConfig {
+        roko_core::config::schema::RokoConfig::from_toml(
+            r#"
+config_version = 2
+schema_version = 2
+
+[agent]
+default_model = "model-a"
+
+[providers.provider-a]
+kind = "openai_compat"
+base_url = "https://a.example.test/v1"
+api_key_env = ""
+
+[providers.provider-b]
+kind = "openai_compat"
+base_url = "https://b.example.test/v1"
+api_key_env = ""
+
+[models.model-a]
+provider = "provider-a"
+slug = "model-a-slug"
+context_window = 8192
+
+[models.model-b]
+provider = "provider-b"
+slug = "model-b-slug"
+context_window = 8192
+"#,
+        )
+        .expect("test config should parse")
+    }
+
     fn write_persisted_session(workdir: &std::path::Path, session: &AcpSession) {
         let sessions_dir = workdir.join(".roko").join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
@@ -1574,6 +1622,42 @@ context_window = 8192
             option_values(&options, "model"),
             vec!["missing-key-model".to_owned()]
         );
+    }
+
+    #[test]
+    fn update_config_ignores_unknown_provider_selection() {
+        let config = config_with_two_providers();
+        let mut session = AcpSession::new_with_config(session_params("provider-update"), &config);
+
+        session.update_config(
+            "provider",
+            &serde_json::Value::String("missing-provider".to_owned()),
+            &config,
+        );
+
+        assert_eq!(session.config_state.provider, "provider-a");
+        assert_eq!(session.config_state.model, "model-a");
+    }
+
+    #[test]
+    fn update_config_ignores_unknown_or_cross_provider_model_selection() {
+        let config = config_with_two_providers();
+        let mut session = AcpSession::new_with_config(session_params("model-update"), &config);
+
+        session.update_config(
+            "model",
+            &serde_json::Value::String("missing-model".to_owned()),
+            &config,
+        );
+        assert_eq!(session.config_state.model, "model-a");
+
+        session.update_config(
+            "model",
+            &serde_json::Value::String("model-b".to_owned()),
+            &config,
+        );
+        assert_eq!(session.config_state.provider, "provider-a");
+        assert_eq!(session.config_state.model, "model-a");
     }
 
     #[test]
