@@ -181,7 +181,7 @@ enum OverflowAction {
 /// reached, the cancel token fires, or the backend errors.
 /// Shared budget guard that can be attached to a [`ToolLoop`] to enforce
 /// budget constraints before each LLM invocation.
-pub type SharedBudgetTracker = Arc<std::sync::Mutex<BudgetTracker>>;
+pub type SharedBudgetTracker = Arc<parking_lot::Mutex<BudgetTracker>>;
 
 #[derive(Clone)]
 pub struct ToolLoop {
@@ -448,19 +448,18 @@ impl ToolLoop {
 
             // LIFE-03: Budget check before each LLM invocation.
             if let Some(ref budget) = self.budget {
-                if let Ok(guard) = budget.lock() {
-                    if guard.check() == BudgetStatus::Exhausted {
-                        let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
-                            .with_session(session.clone());
-                        return ToolLoopOutput {
-                            final_text: String::new(),
-                            iterations,
-                            tool_calls: all_calls,
-                            total_usage,
-                            stop_reason: StopReason::BudgetExhausted,
-                            checkpoint: Some(cp),
-                        };
-                    }
+                let guard = budget.lock();
+                if guard.check() == BudgetStatus::Exhausted {
+                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                        .with_session(session.clone());
+                    return ToolLoopOutput {
+                        final_text: String::new(),
+                        iterations,
+                        tool_calls: all_calls,
+                        total_usage,
+                        stop_reason: StopReason::BudgetExhausted,
+                        checkpoint: Some(cp),
+                    };
                 }
             }
 
@@ -496,28 +495,27 @@ impl ToolLoop {
 
             // LIFE-03: Record turn cost in budget tracker after LLM call.
             if let Some(ref budget) = self.budget {
-                if let Ok(mut guard) = budget.lock() {
-                    let model_name = self
-                        .model_profile
-                        .as_ref()
-                        .map(|p| p.slug.clone())
-                        .unwrap_or_default();
-                    let cost_record = TurnCostRecord {
-                        turn_id: format!("turn-{iterations}"),
-                        model: model_name,
-                        input_tokens: u64::from(turn_usage.input_tokens),
-                        output_tokens: u64::from(turn_usage.output_tokens),
-                        cache_read_tokens: u64::from(turn_usage.cache_read_tokens),
-                        estimated_cost_usd: f64::from(turn_usage.cost_usd),
-                        cognitive_tier: CognitiveTier::Gamma,
-                        t0_suppressed: false,
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0),
-                    };
-                    guard.record_turn(&cost_record);
-                }
+                let mut guard = budget.lock();
+                let model_name = self
+                    .model_profile
+                    .as_ref()
+                    .map(|p| p.slug.clone())
+                    .unwrap_or_default();
+                let cost_record = TurnCostRecord {
+                    turn_id: format!("turn-{iterations}"),
+                    model: model_name,
+                    input_tokens: u64::from(turn_usage.input_tokens),
+                    output_tokens: u64::from(turn_usage.output_tokens),
+                    cache_read_tokens: u64::from(turn_usage.cache_read_tokens),
+                    estimated_cost_usd: f64::from(turn_usage.cost_usd),
+                    cognitive_tier: CognitiveTier::Gamma,
+                    t0_suppressed: false,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                };
+                guard.record_turn(&cost_record);
             }
 
             // Parse tool calls from the response.

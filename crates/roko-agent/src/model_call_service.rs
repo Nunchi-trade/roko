@@ -21,9 +21,11 @@ use roko_core::{
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use parking_lot::{Mutex, RwLock};
 
 type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
 type KnowledgeStoreQuery = dyn Fn(&str, usize) -> Result<Vec<serde_json::Value>> + Send + Sync;
@@ -869,14 +871,17 @@ fn push_unique_model_slug(config: &RokoConfig, fallbacks: &mut Vec<String>, mode
 
 /// L1 in-memory response cache. Keyed by (model, messages, temperature).
 ///
-/// TODO(gateway): L2 semantic cache.
+/// Uses a single `RwLock` over the combined entries + LRU order to eliminate
+/// the dual-mutex deadlock risk from the previous design (§15.2).
 struct CacheCell {
-    /// Maximum number of cached entries.
+    inner: RwLock<CacheCellInner>,
+}
+
+struct CacheCellInner {
     max_entries: usize,
-    /// The cache store. Uses a simple HashMap with LRU eviction.
-    entries: Mutex<HashMap<u64, CachedResponse>>,
-    /// Insertion-order keys for LRU eviction.
-    order: Mutex<Vec<u64>>,
+    entries: HashMap<u64, CachedResponse>,
+    /// Insertion-order keys for LRU eviction (oldest at front).
+    order: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -890,9 +895,11 @@ struct CachedResponse {
 impl CacheCell {
     fn new(max_entries: usize) -> Self {
         Self {
-            max_entries,
-            entries: Mutex::new(HashMap::new()),
-            order: Mutex::new(Vec::new()),
+            inner: RwLock::new(CacheCellInner {
+                max_entries,
+                entries: HashMap::new(),
+                order: Vec::new(),
+            }),
         }
     }
 
@@ -921,49 +928,52 @@ impl CacheCell {
     }
 
     /// Look up a cached response. Returns None on miss.
+    /// On hit, promotes the key to most-recently-used.
     fn lookup(&self, key: u64) -> Option<CachedResponse> {
-        let entries = self.entries.lock().expect("cache entries mutex poisoned");
-        let response = entries.get(&key).cloned();
-        drop(entries);
-
-        if response.is_some() {
-            let mut order = self.order.lock().expect("cache order mutex poisoned");
-            if let Some(index) = order.iter().position(|existing| *existing == key) {
-                order.remove(index);
+        // Fast path: read lock for miss check.
+        {
+            let inner = self.inner.read();
+            if !inner.entries.contains_key(&key) {
+                return None;
             }
-            order.push(key);
         }
 
+        // Slow path: write lock to clone + promote.
+        let mut inner = self.inner.write();
+        let response = inner.entries.get(&key).cloned();
+        if response.is_some() {
+            if let Some(index) = inner.order.iter().position(|existing| *existing == key) {
+                inner.order.remove(index);
+            }
+            inner.order.push(key);
+        }
         response
     }
 
     /// Store a successful response. Evicts the oldest entry if at capacity.
     fn store(&self, key: u64, response: CachedResponse) {
-        if self.max_entries == 0 {
+        let mut inner = self.inner.write();
+        if inner.max_entries == 0 {
             return;
         }
 
-        let mut entries = self.entries.lock().expect("cache entries mutex poisoned");
-        let mut order = self.order.lock().expect("cache order mutex poisoned");
-
-        if entries.contains_key(&key) {
-            order.retain(|existing| *existing != key);
-        } else if entries.len() >= self.max_entries {
-            if let Some(oldest) = order.first().copied() {
-                entries.remove(&oldest);
-                order.remove(0);
+        if inner.entries.contains_key(&key) {
+            inner.order.retain(|existing| *existing != key);
+        } else if inner.entries.len() >= inner.max_entries {
+            if let Some(oldest) = inner.order.first().copied() {
+                inner.entries.remove(&oldest);
+                inner.order.remove(0);
             }
         }
 
-        entries.insert(key, response);
-        order.push(key);
+        inner.entries.insert(key, response);
+        inner.order.push(key);
     }
 
     fn evict(&self, key: u64) {
-        let mut entries = self.entries.lock().expect("cache entries mutex poisoned");
-        let mut order = self.order.lock().expect("cache order mutex poisoned");
-        entries.remove(&key);
-        order.retain(|existing| *existing != key);
+        let mut inner = self.inner.write();
+        inner.entries.remove(&key);
+        inner.order.retain(|existing| *existing != key);
     }
 }
 
@@ -1140,10 +1150,7 @@ impl ConvergenceDetectionCell {
         }
 
         let previous = {
-            let history = self
-                .history
-                .lock()
-                .expect("convergence history mutex poisoned");
+            let history = self.history.lock();
             history.get(key).cloned().unwrap_or_default()
         };
 
@@ -1177,10 +1184,7 @@ impl ConvergenceDetectionCell {
             return;
         }
 
-        let mut history = self
-            .history
-            .lock()
-            .expect("convergence history mutex poisoned");
+        let mut history = self.history.lock();
         let outputs = history.entry(key.to_string()).or_default();
         outputs.push(output);
         if outputs.len() > self.window_size {

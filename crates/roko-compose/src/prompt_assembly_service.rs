@@ -20,6 +20,10 @@ use crate::token_counter::TokenCounter;
 
 const SOURCE_SAMPLE_LIMIT: usize = 12;
 const WORKSPACE_MAP_LINE_LIMIT: usize = 200;
+/// Maximum recursion depth for source directory scanning (§17.1).
+const SOURCE_SCAN_MAX_DEPTH: usize = 5;
+/// Maximum files to enumerate before cutting off (§17.1).
+const SOURCE_SCAN_MAX_FILES: usize = 500;
 
 // TODO(converge): roko_neuro::NeuroStore currently has a `Sized` supertrait,
 // so it cannot be stored directly as `dyn NeuroStore`. Keep this object-safe
@@ -676,6 +680,7 @@ fn collect_source_context(workdir: &Path) -> (Vec<String>, Vec<String>) {
         workdir,
         &mut source_samples,
         &mut file_listing,
+        0,
     );
     (source_samples, file_listing)
 }
@@ -685,15 +690,24 @@ fn collect_source_context_from(
     root: &Path,
     source_samples: &mut Vec<String>,
     file_listing: &mut Vec<String>,
+    depth: usize,
 ) {
+    if depth > SOURCE_SCAN_MAX_DEPTH || file_listing.len() >= SOURCE_SCAN_MAX_FILES {
+        return;
+    }
+
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
 
     for entry in entries.flatten() {
+        if file_listing.len() >= SOURCE_SCAN_MAX_FILES {
+            return;
+        }
+
         let path = entry.path();
         if path.is_dir() {
-            collect_source_context_from(&path, root, source_samples, file_listing);
+            collect_source_context_from(&path, root, source_samples, file_listing, depth + 1);
             continue;
         }
 

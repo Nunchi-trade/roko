@@ -558,19 +558,37 @@ pub struct ClusterEvolution {
     pub still_active: bool,
 }
 
-/// Derive a stable id by hashing `(agent_id, task_id, timestamp)` with
-/// Rust's default hasher. Not cryptographic — collisions are acceptable
-/// because ids are scoped to a single log file.
+/// Derive a stable episode id by hashing `(agent_id, task_id, timestamp)`.
+///
+/// Uses FNV-1a (64-bit) for cross-version stability (§16.2:
+/// `DefaultHasher` is not guaranteed stable across Rust versions).
+/// Not cryptographic — collisions are acceptable because ids are
+/// scoped to a single log file.
 fn derive_id(agent_id: &str, task_id: &str, timestamp: DateTime<Utc>) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    agent_id.hash(&mut hasher);
-    task_id.hash(&mut hasher);
-    timestamp
-        .timestamp_nanos_opt()
-        .unwrap_or(0)
-        .hash(&mut hasher);
-    format!("ep_{:016x}", hasher.finish())
+    let nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
+    let hash = fnv1a_64(
+        &[
+            agent_id.as_bytes(),
+            b"|",
+            task_id.as_bytes(),
+            b"|",
+            &nanos.to_le_bytes(),
+        ]
+        .concat(),
+    );
+    format!("ep_{hash:016x}")
+}
+
+/// FNV-1a 64-bit hash — deterministic across all Rust versions.
+fn fnv1a_64(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 fn suggest_template_from_episodes(episodes: &[Episode], signal: &Engram) -> Option<String> {

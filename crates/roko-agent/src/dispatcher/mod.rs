@@ -87,7 +87,7 @@ pub struct ToolDispatcher {
     max_result_bytes: usize,
     safety: Option<SafetyLayer>,
     /// Optional tool result cache for deterministic tools (AGT-10).
-    tool_cache: Option<std::sync::Mutex<result_cache::ToolResultCache>>,
+    tool_cache: Option<parking_lot::Mutex<result_cache::ToolResultCache>>,
     /// Optional sequential safety hook chain (TOOL-02).
     ///
     /// When present, each tool call passes through every hook in order
@@ -178,14 +178,14 @@ impl ToolDispatcher {
     /// cached by argument hash. Write/Edit calls invalidate affected entries.
     #[must_use]
     pub fn with_tool_cache(mut self, cache: result_cache::ToolResultCache) -> Self {
-        self.tool_cache = Some(std::sync::Mutex::new(cache));
+        self.tool_cache = Some(parking_lot::Mutex::new(cache));
         self
     }
 
     /// Returns tool cache statistics, if caching is enabled.
     #[must_use]
     pub fn cache_stats(&self) -> Option<(u64, u64, f64)> {
-        let cache = self.tool_cache.as_ref()?.lock().ok()?;
+        let cache = self.tool_cache.as_ref()?.lock();
         Some((cache.hits(), cache.misses(), cache.hit_rate()))
     }
 
