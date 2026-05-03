@@ -30,11 +30,6 @@ pub use super::subscriptions::*;
 pub use super::tools::*;
 pub use super::tui_cfg::*;
 
-use super::provider::{
-    default_provider_connect_timeout_ms, default_provider_timeout_ms,
-    default_provider_ttft_timeout_ms,
-};
-
 /// Current schema version. Bump on incompatible changes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
@@ -181,7 +176,11 @@ impl RokoConfig {
 
     // ---- provider / model synthesis --------------------------------------
 
-    /// Return the provider registry that should be used at runtime.
+    /// Return the explicit provider registry that should be used at runtime.
+    ///
+    /// Empty configs do not receive a synthetic provider. Callers that need
+    /// legacy command-backed behavior must materialize a transient provider at
+    /// their boundary before dispatch.
     #[must_use]
     pub fn effective_providers(&self) -> HashMap<String, ProviderConfig> {
         if !self.providers.is_empty() {
@@ -201,30 +200,7 @@ impl RokoConfig {
             return providers;
         }
 
-        let mut providers = HashMap::new();
-        let claude_command = self
-            .agent
-            .command
-            .clone()
-            .unwrap_or_else(|| "claude".to_string());
-
-        providers.insert(
-            "claude_cli".into(),
-            ProviderConfig {
-                kind: ProviderKind::ClaudeCli,
-                base_url: None,
-                api_key_env: None,
-                command: Some(claude_command),
-                args: self.agent.args.clone(),
-                timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
-                ttft_timeout_ms: default_provider_ttft_timeout_ms(),
-                connect_timeout_ms: default_provider_connect_timeout_ms(),
-                extra_headers: None,
-                max_concurrent: None,
-            },
-        );
-
-        providers
+        HashMap::new()
     }
 
     /// Return the explicit model registry that should be used at runtime.
@@ -1608,7 +1584,7 @@ default_model = "claude-sonnet-4-6"
     }
 
     #[test]
-    fn effective_providers_do_not_synthesize_anthropic_from_agent_env() {
+    fn effective_providers_do_not_synthesize_empty_config_providers() {
         let mut cfg = RokoConfig::default();
         cfg.providers.clear();
         cfg.agent.env = Some(vec![
@@ -1620,15 +1596,7 @@ default_model = "claude-sonnet-4-6"
         ]);
 
         let providers = cfg.effective_providers();
-        assert_eq!(
-            providers.get("claude_cli").map(|provider| provider.kind),
-            Some(ProviderKind::ClaudeCli)
-        );
-        assert!(
-            providers
-                .values()
-                .all(|provider| provider.kind != ProviderKind::AnthropicApi)
-        );
+        assert!(providers.is_empty());
     }
 
     #[test]
