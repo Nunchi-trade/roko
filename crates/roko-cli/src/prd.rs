@@ -727,6 +727,13 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
         return Err(anyhow!("draft not found: {}", src.display()));
     }
     let dst = published_dir(workdir).join(format!("{slug}.md"));
+    // §14.2: Refuse to silently overwrite an existing published PRD.
+    if dst.exists() {
+        return Err(anyhow!(
+            "published PRD already exists at {}; remove or rename it first",
+            dst.display()
+        ));
+    }
 
     let mut content = std::fs::read_to_string(&src)?;
     if !has_substantive_markdown_content(&content) {
@@ -735,7 +742,8 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
              Re-run `roko prd draft edit {slug}` to populate it first."
         ));
     }
-    content = content.replace("status: draft", "status: published");
+    // §14.4: Only replace status within YAML frontmatter, not in body text.
+    content = replace_in_frontmatter(&content, "status: draft", "status: published");
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     // Update the 'updated' field if present
     if content.contains("updated:") {
@@ -825,7 +833,12 @@ where
             Ok(Some(plans_root))
         }
         Err(err) => {
-            eprintln!("warning: auto plan generation failed: {err:#}");
+            // §14.6: Surface actionable feedback — the PRD was promoted
+            // but no plan was generated. Tell the user how to recover.
+            eprintln!("error: auto plan generation failed for '{prd_path_display}': {err:#}");
+            eprintln!(
+                "  → PRD is promoted. Run `roko prd plan <slug>` manually to generate a plan."
+            );
             Ok(None)
         }
     }
@@ -1314,6 +1327,23 @@ pub fn new_draft_frontmatter(slug: &str, title: &str) -> String {
          tags: []\n\
          ---\n\n"
     )
+}
+
+/// Replace `from` with `to` only within the YAML frontmatter (between first
+/// pair of `---` delimiters). Body content is left untouched.
+fn replace_in_frontmatter(content: &str, from: &str, to: &str) -> String {
+    // Frontmatter is the region between the first `---\n` and the next `---\n`.
+    if let Some(start) = content.find("---") {
+        let after_first = start + 3;
+        if let Some(end_offset) = content[after_first..].find("---") {
+            let end = after_first + end_offset + 3;
+            let frontmatter = &content[..end];
+            let body = &content[end..];
+            return format!("{}{}", frontmatter.replace(from, to), body);
+        }
+    }
+    // No frontmatter delimiters found — fall back to global replace.
+    content.replace(from, to)
 }
 
 /// Returns true if a PRD markdown string contains substantive body content.
@@ -2022,6 +2052,17 @@ mod tests {
         assert!(fm.contains("id: prd-test-prd"));
         assert!(fm.contains("title: Test PRD"));
         assert!(fm.contains("status: draft"));
+    }
+
+    #[test]
+    fn replace_in_frontmatter_only_affects_frontmatter() {
+        let content = "---\nstatus: draft\ntitle: Demo\n---\n\n# Body\n\nThe status: draft is mentioned here too.\n";
+        let result = replace_in_frontmatter(content, "status: draft", "status: published");
+        assert!(result.contains("status: published"));
+        assert!(
+            result.contains("The status: draft is mentioned here too."),
+            "body should be untouched"
+        );
     }
 
     #[test]
