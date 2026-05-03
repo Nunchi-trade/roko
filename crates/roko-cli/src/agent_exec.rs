@@ -15,7 +15,9 @@ use crate::learning_helpers::distillation_model_caller;
 use anyhow::{Context as _, Result};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
+use roko_core::config::schema::RokoConfig;
 use roko_core::{Body, Context, Engram, Kind};
+use roko_learn::provider_health::{ErrorClass, ProviderHealthRegistry};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 
 /// Options for agent execution.
@@ -188,7 +190,7 @@ async fn run_agent_capture_impl(
         persist_capture_episode(
             opts.workdir,
             resolved.provider_kind.label(),
-            Some(&model),
+            Some(&resolved.slug),
             episode.task_kind,
             episode.task_id,
             opts.prompt,
@@ -216,9 +218,17 @@ pub async fn persist_capture_episode(
     wall_time_ms: u64,
     resume_session: Option<&str>,
 ) -> Result<()> {
-    let (episode, provider) = build_capture_episode(
+    let config = roko_core::config::loader::load_config_unified(workdir).unwrap_or_default();
+    let capture_model = resolve_capture_model_slug(&config, model);
+    let provider_from_config = capture_model
+        .as_deref()
+        .and_then(|model_slug| provider_id_for_model(&config, model_slug))
+        .or_else(|| model.and_then(|model_key| provider_id_for_model(&config, model_key)));
+
+    let episode_model = capture_model.as_deref().or(model);
+    let (mut episode, fallback_provider) = build_capture_episode(
         agent_command,
-        model,
+        episode_model,
         task_kind,
         task_id,
         prompt,
@@ -227,10 +237,21 @@ pub async fn persist_capture_episode(
         wall_time_ms,
         resume_session,
     );
+    let provider = provider_from_config.unwrap_or(fallback_provider);
+    if !provider.trim().is_empty() {
+        episode
+            .extra
+            .insert("provider".to_string(), serde_json::json!(provider.clone()));
+    }
 
-    let mut runtime = LearningRuntime::open_under(workdir.join(".roko").join("memory"))
-        .await
-        .map_err(|e| anyhow::anyhow!("open learning runtime: {e}"))?;
+    let learn_root = workdir.join(".roko").join("learn");
+    let model_slugs = capture_runtime_model_slugs(&config, episode.model.as_str());
+    let mut runtime = if model_slugs.is_empty() {
+        LearningRuntime::open_under(&learn_root).await
+    } else {
+        LearningRuntime::open_under_with_models(&learn_root, model_slugs).await
+    }
+    .map_err(|e| anyhow::anyhow!("open learning runtime: {e}"))?;
     let distillation_workdir = workdir.to_path_buf();
     let distillation_caller = distillation_model_caller(workdir);
     runtime.set_episode_completion_hook(move |episode| {
@@ -242,11 +263,69 @@ pub async fn persist_capture_episode(
     });
 
     let mut completed = CompletedRunInput::from_episode(episode);
-    completed.provider = Some(provider);
+    completed.provider = (!provider.trim().is_empty()).then_some(provider.clone());
     runtime
         .record_completed_run(completed)
         .await
         .map_err(|e| anyhow::anyhow!("record learning feedback: {e}"))?;
+    record_persisted_provider_health(workdir, &provider, success)?;
+    Ok(())
+}
+
+fn resolve_capture_model_slug(config: &RokoConfig, model: Option<&str>) -> Option<String> {
+    let requested = model.filter(|value| !value.trim().is_empty()).or_else(|| {
+        let default_model = config.agent.default_model.trim();
+        (!default_model.is_empty()).then_some(default_model)
+    })?;
+    let slug = resolve_model(config, requested).slug;
+    (!slug.trim().is_empty()).then_some(slug)
+}
+
+fn provider_id_for_model(config: &RokoConfig, model_key_or_slug: &str) -> Option<String> {
+    let models = config.effective_models();
+    models
+        .get(model_key_or_slug)
+        .or_else(|| {
+            models
+                .values()
+                .find(|profile| profile.slug == model_key_or_slug)
+        })
+        .map(|profile| profile.provider.clone())
+        .filter(|provider| !provider.trim().is_empty())
+}
+
+fn capture_runtime_model_slugs(config: &RokoConfig, episode_model: &str) -> Vec<String> {
+    let mut model_slugs = config.model_slugs_for_cascade();
+    if !episode_model.trim().is_empty() && !model_slugs.iter().any(|slug| slug == episode_model) {
+        model_slugs.push(episode_model.to_string());
+    }
+    model_slugs.sort();
+    model_slugs.dedup();
+    model_slugs
+}
+
+fn record_persisted_provider_health(workdir: &Path, provider: &str, success: bool) -> Result<()> {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return Ok(());
+    }
+
+    let path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("provider-health.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let registry = ProviderHealthRegistry::load_or_new(&path);
+    if success {
+        registry.record_success(provider);
+    } else {
+        registry.record_failure(provider, ErrorClass::Unknown);
+    }
+    registry
+        .save(&path)
+        .with_context(|| format!("save {}", path.display()))?;
     Ok(())
 }
 
@@ -257,7 +336,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn persist_capture_episode_records_memory_episode() {
+    async fn persist_capture_episode_records_learning_episode() {
         let tmp = TempDir::new().expect("tempdir");
 
         persist_capture_episode(
@@ -278,7 +357,7 @@ mod tests {
         let episodes_path = tmp
             .path()
             .join(".roko")
-            .join("memory")
+            .join("learn")
             .join("episodes.jsonl");
         let episodes = EpisodeLogger::read_all_lossy(&episodes_path).await.unwrap();
         assert_eq!(episodes.len(), 1);
@@ -299,6 +378,94 @@ mod tests {
         assert_eq!(
             episode.extra.get("plan_id"),
             Some(&serde_json::json!("demo"))
+        );
+        assert!(
+            !tmp.path()
+                .join(".roko")
+                .join("memory")
+                .join("episodes.jsonl")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_capture_episode_resolves_model_key_to_slug_and_provider() {
+        let tmp = TempDir::new().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("roko.toml"),
+            r#"
+[agent]
+default_model = "glm-mini"
+command = "claude"
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = ""
+
+[models.glm-mini]
+provider = "zai"
+slug = "glm-5.1"
+context_window = 131072
+tool_format = "openai_json"
+"#,
+        )
+        .expect("write roko.toml");
+
+        persist_capture_episode(
+            tmp.path(),
+            "claude",
+            Some("glm-mini"),
+            "prd-plan-generate",
+            "prd:plan:glm",
+            "prompt body",
+            "output body",
+            true,
+            42,
+            None,
+        )
+        .await
+        .expect("persist capture episode");
+
+        let episodes_path = tmp
+            .path()
+            .join(".roko")
+            .join("learn")
+            .join("episodes.jsonl");
+        let episodes = EpisodeLogger::read_all_lossy(&episodes_path).await.unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].model, "glm-5.1");
+        assert_eq!(
+            episodes[0].extra.get("provider"),
+            Some(&serde_json::json!("zai"))
+        );
+
+        let cascade_path = tmp
+            .path()
+            .join(".roko")
+            .join("learn")
+            .join("cascade-router.json");
+        let cascade: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(cascade_path).unwrap()).unwrap();
+        assert_eq!(
+            cascade
+                .pointer("/confidence_stats/glm-5.1/trials")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+
+        let health_path = tmp
+            .path()
+            .join(".roko")
+            .join("learn")
+            .join("provider-health.json");
+        let health: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(health_path).unwrap()).unwrap();
+        assert_eq!(
+            health
+                .pointer("/providers/zai/total_requests")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
         );
     }
 }
