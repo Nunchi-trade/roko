@@ -313,6 +313,7 @@ impl ServerBuilder {
         let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
         let _cold_archival = start_cold_archival_timer(Arc::clone(&state));
         let _workspace_gc = start_workspace_gc(Arc::clone(&state));
+        let _handle_gc = start_handle_gc(Arc::clone(&state));
 
         // Load persisted deployments from disk.
         routes::load_persisted_deployments(&state).await;
@@ -1600,6 +1601,25 @@ fn start_workspace_gc(state: Arc<AppState>) -> JoinHandle<()> {
                 count = removed,
                 "workspace GC: removed {removed} stale ephemeral workspace(s)"
             );
+        }
+    })
+}
+
+/// Periodic GC for completed/failed operation handles (§15.6).
+///
+/// Without this, `active_runs`, `active_plans`, and `operations` HashMaps
+/// grow unboundedly as completed JoinHandles accumulate.
+fn start_handle_gc(state: Arc<AppState>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await; // skip first immediate tick
+
+        loop {
+            tokio::select! {
+                _ = state.cancel.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            state.gc_completed_handles().await;
         }
     })
 }

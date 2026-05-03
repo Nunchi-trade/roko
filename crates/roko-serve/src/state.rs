@@ -942,6 +942,25 @@ impl AppState {
             .await
             .retain(|key, _| !key.starts_with("aggregator:"));
     }
+
+    /// Remove completed/failed handles from active collections (§15.6).
+    ///
+    /// Should be called periodically (e.g. from a background interval task)
+    /// to prevent unbounded memory growth from accumulated handles.
+    pub async fn gc_completed_handles(&self) {
+        self.active_runs
+            .write()
+            .await
+            .retain(|_, handle| !handle.handle.is_finished());
+        self.active_plans
+            .write()
+            .await
+            .retain(|_, handle| !handle.handle.is_finished());
+        self.operations
+            .write()
+            .await
+            .retain(|_, handle| !handle.handle.is_finished());
+    }
 }
 
 /// Serializable snapshot of server state that survives restarts.
