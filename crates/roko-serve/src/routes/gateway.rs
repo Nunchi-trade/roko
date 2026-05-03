@@ -20,6 +20,7 @@ use validator::Validate;
 
 use roko_agent::GatewayEventWriter;
 use roko_core::agent::{AgentRole, resolve_model};
+use roko_core::config::schema::RokoConfig;
 use roko_core::foundation::{
     CachePolicy, ChatMessage as CoreChatMessage, MessageRole as CoreMessageRole,
     ModelCallRequest as CoreModelCallRequest, ModelCallResponse as CoreModelCallResponse,
@@ -308,11 +309,12 @@ async fn inference_complete(
         body.temperature,
         body.agent_id.clone(),
     );
+    let requested_provider = provider_id_for_model(&config, &model_slug);
 
     let call_start = std::time::Instant::now();
 
     let model_response = state.model_call_service.call(req).await.map_err(|err| {
-        state.provider_health.record_failure(&model_slug);
+        state.provider_health.record_failure(&requested_provider);
         let _duration_ms = call_start.elapsed().as_millis() as u64;
         state.event_bus.publish(ServerEvent::InferenceFailed {
             request_id: request_id.clone(),
@@ -323,9 +325,9 @@ async fn inference_complete(
         ApiError::internal(format!("inference dispatch failed: {err}"))
     })?;
 
-    state.provider_health.record_success(&model_slug);
-
     let served_model = model_response.model.clone();
+    let served_provider = provider_id_for_model(&config, &served_model);
+    state.provider_health.record_success(&served_provider);
     let input_tokens = model_response.usage.input_tokens;
     let output_tokens = model_response.usage.output_tokens;
     let cost_usd = model_response.usage.cost_usd;
@@ -573,11 +575,13 @@ async fn batch_submit(
 
                     let req =
                         model_call_request(model_slug.clone(), &item.messages, None, None, None);
+                    let requested_provider = provider_id_for_model(&config_ref, &model_slug);
 
                     let result_item = match state_ref.model_call_service.call(req).await {
                         Ok(model_response) => {
-                            state_ref.provider_health.record_success(&model_slug);
                             let served_model = model_response.model.clone();
+                            let served_provider = provider_id_for_model(&config_ref, &served_model);
+                            state_ref.provider_health.record_success(&served_provider);
                             let input_tokens = model_response.usage.input_tokens;
                             let output_tokens = model_response.usage.output_tokens;
                             let cost_usd = model_response.usage.cost_usd;
@@ -597,7 +601,9 @@ async fn batch_submit(
                             }
                         }
                         Err(err) => {
-                            state_ref.provider_health.record_failure(&model_slug);
+                            state_ref
+                                .provider_health
+                                .record_failure(&requested_provider);
                             BatchResultItem {
                                 custom_id: item.custom_id.clone(),
                                 success: false,
@@ -841,6 +847,24 @@ fn parse_agent_role(s: &str) -> AgentRole {
         // "implementer" and unrecognised values
         _ => AgentRole::Implementer,
     }
+}
+
+fn provider_id_for_model(config: &RokoConfig, model_key_or_slug: &str) -> String {
+    let models = config.effective_models();
+    if let Some(profile) = models.get(model_key_or_slug) {
+        return profile.provider.clone();
+    }
+    if let Some(profile) = models
+        .values()
+        .find(|profile| profile.slug == model_key_or_slug)
+    {
+        return profile.provider.clone();
+    }
+
+    resolve_model(config, model_key_or_slug)
+        .provider_kind
+        .label()
+        .to_string()
 }
 
 /// Select the optimal model via the [`CascadeRouter`] (D1: cached in AppState),
@@ -1237,7 +1261,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let workdir = dir.path().to_path_buf();
         let model = "gateway-durable-model";
-        let provider = model;
+        let provider = "gateway-durable-provider";
 
         let script = workdir.join("mock-provider.sh");
         std::fs::write(
@@ -1370,6 +1394,7 @@ mod tests {
         let health = state.provider_health.get(provider);
         assert_eq!(health.total_attempts, 1);
         assert_eq!(health.total_successes, 1);
+        assert_eq!(state.provider_health.get(model).total_attempts, 0);
 
         let Json(stats) = gateway_stats(State(Arc::clone(&state)))
             .await
