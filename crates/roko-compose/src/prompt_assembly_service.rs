@@ -344,7 +344,9 @@ impl PromptAssembler for PromptAssemblyService {
         if self.should_include("context")
             && let Some(ref episodes_path) = self.episodes_path
         {
-            if let Ok(episodes) = EpisodeLogger::read_all(episodes_path).await {
+            // §17.6: Use lossy read to tolerate truncated crash lines rather
+            // than failing the entire episode context on a single parse error.
+            if let Ok(episodes) = EpisodeLogger::read_all_lossy(episodes_path).await {
                 let recent = episodes.into_iter().rev().take(5).collect::<Vec<_>>();
                 if !recent.is_empty() {
                     context_blocks.push(format_episode_context(&recent));

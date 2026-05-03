@@ -856,8 +856,28 @@ fn sync_file_if_present(path: &Path) -> Result<()> {
     }
 }
 
+/// Load roko config, cached per workdir within a process run (§13.6).
+///
+/// The config file is read from disk at most once per unique workdir path.
+/// If the config changes during a run, use `reload_roko_config` to invalidate.
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
+    use std::sync::OnceLock;
+
+    // Single-entry cache: stores the last loaded config and its workdir.
+    static CACHE: OnceLock<parking_lot::Mutex<Option<(PathBuf, RokoConfig)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| parking_lot::Mutex::new(None));
+
+    let mut guard = cache.lock();
+    if let Some((ref cached_dir, ref config)) = *guard {
+        if cached_dir == workdir {
+            return Ok(config.clone());
+        }
+    }
+
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    *guard = Some((workdir.to_path_buf(), config.clone()));
+    Ok(config)
 }
 
 fn frequency_label(frequency: OperatingFrequency) -> &'static str {
