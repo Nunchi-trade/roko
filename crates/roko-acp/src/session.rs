@@ -909,34 +909,44 @@ fn capitalize_model_key(key: &str) -> String {
         .join(" ")
 }
 
+fn provider_option_description(
+    roko_config: &roko_core::config::schema::RokoConfig,
+    provider: &roko_core::config::schema::ProviderConfig,
+) -> Option<String> {
+    if roko_config.is_provider_available(provider) {
+        return Some("Ready".to_owned());
+    }
+
+    match provider.api_key_env.as_deref().map(str::trim) {
+        Some(env_name) if !env_name.is_empty() => {
+            Some(format!("API key env {env_name} is not set"))
+        }
+        None => Some("API key env is not configured".to_owned()),
+        Some(_) => Some("Unavailable".to_owned()),
+    }
+}
+
 fn build_config_options(
     state: &SessionConfigState,
     roko_config: &roko_core::config::schema::RokoConfig,
 ) -> Vec<ConfigOption> {
-    // ── Provider options from [providers.*] in roko.toml, filtered by credential availability ──
+    // ── Provider options from [providers.*] in roko.toml, with availability status ──
     let mut provider_options: Vec<ConfigOptionValue> = roko_config
         .providers
         .iter()
-        .filter(|(_, provider)| roko_config.is_provider_available(provider))
-        .map(|(key, _)| ConfigOptionValue {
+        .map(|(key, provider)| ConfigOptionValue {
             value: key.clone(),
             name: capitalize_model_key(key),
-            description: None,
+            description: provider_option_description(roko_config, provider),
         })
         .collect();
     provider_options.sort_by(|a, b| a.value.cmp(&b.value));
 
-    // ── Model options filtered by selected provider (only if provider is available) ──
+    // ── Model options filtered by selected provider ──
     let mut model_options: Vec<ConfigOptionValue> = roko_config
         .models
         .iter()
-        .filter(|(_, profile)| {
-            profile.provider == state.provider
-                && roko_config
-                    .providers
-                    .get(&profile.provider)
-                    .is_some_and(|p| roko_config.is_provider_available(p))
-        })
+        .filter(|(_, profile)| profile.provider == state.provider)
         .map(|(key, profile)| ConfigOptionValue {
             value: key.clone(),
             name: capitalize_model_key(key),
@@ -1445,6 +1455,15 @@ mod tests {
             .unwrap_or_default()
     }
 
+    fn option_description(options: &[ConfigOption], id: &str, value: &str) -> Option<String> {
+        options
+            .iter()
+            .find(|option| option.id == id)
+            .and_then(|option| option.options.as_ref())
+            .and_then(|values| values.iter().find(|item| item.value == value))
+            .and_then(|item| item.description.clone())
+    }
+
     fn config_with_provider_model(
         provider_key: &str,
         model_key: &str,
@@ -1465,6 +1484,26 @@ slug = "{model_key}-slug"
 context_window = 8192
 "#
         ))
+        .expect("test config should parse")
+    }
+
+    fn config_with_missing_key_provider() -> roko_core::config::schema::RokoConfig {
+        roko_core::config::schema::RokoConfig::from_toml(
+            r#"
+config_version = 2
+schema_version = 2
+
+[providers.missing-key-provider]
+kind = "openai_compat"
+base_url = "https://example.test/v1"
+api_key_env = "ROKO_ACP_TEST_UNSET_PROVIDER_KEY"
+
+[models.missing-key-model]
+provider = "missing-key-provider"
+slug = "missing-key-model-slug"
+context_window = 8192
+"#,
+        )
         .expect("test config should parse")
     }
 
@@ -1515,6 +1554,26 @@ context_window = 8192
         assert!(session.config_state.model.is_empty());
         assert!(option_values(&options, "provider").is_empty());
         assert!(option_values(&options, "model").is_empty());
+    }
+
+    #[test]
+    fn config_options_include_unavailable_configured_providers_with_status() {
+        let config = config_with_missing_key_provider();
+        let session = AcpSession::new_with_config(session_params("missing-key-provider"), &config);
+        let options = session.config_options();
+
+        assert_eq!(
+            option_values(&options, "provider"),
+            vec!["missing-key-provider".to_owned()]
+        );
+        assert_eq!(
+            option_description(&options, "provider", "missing-key-provider").as_deref(),
+            Some("API key env ROKO_ACP_TEST_UNSET_PROVIDER_KEY is not set")
+        );
+        assert_eq!(
+            option_values(&options, "model"),
+            vec!["missing-key-model".to_owned()]
+        );
     }
 
     #[test]
