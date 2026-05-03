@@ -95,9 +95,6 @@ impl Default for CancelToken {
     }
 }
 
-/// Default model key when roko.toml has no models configured.
-pub const FALLBACK_MODEL: &str = "sonnet";
-
 /// Default provider for serde deserialization of old sessions missing the field.
 fn default_provider() -> String {
     "anthropic".to_owned()
@@ -161,8 +158,8 @@ impl Default for SessionConfigState {
     fn default() -> Self {
         Self {
             agent_mode: "code".to_owned(),
-            provider: "anthropic".to_owned(),
-            model: FALLBACK_MODEL.to_owned(),
+            provider: String::new(),
+            model: String::new(),
             effort: "medium".to_owned(),
             temperament: "balanced".to_owned(),
             routing_mode: "auto_override".to_owned(),
@@ -181,26 +178,20 @@ impl SessionConfigState {
         let configured_default = config.agent.default_model.trim();
         let default_model =
             if !configured_default.is_empty() && config.models.contains_key(configured_default) {
-                configured_default
+                Some(configured_default)
             } else {
-                config
-                    .models
-                    .keys()
-                    .next()
-                    .map(|s| s.as_str())
-                    .unwrap_or(FALLBACK_MODEL)
+                config.models.keys().next().map(String::as_str)
             };
         // Derive the default provider from the default model's profile.
-        let default_provider = config
-            .models
-            .get(default_model)
-            .map(|p| p.provider.clone())
+        let default_provider = default_model
+            .and_then(|model| config.models.get(model))
+            .map(|profile| profile.provider.clone())
             .or_else(|| config.providers.keys().next().cloned())
-            .unwrap_or_else(|| "anthropic".to_owned());
+            .unwrap_or_default();
         Self {
             agent_mode: "code".to_owned(),
             provider: default_provider,
-            model: default_model.to_owned(),
+            model: default_model.unwrap_or_default().to_owned(),
             effort: config.agent.default_effort.clone(),
             temperament: config.agent.temperament.label().to_owned(),
             routing_mode: config.routing.mode.clone(),
@@ -262,7 +253,7 @@ impl AcpSession {
     #[must_use]
     pub fn new(params: SessionNewParams) -> Self {
         let config_state = SessionConfigState::default();
-        let config_options = build_config_options_static(&config_state);
+        let config_options = build_config_options(&config_state, &Default::default());
         Self {
             session_id: format!("sess_{}", Uuid::new_v4()),
             session_name: params.session_name,
@@ -870,11 +861,6 @@ fn build_config_options(
     state: &SessionConfigState,
     roko_config: &roko_core::config::schema::RokoConfig,
 ) -> Vec<ConfigOption> {
-    // If roko.toml has no providers/models, fall back to static defaults.
-    if roko_config.providers.is_empty() || roko_config.models.is_empty() {
-        return build_config_options_static(state);
-    }
-
     // ── Provider options from [providers.*] in roko.toml, filtered by credential availability ──
     let mut provider_options: Vec<ConfigOptionValue> = roko_config
         .providers
@@ -1021,147 +1007,6 @@ fn build_config_options(
             ]),
         },
         // 6. Tests
-        ConfigOption {
-            id: "tests".to_owned(),
-            name: "Tests".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "gates".to_owned(),
-            current_value: serde_json::Value::String(
-                if state.tests_enabled { "on" } else { "off" }.to_owned(),
-            ),
-            description: Some("Run test gate after changes".to_owned()),
-            options: Some(vec![
-                ConfigOptionValue {
-                    value: "on".to_owned(),
-                    name: "On".to_owned(),
-                    description: Some("Test validation enabled".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "off".to_owned(),
-                    name: "Off".to_owned(),
-                    description: Some("Skip tests".to_owned()),
-                },
-            ]),
-        },
-    ]
-}
-
-/// Fallback config options when no roko.toml is available.
-fn build_config_options_static(state: &SessionConfigState) -> Vec<ConfigOption> {
-    vec![
-        ConfigOption {
-            id: "provider".to_owned(),
-            name: "Provider".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "model".to_owned(),
-            current_value: serde_json::Value::String(state.provider.clone()),
-            description: Some("LLM provider".to_owned()),
-            options: Some(vec![ConfigOptionValue {
-                value: "anthropic".to_owned(),
-                name: "Anthropic".to_owned(),
-                description: None,
-            }]),
-        },
-        ConfigOption {
-            id: "model".to_owned(),
-            name: "Model".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "model".to_owned(),
-            current_value: serde_json::Value::String(state.model.clone()),
-            description: Some("Language model".to_owned()),
-            options: Some(vec![ConfigOptionValue {
-                value: "sonnet".to_owned(),
-                name: "Sonnet".to_owned(),
-                description: Some("claude-sonnet-4-6".to_owned()),
-            }]),
-        },
-        ConfigOption {
-            id: "effort".to_owned(),
-            name: "Thinking".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "thought_level".to_owned(),
-            current_value: serde_json::Value::String(state.effort.clone()),
-            description: Some("Reasoning depth".to_owned()),
-            options: Some(vec![
-                ConfigOptionValue {
-                    value: "low".to_owned(),
-                    name: "Quick".to_owned(),
-                    description: Some("Minimal reasoning".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "medium".to_owned(),
-                    name: "Standard".to_owned(),
-                    description: Some("Balanced reasoning".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "high".to_owned(),
-                    name: "Deep".to_owned(),
-                    description: Some("Extended reasoning".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "max".to_owned(),
-                    name: "Max".to_owned(),
-                    description: Some("Full reasoning depth".to_owned()),
-                },
-            ]),
-        },
-        ConfigOption {
-            id: "workflow".to_owned(),
-            name: "Workflow".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "workflow".to_owned(),
-            current_value: serde_json::Value::String(state.workflow.clone()),
-            description: Some("Pipeline workflow for prompts".to_owned()),
-            options: Some(vec![
-                ConfigOptionValue {
-                    value: "none".to_owned(),
-                    name: "None".to_owned(),
-                    description: Some("Single agent, no pipeline".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "express".to_owned(),
-                    name: "Express".to_owned(),
-                    description: Some("Implement → gate → commit".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "standard".to_owned(),
-                    name: "Standard".to_owned(),
-                    description: Some("Implement → gate → review → commit".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "full".to_owned(),
-                    name: "Full".to_owned(),
-                    description: Some("Strategy → implement → gate → review → commit".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "auto".to_owned(),
-                    name: "Auto".to_owned(),
-                    description: Some("Select based on complexity".to_owned()),
-                },
-            ]),
-        },
-        ConfigOption {
-            id: "clippy".to_owned(),
-            name: "Clippy".to_owned(),
-            option_type: ConfigOptionType::Select,
-            category: "gates".to_owned(),
-            current_value: serde_json::Value::String(
-                if state.clippy_enabled { "on" } else { "off" }.to_owned(),
-            ),
-            description: Some("Run clippy gate after changes".to_owned()),
-            options: Some(vec![
-                ConfigOptionValue {
-                    value: "on".to_owned(),
-                    name: "On".to_owned(),
-                    description: Some("Clippy validation enabled".to_owned()),
-                },
-                ConfigOptionValue {
-                    value: "off".to_owned(),
-                    name: "Off".to_owned(),
-                    description: Some("Skip clippy".to_owned()),
-                },
-            ]),
-        },
         ConfigOption {
             id: "tests".to_owned(),
             name: "Tests".to_owned(),
@@ -1537,6 +1382,56 @@ mod tests {
             client_capabilities: None,
             mcp_servers: Vec::new(),
         }
+    }
+
+    fn option_values(options: &[ConfigOption], id: &str) -> Vec<String> {
+        options
+            .iter()
+            .find(|option| option.id == id)
+            .and_then(|option| option.options.as_ref())
+            .map(|values| values.iter().map(|value| value.value.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn empty_config_does_not_offer_static_provider_or_model() {
+        let session =
+            AcpSession::new_with_config(session_params("empty-config"), &Default::default());
+        let options = session.config_options();
+
+        assert!(session.config_state.provider.is_empty());
+        assert!(session.config_state.model.is_empty());
+        assert!(option_values(&options, "provider").is_empty());
+        assert!(option_values(&options, "model").is_empty());
+        assert!(
+            !options.iter().any(|option| {
+                option
+                    .options
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(|value| value.value == "anthropic"))
+            }),
+            "empty config must not invent an Anthropic provider"
+        );
+        assert!(
+            !options.iter().any(|option| {
+                option
+                    .options
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(|value| value.value == "sonnet"))
+            }),
+            "empty config must not invent a Sonnet model"
+        );
+    }
+
+    #[test]
+    fn legacy_new_session_does_not_offer_static_provider_or_model() {
+        let session = AcpSession::new(session_params("legacy-empty-config"));
+        let options = session.config_options();
+
+        assert!(session.config_state.provider.is_empty());
+        assert!(session.config_state.model.is_empty());
+        assert!(option_values(&options, "provider").is_empty());
+        assert!(option_values(&options, "model").is_empty());
     }
 
     #[test]
