@@ -108,6 +108,11 @@ impl ModelVariantStats {
 }
 
 impl ModelExperiment {
+    /// Total trials across all variants for this experiment.
+    pub fn total_trials(&self) -> u64 {
+        self.stats.values().map(|s| s.trials).sum()
+    }
+
     /// Select the next model variant to use.
     ///
     /// Concluded experiments always return the winner. Running experiments
@@ -248,19 +253,31 @@ impl ModelExperimentStore {
     }
 
     /// Find an active experiment scoped to a specific role.
+    ///
+    /// When multiple experiments target the same role, selects the one with
+    /// fewest total trials to prevent starvation.
     pub fn active_for_role(&self, role: &str) -> Option<&ModelExperiment> {
-        self.experiments.values().find(|experiment| {
-            experiment.status == ExperimentStatus::Running
-                && experiment.role.as_deref() == Some(role)
-        })
+        self.experiments
+            .values()
+            .filter(|experiment| {
+                experiment.status == ExperimentStatus::Running
+                    && experiment.role.as_deref() == Some(role)
+            })
+            .min_by_key(|experiment| experiment.total_trials())
     }
 
     /// Find an active experiment scoped to a specific task category.
+    ///
+    /// When multiple experiments target the same category, selects the one
+    /// with fewest total trials to prevent starvation.
     pub fn active_for_category(&self, category: &str) -> Option<&ModelExperiment> {
-        self.experiments.values().find(|experiment| {
-            experiment.status == ExperimentStatus::Running
-                && experiment.task_category.as_deref() == Some(category)
-        })
+        self.experiments
+            .values()
+            .filter(|experiment| {
+                experiment.status == ExperimentStatus::Running
+                    && experiment.task_category.as_deref() == Some(category)
+            })
+            .min_by_key(|experiment| experiment.total_trials())
     }
 
     fn applicable_experiment(&self, role: &str, category: &str) -> Option<&ModelExperiment> {

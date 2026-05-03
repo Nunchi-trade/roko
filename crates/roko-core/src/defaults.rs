@@ -157,6 +157,14 @@ pub const DEFAULT_ALERT_MIN_CALLS: u64 = 50;
 /// Default event bus channel capacity.
 pub const DEFAULT_EVENT_BUS_CAPACITY: usize = 32;
 
+/// Default bounded channel buffer for per-subscriber and streaming channels.
+/// Large enough to absorb burst traffic without backpressure under normal load;
+/// small enough to bound memory when a receiver stalls.
+pub const DEFAULT_CHANNEL_BUFFER: usize = 256;
+
+/// Default bounded channel buffer for per-agent streaming multiplexers.
+pub const DEFAULT_MUX_CHANNEL_BUFFER: usize = 512;
+
 /// MCP discovery timeout (seconds).
 pub const DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS: u64 = 5;
 

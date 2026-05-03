@@ -14297,8 +14297,11 @@ impl PlanRunner {
 
     /// Generic fallback agent handler with retry loop + model escalation.
     /// Used for any role not handled by a dedicated phase handler.
+    /// Respects `max_retries_override` (CLI flag) and config-driven escalation ladder.
     async fn handle_generic_agent(&mut self, plan_id: &str, role: AgentRole, task: &str) {
-        let max_retries = 3u32;
+        let max_retries = self
+            .max_retries_override
+            .unwrap_or(roko_core::defaults::DEFAULT_RETRY_ATTEMPTS);
         let escalation_models = roko_core::defaults::MODEL_ESCALATION_LADDER;
         let mut last_error = String::new();
         let mut succeeded = false;

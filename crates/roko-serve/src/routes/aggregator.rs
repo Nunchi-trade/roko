@@ -133,7 +133,7 @@ struct MuxEnvelope {
 }
 
 struct AgentStreamHandle {
-    sender: mpsc::UnboundedSender<String>,
+    sender: mpsc::Sender<String>,
     task: JoinHandle<()>,
 }
 
@@ -734,7 +734,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    let (mux_tx, mut mux_rx) = mpsc::unbounded_channel::<MuxEnvelope>();
+    let (mux_tx, mut mux_rx) =
+        mpsc::channel::<MuxEnvelope>(roko_core::defaults::DEFAULT_MUX_CHANNEL_BUFFER);
     let mut agent_streams = HashMap::<String, AgentStreamHandle>::new();
     sync_agent_streams(&state, &mux_tx, &mut agent_streams).await;
 
@@ -811,14 +812,14 @@ async fn route_client_stream_message(
 
     if target_ids.is_empty() {
         for handle in agent_streams.values() {
-            if handle.sender.send(payload.clone()).is_ok() {
+            if handle.sender.try_send(payload.clone()).is_ok() {
                 delivered += 1;
             }
         }
     } else {
         for target in target_ids {
             if let Some(handle) = agent_streams.get(&target)
-                && handle.sender.send(payload.clone()).is_ok()
+                && handle.sender.try_send(payload.clone()).is_ok()
             {
                 delivered += 1;
             }
@@ -840,7 +841,7 @@ async fn route_client_stream_message(
 
 async fn sync_agent_streams(
     state: &Arc<AppState>,
-    mux_tx: &mpsc::UnboundedSender<MuxEnvelope>,
+    mux_tx: &mpsc::Sender<MuxEnvelope>,
     streams: &mut HashMap<String, AgentStreamHandle>,
 ) {
     let Ok(agents) = known_agents(state).await else {
@@ -869,7 +870,7 @@ async fn sync_agent_streams(
             continue;
         }
 
-        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
         let tx = mux_tx.clone();
         let task = tokio::spawn(async move {
             forward_agent_stream(agent, input_rx, tx).await;
@@ -886,8 +887,8 @@ async fn sync_agent_streams(
 
 async fn forward_agent_stream(
     agent: DiscoveredAgent,
-    mut input_rx: mpsc::UnboundedReceiver<String>,
-    mux_tx: mpsc::UnboundedSender<MuxEnvelope>,
+    mut input_rx: mpsc::Receiver<String>,
+    mux_tx: mpsc::Sender<MuxEnvelope>,
 ) {
     let Some(url) = agent_stream_url(&agent) else {
         return;
@@ -901,7 +902,7 @@ async fn forward_agent_stream(
 
         match connect_async(request).await {
             Ok((stream, _)) => {
-                let _ = mux_tx.send(MuxEnvelope {
+                let _ = mux_tx.try_send(MuxEnvelope {
                     source: agent.agent_id.clone(),
                     event: json!({
                         "type": "stream_status",
@@ -926,7 +927,7 @@ async fn forward_agent_stream(
                         inbound = read.next() => {
                             match inbound {
                                 Some(Ok(WsMessage::Text(text))) => {
-                                    let _ = mux_tx.send(MuxEnvelope {
+                                    let _ = mux_tx.try_send(MuxEnvelope {
                                         source: agent.agent_id.clone(),
                                         event: parse_stream_event(&text),
                                     });
@@ -939,7 +940,7 @@ async fn forward_agent_stream(
                                         .unwrap_or_else(|| json!({
                                             "binary_base64": base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes),
                                         }));
-                                    let _ = mux_tx.send(MuxEnvelope {
+                                    let _ = mux_tx.try_send(MuxEnvelope {
                                         source: agent.agent_id.clone(),
                                         event,
                                     });
