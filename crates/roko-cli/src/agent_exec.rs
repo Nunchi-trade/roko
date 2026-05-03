@@ -11,13 +11,14 @@ use std::time::Instant;
 use crate::agent_config::{command_from_config, model_from_config};
 use crate::agent_episode::build_capture_episode;
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
-use crate::learning_helpers::distillation_model_caller;
+use crate::learning_helpers::{
+    capture_runtime_model_slugs, distillation_model_caller, provider_id_for_model,
+    record_persisted_provider_health, resolve_capture_model_slug,
+};
 use anyhow::{Context as _, Result};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
-use roko_core::config::schema::RokoConfig;
 use roko_core::{Body, Context, Engram, Kind};
-use roko_learn::provider_health::{ErrorClass, ProviderHealthRegistry};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 
 /// Options for agent execution.
@@ -269,63 +270,6 @@ pub async fn persist_capture_episode(
         .await
         .map_err(|e| anyhow::anyhow!("record learning feedback: {e}"))?;
     record_persisted_provider_health(workdir, &provider, success)?;
-    Ok(())
-}
-
-fn resolve_capture_model_slug(config: &RokoConfig, model: Option<&str>) -> Option<String> {
-    let requested = model.filter(|value| !value.trim().is_empty()).or_else(|| {
-        let default_model = config.agent.default_model.trim();
-        (!default_model.is_empty()).then_some(default_model)
-    })?;
-    let slug = resolve_model(config, requested).slug;
-    (!slug.trim().is_empty()).then_some(slug)
-}
-
-fn provider_id_for_model(config: &RokoConfig, model_key_or_slug: &str) -> Option<String> {
-    let models = config.effective_models();
-    models
-        .get(model_key_or_slug)
-        .or_else(|| {
-            models
-                .values()
-                .find(|profile| profile.slug == model_key_or_slug)
-        })
-        .map(|profile| profile.provider.clone())
-        .filter(|provider| !provider.trim().is_empty())
-}
-
-fn capture_runtime_model_slugs(config: &RokoConfig, episode_model: &str) -> Vec<String> {
-    let mut model_slugs = config.model_slugs_for_cascade();
-    if !episode_model.trim().is_empty() && !model_slugs.iter().any(|slug| slug == episode_model) {
-        model_slugs.push(episode_model.to_string());
-    }
-    model_slugs.sort();
-    model_slugs.dedup();
-    model_slugs
-}
-
-fn record_persisted_provider_health(workdir: &Path, provider: &str, success: bool) -> Result<()> {
-    let provider = provider.trim();
-    if provider.is_empty() {
-        return Ok(());
-    }
-
-    let path = workdir
-        .join(".roko")
-        .join("learn")
-        .join("provider-health.json");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let registry = ProviderHealthRegistry::load_or_new(&path);
-    if success {
-        registry.record_success(provider);
-    } else {
-        registry.record_failure(provider, ErrorClass::Unknown);
-    }
-    registry
-        .save(&path)
-        .with_context(|| format!("save {}", path.display()))?;
     Ok(())
 }
 

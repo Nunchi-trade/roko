@@ -8,6 +8,8 @@ use std::{path::Path, sync::Arc};
 use anyhow::Result;
 use roko_agent::chat_types::FinishReason;
 use roko_agent::model_call_service::ModelCallService;
+use roko_core::agent::resolve_model;
+use roko_core::config::schema::RokoConfig;
 use roko_core::foundation::ModelCaller;
 use roko_core::{AgentRole, Body, Engram, Kind};
 use roko_learn::anomaly::AnomalyDetector;
@@ -15,6 +17,7 @@ use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore, QueryContext};
+use roko_learn::provider_health::{ErrorClass, ProviderHealthRegistry};
 use roko_learn::runtime_feedback::LearningRuntime;
 use roko_learn::skill_library::{Skill, SkillLibrary};
 use tokio::io::AsyncWriteExt;
@@ -23,6 +26,82 @@ use crate::task_parser;
 
 /// Efficiency signal tail — imported from the central defaults module.
 const EFFICIENCY_SIGNAL_TAIL: usize = roko_core::defaults::DEFAULT_EFFICIENCY_SIGNAL_TAIL;
+
+/// Resolve a configured model key or slug into the API slug learning stores use.
+///
+/// If `model` is empty, falls back to the config default model. Returns `None`
+/// only when neither source yields a non-empty model slug.
+pub(crate) fn resolve_capture_model_slug(
+    config: &RokoConfig,
+    model: Option<&str>,
+) -> Option<String> {
+    let requested = model.filter(|value| !value.trim().is_empty()).or_else(|| {
+        let default_model = config.agent.default_model.trim();
+        (!default_model.is_empty()).then_some(default_model)
+    })?;
+    let slug = resolve_model(config, requested).slug;
+    (!slug.trim().is_empty()).then_some(slug)
+}
+
+/// Resolve the configured provider id for a model key or API slug.
+pub(crate) fn provider_id_for_model(
+    config: &RokoConfig,
+    model_key_or_slug: &str,
+) -> Option<String> {
+    let models = config.effective_models();
+    models
+        .get(model_key_or_slug)
+        .or_else(|| {
+            models
+                .values()
+                .find(|profile| profile.slug == model_key_or_slug)
+        })
+        .map(|profile| profile.provider.clone())
+        .filter(|provider| !provider.trim().is_empty())
+}
+
+/// Return the stable cascade model universe for a direct one-shot capture.
+pub(crate) fn capture_runtime_model_slugs(config: &RokoConfig, episode_model: &str) -> Vec<String> {
+    let mut model_slugs = config.model_slugs_for_cascade();
+    if !episode_model.trim().is_empty() && !model_slugs.iter().any(|slug| slug == episode_model) {
+        model_slugs.push(episode_model.to_string());
+    }
+    model_slugs.sort();
+    model_slugs.dedup();
+    model_slugs
+}
+
+/// Persist one provider-health outcome to `.roko/learn/provider-health.json`.
+///
+/// This writes the serialized registry used by config and TUI surfaces; it is
+/// intentionally separate from the short-lived in-memory `ProviderHealthTracker`
+/// used by `LearningRuntime` during a process.
+pub(crate) fn record_persisted_provider_health(
+    workdir: &Path,
+    provider: &str,
+    success: bool,
+) -> Result<()> {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return Ok(());
+    }
+
+    let path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("provider-health.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let registry = ProviderHealthRegistry::load_or_new(&path);
+    if success {
+        registry.record_success(provider);
+    } else {
+        registry.record_failure(provider, ErrorClass::Unknown);
+    }
+    registry.save(&path)?;
+    Ok(())
+}
 
 // ─── TurnLearningFeedback ────────────────────────────────────────────────
 

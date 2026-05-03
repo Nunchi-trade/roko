@@ -53,12 +53,16 @@ pub struct DispatchResult {
 /// Uses the ModelCaller trait that WorkflowEngine uses, preserving routing,
 /// budget, cache, gateway event, and feedback behavior.
 pub async fn dispatch_via_model_call_service(prompt: &str) -> AnyhowResult<DispatchResult> {
+    use crate::learning_helpers::{
+        capture_runtime_model_slugs, provider_id_for_model, record_persisted_provider_health,
+    };
     use roko_agent::model_call_service::ModelCallService;
     use roko_core::agent::resolve_model;
     use roko_core::config::schema::RokoConfig;
     use roko_core::foundation::{
         ChatMessage, FeedbackSink, MessageRole, ModelCallRequest, ModelCaller, caller,
     };
+    use roko_learn::cascade_router::CascadeRouter;
     use roko_learn::feedback_service::FeedbackService;
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -87,17 +91,32 @@ pub async fn dispatch_via_model_call_service(prompt: &str) -> AnyhowResult<Dispa
         .unwrap_or_else(|| model_config.agent.default_model.clone());
     let model = resolve_model(&model_config, &model_key).slug;
 
-    let feedback_sink: Arc<dyn FeedbackSink> =
-        Arc::new(FeedbackService::from_roko_dir(&workdir.join(".roko")));
+    let cascade_path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("cascade-router.json");
+    let cascade_model_slugs = capture_runtime_model_slugs(&model_config, &model);
+    let cascade_router = (!cascade_model_slugs.is_empty()).then(|| {
+        Arc::new(CascadeRouter::load_or_new(
+            &cascade_path,
+            cascade_model_slugs,
+        ))
+    });
+
+    let feedback_service = FeedbackService::from_roko_dir(&workdir.join(".roko"));
+    let feedback_sink: Arc<dyn FeedbackSink> = match &cascade_router {
+        Some(router) => Arc::new(feedback_service.with_cascade_router(Arc::clone(router))),
+        None => Arc::new(feedback_service),
+    };
     let mut service = ModelCallService::new(model.clone())
-        .with_config(model_config)
+        .with_config(model_config.clone())
         .with_feedback_sink(feedback_sink);
     if let Some(ref mcp_path) = config.agent.mcp_config {
         service = service.with_mcp_config(mcp_path.clone());
     }
 
     let request = ModelCallRequest {
-        model,
+        model: model.clone(),
         system: None,
         messages: vec![ChatMessage {
             role: MessageRole::User,
@@ -108,10 +127,39 @@ pub async fn dispatch_via_model_call_service(prompt: &str) -> AnyhowResult<Dispa
         ..Default::default()
     };
 
-    let response = service
-        .call(request)
-        .await
-        .context("ModelCallService dispatch failed")?;
+    let call_result = service.call(request).await;
+    if let Some(router) = &cascade_router
+        && let Err(err) = router.save(&cascade_path)
+    {
+        tracing::warn!(
+            path = %cascade_path.display(),
+            error = %err,
+            "failed to persist direct ModelCallService cascade observation"
+        );
+    }
+
+    let response = match call_result {
+        Ok(response) => {
+            if let Some(provider) = provider_id_for_model(&model_config, &response.model) {
+                record_persisted_provider_health(&workdir, &provider, true)
+                    .context("record direct ModelCallService provider success")?;
+            }
+            response
+        }
+        Err(err) => {
+            if let Some(provider) = provider_id_for_model(&model_config, &model)
+                && let Err(health_err) =
+                    record_persisted_provider_health(&workdir, &provider, false)
+            {
+                tracing::warn!(
+                    provider = %provider,
+                    error = %health_err,
+                    "failed to persist direct ModelCallService provider failure"
+                );
+            }
+            return Err(err).context("ModelCallService dispatch failed");
+        }
+    };
 
     Ok(DispatchResult {
         text: response.content,
