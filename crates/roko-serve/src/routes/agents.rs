@@ -165,8 +165,7 @@ fn agent_dashboard_payload(
         .and_then(|model| model_profile_for(config, model));
     let provider = profile
         .as_ref()
-        .map(|(_, profile)| profile.provider.clone())
-        .or_else(|| infer_provider_from_model(model.as_deref()));
+        .map(|(_, profile)| profile.provider.clone());
     let model_profile = profile
         .as_ref()
         .map(|(key, profile)| model_profile_json(key, profile));
@@ -311,18 +310,6 @@ fn model_profile_json(key: &str, profile: &ModelProfile) -> Value {
             "per_request": profile.cost_per_request,
         },
     })
-}
-
-/// Infer provider name from model slug using `AgentBackend::from_model()`.
-///
-/// This is a fallback for when the model isn't found in config. Prefer
-/// config-based resolution via `resolve_model()` when possible.
-fn infer_provider_from_model(model: Option<&str>) -> Option<String> {
-    use roko_core::agent::{AgentBackend, ProviderKind};
-    let slug = model?;
-    let backend = AgentBackend::from_model(slug);
-    let kind: ProviderKind = backend.into();
-    Some(kind.label().to_string())
 }
 
 fn provider_health_json(state: &AppState, provider: &str) -> Value {

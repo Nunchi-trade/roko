@@ -314,7 +314,9 @@ async fn inference_complete(
     let call_start = std::time::Instant::now();
 
     let model_response = state.model_call_service.call(req).await.map_err(|err| {
-        state.provider_health.record_failure(&requested_provider);
+        if let Some(provider) = requested_provider.as_deref() {
+            state.provider_health.record_failure(provider);
+        }
         let _duration_ms = call_start.elapsed().as_millis() as u64;
         state.event_bus.publish(ServerEvent::InferenceFailed {
             request_id: request_id.clone(),
@@ -326,8 +328,9 @@ async fn inference_complete(
     })?;
 
     let served_model = model_response.model.clone();
-    let served_provider = provider_id_for_model(&config, &served_model);
-    state.provider_health.record_success(&served_provider);
+    if let Some(served_provider) = provider_id_for_model(&config, &served_model) {
+        state.provider_health.record_success(&served_provider);
+    }
     let input_tokens = model_response.usage.input_tokens;
     let output_tokens = model_response.usage.output_tokens;
     let cost_usd = model_response.usage.cost_usd;
@@ -580,8 +583,11 @@ async fn batch_submit(
                     let result_item = match state_ref.model_call_service.call(req).await {
                         Ok(model_response) => {
                             let served_model = model_response.model.clone();
-                            let served_provider = provider_id_for_model(&config_ref, &served_model);
-                            state_ref.provider_health.record_success(&served_provider);
+                            if let Some(served_provider) =
+                                provider_id_for_model(&config_ref, &served_model)
+                            {
+                                state_ref.provider_health.record_success(&served_provider);
+                            }
                             let input_tokens = model_response.usage.input_tokens;
                             let output_tokens = model_response.usage.output_tokens;
                             let cost_usd = model_response.usage.cost_usd;
@@ -601,9 +607,9 @@ async fn batch_submit(
                             }
                         }
                         Err(err) => {
-                            state_ref
-                                .provider_health
-                                .record_failure(&requested_provider);
+                            if let Some(provider) = requested_provider.as_deref() {
+                                state_ref.provider_health.record_failure(provider);
+                            }
                             BatchResultItem {
                                 custom_id: item.custom_id.clone(),
                                 success: false,
@@ -849,22 +855,19 @@ fn parse_agent_role(s: &str) -> AgentRole {
     }
 }
 
-fn provider_id_for_model(config: &RokoConfig, model_key_or_slug: &str) -> String {
+fn provider_id_for_model(config: &RokoConfig, model_key_or_slug: &str) -> Option<String> {
     let models = config.effective_models();
     if let Some(profile) = models.get(model_key_or_slug) {
-        return profile.provider.clone();
+        return Some(profile.provider.clone());
     }
     if let Some(profile) = models
         .values()
         .find(|profile| profile.slug == model_key_or_slug)
     {
-        return profile.provider.clone();
+        return Some(profile.provider.clone());
     }
 
-    resolve_model(config, model_key_or_slug)
-        .provider_kind
-        .label()
-        .to_string()
+    None
 }
 
 /// Select the optimal model via the [`CascadeRouter`] (D1: cached in AppState),
@@ -995,8 +998,9 @@ mod tests {
     use roko_agent::GatewayEvent;
     use roko_agent::ModelCallService;
     use roko_agent::task_runner::{CostTable, ModelPricing};
+    use roko_core::agent::ProviderKind;
     use roko_core::config::ServeAuthConfig;
-    use roko_core::config::schema::ModelProfile;
+    use roko_core::config::schema::{ModelProfile, ProviderConfig};
     use roko_learn::FeedbackService;
     use tempfile::tempdir;
     use tower::ServiceExt;
@@ -1020,6 +1024,30 @@ mod tests {
             .expect("AppState::new"),
         );
         (dir, state)
+    }
+
+    #[test]
+    fn provider_id_for_model_requires_configured_model_profile() {
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.models.clear();
+        config.providers.clear();
+        config.providers.insert(
+            "openai_compat".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: None,
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+
+        assert_eq!(provider_id_for_model(&config, "gpt-new-unconfigured"), None);
     }
 
     #[test]
