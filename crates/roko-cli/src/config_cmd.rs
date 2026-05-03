@@ -1132,6 +1132,13 @@ async fn semantic_validate_config(
         }
     }
 
+    let default_model = config.agent.default_model.trim();
+    if !default_model.is_empty() && !models.contains_key(default_model) {
+        report.schema_warnings.push(format!(
+            "agent.default_model references missing model '{default_model}'"
+        ));
+    }
+
     if let Some(fallback_model) = config.agent.fallback_model.as_deref() {
         let fallback_model = fallback_model.trim();
         if fallback_model.is_empty() {
@@ -1157,6 +1164,11 @@ async fn semantic_validate_config(
             report
                 .schema_warnings
                 .push(format!("agent.tier_models.{tier} must not be empty"));
+        } else if !models.contains_key(model.trim()) {
+            report.schema_warnings.push(format!(
+                "agent.tier_models.{tier} references missing model '{}'",
+                model.trim()
+            ));
         }
     }
 
@@ -1765,6 +1777,7 @@ command = "claude"
     async fn semantic_validate_reports_missing_provider_reference() {
         let client = reqwest::Client::builder().build().unwrap();
         let mut config = RokoConfig::default();
+        config.agent.default_model = "kimi-k2-5".to_string();
         config.models.insert(
             "kimi-k2-5".to_string(),
             ModelProfile {
@@ -1807,6 +1820,7 @@ command = "claude"
         let env_name = "ROKO_TEST_VALIDATE_API_KEY_THAT_SHOULD_NOT_EXIST";
 
         let mut config = RokoConfig::default();
+        config.agent.default_model.clear();
         config.providers.insert(
             "moonshot".to_string(),
             ProviderConfig {
@@ -1839,6 +1853,7 @@ command = "claude"
     async fn semantic_validate_reports_missing_fallback_model_reference() {
         let client = reqwest::Client::builder().build().unwrap();
         let mut config = RokoConfig::default();
+        config.agent.default_model.clear();
         config.agent.fallback_model = Some("missing-model".to_string());
 
         let report = semantic_validate_config(&config, &client).await;
@@ -1854,9 +1869,10 @@ command = "claude"
     }
 
     #[tokio::test]
-    async fn semantic_validate_allows_fallback_model_from_legacy_effective_models() {
+    async fn semantic_validate_warns_for_legacy_default_tier_and_fallback_models() {
         let client = reqwest::Client::builder().build().unwrap();
         let mut config = RokoConfig::default();
+        config.models.clear();
         config.agent.default_model = "claude-sonnet-4-6".to_string();
         config
             .agent
@@ -1866,7 +1882,15 @@ command = "claude"
 
         let report = semantic_validate_config(&config, &client).await;
 
-        assert!(report.schema_warnings.is_empty());
+        assert!(report.schema_warnings.contains(
+            &"agent.default_model references missing model 'claude-sonnet-4-6'".to_string()
+        ));
+        assert!(report.schema_warnings.contains(
+            &"agent.fallback_model references missing model 'claude-haiku-4-5'".to_string()
+        ));
+        assert!(report.schema_warnings.contains(
+            &"agent.tier_models.mechanical references missing model 'claude-haiku-4-5'".to_string()
+        ));
     }
 
     #[tokio::test]
@@ -1876,6 +1900,7 @@ command = "claude"
             .build()
             .unwrap();
         let mut config = RokoConfig::default();
+        config.agent.default_model = "kimi-k2-5".to_string();
         config.providers = HashMap::from([(
             "moonshot".to_string(),
             ProviderConfig {

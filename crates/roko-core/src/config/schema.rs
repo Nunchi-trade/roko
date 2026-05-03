@@ -227,29 +227,15 @@ impl RokoConfig {
         providers
     }
 
-    /// Return the model registry that should be used at runtime.
+    /// Return the explicit model registry that should be used at runtime.
+    ///
+    /// Legacy `agent.default_model` and `agent.tier_models` values are model
+    /// references, not model definitions. Runtime dispatch must only use
+    /// profiles declared under `[models.*]` or profiles made explicit by a
+    /// boundary adapter/migration step.
     #[must_use]
     pub fn effective_models(&self) -> HashMap<String, ModelProfile> {
-        let mut models = HashMap::new();
-        for slug in self.agent.tier_models.values() {
-            let slug = slug.trim();
-            if slug.is_empty() {
-                continue;
-            }
-            models
-                .entry(slug.to_owned())
-                .or_insert_with(|| self.synthesized_model_profile(slug));
-        }
-        let default_model = self.agent.default_model.trim();
-        if !default_model.is_empty() {
-            models
-                .entry(default_model.to_owned())
-                .or_insert_with(|| self.synthesized_model_profile(default_model));
-        }
-        for (model_key, profile) in &self.models {
-            models.insert(model_key.clone(), profile.clone());
-        }
-        models
+        self.models.clone()
     }
 
     fn synthesized_model_profile(&self, slug: &str) -> ModelProfile {
@@ -976,7 +962,14 @@ pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
         .keys()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let effective_models = config.effective_models();
+
+    let default_model = config.agent.default_model.trim();
+    if !default_model.is_empty() && !explicit_model_keys.contains(default_model) {
+        warnings.push(ValidationWarning::UnknownModel {
+            field: "agent.default_model".to_string(),
+            model: default_model.to_string(),
+        });
+    }
 
     if let Some(fallback) = config
         .agent
@@ -985,12 +978,7 @@ pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
         .map(str::trim)
         .filter(|f| !f.is_empty())
     {
-        let exists = if explicit_model_keys.is_empty() {
-            effective_models.contains_key(fallback)
-        } else {
-            explicit_model_keys.contains(fallback)
-        };
-        if !exists {
+        if !explicit_model_keys.contains(fallback) {
             warnings.push(ValidationWarning::UnknownModel {
                 field: "agent.fallback_model".to_string(),
                 model: fallback.to_string(),
@@ -998,19 +986,17 @@ pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
         }
     }
 
-    if !explicit_model_keys.is_empty() {
-        let mut tier_entries = config.agent.tier_models.iter().collect::<Vec<_>>();
-        tier_entries.sort_unstable_by_key(|(l, _)| *l);
-        for (tier, model_key) in tier_entries {
-            let model_key = model_key.trim();
-            if model_key.is_empty() || explicit_model_keys.contains(model_key) {
-                continue;
-            }
-            warnings.push(ValidationWarning::UnknownModel {
-                field: format!("agent.tier_models.{tier}"),
-                model: model_key.to_string(),
-            });
+    let mut tier_entries = config.agent.tier_models.iter().collect::<Vec<_>>();
+    tier_entries.sort_unstable_by_key(|(l, _)| *l);
+    for (tier, model_key) in tier_entries {
+        let model_key = model_key.trim();
+        if model_key.is_empty() || explicit_model_keys.contains(model_key) {
+            continue;
         }
+        warnings.push(ValidationWarning::UnknownModel {
+            field: format!("agent.tier_models.{tier}"),
+            model: model_key.to_string(),
+        });
     }
 
     warnings
@@ -1663,6 +1649,30 @@ default_model = "claude-sonnet-4-6"
     }
 
     #[test]
+    fn effective_models_do_not_synthesize_default_or_tier_profiles() {
+        let mut cfg = RokoConfig::default();
+        cfg.models.clear();
+        cfg.agent.default_model = "claude-sonnet-4-6".to_string();
+        cfg.agent
+            .tier_models
+            .insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
+
+        assert!(cfg.effective_models().is_empty());
+
+        let warnings = validate_references(&cfg);
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            ValidationWarning::UnknownModel { field, model }
+                if field == "agent.default_model" && model == "claude-sonnet-4-6"
+        )));
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            ValidationWarning::UnknownModel { field, model }
+                if field == "agent.tier_models.mechanical" && model == "claude-haiku-4-5"
+        )));
+    }
+
+    #[test]
     fn resolve_api_key_returns_env_value() {
         run_resolve_api_key_child(
             "resolve_api_key_child_present",
@@ -1730,6 +1740,7 @@ default_model = "claude-sonnet-4-6"
     #[test]
     fn validate_references_warns_on_unknown_provider_with_suggestion() {
         let mut cfg = RokoConfig::default();
+        cfg.agent.default_model = "glm-5-1".to_string();
         cfg.providers.insert(
             "openrouter".to_string(),
             ProviderConfig {
