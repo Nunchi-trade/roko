@@ -163,92 +163,18 @@ pub fn create_agent_for_model(
         .as_deref()
         .or(config.agent.command.as_deref());
 
-    // When the command is a known protocol CLI (claude, codex, etc.) but no
-    // explicit provider/model config exists, synthesize sensible defaults so
-    // `roko init` + `roko prd draft new` works out of the box.
-    //
-    // IMPORTANT: only use the command-based provider kind when the model
-    // actually belongs to that provider family.  If the model resolves to a
-    // different kind (e.g. "glm-5v-turbo" → OpenAiCompat while command is
-    // "claude" → ClaudeCli), prefer the model's kind so the right adapter is
-    // chosen.  This prevents every non-Claude model from being force-routed
-    // through the Claude CLI just because `agent.command = "claude"`.
     let (provider_config, profile) = match (provider_config, profile) {
         (Some(pc), Some(mp)) => (pc, mp),
-        (pc, mp) if legacy_command.is_some_and(is_known_protocol_command) => {
-            let cmd = legacy_command.unwrap(); // safe: is_some_and passed
-            let cmd_kind = provider_kind_for_known_protocol_command(cmd);
-
-            // Use the command's kind only when the model's resolved kind
-            // matches (or is the generic default).  Otherwise the model's
-            // own kind wins so that e.g. OpenAI-compat models aren't routed
-            // through Claude CLI.
-            let kind = match cmd_kind {
-                Some(ck) if ck == resolved.provider_kind => ck,
-                Some(ck)
-                    if mp.is_none() && resolved.provider_kind == ProviderKind::OpenAiCompat =>
-                {
-                    // Model wasn't found in config — the OpenAiCompat
-                    // kind is just the catch-all default from slug heuristics.
-                    // Check if an explicit provider for the model's kind
-                    // exists in the config; if so, use the model's kind.
-                    let providers = config.effective_providers();
-                    if provider_for_kind(&providers, resolved.provider_kind).is_some() {
-                        resolved.provider_kind
-                    } else {
-                        ck
-                    }
-                }
-                Some(_) => resolved.provider_kind,
-                None => resolved.provider_kind,
-            };
-            let pc = pc.unwrap_or_else(|| {
-                // When using the model's kind (not the command's), don't
-                // attach the CLI command — it belongs to a different
-                // provider.
-                let use_cmd = cmd_kind == Some(kind);
-                let mut synth = ProviderConfig {
-                    kind,
-                    command: if use_cmd { Some(cmd.to_string()) } else { None },
-                    timeout_ms: options.timeout_ms.or(Some(120_000)),
-                    base_url: None,
-                    api_key_env: None,
-                    args: None,
-                    ttft_timeout_ms: None,
-                    connect_timeout_ms: None,
-                    extra_headers: None,
-                    max_concurrent: None,
-                };
-                // For OpenAI-compat models without explicit config, try to
-                // inherit base_url / api_key_env from a configured provider
-                // of the same kind so the adapter can actually reach the API.
-                if !use_cmd {
-                    let providers = config.effective_providers();
-                    if let Some((_, existing)) = provider_for_kind(&providers, kind) {
-                        synth.base_url = existing.base_url.clone();
-                        synth.api_key_env = existing.api_key_env.clone();
-                        synth.timeout_ms = existing.timeout_ms.or(synth.timeout_ms);
-                        synth.ttft_timeout_ms = existing.ttft_timeout_ms;
-                        synth.connect_timeout_ms = existing.connect_timeout_ms;
-                        synth.extra_headers = existing.extra_headers.clone();
-                        synth.max_concurrent = existing.max_concurrent;
-                    }
-                }
-                synth
-            });
-            let mp = mp.unwrap_or_else(|| ModelProfile {
-                provider: format!("{kind}"),
-                slug: resolved.slug.clone(),
-                ..Default::default()
-            });
-            tracing::info!(
+        _ if legacy_command.is_some_and(is_known_protocol_command) => {
+            let command = legacy_command.unwrap_or("unknown");
+            tracing::warn!(
                 model_key = model_key,
-                slug = %resolved.slug,
-                provider_kind = %kind,
-                command = cmd,
-                "no explicit provider config — synthesized defaults"
+                command = command,
+                "known protocol command requires explicit provider/model config"
             );
-            (pc, mp)
+            return Err(AgentCreationError::MissingConfig(format!(
+                "explicit [providers] and [models] entries are required for protocol command `{command}` and model `{model_key}`"
+            )));
         }
         _ => {
             tracing::warn!(
@@ -1207,7 +1133,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_agent_for_model_uses_command_kind_for_ambiguous_claude_model_key() {
+    async fn create_agent_for_model_uses_effective_claude_provider_for_configured_model() {
         let tmp = tempdir().expect("tempdir");
         let script = tmp.path().join("claude");
         let prompt_file = tmp.path().join("prompt.txt");
@@ -1218,18 +1144,19 @@ mod tests {
             response,
         );
         write_script(&script, &script_body);
+        let mut config = RokoConfig::default();
+        config.agent.command = Some(script.display().to_string());
 
         let agent = create_agent_for_model(
-            &RokoConfig::default(),
-            "claude",
+            &config,
+            "claude-sonnet-4-6",
             AgentOptions {
-                command: Some(script.display().to_string()),
                 timeout_ms: Some(5_000),
                 name: "factory-claude".to_string(),
                 ..Default::default()
             },
         )
-        .expect("create synthesized claude agent");
+        .expect("create configured claude agent");
 
         assert_eq!(agent.name(), "factory-claude");
 
@@ -1243,6 +1170,29 @@ mod tests {
             fs::read_to_string(prompt_file).expect("read prompt file"),
             "hello"
         );
+    }
+
+    #[test]
+    fn create_agent_for_model_rejects_protocol_command_without_model_config() {
+        let result = create_agent_for_model(
+            &RokoConfig::default(),
+            "claude",
+            AgentOptions {
+                command: Some("claude".to_string()),
+                timeout_ms: Some(5_000),
+                name: "factory-claude".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let Err(error) = result else {
+            panic!("expected missing config error");
+        };
+        let AgentCreationError::MissingConfig(message) = error else {
+            panic!("expected missing config error, got {error}");
+        };
+        assert!(message.contains("explicit [providers] and [models]"));
+        assert!(message.contains("claude"));
     }
 
     #[tokio::test(start_paused = true)]
