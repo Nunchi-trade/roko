@@ -19,6 +19,7 @@ use roko_agent::safety::{SafetyLayer, ViolationSeverity};
 use roko_core::ContentHash;
 use roko_core::DaimonPolicy;
 use roko_core::agent::{AgentRole, ProviderKind, resolve_model};
+#[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, RokoConfig};
 use roko_core::foundation::{
@@ -1221,8 +1222,9 @@ where
         );
 
         match provider_kind {
-            // AnthropicApi uses the dedicated Anthropic model caller path which
-            // synthesizes a config from ANTHROPIC_API_KEY if needed.
+            // AnthropicApi uses the dedicated Anthropic model caller path.
+            // The provider must be present in explicit RokoConfig; ACP does
+            // not synthesize providers from ANTHROPIC_API_KEY.
             ProviderKind::AnthropicApi => {
                 run_anthropic_cognitive_task(
                     &session_id,
@@ -1423,7 +1425,7 @@ where
 // ── Anthropic Messages API dispatch ──────────────────────────────────
 
 /// Dispatches a prompt via the Anthropic adapter through the shared model stream contract.
-/// Used for ClaudeCli-configured and AnthropicApi-configured models in ACP.
+/// Used for explicitly AnthropicApi-configured models in ACP.
 async fn run_anthropic_cognitive_task(
     session_id: &str,
     messages: &[serde_json::Value],
@@ -1466,40 +1468,13 @@ fn anthropic_model_call_config(
     slug: &str,
 ) -> Option<RokoConfig> {
     let mut config = roko_config.clone();
-    config.providers = roko_config.effective_providers();
+    config.providers = roko_config.providers.clone();
     config.models = roko_config.effective_models();
 
     // 1. Prefer an existing AnthropicApi provider (NOT ClaudeCli — ACP IS the CLI subprocess).
-    let anthropic_provider_id = config
-        .providers
-        .iter()
-        .find_map(|(id, provider)| {
-            (provider.kind == ProviderKind::AnthropicApi).then(|| id.clone())
-        })
-        .or_else(|| {
-            // 2. Synthesize from ANTHROPIC_API_KEY if no AnthropicApi provider configured.
-            if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-                let synth_id = "anthropic_api".to_string();
-                config.providers.insert(
-                    synth_id.clone(),
-                    roko_core::config::schema::ProviderConfig {
-                        kind: ProviderKind::AnthropicApi,
-                        api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
-                        base_url: Some("https://api.anthropic.com".to_string()),
-                        command: None,
-                        args: None,
-                        timeout_ms: Some(120_000),
-                        ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
-                        connect_timeout_ms: Some(5_000),
-                        extra_headers: None,
-                        max_concurrent: None,
-                    },
-                );
-                Some(synth_id)
-            } else {
-                None
-            }
-        })?;
+    let anthropic_provider_id = config.providers.iter().find_map(|(id, provider)| {
+        (provider.kind == ProviderKind::AnthropicApi).then(|| id.clone())
+    })?;
 
     let mut profile = config
         .models
@@ -3286,6 +3261,29 @@ mod tests {
                 .as_ref()
                 .map(|profile| profile.provider.as_str()),
             Some("anthropic")
+        );
+    }
+
+    #[test]
+    fn anthropic_model_call_config_ignores_effective_provider_synthesis() {
+        let mut roko_config = RokoConfig::default();
+        roko_config.agent.env = Some(vec![
+            ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://api.anthropic.com".to_string(),
+            ),
+        ]);
+
+        assert!(
+            roko_config
+                .effective_providers()
+                .values()
+                .any(|provider| provider.kind == ProviderKind::AnthropicApi)
+        );
+        assert!(
+            anthropic_model_call_config(&roko_config, "claude-sonnet-4-6", "claude-sonnet-4-6")
+                .is_none()
         );
     }
 
