@@ -98,12 +98,18 @@ async fn implementer_exceeds_token_budget_is_rejected() {
     let dispatcher = ToolDispatcher::new(registry, resolver)
         .with_safety(SafetyLayer::with_defaults().with_contract(contract));
 
+    // Token estimation uses content length (chars/4 heuristic), NOT
+    // LLM-supplied "estimated_tokens" (security fix: bypass prevented).
+    // Generate an "input" field that exceeds the budget: (limit + 1) * 4 chars.
+    // Using bash with a large "input" field triggers the token estimate
+    // without hitting path validation.
+    let over_budget_input = "x".repeat(((limit + 1) * 4) as usize);
     let call = ToolCall::new(
         "implementer-over-budget",
         "bash",
         json!({
-            "command": "echo ready",
-            "estimated_tokens": limit + 1,
+            "command": "echo hi",
+            "input": over_budget_input,
         }),
     );
     let result = dispatcher.dispatch(call, &full_capability_ctx()).await;

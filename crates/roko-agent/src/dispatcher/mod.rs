@@ -327,30 +327,20 @@ impl ToolDispatcher {
             }),
         );
         // 3b. Safety checks — if a SafetyLayer is attached, run all
-        //     pre-execution policies. First failure short-circuits.
+        //     pre-execution policies (including contract invariants).
+        //     First failure short-circuits.
+        //
+        //     NOTE: check_pre_execution already calls the contract internally,
+        //     so we do NOT call check_contract separately (§12.10 fix: removed
+        //     redundant double-invocation that wasted CPU and double-counted
+        //     rate-limited invariants).
         if let Some(ref safety) = self.safety {
-            let pre_result = safety.check_pre_execution(&call, ctx);
-            if let Err(e) = pre_result {
+            if let Err(e) = safety.check_pre_execution(&call, ctx) {
                 tracing::warn!(tool = %call.name, error = %e, "FAILED at safety pre-execution");
                 Self::emit_audit(
                     ctx,
                     &call,
                     "safety",
-                    "blocked",
-                    &json!({
-                        "error": e.to_string(),
-                        "error_kind": tool_error_kind(&e),
-                    }),
-                );
-                Self::emit_terminal_audit(ctx, &call, &ToolResult::err(e.clone()), timeout_ms);
-                return ToolResult::err(e);
-            }
-            if let Err(e) = safety.check_contract(&call, ctx) {
-                tracing::warn!(tool = %call.name, error = %e, "FAILED at contract check");
-                Self::emit_audit(
-                    ctx,
-                    &call,
-                    "contract",
                     "blocked",
                     &json!({
                         "error": e.to_string(),

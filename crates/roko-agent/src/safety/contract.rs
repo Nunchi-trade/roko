@@ -557,30 +557,22 @@ fn validate_role(role: &str) -> Result<(), ContractLoadError> {
 }
 
 fn estimated_tokens(call: &ToolCall) -> Option<u32> {
-    call.arguments
-        .get("estimated_tokens")
-        .and_then(as_u32)
-        .or_else(|| call.arguments.get("max_tokens").and_then(as_u32))
+    // SECURITY: Do NOT trust LLM-supplied "estimated_tokens" or "max_tokens"
+    // fields. Instead, estimate from actual string content lengths using a
+    // conservative chars/4 heuristic. This prevents an agent from lying
+    // about its token consumption to bypass MaxTokensPerTurn.
+    string_token_estimate(call.arguments.get("content"))
         .or_else(|| string_token_estimate(call.arguments.get("prompt")))
         .or_else(|| string_token_estimate(call.arguments.get("input")))
+        .or_else(|| string_token_estimate(call.arguments.get("source")))
 }
 
-fn estimated_cost_usd(call: &ToolCall) -> Option<f64> {
-    call.arguments
-        .get("estimated_cost_usd")
-        .and_then(|value| value.as_f64())
-        .or_else(|| {
-            call.arguments
-                .get("cost_usd")
-                .and_then(|value| value.as_f64())
-        })
-        .or_else(|| {
-            call.arguments
-                .get("estimated_cost_usd_cents")
-                .and_then(|value| value.as_u64())
-                .and_then(|cents| u32::try_from(cents).ok())
-                .map(|cents| f64::from(cents) / 100.0)
-        })
+fn estimated_cost_usd(_call: &ToolCall) -> Option<f64> {
+    // SECURITY: Do NOT trust LLM-supplied cost estimates. Cost accounting
+    // must come from actual provider response metadata, not from agent claims.
+    // Return None so MaxCostPerTurn is effectively only enforced by the
+    // orchestrator's tracked cost (via external_actions), not pre-dispatch.
+    None
 }
 
 fn as_u32(value: &serde_json::Value) -> Option<u32> {
@@ -625,25 +617,10 @@ fn is_network_like_call(call: &ToolCall) -> bool {
         })
 }
 
-fn has_gate_approval(call: &ToolCall, ctx: &ToolContext) -> bool {
-    if call
-        .arguments
-        .get("gate_passed")
-        .and_then(|value| value.as_bool())
-        == Some(true)
-    {
-        return true;
-    }
-
-    if call
-        .arguments
-        .get("verified")
-        .and_then(|value| value.as_bool())
-        == Some(true)
-    {
-        return true;
-    }
-
+fn has_gate_approval(_call: &ToolCall, ctx: &ToolContext) -> bool {
+    // SECURITY: Only trust orchestrator-recorded external actions, never
+    // LLM-supplied tool-call arguments. An LLM adding `"gate_passed": true`
+    // to its arguments must NOT bypass the gate requirement.
     ctx.external_actions.read().iter().any(|action| {
         action.action_type == "gate_passed"
             || (action.action_type == "run_gate"
@@ -766,12 +743,16 @@ mod tests {
     #[test]
     fn max_tokens_contract_violation_surfaces_permission_error() {
         let contract = AgentContract::load_for_role("implementer").expect("load implementer");
+        // Token estimation is from content length (chars/4 heuristic).
+        // 12000 token limit × 4 chars/token = 48000 chars. Use 50000 chars
+        // to be safely above the threshold.
+        let large_content = "x".repeat(50_000);
         let call = ToolCall::new(
             "call-1",
-            "bash",
+            "write_file",
             serde_json::json!({
-                "command": "echo hi",
-                "estimated_tokens": 12_001_u32,
+                "path": "big.txt",
+                "content": large_content,
             }),
         );
         let ctx = ToolContext::testing("/tmp/contract-tests");
