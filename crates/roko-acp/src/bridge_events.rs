@@ -3265,7 +3265,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_model_call_config_ignores_effective_provider_synthesis() {
+    fn anthropic_model_call_config_requires_explicit_provider_when_env_values_exist() {
         let mut roko_config = RokoConfig::default();
         roko_config.agent.env = Some(vec![
             ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
@@ -3276,7 +3276,7 @@ mod tests {
         ]);
 
         assert!(
-            roko_config
+            !roko_config
                 .effective_providers()
                 .values()
                 .any(|provider| provider.kind == ProviderKind::AnthropicApi)

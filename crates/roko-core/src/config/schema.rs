@@ -186,25 +186,6 @@ impl RokoConfig {
     pub fn effective_providers(&self) -> HashMap<String, ProviderConfig> {
         if !self.providers.is_empty() {
             let mut providers = self.providers.clone();
-            if !providers.contains_key("anthropic")
-                && std::env::var_os("ANTHROPIC_API_KEY").is_some()
-            {
-                providers.insert(
-                    "anthropic".into(),
-                    ProviderConfig {
-                        kind: ProviderKind::AnthropicApi,
-                        base_url: Some("https://api.anthropic.com".to_string()),
-                        api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
-                        command: None,
-                        args: None,
-                        timeout_ms: default_provider_timeout_ms(),
-                        ttft_timeout_ms: default_provider_ttft_timeout_ms(),
-                        connect_timeout_ms: default_provider_connect_timeout_ms(),
-                        extra_headers: None,
-                        max_concurrent: None,
-                    },
-                );
-            }
             // Ensure ClaudeCli providers always have a command — the adapter
             // requires it and users commonly omit it from config.
             let claude_command = self
@@ -242,34 +223,6 @@ impl RokoConfig {
                 max_concurrent: None,
             },
         );
-
-        let has_env_key = std::env::var_os("ANTHROPIC_API_KEY").is_some();
-        let has_config_key = self.agent_env_value("ANTHROPIC_API_KEY").is_some();
-        let base_url = self
-            .agent_env_value("ANTHROPIC_BASE_URL")
-            .map(|s| s.to_owned())
-            .or_else(|| has_env_key.then(|| "https://api.anthropic.com".to_string()));
-        if let Some(base_url) = base_url {
-            providers.insert(
-                "anthropic".into(),
-                ProviderConfig {
-                    kind: ProviderKind::AnthropicApi,
-                    base_url: Some(base_url),
-                    api_key_env: if has_env_key || has_config_key {
-                        Some("ANTHROPIC_API_KEY".to_string())
-                    } else {
-                        None
-                    },
-                    command: None,
-                    args: None,
-                    timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
-                    ttft_timeout_ms: default_provider_ttft_timeout_ms(),
-                    connect_timeout_ms: default_provider_connect_timeout_ms(),
-                    extra_headers: None,
-                    max_concurrent: None,
-                },
-            );
-        }
 
         providers
     }
@@ -1666,6 +1619,30 @@ default_model = "claude-sonnet-4-6"
         let providers = cfg.effective_providers();
         let claude = providers.get("claude_cli").expect("claude_cli provider");
         assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+    }
+
+    #[test]
+    fn effective_providers_do_not_synthesize_anthropic_from_agent_env() {
+        let mut cfg = RokoConfig::default();
+        cfg.providers.clear();
+        cfg.agent.env = Some(vec![
+            ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://api.anthropic.com".to_string(),
+            ),
+        ]);
+
+        let providers = cfg.effective_providers();
+        assert_eq!(
+            providers.get("claude_cli").map(|provider| provider.kind),
+            Some(ProviderKind::ClaudeCli)
+        );
+        assert!(
+            providers
+                .values()
+                .all(|provider| provider.kind != ProviderKind::AnthropicApi)
+        );
     }
 
     #[test]
