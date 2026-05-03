@@ -2,7 +2,11 @@
 
 use std::path::Path;
 
-use roko_core::config::schema::RokoConfig;
+use roko_core::agent::ProviderKind;
+use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::defaults::{
+    DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS,
+};
 
 fn read_roko_toml(workdir: &Path) -> Option<String> {
     let config_path = workdir.join("roko.toml");
@@ -73,24 +77,79 @@ pub fn load_gateway_env(workdir: &Path) -> GatewayEnv {
     GatewayEnv { vars }
 }
 
-/// Build a synthetic Claude CLI config for direct command-backed execution.
-#[must_use]
-pub fn synthesize_claude_cli_config(command: &str, model: &str) -> RokoConfig {
-    let mut config = RokoConfig::default();
-    config.agent.command = Some(command.to_string());
-    config.agent.default_model = model.to_string();
-    config.agent.default_backend = "claude".to_string();
-    config
+fn provider_kind_for_command(command: &str) -> ProviderKind {
+    let executable = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command);
+
+    match executable {
+        "claude" => ProviderKind::ClaudeCli,
+        "cursor-agent" | "cursor_agent" => ProviderKind::CursorAcp,
+        "codex" => ProviderKind::OpenAiCompat,
+        _ => ProviderKind::ClaudeCli,
+    }
 }
 
-/// Build a synthetic known-protocol CLI config for direct command-backed execution.
-#[must_use]
-pub fn synthesize_known_protocol_config(command: &str, model: &str) -> RokoConfig {
+fn provider_api_key_env(kind: ProviderKind) -> Option<String> {
+    match kind {
+        ProviderKind::OpenAiCompat => Some("OPENAI_API_KEY".to_string()),
+        ProviderKind::AnthropicApi => Some("ANTHROPIC_API_KEY".to_string()),
+        ProviderKind::PerplexityApi => Some("PERPLEXITY_API_KEY".to_string()),
+        ProviderKind::GeminiApi => Some("GEMINI_API_KEY".to_string()),
+        ProviderKind::CerebrasApi => Some("CEREBRAS_API_KEY".to_string()),
+        ProviderKind::ClaudeCli | ProviderKind::CursorAcp => None,
+    }
+}
+
+fn provider_command(kind: ProviderKind, command: &str) -> Option<String> {
+    matches!(kind, ProviderKind::ClaudeCli | ProviderKind::CursorAcp).then(|| command.to_string())
+}
+
+fn command_backed_config(command: &str, model: &str, kind: ProviderKind) -> RokoConfig {
+    let provider_id = kind.label().to_string();
     let mut config = RokoConfig::default();
     config.agent.command = Some(command.to_string());
     config.agent.default_model = model.to_string();
     config.agent.default_backend = command.to_string();
+    config.providers.insert(
+        provider_id.clone(),
+        ProviderConfig {
+            kind,
+            base_url: None,
+            api_key_env: provider_api_key_env(kind),
+            command: provider_command(kind, command),
+            args: None,
+            timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+            connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
+            extra_headers: None,
+            max_concurrent: None,
+        },
+    );
+    config.models.insert(
+        model.to_string(),
+        ModelProfile {
+            provider: provider_id,
+            slug: model.to_string(),
+            ..Default::default()
+        },
+    );
     config
+}
+
+/// Build an explicit transient Claude CLI config for direct command-backed execution.
+#[must_use]
+pub fn synthesize_claude_cli_config(command: &str, model: &str) -> RokoConfig {
+    let mut config = command_backed_config(command, model, ProviderKind::ClaudeCli);
+    config.agent.default_backend = "claude".to_string();
+    config
+}
+
+/// Build an explicit transient known-protocol config for direct command-backed execution.
+#[must_use]
+pub fn synthesize_known_protocol_config(command: &str, model: &str) -> RokoConfig {
+    command_backed_config(command, model, provider_kind_for_command(command))
 }
 
 /// Build a synthetic generic subprocess config for direct command-backed execution.
@@ -137,14 +196,42 @@ mod tests {
         assert_eq!(config.agent.command.as_deref(), Some("claude"));
         assert_eq!(config.agent.default_model, "claude-opus-4-6");
         assert_eq!(config.agent.default_backend, "claude");
+        assert_eq!(
+            config
+                .providers
+                .get("claude_cli")
+                .and_then(|provider| provider.command.as_deref()),
+            Some("claude")
+        );
+        assert_eq!(
+            config
+                .models
+                .get("claude-opus-4-6")
+                .map(|model| model.provider.as_str()),
+            Some("claude_cli")
+        );
     }
 
     #[test]
     fn synthesize_known_protocol_config_uses_command_as_backend() {
-        let config = synthesize_known_protocol_config("gemini", "gemini-2.5-pro");
-        assert_eq!(config.agent.command.as_deref(), Some("gemini"));
-        assert_eq!(config.agent.default_model, "gemini-2.5-pro");
-        assert_eq!(config.agent.default_backend, "gemini");
+        let config = synthesize_known_protocol_config("cursor-agent", "composer-2-fast");
+        assert_eq!(config.agent.command.as_deref(), Some("cursor-agent"));
+        assert_eq!(config.agent.default_model, "composer-2-fast");
+        assert_eq!(config.agent.default_backend, "cursor-agent");
+        assert_eq!(
+            config
+                .providers
+                .get("cursor_acp")
+                .and_then(|provider| provider.command.as_deref()),
+            Some("cursor-agent")
+        );
+        assert_eq!(
+            config
+                .models
+                .get("composer-2-fast")
+                .map(|model| model.provider.as_str()),
+            Some("cursor_acp")
+        );
     }
 
     #[test]
