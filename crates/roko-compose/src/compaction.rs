@@ -327,7 +327,8 @@ fn fallback_summary(compactable: &[ChatMessage]) -> String {
 }
 
 fn truncate_to_budget(text: &str, budget_tokens: usize) -> String {
-    let max_chars = budget_tokens.saturating_mul(4);
+    // Conservative: 3.5 chars/token → multiply by 7/2 (≈3.5) to stay under budget.
+    let max_chars = budget_tokens.saturating_mul(7) / 2;
     if text.len() <= max_chars {
         return text.to_string();
     }

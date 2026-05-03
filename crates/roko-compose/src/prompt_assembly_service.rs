@@ -471,7 +471,8 @@ impl PromptAssembler for PromptAssemblyService {
             let scaled = ((base_budget as f64) * (included_weight / total)).ceil() as usize;
             builder = builder.with_token_budget(scaled.max(256));
             let counter = TokenCounter::Heuristic {
-                chars_per_token: 4.0,
+                // §17.2: Conservative estimate for code-heavy prompts.
+                chars_per_token: 3.5,
             };
             return Ok(builder.build_with_counter(&counter));
         }
@@ -577,7 +578,8 @@ fn format_techniques_section(techniques: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    format!("## Relevant Knowledge\n\n{lines}")
+    // §17.3: Use distinct heading to avoid collision with format_knowledge_section.
+    format!("## Relevant Techniques\n\n{lines}")
 }
 
 fn knowledge_kind_label(kind: KnowledgeKind) -> &'static str {

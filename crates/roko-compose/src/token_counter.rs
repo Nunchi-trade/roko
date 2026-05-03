@@ -39,7 +39,9 @@ impl TokenCounter {
             return tiktoken_rs::o200k_base()
                 .map(Self::Tiktoken)
                 .unwrap_or(Self::Heuristic {
-                    chars_per_token: 4.0,
+                    // §17.2: 3.5 is more conservative than 4.0 for code-heavy
+                    // prompts (Claude averages ~3.5 chars/token on code).
+                    chars_per_token: 3.5,
                 });
         }
 

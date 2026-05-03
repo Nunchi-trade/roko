@@ -422,7 +422,12 @@ impl SystemPromptBuilder {
             }
         }
 
-        assemble_selected_sections(&rendered_sections, &kept, self.cache_markers)
+        // §17.4: Normalize whitespace so cache keys match `build()` output.
+        normalize_for_caching(&assemble_selected_sections(
+            &rendered_sections,
+            &kept,
+            self.cache_markers,
+        ))
     }
 
     /// Build the system prompt as a vector of [`PromptSection`]s.
