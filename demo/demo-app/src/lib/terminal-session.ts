@@ -83,17 +83,25 @@ export function getRoko(): string {
   return resolvedRoko;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 /**
- * Build a roko CLI command string, automatically injecting `--model` from ctx.
+ * Build a roko CLI command string, automatically injecting workspace and model context.
  * Every scenario runner should use this instead of `${ROKO} subcommand`.
  */
 export function roko(ctx: ScenarioContext, subcommand: string): string {
   const bin = getRoko();
-  const model = ctx.activeModel;
-  if (model) {
-    return `${bin} --model ${model} ${subcommand}`;
+  const parts = [bin];
+  if (ctx.workspaceDir) {
+    parts.push('--repo', shellQuote(ctx.workspaceDir));
   }
-  return `${bin} ${subcommand}`;
+  if (ctx.activeModel) {
+    parts.push('--model', shellQuote(ctx.activeModel));
+  }
+  parts.push(subcommand);
+  return parts.join(' ');
 }
 
 // ── Workspace entry ──────────────────────────────────────────

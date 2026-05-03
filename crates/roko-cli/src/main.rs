@@ -2487,23 +2487,22 @@ pub(crate) fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
 /// would cause a nested `.roko/.roko/` and silent data loss.
 fn resolve_workdir(cli: &Cli) -> PathBuf {
     let dir = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
+    let resolved = dir.canonicalize().unwrap_or(dir);
 
     // Detect if we're running from inside a .roko/ directory and auto-correct
     // to the project root to avoid nested .roko/.roko/ data dirs.
-    if let Ok(abs) = dir.canonicalize() {
-        for ancestor in abs.ancestors() {
-            if ancestor.file_name().and_then(|n| n.to_str()) == Some(".roko") {
-                let project_root = ancestor.parent().unwrap_or(ancestor).to_path_buf();
-                eprintln!(
-                    "\x1b[33m\u{26a0} Auto-correcting: running from inside .roko/, using project root: {}\x1b[0m",
-                    project_root.display()
-                );
-                return project_root;
-            }
+    for ancestor in resolved.ancestors() {
+        if ancestor.file_name().and_then(|n| n.to_str()) == Some(".roko") {
+            let project_root = ancestor.parent().unwrap_or(ancestor).to_path_buf();
+            eprintln!(
+                "\x1b[33m\u{26a0} Auto-correcting: running from inside .roko/, using project root: {}\x1b[0m",
+                project_root.display()
+            );
+            return project_root;
         }
     }
 
-    dir
+    resolved
 }
 
 /// Resolve the plans directory, preferring `.roko/plans/` and falling back to `./plans/`.
@@ -3379,8 +3378,19 @@ mod tests {
             .ancestors()
             .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some(".roko"))
             .and_then(Path::parent)
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            .map_or_else(|| cwd.clone(), Path::to_path_buf);
         assert_eq!(resolve_workdir(&cli), expected);
+    }
+
+    #[test]
+    fn resolve_workdir_canonicalizes_existing_repo_flag() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("workspace");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_arg = repo.join(".");
+        let cli = Cli::try_parse_from(["roko", "--repo", repo_arg.to_str().unwrap()]).unwrap();
+
+        assert_eq!(resolve_workdir(&cli), repo.canonicalize().unwrap());
     }
 
     #[test]
