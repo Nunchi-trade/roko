@@ -27,7 +27,6 @@ use roko_compose::SystemPromptBuilder;
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, resolve_model};
 use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilterConfig};
-use roko_core::foundation::{FeedbackEvent, FeedbackSink};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
 use roko_core::tool::role_allowlist::role_allowlist;
@@ -39,10 +38,10 @@ use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
-use roko_learn::feedback_service::FeedbackService;
-use roko_learn::model_router::CONTEXT_DIM;
+use roko_learn::model_call_feedback::{
+    ModelCallFeedback, ModelCallFeedbackRecorder, observe_model_call_on_router,
+};
 use roko_learn::prompt_experiment::ExperimentStore;
-use roko_learn::provider_health::{ErrorClass, ProviderHealthRegistry};
 use roko_neuro::spawn_episode_distillation;
 use roko_std::tool::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
@@ -1880,27 +1879,19 @@ async fn record_template_dispatch_feedback(
         state.provider_health.record_failure(&provider_id);
     }
 
-    if let Err(error) = record_persisted_provider_health_at(learn_dir, &provider_id, result.success)
-    {
-        warn!(
-            provider = %provider_id,
-            model = %model_slug,
-            template = %template.name,
-            error = %error,
-            "failed to persist template dispatch provider health"
-        );
-    }
-
-    let cascade_path = learn_dir.join("cascade-router.json");
     let cascade_model_slugs = template_cascade_model_slugs(config, &model_slug);
-    let mut feedback_service = FeedbackService::new(learn_dir.to_path_buf());
-    let mut local_router: Option<Arc<CascadeRouter>> = None;
-
     let global_learn_dir = state.layout.learn_dir();
+    let cascade_path = learn_dir.join("cascade-router.json");
     let used_cached_router = if learn_dir == global_learn_dir.as_path() {
         let router_guard = state.cascade_router.read().await;
         if let Some(router) = router_guard.as_ref() {
-            observe_template_router(router, &model_slug, learning_success, latency_ms);
+            observe_model_call_on_router(
+                router,
+                &model_slug,
+                "template_dispatch",
+                learning_success,
+                latency_ms,
+            );
             if let Err(error) = router.save(&cascade_path) {
                 warn!(
                     path = %cascade_path.display(),
@@ -1915,19 +1906,14 @@ async fn record_template_dispatch_feedback(
     } else {
         false
     };
+    let recorder = if used_cached_router || cascade_model_slugs.is_empty() {
+        ModelCallFeedbackRecorder::without_cascade_router(learn_dir.to_path_buf())
+    } else {
+        ModelCallFeedbackRecorder::from_learn_dir(learn_dir.to_path_buf(), cascade_model_slugs)
+    };
 
-    if !used_cached_router && !cascade_model_slugs.is_empty() {
-        let router = Arc::new(CascadeRouter::load_or_new(
-            &cascade_path,
-            cascade_model_slugs,
-        ));
-        feedback_service = feedback_service.with_cascade_router(Arc::clone(&router));
-        local_router = Some(router);
-    }
-
-    let turn_tokens = u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
-    if let Err(error) = feedback_service
-        .record(FeedbackEvent::ModelCall {
+    if let Err(error) = recorder
+        .record(ModelCallFeedback {
             run_id: None,
             request_id: Some(format!(
                 "template-dispatch-{}-{}",
@@ -1936,16 +1922,15 @@ async fn record_template_dispatch_feedback(
             )),
             prompt_section_ids: Vec::new(),
             knowledge_ids: Vec::new(),
-            model: Some(model_slug.clone()),
-            provider: Some(provider_id.clone()),
-            token_usage: Some(turn_tokens),
-            cost: Some(f64::from(result.usage.cost_usd)),
+            model: model_slug.clone(),
+            provider: provider_id.clone(),
             role: "template_dispatch".to_string(),
             input_tokens: u64::from(result.usage.input_tokens),
             output_tokens: u64::from(result.usage.output_tokens),
             cost_usd: f64::from(result.usage.cost_usd),
             latency_ms,
             success: learning_success,
+            provider_success: Some(result.success),
         })
         .await
     {
@@ -1955,25 +1940,6 @@ async fn record_template_dispatch_feedback(
             template = %template.name,
             error = %error,
             "failed to record template dispatch feedback"
-        );
-    }
-
-    if let Err(error) = feedback_service.flush_async().await {
-        warn!(
-            provider = %provider_id,
-            model = %model_slug,
-            template = %template.name,
-            error = %error,
-            "failed to flush template dispatch feedback"
-        );
-    }
-    if let Some(router) = &local_router
-        && let Err(error) = router.save(&cascade_path)
-    {
-        warn!(
-            path = %cascade_path.display(),
-            error = %error,
-            "failed to persist template dispatch cascade observation"
         );
     }
 }
@@ -1999,62 +1965,6 @@ fn template_cascade_model_slugs(config: &RokoConfig, model_slug: &str) -> Vec<St
     model_slugs.sort();
     model_slugs.dedup();
     model_slugs
-}
-
-fn record_persisted_provider_health_at(
-    learn_dir: &Path,
-    provider: &str,
-    success: bool,
-) -> Result<()> {
-    let provider = provider.trim();
-    if provider.is_empty() {
-        return Ok(());
-    }
-
-    fs::create_dir_all(learn_dir)?;
-    let path = learn_dir.join("provider-health.json");
-    let registry = ProviderHealthRegistry::load_or_new(&path);
-    if success {
-        registry.record_success(provider);
-    } else {
-        registry.record_failure(provider, ErrorClass::Unknown);
-    }
-    registry.save(&path)?;
-    Ok(())
-}
-
-fn observe_template_router(
-    router: &CascadeRouter,
-    model_slug: &str,
-    success: bool,
-    latency_ms: u64,
-) {
-    let Some(model_idx) = router.model_index_for_slug(model_slug) else {
-        return;
-    };
-    let reward = if success { 1.0 } else { 0.0 };
-    router.observe(
-        template_model_call_context_vec("template_dispatch", latency_ms),
-        model_idx,
-        reward,
-    );
-}
-
-fn template_model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
-    let role_feature = template_role_hash(role);
-    let latency_feature = (latency_ms as f64 / 60_000.0).min(1.0);
-    let mut context_vec = vec![0.0; CONTEXT_DIM];
-    context_vec[0] = role_feature;
-    context_vec[1] = latency_feature;
-    context_vec[16] = 1.0;
-    context_vec
-}
-
-fn template_role_hash(role: &str) -> f64 {
-    let hash: u32 = role.bytes().fold(0u32, |acc, b| {
-        acc.wrapping_mul(31).wrapping_add(u32::from(b))
-    });
-    f64::from(hash % 1000) / 1000.0
 }
 
 fn build_template_system_prompt(

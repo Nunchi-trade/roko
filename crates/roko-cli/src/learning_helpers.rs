@@ -16,8 +16,8 @@ use roko_learn::anomaly::AnomalyDetector;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
+use roko_learn::model_call_feedback::record_provider_health_for_workdir;
 use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore, QueryContext};
-use roko_learn::provider_health::{ErrorClass, ProviderHealthRegistry};
 use roko_learn::runtime_feedback::LearningRuntime;
 use roko_learn::skill_library::{Skill, SkillLibrary};
 use tokio::io::AsyncWriteExt;
@@ -81,25 +81,7 @@ pub(crate) fn record_persisted_provider_health(
     provider: &str,
     success: bool,
 ) -> Result<()> {
-    let provider = provider.trim();
-    if provider.is_empty() {
-        return Ok(());
-    }
-
-    let path = workdir
-        .join(".roko")
-        .join("learn")
-        .join("provider-health.json");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let registry = ProviderHealthRegistry::load_or_new(&path);
-    if success {
-        registry.record_success(provider);
-    } else {
-        registry.record_failure(provider, ErrorClass::Unknown);
-    }
-    registry.save(&path)?;
+    record_provider_health_for_workdir(workdir, provider, success)?;
     Ok(())
 }
 

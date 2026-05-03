@@ -5,7 +5,7 @@
 
 use crate::cascade_router::CascadeRouter;
 use crate::episode_logger::{Episode, EpisodeLogger, Usage};
-use crate::model_router::CONTEXT_DIM;
+use crate::model_call_feedback::observe_model_call_on_router;
 use crate::section_effect::SectionEffectivenessRegistry;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -665,14 +665,7 @@ impl FeedbackService {
             return;
         };
 
-        let context_vec = model_call_context_vec(role, latency_ms);
-        let Some(model_idx) = router.model_index_for_slug(model) else {
-            tracing::debug!("model {model} not in cascade router slug list, skipping observe");
-            return;
-        };
-
-        let reward = if success { 1.0 } else { 0.0 };
-        router.observe(context_vec, model_idx, reward);
+        observe_model_call_on_router(router, model, role, success, latency_ms);
     }
 }
 
@@ -763,27 +756,6 @@ fn load_knowledge_scores(path: &Path) -> HashMap<String, i64> {
         .and_then(|contents| serde_json::from_str::<KnowledgeScoreSnapshot>(&contents).ok())
         .map(|snapshot| snapshot.scores)
         .unwrap_or_default()
-}
-
-fn model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
-    let role_feature = simple_role_hash(role);
-    let latency_feature = (latency_ms as f64 / 60_000.0).min(1.0);
-    let mut context_vec = vec![0.0; CONTEXT_DIM];
-
-    // Preserve the requested minimal model-call signals while using the
-    // router's fixed raw context width so LinUCB accepts the observation.
-    context_vec[0] = role_feature;
-    context_vec[1] = latency_feature;
-    context_vec[16] = 1.0;
-
-    context_vec
-}
-
-fn simple_role_hash(role: &str) -> f64 {
-    let hash: u32 = role.bytes().fold(0u32, |acc, b| {
-        acc.wrapping_mul(31).wrapping_add(u32::from(b))
-    });
-    f64::from(hash % 1000) / 1000.0
 }
 
 impl Drop for FeedbackService {

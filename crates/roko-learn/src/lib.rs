@@ -124,6 +124,8 @@ pub mod jsonl_rotation;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
 pub mod local_reward;
+/// Durable direct model-call feedback recorder.
+pub mod model_call_feedback;
 pub mod model_experiment;
 pub mod model_router;
 /// Domain-specific Oracle implementations (Chain, Coding, Research) and witness verification.

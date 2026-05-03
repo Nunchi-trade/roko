@@ -19,14 +19,12 @@ use roko_agent::provider::{AgentOptions, ProviderSemaphores};
 use roko_agent::{Agent, AgentResult, create_agent_for_model};
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
-use roko_core::foundation::{FeedbackEvent, FeedbackSink};
 use roko_core::{Body, Context, Engram, Kind};
-use roko_learn::cascade_router::CascadeRouter;
-use roko_learn::feedback_service::FeedbackService;
+use roko_learn::model_call_feedback::{ModelCallFeedback, ModelCallFeedbackRecorder};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::learning_helpers::{capture_runtime_model_slugs, record_persisted_provider_health};
+use crate::learning_helpers::capture_runtime_model_slugs;
 
 /// A single tool execution output captured from a dispatch response.
 #[derive(Debug, Clone)]
@@ -957,40 +955,23 @@ async fn record_agent_dispatch_feedback(
     result: &AgentResult,
     latency_ms: u64,
 ) {
-    let cascade_path = request
-        .workdir
-        .join(".roko")
-        .join("learn")
-        .join("cascade-router.json");
     let cascade_model_slugs = capture_runtime_model_slugs(config, &target.model_slug);
-    let cascade_router = (!cascade_model_slugs.is_empty()).then(|| {
-        Arc::new(CascadeRouter::load_or_new(
-            &cascade_path,
-            cascade_model_slugs,
-        ))
-    });
-    let mut feedback_service = FeedbackService::from_roko_dir(&request.workdir.join(".roko"));
-    if let Some(router) = &cascade_router {
-        feedback_service = feedback_service.with_cascade_router(Arc::clone(router));
-    }
-
-    let turn_tokens = u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
-    if let Err(error) = feedback_service
-        .record(FeedbackEvent::ModelCall {
+    let recorder = ModelCallFeedbackRecorder::from_workdir(&request.workdir, cascade_model_slugs);
+    if let Err(error) = recorder
+        .record(ModelCallFeedback {
             run_id: None,
             request_id: Some(format!("dispatch-v2-{}", request.agent_id)),
             prompt_section_ids: Vec::new(),
             knowledge_ids: Vec::new(),
-            model: Some(target.model_slug.clone()),
-            provider: Some(target.provider_id.clone()),
-            token_usage: Some(turn_tokens),
-            cost: Some(f64::from(result.usage.cost_usd)),
+            model: target.model_slug.clone(),
+            provider: target.provider_id.clone(),
             role: "dispatch_v2".to_string(),
             input_tokens: u64::from(result.usage.input_tokens),
             output_tokens: u64::from(result.usage.output_tokens),
             cost_usd: f64::from(result.usage.cost_usd),
             latency_ms,
             success: result.success,
+            provider_success: Some(result.success),
         })
         .await
     {
@@ -1000,37 +981,6 @@ async fn record_agent_dispatch_feedback(
             agent_id = %request.agent_id,
             error = %error,
             "failed to record dispatch-v2 feedback"
-        );
-    }
-
-    if let Err(error) =
-        record_persisted_provider_health(&request.workdir, &target.provider_id, result.success)
-    {
-        tracing::warn!(
-            provider = %target.provider_id,
-            model = %target.model_slug,
-            agent_id = %request.agent_id,
-            error = %error,
-            "failed to persist dispatch-v2 provider health"
-        );
-    }
-
-    if let Err(error) = feedback_service.flush_async().await {
-        tracing::warn!(
-            provider = %target.provider_id,
-            model = %target.model_slug,
-            agent_id = %request.agent_id,
-            error = %error,
-            "failed to flush dispatch-v2 feedback"
-        );
-    }
-    if let Some(router) = &cascade_router
-        && let Err(error) = router.save(&cascade_path)
-    {
-        tracing::warn!(
-            path = %cascade_path.display(),
-            error = %error,
-            "failed to persist dispatch-v2 cascade observation"
         );
     }
 }

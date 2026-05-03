@@ -1,7 +1,6 @@
 //! Vision evaluator: multimodal LLM call + response parsing.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -12,14 +11,10 @@ use roko_agent::{
 use roko_core::agent::resolve_model;
 use roko_core::chat_types::{ChatMessage, ContentBlock, ImageUrl, MessageContent};
 use roko_core::config::schema::RokoConfig;
-use roko_core::foundation::{FeedbackEvent, FeedbackSink};
 use roko_core::{Body, Engram, Kind};
-use roko_learn::cascade_router::CascadeRouter;
-use roko_learn::feedback_service::FeedbackService;
+use roko_learn::model_call_feedback::{ModelCallFeedback, ModelCallFeedbackRecorder};
 
-use crate::learning_helpers::{
-    capture_runtime_model_slugs, provider_id_for_model, record_persisted_provider_health,
-};
+use crate::learning_helpers::{capture_runtime_model_slugs, provider_id_for_model};
 
 use super::prompt;
 use super::{Evaluation, IterationRecord};
@@ -145,27 +140,10 @@ impl VisionEvaluator {
             })
             .unwrap_or_else(|| resolved.provider_kind.label().to_string());
 
-        let cascade_path = self
-            .workdir
-            .join(".roko")
-            .join("learn")
-            .join("cascade-router.json");
         let cascade_model_slugs = capture_runtime_model_slugs(&self.config, &model_slug);
-        let cascade_router = (!cascade_model_slugs.is_empty()).then(|| {
-            Arc::new(CascadeRouter::load_or_new(
-                &cascade_path,
-                cascade_model_slugs,
-            ))
-        });
-        let mut feedback_service = FeedbackService::from_roko_dir(&self.workdir.join(".roko"));
-        if let Some(router) = &cascade_router {
-            feedback_service = feedback_service.with_cascade_router(Arc::clone(router));
-        }
-
-        let turn_tokens =
-            u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
-        if let Err(error) = feedback_service
-            .record(FeedbackEvent::ModelCall {
+        let recorder = ModelCallFeedbackRecorder::from_workdir(&self.workdir, cascade_model_slugs);
+        if let Err(error) = recorder
+            .record(ModelCallFeedback {
                 run_id: None,
                 request_id: Some(format!(
                     "vision-evaluator-{}",
@@ -173,16 +151,15 @@ impl VisionEvaluator {
                 )),
                 prompt_section_ids: Vec::new(),
                 knowledge_ids: Vec::new(),
-                model: Some(model_slug.clone()),
-                provider: Some(provider_id.clone()),
-                token_usage: Some(turn_tokens),
-                cost: Some(f64::from(result.usage.cost_usd)),
+                model: model_slug.clone(),
+                provider: provider_id.clone(),
                 role: "vision_evaluator".to_string(),
                 input_tokens: u64::from(result.usage.input_tokens),
                 output_tokens: u64::from(result.usage.output_tokens),
                 cost_usd: f64::from(result.usage.cost_usd),
                 latency_ms,
                 success: learning_success,
+                provider_success: Some(result.success),
             })
             .await
         {
@@ -191,35 +168,6 @@ impl VisionEvaluator {
                 model = %model_slug,
                 error = %error,
                 "failed to record vision evaluator feedback"
-            );
-        }
-
-        if let Err(error) =
-            record_persisted_provider_health(&self.workdir, &provider_id, result.success)
-        {
-            tracing::warn!(
-                provider = %provider_id,
-                model = %model_slug,
-                error = %error,
-                "failed to persist vision evaluator provider health"
-            );
-        }
-
-        if let Err(error) = feedback_service.flush_async().await {
-            tracing::warn!(
-                provider = %provider_id,
-                model = %model_slug,
-                error = %error,
-                "failed to flush vision evaluator feedback"
-            );
-        }
-        if let Some(router) = &cascade_router
-            && let Err(error) = router.save(&cascade_path)
-        {
-            tracing::warn!(
-                path = %cascade_path.display(),
-                error = %error,
-                "failed to persist vision evaluator cascade observation"
             );
         }
     }
