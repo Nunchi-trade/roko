@@ -8,9 +8,7 @@ use crate::provider::{AgentOptions, create_agent_for_model};
 use crate::task_runner::CostTable;
 use async_trait::async_trait;
 use chrono::Utc;
-use roko_core::agent::ProviderKind;
-use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
-use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::config::schema::RokoConfig;
 use roko_core::foundation::{
     CachePolicy, ChatMessage, FeedbackEvent, FeedbackSink, GatewayError, MessageRole,
     ModelCallRequest, ModelCallResponse, ModelCaller, TokenBudget, TokenUsage,
@@ -89,8 +87,6 @@ pub struct ModelCallService {
     fallback_models: Vec<String>,
     /// Service-scoped environment entries passed into provider construction.
     env: Vec<(String, String)>,
-    /// Optional base URL for OpenAI-compatible providers.
-    openai_base_url: Option<String>,
     /// Explicit MCP config path threaded into provider options.
     mcp_config: Option<PathBuf>,
     /// L1 exact-match response cache.
@@ -123,7 +119,6 @@ impl ModelCallService {
             cascade_router: None,
             fallback_models: Vec::new(),
             env: Vec::new(),
-            openai_base_url: None,
             mcp_config: None,
             cache: CacheCell::new(128),
             budget: BudgetCell::new(None),
@@ -210,10 +205,10 @@ impl ModelCallService {
         self
     }
 
-    /// Configure the base URL used by implicit OpenAI-compatible routes.
+    /// Deprecated. Configure OpenAI-compatible providers in `RokoConfig` instead.
     #[must_use]
-    pub fn with_openai_base_url(mut self, url: String) -> Self {
-        self.openai_base_url = Some(url);
+    #[deprecated(note = "configure OpenAI-compatible providers in RokoConfig")]
+    pub fn with_openai_base_url(self, _url: String) -> Self {
         self
     }
 
@@ -318,88 +313,8 @@ impl ModelCallService {
         }
     }
 
-    fn has_env(&self, key: &str) -> bool {
-        self.env
-            .iter()
-            .any(|(name, value)| name == key && !value.is_empty())
-    }
-
-    fn config_for_model(&self, model: &str) -> RokoConfig {
-        let mut config = self.config.clone();
-
-        if let Some(url) = &self.openai_base_url {
-            config.providers.insert(
-                "openai-compat".to_string(),
-                ProviderConfig {
-                    kind: ProviderKind::OpenAiCompat,
-                    base_url: Some(url.clone()),
-                    api_key_env: Some("OPENAI_API_KEY".to_string()),
-                    command: None,
-                    args: None,
-                    timeout_ms: Some(120_000),
-                    ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
-                    connect_timeout_ms: Some(5_000),
-                    extra_headers: None,
-                    max_concurrent: None,
-                },
-            );
-        }
-
-        let has_explicit_model = config.models.contains_key(model)
-            || config.models.values().any(|profile| profile.slug == model);
-        let has_anthropic_provider = config
-            .providers
-            .values()
-            .any(|provider| provider.kind == ProviderKind::AnthropicApi);
-
-        if model.starts_with("claude-") && self.has_env("ANTHROPIC_API_KEY") {
-            if !has_anthropic_provider {
-                config.providers.insert(
-                    "anthropic".to_string(),
-                    ProviderConfig {
-                        kind: ProviderKind::AnthropicApi,
-                        base_url: Some("https://api.anthropic.com".to_string()),
-                        api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
-                        command: None,
-                        args: None,
-                        timeout_ms: Some(120_000),
-                        ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
-                        connect_timeout_ms: Some(5_000),
-                        extra_headers: None,
-                        max_concurrent: None,
-                    },
-                );
-            }
-
-            if !has_explicit_model {
-                config.models.insert(
-                    model.to_string(),
-                    ModelProfile {
-                        provider: "anthropic".to_string(),
-                        slug: model.to_string(),
-                        context_window: 200_000,
-                        tool_format: "anthropic_blocks".to_string(),
-                        ..Default::default()
-                    },
-                );
-            }
-        } else if self.openai_base_url.is_some()
-            && !model.starts_with("claude-")
-            && !has_explicit_model
-        {
-            config.models.insert(
-                model.to_string(),
-                ModelProfile {
-                    provider: "openai-compat".to_string(),
-                    slug: model.to_string(),
-                    context_window: 128_000,
-                    tool_format: "openai_json".to_string(),
-                    ..Default::default()
-                },
-            );
-        }
-
-        config
+    fn config_for_model(&self, _model: &str) -> RokoConfig {
+        self.config.clone()
     }
 
     fn build_agent_options(
@@ -1914,9 +1829,17 @@ mod tests {
         assert_eq!(router.confidence_snapshot().get(model), Some(&(1, 0)));
     }
 
-    #[tokio::test]
-    async fn routes_claude_model_to_anthropic_api_when_key_set() {
-        let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+    #[test]
+    fn config_for_model_does_not_synthesize_providers_from_runtime_inputs() {
+        let mut config = RokoConfig::default();
+        config.providers.clear();
+        config.models.clear();
+
+        #[allow(deprecated)]
+        let svc = ModelCallService::new("default".into())
+            .with_config(config)
+            .with_anthropic_api_key("sk-test".into())
+            .with_openai_base_url("https://example.invalid/v1".into());
         let req = ModelCallRequest {
             model: "claude-haiku-4".into(),
             system: None,
@@ -1936,17 +1859,16 @@ mod tests {
         let model = svc.resolve_model(&req);
         let config = svc.config_for_model(&model);
 
-        let provider = config
-            .providers
-            .get("anthropic")
-            .expect("anthropic provider");
-        assert_eq!(provider.kind, ProviderKind::AnthropicApi);
-        assert_eq!(provider.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
-        assert_eq!(provider.timeout_ms, Some(120_000));
+        assert!(config.providers.is_empty());
+        assert!(config.models.is_empty());
 
-        let profile = config.models.get("claude-haiku-4").expect("model profile");
-        assert_eq!(profile.provider, "anthropic");
-        assert_eq!(profile.slug, "claude-haiku-4");
+        let options = svc.build_agent_options(&req, None);
+        assert!(
+            options
+                .env
+                .iter()
+                .any(|(key, value)| key == "ANTHROPIC_API_KEY" && value == "sk-test")
+        );
     }
 
     #[test]
