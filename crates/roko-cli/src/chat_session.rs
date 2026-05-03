@@ -7,6 +7,7 @@ use std::fs;
 use std::io::{self, Read as _, Write as StdWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -24,10 +25,12 @@ use roko_core::agent::ProviderKind;
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::foundation::{
-    CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, ModelStreamEvent,
-    TokenUsage, caller,
+    CachePolicy, ChatMessage, FeedbackSink, MessageRole, ModelCallRequest, ModelCaller,
+    ModelStreamEvent, TokenUsage, caller,
 };
 use roko_core::{Body, Context, Engram, Kind, OperatingFrequency};
+use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::feedback_service::FeedbackService;
 use serde_yaml_ng as serde_yaml;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -35,6 +38,9 @@ use tokio::process::Command as TokioCommand;
 use tokio::signal;
 
 use crate::config::Config;
+use crate::learning_helpers::{
+    capture_runtime_model_slugs, provider_id_for_model, record_persisted_provider_health,
+};
 use crate::model_selection::EffectiveModelSelection;
 
 const CHAT_SYSTEM_PROMPT_TOKEN_BUDGET: usize = 4_000;
@@ -55,6 +61,60 @@ const SKIP_DIR_NAMES: [&str; 12] = [
     "target",
     "venv",
 ];
+
+struct ChatFeedbackRuntime {
+    sink: Arc<dyn FeedbackSink>,
+    cascade_router: Option<Arc<CascadeRouter>>,
+    cascade_path: PathBuf,
+}
+
+impl ChatFeedbackRuntime {
+    fn new(workdir: &Path, config: &RokoConfig, model_slug: &str) -> Self {
+        let cascade_path = workdir
+            .join(".roko")
+            .join("learn")
+            .join("cascade-router.json");
+        let cascade_model_slugs = capture_runtime_model_slugs(config, model_slug);
+        let cascade_router = (!cascade_model_slugs.is_empty()).then(|| {
+            Arc::new(CascadeRouter::load_or_new(
+                &cascade_path,
+                cascade_model_slugs,
+            ))
+        });
+
+        let feedback_service = FeedbackService::from_roko_dir(&workdir.join(".roko"));
+        let sink: Arc<dyn FeedbackSink> = match &cascade_router {
+            Some(router) => Arc::new(feedback_service.with_cascade_router(Arc::clone(router))),
+            None => Arc::new(feedback_service),
+        };
+
+        Self {
+            sink,
+            cascade_router,
+            cascade_path,
+        }
+    }
+
+    async fn flush(&self, context: &str) {
+        if let Err(error) = self.sink.flush().await {
+            tracing::warn!(
+                error = %error,
+                context,
+                "failed to flush chat model-call feedback"
+            );
+        }
+        if let Some(router) = &self.cascade_router
+            && let Err(error) = router.save(&self.cascade_path)
+        {
+            tracing::warn!(
+                path = %self.cascade_path.display(),
+                error = %error,
+                context,
+                "failed to persist chat cascade observation"
+            );
+        }
+    }
+}
 
 /// Errors returned by `ChatAgentSession` send operations.
 #[derive(Debug, Error)]
@@ -418,6 +478,13 @@ impl ChatAgentSession {
     /// returns a typed [`SessionError::ApiKeyMissing`] when the variable is
     /// absent or empty.
     fn resolve_api_key(&self) -> std::result::Result<String, SessionError> {
+        if matches!(
+            self.api_provider_kind(),
+            ProviderKind::ClaudeCli | ProviderKind::CursorAcp
+        ) {
+            return Ok(String::new());
+        }
+
         // Check provider-specific env var from config first, then fall back to convention.
         if let Some(env_name) = &self.provider_api_key_env {
             if let Ok(key) = std::env::var(env_name) {
@@ -627,18 +694,25 @@ impl ChatAgentSession {
         });
 
         let config = self.model_call_config();
-        let mut caller = ModelCallService::new(model_slug.clone()).with_config(config);
+        let feedback = ChatFeedbackRuntime::new(&self.workdir, &config, &model_slug);
+        let mut caller = ModelCallService::new(model_slug.clone())
+            .with_config(config.clone())
+            .with_feedback_sink(Arc::clone(&feedback.sink));
         if let Some(mcp_config) = self.mcp_config.clone() {
             caller = caller.with_mcp_config(mcp_config);
         }
-        let mut stream =
-            caller
-                .stream(request)
-                .await
-                .map_err(|error| SessionError::NetworkError {
+        let stream_result = caller.stream(request).await;
+        let mut stream = match stream_result {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.record_chat_provider_health(&config, &model_slug, false);
+                feedback.flush("chat stream setup failure").await;
+                return Err(SessionError::NetworkError {
                     provider: provider_kind.clone(),
                     message: error.to_string(),
-                })?;
+                });
+            }
+        };
 
         let mut response_text = String::new();
         let mut usage = TokenUsage::default();
@@ -659,9 +733,12 @@ impl ChatAgentSession {
                 }
                 ModelStreamEvent::Completed { .. } => {}
                 ModelStreamEvent::Cancelled => {
+                    feedback.flush("chat model-call cancelled").await;
                     return Ok(TurnResult::cancelled(started.elapsed()));
                 }
                 ModelStreamEvent::Failed { error } => {
+                    self.record_chat_provider_health(&config, &response_model, false);
+                    feedback.flush("chat model-call failed").await;
                     return Err(SessionError::NetworkError {
                         provider: provider_kind,
                         message: error,
@@ -683,6 +760,9 @@ impl ChatAgentSession {
             content: response_text.clone(),
         });
 
+        self.record_chat_provider_health(&config, &response_model, true);
+        feedback.flush("chat model-call completed").await;
+
         Ok(TurnResult {
             text: response_text,
             model: response_model,
@@ -693,6 +773,27 @@ impl ChatAgentSession {
             duration: started.elapsed(),
             cancelled: false,
         })
+    }
+
+    fn record_chat_provider_health(&self, config: &RokoConfig, model: &str, success: bool) {
+        let Some(provider) = provider_id_for_model(config, model) else {
+            tracing::debug!(
+                model,
+                success,
+                "chat model-call provider health skipped because model has no configured provider"
+            );
+            return;
+        };
+
+        if let Err(error) = record_persisted_provider_health(&self.workdir, &provider, success) {
+            tracing::warn!(
+                provider = %provider,
+                model,
+                success,
+                error = %error,
+                "failed to persist chat model-call provider health"
+            );
+        }
     }
 
     /// Process input that may be a slash command.
@@ -2054,6 +2155,79 @@ mod tests {
             session.api_history.is_empty(),
             "history should be empty when key check fails early"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_turn_api_records_chat_feedback_and_provider_health() {
+        let tmp = tempdir().expect("tempdir");
+        let script = write_fake_claude_script(
+            &tmp,
+            r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"content_block_delta","delta":{"text":"chat feedback ok"}}'
+"#,
+        );
+        std::fs::write(
+            tmp.path().join("roko.toml"),
+            format!(
+                r#"
+[providers.mock]
+kind = "claude_cli"
+command = "{}"
+
+[models.mock-chat]
+provider = "mock"
+slug = "mock-chat"
+max_output = 4096
+"#,
+                script.display()
+            ),
+        )
+        .expect("write roko.toml");
+
+        let mut session = test_session();
+        session.workdir = tmp.path().to_path_buf();
+        session.model = "mock-chat".to_string();
+        session.model_selection.requested_model = Some("mock-chat".to_string());
+        session.model_selection.effective_model_key = "mock-chat".to_string();
+        session.model_selection.provider_key = "mock".to_string();
+        session.model_selection.provider_kind = "claude_cli".to_string();
+        session.model_selection.backend_slug = "mock-chat".to_string();
+
+        let result = session
+            .send_turn_api("hello from chat")
+            .await
+            .expect("mock chat turn");
+
+        assert_eq!(result.model, "mock-chat");
+        assert!(!result.text.trim().is_empty());
+        assert_eq!(session.api_history.len(), 2);
+
+        let learn_dir = tmp.path().join(".roko").join("learn");
+        let efficiency =
+            std::fs::read_to_string(learn_dir.join("efficiency.jsonl")).expect("efficiency log");
+        assert!(
+            efficiency.contains(r#""kind":"model_call""#),
+            "{efficiency}"
+        );
+        assert!(efficiency.contains(r#""role":"chat""#), "{efficiency}");
+        assert!(efficiency.contains(r#""provider":"mock""#), "{efficiency}");
+
+        let health =
+            std::fs::read_to_string(learn_dir.join("provider-health.json")).expect("health log");
+        let health_json: serde_json::Value = serde_json::from_str(&health).expect("health json");
+        assert_eq!(
+            health_json
+                .pointer("/providers/mock/total_requests")
+                .and_then(serde_json::Value::as_u64),
+            Some(1),
+            "{health}"
+        );
+
+        let router =
+            std::fs::read_to_string(learn_dir.join("cascade-router.json")).expect("router log");
+        assert!(router.contains("mock-chat"), "{router}");
     }
 
     #[test]
