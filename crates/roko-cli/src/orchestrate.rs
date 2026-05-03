@@ -4315,21 +4315,13 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let mut configured_model_keys: Vec<String> = roko_config.available_model_keys_for_cascade();
-        if configured_model_keys.is_empty() {
-            configured_model_keys = roko_config.effective_models().keys().cloned().collect();
-            if !configured_model_keys.is_empty() {
-                tracing::warn!(
-                    "no models have provider credentials; using full configured model list (some dispatches may fail until API keys are set)"
-                );
-            }
-        }
-        let mut learning = if configured_model_keys.is_empty() {
+        let configured_model_slugs: Vec<String> = roko_config.model_slugs_for_cascade();
+        let mut learning = if configured_model_slugs.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
                 .map_err(|e| anyhow!("init learning runtime: {e}"))?
         } else {
-            LearningRuntime::open_under_with_models(learn_root, configured_model_keys)
+            LearningRuntime::open_under_with_models(learn_root, configured_model_slugs)
                 .await
                 .map_err(|e| anyhow!("init learning runtime: {e}"))?
         };
@@ -4548,21 +4540,13 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let mut configured_model_keys: Vec<String> = roko_config.available_model_keys_for_cascade();
-        if configured_model_keys.is_empty() {
-            configured_model_keys = roko_config.effective_models().keys().cloned().collect();
-            if !configured_model_keys.is_empty() {
-                tracing::warn!(
-                    "no models have provider credentials; using full configured model list (some dispatches may fail until API keys are set)"
-                );
-            }
-        }
-        let mut learning = if configured_model_keys.is_empty() {
+        let configured_model_slugs: Vec<String> = roko_config.model_slugs_for_cascade();
+        let mut learning = if configured_model_slugs.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
                 .map_err(|e| anyhow!("init learning runtime: {e}"))?
         } else {
-            LearningRuntime::open_under_with_models(learn_root, configured_model_keys)
+            LearningRuntime::open_under_with_models(learn_root, configured_model_slugs)
                 .await
                 .map_err(|e| anyhow!("init learning runtime: {e}"))?
         };
@@ -4768,21 +4752,13 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let mut configured_model_keys: Vec<String> = roko_config.available_model_keys_for_cascade();
-        if configured_model_keys.is_empty() {
-            configured_model_keys = roko_config.effective_models().keys().cloned().collect();
-            if !configured_model_keys.is_empty() {
-                tracing::warn!(
-                    "no models have provider credentials; using full configured model list (some dispatches may fail until API keys are set)"
-                );
-            }
-        }
-        let mut learning = if configured_model_keys.is_empty() {
+        let configured_model_slugs: Vec<String> = roko_config.model_slugs_for_cascade();
+        let mut learning = if configured_model_slugs.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
                 .map_err(|e| anyhow!("init learning runtime: {e}"))?
         } else {
-            LearningRuntime::open_under_with_models(learn_root, configured_model_keys)
+            LearningRuntime::open_under_with_models(learn_root, configured_model_slugs)
                 .await
                 .map_err(|e| anyhow!("init learning runtime: {e}"))?
         };

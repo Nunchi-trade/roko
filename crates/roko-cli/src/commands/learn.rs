@@ -160,10 +160,8 @@ pub(crate) fn print_learn_router(workdir: &std::path::Path) {
         .ok()
         .map(|config| {
             config
-                .models
-                .values()
-                .map(|profile| profile.slug.trim().to_owned())
-                .filter(|slug| !slug.is_empty())
+                .model_slugs_for_cascade()
+                .into_iter()
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();

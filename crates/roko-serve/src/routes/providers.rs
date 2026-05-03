@@ -134,23 +134,17 @@ async fn explain_routing(
 
     let effective_models = config.effective_models();
     let model_catalog = build_model_catalog(&effective_models);
-    let mut model_slugs: Vec<String> = model_catalog.keys().cloned().collect();
-    let cred_slugs = config.available_model_slugs_for_cascade();
-    if !cred_slugs.is_empty() {
-        let allow: std::collections::HashSet<String> = cred_slugs.into_iter().collect();
-        let filtered: Vec<String> = model_slugs
-            .iter()
-            .filter(|s| allow.contains(*s))
-            .cloned()
-            .collect();
-        if !filtered.is_empty() {
-            model_slugs = filtered;
-        }
+    let mut all_model_slugs = config.model_slugs_for_cascade();
+    if all_model_slugs.is_empty() {
+        all_model_slugs.push(resolved.slug.clone());
     }
-    if model_slugs.is_empty() {
-        model_slugs.push(resolved.slug.clone());
+    all_model_slugs.sort();
+
+    let mut dispatch_candidates = config.available_model_slugs_for_cascade();
+    if dispatch_candidates.is_empty() {
+        dispatch_candidates = all_model_slugs.clone();
     }
-    model_slugs.sort();
+    dispatch_candidates.sort();
 
     let routing_ctx = RoutingContext {
         task_category: TaskCategory::Implementation,
@@ -172,8 +166,8 @@ async fn explain_routing(
     };
 
     let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
-    let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
-    let all_explanation = router.explain_routing(&routing_ctx, &model_slugs);
+    let router = CascadeRouter::load_or_new(&cascade_path, all_model_slugs.clone());
+    let all_explanation = router.explain_routing(&routing_ctx, &all_model_slugs);
 
     let mut health_by_provider: HashMap<String, ProviderStatus> = HashMap::new();
     for provider in model_catalog.values().map(|entry| entry.provider.as_str()) {
@@ -182,7 +176,7 @@ async fn explain_routing(
             .or_insert_with(|| state.provider_health.get(provider));
     }
 
-    let available_candidates: Vec<String> = model_slugs
+    let available_candidates: Vec<String> = dispatch_candidates
         .iter()
         .filter(|slug| {
             model_catalog
@@ -199,7 +193,7 @@ async fn explain_routing(
         || all_explanation.selected_model.clone(),
         |explanation| explanation.selected_model.clone(),
     );
-    let selected_model = model_slugs
+    let selected_model = all_model_slugs
         .iter()
         .find(|slug| routing_slugs_match(slug, &selected))
         .cloned()
@@ -216,7 +210,7 @@ async fn explain_routing(
         |explanation| explanation.fallback_model.clone(),
     );
 
-    let mut candidates: Vec<_> = model_slugs
+    let mut candidates: Vec<_> = all_model_slugs
         .iter()
         .map(|slug| {
             let detail = score_by_model.get(slug).cloned();

@@ -442,7 +442,7 @@ tier = "premium"
 
 [models.cerebras-scout]
 provider = "cerebras"
-slug = "llama-4-scout-17b-16e"
+slug = "gpt-oss-120b"
 context_window = 128000
 supports_tools = true
 supports_thinking = false
@@ -588,7 +588,7 @@ tier = "premium"
 
 [models.cerebras-8b]
 provider = "cerebras"
-slug = "llama-3.1-8b"
+slug = "llama3.1-8b"
 context_window = 128000
 supports_tools = true
 supports_thinking = false
@@ -819,7 +819,7 @@ tier = "fast"
 
 [models.cerebras-70b]
 provider = "cerebras"
-slug = "llama-3.3-70b"
+slug = "gpt-oss-120b"
 context_window = 128000
 supports_tools = true
 supports_thinking = false

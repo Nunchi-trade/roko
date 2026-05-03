@@ -476,6 +476,48 @@ impl RokoConfig {
     }
 
     /// `[models.*]` keys (from [`Self::effective_models`]) usable for cascade init.
+    ///
+    /// This list is config-derived and intentionally does not check provider
+    /// credentials. The cascade router's persisted arm set must be stable
+    /// across process restarts and independent of which API key env vars were
+    /// visible at startup. Dispatch paths should use
+    /// [`Self::provider_available_for_model_key`] when they are about to make
+    /// an outbound model call.
+    #[must_use]
+    pub fn model_keys_for_cascade(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .effective_models()
+            .into_iter()
+            .filter(|(_, profile)| !profile.is_embedding_model)
+            .map(|(k, _)| k)
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Backend slugs for cascade routers keyed by API slug lists.
+    ///
+    /// This is the slug companion to [`Self::model_keys_for_cascade`] and is
+    /// likewise independent of runtime credential availability.
+    #[must_use]
+    pub fn model_slugs_for_cascade(&self) -> Vec<String> {
+        let mut slugs: Vec<String> = self
+            .effective_models()
+            .into_iter()
+            .filter(|(_, profile)| !profile.is_embedding_model && !profile.slug.trim().is_empty())
+            .map(|(_, profile)| profile.slug.clone())
+            .collect();
+        slugs.sort();
+        slugs.dedup();
+        slugs
+    }
+
+    /// `[models.*]` keys (from [`Self::effective_models`]) currently dispatchable.
+    ///
+    /// Prefer [`Self::model_keys_for_cascade`] for cascade router
+    /// initialization. This method is for live dispatch filtering and status
+    /// displays that need to know whether credentials are present right now.
     #[must_use]
     pub fn available_model_keys_for_cascade(&self) -> Vec<String> {
         let mut keys: Vec<String> = self
@@ -491,14 +533,19 @@ impl RokoConfig {
         keys
     }
 
-    /// Backend slugs for routers keyed by API slug lists.
+    /// Backend slugs currently dispatchable by provider credential state.
+    ///
+    /// Prefer [`Self::model_slugs_for_cascade`] for cascade router
+    /// initialization.
     #[must_use]
     pub fn available_model_slugs_for_cascade(&self) -> Vec<String> {
         let mut slugs: Vec<String> = self
             .effective_models()
             .into_iter()
             .filter(|(k, profile)| {
-                !profile.is_embedding_model && self.provider_available_for_model_key(k)
+                !profile.is_embedding_model
+                    && !profile.slug.trim().is_empty()
+                    && self.provider_available_for_model_key(k)
             })
             .map(|(_, profile)| profile.slug.clone())
             .collect();
@@ -1857,5 +1904,50 @@ default_model = "claude-sonnet-4-6"
         assert!(!cfg.is_provider_available(&p));
         cfg.agent.env = Some(vec![("OPENAI_API_KEY".into(), "sk-test".into())]);
         assert!(cfg.is_provider_available(&p));
+    }
+
+    #[test]
+    fn cascade_candidate_lists_include_configured_models_without_credentials() {
+        let mut cfg = RokoConfig::default();
+        cfg.agent.default_model.clear();
+        cfg.providers.clear();
+        cfg.models.clear();
+
+        cfg.providers.insert(
+            "missing-key-provider".into(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://example.invalid/v1".into()),
+                api_key_env: Some("ROKO_TEST_CASCADE_MISSING_API_KEY_NEVER_SET".into()),
+                command: None,
+                args: None,
+                timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        cfg.models.insert(
+            "configured-model".into(),
+            ModelProfile {
+                provider: "missing-key-provider".into(),
+                slug: "configured-wire-slug".into(),
+                context_window: 4096,
+                ..Default::default()
+            },
+        );
+
+        assert!(!cfg.provider_available_for_model_key("configured-model"));
+        assert!(cfg.available_model_keys_for_cascade().is_empty());
+        assert!(cfg.available_model_slugs_for_cascade().is_empty());
+        assert_eq!(
+            cfg.model_keys_for_cascade(),
+            vec!["configured-model".to_string()]
+        );
+        assert_eq!(
+            cfg.model_slugs_for_cascade(),
+            vec!["configured-wire-slug".to_string()]
+        );
     }
 }

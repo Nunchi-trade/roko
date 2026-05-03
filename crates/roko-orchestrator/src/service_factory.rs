@@ -149,6 +149,7 @@ impl ServiceFactory {
                 .collect()
         });
         let model_router = Arc::clone(&cascade_router);
+        let routing_config = workspace_config.clone();
         let mut model_call_service = ModelCallService::new(model.clone())
             .with_config(workspace_config)
             .with_feedback_sink(Arc::clone(&feedback_sink))
@@ -161,7 +162,13 @@ impl ServiceFactory {
                     role: agent_role_from_label(role.unwrap_or("implementer")),
                     ..Default::default()
                 };
-                model_router.route(&ctx).primary.slug
+                let mut candidates = routing_config.available_model_slugs_for_cascade();
+                if candidates.is_empty() {
+                    candidates = routing_config.model_slugs_for_cascade();
+                }
+                model_router
+                    .explain_routing(&ctx, &candidates)
+                    .selected_model
             })
             .with_run_id(config.run_id.unwrap_or_else(default_run_id));
         if let Some(mcp_config) = config.mcp_config {

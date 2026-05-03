@@ -2985,11 +2985,7 @@ fn load_roko_config_models(workdir: &Path) -> Vec<String> {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let mut keys = config.available_model_keys_for_cascade();
-    if keys.is_empty() {
-        keys = config.effective_models().keys().cloned().collect();
-    }
-    keys
+    config.model_slugs_for_cascade()
 }
 
 #[cfg(test)]

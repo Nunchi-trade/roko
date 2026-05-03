@@ -860,20 +860,18 @@ fn parse_agent_role(s: &str) -> AgentRole {
 /// been trained (>0 total pulls) its selection overrides the cascade pick.
 async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> String {
     let config = state.load_roko_config();
-    let effective_models = config.effective_models();
-    let mut model_slugs: Vec<String> = config.available_model_slugs_for_cascade();
-    if model_slugs.is_empty() {
-        model_slugs = effective_models
-            .values()
-            .filter(|p| !p.is_embedding_model)
-            .map(|p| p.slug.clone())
-            .collect();
-    }
-    model_slugs.sort();
+    let mut all_model_slugs: Vec<String> = config.model_slugs_for_cascade();
+    all_model_slugs.sort();
 
-    if model_slugs.is_empty() {
+    if all_model_slugs.is_empty() {
         return config.agent.default_model.clone();
     }
+
+    let mut candidate_slugs = config.available_model_slugs_for_cascade();
+    if candidate_slugs.is_empty() {
+        candidate_slugs = all_model_slugs.clone();
+    }
+    candidate_slugs.sort();
 
     // -- B4: build RoutingContext from caller hints, with defaults ----------
     let task_category = hints
@@ -924,19 +922,19 @@ async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> Stri
         let guard = state.cascade_router.read().await;
         if let Some(ref router) = *guard {
             router
-                .explain_routing(&routing_ctx, &model_slugs)
+                .explain_routing(&routing_ctx, &candidate_slugs)
                 .selected_model
         } else {
             drop(guard);
             let mut guard = state.cascade_router.write().await;
             if guard.is_none() {
                 let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
-                let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
+                let router = CascadeRouter::load_or_new(&cascade_path, all_model_slugs.clone());
                 *guard = Some(router);
             }
             let router = guard.as_ref().expect("just initialised");
             router
-                .explain_routing(&routing_ctx, &model_slugs)
+                .explain_routing(&routing_ctx, &candidate_slugs)
                 .selected_model
         }
     };
@@ -947,7 +945,7 @@ async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> Stri
     // (total_pulls > 0) we use its selection to refine the cascade pick.
     // On any failure we silently fall back to the cascade result.
     let bandit_path = state.workdir.join(".roko/learn/model-bandit.json");
-    if let Ok(bandit) = UcbBandit::load(&bandit_path, model_slugs) {
+    if let Ok(bandit) = UcbBandit::load(&bandit_path, candidate_slugs) {
         if bandit.total_pulls() > 0 {
             let bandit_pick = bandit.select();
             return bandit_pick;

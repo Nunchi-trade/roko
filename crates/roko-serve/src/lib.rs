@@ -839,20 +839,7 @@ fn build_app_state(
     // persisted bandit state instead of rebuilding it on the first request.
     {
         let config = state.load_roko_config();
-        let mut model_slugs: Vec<String> = config.available_model_slugs_for_cascade();
-        if model_slugs.is_empty() {
-            model_slugs = config
-                .effective_models()
-                .values()
-                .filter(|profile| !profile.is_embedding_model)
-                .map(|profile| profile.slug.clone())
-                .collect();
-            if !model_slugs.is_empty() {
-                warn!(
-                    "no models have provider credentials; CascadeRouter using full slug list (some routes may fail until keys are set)"
-                );
-            }
-        }
+        let mut model_slugs: Vec<String> = config.model_slugs_for_cascade();
         model_slugs.sort();
 
         if !model_slugs.is_empty() {
