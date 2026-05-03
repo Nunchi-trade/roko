@@ -267,6 +267,7 @@ mod tests {
             is_embedding_model: false,
             search_context_size: None,
             cost_per_request: None,
+            tier: None,
         }
     }
 

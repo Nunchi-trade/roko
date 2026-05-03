@@ -57,7 +57,7 @@ use roko_core::config::schema::{RokoConfig, RoleOverride};
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
 
 use self::bash::BashPolicy;
-use self::contract::{AgentContract, ContractLoadError, GovernanceRule, Invariant};
+use self::contract::{AgentContract, GovernanceRule, Invariant};
 use self::git::GitPolicy;
 use self::network::NetworkPolicy;
 use self::path::PathPolicy;
@@ -862,33 +862,22 @@ impl SafetyLayer {
     }
 
     fn contract_for_role(&self, role: &str) -> AgentContract {
-        if self.role_overrides.contains_key(role) {
-            return match AgentContract::load_for_role(role) {
-                Ok(contract) => contract,
-                Err(ContractLoadError::MissingAsset { .. }) => {
-                    tracing::warn!(
-                        %role,
-                        "missing safety contract YAML, using permissive defaults"
-                    );
-                    AgentContract::permissive(role)
-                }
-                Err(err) => {
-                    tracing::error!(
-                        %role,
-                        %err,
-                        "contract load failed for configured role; using permissive fallback"
-                    );
-                    AgentContract::permissive(role.to_string())
-                }
-            };
-        }
-
-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|_| {
-            // No bundled YAML for this role — fall back to permissive.
-            // The role_tools whitelist (check_pre_execution) already enforces
-            // tool access; a restricted contract here would double-deny
-            // every tool call.
-            AgentContract::permissive(role.to_string())
+        // Load the bundled contract asset, falling back to a deny-all
+        // restricted contract when the YAML is missing or malformed.
+        // This is fail-closed by design: an unknown role gets zero
+        // capabilities until an explicit contract is shipped.
+        let mut contract = AgentContract::load_for_role_with_mode(
+            role,
+            contract::ContractLoadMode::RestrictedFallback,
+        )
+        .unwrap_or_else(|err| {
+            // RestrictedFallback only returns Err for InvalidRole.
+            tracing::error!(
+                %role,
+                %err,
+                "contract load returned unexpected error; using restricted fallback"
+            );
+            AgentContract::restricted(role)
         });
 
         if let Some(role_override) = self.role_overrides.get(role)

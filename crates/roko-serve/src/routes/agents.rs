@@ -313,24 +313,16 @@ fn model_profile_json(key: &str, profile: &ModelProfile) -> Value {
     })
 }
 
+/// Infer provider name from model slug using `AgentBackend::from_model()`.
+///
+/// This is a fallback for when the model isn't found in config. Prefer
+/// config-based resolution via `resolve_model()` when possible.
 fn infer_provider_from_model(model: Option<&str>) -> Option<String> {
-    let model = model?.to_ascii_lowercase();
-    let provider = if model.contains("claude") {
-        "anthropic"
-    } else if model.contains("gpt") || model.contains("o3") || model.contains("o4") {
-        "openai"
-    } else if model.contains("gemini") {
-        "gemini"
-    } else if model.contains("glm") || model.contains("z-ai") {
-        "zai"
-    } else if model.contains("sonar") {
-        "perplexity"
-    } else if model.contains("llama") || model.contains("qwen") {
-        "openrouter"
-    } else {
-        return None;
-    };
-    Some(provider.to_string())
+    use roko_core::agent::{AgentBackend, ProviderKind};
+    let slug = model?;
+    let backend = AgentBackend::from_model(slug);
+    let kind: ProviderKind = backend.into();
+    Some(kind.label().to_string())
 }
 
 fn provider_health_json(state: &AppState, provider: &str) -> Value {

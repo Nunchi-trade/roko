@@ -64,6 +64,23 @@ impl ProviderKind {
             Self::CerebrasApi => "cerebras_api",
         }
     }
+
+    /// Derive the legacy [`AgentBackend`] from this provider kind.
+    ///
+    /// This is the **config-authoritative** path: when a model has a
+    /// configured provider, use this instead of slug-guessing via
+    /// `AgentBackend::from_model()`.
+    #[must_use]
+    pub const fn to_backend(self) -> AgentBackend {
+        match self {
+            Self::AnthropicApi | Self::ClaudeCli => AgentBackend::Claude,
+            Self::OpenAiCompat => AgentBackend::OpenAi,
+            Self::CursorAcp => AgentBackend::Cursor,
+            Self::PerplexityApi => AgentBackend::Perplexity,
+            Self::GeminiApi => AgentBackend::OpenAi,
+            Self::CerebrasApi => AgentBackend::Cerebras,
+        }
+    }
 }
 
 impl fmt::Display for ProviderKind {
@@ -76,8 +93,9 @@ impl fmt::Display for ProviderKind {
 
 /// Which backing CLI tool an agent role spawns.
 ///
-/// Backend is inferred either from a model slug (see [`AgentBackend::from_model`])
-/// or taken from the role's default (see [`AgentRole::backend`]).
+/// Backend is derived from the provider's [`ProviderKind`] via
+/// [`ProviderKind::to_backend()`] (preferred), or as a legacy fallback
+/// from model slug heuristics via [`AgentBackend::from_model()`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -113,7 +131,11 @@ impl AgentBackend {
         }
     }
 
-    /// Infer backend from a model slug.
+    /// Infer backend from a model slug using **substring heuristics**.
+    ///
+    /// **Prefer `ProviderKind::to_backend()`** when the model has a configured
+    /// provider — that path is authoritative. This function is a legacy
+    /// fallback for ad-hoc slugs that don't appear in `[models.*]` config.
     ///
     /// Rules (derived from `apps/mori/src/agent/roles.rs::from_model`):
     /// - `claude-*` → Claude
@@ -304,11 +326,17 @@ fn resolved_from_profile(
     profile: &crate::config::schema::ModelProfile,
 ) -> ResolvedModel {
     let provider_config = config.providers.get(&profile.provider).cloned();
-    let backend = AgentBackend::from_model(&profile.slug);
-    let provider_kind = provider_config
-        .as_ref()
-        .map(|provider| provider.kind)
-        .unwrap_or_else(|| provider_kind_from_backend(backend));
+
+    // Derive provider_kind and backend from config (authoritative) rather
+    // than from slug heuristics. Only fall back to from_model() when the
+    // provider entry is missing from config entirely.
+    let (provider_kind, backend) = match &provider_config {
+        Some(provider) => (provider.kind, provider.kind.to_backend()),
+        None => {
+            let backend = AgentBackend::from_model(&profile.slug);
+            (provider_kind_from_backend(backend), backend)
+        }
+    };
 
     ResolvedModel {
         model_key: model_key.to_owned(),

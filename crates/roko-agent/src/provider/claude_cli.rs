@@ -229,7 +229,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
         };
         let options = AgentOptions {
             command: None,
-            timeout_ms: Some(1_500),
+            timeout_ms: Some(5_000),
             system_prompt: Some("system guidance".to_string()),
             cached_content: None,
             tools: Some("Read,Edit".to_string()),

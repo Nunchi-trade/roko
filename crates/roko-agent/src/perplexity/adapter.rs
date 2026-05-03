@@ -314,6 +314,7 @@ mod tests {
             is_embedding_model: false,
             search_context_size: Some("medium".to_string()),
             cost_per_request: None,
+            tier: None,
         }
     }
 

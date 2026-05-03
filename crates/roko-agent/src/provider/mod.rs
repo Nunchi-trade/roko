@@ -188,8 +188,8 @@ pub fn create_agent_for_model(
                 Some(ck)
                     if mp.is_none() && resolved.provider_kind == ProviderKind::OpenAiCompat =>
                 {
-                    // Model slug wasn't recognised by from_model() — the
-                    // OpenAiCompat kind is just the catch-all default.
+                    // Model wasn't found in config — the OpenAiCompat
+                    // kind is just the catch-all default from slug heuristics.
                     // Check if an explicit provider for the model's kind
                     // exists in the config; if so, use the model's kind.
                     let providers = config.effective_providers();
@@ -877,6 +877,7 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: Some("medium".to_string()),
                 cost_per_request: None,
+                tier: None,
             },
         );
         config

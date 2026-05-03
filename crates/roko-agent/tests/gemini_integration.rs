@@ -226,6 +226,7 @@ fn gemini_model(slug: &str) -> ModelProfile {
         is_embedding_model: false,
         search_context_size: None,
         cost_per_request: None,
+        tier: None,
     }
 }
 

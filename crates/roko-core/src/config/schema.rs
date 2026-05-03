@@ -301,16 +301,19 @@ impl RokoConfig {
 
     fn synthesized_model_profile(&self, slug: &str) -> ModelProfile {
         let tool_profile = profile_for_model(slug);
+
+        // Try to find a matching provider from config by matching the expected
+        // ProviderKind for this slug. Prefer config-based providers over the
+        // slug heuristic so the provider key in the synthesized profile is
+        // actually resolvable at dispatch time.
         let backend = AgentBackend::from_model(slug);
-        let provider = match backend {
-            AgentBackend::Claude => ProviderKind::ClaudeCli.label(),
-            AgentBackend::Cursor => ProviderKind::CursorAcp.label(),
-            AgentBackend::Perplexity => ProviderKind::PerplexityApi.label(),
-            AgentBackend::Cerebras => ProviderKind::CerebrasApi.label(),
-            AgentBackend::Codex | AgentBackend::OpenAi | AgentBackend::Ollama => {
-                ProviderKind::OpenAiCompat.label()
-            }
-        };
+        let expected_kind: ProviderKind = backend.into();
+        let provider = self
+            .providers
+            .iter()
+            .find(|(_, p)| p.kind == expected_kind)
+            .map(|(name, _)| name.as_str())
+            .unwrap_or_else(|| expected_kind.label());
         let context_window = match tool_profile.preferred {
             ToolFormat::AnthropicBlocks => 200_000,
             _ => default_context_window(),
