@@ -37,6 +37,21 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// Config layout version for migration tooling.
 pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
+/// Returns `true` when the raw TOML text contains an explicit `config_version`
+/// key (as opposed to relying on the serde default).  Used to avoid spurious
+/// version-1 warnings for partial configs (e.g. the global `~/.roko/config.toml`)
+/// that legitimately omit the field.
+fn text_has_config_version(s: &str) -> bool {
+    s.lines()
+        .any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("config_version")
+                && trimmed[b"config_version".len()..]
+                    .trim_start()
+                    .starts_with('=')
+        })
+}
+
 // ---- top-level -----------------------------------------------------------
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -148,7 +163,10 @@ impl RokoConfig {
     /// Parse from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         let config: Self = toml::from_str(s)?;
-        if config.config_version == 1 {
+        // Only warn when the TOML text explicitly sets config_version (not when
+        // the serde default of 1 kicks in for configs that omit the field, such
+        // as the global config at ~/.roko/config.toml).
+        if config.config_version <= 1 && text_has_config_version(s) {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
                 tracing::warn!(
@@ -1454,6 +1472,26 @@ default_model = "claude-sonnet-4-6"
         // process. If another test parsed a v1 config first, `logs` may be
         // empty. We assert the config version is correct regardless.
         let _ = logs;
+    }
+
+    #[test]
+    fn text_has_config_version_detects_explicit_field() {
+        assert!(text_has_config_version("config_version = 2\n"));
+        assert!(text_has_config_version("  config_version = 1\n"));
+        assert!(text_has_config_version("config_version=2"));
+        assert!(!text_has_config_version(""));
+        assert!(!text_has_config_version("[agent]\ncommand = \"claude\"\n"));
+        assert!(!text_has_config_version("# config_version = 2\n"));
+    }
+
+    #[test]
+    fn from_toml_does_not_warn_when_config_version_absent() {
+        // A TOML string without config_version (e.g. global config) should
+        // still parse to config_version=1 via the serde default, but should
+        // NOT trigger the tracing::warn!.
+        let cfg = RokoConfig::from_toml("[agent]\ndefault_model = \"test\"\n").expect("parse");
+        assert_eq!(cfg.config_version, 1);
+        // The warning is gated on text_has_config_version, which returns false here.
     }
 
     #[test]

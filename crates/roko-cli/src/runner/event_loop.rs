@@ -61,6 +61,8 @@ pub struct RunReport {
     pub total_tokens_out: u64,
     pub total_agent_calls: usize,
     pub duration: Duration,
+    /// Per-task failure reasons keyed by "plan_id:task_id".
+    pub failure_reasons: HashMap<String, String>,
 }
 
 /// Per-plan report.
@@ -198,7 +200,6 @@ pub async fn run(
                 report
             }
             Err(err) => {
-                error!(error = %err, "resume validation failed; aborting run");
                 return Err(anyhow::anyhow!("resume validation failed: {err}"));
             }
         }
@@ -829,6 +830,7 @@ pub async fn run(
                                 completion.output
                             )
                         };
+                        state.record_task_failure(&completion.plan_id, &completion.task_id, &reason);
                         let run_id = state.run_id().to_string();
                         emit_runner_event(
                             &paths,
@@ -2329,6 +2331,19 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
 
         ExecutorAction::RunGate { plan_id, rung } => {
             let task_id = ctx.state.current_task.clone();
+            // Skip compile/clippy/test gates when no Cargo.toml exists (greenfield workspace).
+            if *rung <= 2 && !ctx.config.workdir.join("Cargo.toml").exists() {
+                info!(plan_id = %plan_id, rung = rung, "skipping cargo gate (no Cargo.toml in workspace)");
+                record_skipped_gate_rung(
+                    ctx,
+                    plan_id,
+                    &task_id,
+                    *rung,
+                    "cargo",
+                    "skipped: no Cargo.toml in workspace",
+                );
+                return;
+            }
             // Honor gates config: skip clippy rung (1) if disabled, skip test rung (2) if skip_tests.
             if *rung == 1 && !ctx.config.clippy_enabled {
                 info!(plan_id = %plan_id, rung = rung, "skipping clippy gate (disabled in config)");
@@ -2381,21 +2396,59 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     *rung,
                 ),
             );
-            let verify_steps = ctx
+            let task_def = ctx
                 .task_index
                 .get(plan_id.as_str())
-                .and_then(|tasks| tasks.get(task_id.as_str()))
-                .map(|task| task.verify.clone())
-                .unwrap_or_default();
-            gate_dispatch::spawn_gate(
-                plan_id.clone(),
-                task_id,
-                *rung,
-                ctx.config.workdir.clone(),
-                verify_steps,
-                ctx.config.timeout_secs,
-                ctx.gate_tx.clone(),
-            );
+                .and_then(|tasks| tasks.get(task_id.as_str()));
+            let is_read_only_role = task_def
+                .and_then(|t| t.role.as_deref())
+                .map_or(false, |r| matches!(r, "researcher" | "strategist" | "quick-reviewer"));
+
+            if is_read_only_role {
+                // Read-only tasks don't produce artifacts — auto-pass the gate.
+                // Running cargo check / structural verify on a researcher task
+                // wastes time and fails on files not yet created.
+                //
+                // IMPORTANT: Send via spawned task, NOT inline. Sending on
+                // gate_tx from inside the select loop that reads gate_rx
+                // would deadlock if the channel buffer is full.
+                info!(
+                    plan_id = %plan_id,
+                    task_id = %task_id,
+                    rung = rung,
+                    "skipping gate for read-only role"
+                );
+                let completion = GateCompletion {
+                    plan_id: plan_id.clone(),
+                    task_id: task_id.clone(),
+                    rung: *rung,
+                    passed: true,
+                    output: "skipped: read-only role".to_string(),
+                    failure_kind: None,
+                    duration_ms: 0,
+                    kind: GateCompletionKind::Gate,
+                    verdicts: Vec::new(),
+                };
+                let gate_tx = ctx.gate_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = gate_tx.send(completion).await {
+                        error!(err = %e, "failed to send auto-pass gate completion");
+                    }
+                });
+            } else {
+                let verify_steps = task_def
+                    .map(|task| task.verify.clone())
+                    .unwrap_or_default();
+                gate_dispatch::spawn_gate(
+                    plan_id.clone(),
+                    task_id,
+                    *rung,
+                    ctx.config.workdir.clone(),
+                    verify_steps,
+                    ctx.config.timeout_secs,
+                    ctx.gate_tx.clone(),
+                );
+            }
         }
 
         ExecutorAction::RunVerify { plan_id } => {
@@ -3260,5 +3313,6 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
         total_tokens_out: state.total_tokens_out,
         total_agent_calls: state.total_agent_calls,
         duration: state.elapsed(),
+        failure_reasons: state.failure_reasons.clone(),
     }
 }

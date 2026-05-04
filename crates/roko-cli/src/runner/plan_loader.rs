@@ -1,6 +1,11 @@
 //! Plan discovery and loading — loads `tasks.toml` without scanning `.md`
 //! files or applying enrichment.
+//!
+//! Also provides [`scaffold_missing_crates`] which creates stub crate
+//! directories for plans that reference crates not yet on disk (e.g. when a
+//! plan's first task is to *create* a new crate).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -82,6 +87,140 @@ pub fn load_plans(dir: &Path) -> Result<Vec<Plan>> {
     Ok(plans)
 }
 
+/// Scan all tasks across `plans` for file references to crates that don't
+/// exist yet, then scaffold those crates (`Cargo.toml` + `src/lib.rs`) and
+/// register them in the workspace `Cargo.toml` members list.
+///
+/// This handles the common case where a plan's first task is to *create* a new
+/// crate — the gate would fail (`cargo check` can't find the crate) unless a
+/// minimal scaffold is present.
+///
+/// Returns the names of any newly created crates.
+pub fn scaffold_missing_crates(workdir: &Path, plans: &[Plan]) -> Result<Vec<String>> {
+    let crates_dir = workdir.join("crates");
+    let mut scaffolded: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    info!(
+        workdir = %workdir.display(),
+        plan_count = plans.len(),
+        "scaffold_missing_crates: scanning plans"
+    );
+
+    // First pass: collect crate names and whether any file ref mentions src/main.rs.
+    let mut crate_needs_main: HashSet<String> = HashSet::new();
+    for plan in plans {
+        let task_count = plan.tasks.tasks.len();
+        let total_files: usize = plan.tasks.tasks.iter().map(|t| t.files.len()).sum();
+        info!(
+            plan_id = %plan.id,
+            task_count,
+            total_files,
+            "scaffold: scanning plan"
+        );
+        for task in &plan.tasks.tasks {
+            for file_ref in &task.files {
+                let parts: Vec<&str> = file_ref.splitn(3, '/').collect();
+                if parts.len() >= 2 && parts[0] == "crates" {
+                    let crate_name = parts[1].to_string();
+                    if crate_name.is_empty() || crate_name.contains('*') {
+                        continue;
+                    }
+                    // Track if any file ref for this crate mentions src/main.rs.
+                    if parts.len() == 3 && parts[2] == "src/main.rs" {
+                        crate_needs_main.insert(crate_name.clone());
+                    }
+                    if !seen.insert(crate_name.clone()) {
+                        continue;
+                    }
+                    let crate_dir = crates_dir.join(&crate_name);
+                    if crate_dir.exists() {
+                        continue;
+                    }
+
+                    scaffolded.push(crate_name);
+                }
+            }
+        }
+    }
+
+    // Second pass: create scaffold files for each new crate.
+    for crate_name in &scaffolded {
+        let crate_dir = crates_dir.join(crate_name);
+        let src_dir = crate_dir.join("src");
+        std::fs::create_dir_all(&src_dir)
+            .with_context(|| format!("scaffold: create {}", src_dir.display()))?;
+
+        let is_bin = crate_needs_main.contains(crate_name.as_str());
+
+        let cargo_toml = if is_bin {
+            format!(
+                "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"{crate_name}\"\npath = \"src/main.rs\"\n"
+            )
+        } else {
+            format!(
+                "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+            )
+        };
+        std::fs::write(crate_dir.join("Cargo.toml"), cargo_toml)
+            .with_context(|| format!("scaffold: write {}/Cargo.toml", crate_dir.display()))?;
+
+        if is_bin {
+            std::fs::write(src_dir.join("main.rs"), "fn main() {}\n")
+                .with_context(|| format!("scaffold: write {}/src/main.rs", crate_dir.display()))?;
+        } else {
+            std::fs::write(src_dir.join("lib.rs"), "")
+                .with_context(|| format!("scaffold: write {}/src/lib.rs", crate_dir.display()))?;
+        }
+
+        info!("scaffolded new crate crates/{crate_name}/ (bin={is_bin})");
+    }
+
+    // Register scaffolded crates in workspace Cargo.toml members.
+    if !scaffolded.is_empty() {
+        let ws_cargo_path = workdir.join("Cargo.toml");
+
+        // In ephemeral workspaces there may be no root Cargo.toml yet.
+        // Create a minimal workspace manifest so `cargo check` can succeed.
+        if !ws_cargo_path.exists() {
+            let minimal = "[workspace]\nresolver = \"2\"\nmembers = [\n]\n";
+            std::fs::write(&ws_cargo_path, minimal)
+                .context("scaffold: create workspace Cargo.toml")?;
+            info!("created minimal workspace Cargo.toml at {}", ws_cargo_path.display());
+        }
+
+        let ws_content = std::fs::read_to_string(&ws_cargo_path)
+            .context("scaffold: read workspace Cargo.toml")?;
+
+        let mut new_content = ws_content.clone();
+        for name in &scaffolded {
+            let member_entry = format!("\"crates/{name}\"");
+            if new_content.contains(&member_entry) {
+                continue;
+            }
+            if let Some(members_pos) = new_content.find("members") {
+                if let Some(bracket_offset) = new_content[members_pos..].find(']') {
+                    let insert_at = members_pos + bracket_offset;
+                    let insertion = format!("    {member_entry},\n");
+                    new_content.insert_str(insert_at, &insertion);
+                }
+            }
+        }
+
+        if new_content != ws_content {
+            std::fs::write(&ws_cargo_path, &new_content)
+                .context("scaffold: write workspace Cargo.toml")?;
+            info!(
+                "added {} new crate(s) to workspace members: {:?}",
+                scaffolded.len(),
+                scaffolded
+            );
+        }
+    }
+
+    Ok(scaffolded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +288,99 @@ title = "Do something"
         let tmp = tempfile::tempdir().unwrap();
         let result = load_plans(tmp.path());
         assert!(result.is_err());
+    }
+
+    const TASKS_WITH_CRATE_FILES: &str = r#"
+[meta]
+plan = "test-plan"
+
+[[task]]
+id = "T1"
+title = "Create new crate"
+files = ["crates/my-new-crate/src/lib.rs", "crates/my-new-crate/Cargo.toml"]
+"#;
+
+    #[test]
+    fn scaffold_creates_missing_crate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan_dir = tmp.path().join("plan");
+        write_tasks_toml(&plan_dir, TASKS_WITH_CRATE_FILES);
+
+        let plans = load_plans(&plan_dir).unwrap();
+        let scaffolded = scaffold_missing_crates(tmp.path(), &plans).unwrap();
+
+        assert_eq!(scaffolded, vec!["my-new-crate"]);
+        assert!(tmp.path().join("crates/my-new-crate/src/lib.rs").exists());
+        assert!(tmp.path().join("crates/my-new-crate/Cargo.toml").exists());
+        // Workspace Cargo.toml should have been created.
+        let ws = fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+        assert!(ws.contains("\"crates/my-new-crate\""));
+    }
+
+    #[test]
+    fn scaffold_skips_existing_crate() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Pre-create the crate directory.
+        fs::create_dir_all(tmp.path().join("crates/my-new-crate/src")).unwrap();
+        fs::write(tmp.path().join("crates/my-new-crate/Cargo.toml"), "").unwrap();
+
+        let plan_dir = tmp.path().join("plan");
+        write_tasks_toml(&plan_dir, TASKS_WITH_CRATE_FILES);
+
+        let plans = load_plans(&plan_dir).unwrap();
+        let scaffolded = scaffold_missing_crates(tmp.path(), &plans).unwrap();
+
+        assert!(scaffolded.is_empty());
+    }
+
+    #[test]
+    fn scaffold_ignores_non_crate_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks = r#"
+[meta]
+plan = "test-plan"
+
+[[task]]
+id = "T1"
+title = "Edit root file"
+files = ["src/main.rs", "README.md"]
+"#;
+        let plan_dir = tmp.path().join("plan");
+        write_tasks_toml(&plan_dir, tasks);
+
+        let plans = load_plans(&plan_dir).unwrap();
+        let scaffolded = scaffold_missing_crates(tmp.path(), &plans).unwrap();
+        assert!(scaffolded.is_empty());
+    }
+
+    #[test]
+    fn scaffold_creates_bin_crate_for_main_rs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks = r#"
+[meta]
+plan = "test-plan"
+
+[[task]]
+id = "T1"
+title = "Create CLI crate"
+files = ["crates/my-cli/src/main.rs", "crates/my-cli/Cargo.toml"]
+"#;
+        let plan_dir = tmp.path().join("plan");
+        write_tasks_toml(&plan_dir, tasks);
+
+        let plans = load_plans(&plan_dir).unwrap();
+        let scaffolded = scaffold_missing_crates(tmp.path(), &plans).unwrap();
+
+        assert_eq!(scaffolded, vec!["my-cli"]);
+        // Should have main.rs, not lib.rs.
+        assert!(tmp.path().join("crates/my-cli/src/main.rs").exists());
+        assert!(!tmp.path().join("crates/my-cli/src/lib.rs").exists());
+        // main.rs should contain fn main().
+        let main_content =
+            fs::read_to_string(tmp.path().join("crates/my-cli/src/main.rs")).unwrap();
+        assert!(main_content.contains("fn main()"));
+        // Cargo.toml should have [[bin]] section.
+        let cargo = fs::read_to_string(tmp.path().join("crates/my-cli/Cargo.toml")).unwrap();
+        assert!(cargo.contains("[[bin]]"));
     }
 }

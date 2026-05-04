@@ -1407,7 +1407,7 @@ fn scaffold_missing_crates(workdir: &Path, tasks_file: &TasksFile) -> Result<Vec
                 })?;
 
                 let cargo_toml = format!(
-                    "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+                    "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
                 );
                 std::fs::write(crate_dir.join("Cargo.toml"), cargo_toml).with_context(|| {
                     format!("scaffold: write {}/Cargo.toml", crate_dir.display())
@@ -1428,6 +1428,20 @@ fn scaffold_missing_crates(workdir: &Path, tasks_file: &TasksFile) -> Result<Vec
     // Register scaffolded crates in workspace Cargo.toml members.
     if !scaffolded.is_empty() {
         let ws_cargo_path = workdir.join("Cargo.toml");
+
+        // In ephemeral workspaces (e.g. `roko init` in a temp dir) there may be
+        // no root Cargo.toml yet.  Create a minimal workspace manifest so the
+        // member-insertion logic below (and later `cargo check`) can succeed.
+        if !ws_cargo_path.exists() {
+            let minimal = "[workspace]\nresolver = \"2\"\nmembers = [\n]\n";
+            std::fs::write(&ws_cargo_path, minimal)
+                .context("scaffold: create workspace Cargo.toml")?;
+            tracing::info!(
+                "[orchestrate] created minimal workspace Cargo.toml at {}",
+                ws_cargo_path.display()
+            );
+        }
+
         let ws_content = std::fs::read_to_string(&ws_cargo_path)
             .context("scaffold: read workspace Cargo.toml")?;
 

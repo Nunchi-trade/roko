@@ -22,12 +22,45 @@ use crate::tui::Theme;
 /// Default viewport height in terminal lines.
 const DEFAULT_VIEWPORT_HEIGHT: u16 = 10;
 
+/// RAII guard that disables raw mode on drop.
+///
+/// Hold this value for as long as raw mode should stay active. When it goes
+/// out of scope — whether via normal return, early `?` bail, or panic unwind —
+/// `disable_raw_mode()` is called automatically.
+///
+/// ```ignore
+/// let _guard = RawModeGuard::enable()?;
+/// // raw mode active …
+/// // dropped here → raw mode disabled
+/// ```
+pub struct RawModeGuard {
+    _private: (),
+}
+
+impl RawModeGuard {
+    /// Enable raw mode and return a guard that will disable it on drop.
+    pub fn enable() -> io::Result<Self> {
+        enable_raw_mode()?;
+        Ok(Self { _private: () })
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
 /// The inline terminal: renders a viewport at the bottom of the screen and
 /// pushes completed blocks into terminal scrollback.
 pub struct InlineTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     theme: Theme,
     viewport_height: u16,
+    /// Keeps raw mode active for the lifetime of this struct. Dropped in
+    /// field-declaration order (after `terminal`), which is fine because
+    /// `restore()` in our `Drop` impl runs first.
+    _raw_guard: RawModeGuard,
 }
 
 impl InlineTerminal {
@@ -57,7 +90,7 @@ impl InlineTerminal {
             default_hook(info);
         }));
 
-        enable_raw_mode()?;
+        let raw_guard = RawModeGuard::enable()?;
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::with_options(
             backend,
@@ -70,6 +103,7 @@ impl InlineTerminal {
             terminal,
             theme,
             viewport_height: height,
+            _raw_guard: raw_guard,
         })
     }
 

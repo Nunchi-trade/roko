@@ -692,7 +692,7 @@ pub fn print_workflow_run_report(
     if let Some(cost) = report.cost {
         output_format::branch(&format!(
             "cost       {}",
-            output_format::cyan(&format!("{cost:.4}"))
+            output_format::cyan(&format!("{:.4}", cost.max(0.0)))
         ));
     }
     if report.gates.is_empty() {

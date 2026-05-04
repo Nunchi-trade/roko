@@ -1101,7 +1101,10 @@ fn print_semantic_result(label: &str, errors: &[String]) {
 }
 
 fn legacy_layout_warning(config: &RokoConfig) -> Option<String> {
-    if config.config_version == 1 {
+    // Only warn for genuinely legacy (v0/v1) configs.  A config_version >= 2
+    // config with an empty [providers] table is perfectly valid — the user may
+    // rely on CLI-based agents or env-var providers.
+    if config.config_version <= 1 {
         if !config.providers.is_empty() {
             return Some(
                 "roko.toml uses config version 1; run `roko config migrate` to upgrade".to_string(),
@@ -1109,13 +1112,6 @@ fn legacy_layout_warning(config: &RokoConfig) -> Option<String> {
         }
         return Some(
             "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
-                .to_string(),
-        );
-    }
-
-    if config.providers.is_empty() {
-        return Some(
-            "roko.toml has no [providers] section; run `roko config migrate` to upgrade"
                 .to_string(),
         );
     }
@@ -1976,7 +1972,7 @@ command = "claude"
     }
 
     #[test]
-    fn legacy_layout_warning_reports_version_one_or_missing_providers() {
+    fn legacy_layout_warning_reports_version_one_only() {
         let mut legacy = RokoConfig::default();
         legacy.config_version = 1;
         assert_eq!(
@@ -1986,10 +1982,9 @@ command = "claude"
             )
         );
 
+        // A v2 config with empty providers should NOT warn — empty providers
+        // is a valid configuration (user may rely on CLI agents or env vars).
         let current = RokoConfig::default();
-        assert_eq!(
-            legacy_layout_warning(&current).as_deref(),
-            Some("roko.toml has no [providers] section; run `roko config migrate` to upgrade")
-        );
+        assert_eq!(legacy_layout_warning(&current).as_deref(), None);
     }
 }

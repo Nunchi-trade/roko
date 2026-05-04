@@ -139,12 +139,13 @@ impl CostsLog {
     ///
     /// Returns an error if the underlying log cannot be read.
     pub async fn total_cost(&self) -> io::Result<f64> {
-        Ok(self
+        let total: f64 = self
             .read_all()
             .await?
             .into_iter()
             .map(|record| record.cost_usd)
-            .sum())
+            .sum();
+        Ok(total.max(0.0))
     }
 
     /// Aggregate recorded cost by model slug.
@@ -194,7 +195,7 @@ impl CostsLog {
             let day = today - chrono::Duration::days(offset as i64);
             out.push((
                 day.format("%Y-%m-%d").to_string(),
-                totals.get(&day).copied().unwrap_or(0.0),
+                totals.get(&day).copied().unwrap_or(0.0).max(0.0),
             ));
         }
         Ok(out)

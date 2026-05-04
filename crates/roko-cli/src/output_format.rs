@@ -121,7 +121,7 @@ pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
     bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
     bar(&format!(
         "~{} USD",
-        yellow(&format!("${:.4}", estimated_cost_usd))
+        yellow(&format!("${:.4}", estimated_cost_usd.max(0.0)))
     ));
 }
 
@@ -144,7 +144,7 @@ pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
 pub fn print_cost_actual(tokens: u64, cost: f64, predicted: f64) {
     step("Cost actual", "");
     bar(&format!("{} tokens", cyan(&fmt_tokens(tokens))));
-    bar(&format!("{} USD", cyan(&format!("${:.4}", cost))));
+    bar(&format!("{} USD", cyan(&format!("${:.4}", cost.max(0.0)))));
 
     let delta = cost - predicted;
     if delta.abs() < 0.0001 {

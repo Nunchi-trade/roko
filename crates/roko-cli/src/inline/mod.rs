@@ -30,4 +30,4 @@ pub use primitives::{
     RetryInfo, RunBlockData, SessionSummaryData, StreamingState, TaskProgress, ToolCallBlock,
     ToolCallInfo, TreeTask, TreeWave, WaterfallEntry,
 };
-pub use terminal::{InlineTerminal, should_use_inline};
+pub use terminal::{InlineTerminal, RawModeGuard, should_use_inline};

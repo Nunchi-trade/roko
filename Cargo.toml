@@ -76,7 +76,7 @@ members = [
     "crates/roko-lang-go",
 
     # Code intelligence — parsing, symbol graphs, PageRank, HDC fingerprints.
-    "crates/roko-index", "hello_world_server",
+    "crates/roko-index",
 ]
 default-members = [
     # Ordinary root builds target the main CLI plus the MCP servers we ship.

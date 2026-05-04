@@ -120,6 +120,10 @@ pub struct RunState {
     /// so `FeedbackEvent::TaskCompleted` can carry the real feature
     /// vector to the CascadeRouter's bandit.
     pub routing_context: Option<RoutingContext>,
+
+    /// Per-task failure reasons (plan_id:task_id → reason string).
+    /// Populated when a task fails so the final summary can show why.
+    pub failure_reasons: HashMap<String, String>,
 }
 
 impl RunState {
@@ -164,6 +168,7 @@ impl RunState {
             replan_contexts: HashMap::new(),
             task_fingerprints: Vec::new(),
             routing_context: None,
+            failure_reasons: HashMap::new(),
         }
     }
 
@@ -411,6 +416,25 @@ impl RunState {
     pub fn task_failed(&mut self) {
         self.tasks_failed += 1;
         self.roll_into_totals();
+    }
+
+    /// Record why a specific task failed, for the final summary.
+    pub fn record_task_failure(&mut self, plan_id: &str, task_id: &str, reason: &str) {
+        let key = format!("{plan_id}:{task_id}");
+        // Keep first 3 lines, up to 500 chars total.
+        let lines: String = reason
+            .lines()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let truncated = if lines.len() > 500 {
+            format!("{}...", &lines[..500])
+        } else if reason.lines().count() > 3 {
+            format!("{lines}\n...")
+        } else {
+            lines
+        };
+        self.failure_reasons.entry(key).or_insert(truncated);
     }
 
     fn roll_into_totals(&mut self) {

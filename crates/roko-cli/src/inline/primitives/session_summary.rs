@@ -65,7 +65,7 @@ impl SessionSummaryData {
         ));
 
         // Cost line with baseline and savings
-        let cost_value = format!("${:.4}", self.cost.total_cost);
+        let cost_value = format!("${:.4}", self.cost.total_cost.max(0.0));
         let cost_detail = if ratio > 1.5 {
             format!(
                 "baseline: ${:.4}  {}  savings: {ratio:.1}x",

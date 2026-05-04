@@ -1315,8 +1315,6 @@ files = [
   "crates/existing-crate/src/lib.rs",
   "crates/missing-crate/src/lib.rs",
   "docs/existing.md",
-]
-write_files = [
   "docs/missing.md",
   "packages/existing-app/package.json",
   "packages/missing-app/package.json",

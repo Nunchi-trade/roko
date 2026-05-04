@@ -110,11 +110,11 @@ pub fn gates_line(theme: &Theme, verdicts: &[(String, bool)]) -> Line<'static> {
 /// Cost comparison: `$0.031 (-28% vs predicted)`
 pub fn cost_delta(actual: f64, predicted: f64) -> String {
     if predicted <= 0.0 {
-        return format!("${actual:.3}");
+        return format!("${:.3}", actual.max(0.0));
     }
     let pct = ((actual - predicted) / predicted * 100.0).round() as i64;
     let sign = if pct <= 0 { "" } else { "+" };
-    format!("${actual:.3}  ({sign}{pct}% vs predicted)")
+    format!("${:.3}  ({sign}{pct}% vs predicted)", actual.max(0.0))
 }
 
 /// Collapsed tool call: `│ ▸ ToolName  summary  (duration)`
@@ -164,7 +164,7 @@ pub fn status_bar(
     progress: Option<f64>,
 ) -> Line<'static> {
     let mut spans = vec![
-        Span::styled(format!("${cost_usd:.4}"), Style::default().fg(Theme::SAGE)),
+        Span::styled(format!("${:.4}", cost_usd.max(0.0)), Style::default().fg(Theme::SAGE)),
         Span::styled(format!("  {}  ", symbols::SEP), theme.muted()),
         Span::styled(
             format!("{input_tokens} in / {output_tokens} out"),

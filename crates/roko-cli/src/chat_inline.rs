@@ -2538,13 +2538,13 @@ fn handle_slash_command(
                 styled::continuation(
                     theme,
                     "total cost",
-                    &format!("${:.4}", session.cost.total_cost),
+                    &format!("${:.4}", session.cost.total_cost.max(0.0)),
                     None,
                 ),
                 styled::continuation(
                     theme,
                     "avg/turn",
-                    &format!("${avg_cost:.4} cost, {avg_tokens} tokens"),
+                    &format!("${:.4} cost, {avg_tokens} tokens", avg_cost.max(0.0)),
                     None,
                 ),
                 styled::continuation(
@@ -2630,7 +2630,7 @@ fn handle_slash_command(
                 styled::continuation(theme, "mcp", &mcp_status, None),
                 styled::continuation(theme, "tokens", &total_tokens.to_string(), None),
                 styled::continuation(theme, "system", &system_preview, None),
-                styled::section_end(theme, "cost", &format!("${:.4}", session.cost.total_cost)),
+                styled::section_end(theme, "cost", &format!("${:.4}", session.cost.total_cost.max(0.0))),
             ])?;
         }
         "/history" => {
@@ -2845,7 +2845,7 @@ fn handle_slash_command(
                 styled::continuation(
                     theme,
                     "total",
-                    &format!("${:.4}", session.cost.total_cost),
+                    &format!("${:.4}", session.cost.total_cost.max(0.0)),
                     None,
                 ),
                 styled::continuation(
@@ -4256,7 +4256,7 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, t
     // Build the base status bar
     let mut spans = vec![
         Span::styled(
-            format!("${:.4}", session.cost.total_cost),
+            format!("${:.4}", session.cost.total_cost.max(0.0)),
             Style::default().fg(Theme::SAGE),
         ),
         Span::styled(format!("  {}  ", symbols::SEP), theme.muted()),

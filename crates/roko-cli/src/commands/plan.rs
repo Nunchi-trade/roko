@@ -365,6 +365,19 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
 
             let plans = roko_cli::runner::plan_loader::load_plans(&resolved_plans_dir)?;
+
+            // Scaffold any crates referenced by tasks that don't exist yet.
+            // Plans that create new crates need a minimal Cargo.toml + src/lib.rs
+            // so the gate pipeline (`cargo check`) can succeed.
+            let scaffolded = roko_cli::runner::plan_loader::scaffold_missing_crates(&wd, &plans)?;
+            if !scaffolded.is_empty() && !cli.quiet {
+                eprintln!(
+                    "▸ Scaffolded {} new crate(s): {}",
+                    scaffolded.len(),
+                    scaffolded.join(", ")
+                );
+            }
+
             let roko_config = early_roko_config;
 
             // Initialize Phase 0 subsystems.
@@ -578,7 +591,21 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 }
             }
 
-            if v2_report.tasks_failed > 0 {
+            if v2_report.tasks_failed > 0 && !cli.quiet {
+                if !v2_report.failure_reasons.is_empty() {
+                    eprintln!("\nFailure details:");
+                    for (key, reason) in &v2_report.failure_reasons {
+                        if reason.contains('\n') {
+                            eprintln!("  ✗ {key}:");
+                            for line in reason.lines() {
+                                eprintln!("    {line}");
+                            }
+                        } else {
+                            eprintln!("  ✗ {key}: {reason}");
+                        }
+                    }
+                    eprintln!("\nhint: check .roko/roko.log for full failure output");
+                }
                 let state_path = wd.join(".roko").join("state").join("executor.json");
                 if state_path.exists() {
                     eprintln!(
@@ -1044,7 +1071,11 @@ fn validate_before_run(plans_dir: &Path, workdir: &Path) -> Option<i32> {
         None
     };
 
-    let report = match plan_validate::validate_plans_dir(plans_dir, models.as_ref()) {
+    let report = match plan_validate::validate_plans_dir_with_workdir(
+        plans_dir,
+        models.as_ref(),
+        Some(workdir),
+    ) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("error: plan validation failed: {error:#}");

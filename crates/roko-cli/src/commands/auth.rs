@@ -210,10 +210,11 @@ pub(crate) async fn cmd_login_browser(url: &str, dashboard_url: &str) -> Result<
 /// Uses raw terminal mode via crossterm (already a dependency) to suppress
 /// echo while the user types. Falls back to plain read on error.
 pub(crate) fn read_password_from_terminal() -> Result<String> {
-    use crossterm::terminal;
+    use roko_cli::inline::RawModeGuard;
     use std::io::Read as _;
 
-    terminal::enable_raw_mode()?;
+    // Guard ensures raw mode is disabled on any exit path (error, bail, panic).
+    let _guard = RawModeGuard::enable()?;
     let mut buf = Vec::new();
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
@@ -229,7 +230,7 @@ pub(crate) fn read_password_from_terminal() -> Result<String> {
             }
             // Ctrl-C
             3 => {
-                terminal::disable_raw_mode()?;
+                // Guard will disable raw mode when it drops via bail!
                 println!();
                 anyhow::bail!("interrupted");
             }
@@ -237,7 +238,8 @@ pub(crate) fn read_password_from_terminal() -> Result<String> {
         }
     }
 
-    terminal::disable_raw_mode()?;
+    // Explicit drop before printing, so newline renders in cooked mode.
+    drop(_guard);
     println!(); // newline after hidden input
     Ok(String::from_utf8_lossy(&buf).to_string())
 }

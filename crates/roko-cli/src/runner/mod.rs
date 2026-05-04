@@ -35,5 +35,5 @@ pub mod types;
 
 // Re-export the primary entry points.
 pub use event_loop::{PlanReport, RunReport, run};
-pub use plan_loader::{Plan, load_plan, load_plans};
+pub use plan_loader::{Plan, load_plan, load_plans, scaffold_missing_crates};
 pub use types::RunConfig;

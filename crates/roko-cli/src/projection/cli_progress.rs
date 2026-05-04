@@ -210,6 +210,7 @@ fn format_cost(event: &ProjectionEvent) -> String {
         .get("total_cost_usd")
         .and_then(|v| v.as_f64())
         .unwrap_or_default();
+    let cost = cost.max(0.0);
     format!("$ cost {cost:.4}")
 }
 

@@ -21,7 +21,12 @@ PIPELINE_PROVIDER=""
 PIPELINE_DRY_RUN=false
 PIPELINE_PROVIDERS_LIST=""
 PIPELINE_STEP_PID=""
+PIPELINE_STEP_OUTPUT=""
 PIPELINE_INTERRUPTED=false
+# Per-step timing: parallel arrays filled by run_step, printed by pipeline_finish
+PIPELINE_STEP_NAMES=()
+PIPELINE_STEP_TIMES=()
+PIPELINE_STEP_RESULTS=()
 
 # ── Colors (auto-detect TTY) ─────────────────────────────────
 if [ -t 1 ]; then
@@ -843,6 +848,11 @@ create_pipeline_workspace() {
   local roko
   roko=$(resolve_roko)
 
+  # Reset per-step timing arrays for this pipeline run
+  PIPELINE_STEP_NAMES=()
+  PIPELINE_STEP_TIMES=()
+  PIPELINE_STEP_RESULTS=()
+
   # Init workspace
   info "Creating workspace: $PIPELINE_WORKSPACE"
   if $PIPELINE_DRY_RUN; then
@@ -912,11 +922,17 @@ run_step() {
 
   if $PIPELINE_DRY_RUN; then
     info "(dry-run) skipped"
+    PIPELINE_STEP_NAMES+=("$desc")
+    PIPELINE_STEP_TIMES+=("skip")
+    PIPELINE_STEP_RESULTS+=("skip")
     return 0
   fi
 
   if $PIPELINE_INTERRUPTED; then
     info "(interrupted) skipped"
+    PIPELINE_STEP_NAMES+=("$desc")
+    PIPELINE_STEP_TIMES+=("skip")
+    PIPELINE_STEP_RESULTS+=("skip")
     return 130
   fi
 
@@ -927,40 +943,76 @@ run_step() {
 
   # Run in background so Ctrl+C can kill it immediately.
   # We track the PID so the pipeline trap can clean it up.
+  # Track output file globally so interrupt handler can clean it too.
+  PIPELINE_STEP_OUTPUT="$output_file"
   bash -c "$full_cmd" > "$output_file" 2>&1 &
   PIPELINE_STEP_PID=$!
 
-  # Wait with timeout: poll every second, kill if exceeded
+  # Wait with timeout: poll every second, kill if exceeded.
+  # Progress indicator every 30s so the user sees it's alive.
   local waited=0
   while kill -0 "$PIPELINE_STEP_PID" 2>/dev/null; do
     if $PIPELINE_INTERRUPTED; then
       kill "$PIPELINE_STEP_PID" 2>/dev/null || true
+      sleep 1
+      if kill -0 "$PIPELINE_STEP_PID" 2>/dev/null; then
+        kill -9 "$PIPELINE_STEP_PID" 2>/dev/null || true
+      fi
       wait "$PIPELINE_STEP_PID" 2>/dev/null || true
       PIPELINE_STEP_PID=""
       rm -f "$output_file"
+      PIPELINE_STEP_OUTPUT=""
+      PIPELINE_STEP_NAMES+=("$desc")
+      PIPELINE_STEP_TIMES+=("${waited}s")
+      PIPELINE_STEP_RESULTS+=("interrupted")
       return 130
     fi
     if [ "$waited" -ge "$timeout" ]; then
-      warn "Step $step_num timed out after ${timeout}s"
+      warn "Step $step_num timed out after ${timeout}s — sending SIGTERM"
       kill "$PIPELINE_STEP_PID" 2>/dev/null || true
+      sleep 2
+      # Escalate to SIGKILL if still alive
+      if kill -0 "$PIPELINE_STEP_PID" 2>/dev/null; then
+        warn "Process still alive — sending SIGKILL"
+        kill -9 "$PIPELINE_STEP_PID" 2>/dev/null || true
+      fi
       wait "$PIPELINE_STEP_PID" 2>/dev/null || true
       PIPELINE_STEP_PID=""
       cat "$output_file"
       rm -f "$output_file"
+      PIPELINE_STEP_OUTPUT=""
+      PIPELINE_STEP_NAMES+=("$desc")
+      PIPELINE_STEP_TIMES+=("${timeout}s")
+      PIPELINE_STEP_RESULTS+=("timeout")
       return 124
     fi
     sleep 1
     waited=$(( waited + 1 ))
+    # Progress indicator every 30s
+    if [ $(( waited % 30 )) -eq 0 ]; then
+      echo "${DIM}  ... ${waited}s / ${timeout}s${RESET}"
+    fi
   done
 
-  wait "$PIPELINE_STEP_PID" 2>/dev/null
-  exit_code=$?
+  # Process exited naturally. Clear PID before wait to avoid race with interrupt handler.
+  local finished_pid="$PIPELINE_STEP_PID"
   PIPELINE_STEP_PID=""
+  wait "$finished_pid" 2>/dev/null
+  exit_code=$?
 
   local elapsed=$(( SECONDS - start_time ))
 
   # Show output
   cat "$output_file"
+
+  # Record step timing
+  PIPELINE_STEP_NAMES+=("$desc")
+  PIPELINE_STEP_TIMES+=("${elapsed}s")
+  if [ "$exit_code" -eq 0 ]; then
+    PIPELINE_STEP_RESULTS+=("pass")
+  else
+    PIPELINE_STEP_RESULTS+=("FAIL")
+  fi
 
   if [ "$exit_code" -eq 0 ]; then
     ok "Step $step_num passed (${elapsed}s)"
@@ -969,11 +1021,15 @@ run_step() {
     echo ""
     echo "${BOLD}--- step $step_num error details ---${RESET}"
 
+    # Quick context: last 5 lines of step output
+    echo "${DIM}Last 5 lines of output:${RESET}"
+    tail -5 "$output_file" 2>/dev/null | sed 's/^/  /'
+
     # Show workspace state for debugging
     echo "${DIM}Workspace: $PIPELINE_WORKSPACE${RESET}"
     if [ -f "$PIPELINE_WORKSPACE/.roko/roko.log" ]; then
-      echo "${DIM}Recent log:${RESET}"
-      tail -20 "$PIPELINE_WORKSPACE/.roko/roko.log" 2>/dev/null | sed 's/^/  /'
+      echo "${DIM}roko.log (last 5 lines):${RESET}"
+      tail -5 "$PIPELINE_WORKSPACE/.roko/roko.log" 2>/dev/null | sed 's/^/  /'
     fi
     if [ -f "$PIPELINE_WORKSPACE/.roko/episodes.jsonl" ]; then
       echo "${DIM}Last episode:${RESET}"
@@ -983,6 +1039,7 @@ run_step() {
   fi
 
   rm -f "$output_file"
+  PIPELINE_STEP_OUTPUT=""
   return $exit_code
 }
 
@@ -1008,23 +1065,33 @@ dump_pipeline_workspace() {
   fi
   echo ""
 
-  echo "--- episodes ---"
+  echo "--- episodes (last 20) ---"
   if [ -f "$ws/.roko/episodes.jsonl" ]; then
-    jq_or_raw . < "$ws/.roko/episodes.jsonl" 2>/dev/null
+    local ep_lines
+    ep_lines=$(wc -l < "$ws/.roko/episodes.jsonl" | tr -d ' ')
+    if [ "$ep_lines" -gt 20 ]; then
+      echo "  ($ep_lines total, showing last 20)"
+    fi
+    tail -20 "$ws/.roko/episodes.jsonl" | jq_or_raw . 2>/dev/null
   else
     echo "  none"
   fi
   echo ""
 
-  echo "--- efficiency ---"
+  echo "--- efficiency (last 20) ---"
   if [ -f "$ws/.roko/learn/efficiency.jsonl" ]; then
-    jq_or_raw . < "$ws/.roko/learn/efficiency.jsonl" 2>/dev/null
+    local eff_lines
+    eff_lines=$(wc -l < "$ws/.roko/learn/efficiency.jsonl" | tr -d ' ')
+    if [ "$eff_lines" -gt 20 ]; then
+      echo "  ($eff_lines total, showing last 20)"
+    fi
+    tail -20 "$ws/.roko/learn/efficiency.jsonl" | jq_or_raw . 2>/dev/null
   else
     echo "  none"
   fi
   echo ""
 
-  echo "--- errors ---"
+  echo "--- errors (last 20) ---"
   if [ -f "$ws/.roko/roko.log" ]; then
     grep -i -E "error|panic|fatal|fail" "$ws/.roko/roko.log" 2>/dev/null | tail -20 || echo "  none"
   else
@@ -1062,24 +1129,45 @@ dump_pipeline_workspace() {
   echo "${BOLD}=== END WORKSPACE DUMP ===${RESET}"
 }
 
-# Pre-flight check: verify resolved provider is reachable before running a pipeline.
+# Pre-flight check: verify workspace and provider are usable before running a pipeline.
 preflight_check() {
   local ws="$1"
   local roko
   roko=$(resolve_roko)
 
   if $PIPELINE_DRY_RUN; then
-    info "(dry-run) would run: $roko --repo $ws config providers health"
+    info "(dry-run) would run preflight checks for $ws"
     return 0
   fi
 
+  # Validate workspace structure
+  if [ ! -d "$ws" ]; then
+    err "Preflight: workspace directory does not exist: $ws"
+    return 1
+  fi
+  if [ ! -d "$ws/.roko" ]; then
+    err "Preflight: workspace missing .roko/ directory: $ws"
+    return 1
+  fi
+  if [ ! -f "$ws/roko.toml" ]; then
+    err "Preflight: workspace missing roko.toml: $ws"
+    return 1
+  fi
+
+  # Verify roko binary actually runs
+  if ! "$roko" --version >/dev/null 2>&1; then
+    err "Preflight: roko binary at $roko is not executable or crashes"
+    return 1
+  fi
+
+  # Check provider health
   local output
   if ! output=$($roko --repo "$ws" config providers health 2>&1); then
     warn "Provider health check failed:"
     echo "$output" | sed 's/^/  /'
     return 1
   fi
-  ok "Provider health check passed"
+  ok "Preflight passed (workspace + provider)"
   return 0
 }
 
@@ -1318,10 +1406,51 @@ pipeline_providers() {
   pipeline_finish "$failed" "$start_time" "$keep"
 }
 
+# Print the per-step timing summary table.
+# Usage: print_step_summary <total_elapsed_seconds>
+print_step_summary() {
+  local total_elapsed="$1"
+  if [ "${#PIPELINE_STEP_NAMES[@]}" -gt 0 ]; then
+    echo ""
+    echo "${BOLD}Step Timing Summary${RESET}"
+    echo "${DIM}──────────────────────────────────────────────────────────${RESET}"
+    printf "  ${DIM}%-4s %-40s %8s %s${RESET}\n" "#" "Step" "Time" "Result"
+    echo "${DIM}  ──── ──────────────────────────────────────── ──────── ──────${RESET}"
+    for i in "${!PIPELINE_STEP_NAMES[@]}"; do
+      local step_n=$(( i + 1 ))
+      local name="${PIPELINE_STEP_NAMES[$i]}"
+      local time="${PIPELINE_STEP_TIMES[$i]}"
+      local result="${PIPELINE_STEP_RESULTS[$i]}"
+      local color="$GREEN"
+      case "$result" in
+        FAIL)        color="$RED" ;;
+        timeout)     color="$RED" ;;
+        interrupted) color="$YELLOW" ;;
+        skip)        color="$DIM" ;;
+      esac
+      printf "  %-4s %-40s %8s ${color}%s${RESET}\n" "$step_n" "$name" "$time" "$result"
+    done
+    echo "${DIM}  ──── ──────────────────────────────────────── ──────── ──────${RESET}"
+    printf "  %-4s %-40s ${BOLD}%8s${RESET}\n" "" "Total" "${total_elapsed}s"
+  fi
+}
+
 # Common finish logic for all pipelines
 pipeline_finish() {
   local failed="$1" start_time="$2" keep="$3"
   local total_elapsed=$(( SECONDS - start_time ))
+
+  # Kill any orphaned step process before clearing the trap
+  if [ -n "${PIPELINE_STEP_PID:-}" ] && kill -0 "$PIPELINE_STEP_PID" 2>/dev/null; then
+    warn "Orphaned step process $PIPELINE_STEP_PID still alive — killing"
+    kill "$PIPELINE_STEP_PID" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$PIPELINE_STEP_PID" 2>/dev/null; then
+      kill -9 "$PIPELINE_STEP_PID" 2>/dev/null || true
+    fi
+    wait "$PIPELINE_STEP_PID" 2>/dev/null || true
+    PIPELINE_STEP_PID=""
+  fi
 
   # Restore default signal handling
   trap - INT TERM
@@ -1339,6 +1468,8 @@ pipeline_finish() {
         ok "Workspace removed."
       fi
     fi
+    print_step_summary "$total_elapsed"
+
     err "Pipeline interrupted after ${total_elapsed}s."
     exit 130
   fi
@@ -1347,6 +1478,8 @@ pipeline_finish() {
     echo ""
     dump_pipeline_workspace "$PIPELINE_WORKSPACE"
   fi
+
+  print_step_summary "$total_elapsed"
 
   echo ""
   if [ "$failed" -eq 0 ]; then
@@ -1405,11 +1538,27 @@ cmd_pipeline() {
     echo ""
     warn "Interrupted! Cleaning up..."
     PIPELINE_INTERRUPTED=true
-    # Kill the current step if running
+    # Kill the current step if running — SIGTERM first, then SIGKILL escalation
     if [ -n "$PIPELINE_STEP_PID" ] && kill -0 "$PIPELINE_STEP_PID" 2>/dev/null; then
       kill "$PIPELINE_STEP_PID" 2>/dev/null || true
+      # Give process 2s to exit gracefully
+      local grace=0
+      while [ "$grace" -lt 20 ] && kill -0 "$PIPELINE_STEP_PID" 2>/dev/null; do
+        sleep 0.1
+        grace=$(( grace + 1 ))
+      done
+      # Escalate to SIGKILL if still alive
+      if kill -0 "$PIPELINE_STEP_PID" 2>/dev/null; then
+        warn "Process $PIPELINE_STEP_PID did not exit — sending SIGKILL"
+        kill -9 "$PIPELINE_STEP_PID" 2>/dev/null || true
+      fi
       wait "$PIPELINE_STEP_PID" 2>/dev/null || true
       PIPELINE_STEP_PID=""
+    fi
+    # Clean up any temp output file from run_step
+    if [ -n "${PIPELINE_STEP_OUTPUT:-}" ]; then
+      rm -f "$PIPELINE_STEP_OUTPUT"
+      PIPELINE_STEP_OUTPUT=""
     fi
   }
   trap pipeline_interrupt INT TERM

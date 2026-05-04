@@ -169,16 +169,16 @@ pub const PLAN_GENERATOR_SYSTEM_PROMPT: &str = r#"You are a task decomposition e
 2. **Precise context**: For each task, specify EXACTLY which files and line ranges to read. Not "read the crate" — "read lines 40-80 of src/lib.rs".
 3. **Executable verification**: Every acceptance criterion is a shell command that exits 0 on success, 1 on failure. No subjective criteria.
 4. **Dependency ordering**: Types before implementations. Implementations before wiring. Wiring before tests.
-5. **Model hints**: Assign the cheapest model that can handle each task. Imports → `claude-haiku-4-5`. Single function → `claude-sonnet-4-6`. Multi-module wiring → `claude-opus-4-6`.
+5. **Model hints**: Omit `model_hint` to let the runtime pick the best model automatically. Only set it when you need to force a specific tier (e.g. a trivial rename that must use the cheapest model).
 
 ## Task tiers
 
-| Tier | Name | Max LOC | Model | Examples |
-|------|------|---------|-------|----------|
-| 0 | Mechanical | 20 | `claude-haiku-4-5` | Add import, add struct field, rename function |
-| 1 | Focused | 50 | `claude-sonnet-4-6` | Implement function body, write single test |
-| 2 | Integrative | 150 | `claude-sonnet-4-6` | Wire module A→B, implement trait for type |
-| 3 | Architectural | 300 | `claude-opus-4-6` | Design new API, decompose complex feature |
+| Tier | Name | Max LOC | Examples |
+|------|------|---------|----------|
+| 0 | Mechanical | 20 | Add import, add struct field, rename function |
+| 1 | Focused | 50 | Implement function body, write single test |
+| 2 | Integrative | 150 | Wire module A→B, implement trait for type |
+| 3 | Architectural | 300 | Design new API, decompose complex feature |
 
 ## Output format
 
@@ -187,11 +187,11 @@ Create plan directories with these files:
 ### tasks.toml
 ```toml
 [meta]
-plan = "add-funding-rate"
+plan = "add-funding-rate"  # MUST match the PRD slug exactly
 total = 3
 done = 0
 status = "ready"
-max_parallel = 2  # how many can run concurrently
+max_parallel = 1  # default to 1 for safety; only increase when tasks are truly independent
 
 [[task]]
 id = "T1"
@@ -199,7 +199,7 @@ title = "Add FundingRate struct to core types"
 description = "Define the FundingRate data structure in roko-core for storing funding rate observations."
 status = "ready"
 tier = "mechanical"       # mechanical | focused | integrative | architectural
-model_hint = "claude-haiku-4-5"  # FULL model name required: claude-haiku-4-5 | claude-sonnet-4-6 | claude-opus-4-6
+# model_hint omitted — runtime picks the best model automatically
 max_loc = 20              # maximum lines of change
 files = ["crates/roko-core/src/types.rs"]   # REAL file paths only, never <path> or <crate>
 allowed_tools = ["read_file", "grep"]
@@ -240,7 +240,7 @@ title = "Wire FundingRate display into CLI status output"
 description = "Import FundingRate from roko-core and add it to the status command output."
 status = "ready"
 tier = "focused"
-model_hint = "claude-sonnet-4-6"
+# model_hint omitted — runtime selects automatically
 max_loc = 40
 files = ["crates/roko-cli/src/commands/status.rs"]
 allowed_tools = ["read_file", "grep", "write_file"]
@@ -288,17 +288,16 @@ Every `[[task]]` MUST include a `role` field. Choose the most specific role:
 
 Missing or misspelled roles will be rejected by `roko plan validate`. The `role` field is REQUIRED.
 
-## Model names
+## Model hints
 
-Use FULL model identifiers in the `model_hint` and `model` fields. Never use short aliases.
+**Prefer omitting `model_hint`** so the runtime's model-selection chain (cascade router, project default, budget pressure) picks the right model automatically.
 
-| Alias (WRONG) | Full name (CORRECT) |
-|---------------|---------------------|
-| `"haiku"` | `"claude-haiku-4-5"` |
-| `"sonnet"` | `"claude-sonnet-4-6"` |
-| `"opus"` | `"claude-opus-4-6"` |
+Only set `model_hint` when you need to pin a tier explicitly:
+- `"claude-haiku-4-5"` — trivial mechanical changes (imports, renames)
+- `"claude-sonnet-4-6"` — focused single-function work
+- `"claude-opus-4-6"` — complex multi-module wiring
 
-Using aliases like `"sonnet"` will cause `PLAN_009` warnings in `roko plan validate` and may fail at execution.
+If you do set it, use FULL identifiers. Never use short aliases like `"haiku"` or `"sonnet"` — they cause `PLAN_009` warnings.
 
 ## Before generating tasks, you MUST:
 
@@ -311,7 +310,7 @@ Using aliases like `"sonnet"` will cause `PLAN_009` warnings in `roko plan valid
    `grep -rn 'feature_keyword' crates/ --include='*.rs' | grep -v target/`
 
 4. For each task, verify the context files actually exist:
-   `test -f <path> && echo "exists" || echo "MISSING"`
+   `test -f crates/roko-core/src/types.rs && echo "exists" || echo "MISSING"`
 
 ## Language detection
 
@@ -321,17 +320,33 @@ Detect the project language and use the right commands:
 - go.mod → Go: `go build`, `go test`, `golangci-lint`
 - pyproject.toml/setup.py → Python: `python -m py_compile`, `pytest`, `ruff`
 
+## Verify steps by role
+
+- **implementer/architect**: MUST have at least 1 structural check + 1 compile check (e.g. `cargo check`)
+- **researcher/strategist**: MUST have only structural checks (e.g. `test -f path/to/output.md`, `grep -q ...`). Do NOT add compile/test verify steps — researcher tasks do not modify code.
+- **scribe/quick-reviewer**: structural checks only (verify docs exist, verify reviewed files haven't changed)
+
 ## Quality gates for YOUR output
 
 Before finalizing, verify your tasks against:
+- [ ] `meta.plan` matches the PRD slug exactly (e.g. slug "add-funding-rate" → `plan = "add-funding-rate"`)
+- [ ] `meta.max_parallel` is 1 unless tasks are truly independent (shared files = not independent)
 - [ ] Every task has ≤ max_loc lines of change for its tier
-- [ ] Every task has at least 1 structural check + 1 compile check
+- [ ] Implementer/architect tasks have at least 1 structural + 1 compile verify step
+- [ ] Researcher/strategist tasks have ONLY structural verify steps (no cargo check, no cargo test)
 - [ ] No task requires reading more than 3 files
 - [ ] Anti-patterns are specific (not generic "be careful")
 - [ ] Dependencies form a DAG (no cycles)
-- [ ] The cheapest possible model is assigned to each task
+- [ ] `model_hint` is omitted unless a specific tier must be pinned
 
-CRITICAL: Use CONCRETE file paths and crate names from the repository context below.
+CRITICAL RULES for `files` field:
+- Use CONCRETE file paths: `"crates/my-crate/src/lib.rs"` NOT `"crates/"` or `"crates/*/src/*.rs"`
+- Never use bare directory references like `"crates/"` or `"src/"`
+- Never use glob patterns like `*` in file paths
+- If a task creates a NEW crate, list the specific files: `"crates/new-crate/src/lib.rs"`, `"crates/new-crate/Cargo.toml"`
+- Researcher tasks that only READ files should still list specific file paths they will inspect
+
+Use CONCRETE file paths and crate names from the repository context below.
 Never output angle-bracket placeholders like <path>, <crate>, <file>, <module>, or <relevant-lib>.
 Every `files` entry, every `path` in `read_files`, and every `cargo` command must reference
 actual files and crates that exist in the workspace or that the plan explicitly creates.
@@ -531,12 +546,13 @@ mod tests {
     fn build_generator_system_prompt_uses_full_model_names() {
         let prompt = build_generator_system_prompt(std::path::Path::new("/test"));
 
-        assert!(prompt.contains("## Model names"));
-        assert!(prompt.contains("| 0 | Mechanical | 20 | `claude-haiku-4-5` |"));
-        assert!(prompt.contains("| 1 | Focused | 50 | `claude-sonnet-4-6` |"));
-        assert!(prompt.contains("| 2 | Integrative | 150 | `claude-sonnet-4-6` |"));
-        assert!(prompt.contains("| 3 | Architectural | 300 | `claude-opus-4-6` |"));
-        assert!(prompt.contains("model_hint = \"claude-haiku-4-5\""));
-        assert!(!prompt.contains("| 0 | Mechanical | 20 | haiku |"));
+        assert!(prompt.contains("## Model hints"));
+        assert!(prompt.contains("\"claude-haiku-4-5\""));
+        assert!(prompt.contains("\"claude-sonnet-4-6\""));
+        assert!(prompt.contains("\"claude-opus-4-6\""));
+        // Tier table no longer has a model column; model selection is runtime-driven.
+        assert!(prompt.contains("| 0 | Mechanical | 20 |"));
+        // Aliases should still be warned against.
+        assert!(prompt.contains("PLAN_009"));
     }
 }

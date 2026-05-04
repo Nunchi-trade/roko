@@ -11,6 +11,7 @@ fn display_cost(cost_usd: f64, input_tokens: u64, output_tokens: u64) -> String 
     if cost_usd == 0.0 && input_tokens == 0 && output_tokens == 0 {
         "unknown".to_string()
     } else {
+        let cost_usd = cost_usd.max(0.0);
         format!("${cost_usd:.2}")
     }
 }
@@ -21,6 +22,7 @@ fn display_cost_precise(cost_usd: f64, input_tokens: u64, output_tokens: u64) ->
     if display == "unknown" {
         display
     } else {
+        let cost_usd = cost_usd.max(0.0);
         format!("${cost_usd:.4}")
     }
 }
