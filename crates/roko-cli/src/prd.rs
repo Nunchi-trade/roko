@@ -1050,7 +1050,7 @@ async fn generate_plan_from_prd_with_outcome(
         let prompt_ms = t_phase.elapsed().as_millis();
         let t_phase = Instant::now();
         let task_id = format!("prd:plan:{slug}");
-        let spinner = crate::spinner::cli_spinner(format!("Generating plan from PRD: {slug}"));
+        eprintln!("  Generating plan from PRD: {slug}");
         let (exit_code, output) = run_agent_capture_logged(
             AgentExecOpts {
                 prompt: &task_prompt,
@@ -1072,9 +1072,9 @@ async fn generate_plan_from_prd_with_outcome(
         let agent_ms = t_phase.elapsed().as_millis();
         let t_phase = Instant::now();
         if exit_code == 0 {
-            spinner.finish_with_message(format!("Plan generated for: {slug}"));
+            eprintln!("  ✓ Plan generated for: {slug}");
         } else {
-            spinner.finish_with_message("Plan generation failed");
+            eprintln!("  ✗ Plan generation failed");
         }
         tracing::info!(
             exit_code,

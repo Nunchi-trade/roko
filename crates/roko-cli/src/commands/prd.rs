@@ -450,8 +450,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 // are detected even on coarse-mtime filesystems.
                 let content_before = std::fs::read(&target).ok();
 
-                let spinner =
-                    roko_cli::spinner::cli_spinner(format!("Generating PRD draft: {slug}"));
+                eprintln!("  Generating PRD draft: {slug}");
                 let t_phase = Instant::now();
                 let started = Instant::now();
                 let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
@@ -467,9 +466,9 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 })
                 .await?;
                 if exit_code == 0 {
-                    spinner.finish_with_message(format!("Draft generated: {slug}"));
+                    eprintln!("  ✓ Draft generated: {slug}");
                 } else {
-                    spinner.finish_with_message("PRD draft generation failed");
+                    eprintln!("  ✗ PRD draft generation failed");
                 }
 
                 let agent_ms = t_phase.elapsed().as_millis();
