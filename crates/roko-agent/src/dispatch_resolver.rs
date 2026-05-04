@@ -10,6 +10,8 @@ use roko_core::agent::{ProviderKind, ResolvedModel, resolve_model};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+#[cfg(test)]
+use roko_core::defaults::{DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::{
     DispatchAttempt, DispatchAttemptKind, DispatchAuthStatus, DispatchError, DispatchPlan,
     DispatchRequest, DispatchRequirement, FallbackPolicy, TransportAuth, TransportPlan,
@@ -350,9 +352,9 @@ mod dispatch_resolver_tests {
                 api_key_env: None,
                 command: Some("claude".to_string()),
                 args: None,
-                timeout_ms: Some(120_000),
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
                 ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
-                connect_timeout_ms: Some(5_000),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -362,9 +364,9 @@ mod dispatch_resolver_tests {
                 api_key_env: Some("EXAMPLE_API_KEY".to_string()),
                 command: None,
                 args: None,
-                timeout_ms: Some(120_000),
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
                 ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
-                connect_timeout_ms: Some(5_000),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
                 extra_headers: None,
                 max_concurrent: None,
             },

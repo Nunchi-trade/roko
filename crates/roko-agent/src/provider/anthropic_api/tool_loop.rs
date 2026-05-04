@@ -18,7 +18,7 @@ use crate::translate::{
     BackendResponse, RenderedResults, RenderedTools, SessionState, Translator, TranslatorError,
 };
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 pub(super) fn create_tool_loop_agent(
@@ -100,7 +100,7 @@ fn create_tool_loop_backend_with_api_key(
     let timeout_ms = options
         .timeout_ms
         .or(provider.timeout_ms)
-        .unwrap_or(120_000);
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
 
     let mut backend = AnthropicMessagesBackend::new(api_key, model.slug.clone())
         .with_provider_id(model.provider.clone())
@@ -240,7 +240,7 @@ impl AnthropicMessagesBackend {
             provider_id: model.clone(),
             model,
             base_url: DEFAULT_BASE_URL.to_string(),
-            timeout_ms: 120_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             extra_headers: Vec::new(),
             provider_semaphores: None,

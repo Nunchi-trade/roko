@@ -15,6 +15,7 @@ use crate::provider::current_safety_layer;
 use crate::safety::SafetyLayer;
 use crate::usage::Usage;
 use async_trait::async_trait;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -59,7 +60,7 @@ impl ExecAgent {
             env: Vec::new(),
             current_dir: None,
             safety: None,
-            timeout_ms: 120_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             name,
         }
     }

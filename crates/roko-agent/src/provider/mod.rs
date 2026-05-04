@@ -50,6 +50,7 @@ use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::tool::{ToolDef, ToolRegistry};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -197,7 +198,7 @@ pub fn create_agent_for_model(
             let mut agent =
                 ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
                     .with_safety_layer(safety_layer)
-                    .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
+                    .with_timeout_ms(options.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS));
             if !options.name.is_empty() {
                 agent = agent.with_name(options.name.clone());
             }

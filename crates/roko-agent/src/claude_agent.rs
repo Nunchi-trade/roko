@@ -18,7 +18,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::translate::claude::{inject_cache_markers, inject_cache_markers_into_content};
 use crate::usage::{UsageObservation, UsageSource};
 use async_trait::async_trait;
-use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -200,7 +200,7 @@ impl ClaudeAgent {
             api_key: api_key.into(),
             model,
             base_url: DEFAULT_BASE_URL.to_owned(),
-            timeout_ms: 120_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             name,
             max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),

@@ -7,6 +7,7 @@ use roko_core::agent::ProviderKind;
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 
 use crate::http::{HttpPostError, HttpPoster};
 use crate::provider::AgentCreationError;
@@ -53,7 +54,7 @@ pub fn create_openai_compat_backend(
             let backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
                 .with_provider_id(model.provider.clone())
                 .with_base_url(base_url_for_tool_loop(provider))
-                .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
+                .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
                 .with_max_tokens(max_tokens_for_model(model))
                 .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                 .with_extra_body_params(build_extra_body_params(provider, model))
@@ -86,7 +87,7 @@ pub fn create_openai_compat_backend(
                 OpenAiCompatBackend::new(api_key, model.slug.clone())
                     .with_provider_id(model.provider.clone())
                     .with_base_url(base_url)
-                    .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
+                    .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
                     .with_max_tokens(max_tokens_for_model(model))
                     .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                     .with_skip_session_fields(true)
@@ -111,7 +112,7 @@ pub fn create_openai_compat_backend(
                 OpenAiCompatBackend::new(api_key, model.slug.clone())
                     .with_provider_id(model.provider.clone())
                     .with_base_url(base_url)
-                    .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
+                    .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
                     .with_max_tokens(max_tokens_for_model(model))
                     .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                     .with_extra_body_params(extra)

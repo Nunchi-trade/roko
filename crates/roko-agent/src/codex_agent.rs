@@ -23,7 +23,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::ProviderSemaphores;
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -168,7 +168,7 @@ impl CodexAgent {
             model,
             name,
             base_url: DEFAULT_BASE_URL.to_owned(),
-            timeout_ms: 120_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             extra_headers: Vec::new(),
             extra_body_params: Map::new(),

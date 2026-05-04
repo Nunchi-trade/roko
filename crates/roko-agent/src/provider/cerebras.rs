@@ -26,6 +26,7 @@ use crate::tool_loop::backends::create_openai_compat_backend;
 use crate::translate::{StrictOpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde_json::Value;
 
 /// Adapter for the Cerebras Inference API.
@@ -50,7 +51,7 @@ impl ProviderAdapter for CerebrasAdapter {
         let timeout = options
             .timeout_ms
             .or(provider.timeout_ms)
-            .unwrap_or(120_000);
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
         let agent_name = if options.name.is_empty() {
             format!("cerebras:{}", model.slug)
         } else {

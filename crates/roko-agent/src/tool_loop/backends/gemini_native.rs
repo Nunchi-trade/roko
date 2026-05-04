@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde_json::Value;
 
 use crate::gemini::native::{
@@ -21,7 +22,7 @@ use crate::provider::AgentOptions;
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_REQUEST_TIMEOUT_MS;
 
 /// HTTP backend for Gemini-native `generateContent` models.
 pub struct GeminiNativeBackend {

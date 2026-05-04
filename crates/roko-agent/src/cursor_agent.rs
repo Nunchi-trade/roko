@@ -49,6 +49,7 @@ use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
 use crate::usage::{Usage, UsageObservation, UsageSource};
 use async_trait::async_trait;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -188,7 +189,7 @@ impl CursorAgent {
             model,
             name,
             base_url: DEFAULT_BASE_URL.to_owned(),
-            timeout_ms: 120_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             protocol_version: DEFAULT_PROTOCOL_VERSION.to_owned(),
             extra_headers: Vec::new(),
             poster: Arc::new(ReqwestPoster::new()),

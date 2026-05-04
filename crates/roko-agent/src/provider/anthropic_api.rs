@@ -7,7 +7,7 @@ use roko_core::agent::ProviderKind;
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
 use serde_json::Value;
 
 /// Adapter for the Anthropic Messages API.
@@ -46,7 +46,7 @@ impl ProviderAdapter for AnthropicApiAdapter {
         let timeout_ms = options
             .timeout_ms
             .or(provider.timeout_ms)
-            .unwrap_or(120_000);
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
         let max_tokens = model
             .max_output
             .and_then(|value| u32::try_from(value).ok())

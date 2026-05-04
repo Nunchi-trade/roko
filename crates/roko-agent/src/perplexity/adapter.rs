@@ -24,6 +24,7 @@ use roko_core::agent::ProviderKind;
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::Value;
 use std::sync::Arc;
@@ -173,7 +174,7 @@ fn perplexity_tool_loop_agent(
         Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
     let dispatcher = build_tool_dispatcher(registry, resolver);
     let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
-    let timeout_ms = options.timeout_ms.unwrap_or(120_000);
+    let timeout_ms = options.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
     let backend = Arc::new(PerplexityToolLoopBackend::new(
         api_key,
         base_url,
@@ -252,7 +253,7 @@ impl ProviderAdapter for PerplexityAdapter {
         }
 
         let name = agent_name(options, &format!("perplexity:{}", model.slug));
-        let timeout = options.timeout_ms.unwrap_or(120_000);
+        let timeout = options.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
 
         Ok(Box::new(
             PerplexityChatAgent::new(api_key, base_url, model.slug.clone(), name, timeout)

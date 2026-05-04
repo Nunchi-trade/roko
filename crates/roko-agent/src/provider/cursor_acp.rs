@@ -5,6 +5,7 @@ use roko_core::agent::ProviderKind;
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde_json::Value;
 
 /// Adapter for the Cursor ACP HTTP fallback.
@@ -43,7 +44,7 @@ impl ProviderAdapter for CursorAcpAdapter {
         let timeout_ms = options
             .timeout_ms
             .or(provider.timeout_ms)
-            .unwrap_or(120_000);
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
 
         let mut agent = CursorAgent::new(api_key, model.slug.clone())
             .with_base_url(Self::base_url(provider))

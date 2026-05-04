@@ -15,6 +15,7 @@ use crate::process::{
 };
 use crate::usage::Usage;
 use async_trait::async_trait;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{Body, Context, Engram, Kind, OperatingFrequency, Provenance};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -126,7 +127,7 @@ impl ClaudeCliAgent {
             mcp_config: None,
             resume: None,
             dangerously_skip_permissions: true,
-            timeout_ms: 120_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             name: format!("claude-cli:{model}"),
         }
     }
