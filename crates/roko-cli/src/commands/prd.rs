@@ -320,6 +320,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
         }
         PrdCmd::Draft { cmd: draft_cmd } => match draft_cmd {
             PrdDraftCmd::New { title } => {
+                let t_total = Instant::now();
+                let t_phase = Instant::now();
                 let title = title.join(" ");
                 let slug = roko_cli::prd::slugify(&title);
                 let feature_keywords = extract_keywords_from_slug_and_description(&slug, &title);
@@ -376,6 +378,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 std::fs::write(&target, &scaffold)?;
                 println!("📄 Creating PRD: {title}");
 
+                let init_ms = t_phase.elapsed().as_millis();
+                let t_phase = Instant::now();
                 let system = roko_cli::prd::prd_agent_prompt(
                     &workdir,
                     &format!(
@@ -387,10 +391,12 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         path = target.display()
                     ),
                 );
+                let prompt_ms = t_phase.elapsed().as_millis();
                 let feature_keyword_refs: Vec<&str> =
                     feature_keywords.iter().map(String::as_str).collect();
                 // Skip repo context scanning for workspaces without source code
                 // (e.g. freshly-initialized workspaces from `roko init`).
+                let t_phase = Instant::now();
                 let has_source_code = workdir.join("src").is_dir()
                     || workdir.join("crates").is_dir()
                     || workdir.join("lib").is_dir()
@@ -439,12 +445,14 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                      and a design section.{context_suffix}",
                     context_suffix = context_suffix
                 );
+                let context_ms = t_phase.elapsed().as_millis();
                 // Snapshot file bytes before the agent runs so direct writes
                 // are detected even on coarse-mtime filesystems.
                 let content_before = std::fs::read(&target).ok();
 
                 let spinner =
                     roko_cli::spinner::cli_spinner(format!("Generating PRD draft: {slug}"));
+                let t_phase = Instant::now();
                 let started = Instant::now();
                 let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                     prompt: &task_prompt,
@@ -464,6 +472,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     spinner.finish_with_message("PRD draft generation failed");
                 }
 
+                let agent_ms = t_phase.elapsed().as_millis();
+                let t_phase = Instant::now();
                 // Check if the agent already wrote the file (CLI agents with tools).
                 let content_after = std::fs::read(&target).ok();
                 let file_was_modified = match (&content_before, &content_after) {
@@ -587,6 +597,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         }
                     }
                 }
+                let post_ms = t_phase.elapsed().as_millis();
+                let t_phase = Instant::now();
                 let _ = crate::commands::util::persist_capture_episode(
                     &workdir,
                     &agent_command,
@@ -600,6 +612,21 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     resume_session,
                 )
                 .await;
+                let learn_ms = t_phase.elapsed().as_millis();
+                let total_ms = t_total.elapsed().as_millis();
+                tracing::info!(
+                    init_ms,
+                    prompt_ms,
+                    context_ms,
+                    agent_ms,
+                    post_ms,
+                    learn_ms,
+                    total_ms,
+                    "prd draft new: phase timing"
+                );
+                eprintln!(
+                    "  Timing: init={init_ms}ms prompt={prompt_ms}ms context={context_ms}ms agent={agent_ms}ms post={post_ms}ms learn={learn_ms}ms total={total_ms}ms"
+                );
                 Ok(if artifact_success {
                     0
                 } else if exit_code == 0 {
@@ -714,6 +741,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             }
         },
         PrdCmd::Plan { slug, dry_run } => {
+            let t_total = Instant::now();
+            let t_phase = Instant::now();
             let _lock = roko_cli::workspace_lock::acquire_workspace_lock(&workdir.join(".roko"))?;
             let prd_path = find_prd(&workdir, &slug)?;
             let model_key = roko_cli::model_selection::resolve_effective_model_key(
@@ -731,6 +760,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         .unwrap_or_default();
                 crate::commands::util::preflight_provider_for_model(&plan_config, &model_key)?;
             }
+            let init_ms = t_phase.elapsed().as_millis();
+            let t_phase = Instant::now();
             let _generated_plans_root = roko_cli::prd::generate_plan_from_prd_with_model(
                 &slug,
                 &prd_path,
@@ -738,6 +769,17 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 Some(model_key.as_str()),
             )
             .await?;
+            let generate_ms = t_phase.elapsed().as_millis();
+            let total_ms = t_total.elapsed().as_millis();
+            tracing::info!(
+                init_ms,
+                generate_ms,
+                total_ms,
+                "prd plan: phase timing"
+            );
+            eprintln!(
+                "  Timing: init={init_ms}ms generate={generate_ms}ms total={total_ms}ms"
+            );
             Ok(0)
         }
         PrdCmd::Consolidate => {

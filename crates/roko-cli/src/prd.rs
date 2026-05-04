@@ -20,6 +20,7 @@ mod plan_validate;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::agent_exec::{
     AgentExecEpisode, AgentExecOpts, run_agent_capture_logged, run_agent_capture_silent,
@@ -935,6 +936,8 @@ async fn generate_plan_from_prd_with_outcome(
 ) -> Result<(PathBuf, GenerationOutcome)> {
     let workdir = prd_workdir(prd_path)?;
     let result = async {
+        let t_total = Instant::now();
+        let t_phase = Instant::now();
         let content = std::fs::read_to_string(prd_path)
             .with_context(|| format!("read {}", prd_path.display()))?;
         let prd_meta = PrdMeta::parse(&content).unwrap_or_default();
@@ -959,9 +962,11 @@ async fn generate_plan_from_prd_with_outcome(
         );
         let plans_root = workspace_plans_dir(workdir_ref);
         let tasks_before = dry_run_fs::snapshot_tasks_files(&plans_root);
+        let init_ms = t_phase.elapsed().as_millis();
 
         // Build repo context to ground the planning agent in actual repository
         // structure. Keywords come from the PRD slug and title.
+        let t_phase = Instant::now();
         let prd_title = prd_meta.title.as_str();
         let mut prd_feature_keywords: Vec<String> = slug
             .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
@@ -1003,6 +1008,8 @@ async fn generate_plan_from_prd_with_outcome(
         } else {
             None // Empty workspace — skip context scanning
         };
+        let context_ms = t_phase.elapsed().as_millis();
+        let t_phase = Instant::now();
         let prd_context_suffix = repo_context_section
             .as_deref()
             .map(|ctx| format!("\n\n---\n\n{ctx}"))
@@ -1040,6 +1047,8 @@ async fn generate_plan_from_prd_with_outcome(
             prd_context_suffix = prd_context_suffix,
         );
 
+        let prompt_ms = t_phase.elapsed().as_millis();
+        let t_phase = Instant::now();
         let task_id = format!("prd:plan:{slug}");
         let spinner = crate::spinner::cli_spinner(format!("Generating plan from PRD: {slug}"));
         let (exit_code, output) = run_agent_capture_logged(
@@ -1060,6 +1069,8 @@ async fn generate_plan_from_prd_with_outcome(
             },
         )
         .await?;
+        let agent_ms = t_phase.elapsed().as_millis();
+        let t_phase = Instant::now();
         if exit_code == 0 {
             spinner.finish_with_message(format!("Plan generated for: {slug}"));
         } else {
@@ -1291,6 +1302,21 @@ async fn generate_plan_from_prd_with_outcome(
                 );
             }
         }
+
+        let post_ms = t_phase.elapsed().as_millis();
+        let total_ms = t_total.elapsed().as_millis();
+        tracing::info!(
+            init_ms,
+            context_ms,
+            prompt_ms,
+            agent_ms,
+            post_ms,
+            total_ms,
+            "prd plan generate: phase timing"
+        );
+        eprintln!(
+            "  Timing: init={init_ms}ms context={context_ms}ms prompt={prompt_ms}ms agent={agent_ms}ms post={post_ms}ms total={total_ms}ms"
+        );
 
         let outcome = GenerationOutcome {
             process_success: true,

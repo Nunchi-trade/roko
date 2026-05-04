@@ -36,9 +36,20 @@ pub fn spawn_gate(
     gate_tx: mpsc::Sender<GateCompletion>,
 ) {
     tokio::spawn(async move {
+        let t_wait = Instant::now();
         let Ok(_permit) = gate_semaphore().acquire_owned().await else {
             return;
         };
+        let wait_ms = t_wait.elapsed().as_millis() as u64;
+        if wait_ms > 10 {
+            info!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                rung,
+                wait_ms,
+                "gate semaphore acquired"
+            );
+        }
         let start = Instant::now();
         let signal = gate_signal(&plan_id, &task_id, rung, &workdir);
         let ctx = roko_core::Context::now();
@@ -126,9 +137,18 @@ pub fn spawn_plan_verify(
     gate_tx: mpsc::Sender<GateCompletion>,
 ) {
     tokio::spawn(async move {
+        let t_wait = Instant::now();
         let Ok(_permit) = gate_semaphore().acquire_owned().await else {
             return;
         };
+        let wait_ms = t_wait.elapsed().as_millis() as u64;
+        if wait_ms > 10 {
+            info!(
+                plan_id = %plan_id,
+                wait_ms,
+                "plan verify semaphore acquired"
+            );
+        }
         let start = Instant::now();
         let ctx = roko_core::Context::now();
         let limit = Duration::from_secs(timeout_secs.max(1));

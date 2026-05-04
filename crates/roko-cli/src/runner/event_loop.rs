@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
@@ -269,6 +269,7 @@ pub async fn run(
 
     // Shared agent factory — expensive components (semaphores, MCP tools,
     // dispatcher, resolver) created once and reused for every task dispatch.
+    let t_factory = Instant::now();
     let factory = SharedAgentFactory::new(
         config.roko_config.clone().unwrap_or_default(),
         config.mcp_config.as_ref(),
@@ -276,6 +277,7 @@ pub async fn run(
         Some(Arc::clone(&prompt_cache)),
     )
     .await;
+    info!(factory_init_ms = t_factory.elapsed().as_millis() as u64, "agent factory initialized");
 
     // State and TUI bridge.
     let tui = TuiBridge::new(state_hub.sender());
@@ -704,6 +706,18 @@ pub async fn run(
                     );
                     tui.task_completed(&completion.plan_id, &completion.task_id, "passed");
 
+                    let total_task_ms = state.task_elapsed_ms();
+                    let dispatch_ms = state.last_dispatch_ms;
+                    let gate_ms = completion.duration_ms;
+                    let agent_ms = total_task_ms.saturating_sub(dispatch_ms + gate_ms);
+                    info!(
+                        task = %completion.task_id,
+                        dispatch_ms,
+                        agent_ms,
+                        gate_ms,
+                        "task timing"
+                    );
+
                     let completed = state.plan_completed_tasks(&completion.plan_id);
                     let completed_plans = completed_plan_ids(&executor, &task_index);
                     let has_more = task_index
@@ -893,6 +907,19 @@ pub async fn run(
                 }
                 let actions = executor.tick();
                 for action in actions {
+                    let t_dispatch = Instant::now();
+                    let action_label = match &action {
+                        ExecutorAction::SpawnAgent { plan_id, task, .. } => {
+                            format!("{plan_id}/{task}")
+                        }
+                        ExecutorAction::DispatchPlan { plan_id } => {
+                            format!("{plan_id}/plan")
+                        }
+                        ExecutorAction::RunGate { plan_id, rung } => {
+                            format!("{plan_id}/gate-{rung}")
+                        }
+                        _ => "other".to_string(),
+                    };
                     let mut ctx = RunContext {
                         executor: &mut executor,
                         task_index: &task_index,
@@ -910,6 +937,13 @@ pub async fn run(
                         factory: &factory,
                     };
                     dispatch_action(&action, &mut ctx).await;
+                    let dispatch_ms = t_dispatch.elapsed().as_millis() as u64;
+                    if matches!(&action, ExecutorAction::SpawnAgent { .. }) {
+                        ctx.state.last_dispatch_ms = dispatch_ms;
+                    }
+                    if dispatch_ms > 50 {
+                        info!(action = %action_label, dispatch_ms, "action dispatched");
+                    }
                 }
             }
 

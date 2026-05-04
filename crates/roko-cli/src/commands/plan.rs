@@ -216,6 +216,9 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             fresh,
             force_resume,
         } => {
+            let t_total = std::time::Instant::now();
+            let t_setup = std::time::Instant::now();
+
             // Resolve workdir FIRST (before using plans_dir)
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
 
@@ -537,6 +540,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 None
             };
 
+            let setup_ms = t_setup.elapsed().as_millis();
             let v2_report =
                 roko_cli::runner::event_loop::run(plans, &run_config, &state_hub, cancel).await?;
 
@@ -613,6 +617,15 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         resolved_plans_dir.display()
                     );
                 }
+            }
+
+            if !cli.quiet && !cli.json {
+                let loop_ms = v2_report.duration.as_millis();
+                let report_ms = t_total.elapsed().as_millis().saturating_sub(setup_ms + loop_ms);
+                let total_ms = t_total.elapsed().as_millis();
+                eprintln!(
+                    "  Timing: setup={setup_ms}ms loop={loop_ms}ms report={report_ms}ms total={total_ms}ms"
+                );
             }
 
             Ok(if v2_report.all_succeeded() {

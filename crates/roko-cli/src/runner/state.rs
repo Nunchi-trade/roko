@@ -104,6 +104,8 @@ pub struct RunState {
     pub started_at: Instant,
     /// When the current task started (reset per task).
     pub task_started_at: Instant,
+    /// How long the last dispatch_action (prompt assembly + spawn) took in ms.
+    pub last_dispatch_ms: u64,
 
     // ─── Replan Context ──────────────────────────────────────────────
     /// Accumulated failure context per plan/task for retry prompt enrichment.
@@ -165,6 +167,7 @@ impl RunState {
             snapshot_degraded: false,
             started_at: Instant::now(),
             task_started_at: Instant::now(),
+            last_dispatch_ms: 0,
             replan_contexts: HashMap::new(),
             task_fingerprints: Vec::new(),
             routing_context: None,
