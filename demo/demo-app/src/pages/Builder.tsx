@@ -44,6 +44,7 @@ interface FileEntry { name: string; isNew: boolean }
 export default function Builder() {
   const [prompt, setPrompt] = useState('');
   const [running, setRunning] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [gates, setGates] = useState<{ name: string; status: 'pass' | 'fail' | 'pending' | 'skip' }[]>([
     { name: 'compile', status: 'pending' },
@@ -158,9 +159,10 @@ export default function Builder() {
     const cmd = `${getRoko()} run "${escaped}" --model ${selectedModel}`;
 
     let hadError = false;
+    setIsRunning(true);
 
     await showCmd(h, cmd, {
-      timeout: 120000,
+      timeout: 300000,  // 5 minutes — LLM calls can be slow
       onGate: (name, gateStatus) => {
         setGates(prev => prev.map(g =>
           g.name === name ? { ...g, status: gateStatus } : g
@@ -180,7 +182,14 @@ export default function Builder() {
         setStatusText(desc);
         flashTerminal('event-flash');
       },
+      onError: (errMsg) => {
+        hadError = true;
+        setStatusText(`error: ${errMsg}`);
+        flashTerminal('event-flash-fail');
+      },
     });
+
+    setIsRunning(false);
 
     // Detect files from terminal output
     const output = h.getOutputBuffer();
@@ -345,6 +354,15 @@ export default function Builder() {
           )}
         </div>
         {running && <span className="builder-processing-indicator" aria-hidden="true" />}
+        {isRunning && (
+          <button
+            type="button"
+            className="btn-cancel"
+            onClick={() => handle.current?.sendRaw('\x03')}
+          >
+            Cancel
+          </button>
+        )}
         <button
           type="submit"
           className={`btn-build${btnState === 'success' ? ' success-flash' : ''}${btnState === 'error' ? ' error-flash' : ''}`}
@@ -365,6 +383,9 @@ export default function Builder() {
       </form>
 
       <div className="builder-gate-bar">
+        {isRunning && gates.every(g => g.status === 'pending') && (
+          <div className="gate-running">Running... waiting for LLM response</div>
+        )}
         <GateBar gates={gates} />
       </div>
 

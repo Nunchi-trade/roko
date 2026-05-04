@@ -266,7 +266,8 @@ impl ProviderLatencySummary {
 }
 
 pub(crate) async fn cmd_provider_list(workdir: &Path) -> Result<()> {
-    let config = load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let providers = configured_providers(&config);
     if providers.is_empty() {
         println!("no providers configured");
@@ -295,7 +296,8 @@ pub(crate) async fn cmd_provider_list(workdir: &Path) -> Result<()> {
 }
 
 pub(crate) fn cmd_provider_health(workdir: &Path) -> Result<()> {
-    let config = load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let eff = config.effective_providers();
     println!("credential coverage (process env or [agent.env]):");
     let mut ids: Vec<&String> = eff.keys().collect();
@@ -357,7 +359,8 @@ pub(crate) async fn cmd_provider_test(
     role_arg: Option<&str>,
     json: bool,
 ) -> Result<ProviderTestReport> {
-    let config = load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let providers = configured_providers(&config);
     if providers.is_empty() {
         bail!(
@@ -511,7 +514,8 @@ pub(crate) async fn cmd_provider_test(
 }
 
 pub(crate) async fn cmd_provider_test_all(workdir: &Path, json: bool) -> Result<()> {
-    let config = load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let providers = configured_providers(&config);
     if providers.is_empty() {
         bail!(
@@ -594,7 +598,8 @@ pub(crate) async fn cmd_provider_test_all(workdir: &Path, json: bool) -> Result<
 }
 
 pub(crate) fn cmd_model_list(workdir: &Path) -> Result<()> {
-    let config = load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let models = configured_models(&config);
     if models.is_empty() {
         println!("no models configured");
@@ -674,7 +679,8 @@ pub(crate) fn cmd_model_route(
     explain: bool,
     complexity_arg: Option<&str>,
 ) -> Result<()> {
-    let config = load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let models = configured_models(&config);
     if models.is_empty() {
         println!("no models configured");
@@ -892,22 +898,15 @@ pub(crate) async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
                 if candidate.exists() {
                     candidate
                 } else {
-                    eprintln!("error: no plugin.toml found in {}", source_path.display());
-                    return Ok(EXIT_SYSTEM_ERROR);
+                    anyhow::bail!("no plugin.toml found in {}", source_path.display());
                 }
             } else {
-                eprintln!("error: source path does not exist: {source}");
-                return Ok(EXIT_SYSTEM_ERROR);
+                anyhow::bail!("source path does not exist: {source}");
             };
 
             // Load and validate the manifest.
-            let manifest = match roko_plugin::manifest::load_manifest(&manifest_path) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("error: failed to load plugin manifest: {e}");
-                    return Ok(EXIT_SYSTEM_ERROR);
-                }
-            };
+            let manifest = roko_plugin::manifest::load_manifest(&manifest_path)
+                .with_context(|| format!("load plugin manifest {}", manifest_path.display()))?;
 
             // Copy to .roko/plugins/<name>/
             let install_dir = workdir
@@ -951,9 +950,10 @@ pub(crate) async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
         PluginCmd::Remove { name, .. } => {
             let install_dir = workdir.join(".roko").join("plugins").join(&name);
             if !install_dir.exists() {
-                eprintln!("error: plugin `{name}` is not installed");
-                eprintln!("  expected at: {}", install_dir.display());
-                return Ok(EXIT_SYSTEM_ERROR);
+                anyhow::bail!(
+                    "plugin `{name}` is not installed (expected at: {})",
+                    install_dir.display()
+                );
             }
             std::fs::remove_dir_all(&install_dir)?;
             println!("removed plugin `{name}` from {}", install_dir.display());

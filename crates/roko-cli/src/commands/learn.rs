@@ -98,8 +98,7 @@ pub(crate) async fn cmd_tune(
             }
         }
         other => {
-            eprintln!("Unknown subsystem '{other}'. Available: gates, routing, budget");
-            return Ok(1);
+            anyhow::bail!("unknown subsystem '{other}'. Available: gates, routing, budget");
         }
     }
     if dry_run {
@@ -134,10 +133,9 @@ pub(crate) async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i
     }
 
     if !show_all && !["router", "experiments", "efficiency", "episodes"].contains(&what) {
-        eprintln!(
-            "Unknown learning area '{what}'. Available: router, experiments, efficiency, episodes, all"
+        anyhow::bail!(
+            "unknown learning area '{what}'. Available: router, experiments, efficiency, episodes, all"
         );
-        return Ok(1);
     }
 
     Ok(EXIT_SUCCESS)
@@ -156,7 +154,8 @@ pub(crate) fn print_learn_router(workdir: &std::path::Path) {
     };
     let snapshot = serde_json::from_str::<LearnCascadeRouterSnapshot>(&content).unwrap_or_default();
     // Compare against the runtime wire slugs, not the config map keys.
-    let configured_slugs = load_roko_config(workdir)
+    let configured_slugs = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))
         .ok()
         .map(|config| {
             config
@@ -423,7 +422,6 @@ pub(crate) fn print_learn_gate_thresholds(workdir: &std::path::Path) {
     let path = learn_gate_thresholds_path(workdir);
     print_checked_path(&path);
     if !path.exists() {
-        eprintln!("Gate thresholds: No data at {}", path.display());
         println!("Gate thresholds: 0 entries at {}", path.display());
         return;
     }

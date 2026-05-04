@@ -197,9 +197,7 @@ pub fn discover_plans(plans_dir: &Path) -> Result<Vec<PlanInfo>, DiscoveryError>
             })?;
         if kind.is_dir() {
             let plan_md = entry.path().join("plan.md");
-            if plan_md.exists() {
-                dir_candidates.push((name, plan_md));
-            }
+            dir_candidates.push((name, plan_md));
         } else if kind.is_file()
             && has_md_extension(&name)
             && !name.eq_ignore_ascii_case("CONTEXT.md")
@@ -214,10 +212,11 @@ pub fn discover_plans(plans_dir: &Path) -> Result<Vec<PlanInfo>, DiscoveryError>
         if plans.iter().any(|p: &PlanInfo| p.base == base) {
             continue;
         }
-        let content = fs::read_to_string(&path).map_err(|source| DiscoveryError::ReadFailed {
-            path: path.clone(),
-            source,
-        })?;
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(DiscoveryError::ReadFailed { path, source }),
+        };
         let frontmatter =
             try_parse_frontmatter(&content).map_err(|reason| DiscoveryError::BadFrontmatter {
                 path: path.clone(),

@@ -74,6 +74,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 
 // -----------------------------------------------------------------------
@@ -252,6 +253,10 @@ struct Cli {
     /// Suppress non-essential output.
     #[arg(long, global = true)]
     quiet: bool,
+
+    /// Enable verbose tracing output to stderr. Without this, tracing goes only to .roko/roko.log.
+    #[arg(long, short = 'v', global = true)]
+    verbose: bool,
 
     /// Disable all re-planning; gate failures become terminal failures.
     #[arg(long, global = true)]
@@ -1814,84 +1819,61 @@ fn main() {
         .unwrap_or(false);
 
     let ansi_logs = use_color;
-    // In TUI mode, write all tracing to a file so it doesn't corrupt the
-    // ratatui rendering. This sets the global subscriber to a file-backed
-    // writer before any background tasks are spawned.
-    if tui_mode {
-        let workdir = match &cli.command {
-            Some(Command::Serve { workdir, .. }) => {
-                workdir.clone().unwrap_or_else(|| resolve_workdir(&cli))
-            }
-            _ => resolve_workdir(&cli),
-        };
-        let log_path = workdir.join(".roko").join("serve-tui.log");
-        if let Some(parent) = log_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+
+    // Determine the workdir for log file placement.
+    let workdir = match &cli.command {
+        Some(Command::Serve { workdir, .. }) => {
+            workdir.clone().unwrap_or_else(|| resolve_workdir(&cli))
         }
-        if let Ok(log_file) = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&log_path)
-        {
-            tracing_subscriber::fmt()
+        _ => resolve_workdir(&cli),
+    };
+
+    // File layer: ALWAYS write to .roko/roko.log (append mode).
+    // In TUI mode, use serve-tui.log to keep it separate from the main log.
+    let log_dir = workdir.join(".roko");
+    let log_file_name = if tui_mode {
+        "serve-tui.log"
+    } else {
+        "roko.log"
+    };
+    let log_path = log_dir.join(log_file_name);
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_layer = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok()
+        .map(|file| {
+            tracing_subscriber::fmt::layer()
                 .with_target(true)
                 .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(log_file))
-                .with_env_filter(filter)
-                .init();
-        } else {
-            // Fallback: suppress everything if we can't open the log.
-            tracing_subscriber::fmt()
-                .with_ansi(false)
-                .with_env_filter(tracing_subscriber::EnvFilter::new("error"))
-                .init();
-        }
-    } else if raw_logs {
-        match cli.log_format {
-            LogFormat::Json => {
-                tracing_subscriber::fmt()
-                    .with_target(false)
-                    .with_ansi(ansi_logs)
-                    .json()
-                    .with_env_filter(filter)
-                    .init();
-            }
-            LogFormat::Text => {
-                tracing_subscriber::fmt()
-                    .with_target(false)
-                    .with_ansi(ansi_logs)
-                    .with_env_filter(filter)
-                    .init();
-            }
-        }
-    } else {
+                .with_writer(std::sync::Mutex::new(file))
+        });
+
+    // Stderr layer: only when --verbose, RUST_LOG is set, or raw_logs mode.
+    // In TUI mode, never write to stderr (would corrupt ratatui rendering).
+    let show_stderr = !tui_mode && (cli.verbose || std::env::var("RUST_LOG").is_ok() || raw_logs);
+    let stderr_layer = if show_stderr {
         let scrubber = build_log_scrubber(&startup_env_redactions);
-        match cli.log_format {
-            LogFormat::Json => {
-                tracing_subscriber::fmt()
-                    .with_target(false)
-                    .with_ansi(ansi_logs)
-                    .event_format(RedactingFormat::new(
-                        tracing_subscriber::fmt::format().json(),
-                        scrubber,
-                    ))
-                    .with_env_filter(filter)
-                    .init();
-            }
-            LogFormat::Text => {
-                tracing_subscriber::fmt()
-                    .with_target(false)
-                    .with_ansi(ansi_logs)
-                    .event_format(RedactingFormat::new(
-                        tracing_subscriber::fmt::format(),
-                        scrubber,
-                    ))
-                    .with_env_filter(filter)
-                    .init();
-            }
-        }
-    }
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(ansi_logs)
+                .event_format(RedactingFormat::new(
+                    tracing_subscriber::fmt::format(),
+                    scrubber,
+                ))
+                .with_writer(std::io::stderr),
+        )
+    } else {
+        None
+    };
+
+    tracing_subscriber::registry()
+        .with(file_layer)
+        .with(stderr_layer)
+        .with(filter)
+        .init();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -2183,11 +2165,22 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             enable_terminal,
         } => {
             let wd = workdir.clone().unwrap_or_else(|| resolve_workdir(cli));
+            let _lock = roko_cli::workspace_lock::acquire_workspace_lock(&wd.join(".roko"))?;
             let config = resolve_config_for_workdir(cli, &wd)?;
             let repo_registry = RepoRegistry::load(&config, &wd).unwrap_or_default();
             let runtime = RokoCliRuntime::new(config, repo_registry).into_arc();
 
-            let mut roko_config = load_roko_config(&wd)?;
+            // Bootstrap: consistent workspace check + unified config load.
+            let boot = roko_cli::bootstrap::RokoBootstrap::new(
+                &wd,
+                roko_cli::bootstrap::BootOpts {
+                    require_workspace: false, // serve auto-creates .roko/ via bootstrap_observability_dirs
+                    require_provider: false,
+                    acquire_lock: false, // workspace lock acquired above
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut roko_config = boot.config;
             if let Some(bind) = bind.as_ref() {
                 roko_config.server.bind = bind.clone();
             }
@@ -2476,10 +2469,6 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
-
-pub(crate) fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
-}
 
 /// Resolve the working directory from CLI flags.
 ///

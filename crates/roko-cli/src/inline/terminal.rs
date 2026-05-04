@@ -49,6 +49,14 @@ impl InlineTerminal {
 
         let theme = Theme::from_env();
 
+        // Set panic hook to restore terminal before panic output
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+            default_hook(info);
+        }));
+
         enable_raw_mode()?;
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::with_options(

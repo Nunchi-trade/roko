@@ -1322,6 +1322,10 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                     }
                     Phase::Error { ref prompt, .. } => {
                         match key.code {
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                session.phase = Phase::Done;
+                                break;
+                            }
                             KeyCode::Char('r') => {
                                 // Retry: resend same prompt
                                 let retry_prompt = prompt.clone();
@@ -1518,7 +1522,7 @@ fn build_unified_inline_agent_session(
 
     // Load RokoConfig from roko.toml (respects user's default_model, default_backend, etc.)
     // instead of starting from RokoConfig::default() which has hardcoded fallbacks.
-    let model_config = crate::config_helpers::load_roko_config(&workdir).unwrap_or_default();
+    let model_config = roko_core::config::loader::load_config_unified(&workdir).unwrap_or_default();
 
     let cost_table = CostTable::from_config(&model_config.models).with_defaults();
     let role = {
@@ -1690,6 +1694,10 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                         }
                     }
                     Phase::Error { ref prompt, .. } => match key.code {
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            session.phase = Phase::Done;
+                            break;
+                        }
                         KeyCode::Char('r') => {
                             let retry_prompt = prompt.clone();
                             session.phase = Phase::Thinking;

@@ -231,6 +231,7 @@ export async function showCmd(
     onGate?: (name: string, status: 'pass' | 'fail') => void;
     onCost?: (cost: string) => void;
     onTokens?: (tokens: string) => void;
+    onError?: (errMsg: string) => void;
     signal?: AbortSignal;
     /** Re-enter this workspace before typing the visible command. */
     workspaceDir?: string;
@@ -331,6 +332,7 @@ function detectFromOutput(
     onGate?: (name: string, status: 'pass' | 'fail') => void;
     onCost?: (cost: string) => void;
     onTokens?: (tokens: string) => void;
+    onError?: (errMsg: string) => void;
   },
 ): DetectionResult {
   const text = stripAnsi(rawText);
@@ -364,6 +366,24 @@ function detectFromOutput(
   const tokenMatch = text.match(/(\d[\d,]*)\s*(?:tokens?|tok)/i);
   const tokens = tokenMatch ? tokenMatch[1] : null;
   if (tokens) opts?.onTokens?.(tokens);
+
+  // Error detection
+  if (opts?.onError) {
+    const errorPatterns = [
+      /HTTP (\d{3}).*?error/i,          // HTTP errors
+      /max_tokens.*not supported/i,      // OpenAI parameter mismatch
+      /network error|transport error/i,  // Network failures
+      /api.*?error|APIError/i,           // API-level errors
+      /anyhow::Error|panic!/i,           // Rust panics
+    ];
+    for (const pat of errorPatterns) {
+      const match = text.match(pat);
+      if (match) {
+        opts.onError(match[0]);
+        break;
+      }
+    }
+  }
 
   return { gates, cost, tokens };
 }

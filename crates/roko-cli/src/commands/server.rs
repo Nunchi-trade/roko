@@ -253,7 +253,8 @@ pub(crate) async fn cmd_deploy_railway(
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     run_release_build(&workdir).await?;
 
-    let config = load_roko_config(&workdir)?;
+    let config = roko_core::config::loader::load_config_unified(&workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("Checking security posture...");
     check_security_posture(&config, unsafe_public)?;
     let deploy_webhooks = match load_layered(&workdir) {
@@ -404,7 +405,8 @@ pub(crate) async fn cmd_deploy_fly(
     unsafe_public: bool,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
-    let config = load_roko_config(&workdir)?;
+    let config = roko_core::config::loader::load_config_unified(&workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("Checking security posture...");
     check_security_posture(&config, unsafe_public)?;
 
@@ -421,7 +423,8 @@ pub(crate) async fn cmd_deploy_docker(
     unsafe_public: bool,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
-    let config = load_roko_config(&workdir)?;
+    let config = roko_core::config::loader::load_config_unified(&workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("Checking security posture...");
     check_security_posture(&config, unsafe_public)?;
     let registry = resolve_docker_registry(&config, registry)?;

@@ -40,10 +40,9 @@ pub(crate) async fn cmd_login(
 
         // Interactive API key entry.
         if !std::io::stdin().is_terminal() {
-            eprintln!(
-                "error: stdin is not a terminal; use --api-key --check for non-interactive mode"
+            anyhow::bail!(
+                "stdin is not a terminal; use --api-key --check for non-interactive mode"
             );
-            return Ok(EXIT_FAILURE);
         }
 
         print!("Enter API key for {url}: ");
@@ -57,8 +56,7 @@ pub(crate) async fn cmd_login(
         let key = key.trim().to_string();
 
         if key.is_empty() {
-            eprintln!("error: empty API key");
-            return Ok(EXIT_FAILURE);
+            anyhow::bail!("empty API key");
         }
 
         match validate_credential(url, &key).await {
@@ -198,14 +196,11 @@ pub(crate) async fn cmd_login_browser(url: &str, dashboard_url: &str) -> Result<
         }
         Ok(Err(_)) => {
             println!("failed");
-            eprintln!("error: callback channel closed unexpectedly");
-            Ok(EXIT_FAILURE)
+            anyhow::bail!("callback channel closed unexpectedly");
         }
         Err(_) => {
             println!("timed out");
-            eprintln!("error: no response within 5 minutes");
-            eprintln!("hint: run `roko login` to try again");
-            Ok(EXIT_FAILURE)
+            anyhow::bail!("no response within 5 minutes; run `roko login` to try again");
         }
     }
 }

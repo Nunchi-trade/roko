@@ -312,6 +312,7 @@ async fn regenerate_old_format_plan(
             resume_session: None,
             env_vars,
             role: Some("strategist"),
+            allowed_tools: None,
         },
         AgentExecEpisode {
             task_kind: "plan-regenerate",
@@ -970,7 +971,14 @@ async fn generate_plan_from_prd_with_outcome(
         prd_feature_keywords.dedup();
         prd_feature_keywords.truncate(10);
         let prd_keyword_refs: Vec<&str> = prd_feature_keywords.iter().map(String::as_str).collect();
-        let repo_context_section: Option<String> =
+        // Skip repo context scanning for workspaces without source code
+        // (e.g. freshly-initialized workspaces from `roko init`).
+        let has_source_code = workdir_ref.join("src").is_dir()
+            || workdir_ref.join("crates").is_dir()
+            || workdir_ref.join("lib").is_dir()
+            || workdir_ref.join("Cargo.toml").is_file()
+            || workdir_ref.join("package.json").is_file();
+        let repo_context_section: Option<String> = if has_source_code {
             match crate::repo_context::build_repo_context(workdir_ref, &prd_keyword_refs).await {
                 Ok(repo_context) => {
                     if !repo_context.context_root_verified {
@@ -989,11 +997,26 @@ async fn generate_plan_from_prd_with_outcome(
                     );
                     None
                 }
-            };
+            }
+        } else {
+            None // Empty workspace — skip context scanning
+        };
         let prd_context_suffix = repo_context_section
             .as_deref()
             .map(|ctx| format!("\n\n---\n\n{ctx}"))
             .unwrap_or_default();
+
+        // Trim PRD content to keep prompt size manageable for smaller models.
+        let max_prd_chars = 8000;
+        let trimmed_content = if content.len() > max_prd_chars {
+            let boundary = content.floor_char_boundary(max_prd_chars);
+            format!(
+                "{}\n\n[PRD content truncated at {max_prd_chars} chars]",
+                &content[..boundary]
+            )
+        } else {
+            content.clone()
+        };
 
         let task_prompt = format!(
             "Generate an implementation plan from the PRD below.\n\n\
@@ -1008,14 +1031,15 @@ async fn generate_plan_from_prd_with_outcome(
              2. Optionally output a fenced block tagged `plan.md` containing the plan narrative.\n\n\
              Include per-task mcp_servers when a task needs a specific MCP server.\n\n\
              {template_guidance}\n\
-             PRD content:\n{content}{prd_context_suffix}",
+             PRD content:\n{trimmed_content}{prd_context_suffix}",
             path = prd_path.display(),
             template_guidance = template_guidance,
-            content = content,
+            trimmed_content = trimmed_content,
             prd_context_suffix = prd_context_suffix,
         );
 
         let task_id = format!("prd:plan:{slug}");
+        let spinner = crate::spinner::cli_spinner(format!("Generating plan from PRD: {slug}"));
         let (exit_code, output) = run_agent_capture_logged(
             AgentExecOpts {
                 prompt: &task_prompt,
@@ -1026,6 +1050,7 @@ async fn generate_plan_from_prd_with_outcome(
                 resume_session: None,
                 env_vars: &resolved.config.agent.env,
                 role: Some("strategist"),
+                allowed_tools: Some("Read,Grep,Glob"),
             },
             AgentExecEpisode {
                 task_kind: "prd-plan-generate",
@@ -1033,6 +1058,11 @@ async fn generate_plan_from_prd_with_outcome(
             },
         )
         .await?;
+        if exit_code == 0 {
+            spinner.finish_with_message(format!("Plan generated for: {slug}"));
+        } else {
+            spinner.finish_with_message("Plan generation failed");
+        }
         tracing::info!(
             exit_code,
             output_len = output.len(),
@@ -1059,9 +1089,10 @@ async fn generate_plan_from_prd_with_outcome(
         }
 
         // Write files from agent output (strategist can't write files directly).
-        // Try fenced ```toml block first, then fall back to ```tasks.toml.
+        // Try fenced ```toml block first, then ```tasks.toml, then unfenced TOML.
         let toml_content = extract_fenced_block(&output, "toml")
-            .or_else(|| extract_fenced_block(&output, "tasks.toml"));
+            .or_else(|| extract_fenced_block(&output, "tasks.toml"))
+            .or_else(|| extract_toml_content_fallback(&output));
         tracing::info!(
             has_toml_block = toml_content.is_some(),
             toml_block_len = toml_content.map(|s| s.len()).unwrap_or(0),
@@ -1078,10 +1109,10 @@ async fn generate_plan_from_prd_with_outcome(
                 toml_content.len(),
                 plan_dir.display()
             );
-            if let Some(plan_md) = extract_fenced_block(&output, "plan.md")
+            let plan_md_content = extract_fenced_block(&output, "plan.md")
                 .or_else(|| extract_fenced_block(&output, "markdown"))
-                .or_else(|| extract_fenced_block(&output, "md"))
-            {
+                .or_else(|| extract_fenced_block(&output, "md"));
+            if let Some(plan_md) = plan_md_content {
                 std::fs::write(plan_dir.join("plan.md"), plan_md)
                     .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
                 println!(
@@ -1089,16 +1120,32 @@ async fn generate_plan_from_prd_with_outcome(
                     plan_md.len(),
                     plan_dir.display()
                 );
+            } else {
+                // Write minimal plan.md so plan discovery tools can find this directory.
+                let minimal_plan_md = format!(
+                    "---\nplan: {slug}\ntitle: {slug}\n---\n\n# {slug}\n\nGenerated plan.\n"
+                );
+                std::fs::write(plan_dir.join("plan.md"), &minimal_plan_md)
+                    .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
             }
         } else {
-            // Show a preview of what the agent actually returned so the user
-            // can diagnose formatting issues.
+            // No fenced toml block found — fail with an actionable error rather
+            // than silently exiting 0 with no tasks.toml produced.
             let preview: String = output.chars().take(500).collect();
-            eprintln!(
-                "warning: agent output ({} bytes) did not contain a fenced ```toml block.\n\
-                 Plan files not extracted. Output preview:\n---\n{preview}\n---",
+            let has_toml_like = output.contains("[meta]") || output.contains("[[task]]");
+            let toml_hint = if has_toml_like {
+                "\nhint: The model output TOML without proper fencing. \
+                 Try a more capable model or check the plan_generate system prompt."
+            } else {
+                ""
+            };
+            return Err(anyhow!(
+                "Plan generation failed: no tasks.toml was produced.\n\
+                 The agent output ({} bytes) did not contain a fenced ```toml block.\n\
+                 Output preview:\n---\n{preview}\n---\n\
+                 hint: Try again, or create plans/{slug}/tasks.toml manually.{toml_hint}",
                 output.len()
-            );
+            ));
         }
 
         let generated_changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);
@@ -1453,6 +1500,22 @@ fn extract_fenced_block<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
             };
         }
         search_from = after_ticks;
+    }
+}
+
+/// Fallback TOML extraction for agent output that lacks fenced code blocks.
+///
+/// Scans for a `[meta]` section header and returns everything from that point
+/// to the end of the string, provided it also contains at least one `[[task]]`.
+fn extract_toml_content_fallback(output: &str) -> Option<&str> {
+    let meta_start = output.find("[meta]")?;
+    // Find the start of the line containing [meta]
+    let line_start = output[..meta_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let candidate = output[line_start..].trim();
+    if candidate.contains("[[task]]") {
+        Some(candidate)
+    } else {
+        None
     }
 }
 

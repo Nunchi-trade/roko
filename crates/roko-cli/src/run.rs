@@ -1770,6 +1770,35 @@ fn claude_tool_allowlist(role: &str) -> String {
     }
 }
 
+/// Build the system prompt and tool CSV for any dispatch path.
+///
+/// Centralises the call sequence: `claude_tool_allowlist` →
+/// `build_system_prompt` → `augment_system_prompt_for_strategy` so that
+/// every dispatch path (A, E, F, …) receives identical baseline context.
+#[cfg(feature = "legacy-orchestrate")]
+async fn prepare_agent_context(
+    config: &Config,
+    workdir: &Path,
+    prompt_text: &str,
+    model: &str,
+    strategy: Option<BenchStrategy>,
+) -> (String, String, Vec<String>) {
+    let tools_csv = claude_tool_allowlist(&config.prompt.role);
+    let StrategyPromptAugmentation {
+        system_prompt,
+        injected_playbook_ids,
+    } = augment_system_prompt_for_strategy(
+        build_system_prompt(config, prompt_text, &tools_csv),
+        workdir,
+        &config.prompt.role,
+        prompt_text,
+        model,
+        strategy,
+    )
+    .await;
+    (system_prompt, tools_csv, injected_playbook_ids)
+}
+
 fn parse_agent_role(role: &str) -> Option<AgentRole> {
     let normalized = role.trim().to_ascii_lowercase();
     let normalized = normalized
@@ -1826,7 +1855,10 @@ async fn dispatch_agent(
     let routing_config = roko_core::config::loader::load_config_unified(workdir)
         .with_context(|| format!("load routing config from {}", workdir.display()))?;
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
-    let use_provider_routing = has_routing && config.agent.command == "claude";
+    // Use provider routing when providers/models are configured.
+    // Previously gated on `command == "claude"`, which broke Railway deployments
+    // where command="false" (no local CLI binary — API-only).
+    let use_provider_routing = has_routing;
     // Use the model already applied to config by resolve_config_for_workdir
     // instead of re-parsing process args.
     let cli_model_override = config.agent.model.clone();
@@ -1859,23 +1891,12 @@ async fn dispatch_agent(
     }
 
     if use_provider_routing {
-        let tools_csv = claude_tool_allowlist(&config.prompt.role);
         let model = selected_model_override
             .clone()
             .or_else(|| config.agent.model.clone())
             .unwrap_or_else(|| routing_config.agent.default_model.clone());
-        let StrategyPromptAugmentation {
-            system_prompt,
-            injected_playbook_ids,
-        } = augment_system_prompt_for_strategy(
-            build_system_prompt(config, prompt_text, &tools_csv),
-            workdir,
-            &config.prompt.role,
-            prompt_text,
-            &model,
-            strategy,
-        )
-        .await;
+        let (system_prompt, tools_csv, injected_playbook_ids) =
+            prepare_agent_context(config, workdir, prompt_text, &model, strategy).await;
         let resolved = resolve_model(&routing_config, &model);
         let agent = spawn_agent_scoped(
             &routing_config,
@@ -2008,6 +2029,8 @@ async fn dispatch_agent(
                     .and_then(|model| (!model.is_empty()).then_some(model))
             })
             .unwrap_or_else(|| config.agent.command.clone());
+        let (system_prompt, tools_csv, injected_playbook_ids) =
+            prepare_agent_context(config, workdir, prompt_text, &model, strategy).await;
         let fallback_config = synthesize_known_protocol_config(&config.agent.command, &model);
 
         let agent = spawn_agent_scoped(
@@ -2016,10 +2039,10 @@ async fn dispatch_agent(
                 model: model.clone(),
                 command: Some(config.agent.command.clone()),
                 timeout_ms: Some(config.agent.timeout_ms),
-                system_prompt: None,
+                system_prompt: Some(system_prompt),
                 cached_content: None,
-                tools: None,
-                mcp_config: None,
+                tools: Some(tools_csv),
+                mcp_config: config.agent.mcp_config.clone(),
                 working_dir: Some(workdir.to_path_buf()),
                 env: config.agent.env.clone(),
                 extra_args: config.agent.args.clone(),
@@ -2037,9 +2060,16 @@ async fn dispatch_agent(
         Ok(DispatchOutcome {
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
-            injected_playbook_ids: Vec::new(),
+            injected_playbook_ids,
             model_selection: resolved_cli_model.clone(),
         })
+    } else if config.agent.command == "false" || config.agent.command.is_empty() {
+        anyhow::bail!(
+            "No LLM providers configured and agent.command is '{}'. \
+             Configure [providers] and [models] in roko.toml, or set agent.command \
+             to a valid CLI binary (e.g., 'claude').",
+            config.agent.command
+        );
     } else {
         let model = selected_model_override
             .clone()
@@ -2051,6 +2081,8 @@ async fn dispatch_agent(
                     .and_then(|model| (!model.is_empty()).then_some(model))
             })
             .unwrap_or_else(|| config.agent.command.clone());
+        let (system_prompt, tools_csv, injected_playbook_ids) =
+            prepare_agent_context(config, workdir, prompt_text, &model, strategy).await;
         let fallback_config = synthesize_subprocess_config(&config.agent.command);
         let agent = spawn_agent_scoped(
             &fallback_config,
@@ -2058,10 +2090,10 @@ async fn dispatch_agent(
                 model: model.clone(),
                 command: Some(config.agent.command.clone()),
                 timeout_ms: Some(config.agent.timeout_ms),
-                system_prompt: None,
+                system_prompt: Some(system_prompt),
                 cached_content: None,
-                tools: None,
-                mcp_config: None,
+                tools: Some(tools_csv),
+                mcp_config: config.agent.mcp_config.clone(),
                 working_dir: Some(workdir.to_path_buf()),
                 env: config.agent.env.clone(),
                 extra_args: config.agent.args.clone(),
@@ -2079,7 +2111,7 @@ async fn dispatch_agent(
         Ok(DispatchOutcome {
             agent_result: agent.run(prompt, ctx).await,
             external_actions: Vec::new(),
-            injected_playbook_ids: Vec::new(),
+            injected_playbook_ids,
             model_selection: resolved_cli_model.clone(),
         })
     }

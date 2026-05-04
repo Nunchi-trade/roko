@@ -58,6 +58,7 @@ supports_tools = true
 supports_thinking = false
 supports_vision = true
 tool_format = "openai_json"
+use_max_completion_tokens = true
 
 [models.sonnet]
 provider = "anthropic"

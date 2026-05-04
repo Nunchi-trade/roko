@@ -158,12 +158,11 @@ pub(crate) async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
             let status = resp.status();
             let payload: serde_json::Value = resp.json().await.unwrap_or_default();
             if !status.is_success() {
-                eprintln!(
-                    "Failed to match job: {} {}",
+                anyhow::bail!(
+                    "failed to match job: {} {}",
                     status,
                     serde_json::to_string_pretty(&payload).unwrap_or_default()
                 );
-                return Ok(EXIT_FAILURE);
             }
 
             if cli.json {
@@ -311,12 +310,11 @@ pub(crate) async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
                         serde_json::to_string_pretty(&body).unwrap_or_default()
                     );
                 } else {
-                    eprintln!(
-                        "Failed to execute job '{id}': {} {}",
+                    anyhow::bail!(
+                        "failed to execute job '{id}': {} {}",
                         status,
                         serde_json::to_string_pretty(&body).unwrap_or_default()
                     );
-                    return Ok(EXIT_FAILURE);
                 }
             } else {
                 // Local inline execution — load config and use run_once
@@ -364,8 +362,7 @@ pub(crate) async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
                         job.status = "failed".to_string();
                         job.updated_at = chrono::Utc::now().to_rfc3339();
                         std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
-                        eprintln!("Job '{id}' failed: {e}");
-                        return Ok(EXIT_AGENT_FAILURE);
+                        return Err(e.context(format!("job '{id}' failed")));
                     }
                 }
             }

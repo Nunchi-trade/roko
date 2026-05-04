@@ -21,7 +21,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     let effort_ref = effort.as_deref();
     let resume_session = cli.resume.as_deref();
     let agent_command = command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
-    let config = load_roko_config(&workdir).unwrap_or_default();
+    let config = roko_core::config::loader::load_config_unified(&workdir).unwrap_or_default();
 
     match cmd {
         ResearchCmd::Topic { topic, deep } => {
@@ -475,6 +475,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
+                allowed_tools: None,
             })
             .await?;
             if !output.is_empty() {
@@ -520,6 +521,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
+                allowed_tools: None,
             })
             .await?;
             if !output.is_empty() {
@@ -575,6 +577,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
+                allowed_tools: None,
             })
             .await?;
             if !output.is_empty() {
@@ -625,6 +628,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
+                allowed_tools: None,
             })
             .await?;
             if !output.is_empty() {
@@ -676,6 +680,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
+                allowed_tools: None,
             })
             .await?;
             if !output.is_empty() {

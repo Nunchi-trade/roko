@@ -309,6 +309,19 @@ fn validate_tasks_file(
         .is_some_and(is_architecture_queue_meta);
 
     let mut diagnostics = Vec::new();
+
+    // Try parsing with the runtime parser — if this fails, `plan run` would
+    // also fail on the same file.  Report any deserialization error so that
+    // `plan validate` and `plan run` agree on whether a file is acceptable.
+    if let Err(runtime_err) = roko_cli::task_parser::TasksFile::parse_str(&content) {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            rule_id: "PLAN_034".to_string(),
+            plan_id: Some(plan_id.clone()),
+            task_id: None,
+            message: format!("plan would fail at runtime: {runtime_err}"),
+        });
+    }
     let tasks = parsed
         .get("task")
         .and_then(Value::as_array)

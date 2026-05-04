@@ -756,10 +756,10 @@ pub(crate) async fn cmd_status(
         println!();
         println!("Cost Summary:");
         if let Some(total_cost_usd) = total_cost_usd {
-            println!("  Total:    ${total_cost_usd:.4}");
+            println!("  Total:    ${:.4}", total_cost_usd.max(0.0));
         }
         if let Some(today_cost_usd) = today_cost_usd {
-            println!("  Today:    ${today_cost_usd:.4}");
+            println!("  Today:    ${:.4}", today_cost_usd.max(0.0));
         }
         if !cost_by_model.is_empty() {
             println!("  By model: {}", format_cost_breakdown(&cost_by_model, 5));
@@ -851,7 +851,7 @@ pub(crate) fn format_cost_breakdown(costs: &HashMap<String, f64>, limit: usize) 
 
     entries
         .into_iter()
-        .map(|(name, cost)| format!("{name}=${cost:.4}"))
+        .map(|(name, cost)| format!("{name}=${:.4}", cost.max(0.0)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1570,4 +1570,82 @@ pub(crate) async fn persist_capture_episode(
         .await
         .map_err(|e| anyhow!("record learning feedback: {e}"))?;
     Ok(())
+}
+
+/// Check that configured providers have their API keys set and CLI binaries on
+/// PATH. Returns an error with an actionable message on the first failure.
+///
+/// Only providers that have at least one of `api_key_env` or `command` set are
+/// checked — providers with neither are silently skipped (local/mock providers).
+pub(crate) fn preflight_providers(config: &RokoConfig) -> anyhow::Result<()> {
+    for (name, provider) in &config.providers {
+        if let Some(ref env_var) = provider.api_key_env {
+            match std::env::var(env_var) {
+                Ok(val) if val.is_empty() => {
+                    anyhow::bail!(
+                        "provider '{}' requires {} but it is empty.\n  hint: export {}=<your-key>",
+                        name,
+                        env_var,
+                        env_var
+                    );
+                }
+                Err(_) => {
+                    anyhow::bail!(
+                        "provider '{}' requires {} but it is not set.\n  hint: export {}=<your-key>",
+                        name,
+                        env_var,
+                        env_var
+                    );
+                }
+                Ok(_) => {} // valid
+            }
+        }
+
+        if let Some(ref binary) = provider.command {
+            if !binary_on_path(binary) {
+                anyhow::bail!(
+                    "provider '{}' requires '{}' on PATH but it was not found.\n  hint: install {} or change provider in roko.toml",
+                    name,
+                    binary,
+                    binary
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check that the gate pipeline tools (cargo, git, clippy) are available.
+/// Returns the names of any missing tools. The caller should warn but not
+/// necessarily abort — some gate rungs may not need all tools.
+pub(crate) fn preflight_gate_deps() -> Vec<String> {
+    let mut missing = Vec::new();
+    for tool in &["cargo", "git"] {
+        if !binary_on_path(tool) {
+            missing.push((*tool).to_string());
+        }
+    }
+    // clippy is a cargo component, not a standalone binary
+    let clippy_ok = std::process::Command::new("cargo")
+        .args(["clippy", "--version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !clippy_ok {
+        missing.push("clippy".to_string());
+    }
+    missing
+}
+
+/// Return `true` if `name` is found on `PATH`.
+fn binary_on_path(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }

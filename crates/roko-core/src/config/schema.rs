@@ -104,7 +104,7 @@ const fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
 }
 const fn default_config_version() -> u32 {
-    1
+    2
 }
 
 impl Default for RokoConfig {

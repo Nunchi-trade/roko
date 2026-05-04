@@ -13,6 +13,15 @@ pub(crate) async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<i32> {
     };
     if let Some(provider_name) = provider {
         if let AgentCmd::Chat { agent, .. } = &cmd {
+            // Pre-flight: check providers before starting chat session.
+            {
+                let chat_config: roko_core::config::schema::RokoConfig =
+                    std::fs::read_to_string(workdir.join("roko.toml"))
+                        .ok()
+                        .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
+                        .unwrap_or_default();
+                crate::commands::util::preflight_providers(&chat_config)?;
+            }
             let resolved = load_layered(&workdir)?;
             let config = resolved.config;
             let mut provider_config = roko_core::config::schema::RokoConfig::default();

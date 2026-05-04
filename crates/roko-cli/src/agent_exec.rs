@@ -42,6 +42,8 @@ pub struct AgentExecOpts<'a> {
     /// When set, the safety layer applies role-specific policies and the
     /// CascadeRouter can make role-aware model selection decisions.
     pub role: Option<&'a str>,
+    /// Tool restriction. `Some("none")` disables all tools. `None` uses provider defaults.
+    pub allowed_tools: Option<&'a str>,
 }
 
 /// Episode metadata for agent execution paths that should persist learning data.
@@ -136,10 +138,10 @@ async fn run_agent_capture_impl(
         SpawnAgentSpec {
             model: model.clone(),
             command: routing_config.agent.command.clone(),
-            timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
+            timeout_ms: Some(300_000), // 5 min for CLI flows (plan generation / research tasks)
             system_prompt: opts.system_prompt.map(str::to_string),
             cached_content: None,
-            tools: None,
+            tools: opts.allowed_tools.map(str::to_string),
             mcp_config: None,
             working_dir: Some(opts.workdir.to_path_buf()),
             env: opts.env_vars.to_vec(),

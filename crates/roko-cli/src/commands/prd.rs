@@ -320,11 +320,22 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
         }
         PrdCmd::Draft { cmd: draft_cmd } => match draft_cmd {
             PrdDraftCmd::New { title } => {
+                // Pre-flight: check providers before spending time on context building.
+                {
+                    let prd_config: roko_core::config::schema::RokoConfig =
+                        std::fs::read_to_string(workdir.join("roko.toml"))
+                            .ok()
+                            .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
+                            .unwrap_or_default();
+                    crate::commands::util::preflight_providers(&prd_config)?;
+                }
                 let title = title.join(" ");
                 let slug = roko_cli::prd::slugify(&title);
                 let feature_keywords = extract_keywords_from_slug_and_description(&slug, &title);
                 let drafts = roko_cli::workspace_paths::drafts_dir(&workdir);
                 roko_cli::prd::ensure_dirs(&workdir)?;
+                let _lock =
+                    roko_cli::workspace_lock::acquire_workspace_lock(&workdir.join(".roko"))?;
                 let target = drafts.join(format!("{slug}.md"));
                 // If the draft exists and has real content (not just scaffold),
                 // point the user to `edit` instead. But if it's only the
@@ -342,9 +353,10 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         .count()
                         == 0;
                     if !is_skeleton {
-                        eprintln!("Draft already exists with content: {}", target.display());
-                        eprintln!("Use: roko prd draft edit {slug}");
-                        return Ok(1);
+                        anyhow::bail!(
+                            "draft already exists with content: {}; use: roko prd draft edit {slug}",
+                            target.display()
+                        );
                     }
                     eprintln!("Found empty scaffold from previous run — regenerating.");
                 }
@@ -368,41 +380,51 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     &workdir,
                     &format!(
                         "Fill in the draft PRD at {path}. \
-                         If you have file tools, read the codebase to understand what exists \
-                         and write the PRD directly to {path}. \
-                         If you do NOT have file tools, output the complete PRD markdown \
-                         (with YAML frontmatter) as your response — do not wrap in code fences. \
+                         Output the complete PRD markdown (with YAML frontmatter) as your response. \
+                         Do NOT use file tools — they are not available. \
+                         Do NOT wrap in code fences. \
                          Follow the PRD quality standards in your system prompt exactly.",
                         path = target.display()
                     ),
                 );
                 let feature_keyword_refs: Vec<&str> =
                     feature_keywords.iter().map(String::as_str).collect();
+                // Skip repo context scanning for workspaces without source code
+                // (e.g. freshly-initialized workspaces from `roko init`).
+                let has_source_code = workdir.join("src").is_dir()
+                    || workdir.join("crates").is_dir()
+                    || workdir.join("lib").is_dir()
+                    || workdir.join("Cargo.toml").is_file()
+                    || workdir.join("package.json").is_file();
                 // Keep the full pack so it can be persisted to the context sidecar.
                 let repo_context_pack: Option<roko_cli::repo_context::RepoContextPack> =
-                    match roko_cli::repo_context::build_repo_context(
-                        &workdir,
-                        &feature_keyword_refs,
-                    )
-                    .await
-                    {
-                        Ok(pack) => {
-                            if !pack.context_root_verified {
+                    if has_source_code {
+                        match roko_cli::repo_context::build_repo_context(
+                            &workdir,
+                            &feature_keyword_refs,
+                        )
+                        .await
+                        {
+                            Ok(pack) => {
+                                if !pack.context_root_verified {
+                                    eprintln!(
+                                        "WARNING: Repository context not verified for keywords {:?}. \
+                                         Generated PRD may reference nonexistent code.",
+                                        feature_keywords
+                                    );
+                                }
+                                Some(pack)
+                            }
+                            Err(err) => {
                                 eprintln!(
-                                    "WARNING: Repository context not verified for keywords {:?}. \
-                                     Generated PRD may reference nonexistent code.",
+                                    "WARNING: Repository context unavailable for keywords {:?}: {err}",
                                     feature_keywords
                                 );
+                                None
                             }
-                            Some(pack)
                         }
-                        Err(err) => {
-                            eprintln!(
-                                "WARNING: Repository context unavailable for keywords {:?}: {err}",
-                                feature_keywords
-                            );
-                            None
-                        }
+                    } else {
+                        None // Empty workspace — skip context scanning
                     };
                 let repo_context_section: Option<String> =
                     repo_context_pack.as_ref().map(|p| p.to_prompt_section());
@@ -412,18 +434,17 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     .unwrap_or_default();
                 let task_prompt = format!(
                     "Generate a complete PRD for: {title}. \
-                     If you have file tools available, search the codebase to understand \
-                     what exists and write the completed PRD to {path}. \
-                     Otherwise, output the complete PRD markdown with YAML frontmatter. \
+                     Output the complete PRD markdown with YAML frontmatter. \
                      Include specific requirements, machine-verifiable acceptance criteria, \
                      and a design section.{context_suffix}",
-                    path = target.display(),
                     context_suffix = context_suffix
                 );
                 // Snapshot file bytes before the agent runs so direct writes
                 // are detected even on coarse-mtime filesystems.
                 let content_before = std::fs::read(&target).ok();
 
+                let spinner =
+                    roko_cli::spinner::cli_spinner(format!("Generating PRD draft: {slug}"));
                 let started = Instant::now();
                 let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                     prompt: &task_prompt,
@@ -434,8 +455,14 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     resume_session,
                     env_vars: &gw.vars,
                     role: Some("scribe"),
+                    allowed_tools: Some("none"),
                 })
                 .await?;
+                if exit_code == 0 {
+                    spinner.finish_with_message(format!("Draft generated: {slug}"));
+                } else {
+                    spinner.finish_with_message("PRD draft generation failed");
+                }
 
                 // Check if the agent already wrote the file (CLI agents with tools).
                 let content_after = std::fs::read(&target).ok();
@@ -584,8 +611,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             PrdDraftCmd::Edit { slug } => {
                 let draft = roko_cli::workspace_paths::draft_prd_path(&workdir, &slug);
                 if !draft.exists() {
-                    eprintln!("Draft not found: {}", draft.display());
-                    return Ok(1);
+                    anyhow::bail!("draft not found: {}", draft.display());
                 }
                 println!("📝 Refining draft: {slug}");
                 let system = roko_cli::prd::prd_agent_prompt(
@@ -621,6 +647,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     resume_session,
                     env_vars: &gw.vars,
                     role: Some("scribe"),
+                    allowed_tools: None,
                 })
                 .await?;
                 let mtime_after = std::fs::metadata(&draft).and_then(|m| m.modified()).ok();
@@ -687,6 +714,16 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             }
         },
         PrdCmd::Plan { slug, dry_run } => {
+            // Pre-flight: check providers before agent dispatch.
+            {
+                let plan_config: roko_core::config::schema::RokoConfig =
+                    std::fs::read_to_string(workdir.join("roko.toml"))
+                        .ok()
+                        .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
+                        .unwrap_or_default();
+                crate::commands::util::preflight_providers(&plan_config)?;
+            }
+            let _lock = roko_cli::workspace_lock::acquire_workspace_lock(&workdir.join(".roko"))?;
             let prd_path = find_prd(&workdir, &slug)?;
             let model_key = roko_cli::model_selection::resolve_effective_model_key(
                 &workdir,
@@ -738,6 +775,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("strategist"),
+                allowed_tools: None,
             })
             .await?;
             if !output.is_empty() {
@@ -768,7 +806,8 @@ fn resolve_effective_model_key(
     role: Option<&str>,
     context: &str,
 ) -> Result<String> {
-    let config = crate::load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let selection = roko_cli::model_selection::resolve_effective_model(
         cli_model,
         None,

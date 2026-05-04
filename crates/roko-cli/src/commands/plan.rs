@@ -92,8 +92,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let Some(plan_info) =
                 roko_cli::plan::discover_plan_by_id(&wd, &plan_id).map_err(|e| anyhow!("{e}"))?
             else {
-                eprintln!("plan '{plan_id}' not found");
-                return Ok(EXIT_AGENT_FAILURE);
+                anyhow::bail!("plan '{plan_id}' not found");
             };
             let summary = roko_cli::plan::summarize_plan_info(&plan_info);
             let tasks_path = roko_cli::plan::tasks_path(&plan_info);
@@ -217,18 +216,30 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             fresh,
             force_resume,
         } => {
+            // Resolve workdir FIRST (before using plans_dir)
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+
+            // Resolve plans_dir relative to workdir if not absolute
+            let resolved_plans_dir = if plans_dir.is_absolute() {
+                plans_dir.clone()
+            } else {
+                wd.join(&plans_dir)
+            };
+
             // ── Mandatory validation: reject malformed plans before execution ──
             // Runs in both normal and `--dry-run` mode.
-            if let Some(exit_code) = validate_before_run(&plans_dir) {
+            if let Some(exit_code) = validate_before_run(&resolved_plans_dir, &wd) {
                 return Ok(exit_code);
             }
 
             // ── Dry-run mode: parse plans + show summary without executing ──
             if dry_run {
-                return cmd_plan_dry_run(&plans_dir, cli).await;
+                return cmd_plan_dry_run(&resolved_plans_dir, cli).await;
             }
 
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            // Acquire exclusive workspace lock before mutating state.
+            let _lock = roko_cli::workspace_lock::acquire_workspace_lock(&wd.join(".roko"))?;
+
             if fresh {
                 let state_path = wd.join(".roko").join("state").join("executor.json");
                 if state_path.exists() {
@@ -259,11 +270,29 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
             let task_timeout_secs = config.executor.task_timeout_secs;
-            let early_roko_config: roko_core::config::schema::RokoConfig =
-                std::fs::read_to_string(wd.join("roko.toml"))
-                    .ok()
-                    .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
-                    .unwrap_or_default();
+
+            // Bootstrap: workspace check + unified config load.
+            let boot = roko_cli::bootstrap::RokoBootstrap::new(
+                &wd,
+                roko_cli::bootstrap::BootOpts {
+                    require_workspace: true,
+                    require_provider: false, // explicit preflight below is more detailed
+                    acquire_lock: false,
+                },
+            )?;
+            let early_roko_config = boot.config;
+
+            // Pre-flight: fail fast if providers are misconfigured.
+            crate::commands::util::preflight_providers(&early_roko_config)?;
+
+            // Pre-flight: warn if gate tools are missing.
+            let missing_gate_tools = crate::commands::util::preflight_gate_deps();
+            if !missing_gate_tools.is_empty() {
+                eprintln!(
+                    "warning: missing gate tools: {}. Some gates may fail.",
+                    missing_gate_tools.join(", ")
+                );
+            }
             let max_concurrent_tasks = if max_tasks > 0 {
                 max_tasks
             } else {
@@ -330,7 +359,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     .status();
             }
 
-            let plans = roko_cli::runner::plan_loader::load_plans(&plans_dir)?;
+            let plans = roko_cli::runner::plan_loader::load_plans(&resolved_plans_dir)?;
             let roko_config = early_roko_config;
 
             // Initialize Phase 0 subsystems.
@@ -397,7 +426,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             let run_config = roko_cli::runner::RunConfig {
                 workdir: wd.clone(),
-                plan_dir: plans_dir.clone(),
+                plan_dir: resolved_plans_dir.clone(),
                 model: roko_config.agent.default_model.clone(),
                 cli_model_override: cli.model.clone(),
                 timeout_secs: task_timeout_secs,
@@ -476,8 +505,36 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 cancel_for_signal.cancel();
             });
 
+            let total_tasks: usize = plans.iter().map(|p| p.tasks.tasks.len()).sum();
+            let plan_count = plans.len();
+            // Only show spinner in non-approval mode (approval mode uses the TUI instead).
+            let run_spinner = if !approval && !cli.quiet && !cli.json {
+                Some(roko_cli::spinner::cli_spinner(format!(
+                    "Running plan{}: {} task{}",
+                    if plan_count == 1 { "" } else { "s" },
+                    total_tasks,
+                    if total_tasks == 1 { "" } else { "s" },
+                )))
+            } else {
+                None
+            };
+
             let v2_report =
                 roko_cli::runner::event_loop::run(plans, &run_config, &state_hub, cancel).await?;
+
+            if let Some(spinner) = run_spinner {
+                if v2_report.all_succeeded() {
+                    spinner.finish_with_message(format!(
+                        "Plan complete: {}/{} tasks",
+                        v2_report.tasks_completed, v2_report.total_tasks
+                    ));
+                } else {
+                    spinner.finish_with_message(format!(
+                        "Plan finished: {}/{} tasks ({} failed)",
+                        v2_report.tasks_completed, v2_report.total_tasks, v2_report.tasks_failed,
+                    ));
+                }
+            }
 
             if cli.json {
                 println!(
@@ -521,7 +578,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 if state_path.exists() {
                     eprintln!(
                         "hint: if tasks appear stuck or state looks wrong, try: roko plan run {} --fresh",
-                        plans_dir.display()
+                        resolved_plans_dir.display()
                     );
                 }
             }
@@ -595,6 +652,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     resume_session: None,
                     env_vars: &gw.vars,
                     role: Some("strategist"),
+                    allowed_tools: None,
                 },
                 AgentExecEpisode {
                     task_kind: "plan-generate",
@@ -687,6 +745,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     resume_session: None,
                     env_vars: &gw.vars,
                     role: Some("strategist"),
+                    allowed_tools: None,
                 },
                 AgentExecEpisode {
                     task_kind: "plan-regenerate",
@@ -771,7 +830,8 @@ fn resolve_effective_model_key(
     role: Option<&str>,
     context: &str,
 ) -> Result<String> {
-    let config = crate::load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let selection = roko_cli::model_selection::resolve_effective_model(
         cli_model,
         None,
@@ -962,16 +1022,14 @@ pub(crate) async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32>
 ///
 /// Returns `Some(exit_code)` when validation fails, or `None` when the plan
 /// set is valid enough to continue.
-fn validate_before_run(plans_dir: &Path) -> Option<i32> {
-    let current_dir = match std::env::current_dir() {
-        Ok(dir) => dir,
-        Err(error) => {
-            eprintln!("error: cannot resolve cwd for validation: {error}");
-            return Some(1);
-        }
-    };
+fn validate_before_run(plans_dir: &Path, workdir: &Path) -> Option<i32> {
+    // If the plans directory doesn't exist yet (e.g. before `prd plan` runs),
+    // skip pre-flight validation — the run path will report "No plans found".
+    if !plans_dir.exists() {
+        return None;
+    }
 
-    let config_path = current_dir.join("roko.toml");
+    let config_path = workdir.join("roko.toml");
     let models = if config_path.is_file() {
         std::fs::read_to_string(&config_path)
             .ok()
@@ -988,6 +1046,12 @@ fn validate_before_run(plans_dir: &Path) -> Option<i32> {
             return Some(1);
         }
     };
+
+    // If no tasks.toml files were found, skip validation — the run path will
+    // report "No plans found" with better context.
+    if report.totals.plans_checked == 0 {
+        return None;
+    }
 
     let code = report.exit_code(false);
     if code != 0 {
