@@ -16,6 +16,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"
+async-trait = { workspace = true }
 reqwest = { workspace = true }
 roko-core = { path = "../roko-core" }
 roko-runtime = { path = "../roko-runtime" }

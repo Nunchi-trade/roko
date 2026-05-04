@@ -48,6 +48,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/agents/create", post(create_agent))
         .route("/agents/{id}", get(get_agent))
         .route("/agents/{id}/profile", get(get_agent_profile))
+        .route("/agents/{id}/config", get(get_agent_config))
         .route("/agents/{id}/stop", post(stop_agent))
         .route("/agents/{id}/episodes", get(agent_episodes))
         .route("/agents/{id}/logs", get(proxy_agent_logs))
@@ -1024,6 +1025,55 @@ async fn get_agent_profile(
     get_agent(State(state), Path(id)).await
 }
 
+/// `GET /api/agents/{id}/config` — return the agent manifest plus runtime metadata.
+async fn get_agent_config(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let agents_root = state.workdir.join(".roko").join("agents");
+    let agent_dir = resolve_agent_dir(&agents_root, &id)?;
+    let manifest_path = agent_dir.join("manifest.toml");
+    let deleted = agent_dir.join("DELETED").exists();
+    let manifest_text = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(ApiError::internal(format!("read agent manifest: {error}"))),
+    };
+
+    let discovered = state.discovered_agent(&id).await;
+    if manifest_text.is_none() && discovered.is_none() {
+        return Err(ApiError::not_found(format!(
+            "agent '{id}' not found (no manifest at {})",
+            manifest_path.display()
+        )));
+    }
+
+    let manifest = manifest_text
+        .as_deref()
+        .and_then(|text| toml::from_str::<toml::Value>(text).ok())
+        .and_then(|value| serde_json::to_value(value).ok());
+    let process_info = state.find_process_by_label(&id).await;
+    let (process_status, uptime_secs, os_pid) = match process_info {
+        Some((_, os, uptime)) => ("running", Some(uptime.as_secs()), os),
+        None => ("stopped", None, None),
+    };
+
+    Ok(Json(json!({
+        "agent_id": id,
+        "manifest_path": manifest_path.display().to_string(),
+        "manifest_exists": manifest_text.is_some(),
+        "deleted": deleted,
+        "manifest_toml": manifest_text,
+        "manifest": manifest,
+        "runtime": {
+            "process_status": process_status,
+            "uptime_secs": uptime_secs,
+            "os_pid": os_pid,
+        },
+        "registration": discovered,
+    })))
+}
+
 /// `POST /api/agents/{id}/stop` — shut down a specific supervised process.
 async fn stop_agent(
     State(state): State<Arc<AppState>>,
@@ -1958,6 +2008,62 @@ mod tests {
             .and_then(|p| p.as_str())
             .expect("core.prompt is a string");
         assert_eq!(prompt, hostile_prompt);
+    }
+
+    #[tokio::test]
+    async fn agent_config_returns_manifest_and_runtime_metadata() {
+        let tempdir = tempdir().expect("tempdir");
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
+        let agent_dir = tempdir.path().join(".roko").join("agents").join("demo");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        std::fs::write(
+            agent_dir.join("manifest.toml"),
+            r#"
+schema_version = 1
+
+[core]
+prompt = "hello"
+mode = "self_hosted"
+"#,
+        )
+        .expect("write manifest");
+
+        let Json(payload) = get_agent_config(State(state), Path("demo".to_string()))
+            .await
+            .expect("agent config");
+
+        assert_eq!(payload["agent_id"], "demo");
+        assert_eq!(payload["manifest_exists"], true);
+        assert_eq!(payload["runtime"]["process_status"], "stopped");
+        assert_eq!(payload["manifest"]["core"]["prompt"], "hello");
+    }
+
+    #[tokio::test]
+    async fn agent_config_rejects_path_traversal_ids() {
+        let tempdir = tempdir().expect("tempdir");
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
+
+        let err = get_agent_config(State(state), Path("../escape".to_string()))
+            .await
+            .expect_err("path traversal id should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
     #[derive(Debug)]

@@ -7,27 +7,39 @@
 //! for provider-agnostic model calls.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::poll_fn,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use roko_agent::ModelCallService;
+use async_trait::async_trait;
+use roko_agent::dispatcher::{HandlerResolver, ToolDispatcher};
+use roko_agent::mcp::{McpClient, StdioTransport as McpStdioTransport, mcp_to_tool_def};
 use roko_agent::safety::{SafetyLayer, ViolationSeverity};
+use roko_agent::streaming::StreamChunk;
+use roko_agent::tool_loop::backends::create_openai_compat_backend;
+use roko_agent::tool_loop::{StopReason as ToolLoopStopReason, ToolLoop};
+use roko_agent::translate::{OpenAiTranslator, StrictOpenAiTranslator, Translator};
+use roko_agent::{ModelCallService, ReqwestPoster};
 use roko_core::ContentHash;
 use roko_core::DaimonPolicy;
-use roko_core::agent::{AgentRole, ProviderKind, resolve_model};
+use roko_core::agent::{AgentRole, ProviderKind, ResolvedModel, resolve_model};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, RokoConfig};
 #[cfg(test)]
 use roko_core::defaults::{DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS};
+use roko_core::defaults::{DEFAULT_MAX_TOOL_ITERATIONS, DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS};
 use roko_core::foundation::{
     ChatMessage, MessageRole, ModelCallRequest, ModelCaller, ModelStreamEvent, TokenUsage,
 };
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_core::tool::{
+    ToolCall, ToolContext, ToolDef, ToolError, ToolHandler, ToolPermission, ToolResult, ToolSource,
+    VecToolRegistry,
+};
 use roko_dreams::{load_dream_routing_advice, relevant_pattern_summaries};
 use roko_learn::{
     cascade_router::CascadeRouter,
@@ -1060,6 +1072,7 @@ where
     let tests_enabled = session.config_state.tests_enabled;
     let max_iterations = session.config_state.max_iterations;
     let review_strictness = session.config_state.review_strictness.clone();
+    let session_mcp_servers = session.mcp_servers.clone();
 
     let shared_run = session.shared_run.clone();
     // SP-1: build a restrictive layer per dispatch; missing contracts fall closed.
@@ -1247,6 +1260,8 @@ where
                     &messages,
                     &model_key,
                     &roko_config,
+                    &workdir,
+                    &session_mcp_servers,
                     cancel_token,
                     event_sender,
                 )
@@ -1700,6 +1715,8 @@ async fn run_openai_compat_cognitive_task(
     messages: &[serde_json::Value],
     model_key: &str,
     roko_config: &RokoConfig,
+    workdir: &Path,
+    mcp_servers: &[crate::types::McpServerConfig],
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
@@ -1718,10 +1735,503 @@ async fn run_openai_compat_cognitive_task(
         return Ok(());
     }
 
+    if !mcp_servers.is_empty()
+        && openai_compat_tool_loop_supported(resolved.provider_kind)
+        && run_openai_compat_mcp_tool_loop(
+            session_id,
+            messages,
+            &resolved,
+            workdir,
+            mcp_servers,
+            cancel_token.clone(),
+            event_sender.clone(),
+        )
+        .await?
+    {
+        return Ok(());
+    }
+
     let caller = ModelCallService::new(model_key.to_string()).with_config(roko_config.clone());
     let request = model_call_request_from_acp_messages(model_key, messages);
     stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)
         .await
+}
+
+fn openai_compat_tool_loop_supported(provider_kind: ProviderKind) -> bool {
+    matches!(
+        provider_kind,
+        ProviderKind::OpenAiCompat | ProviderKind::PerplexityApi | ProviderKind::CerebrasApi
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_openai_compat_mcp_tool_loop(
+    session_id: &str,
+    messages: &[serde_json::Value],
+    resolved: &ResolvedModel,
+    workdir: &Path,
+    mcp_servers: &[crate::types::McpServerConfig],
+    cancel_token: CancelToken,
+    event_sender: mpsc::Sender<CognitiveEvent>,
+) -> Result<bool> {
+    let Some(provider) = resolved.provider_config.as_ref() else {
+        emit_dispatch_failure(
+            &event_sender,
+            format!(
+                "Error: session MCP tools require an explicitly configured provider for model '{}'.",
+                resolved.model_key
+            ),
+        )
+        .await;
+        return Err(anyhow::anyhow!(
+            "session MCP tools require explicit provider config for {}",
+            resolved.model_key
+        )
+        .into());
+    };
+    let Some(model) = resolved.profile.as_ref() else {
+        emit_dispatch_failure(
+            &event_sender,
+            format!(
+                "Error: session MCP tools require an explicitly configured model profile for '{}'.",
+                resolved.model_key
+            ),
+        )
+        .await;
+        return Err(anyhow::anyhow!(
+            "session MCP tools require explicit model profile for {}",
+            resolved.model_key
+        )
+        .into());
+    };
+
+    let mcp_state = setup_session_mcp_tools(session_id, mcp_servers, event_sender.clone()).await;
+    if mcp_state.tools.is_empty() {
+        send_cognitive_event(
+            &event_sender,
+            CognitiveEvent::TokenChunk(
+                "No MCP tools were discovered for this session; continuing without them.\n"
+                    .to_string(),
+            ),
+        )
+        .await;
+        return Ok(false);
+    }
+
+    let translator: Arc<dyn Translator> = if provider.kind == ProviderKind::CerebrasApi {
+        Arc::new(StrictOpenAiTranslator)
+    } else {
+        Arc::new(OpenAiTranslator)
+    };
+    let backend = create_openai_compat_backend(provider, model, Arc::new(ReqwestPoster::new()))
+        .map_err(|error| anyhow::anyhow!("create ACP MCP tool-loop backend: {error}"))?;
+    let registry = Arc::new(VecToolRegistry::from_tools(mcp_state.tools.clone()));
+    let resolver: Arc<dyn HandlerResolver> = Arc::new(AcpMcpHandlerResolver {
+        handlers: mcp_state.handlers,
+    });
+    let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
+    let context_limit = usize::try_from(model.context_window).unwrap_or(usize::MAX);
+    let tool_loop = ToolLoop::new(translator, dispatcher, backend)
+        .with_max_iterations(DEFAULT_MAX_TOOL_ITERATIONS)
+        .with_context_token_limit(context_limit);
+
+    let (chunk_sender, chunk_receiver) = mpsc::unbounded_channel();
+    let forwarder = tokio::spawn(forward_tool_loop_stream_chunks(
+        chunk_receiver,
+        event_sender.clone(),
+    ));
+    let tool_context = ToolContext::testing(workdir)
+        .with_cancel_token(Arc::new(AcpToolCancelToken(cancel_token.clone())));
+    let mut tool_context = tool_context;
+    tool_context.capabilities = ToolPermission {
+        read: true,
+        write: true,
+        exec: true,
+        git: true,
+        network: true,
+    };
+
+    let output = tool_loop
+        .run_messages_streaming(
+            messages.to_vec(),
+            &mcp_state.tools,
+            &tool_context,
+            chunk_sender,
+        )
+        .await;
+    let _ = forwarder.await;
+
+    let usage = usage_info_from_tool_loop_usage(&output.total_usage);
+    match output.stop_reason {
+        ToolLoopStopReason::Stop => {
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage,
+                },
+            )
+            .await;
+        }
+        ToolLoopStopReason::MaxIterations => {
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::TokenChunk(format!(
+                    "\n[stopped after {} tool rounds because the model kept requesting tools]",
+                    DEFAULT_MAX_TOOL_ITERATIONS
+                )),
+            )
+            .await;
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::MaxTokens,
+                    usage,
+                },
+            )
+            .await;
+        }
+        ToolLoopStopReason::Cancelled => {
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::Cancelled,
+                    usage,
+                },
+            )
+            .await;
+        }
+        ToolLoopStopReason::BudgetExhausted => {
+            emit_dispatch_failure(
+                &event_sender,
+                "Error: MCP tool loop stopped because the model-call budget was exhausted."
+                    .to_string(),
+            )
+            .await;
+            return Err(anyhow::anyhow!("ACP MCP tool loop budget exhausted").into());
+        }
+        ToolLoopStopReason::BackendError(error) => {
+            emit_dispatch_failure(
+                &event_sender,
+                format!("Error: MCP tool loop failed: {error}"),
+            )
+            .await;
+            return Err(anyhow::anyhow!("ACP MCP tool loop failed: {error}").into());
+        }
+    }
+
+    Ok(true)
+}
+
+async fn forward_tool_loop_stream_chunks(
+    mut receiver: mpsc::UnboundedReceiver<StreamChunk>,
+    event_sender: mpsc::Sender<CognitiveEvent>,
+) {
+    while let Some(chunk) = receiver.recv().await {
+        match chunk {
+            StreamChunk::ContentDelta(text) if !text.is_empty() => {
+                send_cognitive_event(&event_sender, CognitiveEvent::TokenChunk(text)).await;
+            }
+            StreamChunk::ReasoningDelta(text) if !text.is_empty() => {
+                send_cognitive_event(&event_sender, CognitiveEvent::ThinkingChunk(text)).await;
+            }
+            StreamChunk::Error(error) => {
+                warn!(error = %error, "ACP MCP tool-loop stream error");
+            }
+            StreamChunk::ToolCallDelta { .. } | StreamChunk::Usage(_) | StreamChunk::Done(_) => {}
+            StreamChunk::ContentDelta(_) | StreamChunk::ReasoningDelta(_) => {}
+        }
+    }
+}
+
+fn usage_info_from_tool_loop_usage(usage: &roko_core::Usage) -> Option<UsageInfo> {
+    let input_tokens = u64::from(usage.input_tokens);
+    let output_tokens = u64::from(usage.output_tokens);
+    let cached_read_tokens = u64::from(usage.cache_read_tokens);
+    let cached_write_tokens = u64::from(usage.cache_create_tokens);
+    let total_tokens = u64::from(usage.total_tokens());
+    (total_tokens > 0 || cached_read_tokens > 0).then_some(UsageInfo {
+        total_tokens,
+        input_tokens,
+        output_tokens,
+        thought_tokens: None,
+        cached_read_tokens: (cached_read_tokens > 0).then_some(cached_read_tokens),
+        cached_write_tokens: (cached_write_tokens > 0).then_some(cached_write_tokens),
+    })
+}
+
+struct SessionMcpRuntime {
+    tools: Vec<ToolDef>,
+    handlers: HashMap<String, Arc<dyn ToolHandler>>,
+}
+
+async fn setup_session_mcp_tools(
+    session_id: &str,
+    mcp_servers: &[crate::types::McpServerConfig],
+    event_sender: mpsc::Sender<CognitiveEvent>,
+) -> SessionMcpRuntime {
+    let mut tools = Vec::new();
+    let mut handlers: HashMap<String, Arc<dyn ToolHandler>> = HashMap::new();
+    let mut used_names = HashSet::new();
+    let discovery_timeout = Duration::from_secs(DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS);
+
+    for server in mcp_servers {
+        let (command, args) = match &server.transport {
+            crate::types::McpTransport::Stdio { command, args } => (command, args),
+            crate::types::McpTransport::Http { url } => {
+                warn!(
+                    session_id,
+                    server = %server.name,
+                    url = %url,
+                    "skipping session MCP server with unsupported HTTP transport"
+                );
+                continue;
+            }
+        };
+
+        let transport = match McpStdioTransport::spawn(command, args) {
+            Ok(transport) => transport,
+            Err(error) => {
+                warn!(
+                    session_id,
+                    server = %server.name,
+                    error = %error,
+                    "failed to spawn session MCP server"
+                );
+                continue;
+            }
+        };
+        let client = Arc::new(McpClient::new(transport));
+
+        match tokio::time::timeout(discovery_timeout, client.initialize()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                warn!(
+                    session_id,
+                    server = %server.name,
+                    error = %error,
+                    "session MCP initialize failed"
+                );
+                continue;
+            }
+            Err(_) => {
+                warn!(
+                    session_id,
+                    server = %server.name,
+                    timeout_secs = DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS,
+                    "session MCP initialize timed out"
+                );
+                continue;
+            }
+        }
+
+        let listed = match tokio::time::timeout(discovery_timeout, client.list_tools()).await {
+            Ok(Ok(listed)) => listed,
+            Ok(Err(error)) => {
+                warn!(
+                    session_id,
+                    server = %server.name,
+                    error = %error,
+                    "session MCP tools/list failed"
+                );
+                continue;
+            }
+            Err(_) => {
+                warn!(
+                    session_id,
+                    server = %server.name,
+                    timeout_secs = DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS,
+                    "session MCP tools/list timed out"
+                );
+                continue;
+            }
+        };
+
+        info!(
+            session_id,
+            server = %server.name,
+            tool_count = listed.len(),
+            "discovered session MCP tools"
+        );
+
+        for tool in listed {
+            let base_name = format!(
+                "{}_{}",
+                sanitize_tool_segment(&server.name),
+                sanitize_tool_segment(&tool.name)
+            );
+            let exposed_name = unique_tool_name(&base_name, &mut used_names);
+            let mut def = mcp_to_tool_def(&tool, &server.name);
+            def.name = exposed_name.clone();
+            def.source = ToolSource::Mcp {
+                server: server.name.clone(),
+            };
+
+            handlers.insert(
+                exposed_name.clone(),
+                Arc::new(AcpMcpToolHandler {
+                    client: Arc::clone(&client),
+                    exposed_name,
+                    remote_name: tool.name.clone(),
+                    event_sender: event_sender.clone(),
+                }),
+            );
+            tools.push(def);
+        }
+    }
+
+    SessionMcpRuntime { tools, handlers }
+}
+
+fn sanitize_tool_segment(input: &str) -> String {
+    let mut output = String::with_capacity(input.len().min(28));
+    for ch in input.chars().take(28) {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            output.push(ch);
+        } else {
+            output.push('_');
+        }
+    }
+    if output.is_empty() {
+        "tool".to_string()
+    } else {
+        output
+    }
+}
+
+fn unique_tool_name(base: &str, used: &mut HashSet<String>) -> String {
+    let base: String = base.chars().take(64).collect();
+    if used.insert(base.clone()) {
+        return base;
+    }
+
+    for suffix in 2.. {
+        let suffix = format!("_{suffix}");
+        let max_base_len = 64usize.saturating_sub(suffix.len());
+        let mut candidate: String = base.chars().take(max_base_len).collect();
+        candidate.push_str(&suffix);
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+
+    unreachable!("suffix search should always find a unique tool name")
+}
+
+struct AcpMcpHandlerResolver {
+    handlers: HashMap<String, Arc<dyn ToolHandler>>,
+}
+
+impl HandlerResolver for AcpMcpHandlerResolver {
+    fn resolve(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
+        self.handlers.get(name).cloned()
+    }
+}
+
+struct AcpMcpToolHandler {
+    client: Arc<McpClient<McpStdioTransport>>,
+    exposed_name: String,
+    remote_name: String,
+    event_sender: mpsc::Sender<CognitiveEvent>,
+}
+
+#[async_trait]
+impl ToolHandler for AcpMcpToolHandler {
+    fn name(&self) -> &str {
+        &self.exposed_name
+    }
+
+    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
+        let tool_call_id = if call.id.is_empty() {
+            format!("mcp-{}", uuid::Uuid::new_v4())
+        } else {
+            call.id.clone()
+        };
+        send_cognitive_event(
+            &self.event_sender,
+            CognitiveEvent::ToolCallStart {
+                tool_call_id: tool_call_id.clone(),
+                title: self.exposed_name.clone(),
+                kind: ToolCallKind::Other,
+                locations: None,
+            },
+        )
+        .await;
+
+        let result = match tokio::time::timeout(
+            ctx.timeout,
+            self.client.call_tool(&self.remote_name, call.arguments),
+        )
+        .await
+        {
+            Ok(Ok(result)) => tool_result_from_mcp(&self.exposed_name, &result),
+            Ok(Err(error)) => ToolResult::err(ToolError::Other(format!(
+                "mcp tool `{}` failed: {error}",
+                self.exposed_name
+            ))),
+            Err(_) => ToolResult::err(ToolError::Timeout {
+                after_ms: ctx.timeout.as_millis().try_into().unwrap_or(u64::MAX),
+            }),
+        };
+
+        let (status, text) = tool_result_for_editor(&result);
+        send_cognitive_event(
+            &self.event_sender,
+            CognitiveEvent::ToolCallComplete {
+                tool_call_id,
+                status,
+                content: vec![ContentBlock::Text { text }],
+            },
+        )
+        .await;
+
+        result
+    }
+}
+
+#[derive(Clone)]
+struct AcpToolCancelToken(CancelToken);
+
+impl roko_core::tool::CancelToken for AcpToolCancelToken {
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
+
+fn tool_result_from_mcp(tool_name: &str, result: &roko_agent::mcp::McpToolResult) -> ToolResult {
+    let text = mcp_result_text(result);
+    if result.is_error {
+        let message = if text.is_empty() {
+            format!("mcp tool `{tool_name}` returned an error")
+        } else {
+            format!("mcp tool `{tool_name}` returned an error: {text}")
+        };
+        ToolResult::err(ToolError::Other(message))
+    } else if text.is_empty() {
+        ToolResult::text("(empty result)")
+    } else {
+        ToolResult::text(text)
+    }
+}
+
+fn mcp_result_text(result: &roko_agent::mcp::McpToolResult) -> String {
+    let text_blocks = result
+        .content
+        .iter()
+        .filter(|block| block.content_type == "text")
+        .filter_map(|block| block.text.as_deref())
+        .collect::<Vec<_>>();
+    if !text_blocks.is_empty() {
+        return text_blocks.join("\n");
+    }
+    serde_json::to_string(&result.content).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn tool_result_for_editor(result: &ToolResult) -> (ToolCallStatus, String) {
+    match result {
+        ToolResult::Ok { content, .. } => (ToolCallStatus::Completed, content.clone()),
+        ToolResult::Err(error) => (ToolCallStatus::Failed, format!("error: {error}")),
+    }
 }
 
 async fn emit_knowledge_card(
@@ -3230,6 +3740,38 @@ mod tests {
         assert_eq!(request.messages[1].content, "hello");
         assert_eq!(request.messages[2].role, MessageRole::Assistant);
         assert_eq!(request.messages[2].content, "hi");
+    }
+
+    #[test]
+    fn session_mcp_tool_names_are_provider_safe_and_unique() {
+        let mut used = HashSet::new();
+
+        let first = unique_tool_name(
+            &format!(
+                "{}_{}",
+                sanitize_tool_segment("desktop.tools"),
+                sanitize_tool_segment("read file")
+            ),
+            &mut used,
+        );
+        let second = unique_tool_name(
+            &format!(
+                "{}_{}",
+                sanitize_tool_segment("desktop/tools"),
+                sanitize_tool_segment("read:file")
+            ),
+            &mut used,
+        );
+
+        assert_eq!(first, "desktop_tools_read_file");
+        assert_eq!(second, "desktop_tools_read_file_2");
+        assert!(
+            first
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        );
+        assert!(first.len() <= 64);
+        assert!(second.len() <= 64);
     }
 
     #[test]

@@ -5804,6 +5804,7 @@ name = "roko-acp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "reqwest 0.12.28",
  "roko-agent",

@@ -379,6 +379,32 @@ impl ToolLoop {
         .await
     }
 
+    /// Run a fresh streaming tool loop from an already-built message history.
+    ///
+    /// ACP and other chat surfaces may already have a normalized
+    /// system/history/user message array. This keeps those callers on the
+    /// shared tool-loop runtime without flattening history back into a single
+    /// user prompt.
+    pub async fn run_messages_streaming(
+        &self,
+        messages: Vec<Value>,
+        tools: &[ToolDef],
+        ctx: &ToolContext,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> ToolLoopOutput {
+        self.run_inner(
+            messages,
+            0,
+            Vec::new(),
+            Usage::default(),
+            tools,
+            ctx,
+            Some(event_tx),
+            SessionState::default(),
+        )
+        .await
+    }
+
     /// Resume a tool loop from a previously saved [`Checkpoint`].
     pub async fn resume(
         &self,
@@ -1464,6 +1490,33 @@ mod tests {
         assert_eq!(out.tool_calls[0].name, "echo");
         assert_eq!(out.final_text, "final answer");
         assert!(out.checkpoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_messages_streaming_preserves_prebuilt_history() {
+        let backend = Arc::new(CapturingBackend::new());
+        let tl = make_tool_loop(backend.clone(), 25);
+        let ctx = ToolContext::testing("/tmp");
+        let messages = vec![
+            serde_json::json!({"role": "system", "content": "system"}),
+            serde_json::json!({"role": "assistant", "content": "earlier answer"}),
+            serde_json::json!({"role": "user", "content": "new prompt"}),
+        ];
+        let (stream_tx, _stream_rx) = mpsc::unbounded_channel();
+
+        let out = tl
+            .run_messages_streaming(messages.clone(), &test_tools(), &ctx, stream_tx)
+            .await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.iterations, 1);
+        let captured = backend.captured.lock();
+        assert_eq!(captured[0], messages);
+        assert!(
+            captured[1]
+                .iter()
+                .any(|message| message["role"] == "tool" && message["tool_call_id"] == "call-42")
+        );
     }
 
     #[tokio::test]
