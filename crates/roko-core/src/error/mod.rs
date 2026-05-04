@@ -28,6 +28,13 @@
 pub mod retry;
 pub mod rpc;
 
+use crate::defaults::{
+    DEFAULT_RATE_LIMIT_RETRY_ATTEMPTS, DEFAULT_RATE_LIMIT_RETRY_BASE_DELAY_MS,
+    DEFAULT_RATE_LIMIT_RETRY_MAX_BACKOFF_MS, DEFAULT_TIMEOUT_RETRY_ATTEMPTS,
+    DEFAULT_TIMEOUT_RETRY_BASE_DELAY_MS, DEFAULT_TIMEOUT_RETRY_MAX_BACKOFF_MS,
+    DEFAULT_TRANSIENT_RETRY_ATTEMPTS, DEFAULT_TRANSIENT_RETRY_BASE_DELAY_MS,
+    DEFAULT_TRANSIENT_RETRY_MAX_BACKOFF_MS,
+};
 use thiserror::Error;
 
 /// A `Result` alias with `RokoError` as the default error type.
@@ -449,11 +456,26 @@ impl ErrorKind {
         }
         Some(match self {
             // Rate limits: longer base delay, more attempts.
-            Self::RateLimited => retry::RetryPolicy::new(5, 2_000, 60_000, true),
+            Self::RateLimited => retry::RetryPolicy::new(
+                DEFAULT_RATE_LIMIT_RETRY_ATTEMPTS,
+                DEFAULT_RATE_LIMIT_RETRY_BASE_DELAY_MS,
+                DEFAULT_RATE_LIMIT_RETRY_MAX_BACKOFF_MS,
+                true,
+            ),
             // Timeouts: moderate.
-            Self::Timeout => retry::RetryPolicy::new(3, 1_000, 30_000, true),
+            Self::Timeout => retry::RetryPolicy::new(
+                DEFAULT_TIMEOUT_RETRY_ATTEMPTS,
+                DEFAULT_TIMEOUT_RETRY_BASE_DELAY_MS,
+                DEFAULT_TIMEOUT_RETRY_MAX_BACKOFF_MS,
+                true,
+            ),
             // Everything else transient: standard.
-            _ => retry::RetryPolicy::new(3, 500, 15_000, true),
+            _ => retry::RetryPolicy::new(
+                DEFAULT_TRANSIENT_RETRY_ATTEMPTS,
+                DEFAULT_TRANSIENT_RETRY_BASE_DELAY_MS,
+                DEFAULT_TRANSIENT_RETRY_MAX_BACKOFF_MS,
+                true,
+            ),
         })
     }
 
@@ -783,6 +805,37 @@ mod tests {
         assert!(
             rl.max_attempts() > io.max_attempts(),
             "rate-limited should have more attempts than io"
+        );
+    }
+
+    #[test]
+    fn retry_policy_uses_default_constants() {
+        assert_eq!(
+            ErrorKind::RateLimited.retry_policy().unwrap(),
+            retry::RetryPolicy::new(
+                DEFAULT_RATE_LIMIT_RETRY_ATTEMPTS,
+                DEFAULT_RATE_LIMIT_RETRY_BASE_DELAY_MS,
+                DEFAULT_RATE_LIMIT_RETRY_MAX_BACKOFF_MS,
+                true,
+            )
+        );
+        assert_eq!(
+            ErrorKind::Timeout.retry_policy().unwrap(),
+            retry::RetryPolicy::new(
+                DEFAULT_TIMEOUT_RETRY_ATTEMPTS,
+                DEFAULT_TIMEOUT_RETRY_BASE_DELAY_MS,
+                DEFAULT_TIMEOUT_RETRY_MAX_BACKOFF_MS,
+                true,
+            )
+        );
+        assert_eq!(
+            ErrorKind::Io.retry_policy().unwrap(),
+            retry::RetryPolicy::new(
+                DEFAULT_TRANSIENT_RETRY_ATTEMPTS,
+                DEFAULT_TRANSIENT_RETRY_BASE_DELAY_MS,
+                DEFAULT_TRANSIENT_RETRY_MAX_BACKOFF_MS,
+                true,
+            )
         );
     }
 

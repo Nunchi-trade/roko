@@ -51,6 +51,33 @@ pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 1_000;
 /// Maximum backoff delay for retries (milliseconds).
 pub const DEFAULT_RETRY_MAX_BACKOFF_MS: u64 = 60_000;
 
+/// Retry attempts for rate-limited operations.
+pub const DEFAULT_RATE_LIMIT_RETRY_ATTEMPTS: u32 = 5;
+
+/// Base backoff delay for rate-limited operations (milliseconds).
+pub const DEFAULT_RATE_LIMIT_RETRY_BASE_DELAY_MS: u64 = 2_000;
+
+/// Maximum backoff delay for rate-limited operations (milliseconds).
+pub const DEFAULT_RATE_LIMIT_RETRY_MAX_BACKOFF_MS: u64 = DEFAULT_RETRY_MAX_BACKOFF_MS;
+
+/// Retry attempts for timeout failures.
+pub const DEFAULT_TIMEOUT_RETRY_ATTEMPTS: u32 = DEFAULT_RETRY_ATTEMPTS;
+
+/// Base backoff delay for timeout failures (milliseconds).
+pub const DEFAULT_TIMEOUT_RETRY_BASE_DELAY_MS: u64 = DEFAULT_RETRY_BASE_DELAY_MS;
+
+/// Maximum backoff delay for timeout failures (milliseconds).
+pub const DEFAULT_TIMEOUT_RETRY_MAX_BACKOFF_MS: u64 = 30_000;
+
+/// Retry attempts for generic transient failures.
+pub const DEFAULT_TRANSIENT_RETRY_ATTEMPTS: u32 = DEFAULT_RETRY_ATTEMPTS;
+
+/// Base backoff delay for generic transient failures (milliseconds).
+pub const DEFAULT_TRANSIENT_RETRY_BASE_DELAY_MS: u64 = 500;
+
+/// Maximum backoff delay for generic transient failures (milliseconds).
+pub const DEFAULT_TRANSIENT_RETRY_MAX_BACKOFF_MS: u64 = 15_000;
+
 /// Default max merge retries in the orchestrator.
 pub const DEFAULT_MAX_MERGE_RETRIES: u32 = 5;
 
@@ -258,6 +285,13 @@ mod tests {
     #[test]
     fn retry_backoff_ordering() {
         assert!(DEFAULT_RETRY_BASE_DELAY_MS < DEFAULT_RETRY_MAX_BACKOFF_MS);
+        assert!(DEFAULT_RATE_LIMIT_RETRY_ATTEMPTS > DEFAULT_RETRY_ATTEMPTS);
+        assert!(DEFAULT_TRANSIENT_RETRY_BASE_DELAY_MS < DEFAULT_RETRY_BASE_DELAY_MS);
+        assert!(DEFAULT_TIMEOUT_RETRY_MAX_BACKOFF_MS < DEFAULT_RETRY_MAX_BACKOFF_MS);
+        assert_eq!(
+            DEFAULT_RATE_LIMIT_RETRY_MAX_BACKOFF_MS,
+            DEFAULT_RETRY_MAX_BACKOFF_MS
+        );
     }
 
     #[test]
