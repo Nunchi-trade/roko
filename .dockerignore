@@ -47,6 +47,9 @@ node_modules/
 .next/
 dist/
 
+# Cargo local config (sccache paths are macOS-specific)
+.cargo/
+
 # Caches
 .fastembed_cache/
 **/.fastembed_cache/
