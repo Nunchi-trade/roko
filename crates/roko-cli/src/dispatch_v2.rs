@@ -769,8 +769,9 @@ impl AgentDispatcherV2 {
             .body(Body::text(request.prompt.clone()))
             .build();
         let started = Instant::now();
-        let result = created.agent.run(&input, &Context::now()).await;
+        let mut result = created.agent.run(&input, &Context::now()).await;
         let latency_ms = started.elapsed().as_millis() as u64;
+        fill_cost_from_profile(&mut result, &created.target);
         record_agent_dispatch_feedback(
             &self.config,
             &request,
@@ -825,7 +826,7 @@ impl AgentDispatcherV2 {
             .body(Body::text(request.prompt.clone()))
             .build();
         let started = Instant::now();
-        let result = created
+        let mut result = created
             .agent
             .run_streaming(&input, &Context::now(), chunk_tx)
             .await;
@@ -833,6 +834,9 @@ impl AgentDispatcherV2 {
 
         // Wait for forwarder to drain remaining chunks.
         let _ = forwarder.await;
+
+        // Back-fill cost from model profile pricing before checking cost_usd.
+        fill_cost_from_profile(&mut result, &created.target);
 
         // Emit terminal events.
         if result.usage.total_tokens() > 0 || result.usage.cost_usd > 0.0 {
@@ -915,8 +919,9 @@ impl AgentDispatcherV2 {
             .body(Body::text(request.prompt.clone()))
             .build();
         let started = Instant::now();
-        let result = agent.run(&input, &Context::now()).await;
+        let mut result = agent.run(&input, &Context::now()).await;
         let latency_ms = started.elapsed().as_millis() as u64;
+        fill_cost_from_profile(&mut result, &target);
         record_agent_dispatch_feedback(&self.config, &request, &target, &result, latency_ms).await;
         let events = dispatch_events_from_result(&request, &target, &result);
         Ok(AgentResultDispatch {
@@ -1055,6 +1060,18 @@ pub struct AgentResultDispatch {
 
 /// Provider-neutral events emitted by dispatch v2.
 pub type DispatchEvent = AgentRuntimeEvent;
+
+/// Back-fill `usage.cost_usd` from the model profile's per-million token
+/// pricing when the provider did not report a dollar amount natively.
+fn fill_cost_from_profile(result: &mut AgentResult, target: &ProviderDispatchSpec) {
+    if let Some(profile) = target.model_profile.as_ref() {
+        result.usage.fill_cost_from_pricing(
+            profile.cost_input_per_m,
+            profile.cost_output_per_m,
+            profile.cost_cache_read_per_m,
+        );
+    }
+}
 
 fn dispatch_events_from_result(
     request: &AgentDispatchRequest,

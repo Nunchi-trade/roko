@@ -475,7 +475,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
-                allowed_tools: None,
+                allowed_tools: Some("Read,Write,Edit"),
             })
             .await?;
             if !output.is_empty() {
@@ -521,7 +521,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
-                allowed_tools: None,
+                allowed_tools: Some("Read,Write,Edit"),
             })
             .await?;
             if !output.is_empty() {
@@ -577,7 +577,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
-                allowed_tools: None,
+                allowed_tools: Some("Read,Write,Edit"),
             })
             .await?;
             if !output.is_empty() {
@@ -628,7 +628,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
-                allowed_tools: None,
+                allowed_tools: Some("Read,Write,Edit"),
             })
             .await?;
             if !output.is_empty() {
@@ -680,7 +680,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
                 role: Some("researcher"),
-                allowed_tools: None,
+                allowed_tools: Some("Read,Write,Edit"),
             })
             .await?;
             if !output.is_empty() {

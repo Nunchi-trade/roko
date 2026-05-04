@@ -22,7 +22,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use crate::agent_exec::{
-    AgentExecEpisode, AgentExecOpts, run_agent_capture_logged, run_agent_logged,
+    AgentExecEpisode, AgentExecOpts, run_agent_capture_logged, run_agent_capture_silent,
+    run_agent_logged,
 };
 use crate::task_parser::TasksFile;
 use crate::workspace_paths::{
@@ -1085,30 +1086,86 @@ async fn generate_plan_from_prd_with_outcome(
 
         // Write files from agent output (strategist can't write files directly).
         // Try fenced ```toml block first, then ```tasks.toml, then unfenced TOML.
-        let toml_content = extract_fenced_block(&output, "toml")
-            .or_else(|| extract_fenced_block(&output, "tasks.toml"))
-            .or_else(|| extract_toml_content_fallback(&output));
-        tracing::info!(
-            has_toml_block = toml_content.is_some(),
-            toml_block_len = toml_content.map(|s| s.len()).unwrap_or(0),
-            "prd plan: fenced block extraction"
-        );
-        if let Some(toml_content) = toml_content {
-            // Post-generation validation: fix typos, bad model hints, truncated
-            // slug, and reject structurally broken TOML before writing to disk.
-            let validated_toml = validate_and_fix_generated_plan(
-                toml_content,
-                slug,
-                &resolved.config.models,
-                resolved.config.agent.model.as_deref(),
-            )
-            .with_context(|| {
-                format!(
-                    "post-generation validation failed for plan '{slug}'; \
-                     the agent produced invalid TOML"
+        //
+        // If extraction or validation fails, retry up to 2 times with a
+        // stricter prompt requesting only the TOML block.
+        let try_extract_and_validate =
+            |raw: &str| -> std::result::Result<String, String> {
+                let toml_content = extract_fenced_block(raw, "toml")
+                    .or_else(|| extract_fenced_block(raw, "tasks.toml"))
+                    .or_else(|| extract_toml_content_fallback(raw));
+                tracing::info!(
+                    has_toml_block = toml_content.is_some(),
+                    toml_block_len = toml_content.map(|s| s.len()).unwrap_or(0),
+                    "prd plan: fenced block extraction"
+                );
+                let toml_content = toml_content
+                    .ok_or_else(|| "no TOML block found in agent output".to_string())?;
+                validate_and_fix_generated_plan(
+                    toml_content,
+                    slug,
+                    &resolved.config.models,
+                    resolved.config.agent.model.as_deref(),
                 )
-            })?;
+                .map_err(|e| format!("{e:#}"))
+            };
 
+        // First attempt uses the output we already have.
+        let mut validated_toml = try_extract_and_validate(&output);
+
+        // Retry up to 2 times on extraction/validation failure.
+        if validated_toml.is_err() {
+            let max_retries = 2u32;
+            for attempt in 1..=max_retries {
+                tracing::warn!(
+                    attempt,
+                    err = validated_toml.as_ref().unwrap_err().as_str(),
+                    "prd plan: TOML extraction/validation failed, retrying"
+                );
+                eprintln!(
+                    "⚠️  Plan TOML extraction failed (attempt {}/{}), retrying with stricter prompt…",
+                    attempt,
+                    max_retries + 1,
+                );
+                let retry_prompt = format!(
+                    "Your previous output could not be parsed as valid TOML. \
+                     Output ONLY the ```toml fenced block with no other text.\n\n\
+                     The plan must start with a [meta] section followed by [[task]] entries.\n\n\
+                     PRD slug: {slug}"
+                );
+                let retry_result = run_agent_capture_silent(AgentExecOpts {
+                    prompt: &retry_prompt,
+                    workdir: workdir_ref,
+                    model: model.or_else(|| resolved.config.agent.model.as_deref()),
+                    effort: Some(resolved.config.agent.effort.as_str()),
+                    system_prompt: Some(&system),
+                    resume_session: None,
+                    env_vars: &resolved.config.agent.env,
+                    role: Some("strategist"),
+                    allowed_tools: Some("Read,Grep,Glob"),
+                })
+                .await;
+
+                match retry_result {
+                    Ok((0, retry_output)) if !retry_output.trim().is_empty() => {
+                        validated_toml = try_extract_and_validate(&retry_output);
+                        if validated_toml.is_ok() {
+                            tracing::info!(attempt, "prd plan: retry succeeded");
+                            eprintln!("✅ Retry {attempt} succeeded");
+                            break;
+                        }
+                    }
+                    Ok((code, _)) => {
+                        tracing::warn!(attempt, code, "prd plan: retry agent failed");
+                    }
+                    Err(err) => {
+                        tracing::warn!(attempt, %err, "prd plan: retry agent error");
+                    }
+                }
+            }
+        }
+
+        if let Ok(validated_toml) = validated_toml {
             let plan_dir = plans_root.join(slug);
             std::fs::create_dir_all(&plan_dir)
                 .with_context(|| format!("create plan dir {}", plan_dir.display()))?;
@@ -1139,8 +1196,8 @@ async fn generate_plan_from_prd_with_outcome(
                     .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
             }
         } else {
-            // No fenced toml block found — fail with an actionable error rather
-            // than silently exiting 0 with no tasks.toml produced.
+            // All attempts (initial + retries) failed to produce valid TOML.
+            let final_err = validated_toml.unwrap_err();
             let preview: String = output.chars().take(500).collect();
             let has_toml_like = output.contains("[meta]") || output.contains("[[task]]");
             let toml_hint = if has_toml_like {
@@ -1150,8 +1207,9 @@ async fn generate_plan_from_prd_with_outcome(
                 ""
             };
             return Err(anyhow!(
-                "Plan generation failed: no tasks.toml was produced.\n\
-                 The agent output ({} bytes) did not contain a fenced ```toml block.\n\
+                "Plan generation failed after retries: no valid tasks.toml was produced.\n\
+                 Last error: {final_err}\n\
+                 The agent output ({} bytes) did not contain a parseable ```toml block.\n\
                  Output preview:\n---\n{preview}\n---\n\
                  hint: Try again, or create plans/{slug}/tasks.toml manually.{toml_hint}",
                 output.len()
@@ -1542,16 +1600,66 @@ fn extract_fenced_block<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 /// Fallback TOML extraction for agent output that lacks fenced code blocks.
 ///
 /// Scans for a `[meta]` section header and returns everything from that point
-/// to the end of the string, provided it also contains at least one `[[task]]`.
+/// up to the end of the TOML content, provided it also contains at least one
+/// `[[task]]`.  Trailing explanatory text (markdown headings, horizontal rules,
+/// prose paragraphs after a blank line) is trimmed so that `toml::from_str`
+/// doesn't choke on non-TOML content the LLM appended after the plan.
 fn extract_toml_content_fallback(output: &str) -> Option<&str> {
     let meta_start = output.find("[meta]")?;
     // Find the start of the line containing [meta]
     let line_start = output[..meta_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let candidate = output[line_start..].trim();
-    if candidate.contains("[[task]]") {
-        Some(candidate)
-    } else {
+    let candidate = &output[line_start..];
+    if !candidate.contains("[[task]]") {
+        return None;
+    }
+
+    // Walk lines and find the last one that looks like TOML content.
+    // Stop when we hit lines that are clearly markdown/prose trailing text.
+    let mut last_toml_end = 0; // byte offset into `candidate`
+    let mut saw_blank = false;
+    for line in candidate.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            saw_blank = true;
+            // A blank line inside TOML is fine (between sections), so we don't
+            // stop yet — only if the *next* non-blank line looks non-TOML.
+            last_toml_end += line.len() + 1; // +1 for '\n'
+            continue;
+        }
+
+        // Lines that are clearly not TOML — stop here.
+        if trimmed.starts_with("## ")
+            || trimmed.starts_with("---")
+            || trimmed.starts_with("**")
+            || trimmed.starts_with("> ")
+            || trimmed.starts_with("Note:")
+            || trimmed.starts_with("NOTE:")
+        {
+            break;
+        }
+
+        // After a blank line, the next non-blank line must still look like TOML
+        // (contains `=`, starts with `[`, or is a `"""` / `'''` continuation).
+        if saw_blank
+            && !trimmed.contains('=')
+            && !trimmed.starts_with('[')
+            && !trimmed.starts_with('"')
+            && !trimmed.starts_with('\'')
+            && !trimmed.starts_with('#') // TOML comment
+        {
+            break;
+        }
+
+        saw_blank = false;
+        last_toml_end += line.len() + 1;
+    }
+
+    let result = candidate[..last_toml_end].trim();
+    if result.is_empty() || !result.contains("[[task]]") {
         None
+    } else {
+        Some(result)
     }
 }
 
@@ -2525,6 +2633,70 @@ mod tests {
         let block = extract_fenced_block(text, "toml").unwrap();
         assert!(block.contains("first = true"));
         assert!(!block.contains("second = true"));
+    }
+
+    #[test]
+    fn fallback_extracts_clean_toml() {
+        let text = "[meta]\nplan = \"test\"\ntotal = 2\nstatus = \"ready\"\n\n\
+                    [[task]]\nid = \"T1\"\ntitle = \"First\"\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(block.contains("[meta]"));
+        assert!(block.contains("[[task]]"));
+    }
+
+    #[test]
+    fn fallback_trims_trailing_markdown() {
+        let text = "Here is your plan:\n\n\
+                    [meta]\nplan = \"test\"\ntotal = 1\nstatus = \"ready\"\n\n\
+                    [[task]]\nid = \"T1\"\ntitle = \"Do stuff\"\n\n\
+                    ## Notes\n\nThis plan covers the main requirements.\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(block.contains("[meta]"));
+        assert!(block.contains("[[task]]"));
+        assert!(
+            !block.contains("## Notes"),
+            "should trim trailing markdown heading"
+        );
+        assert!(
+            !block.contains("This plan covers"),
+            "should trim trailing prose"
+        );
+    }
+
+    #[test]
+    fn fallback_trims_trailing_horizontal_rule() {
+        let text = "[meta]\nplan = \"x\"\ntotal = 1\nstatus = \"ready\"\n\n\
+                    [[task]]\nid = \"T1\"\ntitle = \"A\"\n\n\
+                    ---\n\nSome explanation here.\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(!block.contains("---"), "should trim trailing hr");
+        assert!(!block.contains("explanation"));
+    }
+
+    #[test]
+    fn fallback_trims_trailing_prose_after_blank() {
+        let text = "[meta]\nplan = \"x\"\ntotal = 1\nstatus = \"ready\"\n\n\
+                    [[task]]\nid = \"T1\"\ntitle = \"A\"\n\n\
+                    This plan implements the feature as described in the PRD.\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(
+            !block.contains("This plan implements"),
+            "should trim trailing prose paragraph"
+        );
+    }
+
+    #[test]
+    fn fallback_preserves_toml_comments() {
+        let text = "[meta]\nplan = \"x\"\ntotal = 1\nstatus = \"ready\"\n\n\
+                    # Task section\n[[task]]\nid = \"T1\"\ntitle = \"A\"\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(block.contains("# Task section"), "TOML comments should be kept");
+    }
+
+    #[test]
+    fn fallback_returns_none_without_task() {
+        let text = "[meta]\nplan = \"x\"\n";
+        assert!(extract_toml_content_fallback(text).is_none());
     }
 
     #[test]
