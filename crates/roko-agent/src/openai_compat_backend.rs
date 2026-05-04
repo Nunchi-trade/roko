@@ -75,6 +75,9 @@ pub struct OpenAiCompatLlmBackend {
     /// When set, the first `response.chunk()` call is wrapped with
     /// `tokio::time::timeout` so slow providers fail fast.
     ttft_timeout_ms: Option<u64>,
+    /// When true, emit `max_completion_tokens` instead of `max_tokens` in
+    /// request bodies. Required for newer OpenAI models (o1, o3, gpt-5.x).
+    use_max_completion_tokens: bool,
 }
 
 impl OpenAiCompatLlmBackend {
@@ -100,6 +103,7 @@ impl OpenAiCompatLlmBackend {
             disable_parallel_tool_calls: false,
             normalize_tool_call_content: false,
             ttft_timeout_ms: None,
+            use_max_completion_tokens: false,
         }
     }
 
@@ -204,6 +208,16 @@ impl OpenAiCompatLlmBackend {
         self
     }
 
+    /// Emit `max_completion_tokens` instead of `max_tokens` in request bodies.
+    ///
+    /// Newer OpenAI models (o1, o3, gpt-4o, gpt-5.x) reject `max_tokens`
+    /// and require `max_completion_tokens`.
+    #[must_use]
+    pub const fn with_use_max_completion_tokens(mut self, use_it: bool) -> Self {
+        self.use_max_completion_tokens = use_it;
+        self
+    }
+
     fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
@@ -252,7 +266,12 @@ impl OpenAiCompatLlmBackend {
 
         if let Some(body_obj) = body.as_object_mut() {
             if let Some(max_tokens) = self.max_tokens {
-                body_obj.insert("max_tokens".to_string(), Value::from(max_tokens));
+                let key = if self.use_max_completion_tokens {
+                    "max_completion_tokens"
+                } else {
+                    "max_tokens"
+                };
+                body_obj.insert(key.to_string(), Value::from(max_tokens));
             }
             if !self.skip_session_fields {
                 if let Some(session_id) = &session.session_id {
@@ -776,6 +795,26 @@ mod tests {
         assert_eq!(requests[0].body["model"], "glm-5.1");
         assert_eq!(requests[0].body["thinking"]["type"], "enabled");
         assert_eq!(requests[0].body["tools"][0]["function"]["name"], "echo");
+    }
+
+    #[test]
+    fn build_body_can_use_max_completion_tokens() {
+        let backend = OpenAiCompatLlmBackend::new("test-key", "gpt-5.4")
+            .with_max_tokens(256)
+            .with_use_max_completion_tokens(true);
+        let body = backend
+            .build_body(
+                &[serde_json::json!({"role": "user", "content": "hello"})],
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+                false,
+            )
+            .expect("build body");
+        let parsed: Value = serde_json::from_slice(&body).expect("request body json");
+
+        assert_eq!(parsed["model"], "gpt-5.4");
+        assert_eq!(parsed["max_completion_tokens"], 256);
+        assert!(parsed.get("max_tokens").is_none());
     }
 
     #[test]

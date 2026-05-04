@@ -59,6 +59,7 @@ pub fn create_openai_compat_backend(
                 .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                 .with_extra_body_params(build_extra_body_params(provider, model))
                 .with_skip_session_fields(true)
+                .with_use_max_completion_tokens(model.use_max_completion_tokens)
                 .with_ttft_timeout_ms(provider.ttft_timeout_ms)
                 .with_poster(Box::new(SharedHttpPoster { inner: poster }));
             Ok(Arc::new(backend))
@@ -452,6 +453,7 @@ mod tests {
             is_embedding_model: false,
             search_context_size: None,
             cost_per_request: None,
+            use_max_completion_tokens: false,
             tier: None,
         };
         let backend = create_tool_loop_backend(

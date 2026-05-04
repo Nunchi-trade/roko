@@ -1362,6 +1362,7 @@ mod tests {
             is_embedding_model: false,
             search_context_size: None,
             cost_per_request: None,
+            use_max_completion_tokens: false,
             tier: None,
         };
 
@@ -1408,6 +1409,7 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
+                use_max_completion_tokens: false,
                 tier: None,
             },
         );
@@ -1444,6 +1446,7 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
+                use_max_completion_tokens: false,
                 tier: None,
             },
         );

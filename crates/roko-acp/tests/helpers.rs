@@ -317,6 +317,7 @@ fn build_mock_config(base_url: &str, timeout_ms: u64) -> RokoConfig {
             cost_cache_read_per_m: Some(0.75),
             cost_cache_write_per_m: Some(3.75),
             thinking_level: None,
+            use_max_completion_tokens: false,
             max_tools: Some(64),
             tokenizer_ratio: Some(1.0),
             supports_search: false,

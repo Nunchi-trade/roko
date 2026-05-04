@@ -382,6 +382,7 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 tier = "standard"
+use_max_completion_tokens = true
 
 [models.gpt54]
 provider = "openai"
@@ -403,6 +404,7 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 tier = "premium"
+use_max_completion_tokens = true
 
 [models.kimi-k2-5]
 provider = "moonshot"
@@ -680,6 +682,7 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 tier = "premium"
+use_max_completion_tokens = true
 
 [models.llama32]
 provider = "ollama"

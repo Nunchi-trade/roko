@@ -398,6 +398,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .with_base_url(base_url_for_codex(provider))
             .with_timeout_ms(timeout)
             .with_max_tokens(max_tokens)
+            .with_use_max_completion_tokens(model.use_max_completion_tokens)
             .with_extra_headers(extra_headers)
             .with_extra_body_params(extra_body_params)
             .with_name(agent_name);

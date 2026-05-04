@@ -454,6 +454,10 @@ pub struct ModelProfile {
     /// fall back to heuristic detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<crate::agent::ModelTier>,
+    /// Whether this model uses `max_completion_tokens` instead of `max_tokens`.
+    /// Required for newer OpenAI models (o1, o3, gpt-4o, gpt-5.x, etc.).
+    #[serde(default)]
+    pub use_max_completion_tokens: bool,
 }
 
 // ---- Gemini config -------------------------------------------------------
