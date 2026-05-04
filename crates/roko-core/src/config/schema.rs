@@ -1335,6 +1335,31 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::fmt::MakeWriter;
 
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root")
+    }
+
+    fn assert_configured_models_have_max_output(rel_path: &str) {
+        let path = workspace_root().join(rel_path);
+        let text = std::fs::read_to_string(&path).expect("read roko config");
+        let cfg = RokoConfig::from_toml(&text).expect("parse roko config");
+        let missing: Vec<_> = cfg
+            .models
+            .iter()
+            .filter(|(_, model)| !model.is_embedding_model && model.max_output.is_none())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} has models without max_output: {:?}",
+            path.display(),
+            missing
+        );
+    }
+
     #[derive(Clone, Default)]
     struct SharedLogBuffer {
         inner: Arc<Mutex<Vec<u8>>>,
@@ -1601,7 +1626,7 @@ default_model = "claude-sonnet-4-6"
 
     #[test]
     fn effective_models_backwards_compat() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../roko.toml");
+        let path = workspace_root().join("roko.toml");
         let text = std::fs::read_to_string(path).expect("read roko.toml");
         let cfg = RokoConfig::from_toml(&text).expect("parse roko.toml");
         let models = cfg.effective_models();
@@ -1614,6 +1639,12 @@ default_model = "claude-sonnet-4-6"
             !default_model.provider.is_empty(),
             "default model must declare a provider"
         );
+    }
+
+    #[test]
+    fn project_model_profiles_have_explicit_max_output() {
+        assert_configured_models_have_max_output("roko.toml");
+        assert_configured_models_have_max_output("docker/railway.roko.toml");
     }
 
     #[test]
