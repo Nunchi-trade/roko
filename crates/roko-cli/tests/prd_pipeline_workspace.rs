@@ -9,9 +9,12 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 const FIXTURE: &str = "mock-prd-pipeline-fixture";
+const WRITE_THEN_FAIL_FIXTURE: &str = "mock-prd-draft-write-then-fail-fixture";
 const IDEA: &str = "Build a workspace anchored PRD pipeline";
 const TITLE: &str = "workspace anchored feature";
 const SLUG: &str = "workspace-anchored-feature";
+const WRITE_THEN_FAIL_TITLE: &str = "failing but written";
+const WRITE_THEN_FAIL_SLUG: &str = "failing-but-written";
 
 #[test]
 fn explicit_repo_prd_pipeline_artifacts_stay_in_selected_workspace() {
@@ -25,7 +28,7 @@ fn explicit_repo_prd_pipeline_artifacts_stay_in_selected_workspace() {
     common::init_workspace(decoy_root);
     common::seed_minimal_rust_project(decoy_root);
 
-    run_roko_from(decoy_root, selected_root, &["prd", "idea", IDEA]).success();
+    run_roko_from(decoy_root, selected_root, FIXTURE, &["prd", "idea", IDEA]).success();
 
     let selected_ideas = read(selected_root.join(".roko/prd/ideas.md"));
     assert!(
@@ -38,7 +41,13 @@ fn explicit_repo_prd_pipeline_artifacts_stay_in_selected_workspace() {
         "decoy workspace received idea despite --repo:\n{decoy_ideas}"
     );
 
-    run_roko_from(decoy_root, selected_root, &["prd", "draft", "new", TITLE]).success();
+    run_roko_from(
+        decoy_root,
+        selected_root,
+        FIXTURE,
+        &["prd", "draft", "new", TITLE],
+    )
+    .success();
 
     let selected_draft = selected_root
         .join(".roko/prd/drafts")
@@ -59,6 +68,7 @@ fn explicit_repo_prd_pipeline_artifacts_stay_in_selected_workspace() {
     run_roko_from(
         decoy_root,
         selected_root,
+        FIXTURE,
         &["prd", "draft", "promote", SLUG],
     )
     .success();
@@ -72,7 +82,7 @@ fn explicit_repo_prd_pipeline_artifacts_stay_in_selected_workspace() {
         selected_published.display()
     );
 
-    run_roko_from(decoy_root, selected_root, &["prd", "plan", SLUG]).success();
+    run_roko_from(decoy_root, selected_root, FIXTURE, &["prd", "plan", SLUG]).success();
 
     let selected_plan_dir = selected_root.join(".roko/plans").join(SLUG);
     let selected_tasks = selected_plan_dir.join("tasks.toml");
@@ -101,12 +111,38 @@ fn explicit_repo_prd_pipeline_artifacts_stay_in_selected_workspace() {
     run_roko_from(
         decoy_root,
         selected_root,
+        FIXTURE,
         &["plan", "validate", ".roko/plans"],
     )
     .success();
 }
 
-fn run_roko_from(current_dir: &Path, repo: &Path, args: &[&str]) -> Assert {
+#[test]
+fn prd_draft_new_succeeds_when_agent_writes_draft_then_exits_nonzero() {
+    let workspace = TempDir::new().expect("workspace");
+    let root = workspace.path();
+    common::init_workspace(root);
+    common::seed_minimal_rust_project(root);
+
+    run_roko_from(
+        root,
+        root,
+        WRITE_THEN_FAIL_FIXTURE,
+        &["prd", "draft", "new", WRITE_THEN_FAIL_TITLE],
+    )
+    .success();
+
+    let draft_path = root
+        .join(".roko/prd/drafts")
+        .join(format!("{WRITE_THEN_FAIL_SLUG}.md"));
+    let draft = read(&draft_path);
+    assert!(
+        draft.contains("REQ-001"),
+        "draft written before non-zero exit was not preserved:\n{draft}"
+    );
+}
+
+fn run_roko_from(current_dir: &Path, repo: &Path, fixture: &str, args: &[&str]) -> Assert {
     Command::cargo_bin("roko")
         .expect("roko binary")
         .current_dir(current_dir)
@@ -114,18 +150,18 @@ fn run_roko_from(current_dir: &Path, repo: &Path, args: &[&str]) -> Assert {
         .arg(repo)
         .args(args)
         .env("HOME", repo)
-        .env("ROKO_DISPATCHER", FIXTURE)
-        .env("ROKO_MOCK_STATE_PATH", mock_state_path(repo))
+        .env("ROKO_DISPATCHER", fixture)
+        .env("ROKO_MOCK_STATE_PATH", mock_state_path(repo, fixture))
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("XDG_CONFIG_HOME")
         .assert()
 }
 
-fn mock_state_path(workdir: &Path) -> PathBuf {
+fn mock_state_path(workdir: &Path, fixture: &str) -> PathBuf {
     workdir
         .join(".roko")
         .join("state")
-        .join("prd-pipeline-fixture-turn.txt")
+        .join(format!("{fixture}-turn.txt"))
 }
 
 fn read(path: impl AsRef<Path>) -> String {

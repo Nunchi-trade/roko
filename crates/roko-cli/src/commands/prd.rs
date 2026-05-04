@@ -420,9 +420,9 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     path = target.display(),
                     context_suffix = context_suffix
                 );
-                // Snapshot file mtime before agent runs so we can detect
-                // whether a CLI agent wrote the file directly.
-                let mtime_before = std::fs::metadata(&target).and_then(|m| m.modified()).ok();
+                // Snapshot file bytes before the agent runs so direct writes
+                // are detected even on coarse-mtime filesystems.
+                let content_before = std::fs::read(&target).ok();
 
                 let started = Instant::now();
                 let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
@@ -438,17 +438,20 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 .await?;
 
                 // Check if the agent already wrote the file (CLI agents with tools).
-                let mtime_after = std::fs::metadata(&target).and_then(|m| m.modified()).ok();
-                let file_was_modified = match (mtime_before, mtime_after) {
-                    (Some(before), Some(after)) => after > before,
+                let content_after = std::fs::read(&target).ok();
+                let file_was_modified = match (&content_before, &content_after) {
+                    (Some(before), Some(after)) => before != after,
+                    (None, Some(_)) => true,
                     _ => false,
                 };
 
+                let mut draft_written = false;
                 if file_was_modified {
                     // Agent wrote the file directly — verify it has content.
                     let content = std::fs::read_to_string(&target).unwrap_or_default();
                     let has_content = roko_cli::prd::has_substantive_markdown_content(&content);
                     if has_content {
+                        draft_written = true;
                         println!("📄 Draft written to {}", target.display());
                     } else {
                         eprintln!(
@@ -456,13 +459,21 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                             target.display()
                         );
                     }
-                } else if exit_code == 0 && !output.trim().is_empty() {
+                } else if !output.trim().is_empty() {
                     // Agent returned content as text — write it to the file.
                     let content =
                         roko_cli::prd::materialize_agent_markdown_output(&output, Some(&scaffold))
                             .unwrap_or_else(|| scaffold.clone());
-                    std::fs::write(&target, content)?;
-                    println!("📄 Draft written to {}", target.display());
+                    if roko_cli::prd::has_substantive_markdown_content(&content) {
+                        std::fs::write(&target, content)?;
+                        draft_written = true;
+                        println!("📄 Draft written to {}", target.display());
+                    } else {
+                        let _ = std::fs::remove_file(&target);
+                        eprintln!(
+                            "Agent output did not contain a substantive PRD — no draft created."
+                        );
+                    }
                 } else if exit_code != 0 {
                     let _ = std::fs::remove_file(&target);
                     eprintln!("Agent failed (exit {exit_code}) — no draft created.");
@@ -470,7 +481,15 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     let _ = std::fs::remove_file(&target);
                     eprintln!("Agent returned empty output — no draft created.");
                 }
-                let workspace_members: Vec<String> = if exit_code == 0 {
+
+                let artifact_success = draft_written && target.is_file();
+                if artifact_success && exit_code != 0 {
+                    eprintln!(
+                        "Agent exited with {exit_code}, but the draft artifact was written; treating draft creation as successful."
+                    );
+                }
+
+                let workspace_members: Vec<String> = if artifact_success {
                     let crates_dir = workdir.join("crates");
                     let mut workspace_members: Vec<String> = Vec::new();
                     if let Ok(entries) = std::fs::read_dir(&crates_dir) {
@@ -489,7 +508,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     Vec::new()
                 };
                 // Post-generation grounding check and semantic validation.
-                let validation_report: Option<ArtifactValidationReport> = if exit_code == 0 {
+                let validation_report: Option<ArtifactValidationReport> = if artifact_success {
                     if let Ok(written_content) = std::fs::read_to_string(&target) {
                         check_grounding_section(&written_content, &slug);
 
@@ -513,7 +532,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 } else {
                     None
                 };
-                if exit_code == 0 {
+                if artifact_success {
                     if let Some(ref pack) = repo_context_pack {
                         persist_context_sidecar(&drafts, &slug, pack);
                     }
@@ -549,12 +568,18 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     &format!("prd:draft:new:{slug}"),
                     &task_prompt,
                     &output,
-                    exit_code == 0,
+                    artifact_success,
                     started.elapsed().as_millis() as u64,
                     resume_session,
                 )
                 .await;
-                Ok(exit_code)
+                Ok(if artifact_success {
+                    0
+                } else if exit_code == 0 {
+                    1
+                } else {
+                    exit_code
+                })
             }
             PrdDraftCmd::Edit { slug } => {
                 let draft = roko_cli::workspace_paths::draft_prd_path(&workdir, &slug);
