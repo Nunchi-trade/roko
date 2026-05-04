@@ -171,6 +171,18 @@ pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 /// Heartbeat ring buffer capacity.
 pub const DEFAULT_HEARTBEAT_RING_CAPACITY: usize = 500;
 
+/// Default staleness threshold for relay-sourced data (seconds).
+pub const DEFAULT_RELAY_STALE_THRESHOLD_SECS: u64 = 30;
+
+/// Number of consecutive relay heartbeat failures before backoff starts.
+pub const DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+
+/// Base relay circuit-breaker backoff duration (seconds).
+pub const DEFAULT_RELAY_CIRCUIT_BREAKER_BASE_BACKOFF_SECS: u64 = 2;
+
+/// Maximum relay circuit-breaker backoff duration (seconds).
+pub const DEFAULT_RELAY_CIRCUIT_BREAKER_MAX_BACKOFF_SECS: u64 = 60;
+
 // ── Alerting ────────────────────────────────────────────────────────────
 
 /// Default failure rate threshold for anomaly alerts (25%).
@@ -275,6 +287,18 @@ mod tests {
     fn shutdown_drain_is_reasonable() {
         assert!(DEFAULT_SHUTDOWN_DRAIN_SECS >= 5);
         assert!(DEFAULT_SHUTDOWN_DRAIN_SECS <= 60);
+    }
+
+    #[test]
+    fn relay_backoff_defaults_are_ordered() {
+        assert!(DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD > 0);
+        assert!(
+            DEFAULT_RELAY_CIRCUIT_BREAKER_BASE_BACKOFF_SECS
+                < DEFAULT_RELAY_CIRCUIT_BREAKER_MAX_BACKOFF_SECS
+        );
+        assert!(
+            DEFAULT_RELAY_STALE_THRESHOLD_SECS < DEFAULT_RELAY_CIRCUIT_BREAKER_MAX_BACKOFF_SECS
+        );
     }
 
     #[test]

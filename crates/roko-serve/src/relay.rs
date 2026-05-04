@@ -149,19 +149,6 @@ impl RelayHealth {
     }
 }
 
-/// Default staleness threshold in seconds (30s).
-pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 30;
-
-/// Number of consecutive heartbeat failures before the circuit breaker opens
-/// and exponential backoff kicks in.
-const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
-
-/// Maximum backoff duration (60 seconds).
-const MAX_BACKOFF_SECS: u64 = 60;
-
-/// Base backoff duration (2 seconds), doubled for each failure beyond the threshold.
-const BASE_BACKOFF_SECS: u64 = 2;
-
 // ---------------------------------------------------------------------------
 // Workspace registration (roko-serve → relay)
 // ---------------------------------------------------------------------------
@@ -170,8 +157,16 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use roko_core::config::schema::RelayConfig;
+use roko_core::defaults::{
+    DEFAULT_RELAY_CIRCUIT_BREAKER_BASE_BACKOFF_SECS,
+    DEFAULT_RELAY_CIRCUIT_BREAKER_MAX_BACKOFF_SECS, DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD,
+    DEFAULT_RELAY_STALE_THRESHOLD_SECS,
+};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
+
+/// Default staleness threshold in seconds.
+pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = DEFAULT_RELAY_STALE_THRESHOLD_SECS;
 
 /// Resolve the public URL for this roko instance.
 ///
@@ -203,15 +198,16 @@ fn resolve_workspace_name(config: &RelayConfig) -> String {
 
 /// Compute the backoff delay for the circuit breaker.
 ///
-/// After `CIRCUIT_BREAKER_THRESHOLD` consecutive failures, applies exponential
-/// backoff: `min(BASE_BACKOFF_SECS * 2^(failures - threshold), MAX_BACKOFF_SECS)`.
+/// After `DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD` consecutive failures, applies
+/// exponential backoff capped by the relay defaults.
 fn circuit_breaker_backoff(consecutive_failures: u32) -> std::time::Duration {
-    if consecutive_failures < CIRCUIT_BREAKER_THRESHOLD {
+    if consecutive_failures < DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD {
         return std::time::Duration::ZERO;
     }
-    let exponent = consecutive_failures.saturating_sub(CIRCUIT_BREAKER_THRESHOLD);
-    let backoff_secs = BASE_BACKOFF_SECS.saturating_mul(1u64 << exponent.min(30));
-    std::time::Duration::from_secs(backoff_secs.min(MAX_BACKOFF_SECS))
+    let exponent = consecutive_failures.saturating_sub(DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD);
+    let backoff_secs =
+        DEFAULT_RELAY_CIRCUIT_BREAKER_BASE_BACKOFF_SECS.saturating_mul(1u64 << exponent.min(30));
+    std::time::Duration::from_secs(backoff_secs.min(DEFAULT_RELAY_CIRCUIT_BREAKER_MAX_BACKOFF_SECS))
 }
 
 /// Transition the shared relay health to `Degraded` state.
@@ -339,7 +335,7 @@ pub fn start_workspace_registration(
                         consecutive_failures,
                         "relay heartbeat returned non-success, re-registering"
                     );
-                    if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+                    if consecutive_failures >= DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD {
                         mark_degraded(
                             &relay_health,
                             &relay_url,
@@ -363,7 +359,7 @@ pub fn start_workspace_registration(
                         consecutive_failures,
                         "relay heartbeat failed"
                     );
-                    if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+                    if consecutive_failures >= DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD {
                         mark_degraded(&relay_health, &relay_url, &format!("heartbeat error: {e}"));
                     }
                 }
@@ -393,7 +389,7 @@ mod tests {
 
     #[test]
     fn fresh_data_is_not_stale() {
-        let freshness = DataFreshness::new(30);
+        let freshness = DataFreshness::new(DEFAULT_STALE_THRESHOLD_SECS);
         assert!(!freshness.stale);
         assert_eq!(freshness.age_secs, 0);
     }
@@ -404,7 +400,7 @@ mod tests {
             last_confirmed_at: 0,
             stale: true,
             age_secs: 999,
-            stale_threshold_secs: 30,
+            stale_threshold_secs: DEFAULT_STALE_THRESHOLD_SECS,
         };
         freshness.mark_confirmed();
         assert!(!freshness.stale);
@@ -414,10 +410,10 @@ mod tests {
     #[test]
     fn check_detects_stale_data() {
         let mut freshness = DataFreshness {
-            last_confirmed_at: now_epoch_secs().saturating_sub(60),
+            last_confirmed_at: now_epoch_secs().saturating_sub(DEFAULT_STALE_THRESHOLD_SECS * 2),
             stale: false,
             age_secs: 0,
-            stale_threshold_secs: 30,
+            stale_threshold_secs: DEFAULT_STALE_THRESHOLD_SECS,
         };
         freshness.check();
         assert!(freshness.stale);
@@ -428,7 +424,7 @@ mod tests {
     fn relay_health_direct_and_fresh_is_healthy() {
         let health = RelayHealth {
             connection: RelayConnectionState::Direct,
-            freshness: DataFreshness::new(30),
+            freshness: DataFreshness::new(DEFAULT_STALE_THRESHOLD_SECS),
             heartbeat: None,
         };
         assert!(health.is_healthy());
@@ -442,7 +438,7 @@ mod tests {
                 since: "2026-04-21T00:00:00Z".into(),
                 reason: "connection refused".into(),
             },
-            freshness: DataFreshness::new(30),
+            freshness: DataFreshness::new(DEFAULT_STALE_THRESHOLD_SECS),
             heartbeat: None,
         };
         assert!(!health.is_healthy());
@@ -450,8 +446,9 @@ mod tests {
 
     #[test]
     fn relay_health_stale_data_is_not_healthy() {
-        let mut freshness = DataFreshness::new(30);
-        freshness.last_confirmed_at = now_epoch_secs().saturating_sub(60);
+        let mut freshness = DataFreshness::new(DEFAULT_STALE_THRESHOLD_SECS);
+        freshness.last_confirmed_at =
+            now_epoch_secs().saturating_sub(DEFAULT_STALE_THRESHOLD_SECS * 2);
         freshness.check();
 
         let health = RelayHealth {
@@ -471,24 +468,24 @@ mod tests {
 
     #[test]
     fn circuit_breaker_no_backoff_below_threshold() {
-        assert_eq!(circuit_breaker_backoff(0), std::time::Duration::ZERO);
-        assert_eq!(circuit_breaker_backoff(1), std::time::Duration::ZERO);
-        assert_eq!(circuit_breaker_backoff(2), std::time::Duration::ZERO);
+        for failures in 0..DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD {
+            assert_eq!(circuit_breaker_backoff(failures), std::time::Duration::ZERO);
+        }
     }
 
     #[test]
     fn circuit_breaker_exponential_backoff_at_threshold() {
         assert_eq!(
-            circuit_breaker_backoff(3),
-            std::time::Duration::from_secs(2)
+            circuit_breaker_backoff(DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD),
+            std::time::Duration::from_secs(DEFAULT_RELAY_CIRCUIT_BREAKER_BASE_BACKOFF_SECS)
         );
         assert_eq!(
-            circuit_breaker_backoff(4),
-            std::time::Duration::from_secs(4)
+            circuit_breaker_backoff(DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD + 1),
+            std::time::Duration::from_secs(DEFAULT_RELAY_CIRCUIT_BREAKER_BASE_BACKOFF_SECS * 2)
         );
         assert_eq!(
-            circuit_breaker_backoff(5),
-            std::time::Duration::from_secs(8)
+            circuit_breaker_backoff(DEFAULT_RELAY_CIRCUIT_BREAKER_THRESHOLD + 2),
+            std::time::Duration::from_secs(DEFAULT_RELAY_CIRCUIT_BREAKER_BASE_BACKOFF_SECS * 4)
         );
     }
 
@@ -496,7 +493,7 @@ mod tests {
     fn circuit_breaker_caps_at_max() {
         assert_eq!(
             circuit_breaker_backoff(100),
-            std::time::Duration::from_secs(MAX_BACKOFF_SECS)
+            std::time::Duration::from_secs(DEFAULT_RELAY_CIRCUIT_BREAKER_MAX_BACKOFF_SECS)
         );
     }
 
