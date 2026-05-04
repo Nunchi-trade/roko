@@ -7,7 +7,7 @@ use roko_core::config::schema::{ProviderConfig, RokoConfig};
 use roko_learn::cascade_router::CascadeRouter;
 use thiserror::Error;
 
-use crate::config_helpers::{find_role_override, load_roko_config};
+use crate::config_helpers::find_role_override;
 
 /// Provenance for the selected model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,7 +196,8 @@ pub fn resolve_effective_model_key(
     role: Option<&str>,
     context: &str,
 ) -> anyhow::Result<String> {
-    let config = load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let selection = resolve_effective_model(
         cli_model,
         None,

@@ -4,7 +4,7 @@
 //! and by the combined registry loader.
 
 use anyhow::{Context as _, Result, anyhow};
-use roko_core::config::schema::{RokoConfig, SubscriptionConfig};
+use roko_core::config::schema::SubscriptionConfig;
 use roko_serve::dispatch::SubscriptionRegistry;
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -118,7 +118,8 @@ pub fn cmd_set_enabled(workdir: &Path, id: &str, enabled: bool) -> Result<()> {
 }
 
 fn load_registry(workdir: &Path) -> Result<SubscriptionRegistry> {
-    let config = load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(SubscriptionRegistry::load_from_project(workdir, &config))
 }
 
@@ -244,10 +245,6 @@ fn write_subscription_file(path: &Path, config: &SubscriptionConfig) -> Result<(
     let rendered = toml::to_string_pretty(config).context("serialize subscription")?;
     fs::write(path, rendered).with_context(|| format!("write {}", path.display()))?;
     Ok(())
-}
-
-fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]

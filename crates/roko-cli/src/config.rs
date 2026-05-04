@@ -827,11 +827,15 @@ impl RepoRegistry {
         repo_name: &str,
     ) -> Result<(Option<RokoConfig>, Option<PathBuf>)> {
         let path = root.join(".roko").join("roko.toml");
-        if !path.is_file() {
-            return Ok((None, None));
-        }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("read repo config {}", path.display()))?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("read repo config {}", path.display()))
+                );
+            }
+        };
         let config = RokoConfig::from_toml(&text)
             .map_err(|err| anyhow!(err))
             .with_context(|| {
@@ -2835,10 +2839,15 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
         });
     }
 
-    let global_layer = if paths.global.is_file() {
-        ConfigLayer::from_file(&paths.global)?
-    } else {
-        ConfigLayer::default()
+    let global_layer = match std::fs::read_to_string(&paths.global) {
+        Ok(text) => ConfigLayer::parse_toml(&text)
+            .with_context(|| format!("parse config {}", paths.global.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ConfigLayer::default(),
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("read config {}", paths.global.display()))
+            );
+        }
     };
     let project_layer = match &paths.project {
         Some(p) => ConfigLayer::from_file(p)?,

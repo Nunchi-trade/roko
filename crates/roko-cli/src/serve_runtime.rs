@@ -472,10 +472,13 @@ fn load_effective_roko_config(
 }
 
 fn load_roko_config_file(path: &Path) -> anyhow::Result<Option<RokoConfig>> {
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("read {}", path.display())));
+        }
+    };
     let config =
         RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))?;
     Ok(Some(config))

@@ -1,5 +1,6 @@
 //! Main ACP dispatch loop.
 
+use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
@@ -24,12 +25,47 @@ use crate::{
 
 /// Runs the ACP stdio server until stdin reaches EOF or a fatal transport error occurs.
 pub async fn run_acp_server(config: AcpConfig) -> Result<()> {
-    let _guard = setup_file_logging(config.log_file()).with_context(|| {
-        format!(
-            "failed to initialize ACP logging at {}",
-            config.log_file().display()
-        )
-    })?;
+    match run_acp_server_inner(config).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Send JSON-RPC error on stdout so the editor (e.g. Zed) can display it
+            // instead of showing a silent "server shut down unexpectedly" message.
+            let error_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {
+                    "code": -32603,
+                    "message": format!("ACP server failed to start: {e:#}")
+                }
+            });
+            let _ = writeln!(std::io::stdout(), "{error_response}");
+            Err(e)
+        }
+    }
+}
+
+async fn run_acp_server_inner(config: AcpConfig) -> Result<()> {
+    // Ensure .roko/ workspace directory exists before any file operations.
+    let workdir = config
+        .workdir
+        .canonicalize()
+        .unwrap_or_else(|_| config.workdir.clone());
+    let roko_dir = workdir.join(".roko");
+    if let Err(e) = std::fs::create_dir_all(&roko_dir) {
+        // Non-fatal — we'll fall back to /tmp for logging.
+        eprintln!("warning: cannot create .roko/: {e}");
+    }
+
+    let _guard = setup_file_logging(config.log_file())
+        .or_else(|e| {
+            // Fallback: log to /tmp if .roko/ is unavailable.
+            let fallback =
+                std::env::temp_dir().join(format!("roko-acp-{}.log", std::process::id()));
+            eprintln!("warning: {e}, falling back to {}", fallback.display());
+            setup_file_logging(&fallback)
+        })
+        .with_context(|| "failed to initialize ACP logging")?;
+
     let mut transport = StdioTransport::new();
     run_acp_server_with_transport(config, &mut transport).await
 }

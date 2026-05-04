@@ -586,8 +586,9 @@ impl ChatAgentSession {
     }
 
     fn model_call_config(&self) -> RokoConfig {
-        let mut config =
-            crate::config_helpers::load_roko_config(&self.workdir).unwrap_or_else(|err| {
+        let mut config = roko_core::config::loader::load_config_unified(&self.workdir)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .unwrap_or_else(|err| {
                 tracing::warn!(
                     workdir = %self.workdir.display(),
                     error = %err,

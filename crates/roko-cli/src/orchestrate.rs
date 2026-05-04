@@ -1272,11 +1272,12 @@ fn crate_root_for_path(path: &str) -> Option<PathBuf> {
 }
 
 fn collect_crate_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-
-    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("read {}", dir.display()))),
+    };
+    for entry in entries {
         let entry = entry.with_context(|| format!("read entry in {}", dir.display()))?;
         let path = entry.path();
         if path.is_dir() {
@@ -1293,9 +1294,7 @@ fn read_full_crate_source(crate_root: &Path) -> Result<String> {
     let mut files = Vec::new();
 
     for path in [crate_root.join("Cargo.toml"), crate_root.join("build.rs")] {
-        if path.is_file() {
-            files.push(path);
-        }
+        files.push(path);
     }
     for dir in ["src", "tests", "benches", "examples"] {
         collect_crate_source_files(&crate_root.join(dir), &mut files)?;
@@ -1306,8 +1305,11 @@ fn read_full_crate_source(crate_root: &Path) -> Result<String> {
 
     let mut combined = String::new();
     for path in files {
-        let contents =
-            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(anyhow::Error::new(e).context(format!("read {}", path.display()))),
+        };
         let relative = path.strip_prefix(crate_root).unwrap_or(path.as_path());
         combined.push_str(&format!(
             "// FILE: {}\n{}\n\n",
@@ -1843,33 +1845,13 @@ fn selected_enrichment_steps(complexity: TaskComplexityBand) -> Vec<EnrichStep> 
     StepSelector::new().select_steps(complexity, ALL_ORDERED)
 }
 
-fn resolve_enrichment_backend(command: &str, model: &str, provider: &str) -> EnrichmentLlmBackend {
-    let command = command.to_ascii_lowercase();
-    let model = model.to_ascii_lowercase();
-    let provider = provider.to_ascii_lowercase();
-
-    if command.contains("cursor") || provider.contains("cursor") || model.contains("composer") {
-        EnrichmentLlmBackend::Cursor
-    } else if command.contains("ollama")
-        || provider.contains("ollama")
-        || model.contains("gemma")
-        || model.contains("llama")
-        || model.contains("qwen")
-    {
-        EnrichmentLlmBackend::Ollama
-    } else if command.contains("codex")
-        || command.contains("openai")
-        || provider.contains("openai")
-        || provider.contains("zai")
-        || provider.contains("gemini")
-        || model.contains("gpt")
-        || model.contains("o3")
-        || model.contains("o4")
-        || model.contains("gemini")
-    {
-        EnrichmentLlmBackend::Codex
-    } else {
-        EnrichmentLlmBackend::Claude
+fn resolve_enrichment_backend(provider_kind: &str) -> EnrichmentLlmBackend {
+    match provider_kind {
+        "cursor_acp" => EnrichmentLlmBackend::Cursor,
+        "ollama" => EnrichmentLlmBackend::Ollama,
+        "claude_cli" | "anthropic_api" => EnrichmentLlmBackend::Claude,
+        // All OpenAI-compat providers (openai_compat, gemini_api, perplexity_api, cerebras_api, etc.)
+        _ => EnrichmentLlmBackend::Codex,
     }
 }
 
@@ -4226,33 +4208,43 @@ impl PlanRunner {
 
             // Parse tasks.toml if it exists, log task count and parallel groups
             let tasks_path = plans_dir.join(&plan_info.base).join("tasks.toml");
-            if tasks_path.exists() {
-                let tf = TasksFile::parse(&tasks_path).map_err(|e| {
-                    tracing::error!(
-                        target: "plan_validation",
-                        plan_id = %plan_id,
-                        plan_base = %plan_info.base,
-                        tasks_path = %tasks_path.display(),
-                        issue = "parse_error",
-                        error = %e,
-                        "tasks.toml validation failed"
+            match TasksFile::parse(&tasks_path) {
+                Ok(tf) => {
+                    validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
+                    let groups = tf.parallel_groups();
+                    let model_tiers: Vec<String> = tf
+                        .tasks
+                        .iter()
+                        .map(|t| format!("{}:{}", t.id, t.tier))
+                        .collect();
+                    tracing::info!(
+                        "[orchestrate] Plan {plan_id}: {} tasks, {} parallel groups, max_parallel={}, tiers=[{}]",
+                        tf.tasks.len(),
+                        groups.len(),
+                        tf.meta.max_parallel,
+                        model_tiers.join(", ")
                     );
-                    anyhow!("tasks.toml parse failed for {}: {e}", tasks_path.display())
-                })?;
-                validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
-                let groups = tf.parallel_groups();
-                let model_tiers: Vec<String> = tf
-                    .tasks
-                    .iter()
-                    .map(|t| format!("{}:{}", t.id, t.tier))
-                    .collect();
-                tracing::info!(
-                    "[orchestrate] Plan {plan_id}: {} tasks, {} parallel groups, max_parallel={}, tiers=[{}]",
-                    tf.tasks.len(),
-                    groups.len(),
-                    tf.meta.max_parallel,
-                    model_tiers.join(", ")
-                );
+                }
+                Err(e) => {
+                    let is_not_found = e
+                        .downcast_ref::<std::io::Error>()
+                        .map_or(false, |e| e.kind() == std::io::ErrorKind::NotFound);
+                    if !is_not_found {
+                        tracing::error!(
+                            target: "plan_validation",
+                            plan_id = %plan_id,
+                            plan_base = %plan_info.base,
+                            tasks_path = %tasks_path.display(),
+                            issue = "parse_error",
+                            error = %e,
+                            "tasks.toml validation failed"
+                        );
+                        return Err(anyhow!(
+                            "tasks.toml parse failed for {}: {e}",
+                            tasks_path.display()
+                        ));
+                    }
+                }
             }
 
             let priority = plan_info
@@ -4278,32 +4270,42 @@ impl PlanRunner {
                 .and_then(|fm| fm.plan.clone())
                 .unwrap_or_else(|| plan_info.base.clone());
             let tasks_path = plans_dir.join(&plan_info.base).join("tasks.toml");
-            if tasks_path.exists() {
-                let tf = TasksFile::parse(&tasks_path).map_err(|e| {
-                    tracing::error!(
-                        target: "plan_validation",
-                        plan_id = %plan_id,
-                        plan_base = %plan_info.base,
-                        tasks_path = %tasks_path.display(),
-                        issue = "parse_error",
-                        error = %e,
-                        "tasks.toml validation failed"
-                    );
-                    anyhow!("tasks.toml parse failed for {}: {e}", tasks_path.display())
-                })?;
-                validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
-                for task in &tf.tasks {
-                    match task.mcp_servers.as_ref() {
-                        Some(servers) if !servers.is_empty() => {
-                            requested_mcp_servers.extend(servers.iter().cloned());
-                        }
-                        _ => {
-                            any_task_without_mcp_list = true;
+            match TasksFile::parse(&tasks_path) {
+                Ok(tf) => {
+                    validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
+                    for task in &tf.tasks {
+                        match task.mcp_servers.as_ref() {
+                            Some(servers) if !servers.is_empty() => {
+                                requested_mcp_servers.extend(servers.iter().cloned());
+                            }
+                            _ => {
+                                any_task_without_mcp_list = true;
+                            }
                         }
                     }
+                    let pdir = plans_dir.join(&plan_info.base);
+                    task_trackers.insert(plan_id, TaskTracker::new(tf, pdir));
                 }
-                let pdir = plans_dir.join(&plan_info.base);
-                task_trackers.insert(plan_id, TaskTracker::new(tf, pdir));
+                Err(e) => {
+                    let is_not_found = e
+                        .downcast_ref::<std::io::Error>()
+                        .map_or(false, |e| e.kind() == std::io::ErrorKind::NotFound);
+                    if !is_not_found {
+                        tracing::error!(
+                            target: "plan_validation",
+                            plan_id = %plan_id,
+                            plan_base = %plan_info.base,
+                            tasks_path = %tasks_path.display(),
+                            issue = "parse_error",
+                            error = %e,
+                            "tasks.toml validation failed"
+                        );
+                        return Err(anyhow!(
+                            "tasks.toml parse failed for {}: {e}",
+                            tasks_path.display()
+                        ));
+                    }
+                }
             }
         }
 
@@ -8172,12 +8174,10 @@ impl PlanRunner {
                     .to_string_lossy()
                     .to_string();
                 let tasks_path = plan_dir.join("tasks.toml");
-                if tasks_path.exists() {
-                    if let Ok(tf) = TasksFile::parse(&tasks_path) {
-                        self.task_trackers
-                            .entry(name)
-                            .or_insert_with(|| TaskTracker::new(tf, plan_dir.clone()));
-                    }
+                if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                    self.task_trackers
+                        .entry(name)
+                        .or_insert_with(|| TaskTracker::new(tf, plan_dir.clone()));
                 }
             }
 
@@ -8941,10 +8941,6 @@ impl PlanRunner {
     fn refresh_task_tracker(&mut self, plan_id: &str) {
         let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_path = plan_dir.join("tasks.toml");
-        if !tasks_path.exists() {
-            return;
-        }
-
         match TasksFile::parse(&tasks_path) {
             Ok(tasks_file) => {
                 if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
@@ -8955,26 +8951,28 @@ impl PlanRunner {
                 }
             }
             Err(err) => {
-                tracing::warn!("[orchestrate] failed to refresh task tracker for {plan_id}: {err}");
+                let is_not_found = err
+                    .downcast_ref::<std::io::Error>()
+                    .map_or(false, |e| e.kind() == std::io::ErrorKind::NotFound);
+                if !is_not_found {
+                    tracing::warn!(
+                        "[orchestrate] failed to refresh task tracker for {plan_id}: {err}"
+                    );
+                }
             }
         }
     }
 
     async fn run_enrichment_pipeline(&mut self, plan_id: &str) -> Result<EnrichmentPhaseSummary> {
         let plan_dir = plans_dir(&self.workdir).join(plan_id);
-        let tasks_file = plan_dir
-            .join("tasks.toml")
-            .exists()
-            .then(|| TasksFile::parse(&plan_dir.join("tasks.toml")))
-            .transpose()
-            .ok()
-            .flatten();
+        let tasks_file = TasksFile::parse(&plan_dir.join("tasks.toml")).ok();
         let complexity = enrichment_complexity_from_tasks(tasks_file.as_ref());
         let selected_steps = selected_enrichment_steps(complexity);
         let model = self.effective_model();
-        let provider = self.provider_id_for_model(&model);
-        let backend =
-            resolve_enrichment_backend(self.config.agent.command.as_str(), &model, &provider);
+        let provider_kind = load_roko_config(&self.workdir)
+            .map(|cfg| resolve_model(&cfg, &model).provider_kind.label().to_owned())
+            .unwrap_or_else(|_| ProviderKind::ClaudeCli.label().to_owned());
+        let backend = resolve_enrichment_backend(&provider_kind);
         let plan_size_chars = std::fs::read_to_string(plan_dir.join("plan.md"))
             .map(|contents| contents.len())
             .unwrap_or_default();
@@ -9926,11 +9924,7 @@ impl PlanRunner {
 
         let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_toml = plan_dir.join("tasks.toml");
-        let tasks_file = if tasks_toml.exists() {
-            crate::task_parser::TasksFile::parse(&tasks_toml).ok()
-        } else {
-            None
-        };
+        let tasks_file = crate::task_parser::TasksFile::parse(&tasks_toml).ok();
 
         let mcp_config_path = self.resolve_mcp_config_path().await;
 
@@ -14408,11 +14402,9 @@ impl PlanRunner {
         ];
         for plan_dir in candidates {
             let tasks_path = plan_dir.join("tasks.toml");
-            if tasks_path.exists() {
-                if let Ok(tf) = TasksFile::parse(&tasks_path) {
-                    self.task_trackers
-                        .insert(plan_id.to_string(), TaskTracker::new(tf, plan_dir));
-                }
+            if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                self.task_trackers
+                    .insert(plan_id.to_string(), TaskTracker::new(tf, plan_dir));
                 return;
             }
         }
@@ -14654,24 +14646,21 @@ impl PlanRunner {
             routing_budget_pressure(&self.config.budget, plan_spent, last_cost_usd);
 
         // ── Try to load structured task definition ──────────────────
-        let plan_dir = {
-            let primary = plans_dir(&self.workdir).join(plan_id);
-            if primary.join("tasks.toml").exists() {
-                primary
+        let primary = plans_dir(&self.workdir).join(plan_id);
+        let fallback = self.workdir.join(".roko").join("plans").join(plan_id);
+        let (plan_dir, tasks_file) = {
+            let primary_parsed = crate::task_parser::TasksFile::parse(&primary.join("tasks.toml"));
+            if let Ok(tf) = primary_parsed {
+                (primary, Some(tf))
             } else {
-                let fallback = self.workdir.join(".roko").join("plans").join(plan_id);
-                if fallback.join("tasks.toml").exists() {
-                    fallback
+                let fallback_parsed =
+                    crate::task_parser::TasksFile::parse(&fallback.join("tasks.toml"));
+                if let Ok(tf) = fallback_parsed {
+                    (fallback, Some(tf))
                 } else {
-                    primary
+                    (primary, None)
                 }
             }
-        };
-        let tasks_toml = plan_dir.join("tasks.toml");
-        let tasks_file = if tasks_toml.exists() {
-            crate::task_parser::TasksFile::parse(&tasks_toml).ok()
-        } else {
-            None
         };
         let task_def = tasks_file
             .as_ref()
@@ -20411,21 +20400,29 @@ acceptance = []
     }
 
     #[test]
-    fn enrichment_backend_uses_runtime_command_and_provider_hints() {
+    fn enrichment_backend_uses_provider_kind() {
         assert_eq!(
-            resolve_enrichment_backend("cursor", "composer-2-fast", "cursor"),
+            resolve_enrichment_backend("cursor_acp"),
             EnrichmentLlmBackend::Cursor
         );
         assert_eq!(
-            resolve_enrichment_backend("ollama", "gemma4:27b", "ollama"),
+            resolve_enrichment_backend("ollama"),
             EnrichmentLlmBackend::Ollama
         );
         assert_eq!(
-            resolve_enrichment_backend("codex", "gpt-5.4", "openai"),
+            resolve_enrichment_backend("openai_compat"),
             EnrichmentLlmBackend::Codex
         );
         assert_eq!(
-            resolve_enrichment_backend("claude", "claude-sonnet-4-6", "anthropic"),
+            resolve_enrichment_backend("gemini_api"),
+            EnrichmentLlmBackend::Codex
+        );
+        assert_eq!(
+            resolve_enrichment_backend("claude_cli"),
+            EnrichmentLlmBackend::Claude
+        );
+        assert_eq!(
+            resolve_enrichment_backend("anthropic_api"),
             EnrichmentLlmBackend::Claude
         );
     }

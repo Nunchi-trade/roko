@@ -230,7 +230,7 @@ async fn apply_dream_affect_feedback(state: &AppState, report: &DreamCycleReport
             Vec::new()
         }
     };
-    let mut engine = state.affect_engine.lock();
+    let mut engine = state.affect_engine.lock().await;
     apply_dream_affect_feedback_to_engine(&mut engine, report, &dream_episodes);
 }
 

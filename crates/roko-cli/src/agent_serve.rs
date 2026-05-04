@@ -24,7 +24,6 @@ use roko_agent_server::{
     AgentRegistration, AgentServer, DispatchError, DispatchLike, RelayClientConfig,
 };
 use roko_cli::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
-use roko_core::config::schema::RokoConfig;
 use roko_core::{Body, Context, Engram, Kind, MessageContent};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -360,7 +359,8 @@ impl AgentServeRuntimeConfig {
 
     fn try_build_dispatcher(&self) -> Result<Option<Arc<dyn DispatchLike>>> {
         let workdir = std::env::current_dir().context("read current working directory")?;
-        let mut config = load_roko_config(&workdir)?;
+        let mut config = roko_core::config::loader::load_config_unified(&workdir)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let model = config.agent.default_model.trim().to_string();
         if model.is_empty() {
@@ -554,10 +554,6 @@ fn extract_prompt(request: &ChatRequest) -> Option<String> {
         },
         _ => None,
     })
-}
-
-fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Run `roko agent ...`.

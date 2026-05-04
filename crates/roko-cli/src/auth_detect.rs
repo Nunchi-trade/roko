@@ -1,13 +1,14 @@
 //! Auth auto-detection for the unified CLI experience.
 //!
 //! Probes available authentication methods in priority order:
-//! 1. `claude` CLI (installed and reachable)
-//! 2. `ANTHROPIC_API_KEY` environment variable
-//! 3. `ZAI_API_KEY` environment variable (Zhipu/GLM, OpenAI-compatible)
-//! 4. `OPENAI_API_KEY` environment variable (OpenAI-compatible)
-//! 5. Falls back to `NeedsSetup`
+//! 1. Config-aware: loads roko.toml, checks each configured provider's API key
+//! 2. Env-var fallback: `claude` CLI → `ANTHROPIC_API_KEY` → `ZAI_API_KEY` → `OPENAI_API_KEY`
+//! 3. Falls back to `NeedsSetup`
 
+use std::path::Path;
 use std::process::Command;
+
+use roko_core::agent::ProviderKind;
 
 /// Detected authentication method for agent dispatch.
 #[derive(Debug, Clone)]
@@ -55,7 +56,40 @@ impl AuthMethod {
     }
 }
 
-/// Detect the best available authentication method.
+/// Detect which auth method will ACTUALLY be used for dispatch.
+///
+/// Loads `roko.toml` from `workdir` if available and checks each configured
+/// provider's `api_key_env` in order. Returns the first provider with valid
+/// credentials. Falls back to `detect_auth_from_env()` when config is missing
+/// or no configured provider has credentials.
+pub fn detect_auth_from_config(workdir: &Path) -> AuthMethod {
+    if let Ok(config) = roko_core::config::loader::load_config_unified(workdir) {
+        if let Some(method) = detect_from_config(&config) {
+            return method;
+        }
+    }
+    detect_auth_from_env()
+}
+
+fn detect_from_config(config: &roko_core::config::schema::RokoConfig) -> Option<AuthMethod> {
+    for (_name, provider) in &config.providers {
+        let api_key_env = provider.api_key_env.as_deref()?;
+        let key = std::env::var(api_key_env).ok().filter(|k| !k.is_empty())?;
+
+        return Some(match provider.kind {
+            ProviderKind::ClaudeCli => AuthMethod::ClaudeCli,
+            ProviderKind::AnthropicApi => AuthMethod::AnthropicApi { key, model: None },
+            _ => AuthMethod::OpenAiCompat {
+                key,
+                base_url: provider.base_url.clone().unwrap_or_default(),
+                model: None,
+            },
+        });
+    }
+    None
+}
+
+/// Detect the best available authentication method using env var probing only.
 ///
 /// Checks (in order):
 /// 1. `claude` CLI — matches `roko.toml` defaults (claude-sonnet via claude_cli)
@@ -64,9 +98,9 @@ impl AuthMethod {
 /// 4. `OPENAI_API_KEY`
 /// 5. `NeedsSetup`
 ///
-/// Claude CLI is checked first because it's the default provider in `roko.toml`
-/// and avoids auth mismatches when multiple env vars are present.
-pub fn detect_auth() -> AuthMethod {
+/// Prefer `detect_auth_from_config()` for config-aware detection that matches
+/// what dispatch will actually use.
+pub fn detect_auth_from_env() -> AuthMethod {
     // 1. Claude CLI — lightweight probe via `claude --version`
     if let Ok(output) = Command::new("claude").arg("--version").output() {
         if output.status.success() {
@@ -112,15 +146,12 @@ pub fn detect_auth() -> AuthMethod {
 
 /// Print setup instructions when no auth is detected.
 pub fn print_setup_instructions() {
-    eprintln!("No authentication method detected.\n");
-    eprintln!("Set up one of the following:\n");
-    eprintln!("  1. Install and login to Claude CLI:");
-    eprintln!("     npm install -g @anthropic-ai/claude-code && claude\n");
-    eprintln!("  2. Set an Anthropic API key:");
-    eprintln!("     export ANTHROPIC_API_KEY=sk-ant-...\n");
-    eprintln!("  3. Set an OpenAI-compatible API key:");
-    eprintln!("     export OPENAI_API_KEY=sk-...\n");
-    eprintln!("Then run `roko` again.");
+    eprintln!("error: no LLM provider configured.\n");
+    eprintln!("To get started, either:");
+    eprintln!("  1. Run `roko init` to create a workspace with default config");
+    eprintln!("  2. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or ZAI_API_KEY");
+    eprintln!("  3. Edit roko.toml to configure a provider");
+    eprintln!("\n  hint: run `roko doctor` to diagnose your setup");
 }
 
 #[cfg(test)]

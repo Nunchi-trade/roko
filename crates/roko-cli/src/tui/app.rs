@@ -420,11 +420,9 @@ impl App {
         let _ = state_hub.bootstrap_from_workdir(root.as_ref());
         // Replay events.jsonl to pick up events from roko run / roko serve.
         let events_path = root.as_ref().join(".roko").join("events.jsonl");
-        if events_path.exists() {
-            let count = state_hub.replay_log_into_snapshot(&events_path);
-            if count > 0 {
-                tracing::info!(count, path = %events_path.display(), "replayed events from log");
-            }
+        let count = state_hub.replay_log_into_snapshot(&events_path);
+        if count > 0 {
+            tracing::info!(count, path = %events_path.display(), "replayed events from log");
         }
         Self::new_connected_with_state_hub(root, None, state_hub)
     }
@@ -436,11 +434,9 @@ impl App {
         let _ = state_hub.bootstrap_from_workdir(root.as_ref());
         // Replay events.jsonl to pick up events from roko run / roko serve.
         let events_path = root.as_ref().join(".roko").join("events.jsonl");
-        if events_path.exists() {
-            let count = state_hub.replay_log_into_snapshot(&events_path);
-            if count > 0 {
-                tracing::info!(count, path = %events_path.display(), "replayed events from log");
-            }
+        let count = state_hub.replay_log_into_snapshot(&events_path);
+        if count > 0 {
+            tracing::info!(count, path = %events_path.display(), "replayed events from log");
         }
         Self::new_connected_with_state_hub(root, initial_page, state_hub)
     }
@@ -2335,9 +2331,7 @@ impl App {
         if let Some(state_hub) = &self._state_hub {
             let _ = state_hub.bootstrap_from_workdir(&self.workdir);
             let events_path = self.workdir.join(".roko").join("events.jsonl");
-            if events_path.exists() {
-                state_hub.replay_log_into_snapshot(&events_path);
-            }
+            state_hub.replay_log_into_snapshot(&events_path);
         }
         self.reseed_verdicts_aggregator();
         self.refresh_verdicts_from_aggregator();
@@ -2701,9 +2695,7 @@ impl App {
                     // the bootstrap snapshot (e.g. orchestrator events
                     // written since last bootstrap).
                     let events_path = self.workdir.join(".roko").join("events.jsonl");
-                    if events_path.exists() {
-                        state_hub.replay_log_into_snapshot(&events_path);
-                    }
+                    state_hub.replay_log_into_snapshot(&events_path);
                 } else if self.snapshot_rx.is_none() {
                     // Legacy fallback: no StateHub and no snapshot_rx.
                     self.tick_snapshot();

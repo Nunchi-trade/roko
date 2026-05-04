@@ -5,7 +5,7 @@
 //! roots.
 
 use anyhow::{Context as _, Result};
-use roko_core::config::schema::{RokoConfig, WatcherPathConfig};
+use roko_core::config::schema::WatcherPathConfig;
 use roko_plugin::CronEventSource;
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -36,7 +36,8 @@ struct EventSourcesSnapshot {
 
 /// List configured cron schedules and filesystem watchers.
 pub fn cmd_list(workdir: &Path, json: bool) -> Result<()> {
-    let config = load_roko_config(workdir)?;
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let cron_source = CronEventSource::from_config(config.scheduler.clone());
 
     let mut cron_schedules = cron_source
@@ -72,10 +73,6 @@ pub fn cmd_list(workdir: &Path, json: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core::config::loader::load_config_unified(workdir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn file_watcher_row(workdir: &Path, path: &WatcherPathConfig) -> FileWatcherRow {

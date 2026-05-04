@@ -315,21 +315,28 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
-        if let Some(path) = self.checkpoint_path.as_deref().filter(|path| path.exists()) {
+        if let Some(path) = self.checkpoint_path.as_deref() {
             match Checkpoint::load(path) {
                 Ok(cp) => return self.resume(cp, tools, ctx).await,
                 Err(err) => {
-                    return ToolLoopOutput {
-                        final_text: String::new(),
-                        iterations: 0,
-                        tool_calls: Vec::new(),
-                        total_usage: Usage::default(),
-                        stop_reason: StopReason::BackendError(format!(
-                            "checkpoint load {}: {err}",
-                            path.display()
-                        )),
-                        checkpoint: None,
-                    };
+                    let is_not_found = matches!(
+                        &err,
+                        roko_core::RokoError::Io(e) if e.kind() == std::io::ErrorKind::NotFound
+                    );
+                    if !is_not_found {
+                        return ToolLoopOutput {
+                            final_text: String::new(),
+                            iterations: 0,
+                            tool_calls: Vec::new(),
+                            total_usage: Usage::default(),
+                            stop_reason: StopReason::BackendError(format!(
+                                "checkpoint load {}: {err}",
+                                path.display()
+                            )),
+                            checkpoint: None,
+                        };
+                    }
+                    // NotFound: no checkpoint yet, continue with fresh run
                 }
             }
         }

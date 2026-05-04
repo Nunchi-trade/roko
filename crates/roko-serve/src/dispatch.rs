@@ -2311,7 +2311,7 @@ async fn append_dispatch_episode(
     }
 
     episode.attach_all_fingerprints();
-    apply_affect_signature(state, &mut episode);
+    apply_affect_signature(state, &mut episode).await;
 
     // Use per-repo layout for data isolation when a repo context is available.
     // This writes episodes, efficiency, and cascade router data under
@@ -2450,14 +2450,14 @@ async fn drain_dispatch_learning_events(
     Ok(())
 }
 
-fn apply_affect_signature(state: &AppState, episode: &mut Episode) {
+async fn apply_affect_signature(state: &AppState, episode: &mut Episode) {
     let task_key = if episode.task_id.trim().is_empty() {
         episode.agent_id.clone()
     } else {
         episode.task_id.clone()
     };
 
-    let mut engine = state.affect_engine.lock();
+    let mut engine = state.affect_engine.lock().await;
     for (rung, verdict) in episode.gate_verdicts.iter().enumerate() {
         let _ = engine.appraise(AffectEvent::GateResult {
             plan_id: String::new(),

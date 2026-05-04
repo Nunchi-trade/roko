@@ -73,7 +73,9 @@ impl LoopOrchestrator {
         let roko_dir = find_roko_dir(&self.config.target_file)?;
 
         // 3. Load config for the evaluator.
-        let roko_config = load_roko_config(&roko_dir)?;
+        let roko_config =
+            roko_core::config::loader::load_config_unified(roko_dir.parent().unwrap_or(&roko_dir))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // 4. Initialize subsystems.
         let screenshot = ScreenshotService::new(
@@ -299,12 +301,6 @@ fn find_roko_dir(target_file: &std::path::Path) -> Result<PathBuf> {
         "no .roko/ directory found. Run `roko init` first, or ensure .roko/ exists \
          in the project root."
     )
-}
-
-/// Load `roko.toml` configuration.
-fn load_roko_config(roko_dir: &std::path::Path) -> Result<roko_core::config::schema::RokoConfig> {
-    let project_root = roko_dir.parent().unwrap_or(roko_dir);
-    roko_core::config::loader::load_config_unified(project_root).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]

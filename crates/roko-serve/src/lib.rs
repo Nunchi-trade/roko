@@ -428,17 +428,6 @@ impl ServerBuilder {
     }
 }
 
-/// Load [`RokoConfig`] from the workdir using the unified core loader.
-///
-/// Delegates to [`roko_core::config::loader::load_config_unified`] so that
-/// serve gets the same config resolution as the CLI: global merge, env-var
-/// interpolation, `${VAR}` expansion, file-secret resolution, and `ROKO__*`
-/// process env overrides.
-fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    roko_core_crate::config::loader::load_config_unified(workdir)
-        .map_err(|e| anyhow::anyhow!("{e}"))
-}
-
 /// Start the HTTP server.
 ///
 /// # Errors
@@ -451,7 +440,8 @@ pub async fn run_server(
     bind: Option<String>,
     port: Option<u16>,
 ) -> Result<()> {
-    let roko_config = load_roko_config(&workdir)?;
+    let roko_config = roko_core_crate::config::loader::load_config_unified(&workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
     ServerBuilder::new(config).run().await
 }
@@ -470,7 +460,8 @@ pub async fn start_server_background(
     bind: Option<String>,
     port: Option<u16>,
 ) -> Result<(Arc<AppState>, JoinHandle<Result<()>>)> {
-    let roko_config = load_roko_config(&workdir)?;
+    let roko_config = roko_core_crate::config::loader::load_config_unified(&workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
     ServerBuilder::new(config).start_background().await
 }

@@ -75,48 +75,106 @@ impl AuditSink for NoopAuditSink {
 /// The conductor (or a user-initiated abort) toggles the token;
 /// well-behaved handlers poll [`Self::is_cancelled`] at loop boundaries
 /// or check it in futures that support cooperative cancellation.
+///
+/// The async [`Self::cancelled`] method provides event-driven waiting
+/// without busy-polling. Impls backed by a real notification primitive
+/// (e.g. [`AtomicCancel`]) override it for zero-latency wake-up; the
+/// default falls back to 50 ms polling for foreign impls.
+#[async_trait]
 pub trait CancelToken: Send + Sync {
     /// Returns `true` once cancellation has been requested.
     fn is_cancelled(&self) -> bool;
+
+    /// Async wait that resolves as soon as the token is cancelled.
+    ///
+    /// The default implementation polls every 50 ms so that foreign
+    /// impls automatically gain async support without any changes.
+    /// Override for zero-latency wake-up when a notification primitive
+    /// is available.
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if self.is_cancelled() {
+                return;
+            }
+        }
+    }
 }
 
 /// Token that never fires. Used in tests and for "no cancellation" contexts.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NeverCancel;
 
+#[async_trait]
 impl CancelToken for NeverCancel {
     fn is_cancelled(&self) -> bool {
         false
     }
+
+    async fn cancelled(&self) {
+        // Never cancels — wait forever (caller will be dropped via select!).
+        std::future::pending::<()>().await;
+    }
 }
 
-/// Token backed by an atomic bool — flip once, stay tripped.
+/// Token backed by an atomic bool + `tokio::sync::Notify` for instant wake-up.
 ///
 /// Useful for single-call orchestration where an owner decides to abort
 /// after dispatching. Clone via `Arc` to share state across threads.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AtomicCancel {
     flag: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl Default for AtomicCancel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AtomicCancel {
     /// Construct a fresh, un-tripped token.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             flag: std::sync::atomic::AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
         }
     }
 
-    /// Trip the token. Subsequent [`Self::is_cancelled`] calls return true.
+    /// Trip the token. Wakes any tasks waiting in [`CancelToken::cancelled`].
     pub fn cancel(&self) {
         self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 }
 
+#[async_trait]
 impl CancelToken for AtomicCancel {
     fn is_cancelled(&self) -> bool {
         self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        // Use a loop with notified() to handle spurious wake-ups or races
+        // where cancel() fires between the is_cancelled check and .notified().
+        loop {
+            let notified = self.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+            if self.is_cancelled() {
+                return;
+            }
+        }
     }
 }
 

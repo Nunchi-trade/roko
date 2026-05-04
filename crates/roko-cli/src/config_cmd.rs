@@ -365,8 +365,17 @@ pub fn cmd_check_secrets(workdir: &Path) -> Result<()> {
 pub async fn cmd_validate(workdir: &Path) -> Result<()> {
     let paths = resolve_paths(workdir);
     let config_path = validate_config_path(&paths, workdir)?;
-    let text = fs::read_to_string(&config_path)
-        .with_context(|| format!("read config {}", config_path.display()))?;
+    let text = match fs::read_to_string(&config_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow!("config file not found: {}", config_path.display()));
+        }
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("read config {}", config_path.display()))
+            );
+        }
+    };
 
     if let Err(err) = toml::from_str::<toml::Value>(&text) {
         print_phase_status("Phase 1: TOML syntax", false);
@@ -430,8 +439,15 @@ pub async fn cmd_validate(workdir: &Path) -> Result<()> {
 pub fn cmd_migrate(workdir: &Path, dry_run: bool, yes: bool) -> Result<()> {
     let paths = resolve_paths(workdir);
     let config_path = validate_config_path(&paths, workdir)?;
-    let text = fs::read_to_string(&config_path)
-        .with_context(|| format!("read {}", config_path.display()))?;
+    let text = match fs::read_to_string(&config_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow!("config file not found: {}", config_path.display()));
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("read {}", config_path.display())));
+        }
+    };
     let plan = build_config_migration_plan(&text)?;
 
     match plan {

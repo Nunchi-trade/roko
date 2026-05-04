@@ -225,21 +225,37 @@ fn load_active_config(workdir: &Path, config_override: Option<&Path>) -> Result<
     let paths = resolve_paths(workdir);
     let mut explicit_serve = false;
     let active_path = if let Some(env_path) = &paths.env_override {
-        if env_path.is_file() {
-            explicit_serve = ConfigLayer::from_file(env_path)?.serve.is_some();
-            Some(env_path.clone())
-        } else {
-            Some(env_path.clone())
+        match std::fs::read_to_string(env_path) {
+            Ok(text) => {
+                let layer = ConfigLayer::parse_toml(&text)
+                    .with_context(|| format!("parse config {}", env_path.display()))?;
+                explicit_serve = layer.serve.is_some();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("read config {}", env_path.display()))
+                );
+            }
         }
+        Some(env_path.clone())
     } else {
         let mut merged = ConfigLayer::default();
         let mut active_path = None;
 
-        if paths.global.is_file() {
-            let layer = ConfigLayer::from_file(&paths.global)?;
-            explicit_serve |= layer.serve.is_some();
-            merged = merged.merge(layer);
-            active_path = Some(paths.global.clone());
+        match std::fs::read_to_string(&paths.global) {
+            Ok(text) => {
+                let layer = ConfigLayer::parse_toml(&text)
+                    .with_context(|| format!("parse config {}", paths.global.display()))?;
+                explicit_serve |= layer.serve.is_some();
+                merged = merged.merge(layer);
+                active_path = Some(paths.global.clone());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("read config {}", paths.global.display())));
+            }
         }
         if let Some(project_path) = &paths.project {
             let layer = ConfigLayer::from_file(project_path)?;

@@ -217,9 +217,6 @@ fn read_process_session_summary(
     ledger_path: &Path,
     stale_after_ms: Option<u64>,
 ) -> Option<ProcessSessionStateSummary> {
-    if !ledger_path.is_file() {
-        return None;
-    }
     let ledger = ProcessSessionLedger::load(ledger_path).ok()?;
     Some(ledger.state_summary(stale_after_ms, unix_ms()))
 }

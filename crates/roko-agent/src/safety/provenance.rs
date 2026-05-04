@@ -233,10 +233,11 @@ impl CustodyLogger {
     ///
     /// Returns an error if the file exists but cannot be read.
     pub fn read_all(&self) -> std::io::Result<Vec<Custody>> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = fs::read_to_string(&self.path)?;
+        let content = match fs::read_to_string(&self.path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
         let records = content
             .lines()
             .filter(|line| !line.trim().is_empty())

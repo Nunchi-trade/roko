@@ -890,9 +890,6 @@ fn scan_atelier_prds(
         };
         for entry in plan_entries.filter_map(|e| e.ok()) {
             let tasks_path = entry.path().join("tasks.toml");
-            if !tasks_path.is_file() {
-                continue;
-            }
             let Ok(tasks_file) = TasksFile::parse(&tasks_path) else {
                 continue;
             };

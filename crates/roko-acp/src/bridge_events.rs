@@ -1710,6 +1710,7 @@ fn acp_stop_reason_from_model(stop_reason: Option<&str>) -> StopReason {
 /// OpenAI-compatible provider selections (zhipu/GLM, moonshot/Kimi, OpenAI,
 /// Perplexity, Ollama, etc.). Accepts a pre-built messages array with system
 /// prompt and history.
+#[allow(clippy::too_many_arguments)]
 async fn run_openai_compat_cognitive_task(
     session_id: &str,
     messages: &[serde_json::Value],

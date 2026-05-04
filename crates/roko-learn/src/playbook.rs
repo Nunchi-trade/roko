@@ -724,20 +724,20 @@ impl PlaybookStore {
     /// Returns an error for any I/O or serialization failure.
     pub async fn save_or_merge(&self, playbook: &Playbook) -> io::Result<()> {
         validate_playbook_id(&playbook.id)?;
+
+        // Global merge lock serializes all merge operations — no per-ID locks needed
         let merge_lock = self.id_lock("__playbook_merge__/global");
         let _merge_guard = merge_lock.lock().await;
 
-        let exact_lock = self.id_lock(&playbook.id);
-        let _exact_guard = exact_lock.lock().await;
+        // Check for exact match (no per-ID lock)
         if let Some(existing) = self.load(&playbook.id).await? {
             let merged = merge_playbooks(existing, playbook);
             self.save(&merged).await?;
             return Ok(());
         }
 
+        // Check for similar match (no candidate lock)
         if let Some(candidate) = self.best_similar_playbook(playbook).await? {
-            let candidate_lock = self.id_lock(&candidate.id);
-            let _candidate_guard = candidate_lock.lock().await;
             if let Some(existing) = self.load(&candidate.id).await? {
                 let merged = merge_playbooks(existing, playbook);
                 self.save(&merged).await?;

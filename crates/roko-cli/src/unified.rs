@@ -13,7 +13,8 @@ use anyhow::{Context, Result};
 use tokio::task::JoinHandle;
 use tracing::info;
 
-use crate::auth_detect::{AuthMethod, detect_auth, print_setup_instructions};
+use crate::auth_detect::{AuthMethod, detect_auth_from_config, print_setup_instructions};
+use crate::bootstrap::{BootOpts, RokoBootstrap};
 use crate::chat_inline;
 use crate::chat_session::ChatAgentSession;
 use crate::config::RepoRegistry;
@@ -30,23 +31,43 @@ pub async fn cmd_unified_chat(
     quiet: bool,
     no_serve: bool,
 ) -> Result<i32> {
-    // 1. Auto-detect auth
-    let auth = detect_auth();
+    // 1. Resolve working directory (needed for config-aware auth detection)
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // 2. Auto-detect auth (config-aware: reads roko.toml to match dispatch provider)
+    let auth = detect_auth_from_config(&workdir);
     if matches!(auth, AuthMethod::NeedsSetup) {
         print_setup_instructions();
         return Ok(1);
     }
 
-    // 2. Resolve working directory
-    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // 3. Bootstrap: workspace auto-create (not required) + config load.
+    //    Chat does not require a workspace — it auto-creates .roko/ if missing.
+    let _boot = RokoBootstrap::new(
+        &workdir,
+        BootOpts {
+            require_workspace: false,
+            require_provider: false,
+            acquire_lock: false,
+        },
+    )
+    .unwrap_or_else(|_| {
+        // Best-effort: fall back to defaults if bootstrap fails (e.g. workdir unreadable).
+        crate::bootstrap::RokoBootstrap {
+            config: roko_core::config::schema::RokoConfig::default(),
+            workdir: workdir.clone(),
+            workspace_ready: false,
+        }
+    });
 
-    // 3. Auto-create .roko/ if missing
+    // 4. Auto-create .roko/ if missing (bootstrap with require_workspace=false won't error,
+    //    but chat still needs the directory to exist for session persistence).
     ensure_workspace(&workdir)?;
 
-    // 4. Load config for serve (best-effort)
+    // 5. Load config for serve (best-effort, respects explicit --config override)
     let config = load_config_or_defaults(config_path, &workdir)?;
 
-    // 5. Start serve in background only when the resolved config opts in.
+    // 6. Start serve in background only when the resolved config opts in.
     let serve_state = if no_serve {
         None
     } else if load_auto_start_config(&config) {
@@ -70,10 +91,10 @@ pub async fn cmd_unified_chat(
         );
     }
 
-    // 6. Launch inline chat with direct dispatch
+    // 7. Launch inline chat with direct dispatch
     let result = chat_inline::run_unified_inline(&auth).await;
 
-    // 7. Graceful shutdown of background serve
+    // 8. Graceful shutdown of background serve
     if let Some((state, handle)) = serve_state {
         state.shutdown().await;
         handle.abort();
@@ -96,7 +117,8 @@ pub async fn cmd_unified_chat(
 /// settings. Session initialization failures are user-visible errors; production
 /// one-shot dispatch must not downgrade to deprecated raw dispatch.
 pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
-    let auth = detect_auth();
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let auth = detect_auth_from_config(&workdir);
     if matches!(auth, AuthMethod::NeedsSetup) {
         print_setup_instructions();
         return Ok(1);
@@ -105,8 +127,6 @@ pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
     if !quiet {
         eprintln!("roko — auth: {}", auth.label());
     }
-
-    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = load_config_or_defaults(None, &workdir)?;
 
     // Build a ChatAgentSession for full tool/system-prompt/MCP support.
