@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
 use roko_core::agent::ModelSpec;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{AgentRole, PhaseKind, PlanPhase};
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
@@ -2933,7 +2934,7 @@ async fn run_dream_consolidation(config: &RunConfig) {
             bare_mode: true,
             effort: "low".to_string(),
             fallback_model: None,
-            timeout_ms: 120_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             env: Vec::new(),
         },
     };

@@ -16,6 +16,7 @@ use roko_core::config::schema::{
 use roko_core::config::{
     DEFAULT_TTFT_TIMEOUT_MS, ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig,
 };
+use roko_core::defaults::{DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_daimon::StrategySpaceDefinition;
 use roko_orchestrator::ExecutorConfig;
 
@@ -262,7 +263,7 @@ impl Default for DaimonConfig {
 
 impl AgentConfig {
     const fn default_timeout() -> u64 {
-        120_000
+        DEFAULT_REQUEST_TIMEOUT_MS
     }
 
     fn default_effort() -> String {
@@ -1396,9 +1397,9 @@ impl ProviderLayer {
             api_key_env: self.api_key_env,
             command: self.command,
             args: self.args,
-            timeout_ms: self.timeout_ms.or(Some(120_000)),
+            timeout_ms: self.timeout_ms.or(Some(DEFAULT_REQUEST_TIMEOUT_MS)),
             ttft_timeout_ms: self.ttft_timeout_ms.or(Some(DEFAULT_TTFT_TIMEOUT_MS)),
-            connect_timeout_ms: self.connect_timeout_ms.or(Some(5_000)),
+            connect_timeout_ms: self.connect_timeout_ms.or(Some(DEFAULT_CONNECT_TIMEOUT_MS)),
             extra_headers: self.extra_headers,
             max_concurrent: self.max_concurrent,
         })
@@ -3078,7 +3079,10 @@ command = "cat"
 "#;
         let cfg = Config::parse_toml(toml).unwrap();
         assert_eq!(cfg.agent.command, "cat");
-        assert_eq!(cfg.agent.timeout_ms, 120_000);
+        assert_eq!(
+            cfg.agent.timeout_ms,
+            roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS
+        );
         assert!(!cfg.tools.prefer_mcp);
         assert!(cfg.tools.global_denied.is_empty());
         assert_eq!(cfg.tools.mcp_timeout_secs, 30);

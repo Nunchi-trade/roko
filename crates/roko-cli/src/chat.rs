@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -267,7 +268,7 @@ pub async fn run_direct_provider_chat(
 
     let options = AgentOptions {
         name: agent_id.to_string(),
-        timeout_ms: Some(120_000),
+        timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
         ..Default::default()
     };
 

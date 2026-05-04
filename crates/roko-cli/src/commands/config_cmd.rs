@@ -1486,7 +1486,9 @@ pub(crate) async fn run_openai_compat_provider_test(
     let client = reqwest::Client::builder()
         .user_agent("roko-cli/0.1")
         .timeout(Duration::from_millis(
-            provider.timeout_ms.unwrap_or(120_000),
+            provider
+                .timeout_ms
+                .unwrap_or(roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS),
         ))
         .build()
         .context("build provider test client")?;
@@ -1655,7 +1657,9 @@ pub(crate) async fn run_anthropic_provider_test(
     let client = reqwest::Client::builder()
         .user_agent("roko-cli/0.1")
         .timeout(Duration::from_millis(
-            provider.timeout_ms.unwrap_or(120_000),
+            provider
+                .timeout_ms
+                .unwrap_or(roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS),
         ))
         .build()
         .context("build provider test client")?;
@@ -1822,7 +1826,9 @@ pub(crate) async fn run_gemini_provider_test(
     let client = reqwest::Client::builder()
         .user_agent("roko-cli/0.1")
         .timeout(Duration::from_millis(
-            provider.timeout_ms.unwrap_or(120_000),
+            provider
+                .timeout_ms
+                .unwrap_or(roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS),
         ))
         .build()
         .context("build provider test client")?;
@@ -2284,7 +2290,7 @@ pub(crate) fn default_latency_sla_for_slug(slug: &str) -> u64 {
     if slug.contains("haiku") {
         10_000
     } else if slug.contains("opus") || slug.contains("premium") {
-        120_000
+        roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS
     } else {
         30_000
     }

@@ -7333,7 +7333,9 @@ impl PlanRunner {
         let base_url = provider
             .base_url
             .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
-        let timeout_ms = provider.timeout_ms.unwrap_or(120_000);
+        let timeout_ms = provider
+            .timeout_ms
+            .unwrap_or(roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS);
         let cache_client = GeminiCacheClient::new(api_key, base_url).with_timeout_ms(timeout_ms);
 
         match cache_client
@@ -17700,7 +17702,7 @@ impl PlanRunner {
                 command: self.config.agent.command.clone(),
                 exec_dir: self.workdir.clone(),
                 model: judge_model,
-                timeout_ms: 120_000,
+                timeout_ms: roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS,
                 skip_permissions: true, // internal gate call, no user approval needed
             }));
         }

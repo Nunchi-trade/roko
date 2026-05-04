@@ -11,6 +11,7 @@ use roko_agent::{
 use roko_core::agent::resolve_model;
 use roko_core::chat_types::{ChatMessage, ContentBlock, ImageUrl, MessageContent};
 use roko_core::config::schema::RokoConfig;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{Body, Engram, Kind};
 use roko_learn::model_call_feedback::{ModelCallFeedback, ModelCallFeedbackRecorder};
 
@@ -84,7 +85,7 @@ impl VisionEvaluator {
 
         let options = AgentOptions {
             system_prompt: Some(sys_prompt),
-            timeout_ms: Some(120_000),
+            timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
             name: "vision-evaluator".to_string(),
             ..Default::default()
         };

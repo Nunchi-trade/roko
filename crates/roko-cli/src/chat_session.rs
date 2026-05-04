@@ -24,6 +24,7 @@ use roko_compose::{ProjectConventions, TokenCounter, detect_conventions};
 use roko_core::agent::ProviderKind;
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::foundation::{
     CachePolicy, ChatMessage, FeedbackSink, MessageRole, ModelCallRequest, ModelCaller,
     ModelStreamEvent, TokenUsage, caller,
@@ -563,7 +564,7 @@ impl ChatAgentSession {
     fn api_timeout_ms(&self) -> Option<u64> {
         self.timeout
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-            .or(Some(120_000))
+            .or(Some(DEFAULT_REQUEST_TIMEOUT_MS))
     }
 
     fn model_call_model_key(&self) -> String {
