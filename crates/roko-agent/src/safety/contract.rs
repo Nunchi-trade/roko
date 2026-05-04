@@ -469,17 +469,15 @@ impl GovernanceRule {
                 }
             }
             Self::MaxCostPerTurn(max) => {
-                if let Some(estimated_cost_usd) = estimated_cost_usd(call)
-                    && estimated_cost_usd > *max
+                if let Some(observed_cost_usd) = observed_cost_usd(ctx)
+                    && observed_cost_usd > *max
                 {
                     return Err(ContractViolation::new(
                         role,
                         "MaxCostPerTurn",
-                        format!("{estimated_cost_usd:.4} > {max:.4}"),
+                        format!("{observed_cost_usd:.4} > {max:.4}"),
                     ));
                 }
-                // TODO(UX26): enforce cumulative per-turn spend once tool-cost
-                // accounting is threaded into ToolContext.
             }
             Self::MaxConsecutiveFailures(max) => {
                 let consecutive = count_trailing_failures(&ctx.external_actions.read());
@@ -567,16 +565,33 @@ fn estimated_tokens(call: &ToolCall) -> Option<u32> {
         .or_else(|| string_token_estimate(call.arguments.get("source")))
 }
 
-fn estimated_cost_usd(_call: &ToolCall) -> Option<f64> {
-    // SECURITY: Do NOT trust LLM-supplied cost estimates. Cost accounting
-    // must come from actual provider response metadata, not from agent claims.
-    // Return None so MaxCostPerTurn is effectively only enforced by the
-    // orchestrator's tracked cost (via external_actions), not pre-dispatch.
-    None
+fn observed_cost_usd(ctx: &ToolContext) -> Option<f64> {
+    // SECURITY: Do NOT trust LLM-supplied "estimated_cost_usd" fields on the
+    // pending tool call. Cost budget enforcement is based only on prior
+    // orchestrator/tool-recorded external action metadata.
+    let total = ctx
+        .external_actions
+        .read()
+        .iter()
+        .filter_map(action_cost_usd)
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+        .sum::<f64>();
+
+    (total > 0.0).then_some(total)
 }
 
-fn as_u32(value: &serde_json::Value) -> Option<u32> {
-    value.as_u64().and_then(|value| u32::try_from(value).ok())
+fn action_cost_usd(action: &ExternalAction) -> Option<f64> {
+    let metadata = &action.metadata;
+    [
+        metadata.get("actual_cost_usd"),
+        metadata.get("cost_usd"),
+        metadata.get("total_cost_usd"),
+        metadata.pointer("/usage/cost_usd"),
+        metadata.pointer("/usage/total_cost_usd"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(serde_json::Value::as_f64)
 }
 
 fn string_token_estimate(value: Option<&serde_json::Value>) -> Option<u32> {
@@ -765,6 +780,161 @@ mod tests {
             err.clone().into_tool_error(),
             ToolError::PermissionDenied(message) if message.contains("MaxTokensPerTurn")
         ));
+    }
+
+    #[test]
+    fn max_tokens_ignores_llm_supplied_estimate() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: vec![Invariant::MaxTokensPerTurn(10)],
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let call = ToolCall::new(
+            "call-token-bypass",
+            "write_file",
+            serde_json::json!({
+                "path": "large.txt",
+                "content": "x".repeat(44),
+                "estimated_tokens": 1,
+                "max_tokens": 1,
+            }),
+        );
+        let ctx = ToolContext::testing("/tmp/contract-tests");
+
+        let err = contract
+            .check_pre_execution(&call, &ctx)
+            .expect_err("content-derived token estimate should exceed the limit");
+        assert_eq!(err.rule, "MaxTokensPerTurn");
+        assert!(err.detail.contains("11 > 10"));
+    }
+
+    #[test]
+    fn require_gate_before_commit_ignores_llm_supplied_gate_passed_argument() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: vec![Invariant::RequireGateBeforeCommit],
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let call = ToolCall::new(
+            "call-gate-bypass",
+            "bash",
+            serde_json::json!({
+                "command": "git commit -m test",
+                "gate_passed": true,
+            }),
+        );
+        let ctx = ToolContext::testing("/tmp/contract-tests");
+
+        let err = contract
+            .check_pre_execution(&call, &ctx)
+            .expect_err("tool-call arguments must not satisfy gate approval");
+        assert_eq!(err.rule, "RequireGateBeforeCommit");
+    }
+
+    #[test]
+    fn require_gate_before_commit_accepts_recorded_gate_actions() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: vec![Invariant::RequireGateBeforeCommit],
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let call = ToolCall::new(
+            "call-gated-commit",
+            "bash",
+            serde_json::json!({ "command": "git push origin HEAD" }),
+        );
+
+        let ctx = ToolContext::testing("/tmp/contract-tests").with_external_actions(Arc::new(
+            RwLock::new(vec![ExternalAction {
+                service: "gate".into(),
+                action_type: "run_gate".into(),
+                resource_id: "compile".into(),
+                metadata: serde_json::json!({ "passed": true }),
+                performed_at: chrono::Utc::now(),
+            }]),
+        ));
+        assert!(contract.check_pre_execution(&call, &ctx).is_ok());
+
+        let ctx = ToolContext::testing("/tmp/contract-tests").with_external_actions(Arc::new(
+            RwLock::new(vec![ExternalAction {
+                service: "gate".into(),
+                action_type: "gate_passed".into(),
+                resource_id: "test".into(),
+                metadata: serde_json::json!({}),
+                performed_at: chrono::Utc::now(),
+            }]),
+        ));
+        assert!(contract.check_pre_execution(&call, &ctx).is_ok());
+    }
+
+    #[test]
+    fn max_cost_ignores_llm_supplied_estimate() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: Vec::new(),
+            governance: vec![GovernanceRule::MaxCostPerTurn(0.01)],
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let call = ToolCall::new(
+            "call-cost-claim",
+            "bash",
+            serde_json::json!({
+                "command": "echo hi",
+                "estimated_cost_usd": 999.0,
+            }),
+        );
+        let ctx = ToolContext::testing("/tmp/contract-tests");
+
+        assert!(contract.check_pre_execution(&call, &ctx).is_ok());
+    }
+
+    #[test]
+    fn max_cost_uses_recorded_external_action_costs() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: Vec::new(),
+            governance: vec![GovernanceRule::MaxCostPerTurn(0.25)],
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let actions = Arc::new(RwLock::new(vec![
+            ExternalAction {
+                service: "provider".into(),
+                action_type: "model_call".into(),
+                resource_id: "turn-1".into(),
+                metadata: serde_json::json!({ "usage": { "cost_usd": 0.10 } }),
+                performed_at: chrono::Utc::now(),
+            },
+            ExternalAction {
+                service: "provider".into(),
+                action_type: "model_call".into(),
+                resource_id: "turn-2".into(),
+                metadata: serde_json::json!({ "total_cost_usd": 0.20 }),
+                performed_at: chrono::Utc::now(),
+            },
+        ]));
+        let ctx = ToolContext::testing("/tmp/contract-tests").with_external_actions(actions);
+        let call = ToolCall::new(
+            "call-cost-bypass",
+            "bash",
+            serde_json::json!({
+                "command": "echo hi",
+                "estimated_cost_usd": 0.0,
+            }),
+        );
+
+        let err = contract
+            .check_pre_execution(&call, &ctx)
+            .expect_err("recorded provider cost should exceed the limit");
+        assert_eq!(err.rule, "MaxCostPerTurn");
+        assert!(err.detail.contains("0.3000 > 0.2500"));
     }
 
     #[test]
