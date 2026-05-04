@@ -43,10 +43,7 @@ pub enum RunnerFailureKind {
 
 impl RunnerFailureKind {
     pub const fn is_retryable(self) -> bool {
-        matches!(
-            self,
-            Self::Transient | Self::Permanent | Self::Structural | Self::Unknown
-        )
+        matches!(self, Self::Transient | Self::Structural | Self::Unknown)
     }
 
     pub const fn retry_cooldown_secs(self) -> u64 {
@@ -1248,6 +1245,8 @@ pub struct RunConfig {
     pub max_retries: u32,
     /// Maximum number of tasks that may execute concurrently within a plan.
     pub max_concurrent_tasks: usize,
+    /// Maximum number of gate rungs that may run concurrently across all tasks.
+    pub gate_concurrency: usize,
     /// Whether to require approval before each task.
     pub approval: bool,
     /// Whether to dangerously skip permissions in the agent.
@@ -1292,6 +1291,10 @@ pub struct RunConfig {
     /// stderr instead of showing a spinner. Enabled in non-quiet,
     /// non-json, non-approval CLI mode.
     pub stream_to_stderr: bool,
+    /// When true, run `cargo check --workspace` before the main event loop
+    /// to warm the incremental cache. Makes subsequent compile gates fast.
+    /// Default: true.
+    pub warm_cache: bool,
 }
 
 impl RunConfig {
@@ -1345,6 +1348,7 @@ impl RunConfig {
             plan_timeout_secs: roko_config.runner.plan_timeout_secs,
             max_retries: 2,
             max_concurrent_tasks,
+            gate_concurrency: max_concurrent_tasks,
             approval: false,
             dangerously_skip_permissions: roko_config.runner.dangerously_skip_permissions,
             force_resume: false,
@@ -1371,6 +1375,7 @@ impl RunConfig {
             connector_registry: Some(connector_registry),
             feed_registry: Some(feed_registry),
             stream_to_stderr: false,
+            warm_cache: true,
             // The runner constructs feedback / projection facades at run
             // start (`event_loop::run`) so they share their lifetime
             // with the run id. `None` here is the safe default for
@@ -1393,6 +1398,7 @@ impl Default for RunConfig {
             plan_timeout_secs: DEFAULT_PLAN_TIMEOUT_SECS,
             max_retries: DEFAULT_MAX_AUTO_FIX_ITERATIONS,
             max_concurrent_tasks: 4,
+            gate_concurrency: 4,
             approval: false,
             dangerously_skip_permissions: true,
             force_resume: false,
@@ -1412,6 +1418,7 @@ impl Default for RunConfig {
             feedback_facade: None,
             projection: None,
             stream_to_stderr: false,
+            warm_cache: true,
         }
     }
 }
@@ -1448,6 +1455,7 @@ impl std::fmt::Debug for RunConfig {
             )
             .field("feed_registry", &self.feed_registry.as_ref().map(|_| ".."))
             .field("stream_to_stderr", &self.stream_to_stderr)
+            .field("warm_cache", &self.warm_cache)
             .finish()
     }
 }
@@ -1582,6 +1590,6 @@ mod tests {
 
         let permanent = RunnerFailureKind::from_output("error[E0308]: mismatched types");
         assert_eq!(permanent, RunnerFailureKind::Permanent);
-        assert!(permanent.is_retryable());
+        assert!(!permanent.is_retryable());
     }
 }

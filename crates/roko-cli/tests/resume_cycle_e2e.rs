@@ -55,6 +55,7 @@ fn task(id: &str, title: &str) -> TaskDef {
         acceptance: vec!["compiles".into()],
         acceptance_contract: None,
         domain: None,
+        sequence: 0,
     }
 }
 

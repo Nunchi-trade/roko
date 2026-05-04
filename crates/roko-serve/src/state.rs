@@ -376,6 +376,19 @@ pub struct AppState {
     pub provider_health: ProviderHealthTracker,
     /// In-memory provider latency stats exposed via serve APIs.
     pub latency_registry: LatencyRegistry,
+    // -- Lock acquisition order (acquire outer before inner) ---------------
+    //
+    //  1. active_runs          7. discovered_agents     13. cascade_router
+    //  2. active_plans         8. aggregator_cache      14. gateway_model_counters
+    //  3. operations           9. heartbeats            15. batch_progress
+    //  4. templates           10. connectors            16. active_bench_runs
+    //  5. deployments         11. feeds                 17. active_matrix_runs
+    //  6. template_runs       12. ephemeral_workspaces
+    //
+    // Handlers that need multiple locks MUST acquire them in this order.
+    // Read-heavy maps (discovered_agents, aggregator_cache, heartbeats)
+    // are candidates for DashMap conversion in a future wave.
+    // ------------------------------------------------------------------
     /// Active one-shot runs.
     pub active_runs: RwLock<HashMap<String, RunHandle>>,
     /// Active plan executions.

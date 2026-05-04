@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/prd-pipeline.ts ---
 import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { showCmd, roko } from '../terminal-session';
+import { showCmd, roko, getRoko } from '../terminal-session';
 import { fetchWorkflowSnapshot } from '../workflow-api';
 
 // ── PRD pipeline idea ────────────────────────────────────────
@@ -8,32 +8,54 @@ import { fetchWorkflowSnapshot } from '../workflow-api';
 export const PRD_IDEA =
   'Build a CLI that fetches BTC funding rates from Binance, calculates average funding over 7 days, and alerts when funding exceeds 0.1%';
 
-// ── Static command definitions (display layer, no ctx needed) ─
+// ── Command templates (single source of truth) ──────────────
 
-export const PRD_PIPELINE_COMMANDS: CommandDef[] = [
-  { id: 'init',     command: 'roko init',                                                  description: 'Create workspace and config',    timeout: 10000  },
-  { id: 'idea',     command: `roko prd idea "${PRD_IDEA}"`,                                  description: 'Capture work item',              timeout: 10000  },
-  { id: 'draft',    command: 'roko prd draft new "BTC Funding Alert CLI"',                 description: 'Generate PRD via LLM',           timeout: 180000 },
-  { id: 'promote',  command: 'roko prd draft promote btc-funding-alert-cli',               description: 'Promote to published',           timeout: 10000  },
-  { id: 'plan',     command: 'roko prd plan btc-funding-alert-cli',                        description: 'Generate implementation plan',   timeout: 300000 },
-  { id: 'validate', command: 'roko plan validate .roko/plans',                             description: 'Lint the generated plan',        timeout: 10000  },
-  { id: 'run',      command: 'roko plan run .roko/plans --max-retries 1',                  description: 'Execute: agents + gates',        timeout: 600000 },
-  { id: 'status',   command: 'roko status',                                                description: 'View results and costs',         timeout: 10000  },
+interface CommandTemplate {
+  id: string;
+  subcommand: string;
+  display: string;
+  description: string;
+  timeout: number;
+  needsModel: boolean;
+}
+
+const TEMPLATES: CommandTemplate[] = [
+  { id: 'init',     subcommand: 'init',                                         display: 'roko init',                                                  description: 'Create workspace and config',    timeout: 10000,  needsModel: false },
+  { id: 'idea',     subcommand: `prd idea "${PRD_IDEA}"`,                        display: `roko prd idea "${PRD_IDEA}"`,                                  description: 'Capture work item',              timeout: 10000,  needsModel: false },
+  { id: 'draft',    subcommand: 'prd draft new "BTC Funding Alert CLI"',        display: 'roko prd draft new "BTC Funding Alert CLI"',                 description: 'Generate PRD via LLM',           timeout: 600000, needsModel: true  },
+  { id: 'promote',  subcommand: 'prd draft promote btc-funding-alert-cli',      display: 'roko prd draft promote btc-funding-alert-cli',               description: 'Promote to published',           timeout: 10000,  needsModel: false },
+  { id: 'plan',     subcommand: 'prd plan btc-funding-alert-cli',              display: 'roko prd plan btc-funding-alert-cli',                        description: 'Generate implementation plan',   timeout: 600000, needsModel: true  },
+  { id: 'validate', subcommand: 'plan validate .roko/plans',                    display: 'roko plan validate .roko/plans',                             description: 'Lint the generated plan',        timeout: 10000,  needsModel: false },
+  { id: 'run',      subcommand: 'plan run .roko/plans --max-retries 1',         display: 'roko plan run .roko/plans --max-retries 1',                  description: 'Execute: agents + gates',        timeout: 600000, needsModel: true  },
+  { id: 'status',   subcommand: 'status',                                       display: 'roko status',                                                description: 'View results and costs',         timeout: 10000,  needsModel: false },
 ];
 
-// ── Runtime commands factory (ctx-aware, actual command strings) ─
+// ── Derived static commands (display layer, no ctx needed) ───
 
-function prdCommands(ctx: ScenarioContext): CommandDef[] {
-  return [
-    { id: 'init',     command: roko(ctx, 'init'),                                              description: 'Create workspace and config',    timeout: 10000  },
-    { id: 'idea',     command: roko(ctx, `prd idea "${PRD_IDEA}"`),                            description: 'Capture work item',              timeout: 10000  },
-    { id: 'draft',    command: roko(ctx, 'prd draft new "BTC Funding Alert CLI"'),             description: 'Generate PRD via LLM',           timeout: 180000 },
-    { id: 'promote',  command: roko(ctx, 'prd draft promote btc-funding-alert-cli'),           description: 'Promote to published',           timeout: 10000  },
-    { id: 'plan',     command: roko(ctx, 'prd plan btc-funding-alert-cli'),                    description: 'Generate implementation plan',   timeout: 300000 },
-    { id: 'validate', command: roko(ctx, 'plan validate .roko/plans'),                         description: 'Lint the generated plan',        timeout: 10000  },
-    { id: 'run',      command: roko(ctx, 'plan run .roko/plans --max-retries 1'),              description: 'Execute: agents + gates',        timeout: 600000 },
-    { id: 'status',   command: roko(ctx, 'status'),                                            description: 'View results and costs',         timeout: 10000  },
-  ];
+export const PRD_PIPELINE_COMMANDS: CommandDef[] = TEMPLATES.map(t => ({
+  id: t.id,
+  command: t.display,
+  description: t.description,
+  timeout: t.timeout,
+}));
+
+// ── Runtime command helpers ───────────────────────────────────
+
+function runtimeCommand(ctx: ScenarioContext, tmpl: CommandTemplate): string {
+  if (tmpl.needsModel) {
+    return roko(ctx, tmpl.subcommand);
+  }
+  return `${getRoko()} ${tmpl.subcommand}`;
+}
+
+export function getRuntimeCmd(ctx: ScenarioContext, commandId: string): { command: string; description: string; timeout: number } | undefined {
+  const tmpl = TEMPLATES.find(t => t.id === commandId);
+  if (!tmpl) return undefined;
+  return {
+    command: runtimeCommand(ctx, tmpl),
+    description: tmpl.description,
+    timeout: tmpl.timeout,
+  };
 }
 
 // ── Scenario ─────────────────────────────────────────────────
@@ -64,16 +86,15 @@ export const prdPipeline: ClickableScenario = {
   commands: PRD_PIPELINE_COMMANDS,
 
   async runCommand(ctx: ScenarioContext, commandId: string): Promise<{ ok: boolean; error?: string }> {
-    const commands = prdCommands(ctx);
-    const cmd = commands.find(c => c.id === commandId);
-    if (!cmd) return { ok: false, error: 'Unknown command' };
+    const resolved = getRuntimeCmd(ctx, commandId);
+    if (!resolved) return { ok: false, error: 'Unknown command' };
 
     const [main] = ctx.entries;
     if (!main) return { ok: false, error: 'No terminal connected' };
 
-    const result = await showCmd(main, cmd.command, {
-      timeout: cmd.timeout ?? 60000,
-      customDesc: cmd.description,
+    const result = await showCmd(main, resolved.command, {
+      timeout: resolved.timeout,
+      customDesc: resolved.description,
       workspaceDir: ctx.workspaceDir,
       signal: ctx.signal,
     });

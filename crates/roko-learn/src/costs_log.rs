@@ -60,6 +60,11 @@ impl CostsLog {
 
     /// Append one [`CostRecord`] as one JSON line.
     ///
+    /// Each call opens, writes, optionally fsyncs, and closes the file.
+    /// For high-throughput paths (many concurrent agents), prefer collecting
+    /// records into a `Vec` and calling [`append_all`] in a periodic flush
+    /// to amortize the syscall overhead.
+    ///
     /// # Errors
     ///
     /// Returns an error for serialization or file I/O failures.
@@ -105,6 +110,15 @@ impl CostsLog {
             file.sync_data().await?;
         }
         Ok(())
+    }
+
+    /// Return whether the log has fsync enabled.
+    ///
+    /// Callers that do high-frequency appends can check this and batch
+    /// records themselves before calling [`append_all`].
+    #[must_use]
+    pub const fn fsync_enabled(&self) -> bool {
+        self.fsync
     }
 
     /// Read all valid records; malformed lines are skipped.

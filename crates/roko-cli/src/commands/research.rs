@@ -650,14 +650,14 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
             Ok(exit_code)
         }
         ResearchCmd::Analyze => {
-            let episodes_path = workdir.join(".roko/memory/episodes.jsonl");
+            let episodes_path = workdir.join(".roko/episodes.jsonl");
             let context = if episodes_path.exists() {
                 std::fs::read_to_string(&episodes_path).unwrap_or_default()
             } else {
                 String::from("(no episodes yet — run some tasks first)")
             };
             println!("🔬 Analyzing execution data");
-            let task_prompt = "Read .roko/memory/episodes.jsonl and analyze: \
+            let task_prompt = "Read .roko/episodes.jsonl and analyze: \
                  (1) First-attempt pass rate by task tier and model. \
                  (2) Cost per task — are expensive models used for easy tasks? \
                  (3) Retry patterns — what kinds of tasks fail most? \

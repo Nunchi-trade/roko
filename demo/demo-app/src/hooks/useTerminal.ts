@@ -219,9 +219,17 @@ export function useTerminal(sessionId?: string) {
 
     handle.waitForPrompt = async (timeout = 60000, signal?: AbortSignal): Promise<boolean> => {
       const start = Date.now();
+      let lastHeartbeat = start;
       await sleep(50);
       while (Date.now() - start < timeout) {
         if (signal?.aborted) return false;
+        // Periodic heartbeat every 30s so devtools shows progress
+        const now = Date.now();
+        if (now - lastHeartbeat > 30000) {
+          lastHeartbeat = now;
+          const elapsed = ((now - start) / 1000).toFixed(0);
+          console.debug(`[waitForPrompt] still waiting... ${elapsed}s/${(timeout / 1000).toFixed(0)}s bufLen=${outBuf.length}`);
+        }
         // Check a much larger window — long command output shouldn't hide the prompt
         const tail = stripAnsi(outBuf).slice(-2000);
         if (PROMPT_RE.test(tail)) {
@@ -234,7 +242,10 @@ export function useTerminal(sessionId?: string) {
           const growth = outBuf.length - snapshot;
           if (growth <= 50) {
             const recheck = stripAnsi(outBuf).slice(-2000);
-            if (PROMPT_RE.test(recheck)) return true;
+            if (PROMPT_RE.test(recheck)) {
+              console.debug(`[waitForPrompt] prompt detected after ${((Date.now() - start) / 1000).toFixed(1)}s`);
+              return true;
+            }
           }
         }
         await sleep(20);

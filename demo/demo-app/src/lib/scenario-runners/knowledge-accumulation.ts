@@ -1,8 +1,42 @@
 // --- src/lib/scenario-runners/knowledge-accumulation.ts ---
-import type { Scenario } from '../scenarios';
-import { enterWorkspace, showCmd, roko } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
+import { showCmd, roko } from '../terminal-session';
 
-export const knowledgeAccumulation: Scenario = {
+// ── Static command definitions (display layer, no ctx needed) ─
+
+export const KNOWLEDGE_ACCUMULATION_COMMANDS: CommandDef[] = [
+  { id: 'initial-stats',   command: 'roko knowledge stats',                                                          description: 'Check initial store state',            timeout: 30000,  target: { pane: 1 } },
+  { id: 'initial-query',   command: 'roko knowledge query "error handling patterns"',                                description: 'Query before any runs',                timeout: 30000,  target: { pane: 1 } },
+  { id: 'run-1',           command: 'roko run "Build a Rust CLI that parses JSON from stdin"',                        description: 'First run seeds knowledge',            timeout: 180000, target: { pane: 0 } },
+  { id: 'check-stats-1',   command: 'roko knowledge stats',                                                          description: 'Store after run 1',                    timeout: 30000,  target: { pane: 1 } },
+  { id: 'check-query-1',   command: 'roko knowledge query "JSON parsing"',                                           description: 'Query after run 1',                    timeout: 30000,  target: { pane: 1 } },
+  { id: 'run-2',           command: 'roko run "Add comprehensive error handling with anyhow and thiserror"',          description: 'Second run compounds knowledge',       timeout: 180000, target: { pane: 0 } },
+  { id: 'check-stats-2',   command: 'roko knowledge stats',                                                          description: 'Store after run 2',                    timeout: 30000,  target: { pane: 1 } },
+  { id: 'check-query-2',   command: 'roko knowledge query "error handling patterns"',                                description: 'Query after run 2',                    timeout: 30000,  target: { pane: 1 } },
+  { id: 'final-stats',     command: 'roko knowledge stats',                                                          description: 'Final store statistics',               timeout: 30000,  target: { pane: 1 } },
+  { id: 'final-learn',     command: 'roko learn all',                                                                description: 'All learning state',                  timeout: 30000,  target: { pane: 1 } },
+];
+
+// ── Runtime commands factory (ctx-aware, actual command strings) ─
+
+function knowledgeAccumulationCommands(ctx: ScenarioContext): CommandDef[] {
+  return [
+    { id: 'initial-stats',  command: roko(ctx, 'knowledge stats'),                                                    description: 'Check initial store state',            timeout: 30000,  target: { pane: 1 } },
+    { id: 'initial-query',  command: roko(ctx, 'knowledge query "error handling patterns"'),                          description: 'Query before any runs',                timeout: 30000,  target: { pane: 1 } },
+    { id: 'run-1',          command: roko(ctx, 'run "Build a Rust CLI that parses JSON from stdin"'),                  description: 'First run seeds knowledge',            timeout: 180000, target: { pane: 0 } },
+    { id: 'check-stats-1',  command: roko(ctx, 'knowledge stats'),                                                    description: 'Store after run 1',                    timeout: 30000,  target: { pane: 1 } },
+    { id: 'check-query-1',  command: roko(ctx, 'knowledge query "JSON parsing"'),                                     description: 'Query after run 1',                    timeout: 30000,  target: { pane: 1 } },
+    { id: 'run-2',          command: roko(ctx, 'run "Add comprehensive error handling with anyhow and thiserror"'),    description: 'Second run compounds knowledge',       timeout: 180000, target: { pane: 0 } },
+    { id: 'check-stats-2',  command: roko(ctx, 'knowledge stats'),                                                    description: 'Store after run 2',                    timeout: 30000,  target: { pane: 1 } },
+    { id: 'check-query-2',  command: roko(ctx, 'knowledge query "error handling patterns"'),                          description: 'Query after run 2',                    timeout: 30000,  target: { pane: 1 } },
+    { id: 'final-stats',    command: roko(ctx, 'knowledge stats'),                                                    description: 'Final store statistics',               timeout: 30000,  target: { pane: 1 } },
+    { id: 'final-learn',    command: roko(ctx, 'learn all'),                                                          description: 'All learning state',                  timeout: 30000,  target: { pane: 1 } },
+  ];
+}
+
+// ── Scenario ─────────────────────────────────────────────────
+
+export const knowledgeAccumulation: ClickableScenario = {
   id: 'knowledge-accumulation',
   title: 'Knowledge Growth',
   subtitle: 'Watch the knowledge store grow across successive runs.',
@@ -23,149 +57,39 @@ export const knowledgeAccumulation: Scenario = {
     { label: 'Knowledge growth', sublabel: 'query after run 2' },
     { label: 'Final state', sublabel: 'knowledge stats' },
   ],
-  async run(ctx) {
-    const { entries, playback, timeline, setMetric, logCommand, logCommandComplete, workspaceDir } = ctx;
-    const [runner, knowledge] = entries;
+  commands: KNOWLEDGE_ACCUMULATION_COMMANDS,
 
-    await enterWorkspace(runner, workspaceDir);
-    await enterWorkspace(knowledge, workspaceDir);
+  async runCommand(ctx: ScenarioContext, commandId: string): Promise<{ ok: boolean; error?: string }> {
+    const commands = knowledgeAccumulationCommands(ctx);
+    const cmd = commands.find(c => c.id === commandId);
+    if (!cmd) return { ok: false, error: 'Unknown command' };
 
-    timeline.init(this.steps);
-    setMetric('model', '--');
+    const paneIndex = typeof cmd.target === 'object' && 'pane' in cmd.target ? cmd.target.pane : 0;
+    const entry = ctx.entries[paneIndex];
+    if (!entry) return { ok: false, error: 'No terminal connected' };
 
-    // Step 1: Initial query shows an empty store.
-    await playback.waitForStep();
-    timeline.setActive(0);
-    playback.setProgress(1, 6, roko(ctx, 'knowledge stats'));
-    logCommand(
-      'knowledge stats',
-      'Checking the initial state of the neuro knowledge store. The store should be empty before any task runs.',
-    );
-    await showCmd(knowledge, roko(ctx, 'knowledge stats'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Checks the initial knowledge store state before any runs.',
-    });
-    await showCmd(knowledge, roko(ctx, 'knowledge query "error handling patterns"'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Queries for error handling patterns before the store has accumulated any knowledge.',
-    });
-    knowledge.clearTerminal();
+    // Clear terminal before certain commands
+    if (commandId === 'check-stats-1' || commandId === 'check-stats-2' || commandId === 'final-stats') {
+      ctx.entries[1]?.clearTerminal();
+    }
+    if (commandId === 'run-2') {
+      ctx.entries[0]?.clearTerminal();
+    }
 
-    // Step 2: First run grows the store.
-    await playback.waitForStep();
-    timeline.setActive(1);
-    playback.setProgress(2, 6, roko(ctx, 'run "Build a Rust CLI..."'));
-    logCommand(
-      'run 1',
-      'First task run builds a small Rust CLI. Episodes and efficiency data flow into the knowledge store.',
-    );
-    const firstRun = await showCmd(runner, roko(ctx, 'run "Build a Rust CLI that parses JSON from stdin"'), {
-      playback,
-      timeout: 180000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'First run: builds a JSON parser CLI and seeds the knowledge store with reusable patterns.',
-    });
-    if (firstRun.cost) setMetric('cost', firstRun.cost);
-    if (firstRun.tokens) setMetric('tokens', firstRun.tokens);
-
-    // Step 3: Query after run 1 should return richer results.
-    await playback.waitForStep();
-    timeline.setActive(2);
-    playback.setProgress(3, 6, roko(ctx, 'knowledge query ...'));
-    knowledge.clearTerminal();
-    logCommand(
-      'knowledge check 1',
-      'Querying the store after the first run. The results should now include JSON parsing and CLI patterns.',
-    );
-    await showCmd(knowledge, roko(ctx, 'knowledge stats'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Shows the store after one run has added entries.',
-    });
-    await showCmd(knowledge, roko(ctx, 'knowledge query "JSON parsing"'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Queries for JSON parsing after the first run has seeded relevant knowledge.',
+    const result = await showCmd(entry, cmd.command, {
+      timeout: cmd.timeout ?? 60000,
+      customDesc: cmd.description,
+      signal: ctx.signal,
+      onLog: ctx.logCommand,
+      onLogComplete: ctx.logCommandComplete,
     });
 
-    // Step 4: Second run compounds the store.
-    await playback.waitForStep();
-    timeline.setActive(3);
-    playback.setProgress(4, 6, roko(ctx, 'run "Add error handling..."'));
-    runner.clearTerminal();
-    logCommand(
-      'run 2',
-      'Second task adds error handling to the existing code. Knowledge compounds with the first run.',
-    );
-    const secondRun = await showCmd(runner, roko(ctx, 'run "Add comprehensive error handling with anyhow and thiserror"'), {
-      playback,
-      timeout: 180000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Second run: adds error handling and grows the knowledge store again.',
-    });
-    if (secondRun.cost) setMetric('cost', secondRun.cost);
-    if (secondRun.tokens) setMetric('tokens', secondRun.tokens);
+    // Track cost/tokens for run commands
+    if (commandId === 'run-1' || commandId === 'run-2') {
+      if (result.cost) ctx.setMetric('cost', result.cost);
+      if (result.tokens) ctx.setMetric('tokens', result.tokens);
+    }
 
-    // Step 5: Query after run 2 should be richer again.
-    await playback.waitForStep();
-    timeline.setActive(4);
-    playback.setProgress(5, 6, roko(ctx, 'knowledge query ...'));
-    knowledge.clearTerminal();
-    logCommand(
-      'knowledge check 2',
-      'After two runs the store should have accumulated entries across both tasks.',
-    );
-    await showCmd(knowledge, roko(ctx, 'knowledge stats'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Shows the store after two runs have accumulated more knowledge.',
-    });
-    await showCmd(knowledge, roko(ctx, 'knowledge query "error handling patterns"'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Queries for error handling patterns after the second run has added more knowledge.',
-    });
-
-    // Step 6: Final state shows learning surface area.
-    await playback.waitForStep();
-    timeline.setActive(5);
-    playback.setProgress(6, 6, roko(ctx, 'knowledge stats'));
-    knowledge.clearTerminal();
-    logCommand(
-      'final state',
-      'Final knowledge store statistics after two accumulation cycles.',
-    );
-    await showCmd(knowledge, roko(ctx, 'knowledge stats'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Final stats for the knowledge store after two task runs.',
-    });
-    await showCmd(knowledge, roko(ctx, 'learn all'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Shows all learning state after the accumulated runs.',
-    });
-
-    timeline.markAllComplete();
+    return { ok: result.ok };
   },
 };

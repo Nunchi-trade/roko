@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -1271,6 +1271,60 @@ fn crate_root_for_path(path: &str) -> Option<PathBuf> {
     }
 }
 
+/// Build a short workspace context string listing crate names and descriptions.
+///
+/// Reads `crates/*/Cargo.toml` to extract `[package].name` and `[package].description`
+/// so the agent knows which crates exist without reading the full source.
+fn workspace_context(workdir: &Path) -> String {
+    let crates_dir = workdir.join("crates");
+    let entries = match std::fs::read_dir(&crates_dir) {
+        Ok(e) => e,
+        Err(_) => return String::new(),
+    };
+
+    let mut crates: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let cargo_path = entry.path().join("Cargo.toml");
+        let Ok(content) = std::fs::read_to_string(&cargo_path) else {
+            continue;
+        };
+        let Ok(parsed) = content.parse::<toml::Value>() else {
+            continue;
+        };
+        let name = parsed
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let desc = parsed
+            .get("package")
+            .and_then(|p| p.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !name.is_empty() {
+            crates.push((name, desc));
+        }
+    }
+
+    if crates.is_empty() {
+        return String::new();
+    }
+
+    crates.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::from("## Workspace crates\n\n");
+    for (name, desc) in &crates {
+        if desc.is_empty() {
+            out.push_str(&format!("- {name}\n"));
+        } else {
+            out.push_str(&format!("- {name}: {desc}\n"));
+        }
+    }
+    out.push('\n');
+    out
+}
+
 fn collect_crate_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -1402,9 +1456,8 @@ fn scaffold_missing_crates(workdir: &Path, tasks_file: &TasksFile) -> Result<Vec
                 }
                 // Scaffold the crate directory.
                 let src_dir = crate_dir.join("src");
-                std::fs::create_dir_all(&src_dir).with_context(|| {
-                    format!("scaffold: create {}", src_dir.display())
-                })?;
+                std::fs::create_dir_all(&src_dir)
+                    .with_context(|| format!("scaffold: create {}", src_dir.display()))?;
 
                 let cargo_toml = format!(
                     "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
@@ -1417,9 +1470,7 @@ fn scaffold_missing_crates(workdir: &Path, tasks_file: &TasksFile) -> Result<Vec
                     format!("scaffold: write {}/src/lib.rs", crate_dir.display())
                 })?;
 
-                tracing::info!(
-                    "[orchestrate] scaffolded new crate crates/{crate_name}/"
-                );
+                tracing::info!("[orchestrate] scaffolded new crate crates/{crate_name}/");
                 scaffolded.push(crate_name);
             }
         }
@@ -1544,16 +1595,16 @@ struct EnrichmentRuntimeClient {
     env_vars: Vec<(String, String)>,
     extra_args: Vec<String>,
     skip_permissions: bool,
-    stats: Arc<Mutex<EnrichmentRunStats>>,
+    stats: Arc<parking_lot::Mutex<EnrichmentRunStats>>,
 }
 
 impl EnrichmentRuntimeClient {
     fn snapshot(&self) -> EnrichmentRunStats {
-        self.stats.lock().expect("enrichment stats lock").clone()
+        self.stats.lock().clone()
     }
 
     fn record_usage(&self, usage: &roko_agent::Usage) {
-        let mut stats = self.stats.lock().expect("enrichment stats lock");
+        let mut stats = self.stats.lock();
         stats.calls += 1;
         stats.input_tokens += u64::from(usage.input_tokens);
         stats.output_tokens += u64::from(usage.output_tokens);
@@ -4394,7 +4445,12 @@ impl PlanRunner {
             match TasksFile::parse(&tasks_path) {
                 Ok(tf) => {
                     if !self.skip_validate {
-                        validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
+                        validate_tasks_file_for_execution(
+                            &plan_id,
+                            &plan_info.base,
+                            &tasks_path,
+                            &tf,
+                        )?;
                     }
                     for task in &tf.tasks {
                         match task.mcp_servers.as_ref() {
@@ -4440,8 +4496,7 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let configured_model_slugs: Vec<String> =
-            available_model_slugs_with_fallback(&roko_config);
+        let configured_model_slugs: Vec<String> = available_model_slugs_with_fallback(&roko_config);
         let mut learning = if configured_model_slugs.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
@@ -4667,8 +4722,7 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let configured_model_slugs: Vec<String> =
-            available_model_slugs_with_fallback(&roko_config);
+        let configured_model_slugs: Vec<String> = available_model_slugs_with_fallback(&roko_config);
         let mut learning = if configured_model_slugs.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
@@ -4881,8 +4935,7 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let configured_model_slugs: Vec<String> =
-            available_model_slugs_with_fallback(&roko_config);
+        let configured_model_slugs: Vec<String> = available_model_slugs_with_fallback(&roko_config);
         let mut learning = if configured_model_slugs.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
@@ -7833,10 +7886,12 @@ impl PlanRunner {
             // neutral defaults so that plan-level somatic markers are positioned
             // in the landscape relative to plan complexity, scope, and risk.
             for p in &plans {
-                let _ = self.daimon.appraise(AffectEvent::TaskOutcome {
+                if let Err(e) = self.daimon.appraise(AffectEvent::TaskOutcome {
                     task_id: format!("plan:{}", p.plan_id),
                     succeeded: p.succeeded,
-                });
+                }) {
+                    tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+                }
                 let outcome_label = if p.succeeded { "success" } else { "failure" };
                 let plan_coords = plan_heuristic_strategy_coords(self, &p.plan_id);
                 self.daimon.record_somatic_outcome(
@@ -8005,10 +8060,7 @@ impl PlanRunner {
                                 task.id, task.title
                             );
                         } else {
-                            eprintln!(
-                                "  \u{2014} {} \"{}\": {reason}",
-                                task.id, task.title
-                            );
+                            eprintln!("  \u{2014} {} \"{}\": {reason}", task.id, task.title);
                         }
                     }
                 }
@@ -8162,13 +8214,15 @@ impl PlanRunner {
                 // Convert dream cycle report metrics into an affect event so the
                 // daimon can adjust its emotional/motivational state based on what
                 // the dream consolidation discovered.
-                let _ = self.daimon.appraise(AffectEvent::DreamOutcome {
+                if let Err(e) = self.daimon.appraise(AffectEvent::DreamOutcome {
                     knowledge_entries: report.knowledge_entries_written,
                     playbooks_created: report.playbooks_created,
                     regressions_detected: report.regressions_detected.len(),
                     strategy_hypotheses: report.strategy_hypotheses.len(),
                     episodes_processed: report.processed_episodes,
-                });
+                }) {
+                    tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+                }
                 tracing::debug!(
                     knowledge = report.knowledge_entries_written,
                     playbooks = report.playbooks_created,
@@ -8654,12 +8708,14 @@ impl PlanRunner {
                         );
 
                         if counts.executed() > 0 {
-                            let _ = self.daimon.appraise(AffectEvent::GateResult {
+                            if let Err(e) = self.daimon.appraise(AffectEvent::GateResult {
                                 plan_id: plan_id.clone(),
                                 task_id: format!("rung-{effective_rung}"),
                                 passed,
                                 rung: effective_rung,
-                            });
+                            }) {
+                                tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+                            }
                         }
 
                         // Store gate failure context for AutoFix phase
@@ -9203,7 +9259,7 @@ impl PlanRunner {
             env_vars: self.config.agent.env.clone(),
             extra_args: self.config.agent.args.clone(),
             skip_permissions: claude_skip_permissions_for_role(AgentRole::Strategist),
-            stats: Arc::new(Mutex::new(EnrichmentRunStats::default())),
+            stats: Arc::new(parking_lot::Mutex::new(EnrichmentRunStats::default())),
         };
         let pipeline = EnrichmentPipeline::new(
             EnrichmentConfig {
@@ -9502,10 +9558,12 @@ impl PlanRunner {
             for tid in &ready {
                 if let Some(wait_hours) = tracker.queue_wait_hours(tid) {
                     if wait_hours > 24.0 {
-                        let _ = self.daimon.appraise(AffectEvent::QueueWait {
+                        if let Err(e) = self.daimon.appraise(AffectEvent::QueueWait {
                             task_id: tid.clone(),
                             wait_hours,
-                        });
+                        }) {
+                            tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+                        }
                     }
                 }
             }
@@ -9551,10 +9609,12 @@ impl PlanRunner {
                             .count()
                     })
                     .unwrap_or(1);
-                let _ = self.daimon.appraise(AffectEvent::Blocked {
+                if let Err(e) = self.daimon.appraise(AffectEvent::Blocked {
                     task_id: plan_id.to_string(),
                     blocker_count,
-                });
+                }) {
+                    tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+                }
                 tracing::info!(
                     "[orchestrate] {plan_id}: implementation blocked by dependent plan(s), pausing"
                 );
@@ -9576,10 +9636,12 @@ impl PlanRunner {
                             .count()
                     })
                     .unwrap_or(1);
-                let _ = self.daimon.appraise(AffectEvent::Blocked {
+                if let Err(e) = self.daimon.appraise(AffectEvent::Blocked {
                     task_id: plan_id.to_string(),
                     blocker_count,
-                });
+                }) {
+                    tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+                }
                 tracing::error!(
                     "[orchestrate] {plan_id}: no ready tasks but not all done — blocked or failed"
                 );
@@ -11150,10 +11212,12 @@ impl PlanRunner {
             if timeout_ms > 0 {
                 let proximity = (wall_ms as f64) / (timeout_ms as f64);
                 if proximity > 0.8 {
-                    let _ = self.daimon.appraise(AffectEvent::TimePressure {
+                    if let Err(e) = self.daimon.appraise(AffectEvent::TimePressure {
                         task_id: task_id.to_string(),
                         deadline_proximity: proximity.min(1.0),
-                    });
+                    }) {
+                        tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+                    }
                 }
             }
         }
@@ -11337,26 +11401,55 @@ impl PlanRunner {
         }
 
         if let Some(task_def) = task_def.as_ref() {
-            match self.playbook.record(&task_def.id, result.success).await {
-                Ok(true) => {}
-                Ok(false) if !result.success => {}
-                Ok(false) => {
-                    let playbook = build_task_playbook(task_def);
-                    if let Err(err) = self.playbook.save(&playbook).await {
-                        tracing::warn!(
-                            plan_id = %plan_id,
+            // Re-query which playbooks match this task (same query used at dispatch time).
+            // Record outcome against their real IDs -- not task_def.id ("T1", "T2")
+            // which never matches seeded playbooks like "compile-check-loop".
+            let role = resolve_task_role(task_def.role.as_deref());
+            let query_ctx = playbook_query_context(role, task_id, &task_def.title, Some(task_def));
+            match self.playbook.query(&query_ctx).await {
+                Ok(matched) => {
+                    for pb in &matched {
+                        if let Err(err) = self.playbook.record(&pb.id, result.success).await {
+                            tracing::warn!(
+                                playbook_id = %pb.id,
+                                task_id = %task_id,
+                                error = %err,
+                                "failed to record playbook outcome"
+                            );
+                        } else {
+                            tracing::debug!(
+                                playbook_id = %pb.id,
+                                task_id = %task_id,
+                                success = result.success,
+                                "recorded playbook outcome"
+                            );
+                        }
+                    }
+                    if matched.is_empty() {
+                        tracing::debug!(
                             task_id = %task_id,
-                            error = %err,
-                            "failed to persist inferred playbook"
+                            "no matching playbooks found for outcome recording"
                         );
                     }
                 }
                 Err(err) => {
                     tracing::warn!(
+                        task_id = %task_id,
+                        error = %err,
+                        "failed to query playbooks for outcome recording"
+                    );
+                }
+            }
+
+            // Also save a task-specific inferred playbook on success.
+            if result.success {
+                let playbook = build_task_playbook(task_def);
+                if let Err(err) = self.playbook.save(&playbook).await {
+                    tracing::warn!(
                         plan_id = %plan_id,
                         task_id = %task_id,
                         error = %err,
-                        "failed to record playbook outcome"
+                        "failed to persist inferred playbook"
                     );
                 }
             }
@@ -11493,10 +11586,12 @@ impl PlanRunner {
         });
 
         // Appraise task outcome for affect modulation.
-        let _ = self.daimon.appraise(AffectEvent::TaskOutcome {
+        if let Err(e) = self.daimon.appraise(AffectEvent::TaskOutcome {
             task_id: task_id.to_string(),
             succeeded: true,
-        });
+        }) {
+            tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+        }
         self.daimon.record_somatic_outcome(
             task_strategy,
             somatic_episode_hash(plan_id, task_id, "success", &success_episode_id),
@@ -13626,10 +13721,12 @@ impl PlanRunner {
         self.obs_sinks.trace_sink.append(trace_id, event);
 
         // Appraise task outcome for affect modulation.
-        let _ = self.daimon.appraise(AffectEvent::TaskOutcome {
+        if let Err(e) = self.daimon.appraise(AffectEvent::TaskOutcome {
             task_id: task_id.to_string(),
             succeeded: false,
-        });
+        }) {
+            tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+        }
         self.daimon.record_somatic_outcome(
             task_strategy,
             somatic_episode_hash(plan_id, task_id, "failure", &error.to_string()),
@@ -15002,6 +15099,19 @@ impl PlanRunner {
             .clone()
             .or_else(|| self.config.agent.model.clone());
         let task_model_hint = task_def.as_ref().and_then(|td| td.model_hint.clone());
+
+        // ── Inject workspace crate context into the task prompt ──────
+        let ws_ctx = workspace_context(&self.workdir);
+        tracing::debug!(
+            workspace_ctx_len = ws_ctx.len(),
+            "injected workspace context"
+        );
+        let task_text = if ws_ctx.is_empty() {
+            task_text
+        } else {
+            format!("{ws_ctx}{task_text}")
+        };
+
         let base_selection = resolve_effective_model(
             cli_model,
             task_model_hint,
@@ -15115,7 +15225,9 @@ impl PlanRunner {
                     ) {
                         signals.extend(efficiency_signals);
                     }
-                    let _ = self.conductor.decide(&signals, &Context::now());
+                    if let Err(e) = self.conductor.decide(&signals, &Context::now()) {
+                        tracing::warn!(error = %e, "conductor decide failed (non-fatal)");
+                    }
                     self.conductor.routing_bias()
                 };
                 if routing_bias.prefer_cheaper {
@@ -15147,9 +15259,7 @@ impl PlanRunner {
                     // the cascade router from selecting an escalation target
                     // whose provider will fail at dispatch time.
                     let before = slugs.len();
-                    slugs.retain(|slug| {
-                        is_model_provider_available(&roko_config, slug)
-                    });
+                    slugs.retain(|slug| is_model_provider_available(&roko_config, slug));
                     if slugs.is_empty() && before > 0 {
                         // Safety valve: if filtering removed everything,
                         // keep the originally-selected model so dispatch
@@ -16343,11 +16453,10 @@ impl PlanRunner {
                 };
             let registry =
                 Arc::new(VecToolRegistry::from_tools(tools.clone())) as Arc<dyn ToolRegistry>;
-            let resolver: Arc<dyn HandlerResolver> = if self.chain_client.is_some() {
-                let chain_map = chain_handler_map(
-                    Arc::clone(self.chain_client.as_ref().unwrap()),
-                    self.chain_wallet.clone(),
-                );
+            let resolver: Arc<dyn HandlerResolver> = if let Some(client) =
+                self.chain_client.as_ref()
+            {
+                let chain_map = chain_handler_map(Arc::clone(client), self.chain_wallet.clone());
                 Arc::new(chain_aware_resolver(chain_map))
             } else {
                 Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
@@ -17047,6 +17156,45 @@ impl PlanRunner {
         })
     }
 
+    /// Dispatch an agent and record a daimon appraisal for the outcome.
+    ///
+    /// This helper wraps [`dispatch_agent_with`] and centralizes the
+    /// daimon `TaskOutcome` appraisal that is uniform across all call sites.
+    /// Episode recording stays at individual call sites because it varies
+    /// per-context (plan run vs. replan vs. research, etc.).
+    async fn dispatch_and_record(
+        &mut self,
+        plan_id: &str,
+        role: AgentRole,
+        task: &str,
+        prompt_override: Option<String>,
+        model_override: Option<String>,
+        exec_dir_override: Option<PathBuf>,
+        system_prompt_override: Option<String>,
+    ) -> Result<DispatchOutcome> {
+        let outcome = self
+            .dispatch_agent_with(
+                plan_id,
+                role,
+                task,
+                prompt_override,
+                model_override,
+                exec_dir_override,
+                system_prompt_override,
+            )
+            .await;
+
+        let succeeded = outcome.is_ok();
+        if let Err(e) = self.daimon.appraise(AffectEvent::TaskOutcome {
+            task_id: task.to_string(),
+            succeeded,
+        }) {
+            tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
+        }
+
+        outcome
+    }
+
     /// Run per-task verification steps.
     ///
     /// Returns `Ok(())` if all steps succeed. If a step fails, returns
@@ -17229,7 +17377,9 @@ impl PlanRunner {
                 }
                 let sig = maybe_attest_engram(builder.build());
                 if Self::verify_gate_signal_chain(&payload_sig, &sig) {
-                    let _ = substrate.put(sig).await;
+                    if let Err(e) = substrate.put(sig).await {
+                        tracing::error!(error = %e, "substrate put failed — audit trail gap");
+                    }
                 }
             }
             if let Some(ratchet_verdict) = verdicts.iter().find(|verdict| verdict.gate == "ratchet")
@@ -17247,7 +17397,9 @@ impl PlanRunner {
                         .build(),
                 );
                 if Self::verify_gate_signal_chain(&payload_sig, &sig) {
-                    let _ = substrate.put(sig).await;
+                    if let Err(e) = substrate.put(sig).await {
+                        tracing::error!(error = %e, "substrate put failed — audit trail gap");
+                    }
                 }
             }
         }
@@ -17862,7 +18014,7 @@ impl PlanRunner {
         exec_dir: &Path,
     ) -> (Vec<RecordedGateVerdict>, usize) {
         let ctx = Context::now();
-        let sink = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let mut pipeline = GatePipeline::new(format!("gate-pipeline:{plan_id}"));
         let GateSelectionPlan {
             steps,
@@ -17872,7 +18024,7 @@ impl PlanRunner {
             pipeline.push(Box::new(RecordingGate::new(rung, gate, Arc::clone(&sink))));
         }
         let _aggregate = pipeline.verify(payload_sig, &ctx).await;
-        let verdicts = sink.lock().expect("recorded gate sink poisoned").clone();
+        let verdicts = sink.lock().clone();
         (verdicts, skipped_count)
     }
 
@@ -19677,9 +19829,7 @@ fn available_model_slugs_with_fallback(roko_config: &RokoConfig) -> Vec<String> 
         if skipped > 0 {
             for slug in &all {
                 if !available.contains(slug) {
-                    tracing::info!(
-                        "cascade: skipping model '{slug}' — provider not available"
-                    );
+                    tracing::info!("cascade: skipping model '{slug}' — provider not available");
                 }
             }
         }

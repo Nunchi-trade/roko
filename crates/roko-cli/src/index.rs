@@ -151,6 +151,25 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
     }
     plan_dirs.sort();
 
+    // Load run-state for real completion data. tasks.toml is never
+    // updated by plan run -- completion state lives in run-state.json only.
+    // NOTE: This is run-state.json (RunStateSnapshot), NOT executor.json
+    // (ExecutorSnapshot). Only RunStateSnapshot has completed_tasks.
+    let run_state_path = workdir.join(".roko/state/run-state.json");
+    let run_state_completed: std::collections::HashMap<String, Vec<String>> =
+        if run_state_path.exists() {
+            std::fs::read_to_string(&run_state_path)
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|val| {
+                    val.get("completed_tasks")
+                        .and_then(|ct| serde_json::from_value(ct.clone()).ok())
+                })
+                .unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+
     let mut total_tasks = 0u32;
     let mut total_done = 0u32;
 
@@ -159,7 +178,14 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
         let tasks_path = dir.join("tasks.toml");
         let content = std::fs::read_to_string(&tasks_path).unwrap_or_default();
 
-        let (tasks, done, ready) = count_top_level_tasks(&content);
+        let (tasks, mut done, ready) = count_top_level_tasks(&content);
+
+        // Overlay real completion data from run-state.json if available.
+        if let Some(completed_ids) = run_state_completed.get(name.as_ref()) {
+            if !completed_ids.is_empty() {
+                done = completed_ids.len() as u32;
+            }
+        }
         let max_parallel = extract_toml_value(&content, "max_parallel").unwrap_or_default();
 
         let status = if done == tasks && tasks > 0 {
@@ -325,7 +351,7 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "→ [Full index](.roko/research/INDEX.md)\n");
 
     // Episodes summary
-    let episodes_path = workdir.join(".roko/memory/episodes.jsonl");
+    let episodes_path = workdir.join(".roko/episodes.jsonl");
     let episode_count = if episodes_path.exists() {
         std::fs::read_to_string(&episodes_path)
             .unwrap_or_default()
@@ -335,7 +361,7 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
         0
     };
     let _ = writeln!(out, "## Episodes ({episode_count} recorded)");
-    let _ = writeln!(out, "→ `.roko/memory/episodes.jsonl`\n");
+    let _ = writeln!(out, "→ `.roko/episodes.jsonl`\n");
 
     // Config
     let config_exists = workdir.join("roko.toml").exists();

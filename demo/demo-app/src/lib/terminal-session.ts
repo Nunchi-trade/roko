@@ -21,6 +21,34 @@ export function setSpeedMultiplier(m: number) {
   speedMultiplier = m;
 }
 
+// ── Timeout configuration ────────────────────────────────────
+
+export interface TimeoutConfig {
+  binaryDetection: number;
+  execCheck: number;
+  websocketOpen: number;
+  shellPrompt: number;
+  workspaceCd: number;
+}
+
+export const DEFAULT_TIMEOUTS: TimeoutConfig = {
+  binaryDetection: 4000,
+  execCheck: 3000,
+  websocketOpen: 8000,
+  shellPrompt: 6000,
+  workspaceCd: 5000,
+};
+
+let activeTimeouts: TimeoutConfig = { ...DEFAULT_TIMEOUTS };
+
+export function setTimeouts(overrides: Partial<TimeoutConfig>): void {
+  activeTimeouts = { ...DEFAULT_TIMEOUTS, ...overrides };
+}
+
+export function getTimeouts(): TimeoutConfig {
+  return activeTimeouts;
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 
 function rawSleep(ms: number): Promise<void> {
@@ -51,7 +79,7 @@ export async function resolveRoko(handle: TerminalHandle): Promise<string> {
   const marker = `__RK_${Date.now().toString(36)}__`;
   const result = await handle.execCmd(
     `command -v roko >/dev/null 2>&1 && echo "${marker}RP" || { test -x ./target/release/roko && echo "${marker}RR:$PWD/target/release/roko" || { test -x ./target/debug/roko && echo "${marker}RD:$PWD/target/debug/roko" || echo "${marker}RN"; }; }`,
-    4000,
+    activeTimeouts.binaryDetection,
     { silent: true },
   );
   if (result.ok || result.exitCode >= 0) {
@@ -78,7 +106,7 @@ export async function resolveRoko(handle: TerminalHandle): Promise<string> {
   // Validate the resolved path is executable (skip for bare 'roko' which relies on PATH)
   if (resolvedRoko !== 'roko') {
     handle.outputBuffer = '';
-    const check = await handle.execCmd(`test -x ${resolvedRoko}`, 3000, { silent: true });
+    const check = await handle.execCmd(`test -x ${resolvedRoko}`, activeTimeouts.execCheck, { silent: true });
     if (!check.ok) {
       console.warn('[resolveRoko] resolved path not executable, falling back:', resolvedRoko);
       resolvedRoko = 'roko';
@@ -115,7 +143,7 @@ function shellQuote(value: string): string {
 export async function ensureWorkspaceCwd(
   handle: TerminalHandle,
   dir: string,
-  timeout = 5000,
+  timeout = activeTimeouts.workspaceCd,
 ): Promise<boolean> {
   const cdResult = await handle.execCmd(`cd ${shellQuote(dir)}`, timeout, { silent: true });
   if (!cdResult.ok) {
@@ -139,7 +167,7 @@ export async function ensureWorkspaceCwd(
 export function roko(ctx: ScenarioContext, subcommand: string): string {
   const bin = getRoko();
   if (ctx.activeModel) {
-    return `${bin} --model ${ctx.activeModel} ${subcommand}`;
+    return `${bin} --model ${shellQuote(ctx.activeModel)} ${subcommand}`;
   }
   return `${bin} ${subcommand}`;
 }
@@ -158,7 +186,7 @@ export async function enterWorkspace(
   dir: string,
 ): Promise<boolean> {
   // 1. Wait for WebSocket to be open
-  const wsOk = await waitForOpen(handle, 8000);
+  const wsOk = await waitForOpen(handle, activeTimeouts.websocketOpen);
   if (!wsOk) {
     console.error('[enterWorkspace] WebSocket never opened for', handle.sessionId);
     throw new Error(`Terminal WebSocket failed to connect (session: ${handle.sessionId})`);
@@ -167,7 +195,7 @@ export async function enterWorkspace(
   // 2. Wait for shell prompt — the useTerminal hook now waits for this
   //    during connection, but we double-check here with a generous timeout.
   //    If the first check fails, send a blank line to nudge the shell.
-  let promptOk = await handle.waitForPrompt(6000);
+  let promptOk = await handle.waitForPrompt(activeTimeouts.shellPrompt);
   if (!promptOk) {
     console.warn('[enterWorkspace] First prompt check failed, sending blank line to nudge shell');
     handle.sendRaw('\r');
@@ -195,6 +223,8 @@ export async function enterWorkspace(
 
 // ── Command execution with logging ──────────────────────────
 
+export type CommandFailureReason = 'timeout' | 'ws_closed' | 'command_error' | 'aborted' | 'unknown';
+
 export interface CommandResult {
   ok: boolean;
   elapsed: number;
@@ -203,6 +233,8 @@ export interface CommandResult {
   tokens: string | null;
   /** Last lines of terminal output when the command failed. */
   error?: string;
+  /** Reason for failure when ok=false. */
+  failureReason?: CommandFailureReason;
 }
 
 export interface GateResult {
@@ -267,19 +299,21 @@ export async function showCmd(
   // Clear output buffer for fresh detection
   handle.outputBuffer = '';
 
+  console.debug(`[showCmd] start: "${cmd.slice(0, 80)}" timeout=${timeout}ms`);
+
   // Log to command panel (as pending — not yet complete)
   opts?.onLog?.(cmd, desc);
 
   if (opts?.signal?.aborted) {
     opts?.onLogComplete?.(cmd, false);
-    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null };
+    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null, failureReason: 'aborted' };
   }
 
   if (opts?.workspaceDir) {
     const cwdOk = await ensureWorkspaceCwd(handle, opts.workspaceDir);
     if (!cwdOk) {
       opts?.onLogComplete?.(cmd, false);
-      return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null };
+      return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null, failureReason: 'command_error' };
     }
     handle.outputBuffer = '';
   }
@@ -288,18 +322,19 @@ export async function showCmd(
   const typed = await typeChars(handle, cmd);
   if (!typed) {
     opts?.onLogComplete?.(cmd, false);
-    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null };
+    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null, failureReason: 'ws_closed' };
   }
 
   // Press Enter and wait for prompt
   if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) {
     opts?.onLogComplete?.(cmd, false);
-    return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null };
+    return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null, failureReason: 'ws_closed' };
   }
   handle.ws.send('\r');
   const promptOk = await handle.waitForPrompt(timeout, opts?.signal);
 
   const elapsed = (Date.now() - startTime) / 1000;
+  console.debug(`[showCmd] promptOk=${promptOk} elapsed=${elapsed.toFixed(1)}s bufLen=${handle.outputBuffer.length}`);
 
   // Detect gates, cost, tokens from output
   const result = detectFromOutput(handle.outputBuffer, opts);
@@ -319,6 +354,16 @@ export async function showCmd(
     }
   }
 
+  // Override: CLI sometimes exits non-zero but the artifact was written.
+  // Detect "treating ... as successful" pattern and flip ok to true.
+  if (!ok && commandOutput) {
+    const stripped = stripAnsi(commandOutput);
+    if (/treating .* as successful/i.test(stripped)) {
+      console.debug('[showCmd] exit code non-zero but CLI reports artifact written — treating as success');
+      ok = true;
+    }
+  }
+
   // Print a visible separator line directly in the xterm display
   try {
     handle.terminal.write('\r\n\x1b[38;5;132m' + '\u2500'.repeat(60) + '\x1b[0m\r\n');
@@ -334,6 +379,8 @@ export async function showCmd(
     error = lines.slice(-10).join('\n').trim() || undefined;
   }
 
+  console.debug(`[showCmd] done: ok=${ok} elapsed=${elapsed.toFixed(1)}s gates=${result.gates.length} cost=${result.cost} tokens=${result.tokens}${error ? ` error="${error.slice(0, 100)}"` : ''}`);
+
   // Mark the log entry as complete
   opts?.onLogComplete?.(cmd, ok);
 
@@ -344,6 +391,7 @@ export async function showCmd(
     cost: result.cost,
     tokens: result.tokens,
     error,
+    failureReason: ok ? undefined : (!promptOk ? 'timeout' : 'command_error'),
   };
 }
 
@@ -446,6 +494,7 @@ export function trackMetrics(
     onCost?: (cost: string) => void;
     onTokens?: (tokens: string) => void;
     onGate?: (name: string, status: 'pass' | 'fail') => void;
+    signal?: AbortSignal;
   },
   intervalMs = 500,
 ): ReturnType<typeof setInterval> {
@@ -453,7 +502,7 @@ export function trackMetrics(
   let lastTokens: string | null = null;
   const seenGates = new Set<string>();
 
-  return setInterval(() => {
+  const interval = setInterval(() => {
     const result = detectFromOutput(handle.outputBuffer);
     if (result.cost && result.cost !== lastCost) {
       lastCost = result.cost;
@@ -471,4 +520,10 @@ export function trackMetrics(
       }
     }
   }, intervalMs);
+
+  if (opts.signal) {
+    opts.signal.addEventListener('abort', () => clearInterval(interval), { once: true });
+  }
+
+  return interval;
 }

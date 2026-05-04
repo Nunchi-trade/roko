@@ -90,7 +90,7 @@ impl DreamAgentConfig {
             let model = if self.command == "claude" {
                 self.model
                     .clone()
-                    .unwrap_or_else(|| "claude-opus-4-6".to_string())
+                    .unwrap_or_else(|| roko_core::defaults::MODEL_DEEP.to_string())
             } else {
                 self.model.clone().unwrap_or_else(|| self.command.clone())
             };
@@ -144,7 +144,7 @@ impl DreamAgentConfig {
         }
 
         if self.command == "claude" {
-            Ok("claude-opus-4-6".to_string())
+            Ok(roko_core::defaults::MODEL_DEEP.to_string())
         } else {
             Ok(self.command.clone())
         }

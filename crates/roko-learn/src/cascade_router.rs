@@ -1074,6 +1074,13 @@ impl CascadeRouter {
     /// because the caller has not supplied a real [`RoutingContext`].
     pub fn record_confidence_outcome(&self, model_slug: &str, success: bool) -> bool {
         let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            tracing::warn!(
+                slug = %model_slug,
+                success,
+                "cascade router: unknown model slug -- outcome dropped. \
+                 Add this model to [models] in roko.toml or provider config \
+                 so the router can track it."
+            );
             return false;
         };
 
@@ -1222,54 +1229,65 @@ impl CascadeRouter {
             return;
         };
 
-        let mut stage_tracking = self.stage_tracking.lock();
-
-        // Update confidence stats.
-        let mut stats = self.confidence_stats.lock();
-        let entry = stats.entry(slug.clone()).or_default();
-        entry.trials += 1;
-        if success {
-            entry.successes += 1;
-        }
-        if let Some(perplexity) = perplexity {
-            entry.total_citations += perplexity.citation_count;
-            entry.total_search_latency_ms += perplexity.search_latency_ms;
-            entry.total_cost_usd += perplexity.total_cost_usd;
-            entry.perplexity_requests += 1;
-        }
-        if let Some(gemini) = gemini {
-            entry.total_gemini_thinking_tokens += gemini.thinking_tokens;
-            entry.total_gemini_cached_tokens += gemini.cached_tokens;
-            entry.total_gemini_grounding_queries += gemini.grounding_query_count;
-            entry.gemini_code_execution_successes += gemini.code_execution_success_count;
-            entry.gemini_code_execution_failures += gemini.code_execution_failure_count;
-            entry.gemini_requests += 1;
-            match gemini.context_tier {
-                GeminiContextTier::UpTo200k => entry.gemini_context_window_le_200k_requests += 1,
-                GeminiContextTier::Over200k => entry.gemini_context_window_gt_200k_requests += 1,
+        // Phase 1: Update confidence stats (single lock, dropped before next).
+        {
+            let mut stats = self.confidence_stats.lock();
+            let entry = stats.entry(slug.clone()).or_default();
+            entry.trials += 1;
+            if success {
+                entry.successes += 1;
             }
-        }
-        drop(stats);
+            if let Some(perplexity) = perplexity {
+                entry.total_citations += perplexity.citation_count;
+                entry.total_search_latency_ms += perplexity.search_latency_ms;
+                entry.total_cost_usd += perplexity.total_cost_usd;
+                entry.perplexity_requests += 1;
+            }
+            if let Some(gemini) = gemini {
+                entry.total_gemini_thinking_tokens += gemini.thinking_tokens;
+                entry.total_gemini_cached_tokens += gemini.cached_tokens;
+                entry.total_gemini_grounding_queries += gemini.grounding_query_count;
+                entry.gemini_code_execution_successes += gemini.code_execution_success_count;
+                entry.gemini_code_execution_failures += gemini.code_execution_failure_count;
+                entry.gemini_requests += 1;
+                match gemini.context_tier {
+                    GeminiContextTier::UpTo200k => {
+                        entry.gemini_context_window_le_200k_requests += 1;
+                    }
+                    GeminiContextTier::Over200k => {
+                        entry.gemini_context_window_gt_200k_requests += 1;
+                    }
+                }
+            }
+        } // stats lock dropped
 
-        // Update LinUCB (always, so it's ready when stage transitions).
+        // Phase 2: Update LinUCB (internal lock, not nested with ours).
         self.linucb.update_features(context_vec, model_idx, reward);
 
         // Refresh Pareto frontier if the observation count crossed a bucket boundary.
         self.refresh_pareto_frontier_if_needed();
 
+        // Phase 3: Check stage transition (single lock, dropped before log).
         let obs = self.linucb.total_observations();
         let next = stage_for_observations(obs);
-        if next != stage_tracking.current {
-            let transition = StageTransition {
-                from: stage_tracking.current,
-                to: next,
-                observations: obs,
-                timestamp: Utc::now(),
-            };
-            stage_tracking.current = next;
-            stage_tracking.transitions.push(transition.clone());
-            drop(stage_tracking);
+        let transition = {
+            let mut stage_tracking = self.stage_tracking.lock();
+            if next != stage_tracking.current {
+                let t = StageTransition {
+                    from: stage_tracking.current,
+                    to: next,
+                    observations: obs,
+                    timestamp: Utc::now(),
+                };
+                stage_tracking.current = next;
+                stage_tracking.transitions.push(t.clone());
+                Some(t)
+            } else {
+                None
+            }
+        }; // stage_tracking lock dropped
 
+        if let Some(transition) = transition {
             tracing::info!(
                 from = %transition.from,
                 to = %transition.to,
@@ -1618,7 +1636,16 @@ impl CascadeRouter {
                 .collect(),
             total_observations: self.linucb.total_observations(),
             stage_transitions,
+            // LinUCB export methods don't exist yet; populate None as
+            // forward-compatible placeholder. Wire actual export when
+            // LinUCBRouter exposes A/b matrices.
+            linucb_state: None,
         };
+        tracing::debug!(
+            total_observations = snapshot.total_observations,
+            linucb_persisted = snapshot.linucb_state.is_some(),
+            "cascade router snapshot built"
+        );
         serde_json::to_string_pretty(&snapshot).unwrap_or_default()
     }
 
@@ -1647,6 +1674,7 @@ impl CascadeRouter {
             total_observations,
             role_table,
             stage_transitions,
+            linucb_state: _linucb_state,
         } = snapshot;
 
         let slugs = if model_slugs.is_empty() {

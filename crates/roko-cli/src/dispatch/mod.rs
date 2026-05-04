@@ -89,6 +89,10 @@ pub struct DispatchContext {
     /// Routing context for the CascadeRouter. Built at the dispatch site
     /// from task + runner state, threaded through to `RoutingInputs`.
     pub routing_context: Option<RoutingContext>,
+    /// Output files from each completed dependency task.
+    /// Each entry is `(task_id, files)`. Injected into the system prompt
+    /// so the agent knows what its predecessors already produced.
+    pub dependency_outputs: Vec<(String, Vec<String>)>,
 }
 
 // ─── Dispatcher facade ─────────────────────────────────────────────────
@@ -336,6 +340,7 @@ mod tests {
             acceptance: vec![],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         }
     }
 
@@ -350,6 +355,7 @@ mod tests {
             attempt: 0,
             gate_feedback: None,
             routing_context: None,
+            dependency_outputs: Vec::new(),
         }
     }
 

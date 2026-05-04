@@ -1029,6 +1029,7 @@ async fn generate_plan_from_prd_with_outcome(
 
         let task_prompt = format!(
             "Generate an implementation plan from the PRD below.\n\n\
+             Plan slug (use exactly in meta.plan): {slug}\n\n\
              IMPORTANT: The PRD content is included inline — do NOT read {path} \
              again. You may read up to 5 codebase files to understand existing \
              structure, but then you MUST produce your output.\n\n\
@@ -1038,9 +1039,17 @@ async fn generate_plan_from_prd_with_outcome(
              as follows:\n\n\
              1. Output a fenced block tagged `toml` containing the tasks.toml content.\n\
              2. Optionally output a fenced block tagged `plan.md` containing the plan narrative.\n\n\
-             Include per-task mcp_servers when a task needs a specific MCP server.\n\n\
+             TOML quality checklist (every task MUST pass all of these):\n\
+             - `meta.plan` matches the slug exactly: {slug}\n\
+             - Every task has `id`, `title`, `description`, `status = \"ready\"`, `role`, and `tier`\n\
+             - `files` lists only real paths that exist in the codebase (no placeholders)\n\
+             - `depends_on` only references task ids defined in this same plan\n\
+             - No `model_hint` field (the runtime selects the model automatically)\n\
+             - No `mcp_servers` field unless the task genuinely requires an MCP server\n\
+             - Every `[[task.verify]]` entry has `phase` and `command`\n\n\
              {template_guidance}\n\
              PRD content:\n{trimmed_content}{prd_context_suffix}",
+            slug = slug,
             path = prd_path.display(),
             template_guidance = template_guidance,
             trimmed_content = trimmed_content,
@@ -1051,23 +1060,17 @@ async fn generate_plan_from_prd_with_outcome(
         let t_phase = Instant::now();
         let task_id = format!("prd:plan:{slug}");
         eprintln!("  Generating plan from PRD: {slug}");
-        let (exit_code, output) = run_agent_capture_logged(
-            AgentExecOpts {
-                prompt: &task_prompt,
-                workdir: workdir_ref,
-                model: model.or_else(|| resolved.config.agent.model.as_deref()),
-                effort: Some(resolved.config.agent.effort.as_str()),
-                system_prompt: Some(&system),
-                resume_session: None,
-                env_vars: &resolved.config.agent.env,
-                role: Some("strategist"),
-                allowed_tools: Some("Read,Grep,Glob"),
-            },
-            AgentExecEpisode {
-                task_kind: "prd-plan-generate",
-                task_id: &task_id,
-            },
-        )
+        let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
+            prompt: &task_prompt,
+            workdir: workdir_ref,
+            model: model.or_else(|| resolved.config.agent.model.as_deref()),
+            effort: Some(resolved.config.agent.effort.as_str()),
+            system_prompt: Some(&system),
+            resume_session: None,
+            env_vars: &resolved.config.agent.env,
+            role: Some("strategist"),
+            allowed_tools: Some("Read,Grep,Glob"),
+        })
         .await?;
         let agent_ms = t_phase.elapsed().as_millis();
         let t_phase = Instant::now();
@@ -1129,8 +1132,10 @@ async fn generate_plan_from_prd_with_outcome(
         if validated_toml.is_err() {
             let max_retries = 2u32;
             for attempt in 1..=max_retries {
+                let t_retry = Instant::now();
                 tracing::warn!(
                     attempt,
+                    max_retries,
                     err = validated_toml.as_ref().unwrap_err().as_str(),
                     "prd plan: TOML extraction/validation failed, retrying"
                 );
@@ -1162,16 +1167,30 @@ async fn generate_plan_from_prd_with_outcome(
                     Ok((0, retry_output)) if !retry_output.trim().is_empty() => {
                         validated_toml = try_extract_and_validate(&retry_output);
                         if validated_toml.is_ok() {
-                            tracing::info!(attempt, "prd plan: retry succeeded");
+                            tracing::info!(
+                                attempt,
+                                retry_ms = t_retry.elapsed().as_millis() as u64,
+                                "prd plan: retry succeeded"
+                            );
                             eprintln!("✅ Retry {attempt} succeeded");
                             break;
                         }
                     }
                     Ok((code, _)) => {
-                        tracing::warn!(attempt, code, "prd plan: retry agent failed");
+                        tracing::warn!(
+                            attempt,
+                            code,
+                            retry_ms = t_retry.elapsed().as_millis() as u64,
+                            "prd plan: retry agent failed"
+                        );
                     }
                     Err(err) => {
-                        tracing::warn!(attempt, %err, "prd plan: retry agent error");
+                        tracing::warn!(
+                            attempt,
+                            %err,
+                            retry_ms = t_retry.elapsed().as_millis() as u64,
+                            "prd plan: retry agent error"
+                        );
                     }
                 }
             }
@@ -1207,6 +1226,18 @@ async fn generate_plan_from_prd_with_outcome(
                 std::fs::write(plan_dir.join("plan.md"), &minimal_plan_md)
                     .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
             }
+
+            // Update PRD frontmatter: record the generated plan slug.
+            if let Err(err) = update_prd_plans_generated(prd_path, slug) {
+                eprintln!("warning: failed to update PRD plans_generated: {err}");
+                tracing::warn!(
+                    slug = %slug,
+                    error = %err,
+                    "failed to update PRD plans_generated field"
+                );
+            } else {
+                tracing::info!(slug = %slug, "updated PRD plans_generated field");
+            }
         } else {
             // All attempts (initial + retries) failed to produce valid TOML.
             let final_err = validated_toml.unwrap_err();
@@ -1228,6 +1259,12 @@ async fn generate_plan_from_prd_with_outcome(
             ));
         }
 
+        let extraction_ms = t_phase.elapsed().as_millis();
+        tracing::info!(
+            extraction_and_write_ms = extraction_ms,
+            "prd plan: TOML extracted and written"
+        );
+        let t_phase = Instant::now();
         let generated_changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);
 
         if !dry_run {
@@ -1673,7 +1710,8 @@ fn extract_toml_content_fallback(output: &str) -> Option<&str> {
             && !trimmed.starts_with('[')
             && !trimmed.starts_with('"')
             && !trimmed.starts_with('\'')
-            && !trimmed.starts_with('#') // TOML comment
+            && !trimmed.starts_with('#')
+        // TOML comment
         {
             break;
         }
@@ -1688,6 +1726,48 @@ fn extract_toml_content_fallback(output: &str) -> Option<&str> {
     } else {
         Some(result)
     }
+}
+
+/// Update the PRD frontmatter to record that a plan was generated.
+fn update_prd_plans_generated(prd_path: &std::path::Path, plan_slug: &str) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(prd_path)?;
+
+    let updated = if content.contains("plans_generated: []") {
+        content.replace(
+            "plans_generated: []",
+            &format!("plans_generated: [\"{plan_slug}\"]"),
+        )
+    } else if let Some(pos) = content.find("plans_generated: [") {
+        let after_bracket = pos + "plans_generated: [".len();
+        if let Some(close) = content[after_bracket..].find(']') {
+            let close_pos = after_bracket + close;
+            let existing = content[after_bracket..close_pos].trim();
+            if existing.is_empty() {
+                format!(
+                    "{}\"{plan_slug}\"{}",
+                    &content[..after_bracket],
+                    &content[close_pos..]
+                )
+            } else if existing.contains(plan_slug) {
+                // Already listed
+                return Ok(());
+            } else {
+                format!(
+                    "{}, \"{plan_slug}\"{}",
+                    &content[..close_pos],
+                    &content[close_pos..]
+                )
+            }
+        } else {
+            return Ok(()); // Malformed, skip
+        }
+    } else {
+        // No plans_generated field found -- don't modify
+        return Ok(());
+    };
+
+    std::fs::write(prd_path, updated)?;
+    Ok(())
 }
 
 // ---- post-generation plan TOML validation --------------------------------
@@ -1874,9 +1954,15 @@ fn validate_and_fix_generated_plan(
     models: &std::collections::HashMap<String, roko_core::config::schema::ModelProfile>,
     default_model: Option<&str>,
 ) -> Result<String> {
+    // 0. Deterministic repair before parsing
+    let repaired = crate::task_parser::repair_toml(toml_str);
+    if repaired != toml_str {
+        tracing::info!("prd plan: applied deterministic TOML repair");
+    }
+
     // 1. Parse syntax.
     let mut root: toml::Value =
-        toml::from_str(toml_str).map_err(|e| anyhow!("generated plan has invalid TOML: {e}"))?;
+        toml::from_str(&repaired).map_err(|e| anyhow!("generated plan has invalid TOML: {e}"))?;
 
     let root_table = root
         .as_table_mut()
@@ -1967,9 +2053,7 @@ fn validate_and_fix_generated_plan(
                                     task.insert(correction, value);
                                 }
                             } else {
-                                eprintln!(
-                                    "warning: {task_id_label}: unknown field '{key}'"
-                                );
+                                eprintln!("warning: {task_id_label}: unknown field '{key}'");
                             }
                         }
                     }
@@ -1981,9 +2065,8 @@ fn validate_and_fix_generated_plan(
                                 "{task_id_label} is missing required field '{required}'"
                             )),
                             Some(v) if v.as_str().is_some_and(|s| s.trim().is_empty()) => {
-                                errors.push(format!(
-                                    "{task_id_label}: field '{required}' is empty"
-                                ));
+                                errors
+                                    .push(format!("{task_id_label}: field '{required}' is empty"));
                             }
                             _ => {}
                         }
@@ -2037,24 +2120,14 @@ fn validate_and_fix_generated_plan(
                         }
                     }
 
-                    // Validate model_hint: remove if not in config so runtime picks the default.
-                    if let Some(hint_val) = task.get("model_hint").cloned() {
-                        if let Some(hint) = hint_val.as_str() {
-                            let normalized = crate::task_parser::normalize_model_alias(hint);
-                            if !model_in_config(normalized, models) {
-                                eprintln!(
-                                    "warning: {task_id_label}: model_hint '{hint}' \
-                                     not in config, removing (runtime will select)"
-                                );
-                                task.remove("model_hint");
-                            } else if normalized != hint {
-                                // Replace short alias with canonical name.
-                                task.insert(
-                                    "model_hint".to_string(),
-                                    toml::Value::String(normalized.to_string()),
-                                );
-                            }
-                        }
+                    // Always strip model_hint from generated plans — the runtime
+                    // picks the best model via cascade routing.
+                    if let Some(hint_val) = task.remove("model_hint") {
+                        let hint = hint_val.as_str().unwrap_or("<unknown>");
+                        eprintln!(
+                            "info: {task_id_label}: removing model_hint '{hint}' \
+                             (runtime will select via cascade routing)"
+                        );
                     }
 
                     // Validate [[task.verify]] sub-entries.
@@ -2065,10 +2138,9 @@ fn validate_and_fix_generated_plan(
                                     let step_keys: Vec<String> = step.keys().cloned().collect();
                                     for key in &step_keys {
                                         if !KNOWN_VERIFY_FIELDS.contains(&key.as_str()) {
-                                            if let Some(correction) = suggest_field_correction(
-                                                key,
-                                                KNOWN_VERIFY_FIELDS,
-                                            ) {
+                                            if let Some(correction) =
+                                                suggest_field_correction(key, KNOWN_VERIFY_FIELDS)
+                                            {
                                                 if let Some(value) = step.remove(key.as_str()) {
                                                     eprintln!(
                                                         "warning: {task_id_label} verify[{si}]: \
@@ -2146,10 +2218,7 @@ fn validate_and_fix_generated_plan(
     }
 
     // If we did any replacements, verify the TOML still parses.
-    if replacements
-        .iter()
-        .any(|(ph, _)| toml_str.contains(*ph))
-    {
+    if replacements.iter().any(|(ph, _)| toml_str.contains(*ph)) {
         let _: toml::Value = toml::from_str(&serialized)
             .map_err(|e| anyhow!("TOML became invalid after placeholder replacement: {e}"))?;
     }
@@ -2782,7 +2851,10 @@ mod tests {
         let text = "[meta]\nplan = \"x\"\ntotal = 1\nstatus = \"ready\"\n\n\
                     # Task section\n[[task]]\nid = \"T1\"\ntitle = \"A\"\n";
         let block = extract_toml_content_fallback(text).unwrap();
-        assert!(block.contains("# Task section"), "TOML comments should be kept");
+        assert!(
+            block.contains("# Task section"),
+            "TOML comments should be kept"
+        );
     }
 
     #[test]
@@ -2983,7 +3055,8 @@ mod tests {
 
     // ---- validate_and_fix_generated_plan tests -------------------------------
 
-    fn empty_models() -> std::collections::HashMap<String, roko_core::config::schema::ModelProfile> {
+    fn empty_models() -> std::collections::HashMap<String, roko_core::config::schema::ModelProfile>
+    {
         std::collections::HashMap::new()
     }
 
@@ -3100,11 +3173,13 @@ tier = "focused"
 pha = "test"
 command = "cargo test"
 "#;
-        let result =
-            validate_and_fix_generated_plan(toml, "test", &empty_models(), None).unwrap();
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         let verify = parsed["task"][0]["verify"][0].as_table().unwrap();
-        assert!(verify.contains_key("phase"), "pha should be corrected to phase");
+        assert!(
+            verify.contains_key("phase"),
+            "pha should be corrected to phase"
+        );
         assert!(!verify.contains_key("pha"), "pha should be removed");
     }
 
@@ -3125,13 +3200,9 @@ tier = "focused"
 model_hint = "gpt-nonexistent"
 "#;
         let models = sample_models();
-        let result = validate_and_fix_generated_plan(
-            toml,
-            "test",
-            &models,
-            Some("claude-sonnet-4-6"),
-        )
-        .unwrap();
+        let result =
+            validate_and_fix_generated_plan(toml, "test", &models, Some("claude-sonnet-4-6"))
+                .unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert!(
             parsed["task"][0].get("model_hint").is_none(),
@@ -3156,8 +3227,7 @@ tier = "focused"
 model_hint = "haiku"
 "#;
         let models = sample_models();
-        let result =
-            validate_and_fix_generated_plan(toml, "test", &models, None).unwrap();
+        let result = validate_and_fix_generated_plan(toml, "test", &models, None).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert_eq!(
             parsed["task"][0]["model_hint"].as_str().unwrap(),
@@ -3211,7 +3281,10 @@ id = "T1"
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("missing required field 'title'"), "msg: {msg}");
-        assert!(msg.contains("missing required field 'status'"), "msg: {msg}");
+        assert!(
+            msg.contains("missing required field 'status'"),
+            "msg: {msg}"
+        );
         assert!(msg.contains("missing required field 'role'"), "msg: {msg}");
         assert!(msg.contains("missing required field 'tier'"), "msg: {msg}");
     }
@@ -3240,8 +3313,7 @@ stat = "pending"
 role = "implementer"
 tier = "focused"
 "#;
-        let result =
-            validate_and_fix_generated_plan(toml, "test", &empty_models(), None).unwrap();
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         let task = parsed["task"][0].as_table().unwrap();
         assert!(
@@ -3271,13 +3343,9 @@ files = ["crates/<relevant-lib>/src/lib.rs"]
 phase = "build"
 command = "cargo check -p <crate>"
 "#;
-        let result = validate_and_fix_generated_plan(
-            toml,
-            "btc-funding-alert-cli",
-            &empty_models(),
-            None,
-        )
-        .unwrap();
+        let result =
+            validate_and_fix_generated_plan(toml, "btc-funding-alert-cli", &empty_models(), None)
+                .unwrap();
         assert!(
             !result.contains("<relevant-lib>"),
             "placeholder <relevant-lib> should be replaced"
@@ -3318,13 +3386,8 @@ command = "cargo check -p <binary-crate>"
 phase = "test"
 command = "cargo test -p <crate> -- <test_name>"
 "#;
-        let result = validate_and_fix_generated_plan(
-            toml,
-            "my-cool-tool",
-            &empty_models(),
-            None,
-        )
-        .unwrap();
+        let result =
+            validate_and_fix_generated_plan(toml, "my-cool-tool", &empty_models(), None).unwrap();
         // <binary-crate> and <crate> replaced with slug.
         assert!(
             !result.contains("<binary-crate>"),

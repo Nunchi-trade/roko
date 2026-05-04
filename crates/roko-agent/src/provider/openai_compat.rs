@@ -379,7 +379,8 @@ impl ProviderAdapter for OpenAiCompatAdapter {
                 .with_max_iterations(tool_loop_max_iterations())
                 .with_context_token_limit(
                     usize::try_from(model.context_window).unwrap_or(usize::MAX),
-                );
+                )
+                .with_model_profile(model.clone());
 
             let mut agent = ToolLoopAgent::new(tool_loop)
                 .with_tools(tools)

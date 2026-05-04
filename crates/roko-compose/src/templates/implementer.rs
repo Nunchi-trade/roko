@@ -2,7 +2,7 @@
 //!
 //! Roko-owned implementer prompt template with typed, I/O-free inputs.
 
-use super::common::budget_for;
+use super::common::{self, budget_for};
 use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -67,7 +67,18 @@ document the deviation.\n\
 9. No upward dependencies — leaf crates must have zero workspace-internal deps.\n\
 10. All tests from the plan's Verification section must pass.\n\
 11. Self-validate before signaling done: cargo check, cargo test on affected crates.\n\
-12. Operate autonomously. Do not ask questions. Complete all work and end your turn.";
+12. Operate autonomously. Do not ask questions. Complete all work and end your turn.\n\
+\n\
+## When Things Go Wrong\n\
+\n\
+- **cargo check fails**: Read the full error. Fix the root cause in the file that owns the type/trait. \
+Do not add spurious `#[allow(...)]` or `as _` casts to silence errors.\n\
+- **Tests fail**: Run the failing test in isolation with `cargo test -p <crate> <test_name>`. \
+Read the assertion message. Fix the logic, not the test expectation, unless the test was wrong.\n\
+- **You need to touch a file not in your task's `files` list**: STOP. You may only read it for context. \
+If the fix genuinely requires changing that file, note it in your output as a blocker for a follow-up task.\n\
+- **Ambiguous requirement**: Pick the simplest interpretation that satisfies all verify commands. \
+Document your assumption in a code comment.";
 
 impl RolePromptTemplate for ImplementerTemplate {
     type Input = ImplementerInput;
@@ -76,13 +87,8 @@ impl RolePromptTemplate for ImplementerTemplate {
         let budget = budget_for(AgentRole::Implementer);
         let mut sections = Vec::with_capacity(10);
 
-        // 1. agents_instructions — System / Critical
-        sections.push(
-            PromptSection::new("agents_instructions", &input.agents_md)
-                .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Role)
-                .with_placement(Placement::Start),
-        );
+        // 1. agents_instructions — System / Critical / Start
+        sections.push(common::agents_instructions_section(&input.agents_md));
 
         // 2. plan_spec — Session / Critical / hard_cap 50k
         sections.push(
@@ -353,7 +359,7 @@ mod tests {
         let template = ImplementerTemplate;
         let id = template.role_identity();
         assert!(id.len() >= 500);
-        assert!(id.len() <= 2000);
+        assert!(id.len() <= 3000);
         assert!(id.contains("Implementer"));
     }
 }

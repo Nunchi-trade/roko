@@ -86,7 +86,7 @@ pub struct ToolDispatcher {
     registry: Arc<dyn ToolRegistry>,
     resolver: Arc<dyn HandlerResolver>,
     max_result_bytes: usize,
-    safety: Option<SafetyLayer>,
+    safety: SafetyLayer,
     /// Optional tool result cache for deterministic tools (AGT-10).
     tool_cache: Option<parking_lot::Mutex<result_cache::ToolResultCache>>,
     /// Optional sequential safety hook chain (TOOL-02).
@@ -110,7 +110,7 @@ impl ToolDispatcher {
             registry,
             resolver,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
-            safety: None,
+            safety: SafetyLayer::with_defaults(),
             tool_cache: None,
             hook_chain: None,
             tool_selector: None,
@@ -128,14 +128,14 @@ impl ToolDispatcher {
     /// pre-execution safety checks and post-execution output scrubbing.
     #[must_use]
     pub fn with_safety(mut self, layer: SafetyLayer) -> Self {
-        self.safety = Some(layer);
+        self.safety = layer;
         self
     }
 
-    /// Returns the configured safety layer, if any.
+    /// Returns a reference to the configured safety layer.
     #[must_use]
-    pub const fn safety(&self) -> Option<&SafetyLayer> {
-        self.safety.as_ref()
+    pub const fn safety(&self) -> &SafetyLayer {
+        &self.safety
     }
 
     /// Attach a sequential safety hook chain (TOOL-02).
@@ -335,22 +335,20 @@ impl ToolDispatcher {
         //     so we do NOT call check_contract separately (§12.10 fix: removed
         //     redundant double-invocation that wasted CPU and double-counted
         //     rate-limited invariants).
-        if let Some(ref safety) = self.safety {
-            if let Err(e) = safety.check_pre_execution(&call, ctx) {
-                tracing::warn!(tool = %call.name, error = %e, "FAILED at safety pre-execution");
-                Self::emit_audit(
-                    ctx,
-                    &call,
-                    "safety",
-                    "blocked",
-                    &json!({
-                        "error": e.to_string(),
-                        "error_kind": tool_error_kind(&e),
-                    }),
-                );
-                Self::emit_terminal_audit(ctx, &call, &ToolResult::err(e.clone()), timeout_ms);
-                return ToolResult::err(e);
-            }
+        if let Err(e) = self.safety.check_pre_execution(&call, ctx) {
+            tracing::warn!(tool = %call.name, error = %e, "FAILED at safety pre-execution");
+            Self::emit_audit(
+                ctx,
+                &call,
+                "safety",
+                "blocked",
+                &json!({
+                    "error": e.to_string(),
+                    "error_kind": tool_error_kind(&e),
+                }),
+            );
+            Self::emit_terminal_audit(ctx, &call, &ToolResult::err(e.clone()), timeout_ms);
+            return ToolResult::err(e);
         }
         // 3c. Safety hook chain — if a chain is attached, run each hook
         //     sequentially. The first rejection short-circuits. Audit records
@@ -444,18 +442,10 @@ impl ToolDispatcher {
         // 6. Truncate oversized output.
         let result = truncate_result(result, self.max_result_bytes);
         // 7. Scrub secrets from output.
-        let result = if let Some(ref safety) = self.safety {
-            safety.scrub_output(result)
-        } else {
-            result
-        };
-        let result = if let Some(ref safety) = self.safety {
-            match safety.check_recovery(&result) {
-                Ok(()) => result,
-                Err(err) => ToolResult::err(err),
-            }
-        } else {
-            result
+        let result = self.safety.scrub_output(result);
+        let result = match self.safety.check_recovery(&result) {
+            Ok(()) => result,
+            Err(err) => ToolResult::err(err),
         };
         Self::emit_terminal_audit(ctx, &call, &result, timeout_ms);
         result
@@ -661,7 +651,7 @@ impl std::fmt::Debug for ToolDispatcher {
             .field("max_result_bytes", &self.max_result_bytes)
             .field("registry", &"Arc<dyn ToolRegistry>")
             .field("resolver", &"Arc<dyn HandlerResolver>")
-            .field("safety", &self.safety.is_some())
+            .field("safety", &"active")
             .field("hook_chain", &self.hook_chain)
             .finish()
     }

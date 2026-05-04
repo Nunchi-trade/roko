@@ -49,8 +49,16 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCo
         "ok"
     };
 
+    // Map health status to appropriate HTTP status codes so load balancers
+    // and liveness probes can detect degraded/down states.
+    let http_status = match status {
+        "down" => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        _ => axum::http::StatusCode::OK,
+    };
+    tracing::debug!(status, ?http_status, "health check response");
+
     (
-        axum::http::StatusCode::OK,
+        http_status,
         Json(json!({
             "status": status,
             "version": env!("CARGO_PKG_VERSION"),
@@ -70,7 +78,14 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCo
 
 /// `GET /api/relay/health` — return relay connection diagnostics.
 pub async fn relay_health(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let health = state.relay_health.read().clone();
+    // Use try_read() to avoid blocking the Tokio worker thread under write
+    // contention, consistent with the health() handler above.
+    let health = state
+        .relay_health
+        .try_read()
+        .map(|r| r.clone())
+        .unwrap_or_default();
+    tracing::debug!("relay_health: served via try_read");
     Json(serde_json::to_value(&health).unwrap_or_default())
 }
 

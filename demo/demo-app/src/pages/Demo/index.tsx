@@ -345,7 +345,7 @@ export default function Demo() {
       </div>
 
       {/* ── Block ticker (live chain blocks) ── */}
-      <BlockTicker />
+      <BlockTicker enabled={!!SCENARIOS[activeIdx]?.mirageBar} />
 
       {/* ── Scenario slots (lazy-mounted, never unmounted) ── */}
       {SCENARIOS.map((s, i) => {

@@ -383,6 +383,7 @@ mod tests {
             acceptance: vec![],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         }
     }
 

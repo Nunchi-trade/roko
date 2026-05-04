@@ -585,23 +585,65 @@ fn classify_error_pattern(output: &Engram) -> ErrorPattern {
     };
     let text = text.to_ascii_lowercase();
 
-    if text.contains("compile") || text.contains("borrow checker") || text.contains("rustc") {
-        ErrorPattern::Compile
-    } else if text.contains("test") || text.contains("assert") {
-        ErrorPattern::Test
-    } else if text.contains("tool") {
-        ErrorPattern::ToolCall
-    } else if text.contains("timeout") || text.contains("timed out") {
-        ErrorPattern::Timeout
-    } else if text.contains("io error")
-        || text.contains("filesystem")
-        || text.contains("permission denied")
-        || text.contains("network")
+    // Priority-ordered matching: more specific patterns first to avoid
+    // false positives (e.g. "this test compiles fine" should match Test,
+    // not Compile).
+
+    // Timeout is the most unambiguous signal.
+    if text.contains("timed out") || text.contains("timeout") || text.contains("deadline exceeded")
     {
-        ErrorPattern::Infrastructure
-    } else {
-        ErrorPattern::Unknown
+        return ErrorPattern::Timeout;
     }
+
+    // Infrastructure: network/IO errors are unambiguous when they include
+    // specific keywords.
+    if text.contains("io error")
+        || text.contains("permission denied")
+        || text.contains("connection refused")
+        || text.contains("dns resolution")
+        || text.contains("network error")
+        || text.contains("econnreset")
+        || text.contains("broken pipe")
+    {
+        return ErrorPattern::Infrastructure;
+    }
+
+    // Tool call failures -- look for specific tool error patterns.
+    if text.contains("tool call failed")
+        || text.contains("tool execution error")
+        || text.contains("tool_use_error")
+    {
+        return ErrorPattern::ToolCall;
+    }
+
+    // Compile: look for compiler-specific indicators, not just "compile".
+    if text.contains("error[e") // rustc error codes like error[E0308]
+        || text.contains("borrow checker")
+        || text.contains("cannot find")
+        || text.contains("mismatched types")
+        || text.contains("unresolved import")
+        || (text.contains("rustc") && text.contains("error"))
+        || (text.contains("cargo build") && text.contains("failed"))
+    {
+        return ErrorPattern::Compile;
+    }
+
+    // Test: look for test runner output patterns.
+    if text.contains("test result: failed")
+        || text.contains("assertion failed")
+        || text.contains("panicked at")
+        || (text.contains("cargo test") && text.contains("failed"))
+    {
+        return ErrorPattern::Test;
+    }
+
+    // Fallback: broad filesystem/network patterns (lower priority to avoid
+    // false positives).
+    if text.contains("filesystem") || text.contains("no such file") {
+        return ErrorPattern::Infrastructure;
+    }
+
+    ErrorPattern::Unknown
 }
 
 #[cfg(test)]

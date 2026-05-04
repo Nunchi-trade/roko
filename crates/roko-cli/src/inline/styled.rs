@@ -164,7 +164,10 @@ pub fn status_bar(
     progress: Option<f64>,
 ) -> Line<'static> {
     let mut spans = vec![
-        Span::styled(format!("${:.4}", cost_usd.max(0.0)), Style::default().fg(Theme::SAGE)),
+        Span::styled(
+            format!("${:.4}", cost_usd.max(0.0)),
+            Style::default().fg(Theme::SAGE),
+        ),
         Span::styled(format!("  {}  ", symbols::SEP), theme.muted()),
         Span::styled(
             format!("{input_tokens} in / {output_tokens} out"),

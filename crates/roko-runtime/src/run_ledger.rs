@@ -6,9 +6,9 @@
 
 use std::path::PathBuf;
 
+use roko_core::RuntimeEvent;
 use roko_core::foundation::TokenUsage;
 use roko_core::runtime_event::RuntimeEventEnvelope;
-use roko_core::RuntimeEvent;
 
 use crate::pipeline_state::{CommitOutcome, Phase, WorkflowConfig};
 use crate::workflow_engine::{GateOutcome, WorkflowRunReport};

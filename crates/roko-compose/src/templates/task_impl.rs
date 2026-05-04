@@ -6,7 +6,7 @@
 //! file context, sibling task awareness for parallel execution, and per-task
 //! learning packs.
 
-use super::common::budget_for;
+use super::common::{self, budget_for};
 use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -105,12 +105,7 @@ impl RolePromptTemplate for TaskImplTemplate {
 fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) {
     let budget = budget_for(AgentRole::Implementer);
     // 1. agents_instructions — System / Critical / Start
-    sections.push(
-        PromptSection::new("agents_instructions", &input.agents_md)
-            .with_priority(SectionPriority::Critical)
-            .with_cache_layer(CacheLayer::Role)
-            .with_placement(Placement::Start),
-    );
+    sections.push(common::agents_instructions_section(&input.agents_md));
     // 2. plan_spec — Session / Critical / Start / hard_cap 50k
     sections.push(
         PromptSection::new("plan_spec", truncate(&input.plan.content, budget.plan))

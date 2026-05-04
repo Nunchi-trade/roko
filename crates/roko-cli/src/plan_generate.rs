@@ -123,16 +123,6 @@ pub enum TaskTier {
 }
 
 impl TaskTier {
-    /// Suggested model for this tier.
-    #[must_use]
-    pub const fn model_hint(&self) -> &'static str {
-        match self {
-            Self::Mechanical => "claude-haiku-4-5",
-            Self::Focused | Self::Integrative => "claude-sonnet-4-6",
-            Self::Architectural => "claude-opus-4-6",
-        }
-    }
-
     /// Maximum lines of code change for this tier.
     #[must_use]
     pub const fn max_loc(&self) -> u32 {
@@ -204,7 +194,7 @@ max_loc = 20              # maximum lines of change
 files = ["crates/roko-core/src/types.rs"]   # REAL file paths only, never <path> or <crate>
 allowed_tools = ["read_file", "grep"]
 denied_tools = []
-mcp_servers = ["filesystem"] # MCP servers this task needs
+# mcp_servers omitted — only include when a task genuinely requires an MCP server
 depends_on = []
 role = "implementer"      # REQUIRED: implementer | architect | researcher | strategist | quick-reviewer | scribe
 
@@ -245,7 +235,7 @@ max_loc = 40
 files = ["crates/roko-cli/src/commands/status.rs"]
 allowed_tools = ["read_file", "grep", "write_file"]
 denied_tools = []
-mcp_servers = ["filesystem"]
+# mcp_servers omitted — only include when a task genuinely requires an MCP server
 depends_on = ["T1"]
 role = "implementer"
 
@@ -287,6 +277,19 @@ Every `[[task]]` MUST include a `role` field. Choose the most specific role:
 | `"quick-reviewer"` | Code review tasks, auditing for correctness |
 
 Missing or misspelled roles will be rejected by `roko plan validate`. The `role` field is REQUIRED.
+
+## Role-Tool Constraints
+
+Each role has a default tool permission set. Tasks can further restrict via `allowed_tools`/`denied_tools`.
+
+| Role | Read | Write | Execute | Notes |
+|------|------|-------|---------|-------|
+| `"implementer"` | yes | yes | yes | Full access to modify and build |
+| `"architect"` | yes | yes | yes | Same as implementer but for design-level tasks |
+| `"researcher"` | yes | no | no | Read-only; cannot modify files or run commands |
+| `"strategist"` | yes | no | no | Read-only; planning and analysis only |
+| `"scribe"` | yes | yes | no | Can write docs but cannot execute commands |
+| `"quick-reviewer"` | yes | no | no | Read-only; audits code without changes |
 
 ## Model hints
 
@@ -334,19 +337,117 @@ Before finalizing, verify your tasks against:
 - [ ] Dependencies form a DAG (no cycles)
 - [ ] `model_hint` is NEVER set — runtime selects models from `tier`
 
-CRITICAL RULES for `files` field:
-- Use CONCRETE file paths: `"crates/my-crate/src/lib.rs"` NOT `"crates/"` or `"crates/*/src/*.rs"`
-- Never use bare directory references like `"crates/"` or `"src/"`
-- Never use glob patterns like `*` in file paths
-- If a task creates a NEW crate, list the specific files: `"crates/new-crate/src/lib.rs"`, `"crates/new-crate/Cargo.toml"`
-- Researcher tasks that only READ files should still list specific file paths they will inspect
+## File Path Rules
 
-Use CONCRETE file paths and crate names from the repository context below.
-Never output angle-bracket placeholders like <path>, <crate>, <file>, <module>, or <relevant-lib>.
-Every `files` entry, every `path` in `read_files`, and every `cargo` command must reference
-actual files and crates that exist in the workspace or that the plan explicitly creates.
-If the PRD describes a new crate to create, use the PRD's slug as the crate name
-(e.g., for slug "btc-funding-alert", use "crates/btc-funding-alert/src/lib.rs").
+1. Use CONCRETE file paths: `"crates/my-crate/src/lib.rs"` NOT `"crates/"` or `"crates/*/src/*.rs"`.
+2. Never use bare directory references like `"crates/"` or `"src/"`.
+3. Never use glob patterns like `*` in file paths.
+4. Never output angle-bracket placeholders like `<path>`, `<crate>`, `<file>`, `<module>`, or `<relevant-lib>`.
+5. Every `files` entry, every `path` in `read_files`, and every `cargo` command must reference actual files and crates that exist in the workspace or that the plan explicitly creates.
+6. If a task creates a NEW crate, list the specific files: `"crates/new-crate/src/lib.rs"`, `"crates/new-crate/Cargo.toml"`. Use the PRD slug as the crate name (e.g., slug "btc-funding-alert" → `"crates/btc-funding-alert/src/lib.rs"`).
+7. Researcher tasks that only READ files should still list specific file paths they will inspect.
+
+## Complete Example (end-to-end)
+
+A realistic 3-task plan for "Add health check endpoint to roko-serve":
+
+```toml
+[meta]
+plan = "add-health-check"
+total = 3
+done = 0
+status = "ready"
+max_parallel = 1
+
+[[task]]
+id = "T1"
+title = "Define HealthStatus response type"
+description = "Add a HealthStatus struct with uptime, version, and db_connected fields to the serve types module."
+status = "ready"
+tier = "mechanical"
+max_loc = 15
+files = ["crates/roko-serve/src/types.rs"]
+allowed_tools = ["read_file", "write_file", "grep"]
+denied_tools = []
+depends_on = []
+role = "implementer"
+
+[task.context]
+read_files = [
+    { path = "crates/roko-serve/src/types.rs", lines = "1-40", why = "Find existing response types to follow conventions." },
+]
+symbols = ["AppState — shared state struct to reference for db_connected"]
+anti_patterns = ["Do NOT add new dependencies. Use only std and existing crate types."]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pub struct HealthStatus' crates/roko-serve/src/types.rs"
+fail_msg = "HealthStatus struct not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-serve"
+
+[[task]]
+id = "T2"
+title = "Implement GET /health handler"
+description = "Add an async handler that returns HealthStatus as JSON, wired to the router."
+status = "ready"
+tier = "focused"
+max_loc = 35
+files = ["crates/roko-serve/src/routes/health.rs", "crates/roko-serve/src/routes/mod.rs"]
+allowed_tools = ["read_file", "write_file", "grep"]
+denied_tools = []
+depends_on = ["T1"]
+role = "implementer"
+
+[task.context]
+read_files = [
+    { path = "crates/roko-serve/src/routes/mod.rs", lines = "1-30", why = "Understand router setup to add new route." },
+    { path = "crates/roko-serve/src/types.rs", lines = "1-40", why = "Import HealthStatus type." },
+]
+symbols = ["router() — function where routes are registered"]
+anti_patterns = ["Do NOT modify types.rs. Only add the handler and route registration."]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'health' crates/roko-serve/src/routes/mod.rs"
+fail_msg = "Health route not registered"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-serve"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-serve"
+
+[[task]]
+id = "T3"
+title = "Add integration test for /health endpoint"
+description = "Write a test that starts the server and verifies GET /health returns 200 with valid JSON."
+status = "ready"
+tier = "focused"
+max_loc = 40
+files = ["crates/roko-serve/tests/health_check.rs"]
+allowed_tools = ["read_file", "write_file", "grep"]
+denied_tools = []
+depends_on = ["T2"]
+role = "implementer"
+
+[task.context]
+read_files = [
+    { path = "crates/roko-serve/tests/", lines = "1-50", why = "Follow existing test patterns." },
+    { path = "crates/roko-serve/src/routes/health.rs", lines = "1-40", why = "Know what the handler returns." },
+]
+symbols = ["TestClient — test helper if one exists"]
+anti_patterns = ["Do NOT modify production code. Only add the test file."]
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-serve --test health_check"
+fail_msg = "Integration test failed or not found"
+```
 "#;
 
 /// Build the shared system prompt for plan generation and regeneration.
@@ -511,10 +612,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tier_model_hints() {
-        assert_eq!(TaskTier::Mechanical.model_hint(), "claude-haiku-4-5");
-        assert_eq!(TaskTier::Focused.model_hint(), "claude-sonnet-4-6");
-        assert_eq!(TaskTier::Architectural.model_hint(), "claude-opus-4-6");
+    fn tier_labels() {
+        assert_eq!(TaskTier::Mechanical.label(), "mechanical");
+        assert_eq!(TaskTier::Focused.label(), "focused");
+        assert_eq!(TaskTier::Integrative.label(), "integrative");
+        assert_eq!(TaskTier::Architectural.label(), "architectural");
     }
 
     #[test]

@@ -5,11 +5,16 @@
 //! real time so the operator sees what the agent is doing instead of a
 //! static spinner.
 
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::state::RunState;
 use super::tui_bridge::TuiBridge;
 use super::types::AgentEvent;
+
+/// Maximum bytes retained in `agent_output`. When exceeded, the buffer is
+/// trimmed to keep the tail (most recent output), which is what replan
+/// context and diagnostics need.
+const MAX_AGENT_OUTPUT: usize = 32_768;
 
 /// Buffered stderr streamer for agent text output.
 ///
@@ -23,9 +28,7 @@ pub struct AgentStreamBuffer {
 
 impl AgentStreamBuffer {
     pub fn new() -> Self {
-        Self {
-            buf: String::new(),
-        }
+        Self { buf: String::new() }
     }
 
     /// Append a text delta to the buffer.
@@ -41,11 +44,7 @@ impl AgentStreamBuffer {
             return;
         }
 
-        let lines: Vec<&str> = self
-            .buf
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect();
+        let lines: Vec<&str> = self.buf.lines().filter(|l| !l.trim().is_empty()).collect();
         let start = lines.len().saturating_sub(max_lines);
         for line in &lines[start..] {
             let trimmed = line.trim();
@@ -101,6 +100,19 @@ pub fn handle_agent_event(
 
         AgentEvent::MessageDelta { text } => {
             state.agent_output.push_str(text);
+            if state.agent_output.len() > MAX_AGENT_OUTPUT {
+                let trim_point = state.agent_output.len() - MAX_AGENT_OUTPUT / 2;
+                let boundary = state.agent_output.ceil_char_boundary(trim_point);
+                state.agent_output = format!(
+                    "[...truncated {}B...]\n{}",
+                    boundary,
+                    &state.agent_output[boundary..],
+                );
+                debug!(
+                    trimmed_to = state.agent_output.len(),
+                    "agent_output exceeded cap, trimmed to tail"
+                );
+            }
             let agent_id = agent_id_for_state(state);
             tui.agent_output(&agent_id, text);
 
@@ -159,9 +171,7 @@ pub fn handle_agent_event(
 
             if stream_to_stderr {
                 let total = input_tokens + output_tokens;
-                eprintln!(
-                    "     \u{2502} tokens: {total} (in:{input_tokens} out:{output_tokens})"
-                );
+                eprintln!("     \u{2502} tokens: {total} (in:{input_tokens} out:{output_tokens})");
             }
         }
 
@@ -185,11 +195,17 @@ pub fn handle_agent_event(
             }
             let agent_id = agent_id_for_state(state);
             tui.agent_completed(&agent_id);
-            debug!(
+            let cost_display = format!("{:.4}", state.cost_usd);
+            info!(
                 task = %state.current_task,
+                plan_id = %state.plan_id,
                 tokens_in = state.tokens_in,
                 tokens_out = state.tokens_out,
-                cost = state.cost_usd,
+                cache_read = state.cache_read_tokens,
+                cache_write = state.cache_write_tokens,
+                cost_usd = %cost_display,
+                model = %state.agent_model,
+                is_error = *is_error,
                 "agent turn completed"
             );
 

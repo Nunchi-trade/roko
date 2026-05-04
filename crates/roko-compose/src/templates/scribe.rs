@@ -3,7 +3,7 @@
 //! Roko-owned scribe, doc revision, and critic prompt templates. The Critic is
 //! treated as a scribe-variant (same section set, different role identity).
 
-use super::common::budget_for;
+use super::common::{self, budget_for};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -115,13 +115,8 @@ impl RolePromptTemplate for ScribeTemplate {
         };
         let mut sections = Vec::with_capacity(8);
 
-        // 1. agents_instructions — System / Critical
-        sections.push(
-            PromptSection::new("agents_instructions", &input.agents_md)
-                .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Role)
-                .with_placement(Placement::Start),
-        );
+        // 1. agents_instructions — System / Critical / Start
+        sections.push(common::agents_instructions_section(&input.agents_md));
 
         // 2. plan_spec — Session / Critical / hard_cap 50k
         sections.push(

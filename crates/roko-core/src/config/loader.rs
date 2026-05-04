@@ -2,16 +2,36 @@
 //!
 //! Before this module, 12+ separate `load_roko_config` functions existed across
 //! the codebase, each with different behavior around global config merging,
-//! `ROKO_CONFIG` env var, `ROKO__*` overrides, and validation. This module
-//! provides a **single entry point** that all callsites should use.
+//! `ROKO_CONFIG` env var, env overrides, and validation. This module provides
+//! a **single entry point** that all callsites should use.
 //!
 //! # Precedence (highest wins)
 //!
-//! 1. Process environment `ROKO__*` overrides (field-level)
-//! 2. `ROKO_CONFIG` env var → load that file instead of ancestor walk
+//! 1. Named env var overrides (see list below)
+//! 2. `ROKO_CONFIG` env var -> load that file instead of ancestor walk
 //! 3. Project `roko.toml` (found via ancestor walk from workdir)
-//! 4. Global `~/.roko/config.toml` (providers/models merged)
+//! 4. Global `~/.roko/config.toml` (providers/models/agent defaults merged)
 //! 5. Built-in defaults ([`RokoConfig::default()`])
+//!
+//! # Supported environment variable overrides
+//!
+//! | Variable | Config field |
+//! |---|---|
+//! | `ROKO_MODEL` | `agent.default_model` |
+//! | `ROKO_BACKEND` | `agent.default_backend` |
+//! | `ROKO_EFFORT` | `agent.default_effort` |
+//! | `ROKO_CONTEXT_LIMIT_K` | `agent.context_limit_k` |
+//! | `ROKO_MAX_AGENTS` | `conductor.max_agents` |
+//! | `ROKO_BUDGET_USD` | `budget.max_plan_usd` |
+//! | `ROKO_PARALLEL` | `conductor.parallel_enabled` |
+//! | `ROKO_EXPRESS` | `conductor.express_mode` |
+//! | `ROKO_SKIP_TESTS` | `gates.skip_tests` |
+//! | `ROKO_CLIPPY` | `gates.clippy_enabled` |
+//! | `ROKO_PROVIDER` | synthesized model profile provider |
+//! | `ROKO_MODEL_SLUG` | synthesized model profile slug |
+//!
+//! **Note**: Hierarchical `ROKO__SECTION__FIELD` overrides are not currently
+//! implemented. Only the named variables listed above are supported.
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +46,7 @@ use super::schema::RokoConfig;
 pub struct LoadOptions {
     /// Merge providers/models from `~/.roko/config.toml`.
     pub merge_global: bool,
-    /// Apply `ROKO__*` env var overrides.
+    /// Apply named env var overrides (ROKO_MODEL, ROKO_BACKEND, etc.).
     pub apply_env_overrides: bool,
     /// Apply strict safety validation (reject `dangerously_skip_permissions`).
     pub strict_validation: bool,
@@ -259,6 +279,22 @@ fn collect_diagnostics(config: &RokoConfig) -> Vec<ConfigDiagnostic> {
         }
     }
 
+    // If env overrides were applied, add a note so users understand that
+    // some diagnostics may refer to env-injected values.
+    let env_vars_present = std::env::var("ROKO_MODEL").is_ok()
+        || std::env::var("ROKO_BACKEND").is_ok()
+        || std::env::var("ROKO_PROVIDER").is_ok()
+        || std::env::var("ROKO_CONFIG").is_ok();
+
+    if env_vars_present && !diagnostics.is_empty() {
+        diagnostics.push(ConfigDiagnostic {
+            key: "_env_override_note".to_string(),
+            message: "one or more ROKO_* env vars are set; some diagnostics above \
+                      may reflect env-injected values rather than roko.toml contents"
+                .to_string(),
+        });
+    }
+
     diagnostics
 }
 
@@ -385,6 +421,7 @@ pub fn merge_global_into(config: &mut RokoConfig) {
         }
     };
 
+    // -- Providers and models (always merge, project wins) --
     for (name, provider) in global.providers {
         config.providers.entry(name).or_insert(provider);
     }
@@ -392,12 +429,44 @@ pub fn merge_global_into(config: &mut RokoConfig) {
         config.models.entry(name).or_insert(model);
     }
 
-    // Merge agent defaults when the project config doesn't set them.
+    // -- Agent defaults (fill gaps only) --
     if config.agent.default_model.is_empty() && !global.agent.default_model.is_empty() {
+        tracing::debug!(model = %global.agent.default_model, "merged global agent.default_model");
         config.agent.default_model = global.agent.default_model;
     }
     if config.agent.default_backend.is_empty() && !global.agent.default_backend.is_empty() {
+        tracing::debug!(backend = %global.agent.default_backend, "merged global agent.default_backend");
         config.agent.default_backend = global.agent.default_backend;
+    }
+    if config.agent.default_effort.is_empty() && !global.agent.default_effort.is_empty() {
+        tracing::debug!(effort = %global.agent.default_effort, "merged global agent.default_effort");
+        config.agent.default_effort = global.agent.default_effort.clone();
+    }
+
+    // -- Budget defaults (fill when project uses default values) --
+    // BudgetConfig::default().max_plan_usd = 25.0
+    let default_max_plan_usd: f32 = 25.0;
+    if (config.budget.max_plan_usd - default_max_plan_usd).abs() < f32::EPSILON
+        && (global.budget.max_plan_usd - default_max_plan_usd).abs() > f32::EPSILON
+    {
+        tracing::debug!(
+            max_plan_usd = global.budget.max_plan_usd,
+            "merged global budget.max_plan_usd"
+        );
+        config.budget.max_plan_usd = global.budget.max_plan_usd;
+    }
+
+    // -- Conductor defaults (fill when project uses defaults) --
+    // ConductorConfig default max_agents = 8
+    let default_max_agents: usize = 8;
+    if config.conductor.max_agents == default_max_agents
+        && global.conductor.max_agents != default_max_agents
+    {
+        tracing::debug!(
+            max_agents = global.conductor.max_agents,
+            "merged global conductor.max_agents"
+        );
+        config.conductor.max_agents = global.conductor.max_agents;
     }
 }
 

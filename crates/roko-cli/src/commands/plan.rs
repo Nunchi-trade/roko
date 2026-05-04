@@ -244,27 +244,30 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let _lock = roko_cli::workspace_lock::acquire_workspace_lock(&wd.join(".roko"))?;
 
             if fresh {
-                let state_path = wd.join(".roko").join("state").join("executor.json");
-                if state_path.exists() {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis();
-                    let backup_path = state_path.with_extension(format!("json.bak.{ts}"));
-                    match std::fs::rename(&state_path, &backup_path) {
-                        Ok(()) => {
-                            if !cli.quiet {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let state_dir = wd.join(".roko").join("state");
+                for filename in &["executor.json", "orchestrator.json", "run-state.json"] {
+                    let state_path = state_dir.join(filename);
+                    if state_path.exists() {
+                        let backup_path = state_path.with_extension(format!("json.bak.{ts}"));
+                        match std::fs::rename(&state_path, &backup_path) {
+                            Ok(()) => {
+                                if !cli.quiet {
+                                    eprintln!(
+                                        "▸ --fresh: archived old state to {}",
+                                        backup_path.display()
+                                    );
+                                }
+                            }
+                            Err(err) => {
                                 eprintln!(
-                                    "▸ --fresh: archived old state to {}",
-                                    backup_path.display()
+                                    "warning: --fresh: could not archive {}: {err}",
+                                    state_path.display()
                                 );
                             }
-                        }
-                        Err(err) => {
-                            eprintln!(
-                                "warning: --fresh: could not archive {}: {err}",
-                                state_path.display()
-                            );
                         }
                     }
                 }
@@ -454,10 +457,29 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 plan_timeout_secs: config.runner.plan_timeout_secs,
                 max_retries: max_retries.unwrap_or(2),
                 max_concurrent_tasks,
+                gate_concurrency: max_concurrent_tasks,
                 approval,
                 dangerously_skip_permissions: true,
                 force_resume,
-                mcp_config: None,
+                mcp_config: {
+                    // Resolve MCP config: .roko/mcp.json > auto-discovery
+                    let mcp = {
+                        let roko_local = wd.join(".roko").join("mcp.json");
+                        if roko_local.is_file() {
+                            Some(roko_local)
+                        } else {
+                            roko_agent::mcp::find_mcp_config(&wd)
+                                .and_then(|r| r.ok())
+                                .map(|(p, _)| p)
+                        }
+                    };
+                    if let Some(ref path) = mcp {
+                        tracing::info!(path = ?path, "MCP config resolved for plan run");
+                    } else {
+                        tracing::debug!("no MCP config found for plan run");
+                    }
+                    mcp
+                },
                 resume_session: cli.resume.clone(),
                 max_gate_rung: if roko_config.gates.skip_tests {
                     u32::from(roko_config.gates.clippy_enabled)
@@ -482,6 +504,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 feedback_facade: Some(feedback_facade),
                 projection: Some(projection),
                 stream_to_stderr: !approval && !cli.quiet && !cli.json,
+                warm_cache: true,
             };
 
             // Optionally spawn the approval TUI.
@@ -544,6 +567,21 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
 
             let setup_ms = t_setup.elapsed().as_millis();
+            tracing::info!(
+                setup_ms,
+                plan_count,
+                total_tasks,
+                default_model = %roko_config.agent.default_model,
+                max_concurrent_tasks,
+                max_retries = run_config.max_retries,
+                max_gate_rung = run_config.max_gate_rung,
+                max_plan_usd = %format!("{:.2}", run_config.max_plan_usd),
+                max_turn_usd = %format!("{:.2}", run_config.max_turn_usd),
+                clippy_enabled = run_config.clippy_enabled,
+                skip_tests = run_config.skip_tests,
+                plans_dir = %resolved_plans_dir.display(),
+                "plan run: setup complete, entering event loop"
+            );
             let v2_report =
                 roko_cli::runner::event_loop::run(plans, &run_config, &state_hub, cancel).await?;
 
@@ -610,7 +648,10 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             if !cli.quiet && !cli.json {
                 let loop_ms = v2_report.duration.as_millis();
-                let report_ms = t_total.elapsed().as_millis().saturating_sub(setup_ms + loop_ms);
+                let report_ms = t_total
+                    .elapsed()
+                    .as_millis()
+                    .saturating_sub(setup_ms + loop_ms);
                 let total_ms = t_total.elapsed().as_millis();
                 eprintln!(
                     "  Timing: setup={setup_ms}ms loop={loop_ms}ms report={report_ms}ms total={total_ms}ms"

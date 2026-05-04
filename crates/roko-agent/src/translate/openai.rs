@@ -298,9 +298,11 @@ pub(crate) fn parse_usage_observation(response: &serde_json::Value) -> UsageObse
 
     let input_tokens = usage
         .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
         .and_then(serde_json::Value::as_u64);
     let output_tokens = usage
         .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
         .and_then(serde_json::Value::as_u64);
     let cache_read_tokens = usage
         .pointer("/prompt_tokens_details/cached_tokens")

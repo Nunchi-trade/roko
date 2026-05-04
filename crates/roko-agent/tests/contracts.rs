@@ -193,9 +193,7 @@ async fn no_contract_means_restricted_default() {
     let dispatcher = ToolDispatcher::new(registry, resolver)
         .with_safety(SafetyLayer::with_defaults().with_role("does-not-exist"));
 
-    let safety = dispatcher
-        .safety()
-        .expect("dispatcher should retain safety");
+    let safety = dispatcher.safety();
     assert_eq!(safety.contract.role, "does-not-exist");
     // X01: fail-closed — restricted contract has an empty allowlist (deny-all)
     assert!(

@@ -8,6 +8,29 @@ use super::agent::default_true;
 
 // ---- [gates] -------------------------------------------------------------
 
+/// A single custom gate rung definition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateRungConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default = "default_gate_rung_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    #[serde(default)]
+    pub parallel_with: Vec<String>,
+}
+
+fn default_gate_rung_timeout() -> u64 {
+    120
+}
+
+impl GateRungConfig {
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_secs)
+    }
+}
+
 /// Verify (verification) settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatesConfig {
@@ -24,6 +47,9 @@ pub struct GatesConfig {
     /// values are shell commands to run as gates (e.g. `["shell:true"]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub domain_gates: HashMap<String, Vec<String>>,
+    /// Custom gate rungs. When non-empty, these replace the built-in defaults.
+    #[serde(default)]
+    pub custom_rungs: Vec<GateRungConfig>,
 }
 
 const fn default_max_iterations() -> u32 {
@@ -37,7 +63,41 @@ impl Default for GatesConfig {
             skip_tests: false,
             max_iterations: default_max_iterations(),
             domain_gates: HashMap::new(),
+            custom_rungs: Vec::new(),
         }
+    }
+}
+
+impl GatesConfig {
+    /// Returns custom rungs if configured, otherwise built-in defaults (compile, lint, test).
+    #[must_use]
+    pub fn effective_rungs(&self) -> Vec<GateRungConfig> {
+        if !self.custom_rungs.is_empty() {
+            return self.custom_rungs.clone();
+        }
+        vec![
+            GateRungConfig {
+                name: "compile".to_string(),
+                command: "cargo build --workspace".to_string(),
+                timeout_secs: 120,
+                required: true,
+                parallel_with: Vec::new(),
+            },
+            GateRungConfig {
+                name: "lint".to_string(),
+                command: "cargo clippy --workspace --no-deps -- -D warnings".to_string(),
+                timeout_secs: 120,
+                required: true,
+                parallel_with: Vec::new(),
+            },
+            GateRungConfig {
+                name: "test".to_string(),
+                command: "cargo test --workspace".to_string(),
+                timeout_secs: 300,
+                required: true,
+                parallel_with: Vec::new(),
+            },
+        ]
     }
 }
 

@@ -2096,19 +2096,22 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         }
         Command::LayerCheck => roko_cli::layer_check::run_layer_check(),
         Command::Plan { cmd } => {
+            let wd = resolve_workdir(cli);
             let result = commands::plan::cmd_plan(cli, cmd).await;
-            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
+            let _ = roko_cli::index::rebuild_all(&wd);
             result
         }
         Command::Prd { cmd } => {
+            let wd = resolve_workdir(cli);
             let result = commands::prd::cmd_prd(cli, cmd).await;
-            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
+            let _ = roko_cli::index::rebuild_all(&wd);
             result
         }
         Command::Agent { cmd } => commands::agent::cmd_agent(cli, cmd).await,
         Command::Research { cmd } => {
+            let wd = resolve_workdir(cli);
             let result = commands::research::cmd_research(cli, cmd).await;
-            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
+            let _ = roko_cli::index::rebuild_all(&wd);
             result
         }
         Command::Knowledge { cmd } => commands::knowledge::dispatch_knowledge(cli, cmd).await,
@@ -2634,11 +2637,14 @@ fn resolve_config_for_workdir(cli: &Cli, workdir: &Path) -> Result<Config> {
         let resolved = load_layered(workdir)?;
         let fully_default = resolved.sources.agent_command == Source::Default
             && resolved.sources.prompt_token_budget == Source::Default;
-        if fully_default && resolved.config.agent.command == "cat" && !cli.quiet {
-            eprintln!(
-                "warning: no config found — agent command is \"cat\" (test-only, echoes prompts back). \
-                 Run `roko init` or set [agent] command in roko.toml."
-            );
+        if fully_default && resolved.config.agent.command == "cat" {
+            eprintln!("error: no LLM provider configured.\n");
+            eprintln!("To get started, either:");
+            eprintln!("  1. Run `roko init` to create a workspace with default config");
+            eprintln!("  2. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or ZAI_API_KEY");
+            eprintln!("  3. Edit roko.toml to configure a provider");
+            eprintln!("\n  hint: run `roko doctor` to diagnose your setup");
+            std::process::exit(1);
         }
         (resolved.config, workdir)
     };

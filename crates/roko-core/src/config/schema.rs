@@ -42,14 +42,29 @@ pub const CURRENT_CONFIG_VERSION: u32 = 2;
 /// version-1 warnings for partial configs (e.g. the global `~/.roko/config.toml`)
 /// that legitimately omit the field.
 fn text_has_config_version(s: &str) -> bool {
-    s.lines()
-        .any(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("config_version")
-                && trimmed[b"config_version".len()..]
-                    .trim_start()
-                    .starts_with('=')
-        })
+    s.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("config_version")
+            && trimmed[b"config_version".len()..]
+                .trim_start()
+                .starts_with('=')
+    })
+}
+
+/// Extract the numeric config_version value from raw TOML text.
+/// Returns 1 as fallback if parsing fails.
+fn extract_config_version_from_text(s: &str) -> u32 {
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("config_version") {
+            if let Some(val) = trimmed.split('=').nth(1) {
+                if let Ok(v) = val.trim().parse::<u32>() {
+                    return v;
+                }
+            }
+        }
+    }
+    1
 }
 
 // ---- top-level -----------------------------------------------------------
@@ -87,6 +102,8 @@ pub struct RokoConfig {
     pub learning: LearningConfig,
     #[serde(default)]
     pub tui: TuiConfig,
+    #[serde(default)]
+    pub timeouts: super::timeouts::TimeoutConfig,
     #[serde(default)]
     pub serve: ServeConfig,
     #[serde(default)]
@@ -140,6 +157,7 @@ impl Default for RokoConfig {
             watcher: WatcherConfig::default(),
             learning: LearningConfig::default(),
             tui: TuiConfig::default(),
+            timeouts: super::timeouts::TimeoutConfig::default(),
             serve: ServeConfig::default(),
             scheduler: SchedulerConfig::default(),
             webhooks: WebhooksConfig::default(),
@@ -163,17 +181,37 @@ impl RokoConfig {
     /// Parse from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         let config: Self = toml::from_str(s)?;
-        // Only warn when the TOML text explicitly sets config_version (not when
-        // the serde default of 1 kicks in for configs that omit the field, such
-        // as the global config at ~/.roko/config.toml).
-        if config.config_version <= 1 && text_has_config_version(s) {
-            static WARNED: std::sync::Once = std::sync::Once::new();
-            WARNED.call_once(|| {
-                tracing::warn!(
-                    "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
-                );
-            });
+        // Only warn when the TOML text explicitly sets config_version to a value
+        // below CURRENT_CONFIG_VERSION. Skip if:
+        //   - The field is absent (serde default kicks in; not a real v1 config)
+        //   - The value matches or exceeds the current version
+        //   - We've already warned in this process
+        if text_has_config_version(s) {
+            let explicit_version = extract_config_version_from_text(s);
+            if explicit_version < CURRENT_CONFIG_VERSION {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        version = explicit_version,
+                        current = CURRENT_CONFIG_VERSION,
+                        "roko.toml uses config version {} (current is {})\n  \
+                         hint: run `roko config migrate` to upgrade",
+                        explicit_version,
+                        CURRENT_CONFIG_VERSION,
+                    );
+                });
+            }
         }
+        let warnings = validate_references(&config);
+        for w in &warnings {
+            tracing::warn!("config reference validation: {w}");
+        }
+        tracing::debug!(
+            providers = config.providers.len(),
+            models = config.models.len(),
+            ref_warnings = warnings.len(),
+            "config loaded and validated"
+        );
         Ok(config)
     }
 
@@ -242,12 +280,24 @@ impl RokoConfig {
         // actually resolvable at dispatch time.
         let backend = AgentBackend::from_model(slug);
         let expected_kind: ProviderKind = backend.into();
-        let provider = self
+        let provider = match self
             .providers
             .iter()
             .find(|(_, p)| p.kind == expected_kind)
             .map(|(name, _)| name.as_str())
-            .unwrap_or_else(|| expected_kind.label());
+        {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    slug = %slug,
+                    kind = ?expected_kind,
+                    "no provider of kind {:?} configured for synthesized model '{}'; \
+                     using label '{}' as fallback -- dispatch may fail",
+                    expected_kind, slug, expected_kind.label()
+                );
+                expected_kind.label()
+            }
+        };
         let context_window = match tool_profile.preferred {
             ToolFormat::AnthropicBlocks => 200_000,
             _ => default_context_window(),
@@ -307,18 +357,36 @@ impl RokoConfig {
             self.agent.default_effort = v;
         }
         if let Some(v) = env_fn("ROKO_CONTEXT_LIMIT_K") {
-            if let Ok(n) = v.parse::<u32>() {
-                self.agent.context_limit_k = n;
+            match v.parse::<u32>() {
+                Ok(n) => self.agent.context_limit_k = n,
+                Err(e) => tracing::warn!(
+                    env = "ROKO_CONTEXT_LIMIT_K",
+                    value = %v,
+                    error = %e,
+                    "failed to parse env var as u32, ignoring"
+                ),
             }
         }
         if let Some(v) = env_fn("ROKO_MAX_AGENTS") {
-            if let Ok(n) = v.parse::<usize>() {
-                self.conductor.max_agents = n;
+            match v.parse::<usize>() {
+                Ok(n) => self.conductor.max_agents = n,
+                Err(e) => tracing::warn!(
+                    env = "ROKO_MAX_AGENTS",
+                    value = %v,
+                    error = %e,
+                    "failed to parse env var as usize, ignoring"
+                ),
             }
         }
         if let Some(v) = env_fn("ROKO_BUDGET_USD") {
-            if let Ok(n) = v.parse::<f32>() {
-                self.budget.max_plan_usd = n;
+            match v.parse::<f32>() {
+                Ok(n) => self.budget.max_plan_usd = n,
+                Err(e) => tracing::warn!(
+                    env = "ROKO_BUDGET_USD",
+                    value = %v,
+                    error = %e,
+                    "failed to parse env var as f32, ignoring"
+                ),
             }
         }
         if let Some(v) = env_fn("ROKO_PARALLEL") {
@@ -491,10 +559,23 @@ impl RokoConfig {
     // ---- secret resolution -----------------------------------------------
 
     /// Interpolate `${VAR}` patterns in provider config strings.
+    ///
+    /// **Scope**: Interpolation currently only applies to provider fields:
+    /// `base_url`, `api_key_env`, `command`, and `extra_headers`. Other
+    /// config sections (agent, budget, gates, etc.) do NOT support `${VAR}`
+    /// syntax -- literal strings are used as-is.
+    ///
+    /// To set non-provider fields dynamically, use the named environment
+    /// variable overrides (e.g., `ROKO_MODEL`, `ROKO_BACKEND`) instead.
     pub fn interpolate_env_vars(&mut self) {
         Self::interpolate_env_vars_with(&mut self.providers, &|key| std::env::var(key).ok());
     }
 
+    /// Internal: walk provider config strings and expand `${VAR}` references.
+    ///
+    /// Only provider fields are walked. This is intentional -- expanding
+    /// arbitrary config fields risks unintended side effects (e.g., a model
+    /// slug containing `${...}` should be literal, not interpolated).
     fn interpolate_env_vars_with(
         providers: &mut HashMap<String, ProviderConfig>,
         env_fn: &dyn Fn(&str) -> Option<String>,

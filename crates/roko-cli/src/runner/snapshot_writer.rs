@@ -179,10 +179,25 @@ fn write_payload(payload: &SnapshotPayload, fail_streak: &mut u32) {
 }
 
 fn write_all_files(payload: &SnapshotPayload) -> anyhow::Result<()> {
-    use super::persist::atomic_write;
+    use super::persist::{atomic_write, write_checkpoint};
     atomic_write(&payload.orchestrator_path, &payload.orchestrator_json)?;
     atomic_write(&payload.executor_path, &payload.executor_json)?;
     atomic_write(&payload.run_state_path, &payload.run_state_json)?;
+
+    // Write a checkpoint manifest so the next resume can verify the three
+    // state files are consistent.  Errors are non-fatal — a missing or stale
+    // checkpoint just means the verification step will log a warning.
+    if let Some(state_dir) = payload.executor_path.parent() {
+        let files: &[(&str, &[u8])] = &[
+            ("orchestrator.json", &payload.orchestrator_json),
+            ("executor.json", &payload.executor_json),
+            ("run-state.json", &payload.run_state_json),
+        ];
+        if let Err(err) = write_checkpoint(state_dir, files) {
+            tracing::warn!(error = %err, "failed to write state checkpoint");
+        }
+    }
+
     Ok(())
 }
 

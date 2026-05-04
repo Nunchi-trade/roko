@@ -41,7 +41,7 @@ impl AuthMethod {
                 if let Some(m) = model {
                     format!("{m} (Anthropic API)")
                 } else {
-                    "claude-sonnet-4-6 (Anthropic API)".to_string()
+                    format!("{} (Anthropic API)", roko_core::defaults::MODEL_FOCUSED)
                 }
             }
             Self::OpenAiCompat { model, .. } => {
@@ -185,7 +185,7 @@ mod tests {
                 model: None,
             }
             .label(),
-            "claude-sonnet-4-6 (Anthropic API)"
+            format!("{} (Anthropic API)", roko_core::defaults::MODEL_FOCUSED)
         );
         assert_eq!(
             AuthMethod::OpenAiCompat {

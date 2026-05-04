@@ -93,11 +93,15 @@ export interface Scenario {
 
 // ── ClickableScenario ────────────────────────────────────────
 
+export type CommandTarget = { pane: number } | { panes: number[] } | 'all';
+
 export interface CommandDef {
   id: string;
   command: string;
   description: string;
   timeout?: number;
+  /** Which terminal pane(s) this command targets. Defaults to pane 0. */
+  target?: CommandTarget;
 }
 
 export interface ClickableScenario extends Omit<Scenario, 'run'> {

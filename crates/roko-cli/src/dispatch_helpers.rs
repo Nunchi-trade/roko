@@ -67,7 +67,9 @@ pub(crate) fn task_dispatch_conventions(task_def: Option<&task_parser::TaskDef>)
 
     if let Some(max_loc) = task_def.max_loc {
         sections.push(format!(
-            "Keep the total code delta within roughly {max_loc} lines of change unless verification requires a tightly scoped follow-up."
+            "HARD LIMIT: The total code delta MUST be strictly under {max_loc} lines of change. \
+             If you find yourself exceeding this, stop and split the work into smaller changes. \
+             This is a quality gate — exceeding it will cause the task to fail."
         ));
     }
 

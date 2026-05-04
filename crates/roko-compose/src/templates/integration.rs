@@ -5,7 +5,7 @@
 //! The integration tester runs workspace-wide tests after batch merges and
 //! reports failures without fixing them.
 
-use super::common::budget_for;
+use super::common::{self, budget_for};
 use super::{RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -60,12 +60,7 @@ impl RolePromptTemplate for IntegrationTemplate {
         let mut sections = Vec::with_capacity(6);
 
         // 1. agents_instructions — System / Critical / Start
-        sections.push(
-            PromptSection::new("agents_instructions", &input.agents_md)
-                .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Role)
-                .with_placement(Placement::Start),
-        );
+        sections.push(common::agents_instructions_section(&input.agents_md));
 
         // 2. integration_context — Session / Critical / Start
         // Contains the batch branch and list of merged plans.

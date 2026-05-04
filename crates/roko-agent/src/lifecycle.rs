@@ -189,9 +189,9 @@ pub struct ModelRoutingConfig {
 impl Default for ModelRoutingConfig {
     fn default() -> Self {
         Self {
-            gamma_model: "claude-haiku-4-5".into(),
-            theta_model: "claude-sonnet-4-6".into(),
-            delta_model: "claude-opus-4-6".into(),
+            gamma_model: roko_core::defaults::MODEL_FAST.into(),
+            theta_model: roko_core::defaults::MODEL_FOCUSED.into(),
+            delta_model: roko_core::defaults::MODEL_DEEP.into(),
         }
     }
 }
@@ -323,9 +323,9 @@ pub struct InferenceConfig {
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
-            default_model: "claude-haiku-4-5".into(),
-            escalation_model: "claude-sonnet-4-6".into(),
-            critical_model: "claude-opus-4-6".into(),
+            default_model: roko_core::defaults::MODEL_FAST.into(),
+            escalation_model: roko_core::defaults::MODEL_FOCUSED.into(),
+            critical_model: roko_core::defaults::MODEL_DEEP.into(),
             max_tokens_per_turn: 4096,
             temperature: 0.7,
         }

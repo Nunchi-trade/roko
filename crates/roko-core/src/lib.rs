@@ -157,6 +157,7 @@ pub mod tool;
 pub mod traits;
 pub mod usage;
 pub mod verdict;
+pub mod workspace;
 
 pub use affect::{BehavioralState, DaimonPolicy, EmotionalTag, PadVector};
 pub use agent::{
@@ -304,3 +305,4 @@ pub use traits::{Bus, ColdStore, Compose, Connect, Observe, React, Route, Store,
 // the crate root to avoid colliding with the `Score` value struct. Access it
 // via `roko_core::traits::Score` or import with an alias.
 pub use verdict::{Outcome, Selection, TestCount, Verdict};
+pub use workspace::Workspace;

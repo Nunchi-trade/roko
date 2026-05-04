@@ -62,6 +62,7 @@ fn task() -> TaskDef {
         acceptance: vec!["compiles".into()],
         acceptance_contract: None,
         domain: Some(roko_core::task::TaskDomain::Code),
+        sequence: 0,
     }
 }
 
@@ -76,6 +77,7 @@ fn ctx(workdir: std::path::PathBuf) -> DispatchContext {
         attempt: 0,
         gate_feedback: None,
         routing_context: None,
+        dependency_outputs: Vec::new(),
     }
 }
 

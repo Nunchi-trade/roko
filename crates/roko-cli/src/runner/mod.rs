@@ -23,6 +23,7 @@ pub mod event_loop;
 pub mod extension_loader;
 pub mod gate_dispatch;
 pub mod merge;
+pub mod output_sink;
 pub mod persist;
 pub mod plan_loader;
 pub mod projection;

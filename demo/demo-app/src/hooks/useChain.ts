@@ -90,8 +90,30 @@ export function useChainWs(enabled = true): ChainWsState {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (!MIRAGE_EVENTS_WS_URL) {
+      setConnected(false);
+      setError(null);
+      return;
+    }
+
+    // Pre-flight: check if mirage-rs is reachable via HTTP before attempting WS.
+    // Prevents console errors when mirage-rs isn't running.
+    try {
+      const httpUrl = MIRAGE_EVENTS_WS_URL.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:').replace(/\/api\/ws.*/, '');
+      const res = await fetch(`${httpUrl}/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
+        signal: AbortSignal.timeout(2000),
+      });
+      if (!res.ok) {
+        setConnected(false);
+        setError(null); // Not an error — mirage just isn't running
+        return;
+      }
+    } catch {
+      // Mirage not available — don't attempt WS connection
       setConnected(false);
       setError(null);
       return;
@@ -180,10 +202,10 @@ export function useChainWs(enabled = true): ChainWsState {
 
     ws.onerror = () => {
       if (!mountedRef.current) return;
+      // Suppress console noise — just let onclose handle reconnect.
+      // Only surface an error after retries are exhausted.
       if (retriesRef.current >= MAX_RETRIES) {
         setError('mirage-rs unreachable — chain features disabled');
-      } else {
-        setError('WebSocket error — will retry');
       }
       // onclose fires after onerror, so reconnect is handled there
     };

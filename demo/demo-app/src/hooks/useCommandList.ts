@@ -41,6 +41,11 @@ export function useCommandList(commands: CommandDef[]) {
     setItems(commands.map(c => ({ ...c, status: 'pending' as const })));
   }, [commands]);
 
+  /** Replace the entire command list (e.g. for dynamic/conditional branching). */
+  const replaceCommands = useCallback((newCommands: CommandDef[]) => {
+    setItems(newCommands.map(c => ({ ...c, status: 'pending' as const })));
+  }, []);
+
   // First pending after all leading successes; null if a failure blocks progress.
   const nextPendingId = (() => {
     for (const item of items) {
@@ -51,5 +56,5 @@ export function useCommandList(commands: CommandDef[]) {
   })();
   const isRunning = items.some(i => i.status === 'running');
 
-  return { items, markRunning, markSuccess, markFailure, reset, nextPendingId, isRunning };
+  return { items, markRunning, markSuccess, markFailure, reset, replaceCommands, nextPendingId, isRunning };
 }

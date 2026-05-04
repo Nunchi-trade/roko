@@ -1,9 +1,21 @@
 // --- src/lib/scenario-runners/chat.ts ---
-import type { Scenario } from '../scenarios';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
 import { rawSleep, stripAnsi } from '../scenario-helpers';
-import { enterWorkspace, getRoko } from '../terminal-session';
+import { getRoko } from '../terminal-session';
 
-export const chat: Scenario = {
+export const CHAT_COMMANDS: CommandDef[] = [
+  { id: 'start', command: 'roko', timeout: 30000, description: 'Start chat TUI' },
+  {
+    id: 'ask',
+    command: 'explain what cascade routing does',
+    timeout: 60000,
+    description: 'Ask about cascade routing',
+  },
+  { id: 'slash-status', command: '/status', timeout: 10000, description: 'Inline workspace status' },
+  { id: 'slash-model', command: '/model', timeout: 10000, description: 'Show/switch active model' },
+];
+
+export const chat: ClickableScenario = {
   id: 'chat',
   title: 'Chat',
   subtitle:
@@ -22,75 +34,54 @@ export const chat: Scenario = {
     { label: 'Send message', sublabel: 'explain cascade routing' },
     { label: 'Slash commands', sublabel: '/status, /model' },
   ],
-  async run(ctx) {
-    const { entries, playback, timeline, logCommand, workspaceDir } = ctx;
-    const e = entries[0];
-    await enterWorkspace(e, workspaceDir);
-    const ROKO = getRoko();
+  commands: CHAT_COMMANDS,
+  async runCommand(ctx: ScenarioContext, commandId: string) {
+    const { entries } = ctx;
 
-    timeline.init(this.steps);
+    switch (commandId) {
+      case 'start': {
+        const ROKO = getRoko();
+        entries[0].outputBuffer = '';
+        await entries[0].typeCmd(ROKO);
+        const start = Date.now();
+        while (Date.now() - start < 30000) {
+          await rawSleep(300);
+          const buf = stripAnsi(entries[0].outputBuffer);
+          if (/❯|roko>|\/help|model|chat/i.test(buf)) break;
+        }
+        await rawSleep(800);
+        return { ok: true };
+      }
 
-    // Phase 1: start roko (bare command — no --model for interactive chat)
-    await playback.waitForStep();
-    playback.setProgress(1, 3, ROKO);
-    timeline.setActive(0);
-    logCommand(
-      ROKO,
-      'Starts the unified chat TUI — auto-detects auth, auto-creates .roko/ if missing, starts serve in-process, drops into interactive chat.',
-    );
+      case 'ask': {
+        entries[0].outputBuffer = '';
+        await entries[0].typeCmd('explain what cascade routing does', 20);
+        const rStart = Date.now();
+        while (Date.now() - rStart < 60000) {
+          await rawSleep(500);
+          const buf = stripAnsi(entries[0].outputBuffer);
+          if (buf.length > 200 && /❯|roko>/i.test(buf.slice(-200))) break;
+        }
+        await rawSleep(500);
+        return { ok: true };
+      }
 
-    e.outputBuffer = '';
-    await e.typeCmd(ROKO);
+      case 'slash-status': {
+        entries[0].outputBuffer = '';
+        await entries[0].typeCmd('/status', 20);
+        await rawSleep(3000);
+        return { ok: true };
+      }
 
-    // Wait for chat prompt to appear
-    const start = Date.now();
-    while (Date.now() - start < 30000) {
-      await rawSleep(300);
-      const buf = stripAnsi(e.outputBuffer);
-      if (/❯|roko>|\/help|model|chat/i.test(buf)) break;
+      case 'slash-model': {
+        entries[0].outputBuffer = '';
+        await entries[0].typeCmd('/model', 20);
+        await rawSleep(2000);
+        return { ok: true };
+      }
+
+      default:
+        return { ok: false, error: `Unknown command: ${commandId}` };
     }
-    await rawSleep(800);
-
-    // Phase 2: send a message
-    await playback.waitForStep();
-    playback.setProgress(2, 3, 'explain what cascade routing does');
-    timeline.setActive(1);
-    logCommand(
-      'explain what cascade routing does',
-      'Sends a natural-language question to the active agent. The agent uses context from the knowledge store and responds inline with streaming markdown.',
-    );
-    e.outputBuffer = '';
-    await e.typeCmd('explain what cascade routing does', 20);
-
-    // Wait for response to complete
-    const rStart = Date.now();
-    while (Date.now() - rStart < 60000) {
-      await rawSleep(500);
-      const buf = stripAnsi(e.outputBuffer);
-      if (buf.length > 200 && /❯|roko>/i.test(buf.slice(-200))) break;
-    }
-    await rawSleep(500);
-
-    // Phase 3: slash commands
-    await playback.waitForStep();
-    playback.setProgress(3, 3, '/status');
-    timeline.setActive(2);
-    logCommand(
-      '/status',
-      'Runs workspace status inline from the chat TUI. Slash commands give quick access to all roko features without leaving the conversation.',
-    );
-    e.outputBuffer = '';
-    await e.typeCmd('/status', 20);
-    await rawSleep(3000);
-
-    logCommand(
-      '/model',
-      'Shows or switches the active model. Supports all configured providers — Anthropic, OpenAI, Zhipu, Google, Moonshot, Ollama.',
-    );
-    e.outputBuffer = '';
-    await e.typeCmd('/model', 20);
-    await rawSleep(2000);
-
-    timeline.markAllComplete();
   },
 };

@@ -189,6 +189,10 @@ pub struct Episode {
     #[serde(default)]
     pub output_signal_hash: String,
     /// Stable identifier for the episode record.
+    ///
+    /// **Deprecated**: Use `id` instead. Both fields are set to the same
+    /// `derive_id()` value. This field is retained for backward compatibility
+    /// with older serialized episodes.
     #[serde(default)]
     pub episode_id: String,
     /// Template or role name used to dispatch the agent.
@@ -278,13 +282,13 @@ impl Episode {
         let id = derive_id(&agent_id, &task_id, completed_at.clone());
         Self {
             kind: String::new(),
-            id,
+            id: id.clone(),
             timestamp,
             agent_id,
             task_id,
             input_signal_hash: String::new(),
             output_signal_hash: String::new(),
-            episode_id: String::new(),
+            episode_id: id,
             agent_template: String::new(),
             model: String::new(),
             backend: String::new(),
@@ -652,10 +656,32 @@ pub fn importance_components(
     }
 }
 
+/// Maximum number of recent history episodes used for importance scoring.
+///
+/// Limits the O(N * M) cost of scoring N episodes against M history entries.
+/// Using only the most recent history is also more representative of current
+/// project state than ancient episodes.
+const IMPORTANCE_HISTORY_LIMIT: usize = 256;
+
+/// Cap history to the most recent [`IMPORTANCE_HISTORY_LIMIT`] entries.
+fn capped_history(history: &[Episode]) -> &[Episode] {
+    if history.len() > IMPORTANCE_HISTORY_LIMIT {
+        &history[history.len() - IMPORTANCE_HISTORY_LIMIT..]
+    } else {
+        history
+    }
+}
+
 /// Collapse the importance score into a replay tier.
 #[must_use]
 pub fn importance_tier(episode: &Episode, history: &[Episode]) -> EpisodePriorityTier {
-    match importance_score(episode, history) {
+    let recent = capped_history(history);
+    tracing::debug!(
+        history_len = history.len(),
+        capped_len = recent.len(),
+        "importance_tier: capped history"
+    );
+    match importance_score(episode, recent) {
         score if score >= 0.8 => EpisodePriorityTier::Critical,
         score if score >= 0.6 => EpisodePriorityTier::High,
         score if score >= 0.35 => EpisodePriorityTier::Normal,
@@ -664,14 +690,20 @@ pub fn importance_tier(episode: &Episode, history: &[Episode]) -> EpisodePriorit
 }
 
 /// Rank episodes by importance, highest score first.
+///
+/// History is capped to the most recent [`IMPORTANCE_HISTORY_LIMIT`] entries
+/// to avoid O(N^2) scoring against unbounded history.
 #[must_use]
 pub fn prioritize_by_importance<'a>(
     episodes: &'a [Episode],
     history: &[Episode],
 ) -> Vec<&'a Episode> {
+    // Use only the tail of history to bound the scoring cost.
+    let recent = capped_history(history);
+
     let mut ranked: Vec<(&Episode, f64)> = episodes
         .iter()
-        .map(|episode| (episode, importance_score(episode, history)))
+        .map(|episode| (episode, importance_score(episode, recent)))
         .collect();
     ranked.sort_by(|left, right| {
         right

@@ -1,8 +1,40 @@
 // --- src/lib/scenario-runners/prd-research-loop.ts ---
-import type { Scenario } from '../scenarios';
-import { enterWorkspace, showCmd, roko, trackMetrics } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
+import { showCmd, roko, trackMetrics } from '../terminal-session';
 
-export const prdResearchLoop: Scenario = {
+// ── Static command definitions (display layer, no ctx needed) ─
+
+export const RESEARCH_LOOP_COMMANDS: CommandDef[] = [
+  { id: 'idea',       command: 'roko prd idea "Add config validation with schema checking and helpful error messages"', description: 'Capture raw work item into PRD backlog',            timeout: 45000  },
+  { id: 'draft',      command: 'roko prd draft new cli-config-validation',                                              description: 'Agent expands idea into structured PRD',            timeout: 120000 },
+  { id: 'research',   command: 'roko research enhance-prd cli-config-validation',                                       description: 'Research agent enriches PRD with prior art',        timeout: 180000 },
+  { id: 'plan',       command: 'roko prd plan cli-config-validation',                                                   description: 'Generate implementation plan from research-enhanced PRD', timeout: 180000 },
+  { id: 'run',        command: 'roko plan run .roko/plans --max-retries 1',                                             description: 'Execute plan: agents implement, gates validate',    timeout: 300000 },
+  { id: 'learn-all',  command: 'roko learn all',                                                                        description: 'Full learning state: router, experiments, thresholds', timeout: 30000 },
+  { id: 'learn-tune', command: 'roko learn tune routing',                                                               description: 'Cascade router tuning: model confidence scores',    timeout: 30000  },
+  { id: 'status',     command: 'roko status',                                                                           description: 'Workspace status: signals, episodes, health',       timeout: 30000  },
+  { id: 'efficiency', command: 'roko learn efficiency',                                                                 description: 'Per-turn efficiency: tokens, cost, latency, model selection', timeout: 30000 },
+];
+
+// ── Runtime commands factory (ctx-aware, actual command strings) ─
+
+function researchLoopCommands(ctx: ScenarioContext): CommandDef[] {
+  return [
+    { id: 'idea',       command: roko(ctx, 'prd idea "Add config validation with schema checking and helpful error messages"'), description: 'Capture raw work item into PRD backlog',            timeout: 45000  },
+    { id: 'draft',      command: roko(ctx, 'prd draft new cli-config-validation'),                                              description: 'Agent expands idea into structured PRD',            timeout: 120000 },
+    { id: 'research',   command: roko(ctx, 'research enhance-prd cli-config-validation'),                                       description: 'Research agent enriches PRD with prior art',        timeout: 180000 },
+    { id: 'plan',       command: roko(ctx, 'prd plan cli-config-validation'),                                                   description: 'Generate implementation plan from research-enhanced PRD', timeout: 180000 },
+    { id: 'run',        command: roko(ctx, 'plan run .roko/plans --max-retries 1'),                                             description: 'Execute plan: agents implement, gates validate',    timeout: 300000 },
+    { id: 'learn-all',  command: roko(ctx, 'learn all'),                                                                        description: 'Full learning state: router, experiments, thresholds', timeout: 30000 },
+    { id: 'learn-tune', command: roko(ctx, 'learn tune routing'),                                                               description: 'Cascade router tuning: model confidence scores',    timeout: 30000  },
+    { id: 'status',     command: roko(ctx, 'status'),                                                                           description: 'Workspace status: signals, episodes, health',       timeout: 30000  },
+    { id: 'efficiency', command: roko(ctx, 'learn efficiency'),                                                                 description: 'Per-turn efficiency: tokens, cost, latency, model selection', timeout: 30000 },
+  ];
+}
+
+// ── Scenario ─────────────────────────────────────────────────
+
+export const prdResearchLoop: ClickableScenario = {
   id: 'prd-research-loop',
   title: 'Research Loop',
   subtitle: 'Full pipeline: idea, draft, research, plan, execute, gates, learn.',
@@ -25,161 +57,46 @@ export const prdResearchLoop: Scenario = {
     { label: 'Learn', sublabel: 'learn all' },
     { label: 'Summary', sublabel: 'status + efficiency' },
   ],
-  async run(ctx) {
-    const { entries, playback, timeline, setMetric, setGate, logCommand, logCommandComplete, workspaceDir } = ctx;
-    const e = entries[0];
-    await enterWorkspace(e, workspaceDir);
-    setMetric('model', '--');
-    timeline.init(this.steps);
+  commands: RESEARCH_LOOP_COMMANDS,
 
-    // Live metric tracking from terminal output
-    const tracker = trackMetrics(e, {
-      onCost: (c) => setMetric('cost', c),
-      onTokens: (t) => setMetric('tokens', t),
+  async runCommand(ctx: ScenarioContext, commandId: string): Promise<{ ok: boolean; error?: string }> {
+    const commands = researchLoopCommands(ctx);
+    const cmd = commands.find(c => c.id === commandId);
+    if (!cmd) return { ok: false, error: 'Unknown command' };
+
+    const [main] = ctx.entries;
+    if (!main) return { ok: false, error: 'No terminal connected' };
+
+    const tracker = trackMetrics(main, {
+      onCost: (c) => ctx.setMetric('cost', c),
+      onTokens: (t) => ctx.setMetric('tokens', t),
     }, 250);
-    const stopTracking = () => clearInterval(tracker);
 
     try {
+      if (commandId === 'learn-all' || commandId === 'status') {
+        main.clearTerminal();
+      }
 
-    // Phase 1: capture idea
-    await playback.waitForStep();
-    playback.setProgress(1, 8, roko(ctx, 'prd idea "..."'));
-    timeline.setActive(0);
-    const ideaResult = await showCmd(e, roko(ctx, 'prd idea "Add config validation with schema checking and helpful error messages"'), {
-      playback,
-      timeout: 45000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Captures a raw work item into the PRD backlog. This is the seed for the full pipeline.',
-    });
-    if (ideaResult.cost) setMetric('cost', ideaResult.cost);
-    if (ideaResult.tokens) setMetric('tokens', ideaResult.tokens);
+      if (commandId === 'run') {
+        ctx.setGate('compile', 'pending');
+        ctx.setGate('test', 'pending');
+        ctx.setGate('clippy', 'pending');
+      }
 
-    // Phase 2: draft PRD
-    await playback.waitForStep();
-    playback.setProgress(2, 8, roko(ctx, 'prd draft new ...'));
-    timeline.setActive(1);
-    const draftResult = await showCmd(e, roko(ctx, 'prd draft new cli-config-validation'), {
-      playback,
-      timeout: 120000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Agent expands the idea into a structured PRD with motivation, design, tasks, and success criteria.',
-    });
-    if (draftResult.cost) setMetric('cost', draftResult.cost);
-    if (draftResult.tokens) setMetric('tokens', draftResult.tokens);
+      const result = await showCmd(main, cmd.command, {
+        timeout: cmd.timeout ?? 60000,
+        customDesc: cmd.description,
+        workspaceDir: ctx.workspaceDir,
+        signal: ctx.signal,
+        onGate: commandId === 'run' ? (name, status) => ctx.setGate(name, status) : undefined,
+      });
 
-    // Phase 3: research enhance -- the new step
-    await playback.waitForStep();
-    playback.setProgress(3, 8, roko(ctx, 'research enhance-prd cli-config-validation'));
-    timeline.setActive(2);
-    logCommand(
-      'research enhance-prd',
-      'Enriching the PRD with research: prior art, implementation references, and architectural context. This step makes the generated plan more informed.',
-    );
-    const researchResult = await showCmd(e, roko(ctx, 'research enhance-prd cli-config-validation'), {
-      playback,
-      timeout: 180000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc:
-        'Research agent searches for relevant prior art, patterns, and references, then weaves findings into the PRD. The subsequent plan generation benefits from this enriched context.',
-    });
-    if (researchResult.cost) setMetric('cost', researchResult.cost);
-    if (researchResult.tokens) setMetric('tokens', researchResult.tokens);
+      if (result.cost) ctx.setMetric('cost', result.cost);
+      if (result.tokens) ctx.setMetric('tokens', result.tokens);
 
-    // Phase 4: generate plan (now informed by research)
-    await playback.waitForStep();
-    playback.setProgress(4, 8, roko(ctx, 'prd plan cli-config-validation'));
-    timeline.setActive(3);
-    const planResult = await showCmd(e, roko(ctx, 'prd plan cli-config-validation'), {
-      playback,
-      timeout: 180000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Generates tasks.toml from the research-enhanced PRD. The plan quality is higher because the PRD now contains prior art and implementation references.',
-    });
-    if (planResult.cost) setMetric('cost', planResult.cost);
-    if (planResult.tokens) setMetric('tokens', planResult.tokens);
-
-    // Phase 5: execute plan
-    await playback.waitForStep();
-    playback.setProgress(5, 8, roko(ctx, 'plan run .roko/plans --max-retries 1'));
-    timeline.setActive(4);
-    setGate('compile', 'pending');
-    setGate('test', 'pending');
-    setGate('clippy', 'pending');
-    const runResult = await showCmd(e, roko(ctx, 'plan run .roko/plans --max-retries 1'), {
-      playback,
-      timeout: 300000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      onGate: (name, status) => setGate(name, status),
-      customDesc: 'Executes the generated plan through the Roko runner. Agents implement tasks, gates validate each one.',
-    });
-    if (runResult.cost) setMetric('cost', runResult.cost);
-
-    // Phase 6: gate results
-    timeline.setActive(5);
-    playback.setProgress(6, 8, 'gate results');
-    if (runResult.gates.length > 0) {
-      logCommand(
-        'gates',
-        runResult.gates.map(gate => `${gate.name}: ${gate.status}`).join(', '),
-      );
-    } else if (runResult.ok) {
-      logCommand('gates', 'Run completed, but no gate verdicts were detected in the output.');
-    } else {
-      logCommand('gates', 'Plan run failed before gate verdicts were fully reported.');
-    }
-    if (runResult.tokens) setMetric('tokens', runResult.tokens);
-
-    // Phase 7: learn -- show what the system learned
-    await playback.waitForStep();
-    playback.setProgress(7, 8, roko(ctx, 'learn all'));
-    timeline.setActive(6);
-    e.clearTerminal();
-    await showCmd(e, roko(ctx, 'learn all'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Full learning state: cascade router weights, prompt experiments, adaptive gate thresholds, and efficiency metrics.',
-    });
-    const tuneResult = await showCmd(e, roko(ctx, 'learn tune routing'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Cascade router tuning: shows model confidence scores and routing decisions based on this execution.',
-    });
-    if (tuneResult.cost) setMetric('cost', tuneResult.cost);
-
-    // Phase 8: summary -- status + efficiency
-    await playback.waitForStep();
-    playback.setProgress(8, 8, roko(ctx, 'status'));
-    timeline.setActive(7);
-    e.clearTerminal();
-    await showCmd(e, roko(ctx, 'status'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Workspace status: signal counts, episode count, and overall health.',
-    });
-    await showCmd(e, roko(ctx, 'learn efficiency'), {
-      playback,
-      timeout: 30000,
-      onLog: logCommand,
-      onLogComplete: logCommandComplete,
-      customDesc: 'Per-turn efficiency events: tokens used, cost, latency, and model selection decisions across all steps of the pipeline.',
-    });
-    setMetric('model', 'done');
-
-    timeline.markAllComplete();
-
+      return { ok: result.ok, error: result.error };
     } finally {
-      stopTracking();
+      clearInterval(tracker);
     }
   },
 };

@@ -770,15 +770,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             .await?;
             let generate_ms = t_phase.elapsed().as_millis();
             let total_ms = t_total.elapsed().as_millis();
-            tracing::info!(
-                init_ms,
-                generate_ms,
-                total_ms,
-                "prd plan: phase timing"
-            );
-            eprintln!(
-                "  Timing: init={init_ms}ms generate={generate_ms}ms total={total_ms}ms"
-            );
+            tracing::info!(init_ms, generate_ms, total_ms, "prd plan: phase timing");
+            eprintln!("  Timing: init={init_ms}ms generate={generate_ms}ms total={total_ms}ms");
             Ok(0)
         }
         PrdCmd::Consolidate => {

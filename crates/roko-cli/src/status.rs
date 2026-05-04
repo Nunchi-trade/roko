@@ -249,8 +249,8 @@ fn count_non_empty_lines(path: &Path) -> usize {
 }
 
 fn read_episode_summary(workdir: &Path) -> (usize, Option<bool>) {
-    let primary = workdir.join(".roko").join("memory").join("episodes.jsonl");
-    let fallback = workdir.join(".roko").join("episodes.jsonl");
+    let primary = workdir.join(".roko").join("episodes.jsonl");
+    let fallback = workdir.join(".roko").join("learn").join("episodes.jsonl");
     let path = if primary.exists() { primary } else { fallback };
     let Ok(text) = std::fs::read_to_string(path) else {
         return (0, None);
@@ -354,11 +354,10 @@ mod tests {
     fn collect_session_status_reads_signal_and_episode_counts() {
         let tmp = tempfile::tempdir().unwrap();
         let roko = tmp.path().join(".roko");
-        let memory = roko.join("memory");
-        std::fs::create_dir_all(&memory).unwrap();
+        std::fs::create_dir_all(&roko).unwrap();
         std::fs::write(roko.join("engrams.jsonl"), "a\nb\n").unwrap();
         std::fs::write(
-            memory.join("episodes.jsonl"),
+            roko.join("episodes.jsonl"),
             "{\"success\":false}\n{\"success\":true}\n",
         )
         .unwrap();

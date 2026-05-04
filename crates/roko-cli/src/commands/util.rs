@@ -1550,7 +1550,8 @@ pub(crate) async fn persist_capture_episode(
         resume_session,
     );
 
-    let mut runtime = LearningRuntime::open_under(workdir.join(".roko").join("memory"))
+    tracing::debug!(workdir = %workdir.display(), "opening learning runtime under .roko/learn/");
+    let mut runtime = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
         .await
         .map_err(|e| anyhow!("open learning runtime: {e}"))?;
     let distillation_workdir = workdir.to_path_buf();
@@ -1633,16 +1634,13 @@ pub(crate) fn preflight_provider_for_model(
         .get(model_key)
         .ok_or_else(|| anyhow!("model '{}' not found in config", model_key))?;
     let provider_name = &model.provider;
-    let provider = config
-        .providers
-        .get(provider_name)
-        .ok_or_else(|| {
-            anyhow!(
-                "provider '{}' (for model '{}') not found in config",
-                provider_name,
-                model_key
-            )
-        })?;
+    let provider = config.providers.get(provider_name).ok_or_else(|| {
+        anyhow!(
+            "provider '{}' (for model '{}') not found in config",
+            provider_name,
+            model_key
+        )
+    })?;
 
     if let Some(ref env_var) = provider.api_key_env {
         if !env_var.trim().is_empty() {

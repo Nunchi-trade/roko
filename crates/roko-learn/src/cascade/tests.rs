@@ -819,6 +819,7 @@ fn version_change_detection_transfers_weighted_stats_on_load() {
         total_observations: 10,
         role_table: HashMap::new(),
         stage_transitions: vec![],
+        linucb_state: None,
     };
     std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
 
@@ -840,6 +841,7 @@ fn version_change_detection_remaps_role_table_upgrade() {
         total_observations: 0,
         role_table: HashMap::from([(AgentRole::Implementer, "glm-5".to_string())]),
         stage_transitions: vec![],
+        linucb_state: None,
     };
     std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
 

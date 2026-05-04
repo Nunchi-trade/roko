@@ -116,7 +116,7 @@ impl ClaudeCliAgent {
             current_dir: current_dir.into(),
             model: model.clone(),
             effort: "medium".to_string(),
-            fallback_model: Some("claude-haiku-4-5".to_string()),
+            fallback_model: Some(roko_core::defaults::MODEL_FAST.to_string()),
             bare_mode: true,
             system_prompt: None,
             allowed_tools: None,

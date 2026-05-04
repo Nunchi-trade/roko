@@ -116,6 +116,7 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         relay: RelayConfig::default(),
         tools: ToolsConfig::default(),
         runner: CoreRunnerConfig::default(),
+        timeouts: super::timeouts::TimeoutConfig::default(),
         agents: Vec::new(),
     }
 }
@@ -187,6 +188,7 @@ fn convert_gates(m: &MoriConfig) -> GatesConfig {
         skip_tests: m.skip_tests.unwrap_or(d.skip_tests),
         max_iterations: m.max_iterations.unwrap_or(d.max_iterations),
         domain_gates: HashMap::new(),
+        custom_rungs: Vec::new(),
     }
 }
 

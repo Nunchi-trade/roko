@@ -34,10 +34,13 @@ async fn sse_handler(
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
 
+    // Cap the replay to 256 events to prevent a reconnecting client from
+    // materializing the entire ring buffer into memory at once.
     let replay = state
         .state_hub
         .replay_from(last_event_id)
         .into_iter()
+        .take(256)
         .map(|envelope| {
             let data = serde_json::to_string(&envelope.payload).unwrap_or_default();
             Ok(Event::default().data(data).id(envelope.seq.to_string()))
@@ -60,5 +63,13 @@ async fn sse_handler(
         }
     });
 
-    Sse::new(stream::iter(replay).chain(live)).keep_alive(KeepAlive::default())
+    // Use a shorter keep-alive interval than the default 15s to survive
+    // aggressive proxy timeouts (Railway 30s, Nginx 60s). The "keepalive"
+    // text triggers a proper SSE comment event in clients that ignore
+    // empty comments.
+    Sse::new(stream::iter(replay).chain(live)).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(8))
+            .text("keepalive"),
+    )
 }

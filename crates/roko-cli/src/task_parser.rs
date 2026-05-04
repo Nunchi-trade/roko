@@ -95,6 +95,11 @@ pub struct TaskDef {
     pub acceptance_contract: Option<AcceptanceContract>,
     /// Work domain — controls gate selection and git policy.
     pub domain: Option<TaskDomain>,
+    /// Definition order index (0-based) from the TOML array. Used for
+    /// tie-breaking in DAG resolution so tasks without dependency constraints
+    /// execute in the order they were authored, not alphabetically.
+    #[serde(default)]
+    pub sequence: usize,
 }
 
 impl TaskDef {
@@ -182,6 +187,7 @@ impl From<TaskDefSerde> for TaskDef {
             acceptance: raw.acceptance,
             acceptance_contract: raw.acceptance_contract,
             domain: raw.domain,
+            sequence: 0, // stamped by TasksFile::parse_str after deserialization
         };
         task.apply_role_tool_defaults();
         task
@@ -461,6 +467,35 @@ impl TaskDef {
             prompt.push_str(&format!("Maximum lines of change: {max}\n"));
         }
 
+        // Inject PRD excerpt when available so agents see the high-level
+        // requirements without having to locate the PRD file themselves.
+        let prd_base = workdir.join(".roko").join("prd");
+        let prd_candidates = [
+            prd_base.join("published").join(format!("{plan_id}.md")),
+            prd_base.join("draft").join(format!("{plan_id}.md")),
+        ];
+        for prd_path in &prd_candidates {
+            if prd_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(prd_path) {
+                    const PRD_BUILD_PROMPT_LIMIT: usize = 2_000;
+                    let excerpt = if content.len() > PRD_BUILD_PROMPT_LIMIT {
+                        let mut s = content
+                            .chars()
+                            .take(PRD_BUILD_PROMPT_LIMIT)
+                            .collect::<String>();
+                        s.push_str("\n[truncated]");
+                        s
+                    } else {
+                        content
+                    };
+                    prompt.push_str("\n## PRD Requirements\n");
+                    prompt.push_str(&excerpt);
+                    prompt.push('\n');
+                }
+                break;
+            }
+        }
+
         if !self.files.is_empty() {
             prompt.push_str("\n## Files to modify\n");
             for f in &self.files {
@@ -650,7 +685,12 @@ impl TasksFile {
 
     /// Parse a `tasks.toml` payload from a string slice.
     pub fn parse_str(content: &str) -> Result<Self> {
-        toml::from_str(content).context("parse tasks.toml")
+        let mut parsed: Self = toml::from_str(content).context("parse tasks.toml")?;
+        // Stamp definition order so DAG sort preserves author intent.
+        for (i, task) in parsed.tasks.iter_mut().enumerate() {
+            task.sequence = i;
+        }
+        Ok(parsed)
     }
 
     /// Parse a `tasks.toml` payload returned inline by an agent.
@@ -780,6 +820,90 @@ impl TasksFile {
         }
 
         warnings
+    }
+
+    /// Validate task definitions against the field schema.
+    ///
+    /// Checks that role, tier, and status values are from the known set,
+    /// and that role-specific required fields are present.
+    /// Returns a list of issues (empty = valid).
+    pub fn validate_against_schema(&self) -> Vec<String> {
+        const VALID_ROLES: &[&str] = &[
+            "implementer",
+            "researcher",
+            "strategist",
+            "architect",
+            "reviewer",
+            "quick-reviewer",
+            "scribe",
+        ];
+        const VALID_TIERS: &[&str] = &["mechanical", "focused", "integrative", "architectural"];
+        const VALID_STATUSES: &[&str] =
+            &["pending", "ready", "active", "done", "blocked", "skipped"];
+        // Role -> required fields
+        const IMPLEMENTER_REQUIRED: &[&str] = &["verify", "files"];
+
+        let mut issues = Vec::new();
+
+        for task in &self.tasks {
+            let tid = &task.id;
+            let role = task.role.as_deref().unwrap_or("implementer");
+
+            // Check role is valid.
+            if !VALID_ROLES.contains(&role) {
+                issues.push(format!(
+                    "{tid}: unknown role '{role}' (valid: {})",
+                    VALID_ROLES.join(", ")
+                ));
+            }
+
+            // Check required fields for implementer role.
+            if role == "implementer" {
+                for &field in IMPLEMENTER_REQUIRED {
+                    let missing = match field {
+                        "verify" => task.verify.is_empty(),
+                        "files" => task.files.is_empty(),
+                        _ => false,
+                    };
+                    if missing {
+                        issues.push(format!(
+                            "{tid}: missing '{field}' (required for role '{role}')"
+                        ));
+                    }
+                }
+            }
+
+            // Check tier is valid.
+            if !task.tier.is_empty()
+                && task.tier != "unknown"
+                && !VALID_TIERS.contains(&task.tier.as_str())
+            {
+                issues.push(format!(
+                    "{tid}: unknown tier '{}' (valid: {})",
+                    task.tier,
+                    VALID_TIERS.join(", ")
+                ));
+            }
+
+            // Check status is valid.
+            if !task.status.is_empty() && !VALID_STATUSES.contains(&task.status.as_str()) {
+                issues.push(format!(
+                    "{tid}: unknown status '{}' (valid: {})",
+                    task.status,
+                    VALID_STATUSES.join(", ")
+                ));
+            }
+
+            // Check numeric bounds.
+            if task.timeout_secs == 0 {
+                issues.push(format!("{tid}: timeout_secs must be > 0"));
+            }
+            if task.max_loc.is_some_and(|m| m == 0) {
+                issues.push(format!("{tid}: max_loc must be > 0"));
+            }
+        }
+
+        issues
     }
 
     /// Validate that the raw `tasks.toml` still carries the modern task fields.
@@ -978,6 +1102,75 @@ fn extract_toml_payload(content: &str) -> String {
     }
 }
 
+/// Deterministic TOML repair pipeline.
+pub fn repair_toml(raw: &str) -> String {
+    let t0 = std::time::Instant::now();
+    let mut s = extract_toml_payload(raw);
+
+    // Strip trailing prose after last ]]
+    if let Some(pos) = s.rfind("]]") {
+        let line_end = s[pos..].find('\n').map(|i| pos + i + 1).unwrap_or(pos + 2);
+        let trailing = s[line_end..].trim();
+        if !trailing.is_empty() && !trailing.starts_with('[') && !trailing.starts_with('#') {
+            s.truncate(line_end);
+        }
+    }
+
+    s = split_merged_fields(&s);
+    s = close_unclosed_strings(&s);
+
+    let elapsed_us = t0.elapsed().as_micros();
+    if s != extract_toml_payload(raw) {
+        tracing::info!(elapsed_us, "repair_toml: applied deterministic fixes");
+    }
+    s
+}
+
+fn split_merged_fields(s: &str) -> String {
+    let field_boundaries = [
+        "max_loc",
+        "timeout_secs",
+        "max_retries",
+        "model_hint",
+        "allowed_tools",
+        "denied_tools",
+        "depends_on",
+        "status",
+        "tier",
+        "role",
+        "verify",
+        "files",
+        "description",
+        "title",
+        "id",
+    ];
+    let mut result = s.to_string();
+    for field in &field_boundaries {
+        let pattern = format!("{field} = ");
+        let merged = format!("\"{pattern}");
+        let split = format!("\"\n{pattern}");
+        result = result.replace(&merged, &split);
+    }
+    result
+}
+
+fn close_unclosed_strings(s: &str) -> String {
+    s.lines()
+        .map(|line| {
+            if line.trim_start().starts_with('#') {
+                return line.to_string();
+            }
+            let quote_count = line.chars().filter(|&c| c == '"').count();
+            if quote_count % 2 != 0 {
+                format!("{line}\"")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1132,6 +1325,7 @@ command = "cargo check -p roko-cli"
             acceptance: vec![],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         };
         assert_eq!(task.effective_model("fallback", None), "claude-haiku-4-5");
 
@@ -1177,6 +1371,7 @@ command = "cargo check -p roko-cli"
             acceptance: vec![],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         };
         assert_eq!(task.operating_frequency(), OperatingFrequency::Gamma);
     }
@@ -1208,6 +1403,7 @@ command = "cargo check -p roko-cli"
             acceptance: vec![],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         };
         assert_eq!(reactive.operating_frequency(), OperatingFrequency::Gamma);
 
@@ -1236,6 +1432,7 @@ command = "cargo check -p roko-cli"
             acceptance: vec![],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         };
         assert_eq!(reflective.operating_frequency(), OperatingFrequency::Delta);
 
@@ -1264,6 +1461,7 @@ command = "cargo check -p roko-cli"
             acceptance: vec![],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         };
         assert_eq!(
             deliberative.operating_frequency(),
@@ -1589,6 +1787,7 @@ depends_on = []
                 acceptance: vec![],
                 acceptance_contract: None,
                 domain: None,
+                sequence: 0,
             });
         }
 
@@ -1657,6 +1856,7 @@ depends_on = ["other-plan:T3"]
             acceptance: vec![],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         };
         let original = "Original task prompt";
         let error_msg = "compilation failed: undefined symbol";
@@ -1694,6 +1894,7 @@ depends_on = ["other-plan:T3"]
             acceptance: vec![],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         };
         let original = "Original prompt";
         let long_error = "x".repeat(5000);

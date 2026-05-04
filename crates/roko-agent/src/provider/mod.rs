@@ -95,18 +95,39 @@ pub const PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX: &str = "pplx.search_options=";
 /// constructed for the same process.
 static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
+        // Keep at most 10 idle connections per host so a burst of parallel
+        // agent requests does not accumulate unbounded sockets.
         .pool_max_idle_per_host(10)
+        // Evict idle connections after 90 s to avoid holding sockets open
+        // against provider endpoints that enforce shorter server-side timeouts.
         .pool_idle_timeout(Duration::from_secs(90))
+        // Send TCP keep-alive probes every 30 s so NAT/firewall state is
+        // refreshed between long streaming responses.
         .tcp_keepalive(Duration::from_secs(30))
+        // Fail fast on unreachable hosts instead of blocking an agent task
+        // indefinitely while waiting for a three-way handshake.
         .connect_timeout(Duration::from_secs(10))
+        // Identify outbound requests so provider logs and rate-limit headers
+        // can be correlated back to the roko-agent version in use.
+        .user_agent(concat!("roko-agent/", env!("CARGO_PKG_VERSION")))
         .build()
         .expect("failed to build shared HTTP client")
 });
 
 /// Return the process-wide shared HTTP client.
 ///
-/// All production HTTP posters should use this client so requests can reuse
+/// All production HTTP callers should use this client so requests can reuse
 /// pooled connections instead of paying a fresh TLS handshake per backend.
+///
+/// Pool settings (configured in [`SHARED_HTTP_CLIENT`]):
+///
+/// | Setting | Value | Rationale |
+/// |---|---|---|
+/// | `pool_max_idle_per_host` | 10 | Caps idle sockets per provider endpoint |
+/// | `pool_idle_timeout` | 90 s | Evicts before typical server-side timeouts |
+/// | `tcp_keepalive` | 30 s | Keeps NAT state alive during long streams |
+/// | `connect_timeout` | 10 s | Fails fast on unreachable hosts |
+/// | `user_agent` | `roko-agent/<version>` | Correlates provider logs to this build |
 #[must_use]
 pub fn shared_http_client() -> reqwest::Client {
     SHARED_HTTP_CLIENT.clone()
@@ -886,7 +907,8 @@ mod tests {
             build_tool_dispatcher(registry, resolver)
         });
 
-        assert!(dispatcher.safety().is_some());
+        // Safety is always present; verify it was constructed.
+        let _ = dispatcher.safety();
     }
 
     #[test]
@@ -1177,6 +1199,35 @@ mod tests {
         write_script(&script, &script_body);
         let mut config = RokoConfig::default();
         config.agent.command = Some(script.display().to_string());
+        // The protocol-command guard requires explicit provider+model config
+        // when the command binary is a known protocol (e.g. "claude").
+        config.providers.insert(
+            "test-claude".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::ClaudeCli,
+                base_url: None,
+                api_key_env: None,
+                command: Some(script.display().to_string()),
+                args: None,
+                timeout_ms: Some(5_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        config.models.insert(
+            "claude-sonnet-4-6".to_string(),
+            ModelProfile {
+                provider: "test-claude".to_string(),
+                slug: "claude-sonnet-4-6".to_string(),
+                context_window: 200_000,
+                max_output: Some(16_000),
+                supports_tools: true,
+                supports_thinking: true,
+                ..Default::default()
+            },
+        );
 
         let agent = create_agent_for_model(
             &config,

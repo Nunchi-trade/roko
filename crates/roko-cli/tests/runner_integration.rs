@@ -48,6 +48,7 @@ fn task(id: &str, deps: &[&str]) -> TaskDef {
         acceptance: vec![],
         acceptance_contract: None,
         domain: None,
+        sequence: 0,
     }
 }
 

@@ -503,6 +503,81 @@ fn fnv1a_hex(payload: &str) -> String {
     format!("{hash:016x}")
 }
 
+fn fnv1a_hex_bytes(payload: &[u8]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in payload {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
+/// Write a checkpoint manifest to `<state_dir>/checkpoint.txt`.
+///
+/// Each entry is written as `name:hash` where `hash` is the FNV-1a hex
+/// fingerprint of the file contents supplied in `files`. The manifest is
+/// written atomically via [`atomic_write`] so a crash mid-write leaves the
+/// previous checkpoint intact.
+pub fn write_checkpoint(state_dir: &Path, files: &[(&str, &[u8])]) -> Result<()> {
+    let mut lines = String::new();
+    for (name, content) in files {
+        let hash = fnv1a_hex_bytes(content);
+        lines.push_str(name);
+        lines.push(':');
+        lines.push_str(&hash);
+        lines.push('\n');
+    }
+    let checkpoint_path = state_dir.join("checkpoint.txt");
+    atomic_write(&checkpoint_path, lines.as_bytes())
+}
+
+/// Verify the checkpoint manifest at `<state_dir>/checkpoint.txt`.
+///
+/// Re-reads each file listed in the manifest, re-hashes it, and compares
+/// against the recorded hash. Returns `Ok(true)` when all hashes match,
+/// `Ok(false)` on any mismatch or missing file, and `Err` only on
+/// I/O errors reading the manifest itself.
+pub fn verify_checkpoint(state_dir: &Path) -> Result<bool> {
+    let checkpoint_path = state_dir.join("checkpoint.txt");
+    let manifest = match fs::read_to_string(&checkpoint_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(true); // no checkpoint written yet — treat as passing
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("reading {}", checkpoint_path.display()));
+        }
+    };
+
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, expected_hash)) = line.split_once(':') else {
+            // Malformed entry — treat as mismatch.
+            return Ok(false);
+        };
+        let file_path = state_dir.join(name);
+        let content = match fs::read(&file_path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("reading {}", file_path.display()));
+            }
+        };
+        let actual_hash = fnv1a_hex_bytes(&content);
+        if actual_hash != expected_hash {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Read previously-saved agent PIDs and kill any that are still alive.
 pub fn cleanup_orphaned_agents(paths: &PersistPaths) {
     let Ok(content) = fs::read_to_string(&paths.agent_pids_json) else {

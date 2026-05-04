@@ -2,7 +2,7 @@
 //! results through a channel.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use roko_core::{Body, Engram, EngramBuilder, Kind, Provenance, Verdict, Verify};
@@ -17,13 +17,10 @@ use crate::task_parser::VerifyStep;
 
 use super::types::{GateCompletion, GateCompletionKind, GateVerdictSummary, RunnerFailureKind};
 
-static GATE_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
-
-fn gate_semaphore() -> Arc<Semaphore> {
-    GATE_SEMAPHORE
-        .get_or_init(|| Arc::new(Semaphore::new(1)))
-        .clone()
-}
+/// Sentinel rung value for plan-level verification (not a per-task rung).
+pub const RUNG_PLAN_VERIFY: u32 = 1000;
+/// Sentinel rung value for post-merge regression gates.
+pub const RUNG_MERGE: u32 = 1001;
 
 /// Spawn a gate rung as a background task. Sends `GateCompletion` when done.
 pub fn spawn_gate(
@@ -34,10 +31,11 @@ pub fn spawn_gate(
     verify_steps: Vec<VerifyStep>,
     timeout_secs: u64,
     gate_tx: mpsc::Sender<GateCompletion>,
+    gate_sem: Arc<Semaphore>,
 ) {
     tokio::spawn(async move {
         let t_wait = Instant::now();
-        let Ok(_permit) = gate_semaphore().acquire_owned().await else {
+        let Ok(_permit) = gate_sem.acquire_owned().await else {
             return;
         };
         let wait_ms = t_wait.elapsed().as_millis() as u64;
@@ -54,6 +52,15 @@ pub fn spawn_gate(
         let signal = gate_signal(&plan_id, &task_id, rung, &workdir);
         let ctx = roko_core::Context::now();
         let limit = Duration::from_secs(timeout_secs.max(1));
+
+        info!(
+            plan_id = %plan_id,
+            task_id = %task_id,
+            rung,
+            timeout_secs,
+            verify_step_count = verify_steps.len(),
+            "gate rung starting"
+        );
 
         let workdir_for_run = workdir.clone();
         let run = async {
@@ -100,12 +107,17 @@ pub fn spawn_gate(
             })
             .collect();
 
+        let output_preview: String = output.chars().take(200).collect();
+        let verdict_names: Vec<&str> = summaries.iter().map(|v| v.gate_name.as_str()).collect();
         info!(
             plan_id = %plan_id,
             task_id = %task_id,
             rung,
             passed,
             duration_ms,
+            verdict_count = summaries.len(),
+            verdicts = ?verdict_names,
+            output_preview = %output_preview,
             "gate completed"
         );
 
@@ -135,10 +147,11 @@ pub fn spawn_plan_verify(
     verify_steps: Vec<(String, Vec<VerifyStep>)>,
     timeout_secs: u64,
     gate_tx: mpsc::Sender<GateCompletion>,
+    gate_sem: Arc<Semaphore>,
 ) {
     tokio::spawn(async move {
         let t_wait = Instant::now();
-        let Ok(_permit) = gate_semaphore().acquire_owned().await else {
+        let Ok(_permit) = gate_sem.acquire_owned().await else {
             return;
         };
         let wait_ms = t_wait.elapsed().as_millis() as u64;
@@ -158,7 +171,12 @@ pub fn spawn_plan_verify(
         let run = async move {
             let mut all = Vec::new();
             for (task_id, steps) in verify_steps {
-                let signal = gate_signal(&plan_id_for_run, &task_id, u32::MAX, &workdir_for_run);
+                let signal = gate_signal(
+                    &plan_id_for_run,
+                    &task_id,
+                    RUNG_PLAN_VERIFY,
+                    &workdir_for_run,
+                );
                 all.extend(run_verify_steps(&signal, &ctx, &task_id, steps).await);
             }
             all
@@ -201,7 +219,7 @@ pub fn spawn_plan_verify(
             kind: GateCompletionKind::PlanVerify,
             plan_id,
             task_id: "plan-verify".to_string(),
-            rung: u32::MAX,
+            rung: RUNG_PLAN_VERIFY,
             passed,
             failure_kind,
             verdicts: summaries,
@@ -271,11 +289,23 @@ async fn run_verify_steps(
     verify_steps: Vec<VerifyStep>,
 ) -> Vec<Verdict> {
     let mut verdicts = Vec::new();
-    for step in verify_steps {
+    for (i, step) in verify_steps.iter().enumerate() {
+        let step_start = Instant::now();
         let gate = ShellGate::new("sh", vec!["-c".into(), step.command.clone()])
             .with_name(format!("task-verify:{}:{}", task_id, step.phase))
             .with_timeout_ms(step.timeout_ms);
-        verdicts.push(gate.verify(signal, ctx).await);
+        let verdict = gate.verify(signal, ctx).await;
+        info!(
+            task_id = %task_id,
+            step = i + 1,
+            total_steps = verify_steps.len(),
+            phase = %step.phase,
+            command = %step.command,
+            passed = verdict.passed,
+            elapsed_ms = step_start.elapsed().as_millis() as u64,
+            "verify step completed"
+        );
+        verdicts.push(verdict);
     }
     verdicts
 }

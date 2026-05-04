@@ -6,6 +6,23 @@ use std::collections::{HashMap, HashSet};
 
 use super::types::StageTransition;
 
+/// Serializable form of LinUCB arm parameters.
+///
+/// Persisting these avoids routing quality regression after restart:
+/// without them, a stage-3 router (UCB mode) would have empty A/b
+/// parameters and produce effectively random selections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct LinUCBSnapshot {
+    /// Per-arm A matrix (flattened from `dim x dim`).
+    pub(crate) a_matrices: Vec<Vec<f64>>,
+    /// Per-arm b vector.
+    pub(crate) b_vectors: Vec<Vec<f64>>,
+    /// Dimensionality of the context feature vector.
+    pub(crate) dim: usize,
+    /// Total observations at snapshot time.
+    pub(crate) observations: usize,
+}
+
 /// Persisted snapshot of cascade router state.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CascadeSnapshot {
@@ -22,6 +39,10 @@ pub(crate) struct CascadeSnapshot {
     pub(crate) total_observations: u64,
     #[serde(default)]
     pub(crate) stage_transitions: Vec<StageTransition>,
+    /// LinUCB bandit state. `None` for snapshots written before this field
+    /// was added; the router will start with fresh parameters in that case.
+    #[serde(default)]
+    pub(crate) linucb_state: Option<LinUCBSnapshot>,
 }
 
 /// Serializable form of per-model confidence stats.

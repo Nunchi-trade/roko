@@ -87,7 +87,7 @@ async fn handle_ws(state: Arc<AppState>, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let mut filter: Vec<String> = Vec::new();
     let mut replay_cursor: u64 = 0;
-    let mut _back_pressure = BackPressureMode::AtMostOnce;
+    let mut back_pressure = BackPressureMode::AtMostOnce;
 
     // Wait for the first client message to get the cursor, or replay from 0.
     // We do an initial replay from 0; if the client sends a cursor later we
@@ -119,7 +119,20 @@ async fn handle_ws(state: Arc<AppState>, socket: WebSocket) {
                         if let Ok(cmd) = serde_json::from_str::<ClientMsg>(&text) {
                             filter = cmd.subscribe;
                             if let Some(bp) = cmd.back_pressure {
-                                _back_pressure = bp;
+                                match bp {
+                                    BackPressureMode::AtMostOnce => {
+                                        back_pressure = bp;
+                                    }
+                                    _ => {
+                                        // Coalesce and ResumeRequired are not yet implemented.
+                                        // Log and continue with at_most_once rather than silently
+                                        // ignoring the request.
+                                        tracing::warn!(
+                                            mode = ?bp,
+                                            "unsupported back_pressure mode requested; using at_most_once"
+                                        );
+                                    }
+                                }
                             }
                             // If client provides a cursor, replay missed events.
                             if let Some(cursor) = cmd.cursor {
@@ -186,6 +199,7 @@ async fn handle_ws(state: Arc<AppState>, socket: WebSocket) {
         }
     }
 
+    let _ = back_pressure; // forward-compat: will be consulted once Coalesce/Resume are wired
     let _ = sink.close().await;
 }
 

@@ -155,7 +155,7 @@ impl EnrichStep {
         match backend {
             LlmBackend::Claude => match self {
                 Self::Decompose | Self::Verify | Self::Reviews | Self::Tests | Self::Scribe => {
-                    "claude-sonnet-4-6"
+                    roko_core::defaults::MODEL_FOCUSED
                 }
                 Self::Prd
                 | Self::Briefs
@@ -164,7 +164,7 @@ impl EnrichStep {
                 | Self::Research
                 | Self::Dependencies
                 | Self::Fixtures
-                | Self::Integration => "claude-haiku-4-5-20251001",
+                | Self::Integration => roko_core::defaults::MODEL_FAST,
             },
             LlmBackend::Codex => match self {
                 Self::Decompose | Self::Verify | Self::Reviews | Self::Tests | Self::Scribe => {
@@ -350,7 +350,7 @@ mod tests {
         for step in heavy {
             assert_eq!(
                 step.default_model(LlmBackend::Claude),
-                "claude-sonnet-4-6",
+                roko_core::defaults::MODEL_FOCUSED,
                 "expected sonnet for {step}"
             );
         }
@@ -371,7 +371,7 @@ mod tests {
         for step in light {
             assert_eq!(
                 step.default_model(LlmBackend::Claude),
-                "claude-haiku-4-5-20251001",
+                roko_core::defaults::MODEL_FAST,
                 "expected haiku for {step}"
             );
         }

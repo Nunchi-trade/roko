@@ -2630,7 +2630,11 @@ fn handle_slash_command(
                 styled::continuation(theme, "mcp", &mcp_status, None),
                 styled::continuation(theme, "tokens", &total_tokens.to_string(), None),
                 styled::continuation(theme, "system", &system_preview, None),
-                styled::section_end(theme, "cost", &format!("${:.4}", session.cost.total_cost.max(0.0))),
+                styled::section_end(
+                    theme,
+                    "cost",
+                    &format!("${:.4}", session.cost.total_cost.max(0.0)),
+                ),
             ])?;
         }
         "/history" => {

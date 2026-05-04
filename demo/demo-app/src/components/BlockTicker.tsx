@@ -7,8 +7,8 @@ function truncateHash(hash: string): string {
   return `${hash.slice(0, 8)}...${hash.slice(-4)}`;
 }
 
-export default function BlockTicker() {
-  const { blocks, connected } = useBlockStream();
+export default function BlockTicker({ enabled = true }: { enabled?: boolean }) {
+  const { blocks, connected } = useBlockStream(enabled);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(0);
 

@@ -74,12 +74,31 @@ pub struct PromptContext {
     pub gate_feedback: Option<GateFeedback>,
     /// Attempt number (0 = first, > 0 = retry).
     pub attempt: u32,
+    /// Indented tree of `crates/*/src/` paths (truncated to 20 000 chars).
+    pub workspace_map: String,
+    /// Raw content of this plan's `tasks.toml` (truncated to 10 000 chars).
+    pub tasks_toml: String,
+    /// Short excerpt from the plan's PRD document (truncated to 2 000 chars).
+    pub prd_excerpt: String,
+    /// Output files from completed dependency tasks.
+    /// Each entry is `(task_id, files)`.
+    pub dependency_outputs: Vec<(String, Vec<String>)>,
 }
 
 impl PromptContext {
     /// Construct a `PromptContext` from runner inputs.
     #[must_use]
     pub fn from_task(task: &TaskDef, ctx: &DispatchContext) -> Self {
+        let workspace_map = generate_workspace_map(&ctx.workdir);
+        let tasks_toml = load_tasks_toml(&ctx.workdir, &ctx.plan_id);
+        let prd_excerpt = load_prd_excerpt(&ctx.workdir, &ctx.plan_id);
+        tracing::debug!(
+            plan_id = %ctx.plan_id,
+            workspace_map_bytes = workspace_map.len(),
+            tasks_toml_bytes = tasks_toml.len(),
+            prd_excerpt_bytes = prd_excerpt.len(),
+            "PromptContext enrichment sizes"
+        );
         Self {
             plan_id: ctx.plan_id.clone(),
             role: ctx.role.clone(),
@@ -93,8 +112,163 @@ impl PromptContext {
                 .collect(),
             gate_feedback: ctx.gate_feedback.clone(),
             attempt: ctx.attempt,
+            workspace_map,
+            tasks_toml,
+            prd_excerpt,
+            dependency_outputs: ctx.dependency_outputs.clone(),
         }
     }
+}
+
+// ─── PromptContext enrichment helpers ──────────────────────────────────
+
+const WORKSPACE_MAP_LIMIT: usize = 20_000;
+const TASKS_TOML_LIMIT: usize = 10_000;
+const PRD_EXCERPT_LIMIT: usize = 2_000;
+
+/// Walk `{workdir}/crates/*/src/` and produce an indented file tree.
+///
+/// The result is truncated to [`WORKSPACE_MAP_LIMIT`] characters so it
+/// never balloons the system prompt on large workspaces.
+fn generate_workspace_map(workdir: &Path) -> String {
+    let crates_dir = workdir.join("crates");
+    if !crates_dir.is_dir() {
+        return String::new();
+    }
+
+    let mut out = String::from("# Workspace crate map\n");
+    let mut entries: Vec<_> = match std::fs::read_dir(&crates_dir) {
+        Ok(e) => e.filter_map(|r| r.ok()).collect(),
+        Err(_) => return String::new(),
+    };
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let crate_path = entry.path();
+        if !crate_path.is_dir() {
+            continue;
+        }
+        let crate_name = crate_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        out.push_str(&format!("crates/{crate_name}/\n"));
+
+        let src_dir = crate_path.join("src");
+        if src_dir.is_dir() {
+            out.push_str(&walk_src_tree(&src_dir, "  ", 0));
+        }
+
+        if out.len() >= WORKSPACE_MAP_LIMIT {
+            out.truncate(WORKSPACE_MAP_LIMIT);
+            out.push_str("\n[truncated]");
+            return out;
+        }
+    }
+
+    if out.len() > WORKSPACE_MAP_LIMIT {
+        out.truncate(WORKSPACE_MAP_LIMIT);
+        out.push_str("\n[truncated]");
+    }
+    out
+}
+
+/// Recursively walk a source directory, producing an indented tree.
+///
+/// Stops at `MAX_DEPTH` levels of nesting to avoid runaway recursion on
+/// deeply nested source trees.
+fn walk_src_tree(dir: &Path, prefix: &str, depth: usize) -> String {
+    const MAX_DEPTH: usize = 3;
+    if depth >= MAX_DEPTH {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(e) => e.filter_map(|r| r.ok()).collect(),
+        Err(_) => return out,
+    };
+    // Directories first, then files, each group sorted by name.
+    entries.sort_by_key(|e| {
+        let is_file = e.path().is_file();
+        (is_file as u8, e.file_name())
+    });
+
+    for entry in entries {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if path.is_dir() {
+            out.push_str(&format!("{prefix}{name}/\n"));
+            out.push_str(&walk_src_tree(&path, &format!("{prefix}  "), depth + 1));
+        } else {
+            out.push_str(&format!("{prefix}{name}\n"));
+        }
+    }
+    out
+}
+
+/// Load `tasks.toml` for `plan_id` from the two canonical locations.
+///
+/// Searches:
+/// 1. `{workdir}/.roko/plans/{plan_id}/tasks.toml`
+/// 2. `{workdir}/plans/{plan_id}/tasks.toml`
+///
+/// Returns an empty string when neither exists.
+fn load_tasks_toml(workdir: &Path, plan_id: &str) -> String {
+    let candidates = [
+        workdir
+            .join(".roko")
+            .join("plans")
+            .join(plan_id)
+            .join("tasks.toml"),
+        workdir.join("plans").join(plan_id).join("tasks.toml"),
+    ];
+    for path in &candidates {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                return if content.len() > TASKS_TOML_LIMIT {
+                    let mut truncated = content.chars().take(TASKS_TOML_LIMIT).collect::<String>();
+                    truncated.push_str("\n[truncated]");
+                    truncated
+                } else {
+                    content
+                };
+            }
+        }
+    }
+    String::new()
+}
+
+/// Load a PRD excerpt for `plan_id`.
+///
+/// Searches:
+/// 1. `{workdir}/.roko/prd/published/{plan_id}.md`
+/// 2. `{workdir}/.roko/prd/draft/{plan_id}.md`
+///
+/// Returns an empty string when neither exists.
+fn load_prd_excerpt(workdir: &Path, plan_id: &str) -> String {
+    let prd_base = workdir.join(".roko").join("prd");
+    let candidates = [
+        prd_base.join("published").join(format!("{plan_id}.md")),
+        prd_base.join("draft").join(format!("{plan_id}.md")),
+    ];
+    for path in &candidates {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                return if content.len() > PRD_EXCERPT_LIMIT {
+                    let mut truncated = content.chars().take(PRD_EXCERPT_LIMIT).collect::<String>();
+                    truncated.push_str("\n[truncated]");
+                    truncated
+                } else {
+                    content
+                };
+            }
+        }
+    }
+    String::new()
 }
 
 /// Structured gate feedback injected into retry prompts.
@@ -418,6 +592,39 @@ impl PromptAssembler {
             sections.push(PromptSection::new("allowlist", s, 6));
         }
 
+        if !ctx.dependency_outputs.is_empty() {
+            let mut dep_text = String::from(
+                "# Prior Task Outputs\n\nThese tasks have already completed. Use their output files instead of reimplementing.\n",
+            );
+            for (task_id, files) in &ctx.dependency_outputs {
+                dep_text.push_str(&format!(
+                    "\n## Completed by task {task_id}:\nFiles created/modified:\n"
+                ));
+                for f in files {
+                    dep_text.push_str(&format!("- `{f}`\n"));
+                }
+            }
+            sections.push(PromptSection::new("dependency_outputs", dep_text, 7));
+        }
+
+        if !ctx.prd_excerpt.is_empty() {
+            let body = format!("# PRD Requirements\n{}", ctx.prd_excerpt);
+            sections.push(PromptSection::new("prd_excerpt", body, 7));
+        }
+
+        if !ctx.workspace_map.is_empty() {
+            sections.push(PromptSection::new(
+                "workspace_map",
+                ctx.workspace_map.clone(),
+                8,
+            ));
+        }
+
+        if !ctx.tasks_toml.is_empty() {
+            let body = format!("# Sibling Tasks\n```toml\n{}\n```", ctx.tasks_toml);
+            sections.push(PromptSection::new("tasks_toml", body, 9));
+        }
+
         let mut diagnostics = PromptDiagnostics::default();
         for source in &self.sources {
             sections.extend(source.collect(task, ctx));
@@ -530,15 +737,19 @@ impl PromptAssembler {
             }
         }
 
-        // Restore canonical order (role, task, files, acceptance, verify, retry, allowlist)
+        // Restore canonical order (role, task, files, acceptance, verify, retry, allowlist, …)
         let canonical: &[&str] = &[
             "role",
             "task",
             "files",
             "acceptance",
             "verify",
+            "dependency_outputs",
             "retry",
             "allowlist",
+            "prd_excerpt",
+            "workspace_map",
+            "tasks_toml",
             "knowledge",
             "episode_knowledge",
             "playbooks",
@@ -1186,6 +1397,7 @@ mod tests {
             acceptance: vec!["compiles".into()],
             acceptance_contract: None,
             domain: None,
+            sequence: 0,
         }
     }
 
@@ -1200,6 +1412,7 @@ mod tests {
             attempt: 0,
             gate_feedback: None,
             routing_context: None,
+            dependency_outputs: Vec::new(),
         }
     }
 

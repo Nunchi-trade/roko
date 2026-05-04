@@ -30,6 +30,7 @@ pub struct RungStats {
     /// Exponential moving average of the pass rate (0.0 to 1.0).
     pub ema_pass_rate: f64,
     /// Total observations for this rung.
+    #[serde(default, alias = "total_count")]
     pub total_observations: u64,
     /// Consecutive passes (reset on any failure).
     pub consecutive_passes: u32,

@@ -22,6 +22,8 @@ pub struct Plan {
     pub dir: PathBuf,
     /// Parsed task definitions.
     pub tasks: TasksFile,
+    /// Short excerpt from the plan's PRD document (empty when no PRD exists).
+    pub prd_excerpt: String,
 }
 
 /// Load a single plan from a directory that must contain `tasks.toml`.
@@ -39,11 +41,15 @@ pub fn load_plan(dir: &Path) -> Result<Plan> {
     let tasks = TasksFile::parse(&tasks_path)
         .with_context(|| format!("failed to parse {}", tasks_path.display()))?;
 
+    let workdir = find_workspace_root(dir);
+    let prd_excerpt = load_prd_excerpt_for_plan(workdir.as_deref(), &id);
+
     info!(plan_id = %id, task_count = tasks.tasks.len(), "loaded plan");
     Ok(Plan {
         id,
         dir: dir.to_path_buf(),
         tasks,
+        prd_excerpt,
     })
 }
 
@@ -87,6 +93,74 @@ pub fn load_plans(dir: &Path) -> Result<Vec<Plan>> {
     Ok(plans)
 }
 
+/// Walk up from `start` looking for the workspace root (a directory that
+/// contains `.roko/`).  Returns `None` when no such ancestor is found.
+fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(".roko").is_dir() {
+            return Some(current);
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => return None,
+        }
+    }
+}
+
+/// Load a PRD excerpt for `plan_id` relative to `workdir`.
+///
+/// Checks:
+/// 1. `{workdir}/.roko/prd/published/{plan_id}.md`
+/// 2. `{workdir}/.roko/prd/draft/{plan_id}.md`
+///
+/// Returns an empty string when `workdir` is `None` or no PRD file exists.
+fn load_prd_excerpt_for_plan(workdir: Option<&Path>, plan_id: &str) -> String {
+    const PRD_LIMIT: usize = 2_000;
+    let Some(root) = workdir else {
+        return String::new();
+    };
+    let prd_base = root.join(".roko").join("prd");
+    let candidates = [
+        prd_base.join("published").join(format!("{plan_id}.md")),
+        prd_base.join("draft").join(format!("{plan_id}.md")),
+    ];
+    for path in &candidates {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                return if content.len() > PRD_LIMIT {
+                    let mut s = content.chars().take(PRD_LIMIT).collect::<String>();
+                    s.push_str("\n[truncated]");
+                    s
+                } else {
+                    content
+                };
+            }
+        }
+    }
+    String::new()
+}
+
+/// Validate that a crate name is safe and follows Rust naming conventions.
+///
+/// Rejects:
+/// - Empty names
+/// - Names starting with `-` or `.`
+/// - Names containing `..` (directory traversal)
+/// - Names containing `/` or `\` (path separators)
+/// - Names with characters outside `[a-zA-Z0-9_-]`
+fn is_valid_crate_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.starts_with('.')
+        && !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Scan all tasks across `plans` for file references to crates that don't
 /// exist yet, then scaffold those crates (`Cargo.toml` + `src/lib.rs`) and
 /// register them in the workspace `Cargo.toml` members list.
@@ -126,6 +200,15 @@ pub fn scaffold_missing_crates(workdir: &Path, plans: &[Plan]) -> Result<Vec<Str
                     if crate_name.is_empty() || crate_name.contains('*') {
                         continue;
                     }
+                    // Validate crate name to prevent directory traversal and
+                    // invalid Rust crate names.
+                    if !is_valid_crate_name(&crate_name) {
+                        info!(
+                            crate_name = %crate_name,
+                            "scaffold: skipping invalid crate name"
+                        );
+                        continue;
+                    }
                     // Track if any file ref for this crate mentions src/main.rs.
                     if parts.len() == 3 && parts[2] == "src/main.rs" {
                         crate_needs_main.insert(crate_name.clone());
@@ -153,13 +236,65 @@ pub fn scaffold_missing_crates(workdir: &Path, plans: &[Plan]) -> Result<Vec<Str
 
         let is_bin = crate_needs_main.contains(crate_name.as_str());
 
+        // Infer inter-crate dependencies from task graph:
+        // If any task targets this crate and depends_on tasks in other crates,
+        // those other crates are likely dependencies.
+        let mut deps: Vec<String> = Vec::new();
+        for plan in plans {
+            for task in &plan.tasks.tasks {
+                let targets_this = task.files.iter().any(|f| {
+                    f.starts_with(&format!("crates/{crate_name}/"))
+                        || f.starts_with(&format!("crates/{}/", crate_name.replace('-', "_")))
+                });
+                if targets_this {
+                    for dep_id in &task.depends_on {
+                        // Find the dependency task and extract its target crate
+                        for other_task in &plan.tasks.tasks {
+                            if &other_task.id == dep_id {
+                                for f in &other_task.files {
+                                    if let Some(rest) = f.strip_prefix("crates/") {
+                                        if let Some(dep_crate) = rest.split('/').next() {
+                                            if dep_crate != crate_name
+                                                && !deps.contains(&dep_crate.to_string())
+                                            {
+                                                deps.push(dep_crate.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let deps_section = if deps.is_empty() {
+            String::new()
+        } else {
+            let mut s = String::from("\n[dependencies]\n");
+            for dep in &deps {
+                s.push_str(&format!(
+                    "{} = {{ path = \"../{dep}\" }}\n",
+                    dep.replace('-', "_")
+                ));
+            }
+            s
+        };
+        tracing::debug!(
+            crate_name,
+            dep_count = deps.len(),
+            deps = ?deps,
+            "scaffold: inferred inter-crate dependencies"
+        );
+
         let cargo_toml = if is_bin {
             format!(
-                "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"{crate_name}\"\npath = \"src/main.rs\"\n"
+                "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"{crate_name}\"\npath = \"src/main.rs\"\n{deps_section}"
             )
         } else {
             format!(
-                "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+                "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{deps_section}"
             )
         };
         std::fs::write(crate_dir.join("Cargo.toml"), cargo_toml)
@@ -186,7 +321,10 @@ pub fn scaffold_missing_crates(workdir: &Path, plans: &[Plan]) -> Result<Vec<Str
             let minimal = "[workspace]\nresolver = \"2\"\nmembers = [\n]\n";
             std::fs::write(&ws_cargo_path, minimal)
                 .context("scaffold: create workspace Cargo.toml")?;
-            info!("created minimal workspace Cargo.toml at {}", ws_cargo_path.display());
+            info!(
+                "created minimal workspace Cargo.toml at {}",
+                ws_cargo_path.display()
+            );
         }
 
         let ws_content = std::fs::read_to_string(&ws_cargo_path)
@@ -198,11 +336,34 @@ pub fn scaffold_missing_crates(workdir: &Path, plans: &[Plan]) -> Result<Vec<Str
             if new_content.contains(&member_entry) {
                 continue;
             }
+            // Find the `members = [` line, then locate the matching `]`.
+            // Skip comment lines and nested brackets to handle:
+            //   members = [
+            //     # core crates
+            //     "crates/roko-core",
+            //   ]
             if let Some(members_pos) = new_content.find("members") {
-                if let Some(bracket_offset) = new_content[members_pos..].find(']') {
-                    let insert_at = members_pos + bracket_offset;
-                    let insertion = format!("    {member_entry},\n");
-                    new_content.insert_str(insert_at, &insertion);
+                if let Some(open_bracket) = new_content[members_pos..].find('[') {
+                    let search_start = members_pos + open_bracket + 1;
+                    let mut depth = 1i32;
+                    let mut close_pos = None;
+                    for (i, ch) in new_content[search_start..].char_indices() {
+                        match ch {
+                            '[' => depth += 1,
+                            ']' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close_pos = Some(search_start + i);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(insert_at) = close_pos {
+                        let insertion = format!("    {member_entry},\n");
+                        new_content.insert_str(insert_at, &insertion);
+                    }
                 }
             }
         }

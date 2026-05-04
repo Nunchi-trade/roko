@@ -22,6 +22,7 @@ use std::time::Duration;
 use roko_orchestrator::{MergeQueue, MergeRequest};
 use tokio::sync::mpsc;
 
+use super::gate_dispatch::RUNG_MERGE;
 use super::types::{GateCompletion, GateCompletionKind, GateVerdictSummary, RunnerFailureKind};
 
 // ─── PlanMerger ─────────────────────────────────────────────────────────
@@ -513,7 +514,7 @@ impl PlanMerger {
                 kind: GateCompletionKind::Merge,
                 plan_id,
                 task_id: format!("merge:{}", request.branch_name),
-                rung: u32::MAX - 1,
+                rung: RUNG_MERGE,
                 passed,
                 failure_kind: outcome.failure_kind,
                 verdicts: vec![summary],

@@ -68,8 +68,8 @@ pub struct RunState {
     pub tasks_total: usize,
     /// Current gate output (last gate run).
     pub gate_output: String,
-    /// Iteration count for the current task (retries).
-    pub iteration: u32,
+    /// Iteration count per task, keyed by `"{plan_id}:{task_id}"`.
+    pub iterations: HashMap<String, u32>,
 
     // ─── Totals ─────────────────────────────────────────────────────
     /// Total input tokens across the entire run.
@@ -92,6 +92,9 @@ pub struct RunState {
     // ─── Task DAG ───────────────────────────────────────────────────
     /// Completed task IDs per plan (for DAG dependency resolution).
     pub completed_tasks: HashMap<String, Vec<String>>,
+    /// Files created or modified by each completed task.
+    /// Key: `"{plan_id}:{task_id}"`, value: list of file paths.
+    pub task_outputs: HashMap<String, Vec<String>>,
 
     // ─── Health ──────────────────────────────────────────────────────
     /// Consecutive snapshot-save failures. After 3, `snapshot_degraded` is set.
@@ -102,6 +105,9 @@ pub struct RunState {
     // ─── Timing ─────────────────────────────────────────────────────
     /// When the run started.
     pub started_at: Instant,
+    /// Epoch timestamp (ms since UNIX epoch) when the run started. Used in
+    /// snapshots for cross-run comparisons and dashboard display.
+    pub start_epoch_ms: u64,
     /// When the current task started (reset per task).
     pub task_started_at: Instant,
     /// How long the last dispatch_action (prompt assembly + spawn) took in ms.
@@ -153,7 +159,7 @@ impl RunState {
             tasks_failed: 0,
             tasks_total: total_tasks,
             gate_output: String::new(),
-            iteration: 0,
+            iterations: HashMap::new(),
             total_tokens_in: 0,
             total_tokens_out: 0,
             total_cost_usd: 0.0,
@@ -163,9 +169,14 @@ impl RunState {
             last_failure_kind: HashMap::new(),
             active_gate_effects: HashSet::new(),
             completed_tasks: HashMap::new(),
+            task_outputs: HashMap::new(),
             snapshot_fail_streak: 0,
             snapshot_degraded: false,
             started_at: Instant::now(),
+            start_epoch_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             task_started_at: Instant::now(),
             last_dispatch_ms: 0,
             replan_contexts: HashMap::new(),
@@ -182,11 +193,25 @@ impl RunState {
 
     /// Current task attempt reference, using at least attempt 1.
     pub fn current_attempt_ref(&self) -> TaskAttemptRef {
+        let key = format!("{}:{}", self.plan_id, self.current_task);
+        let iteration = self.iterations.get(&key).copied().unwrap_or(1);
         TaskAttemptRef::new(
             self.plan_id.clone(),
             self.current_task.clone(),
-            self.iteration.max(1),
+            iteration.max(1),
         )
+    }
+
+    /// Get the iteration count for a specific plan/task pair.
+    pub fn iteration_for(&self, plan_id: &str, task_id: &str) -> u32 {
+        let key = format!("{plan_id}:{task_id}");
+        self.iterations.get(&key).copied().unwrap_or(1)
+    }
+
+    /// Set the iteration count for a specific plan/task pair.
+    pub fn set_iteration(&mut self, plan_id: &str, task_id: &str, value: u32) {
+        let key = format!("{plan_id}:{task_id}");
+        self.iterations.insert(key, value);
     }
 
     /// Apply a normalized runner event to the in-memory lifecycle projection.
@@ -404,7 +429,7 @@ impl RunState {
         self.current_task = task_id.to_string();
         self.task_model_hint = None;
         self.gate_output.clear();
-        self.iteration = 0;
+        // iteration is per-task in self.iterations, set from executor state
         self.task_started_at = Instant::now();
         self.routing_context = None;
     }
@@ -425,11 +450,7 @@ impl RunState {
     pub fn record_task_failure(&mut self, plan_id: &str, task_id: &str, reason: &str) {
         let key = format!("{plan_id}:{task_id}");
         // Keep first 3 lines, up to 500 chars total.
-        let lines: String = reason
-            .lines()
-            .take(3)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let lines: String = reason.lines().take(3).collect::<Vec<_>>().join("\n");
         let truncated = if lines.len() > 500 {
             format!("{}...", &lines[..500])
         } else if reason.lines().count() > 3 {
@@ -440,7 +461,7 @@ impl RunState {
         self.failure_reasons.entry(key).or_insert(truncated);
     }
 
-    fn roll_into_totals(&mut self) {
+    pub fn roll_into_totals(&mut self) {
         self.total_tokens_in += self.tokens_in;
         self.total_tokens_out += self.tokens_out;
         self.total_cost_usd += self.cost_usd;
@@ -448,6 +469,18 @@ impl RunState {
         if !self.plan_id.is_empty() {
             *self.plan_costs.entry(self.plan_id.clone()).or_default() += self.cost_usd;
         }
+    }
+
+    /// Force a plan into a terminal state when `apply_event(Fatal)` is rejected
+    /// by the executor (e.g. because the plan is already in a terminal state or
+    /// the state machine rejects the transition). This prevents the run from
+    /// hanging forever waiting for a plan that can never advance.
+    pub fn force_plan_terminal(&mut self, plan_id: &str) {
+        tracing::warn!(plan_id = %plan_id, "force_plan_terminal: marking plan as dead in RunState");
+        self.tasks_failed += 1;
+        self.failure_reasons
+            .entry(format!("{plan_id}:_forced"))
+            .or_insert_with(|| "plan forced terminal after apply_event(Fatal) rejection".into());
     }
 
     /// Cost accumulated for a specific plan.
@@ -533,6 +566,43 @@ impl RunState {
             .get(plan_id)
             .map(|v| v.as_slice())
             .unwrap_or_default()
+    }
+
+    /// Record the files produced by a completed task.
+    pub fn record_task_outputs(&mut self, plan_id: &str, task_id: &str, files: Vec<String>) {
+        let key = format!("{plan_id}:{task_id}");
+        self.task_outputs.insert(key, files);
+    }
+
+    /// Return the files recorded for a specific completed task.
+    pub fn task_output_files(&self, plan_id: &str, task_id: &str) -> &[String] {
+        let key = format!("{plan_id}:{task_id}");
+        self.task_outputs
+            .get(&key)
+            .map(|v| v.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Collect output file lists for all tasks in `depends_on`.
+    ///
+    /// Returns a vec of `(task_id, files)` pairs — empty pairs are
+    /// omitted so callers only see tasks that actually produced output.
+    pub fn dependency_outputs(
+        &self,
+        plan_id: &str,
+        depends_on: &[String],
+    ) -> Vec<(String, Vec<String>)> {
+        depends_on
+            .iter()
+            .filter_map(|task_id| {
+                let files = self.task_output_files(plan_id, task_id);
+                if files.is_empty() {
+                    None
+                } else {
+                    Some((task_id.clone(), files.to_vec()))
+                }
+            })
+            .collect()
     }
 
     /// Total elapsed time since the run started.

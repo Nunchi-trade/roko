@@ -165,7 +165,32 @@ async fn run_agent_capture_impl(
         prompt_len = opts.prompt.len(),
         "agent_exec: dispatching prompt"
     );
+
+    // Run agent with a concurrent progress ticker so the user sees activity
+    // during long-running LLM calls (especially non-Claude backends that
+    // don't emit streaming stderr).
+    let tick_model = model.clone();
+    let tick_provider = resolved.provider_kind.label().to_string();
+    let tick_start = Instant::now();
+    let ticker = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        interval.tick().await; // skip immediate first tick
+        loop {
+            interval.tick().await;
+            let elapsed = tick_start.elapsed().as_secs();
+            let mins = elapsed / 60;
+            let secs = elapsed % 60;
+            if mins > 0 {
+                eprintln!(
+                    "  ⏳ Agent working... ({mins}m {secs}s) [{tick_model} via {tick_provider}]"
+                );
+            } else {
+                eprintln!("  ⏳ Agent working... ({secs}s) [{tick_model} via {tick_provider}]");
+            }
+        }
+    });
     let result = agent.run(&prompt, &Context::now()).await;
+    ticker.abort();
 
     let rendered = result.output.body.as_text().unwrap_or("").to_string();
     let elapsed_ms = started.elapsed().as_millis();
@@ -177,6 +202,26 @@ async fn run_agent_capture_impl(
         elapsed_ms = elapsed_ms,
         "agent_exec: agent returned"
     );
+    // Print completion summary to stderr
+    {
+        let secs = elapsed_ms / 1000;
+        let mins = secs / 60;
+        let s = secs % 60;
+        let len = rendered.len();
+        if result.success {
+            if mins > 0 {
+                eprintln!("  ✓ Agent completed ({mins}m {s}s, {len} bytes) [{model}]");
+            } else {
+                eprintln!("  ✓ Agent completed ({s}s, {len} bytes) [{model}]");
+            }
+        } else {
+            if mins > 0 {
+                eprintln!("  ✗ Agent failed ({mins}m {s}s, {len} bytes) [{model}]");
+            } else {
+                eprintln!("  ✗ Agent failed ({s}s, {len} bytes) [{model}]");
+            }
+        }
+    }
     if rendered.trim().is_empty() {
         tracing::warn!(
             model = %model,

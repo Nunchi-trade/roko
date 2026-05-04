@@ -373,10 +373,7 @@ async fn collect_plans(
             }
 
             let tasks_path = entry_path.join("tasks.toml");
-            let plan_name = entry
-                .file_name()
-                .to_string_lossy()
-                .to_string();
+            let plan_name = entry.file_name().to_string_lossy().to_string();
 
             // Skip if we've already seen this plan name from the other directory.
             if plans.contains_key(&plan_name) {

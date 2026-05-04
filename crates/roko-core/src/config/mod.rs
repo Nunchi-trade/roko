@@ -26,6 +26,7 @@ pub mod routing;
 pub mod schema;
 pub mod serve;
 pub mod subscriptions;
+pub mod timeouts;
 pub mod tools;
 pub mod tui_cfg;
 pub mod validation;
@@ -42,25 +43,27 @@ pub use provider::{
     ModelCost, ModelDefinition, ModelMetadataSource, ProviderAuth, ProviderCapabilities,
     ProviderDefinition, ProviderId, ProviderTransport,
 };
+pub use timeouts::TimeoutConfig;
 pub use validation::{
     DangerousPermissionOverride, DangerousPermissionOverrideError, StrictConfigSource,
     StrictConfigValidationError, validate_strict_config_toml,
 };
+
 // All section structs are re-exported from schema (which re-exports from submodules).
 pub use schema::{
     AgentBudget, AgentConfig, AgentDefinition, AgentMode, AgentThresholds, ApiKeyEntry,
     BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig, CompileFailRepeatConfig, ConductorConfig,
     ContextWindowPressureConfig, CoreRunnerConfig, CostOverrunConfig, DataLlmConfig, DeployConfig,
-    GatesConfig, GeminiConfig, GhostTurnConfig, GithubWebhookConfig, IterationLoopConfig,
-    LearningConfig, ModelProfile, PerplexityConfig, PipelineBandConfig, PipelineConfig,
-    PipelineReviewerMode, PrdConfig, ProjectConfig, ProviderConfig, ProviderRouting, RelayConfig,
-    ReviewLoopConfig, RewardWeights, RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig,
-    RoutingOverrides, RoutingRewardWeightsConfig, SafetySetting, SchedulerConfig,
-    SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig,
-    ServerConfig, SpecDriftConfig, StuckPatternConfig, SubscriptionConfig,
-    SubscriptionFilterConfig, SubscriptionTrigger, TestFailureBudgetConfig, TimeOverrunConfig,
-    ToolProfileConfig, ToolsConfig, TuiConfig, WatcherConfig, WatcherPathConfig, WatcherThresholds,
-    WebhooksConfig,
+    GateRungConfig, GatesConfig, GeminiConfig, GhostTurnConfig, GithubWebhookConfig,
+    IterationLoopConfig, LearningConfig, ModelProfile, PerplexityConfig, PipelineBandConfig,
+    PipelineConfig, PipelineReviewerMode, PrdConfig, ProjectConfig, ProviderConfig,
+    ProviderRouting, RelayConfig, ReviewLoopConfig, RewardWeights, RokoConfig, RoleOverride,
+    RoutingAlgorithm, RoutingConfig, RoutingOverrides, RoutingRewardWeightsConfig, SafetySetting,
+    SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServeDeployConfig,
+    ServeDeployWebhookConfig, ServerConfig, SpecDriftConfig, StuckPatternConfig,
+    SubscriptionConfig, SubscriptionFilterConfig, SubscriptionTrigger, TestFailureBudgetConfig,
+    TimeOverrunConfig, ToolProfileConfig, ToolsConfig, TuiConfig, WatcherConfig, WatcherPathConfig,
+    WatcherThresholds, WebhooksConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.
@@ -94,27 +97,37 @@ pub enum LoadConfigError {
 
 /// Load the workspace configuration from `workdir/roko.toml`.
 ///
-/// **Deprecated**: Use [`loader::load_config_unified`] or
-/// [`loader::load_config_validated`] instead. This function skips ancestor
-/// walk, global config merge, `ROKO_CONFIG` env var, and `ROKO__*` overrides.
+/// **Deprecated**: Use [`loader::load_config_validated`] instead.
+/// This function now delegates to the unified loader with default options.
 #[deprecated(note = "use roko_core::config::loader::load_config_validated() instead")]
 pub fn load_config(workdir: &Path) -> Result<ValidatedConfig, LoadConfigError> {
-    load_config_impl(workdir, ConfigTrust::Local)
+    tracing::debug!(workdir = %workdir.display(), "deprecated load_config -> unified loader");
+    loader::load_config_validated_with_options(workdir, &loader::LoadOptions::default())
 }
 
 /// Load the workspace configuration with strict safety validation.
 ///
 /// **Deprecated**: Use [`loader::load_config_with_options`] with
 /// [`loader::LoadOptions::strict()`] instead.
+/// This function now delegates to the unified loader with strict options.
 #[deprecated(
     note = "use roko_core::config::loader::load_config_with_options(workdir, &LoadOptions::strict()) instead"
 )]
 pub fn load_config_strict(workdir: &Path) -> Result<ValidatedConfig, LoadConfigError> {
-    load_config_impl(workdir, ConfigTrust::Shared)
+    tracing::debug!(workdir = %workdir.display(), "deprecated load_config_strict -> unified loader");
+    loader::load_config_validated_with_options(
+        workdir,
+        &loader::LoadOptions {
+            merge_global: true,
+            apply_env_overrides: true,
+            strict_validation: true,
+        },
+    )
 }
 
 /// Trust level for workspace config loading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum ConfigTrust {
     /// Config may be inherited — reject safety-sensitive overrides.
     Shared,
@@ -122,6 +135,7 @@ enum ConfigTrust {
     Local,
 }
 
+#[allow(dead_code)]
 fn load_config_impl(
     workdir: &Path,
     trust: ConfigTrust,

@@ -551,6 +551,7 @@ fn build_runner_config(
         plan_timeout_secs: cli_config.runner.plan_timeout_secs,
         max_retries: cli_config.executor.max_auto_fix_iterations,
         max_concurrent_tasks,
+        gate_concurrency: max_concurrent_tasks,
         approval: false,
         dangerously_skip_permissions: roko_config.runner.dangerously_skip_permissions,
         force_resume: false,
@@ -570,6 +571,7 @@ fn build_runner_config(
         feedback_facade: None,
         projection: None,
         stream_to_stderr: false,
+        warm_cache: true,
     }
 }
 

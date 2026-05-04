@@ -756,11 +756,16 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       }
       workspaceDirRef.current = wsPath;
 
-      // For ClickableScenario: initialise the terminal (roko resolution + cd) but
+      // For ClickableScenario: initialise ALL terminals (roko resolution + cd) but
       // don't run the scenario automatically. Users click individual commands.
       if (isClickable) {
         try {
+          // Enter workspace on all panes (first pane resolves roko binary,
+          // subsequent panes reuse the cached resolution)
           await enterWorkspace(entries[0], wsPath);
+          if (entries.length > 1) {
+            await Promise.all(entries.slice(1).map(e => enterWorkspace(e, wsPath)));
+          }
           workspaceEnteredRef.current = true;
         } catch (err) {
           console.warn('[ScenarioSlot] ClickableScenario enterWorkspace failed:', err);
@@ -934,10 +939,13 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       }
     }
 
-    // On first click, initialise the terminal (resolve roko binary, cd, clear)
+    // On first click, initialise ALL terminals (resolve roko binary, cd, clear)
     if (!workspaceEnteredRef.current) {
       try {
         await enterWorkspace(entries[0], wsPath);
+        if (entries.length > 1) {
+          await Promise.all(entries.slice(1).map(e => enterWorkspace(e, wsPath)));
+        }
         workspaceEnteredRef.current = true;
       } catch (err) {
         console.warn('[ScenarioSlot] handleClickableRun enterWorkspace failed:', err);
@@ -1019,23 +1027,25 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                 />
               )}
 
-              <div className="demo-terminal-grid demo-cols-1">
-                <TerminalPaneWithHandle
-                  key={sessionIds[0]}
-                  sessionId={sessionIds[0]}
-                  label={scenario.labels[0] || 'Terminal'}
-                  handleRef={handleRefsRef.current[0]}
-                  paneIndex={0}
-                  onStatusChange={updateTerminalState}
-                  termReveal={termReveal}
-                  scenarioId={scenario.id}
-                  scenarioCategory={scenario.category}
-                  isRunning={isRunning}
-                />
+              <div className={`demo-terminal-grid demo-cols-${scenario.panes}`}>
+                {Array.from({ length: scenario.panes }).map((_, i) => (
+                  <TerminalPaneWithHandle
+                    key={sessionIds[i]}
+                    sessionId={sessionIds[i]}
+                    label={scenario.labels[i] || `pane ${i + 1}`}
+                    handleRef={handleRefsRef.current[i]}
+                    paneIndex={i}
+                    onStatusChange={updateTerminalState}
+                    termReveal={termReveal}
+                    scenarioId={scenario.id}
+                    scenarioCategory={scenario.category}
+                    isRunning={isRunning}
+                  />
+                ))}
               </div>
             </div>
 
-            {/* Right 30%: command list + context panel */}
+            {/* Right 30%: command list + optional context panel */}
             <div className="demo-clickable-sidebar">
               <div className="demo-clickable-commands">
                 <CommandList
@@ -1044,13 +1054,15 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                   onRetry={handleClickableRun}
                 />
               </div>
-              <div className="demo-clickable-context">
-                <ContextPanel
-                  stage={clickableStage}
-                  idea={PRD_IDEA}
-                  gates={gates.map(g => ({ ...g, status: g.status as 'pass' | 'fail' | 'pending' }))}
-                />
-              </div>
+              {scenario.id === 'prd-pipeline' && (
+                <div className="demo-clickable-context">
+                  <ContextPanel
+                    stage={clickableStage}
+                    idea={PRD_IDEA}
+                    gates={gates.map(g => ({ ...g, status: g.status as 'pass' | 'fail' | 'pending' }))}
+                  />
+                </div>
+              )}
             </div>
           </div>
         ) : (

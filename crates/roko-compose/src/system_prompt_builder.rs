@@ -104,8 +104,6 @@ struct SectionEffectivenessConfig {
     registry: SectionEffectivenessRegistry,
 }
 
-const RELEVANT_TECHNIQUES_TOKEN_BUDGET: usize = 500;
-
 /// Normalize prompt text so logically-identical content yields identical bytes.
 #[must_use]
 pub fn normalize_for_caching(content: &str) -> String {
@@ -394,6 +392,9 @@ impl SystemPromptBuilder {
                 .then_with(|| a.cmp(&b))
         });
 
+        // Maintain a cached assembly of already-accepted sections to avoid O(N^2) reassembly.
+        let mut cached_assembly = String::new();
+
         for index in selection_order {
             let rendered = &rendered_sections[index].rendered;
             if candidate_fits(
@@ -404,13 +405,19 @@ impl SystemPromptBuilder {
                 self.cache_markers,
                 token_budget,
                 counter,
+                &cached_assembly,
             ) {
                 kept[index] = Some(rendered.clone());
+                // Update the cached assembly incrementally.
+                if !cached_assembly.is_empty() {
+                    cached_assembly.push_str("\n\n");
+                }
+                cached_assembly.push_str(rendered);
                 continue;
             }
 
             if rendered_sections[index].section.priority == SectionPriority::Critical {
-                kept[index] = truncate_to_fit(
+                let truncated = truncate_to_fit(
                     &rendered_sections,
                     &kept,
                     index,
@@ -418,7 +425,15 @@ impl SystemPromptBuilder {
                     self.cache_markers,
                     token_budget,
                     counter,
+                    &cached_assembly,
                 );
+                if let Some(ref text) = truncated {
+                    if !cached_assembly.is_empty() {
+                        cached_assembly.push_str("\n\n");
+                    }
+                    cached_assembly.push_str(text);
+                }
+                kept[index] = truncated;
             }
         }
 
@@ -745,6 +760,10 @@ impl SystemPromptBuilder {
             return None;
         }
 
+        // Derive the token budget from the budget profile (skills field, char-to-token
+        // approximation) instead of the old hardcoded 500-token constant.
+        let skill_token_budget = self.budget_profile.map(|b| b.skills / 4).unwrap_or(500);
+
         let mut rendered = String::from("## Relevant Techniques");
         let mut kept_playbooks = 0usize;
         let mut kept_skills = 0usize;
@@ -754,7 +773,7 @@ impl SystemPromptBuilder {
             let block = render_playbook(playbook);
             let candidate = format!("{rendered}\n\n{block}");
             let candidate_tokens = estimate_tokens(&candidate);
-            if candidate_tokens > RELEVANT_TECHNIQUES_TOKEN_BUDGET {
+            if candidate_tokens > skill_token_budget {
                 break;
             }
             rendered = candidate;
@@ -766,7 +785,7 @@ impl SystemPromptBuilder {
             let block = render_skill(skill);
             let candidate = format!("{rendered}\n\n{block}");
             let candidate_tokens = estimate_tokens(&candidate);
-            if candidate_tokens > RELEVANT_TECHNIQUES_TOKEN_BUDGET {
+            if candidate_tokens > skill_token_budget {
                 break;
             }
             rendered = candidate;
@@ -782,27 +801,29 @@ impl SystemPromptBuilder {
                 dropped_playbooks = self.relevant_playbooks.len().min(3) - kept_playbooks,
                 kept_skills,
                 dropped_skills = self.relevant_skills.len() - kept_skills,
-                token_budget = RELEVANT_TECHNIQUES_TOKEN_BUDGET,
+                token_budget = skill_token_budget,
                 used_tokens = total_tokens,
                 "trimmed relevant techniques to fit the prompt budget"
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 kept_playbooks,
                 kept_skills,
-                token_budget = RELEVANT_TECHNIQUES_TOKEN_BUDGET,
+                token_budget = skill_token_budget,
                 used_tokens = total_tokens,
                 "included relevant techniques in the prompt"
             );
         }
 
-        self.apply_budget_profile(
+        // No longer apply_budget_profile here -- the greedy loop already respects
+        // the skills budget. The hard_cap is set to skill_token_budget directly.
+        Some(
             PromptSection::new("relevant_techniques", rendered)
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End)
                 .with_bidder(AttentionBidder::PlaybookRules)
-                .with_hard_cap(RELEVANT_TECHNIQUES_TOKEN_BUDGET),
+                .with_hard_cap(skill_token_budget),
         )
     }
 
@@ -826,8 +847,14 @@ impl SystemPromptBuilder {
             "conventions" | "tool_instructions" | "anti_patterns" => Some(budget.instructions),
             "domain_context" | "context_layer" | "pheromone_signals" => Some(budget.context),
             "gate_feedback" => Some(budget.context),
-            "relevant_techniques" => Some(budget.skills),
-            _ => None,
+            "relevant_techniques" | "tool_hints" => Some(budget.skills),
+            "role_identity" | "agents_instructions" => Some(budget.plan.min(8_000)),
+            "task_context" => Some(budget.plan),
+            "affect_guidance" => Some(budget.instructions),
+            _ => {
+                tracing::debug!(section_name, "no budget cap for section");
+                None
+            }
         }
     }
 }
@@ -1074,24 +1101,21 @@ fn assemble_sections(mut sections: Vec<PromptSection>, cache_markers: bool) -> S
 }
 
 fn render_section(section: &PromptSection) -> String {
-    match section.name.as_str() {
-        "role_identity" => section.content.clone(),
-        "conventions" => format!("## Project Conventions\n\n{}", section.content),
-        "tool_instructions" => format!("## Tool Instructions\n\n{}", section.content),
-        "domain_context" => format!("## Domain Context\n\n{}", section.content),
-        "relevant_techniques" => section.content.clone(),
-        "pheromone_signals" => format!("## Active Signals\n\n{}", section.content),
-        "anti_patterns" => format!("## Anti-Patterns\n\n{}", section.content),
-        "affect_guidance" => format!("## Affect Guidance\n\n{}", section.content),
-        "task_context" => format!("## Current Task\n\n{}", section.content),
-        "gate_feedback" => {
-            if section.content.trim_start().starts_with("## ") {
-                section.content.clone()
-            } else {
-                format!("## Gate Feedback\n\n{}", section.content)
-            }
-        }
-        _ => section.content.clone(),
+    // gate_feedback has a special self-prefix check
+    if section.name == "gate_feedback" {
+        return if section.content.trim_start().starts_with("## ") {
+            section.content.clone()
+        } else {
+            format!("## Gate Feedback\n\n{}", section.content)
+        };
+    }
+
+    match spec_for(&section.name) {
+        Some(spec) => match spec.heading {
+            Some(heading) => format!("{heading}\n\n{}", section.content),
+            None => section.content.clone(),
+        },
+        None => section.content.clone(),
     }
 }
 
@@ -1131,20 +1155,33 @@ fn assemble_selected_sections(
     normalize_for_caching(&parts.join("\n\n"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn candidate_fits(
-    sections: &[RenderedSection],
-    kept: &[Option<String>],
-    index: usize,
+    _sections: &[RenderedSection],
+    _kept: &[Option<String>],
+    _index: usize,
     candidate: &str,
-    cache_markers: bool,
+    _cache_markers: bool,
     token_budget: usize,
     counter: &TokenCounter,
+    cached_assembly: &str,
 ) -> bool {
-    let mut next = kept.to_vec();
-    next[index] = Some(candidate.to_string());
-    counter.count(&assemble_selected_sections(sections, &next, cache_markers)) <= token_budget
+    // Incremental measurement: append only the candidate to the already-assembled prefix.
+    // This avoids the O(N) reassembly per probe that caused O(N^2 log N) overall.
+    let probe = if cached_assembly.is_empty() {
+        candidate.to_string()
+    } else {
+        format!("{cached_assembly}\n\n{candidate}")
+    };
+    tracing::debug!(
+        token_budget,
+        probe_len = probe.len(),
+        "candidate_fits: incremental token check"
+    );
+    counter.count(&probe) <= token_budget
 }
 
+#[allow(clippy::too_many_arguments)]
 fn truncate_to_fit(
     sections: &[RenderedSection],
     kept: &[Option<String>],
@@ -1153,6 +1190,7 @@ fn truncate_to_fit(
     cache_markers: bool,
     token_budget: usize,
     counter: &TokenCounter,
+    cached_assembly: &str,
 ) -> Option<String> {
     let mut boundaries = rendered
         .char_indices()
@@ -1177,6 +1215,7 @@ fn truncate_to_fit(
                 cache_markers,
                 token_budget,
                 counter,
+                cached_assembly,
             )
         {
             best = Some(candidate.to_string());
@@ -1189,21 +1228,86 @@ fn truncate_to_fit(
     best
 }
 
+/// Single source of truth for section metadata.
+///
+/// All three section-name registries (`section_order_rank`, `section_budget_cap`,
+/// `render_section`) are derived from this table. Adding a new section means
+/// adding one entry here.
+struct SectionSpec {
+    name: &'static str,
+    order_rank: u8,
+    heading: Option<&'static str>,
+}
+
+const SECTION_SPECS: &[SectionSpec] = &[
+    SectionSpec {
+        name: "role_identity",
+        order_rank: 0,
+        heading: None,
+    },
+    SectionSpec {
+        name: "conventions",
+        order_rank: 1,
+        heading: Some("## Project Conventions"),
+    },
+    SectionSpec {
+        name: "tool_instructions",
+        order_rank: 2,
+        heading: Some("## Tool Instructions"),
+    },
+    SectionSpec {
+        name: "domain_context",
+        order_rank: 3,
+        heading: Some("## Domain Context"),
+    },
+    SectionSpec {
+        name: "context_layer",
+        order_rank: 4,
+        heading: None,
+    },
+    SectionSpec {
+        name: "pheromone_signals",
+        order_rank: 5,
+        heading: Some("## Active Signals"),
+    },
+    SectionSpec {
+        name: "task_context",
+        order_rank: 6,
+        heading: Some("## Current Task"),
+    },
+    SectionSpec {
+        name: "gate_feedback",
+        order_rank: 7,
+        heading: None,
+    }, // self-prefixed check
+    SectionSpec {
+        name: "relevant_techniques",
+        order_rank: 8,
+        heading: None,
+    },
+    SectionSpec {
+        name: "anti_patterns",
+        order_rank: 9,
+        heading: Some("## Anti-Patterns"),
+    },
+    SectionSpec {
+        name: "affect_guidance",
+        order_rank: 10,
+        heading: Some("## Affect Guidance"),
+    },
+    SectionSpec {
+        name: "tool_hints",
+        order_rank: 11,
+        heading: None,
+    },
+];
+
+fn spec_for(name: &str) -> Option<&'static SectionSpec> {
+    SECTION_SPECS.iter().find(|s| s.name == name)
+}
+
 fn section_order_rank(name: &str) -> u8 {
-    match name {
-        "role_identity" => 0,
-        "conventions" => 1,
-        "tool_instructions" => 2,
-        "domain_context" => 3,
-        "context_layer" => 4,
-        "pheromone_signals" => 5,
-        "task_context" => 6,
-        "gate_feedback" => 7,
-        "relevant_techniques" => 8,
-        "anti_patterns" => 9,
-        "affect_guidance" => 10,
-        _ => 11,
-    }
+    spec_for(name).map_or(12, |s| s.order_rank)
 }
 
 impl SystemPromptBuilder {
