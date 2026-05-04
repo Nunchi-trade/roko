@@ -50,7 +50,7 @@ use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
+use roko_core::defaults::{DEFAULT_MAX_TOOL_ITERATIONS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::tool::{ToolDef, ToolRegistry};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -357,7 +357,8 @@ pub(crate) fn tool_limit_for_temperament(limit: usize) -> usize {
 }
 
 #[must_use]
-pub(crate) fn tool_loop_max_iterations(default_limit: usize) -> usize {
+pub(crate) fn tool_loop_max_iterations() -> usize {
+    let default_limit = DEFAULT_MAX_TOOL_ITERATIONS;
     match current_temperament().unwrap_or_default() {
         Temperament::Conservative => default_limit.saturating_add(10),
         Temperament::Balanced => default_limit,
@@ -819,6 +820,23 @@ mod tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn tool_loop_iterations_derive_from_workspace_default() {
+        assert_eq!(tool_loop_max_iterations(), DEFAULT_MAX_TOOL_ITERATIONS);
+        assert_eq!(
+            with_temperament(Some(Temperament::Conservative), tool_loop_max_iterations),
+            DEFAULT_MAX_TOOL_ITERATIONS + 10
+        );
+        assert_eq!(
+            with_temperament(Some(Temperament::Aggressive), tool_loop_max_iterations),
+            DEFAULT_MAX_TOOL_ITERATIONS - 15
+        );
+        assert_eq!(
+            with_temperament(Some(Temperament::Exploratory), tool_loop_max_iterations),
+            DEFAULT_MAX_TOOL_ITERATIONS + 20
+        );
     }
 
     #[test]

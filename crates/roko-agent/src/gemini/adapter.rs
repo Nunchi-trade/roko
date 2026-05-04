@@ -63,7 +63,7 @@ fn gemini_tool_loop_agent(
         .with_poster(Box::new(ReqwestPoster::new()));
 
     let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend))
-        .with_max_iterations(tool_loop_max_iterations(50))
+        .with_max_iterations(tool_loop_max_iterations())
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -100,7 +100,7 @@ fn gemini_native_tool_loop_agent(
         create_tool_loop_backend(provider, model, options, Arc::new(ReqwestPoster::new()))?;
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-        .with_max_iterations(tool_loop_max_iterations(50))
+        .with_max_iterations(tool_loop_max_iterations())
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 

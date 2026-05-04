@@ -184,7 +184,7 @@ fn perplexity_tool_loop_agent(
     ));
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend.clone())
-        .with_max_iterations(tool_loop_max_iterations(50))
+        .with_max_iterations(tool_loop_max_iterations())
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 

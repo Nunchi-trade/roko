@@ -73,7 +73,7 @@ impl ProviderAdapter for CerebrasAdapter {
             let backend = create_openai_compat_backend(&tool_loop_provider, model, poster)?;
 
             let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-                .with_max_iterations(tool_loop_max_iterations(50))
+                .with_max_iterations(tool_loop_max_iterations())
                 .with_context_token_limit(
                     usize::try_from(model.context_window).unwrap_or(usize::MAX),
                 )
