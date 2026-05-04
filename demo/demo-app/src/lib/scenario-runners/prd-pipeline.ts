@@ -1,7 +1,7 @@
 // --- src/lib/scenario-runners/prd-pipeline.ts ---
 import type { Scenario, ScenarioContext } from '../scenarios';
 import { compactTime, pipelineEvent } from '../scenario-helpers';
-import { enterWorkspace, showCmd, roko, trackMetrics } from '../terminal-session';
+import { enterWorkspace, ensureWorkspaceCwd, showCmd, roko, trackMetrics } from '../terminal-session';
 import {
   type PipelineDemoState,
   type PipelinePhase,
@@ -165,7 +165,15 @@ export const prdPipeline: Scenario = {
       });
       ctx.appendPipelineEvent(pipelineEvent('setup', `${example.setupDescription} Creating a minimal Rust scaffold.`));
       logCommand('prepare workspace', 'Creates a small Rust CLI so the generated PRD and plan target real files.');
+      if (!(await ensureWorkspaceCwd(main, dir))) {
+        failPipeline(ctx, 'failed', 'Workspace setup failed', `Could not enter workspace ${dir}.`);
+        return;
+      }
       await main.execCmd(setupCmd, 15000);
+      if (!(await ensureWorkspaceCwd(main, dir))) {
+        failPipeline(ctx, 'failed', 'Workspace setup failed', `Could not re-enter workspace ${dir}.`);
+        return;
+      }
       await main.execCmd(`${roko(ctx, 'init')} 2>/dev/null; true`, 15000);
       main.clearTerminal();
 
@@ -180,7 +188,13 @@ export const prdPipeline: Scenario = {
         currentCommand: ideaCmd,
       });
       ctx.appendPipelineEvent(pipelineEvent('idea', 'Idea captured into .roko/prd/ideas.md.'));
-      const ideaResult = await showCmd(main, ideaCmd, { timeout: 45000, onLog: logCommand, onLogComplete: logCommandComplete, playback });
+      const ideaResult = await showCmd(main, ideaCmd, {
+        timeout: 45000,
+        workspaceDir: dir,
+        onLog: logCommand,
+        onLogComplete: logCommandComplete,
+        playback,
+      });
       if (!ideaResult.ok) {
         failPipeline(ctx, 'failed', 'prd idea command failed', 'prd idea returned a non-zero exit code.');
         return;
@@ -201,6 +215,7 @@ export const prdPipeline: Scenario = {
       ctx.appendPipelineEvent(pipelineEvent('draft', 'Generating PRD via LLM agent.'));
       const draftResult = await showCmd(main, draftCmd, {
         timeout: 180000,
+        workspaceDir: dir,
         onLog: logCommand,
         onLogComplete: logCommandComplete,
         playback,
@@ -226,7 +241,13 @@ export const prdPipeline: Scenario = {
         currentCommand: promoteCmd,
       });
       ctx.appendPipelineEvent(pipelineEvent('published', 'Promoting draft PRD into the published set.'));
-      await showCmd(main, promoteCmd, { timeout: 30000, onLog: logCommand, onLogComplete: logCommandComplete, playback });
+      await showCmd(main, promoteCmd, {
+        timeout: 30000,
+        workspaceDir: dir,
+        onLog: logCommand,
+        onLogComplete: logCommandComplete,
+        playback,
+      });
       await refreshWorkflowSnapshot(ctx, dir, 'published', 'PRD published and ready for planning', promoteCmd);
 
       // ── Step 4: prd plan (LLM generates tasks.toml) ────────
@@ -242,6 +263,7 @@ export const prdPipeline: Scenario = {
       ctx.appendPipelineEvent(pipelineEvent('planning', 'Generating tasks.toml from the published PRD via LLM agent.'));
       const planResult = await showCmd(main, planCmd, {
         timeout: 300000,
+        workspaceDir: dir,
         onLog: logCommand,
         onLogComplete: logCommandComplete,
         playback,
@@ -268,6 +290,7 @@ export const prdPipeline: Scenario = {
       ctx.appendPipelineEvent(pipelineEvent('tasks', 'Validating plan structure and task metadata.'));
       const validateResult = await showCmd(main, validateCmd, {
         timeout: 30000,
+        workspaceDir: dir,
         onLog: logCommand,
         onLogComplete: logCommandComplete,
         playback,
@@ -292,6 +315,7 @@ export const prdPipeline: Scenario = {
       ctx.appendPipelineEvent(pipelineEvent('implementing', 'Executing plan: agents implement tasks, gates validate each one.'));
       const runResult = await showCmd(main, runCmd, {
         timeout: 600000,
+        workspaceDir: dir,
         onLog: logCommand,
         onLogComplete: logCommandComplete,
         onGate: setGate,
@@ -314,6 +338,7 @@ export const prdPipeline: Scenario = {
       // Show learning state
       await showCmd(main, roko(ctx, 'learn all'), {
         timeout: 30000,
+        workspaceDir: dir,
         onLog: logCommand,
         onLogComplete: logCommandComplete,
         playback,

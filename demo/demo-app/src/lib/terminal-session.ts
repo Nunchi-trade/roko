@@ -88,6 +88,26 @@ function shellQuote(value: string): string {
 }
 
 /**
+ * Re-enter the expected workspace before hidden or visible scenario commands.
+ *
+ * Demo runs are long-lived terminal sessions; this keeps generated commands
+ * anchored to the server-created workspace even if a previous command changed
+ * directories or a shell integration restored a different working directory.
+ */
+export async function ensureWorkspaceCwd(
+  handle: TerminalHandle,
+  dir: string,
+  timeout = 5000,
+): Promise<boolean> {
+  const cdResult = await handle.execCmd(`cd ${shellQuote(dir)}`, timeout);
+  if (!cdResult.ok) {
+    console.error('[ensureWorkspaceCwd] cd failed:', dir, cdResult);
+    return false;
+  }
+  return true;
+}
+
+/**
  * Build a roko CLI command string, automatically injecting workspace and model context.
  * Every scenario runner should use this instead of `${ROKO} subcommand`.
  */
@@ -142,9 +162,8 @@ export async function enterWorkspace(
   await resolveRoko(handle);
 
   // 4. cd into workspace
-  const cdResult = await handle.execCmd(`cd "${dir}"`, 5000);
-  if (!cdResult.ok && cdResult.exitCode !== -1) {
-    console.error('[enterWorkspace] cd failed:', dir, cdResult);
+  const cdResult = await ensureWorkspaceCwd(handle, dir);
+  if (!cdResult) {
     throw new Error(`Failed to cd into workspace: ${dir}`);
   }
 
@@ -212,6 +231,8 @@ export async function showCmd(
     onCost?: (cost: string) => void;
     onTokens?: (tokens: string) => void;
     signal?: AbortSignal;
+    /** Re-enter this workspace before typing the visible command. */
+    workspaceDir?: string;
     /** Unused — kept for caller compatibility. */
     playback?: PlaybackController;
   },
@@ -229,6 +250,15 @@ export async function showCmd(
   if (opts?.signal?.aborted) {
     opts?.onLogComplete?.(cmd, false);
     return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null };
+  }
+
+  if (opts?.workspaceDir) {
+    const cwdOk = await ensureWorkspaceCwd(handle, opts.workspaceDir);
+    if (!cwdOk) {
+      opts?.onLogComplete?.(cmd, false);
+      return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null };
+    }
+    handle.outputBuffer = '';
   }
 
   // Type the command character-by-character (visible animation)
