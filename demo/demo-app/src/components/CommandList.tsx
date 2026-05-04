@@ -138,11 +138,13 @@ function CommandRow({
 // ── CommandList ───────────────────────────────────────────────
 
 export function CommandList({ commands, onRun, onRetry }: CommandListProps) {
-  // The "next" command is the first pending after all leading successes,
-  // or any failed command that is still waiting for retry.
+  // The "next" command is the first pending after all leading successes.
+  // If any command has failed, the failed command takes priority for retry.
   const nextPendingId = (() => {
     for (const c of commands) {
+      if (c.status === 'failure') return null; // failed cmd gets Retry button directly
       if (c.status === 'pending') return c.id;
+      // 'running' or 'success' — keep scanning
     }
     return null;
   })();

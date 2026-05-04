@@ -41,7 +41,14 @@ export function useCommandList(commands: CommandDef[]) {
     setItems(commands.map(c => ({ ...c, status: 'pending' as const })));
   }, [commands]);
 
-  const nextPendingId = items.find(i => i.status === 'pending')?.id;
+  // First pending after all leading successes; null if a failure blocks progress.
+  const nextPendingId = (() => {
+    for (const item of items) {
+      if (item.status === 'failure') return undefined; // blocked by failure
+      if (item.status === 'pending') return item.id;
+    }
+    return undefined;
+  })();
   const isRunning = items.some(i => i.status === 'running');
 
   return { items, markRunning, markSuccess, markFailure, reset, nextPendingId, isRunning };

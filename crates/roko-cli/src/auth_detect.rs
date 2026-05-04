@@ -73,11 +73,29 @@ pub fn detect_auth_from_config(workdir: &Path) -> AuthMethod {
 
 fn detect_from_config(config: &roko_core::config::schema::RokoConfig) -> Option<AuthMethod> {
     for (_name, provider) in &config.providers {
-        let api_key_env = provider.api_key_env.as_deref()?;
-        let key = std::env::var(api_key_env).ok().filter(|k| !k.is_empty())?;
+        // CLI providers don't need an API key — check binary availability.
+        if provider.kind == ProviderKind::ClaudeCli {
+            let cmd = provider.command.as_deref().unwrap_or("claude");
+            if Command::new(cmd)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                return Some(AuthMethod::ClaudeCli);
+            }
+            continue;
+        }
+
+        // API providers need a resolvable key.
+        let Some(api_key_env) = provider.api_key_env.as_deref() else {
+            continue;
+        };
+        let Some(key) = std::env::var(api_key_env).ok().filter(|k| !k.is_empty()) else {
+            continue;
+        };
 
         return Some(match provider.kind {
-            ProviderKind::ClaudeCli => AuthMethod::ClaudeCli,
             ProviderKind::AnthropicApi => AuthMethod::AnthropicApi { key, model: None },
             _ => AuthMethod::OpenAiCompat {
                 key,

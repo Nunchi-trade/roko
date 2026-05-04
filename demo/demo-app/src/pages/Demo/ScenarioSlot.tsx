@@ -13,6 +13,7 @@ import { CommandList } from '../../components/CommandList';
 import { ContextPanel } from '../../components/ContextPanel';
 import type { ContextPanelStage } from '../../components/ContextPanel';
 import { useCommandList } from '../../hooks/useCommandList';
+import { PRD_IDEA } from '../../lib/scenario-runners/prd-pipeline';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../../lib/playback-controller';
 import { enterWorkspace } from '../../lib/terminal-session';
 import type { TerminalHandle } from '../../hooks/useTerminal';
@@ -820,6 +821,21 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     playback.advanceStep();
   }, [playback]);
 
+  // ── ClickableScenario state (must precede handleReset which uses cmdReset) ──
+  const isClickable = isClickableScenario(scenario);
+
+  // Hooks must be called unconditionally.
+  // For non-clickable scenarios these are unused but satisfy the Rules of Hooks.
+  const clickableCommands = isClickable ? (scenario as ClickableScenario).commands : [];
+
+  const {
+    items: cmdItems,
+    markRunning: cmdMarkRunning,
+    markSuccess: cmdMarkSuccess,
+    markFailure: cmdMarkFailure,
+    reset: cmdReset,
+  } = useCommandList(clickableCommands);
+
   // Completion overlay and related handlers removed
   void onNextScenario; // keep prop used
 
@@ -872,21 +888,6 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
   );
 
   const gridCols = scenario.panes;
-
-  // ── ClickableScenario state ─────────────────────────────────
-  const isClickable = isClickableScenario(scenario);
-
-  // Hooks must be called unconditionally.
-  // For non-clickable scenarios these are unused but satisfy the Rules of Hooks.
-  const clickableCommands = isClickable ? (scenario as ClickableScenario).commands : [];
-
-  const {
-    items: cmdItems,
-    markRunning: cmdMarkRunning,
-    markSuccess: cmdMarkSuccess,
-    markFailure: cmdMarkFailure,
-    reset: cmdReset,
-  } = useCommandList(clickableCommands);
 
   // Derive stage from command completion state
   const clickableStage: ContextPanelStage = (() => {
@@ -1036,6 +1037,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
               <div className="demo-clickable-context">
                 <ContextPanel
                   stage={clickableStage}
+                  idea={PRD_IDEA}
                   gates={gates.map(g => ({ ...g, status: g.status as 'pass' | 'fail' | 'pending' }))}
                 />
               </div>

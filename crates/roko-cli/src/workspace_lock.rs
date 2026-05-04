@@ -14,6 +14,13 @@ pub fn acquire_workspace_lock(roko_dir: &Path) -> Result<WorkspaceLockGuard> {
         .with_context(|| format!("create lock dir: {}", lock_dir.display()))?;
 
     let lock_path = lock_dir.join("roko.lock");
+
+    // Read existing PID before opening (truncate would clear it).
+    let existing_pid = fs::read_to_string(&lock_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -23,22 +30,20 @@ pub fn acquire_workspace_lock(roko_dir: &Path) -> Result<WorkspaceLockGuard> {
 
     match file.try_lock_exclusive() {
         Ok(()) => {
-            // Write PID for diagnostics
+            // Write our PID for diagnostics
             let mut f = &file;
             let _ = writeln!(f, "{}", std::process::id());
             Ok(WorkspaceLockGuard { file })
         }
         Err(_) => {
-            // Read PID of holder for better error message
-            let holder_pid = fs::read_to_string(&lock_path)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            let pid = if existing_pid.is_empty() {
+                "unknown".to_string()
+            } else {
+                existing_pid
+            };
             bail!(
-                "Another roko process is running in this workspace (PID {}).\n  \
-                 hint: wait for it to finish, or kill it with `kill {}`",
-                holder_pid,
-                holder_pid
+                "Another roko process is running in this workspace (PID {pid}).\n  \
+                 hint: wait for it to finish, or kill it with `kill {pid}`"
             );
         }
     }

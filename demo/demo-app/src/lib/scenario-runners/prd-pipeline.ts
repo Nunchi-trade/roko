@@ -5,14 +5,14 @@ import { fetchWorkflowSnapshot } from '../workflow-api';
 
 // ── PRD pipeline idea ────────────────────────────────────────
 
-const PRD_IDEA =
+export const PRD_IDEA =
   'Build a CLI that fetches BTC funding rates from Binance, calculates average funding over 7 days, and alerts when funding exceeds 0.1%';
 
 // ── Static command definitions (display layer, no ctx needed) ─
 
 export const PRD_PIPELINE_COMMANDS: CommandDef[] = [
   { id: 'init',     command: 'roko init',                                                  description: 'Create workspace and config',    timeout: 10000  },
-  { id: 'idea',     command: `roko prd idea "..."`,                                        description: 'Capture work item',              timeout: 10000  },
+  { id: 'idea',     command: `roko prd idea "${PRD_IDEA}"`,                                  description: 'Capture work item',              timeout: 10000  },
   { id: 'draft',    command: 'roko prd draft new "BTC Funding Alert CLI"',                 description: 'Generate PRD via LLM',           timeout: 180000 },
   { id: 'promote',  command: 'roko prd draft promote btc-funding-alert-cli',               description: 'Promote to published',           timeout: 10000  },
   { id: 'plan',     command: 'roko prd plan btc-funding-alert-cli',                        description: 'Generate implementation plan',   timeout: 300000 },
