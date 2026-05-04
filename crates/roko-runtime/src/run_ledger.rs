@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use roko_core::foundation::TokenUsage;
 use roko_core::runtime_event::RuntimeEventEnvelope;
+use roko_core::RuntimeEvent;
 
 use crate::pipeline_state::{CommitOutcome, Phase, WorkflowConfig};
 use crate::workflow_engine::{GateOutcome, WorkflowRunReport};
@@ -82,6 +83,7 @@ impl RunLedger {
         let mut saw_cost = false;
         let mut output = None;
         let mut selected_agent = None;
+        let mut fallback_requested_model: Option<String> = None;
 
         for outcome in &self.agent_outcomes {
             agent_turns = agent_turns.saturating_add(1);
@@ -91,6 +93,7 @@ impl RunLedger {
                     output: agent_output,
                     final_model,
                     provider_id,
+                    requested_model,
                     usage,
                     ..
                 } => {
@@ -101,6 +104,11 @@ impl RunLedger {
                     if selected_agent.is_none() || role == "implementer" {
                         selected_agent = Some((final_model.clone(), provider_id.clone()));
                     }
+                    if fallback_requested_model.is_none() {
+                        if let Some(m) = non_empty(requested_model) {
+                            fallback_requested_model = Some(m.to_owned());
+                        }
+                    }
                 }
                 AgentOutcome::Failed { message, .. } => {
                     if output.is_none() {
@@ -110,12 +118,40 @@ impl RunLedger {
             }
         }
 
+        // When no agent completed, scan the event list for an AgentSpawned model as
+        // a final fallback before resorting to "unconfigured".
+        let spawned_model = if selected_agent.is_none() && fallback_requested_model.is_none() {
+            let mut implementer: Option<String> = None;
+            let mut first: Option<String> = None;
+            for envelope in &events {
+                if let RuntimeEvent::AgentSpawned { role, model, .. } = &envelope.payload {
+                    if let Some(m) = non_empty(model) {
+                        if role == "implementer" {
+                            implementer = Some(m.to_owned());
+                            break;
+                        }
+                        first.get_or_insert_with(|| m.to_owned());
+                    }
+                }
+            }
+            implementer.or(first)
+        } else {
+            None
+        };
+
         let (model, provider) = selected_agent
             .map(|(model, provider)| {
                 let provider = non_empty(&provider).map(ToOwned::to_owned);
                 (model, provider)
             })
-            .unwrap_or_else(|| ("unconfigured".to_string(), None));
+            .unwrap_or_else(|| {
+                (
+                    fallback_requested_model
+                        .or(spawned_model)
+                        .unwrap_or_else(|| "unconfigured".to_string()),
+                    None,
+                )
+            });
 
         WorkflowRunReport {
             run_id: self.run_id.clone(),

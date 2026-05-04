@@ -15,7 +15,7 @@ import type { ContextPanelStage } from '../../components/ContextPanel';
 import { useCommandList } from '../../hooks/useCommandList';
 import { PRD_IDEA } from '../../lib/scenario-runners/prd-pipeline';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../../lib/playback-controller';
-import { enterWorkspace } from '../../lib/terminal-session';
+import { enterWorkspace, resetRokoResolution } from '../../lib/terminal-session';
 import type { TerminalHandle } from '../../hooks/useTerminal';
 import { markStart, markEnd, measure, clearMarks } from '../../lib/perf-markers';
 import { lookupCmdDesc } from '../../lib/cmd-descriptions';
@@ -293,6 +293,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
   const runningRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const workspaceDirRef = useRef<string>('');
+  const workspaceEnteredRef = useRef(false);
   const handleRefsRef = useRef<(React.RefObject<TerminalHandle | null>)[]>([]);
   const [terminalStates, setTerminalStates] = useState<TerminalPaneState[]>([]);
 
@@ -760,6 +761,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       if (isClickable) {
         try {
           await enterWorkspace(entries[0], wsPath);
+          workspaceEnteredRef.current = true;
         } catch (err) {
           console.warn('[ScenarioSlot] ClickableScenario enterWorkspace failed:', err);
           // Non-fatal — roko binary will fall back to 'roko' on PATH
@@ -859,6 +861,8 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     setTermReveal(false);
     resetSidebarState();
     cmdReset();
+    resetRokoResolution();
+    workspaceEnteredRef.current = false;
   }, [playback, timeline, clearCompletionTimers, resetSidebarState, cmdReset]);
 
   // ── Imperative handle ──────────────────────────────────────
@@ -930,21 +934,27 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       }
     }
 
-    // If we need to initialise the terminal (first command)
+    // On first click, initialise the terminal (resolve roko binary, cd, clear)
+    if (!workspaceEnteredRef.current) {
+      try {
+        await enterWorkspace(entries[0], wsPath);
+        workspaceEnteredRef.current = true;
+      } catch (err) {
+        console.warn('[ScenarioSlot] handleClickableRun enterWorkspace failed:', err);
+        // Non-fatal — roko binary will fall back to 'roko' on PATH
+      }
+    }
+
     const ctx = buildContext(wsPath, entries);
 
-    // Dynamically build the commands from ctx so roko() can inject args
-    // We replace the scenario's commands with the runtime-generated ones
-    // by accessing the prdCommands factory indirectly via runCommand.
-    // runCommand receives the commandId and calls prdCommands(ctx) internally.
     cmdMarkRunning(id);
     setIsRunning(true);
     try {
-      const ok = await clickable.runCommand(ctx, id);
-      if (ok) {
+      const result = await clickable.runCommand(ctx, id);
+      if (result.ok) {
         cmdMarkSuccess(id);
       } else {
-        cmdMarkFailure(id, 'Command returned non-zero exit code');
+        cmdMarkFailure(id, result.error ?? 'Command returned non-zero exit code');
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

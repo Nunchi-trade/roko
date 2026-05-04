@@ -63,13 +63,13 @@ export const prdPipeline: ClickableScenario = {
   icon: 'pipeline',
   commands: PRD_PIPELINE_COMMANDS,
 
-  async runCommand(ctx: ScenarioContext, commandId: string): Promise<boolean> {
+  async runCommand(ctx: ScenarioContext, commandId: string): Promise<{ ok: boolean; error?: string }> {
     const commands = prdCommands(ctx);
     const cmd = commands.find(c => c.id === commandId);
-    if (!cmd) return false;
+    if (!cmd) return { ok: false, error: 'Unknown command' };
 
     const [main] = ctx.entries;
-    if (!main) return false;
+    if (!main) return { ok: false, error: 'No terminal connected' };
 
     const result = await showCmd(main, cmd.command, {
       timeout: cmd.timeout ?? 60000,
@@ -90,6 +90,6 @@ export const prdPipeline: ClickableScenario = {
       }
     }
 
-    return result.ok;
+    return { ok: result.ok, error: result.error };
   },
 };

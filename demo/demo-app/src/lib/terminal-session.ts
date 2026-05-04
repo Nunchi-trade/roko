@@ -10,12 +10,8 @@ import type { TerminalHandle } from '../hooks/useTerminal';
 import type { PlaybackController } from './playback-controller';
 import type { ScenarioContext } from './scenarios';
 import { lookupCmdDesc } from './cmd-descriptions';
-
-// ── ANSI stripping ──────────────────────────────────────────
-
-export function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
-}
+export { stripAnsi } from './strip-ansi';
+import { stripAnsi } from './strip-ansi';
 
 // ── Speed multiplier ─────────────────────────────────────────
 
@@ -49,27 +45,48 @@ export async function resolveRoko(handle: TerminalHandle): Promise<string> {
   if (rokoResolved) return resolvedRoko;
 
   handle.outputBuffer = '';
-  // Emit absolute paths so the binary remains reachable after `cd` into a workspace.
+  // Use a unique marker so we can distinguish real output from the echoed command text.
+  // The PTY echoes the full command (including 'echo RP') back into outputBuffer.
+  // By using a dynamic marker, we ensure our check can't match the echo.
+  const marker = `__RK_${Date.now().toString(36)}__`;
   const result = await handle.execCmd(
-    'command -v roko >/dev/null 2>&1 && echo RP || { test -x ./target/release/roko && echo "RR:$PWD/target/release/roko" || { test -x ./target/debug/roko && echo "RD:$PWD/target/debug/roko" || echo RN; }; }',
+    `command -v roko >/dev/null 2>&1 && echo "${marker}RP" || { test -x ./target/release/roko && echo "${marker}RR:$PWD/target/release/roko" || { test -x ./target/debug/roko && echo "${marker}RD:$PWD/target/debug/roko" || echo "${marker}RN"; }; }`,
     4000,
     { silent: true },
   );
   if (result.ok || result.exitCode >= 0) {
     const buf = handle.outputBuffer;
-    if (buf.includes('RP')) {
+    if (buf.includes(`${marker}RP`)) {
       resolvedRoko = 'roko';
-    } else if (buf.includes('RR:')) {
-      const m = buf.match(/RR:(\S+)/);
+    } else if (buf.includes(`${marker}RR:`)) {
+      const m = buf.match(new RegExp(`${marker}RR:(\\S+)`));
       resolvedRoko = m ? m[1] : './target/release/roko';
-    } else if (buf.includes('RD:')) {
-      const m = buf.match(/RD:(\S+)/);
+    } else if (buf.includes(`${marker}RD:`)) {
+      const m = buf.match(new RegExp(`${marker}RD:(\\S+)`));
       resolvedRoko = m ? m[1] : './target/debug/roko';
+    } else if (buf.includes(`${marker}RN`)) {
+      throw new Error(
+        'roko binary not found. Build it (cargo build -p roko-cli --release) or add it to PATH.',
+      );
     } else {
+      // Unexpected output — warn but don't throw (resilience)
+      console.warn('[resolveRoko] unexpected detection output, falling back to "roko":', buf.slice(-200));
       resolvedRoko = 'roko';
     }
   }
+
+  // Validate the resolved path is executable (skip for bare 'roko' which relies on PATH)
+  if (resolvedRoko !== 'roko') {
+    handle.outputBuffer = '';
+    const check = await handle.execCmd(`test -x ${resolvedRoko}`, 3000, { silent: true });
+    if (!check.ok) {
+      console.warn('[resolveRoko] resolved path not executable, falling back:', resolvedRoko);
+      resolvedRoko = 'roko';
+    }
+  }
+
   rokoResolved = true;
+  console.debug('[resolveRoko] resolved to:', resolvedRoko);
   return resolvedRoko;
 }
 
@@ -108,21 +125,45 @@ export async function ensureWorkspaceCwd(
   return true;
 }
 
+/** Commands that actually dispatch to an LLM and benefit from --model. */
+const LLM_COMMANDS = new Set([
+  'prd draft new',
+  'prd draft edit',
+  'prd plan',
+  'plan run',
+  'run',
+  'research topic',
+  'research search',
+  'research enhance-prd',
+  'research enhance-plan',
+]);
+
 /**
- * Build a roko CLI command string, automatically injecting workspace and model context.
- * Every scenario runner should use this instead of `${ROKO} subcommand`.
+ * Build a roko CLI command string.
+ *
+ * NOTE: --repo is NOT injected because showCmd() already calls
+ * ensureWorkspaceCwd() to cd into the workspace before typing.
+ * The CLI defaults to cwd when --repo is omitted.
  */
 export function roko(ctx: ScenarioContext, subcommand: string): string {
   const bin = getRoko();
   const parts = [bin];
-  if (ctx.workspaceDir) {
-    parts.push('--repo', shellQuote(ctx.workspaceDir));
-  }
-  if (ctx.activeModel) {
+  // Only inject --model for commands that actually dispatch to an LLM
+  if (ctx.activeModel && needsModel(subcommand)) {
     parts.push('--model', shellQuote(ctx.activeModel));
   }
   parts.push(subcommand);
   return parts.join(' ');
+}
+
+/** Check if a subcommand dispatches to an LLM (and thus benefits from --model). */
+function needsModel(subcommand: string): boolean {
+  // Strip quoted arguments to get just the subcommand words
+  const base = subcommand.replace(/"[^"]*"|'[^']*'/g, '').trim();
+  for (const cmd of LLM_COMMANDS) {
+    if (base.startsWith(cmd)) return true;
+  }
+  return false;
 }
 
 // ── Workspace entry ──────────────────────────────────────────
@@ -182,6 +223,8 @@ export interface CommandResult {
   gates: GateResult[];
   cost: string | null;
   tokens: string | null;
+  /** Last lines of terminal output when the command failed. */
+  error?: string;
 }
 
 export interface GateResult {
@@ -283,6 +326,9 @@ export async function showCmd(
   // Detect gates, cost, tokens from output
   const result = detectFromOutput(handle.outputBuffer, opts);
 
+  // Snapshot the buffer BEFORE the exit-code check clears it (execCmd sets outputBuffer = '')
+  const commandOutput = handle.outputBuffer;
+
   // Capture the real exit code of the visible command.  `$?` still
   // holds it because no other command has run since the prompt returned.
   // The execCmd wrapper preserves $? by design: it reads `$?` first,
@@ -302,6 +348,14 @@ export async function showCmd(
     // terminal may be disposed
   }
 
+  // On failure, capture last lines of terminal output as error context
+  // (uses pre-exit-check snapshot since execCmd clears the buffer)
+  let error: string | undefined;
+  if (!ok && commandOutput) {
+    const lines = stripAnsi(commandOutput).split('\n').filter(l => l.trim());
+    error = lines.slice(-10).join('\n').trim() || undefined;
+  }
+
   // Mark the log entry as complete
   opts?.onLogComplete?.(cmd, ok);
 
@@ -311,6 +365,7 @@ export async function showCmd(
     gates: result.gates,
     cost: result.cost,
     tokens: result.tokens,
+    error,
   };
 }
 

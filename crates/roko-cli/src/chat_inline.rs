@@ -2011,6 +2011,23 @@ async fn handle_input_key(
     // --- Command palette mode (Ctrl+K) ---
     if session.input.palette.active {
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl+C in palette: dismiss and apply normal Ctrl+C behaviour
+                // (clear input or exit) so the user is never trapped.
+                session.input.palette.dismiss();
+                let now = Instant::now();
+                let double_tap = session.last_ctrl_c.map_or(false, |prev| {
+                    now.duration_since(prev) < Duration::from_millis(500)
+                });
+                session.last_ctrl_c = Some(now);
+                if session.input.is_empty() || double_tap {
+                    session.phase = Phase::Done;
+                    return Ok(true);
+                }
+                session.input.clear();
+                session.input.completion.dismiss();
+                return Ok(false);
+            }
             KeyCode::Esc => {
                 session.input.palette.dismiss();
             }

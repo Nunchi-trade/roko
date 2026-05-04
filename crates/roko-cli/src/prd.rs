@@ -1070,21 +1070,16 @@ async fn generate_plan_from_prd_with_outcome(
             "prd plan: agent returned"
         );
         if exit_code != 0 {
-            eprintln!(
-                "error: plan generation agent failed (exit {exit_code}, output {} bytes)",
-                output.len()
-            );
             return Err(anyhow!(
-                "plan generation agent failed with exit code {exit_code}"
+                "plan generation agent failed with exit code {exit_code} \
+                 ({} bytes of output)",
+                output.len()
             ));
         }
         if output.trim().is_empty() {
-            eprintln!(
-                "error: plan generation agent returned empty output — \
-                 the model may not support the required output format"
-            );
             return Err(anyhow!(
-                "plan generation agent returned empty output for {slug}"
+                "plan generation agent returned empty output for {slug} — \
+                 the model may not support the required output format"
             ));
         }
 
@@ -1309,7 +1304,14 @@ pub(crate) fn augment_generator_system_prompt(
 ///
 /// Combines the PRD quality system prompt (from [`crate::prd_prompt`]) with
 /// context about existing PRDs and the specific task.
+/// Default limit for how many PRDs to include in the agent system prompt.
+const PRD_CONTEXT_LIMIT: usize = 20;
+
 pub fn prd_agent_prompt(workdir: &Path, task: &str) -> String {
+    prd_agent_prompt_with_limit(workdir, task, PRD_CONTEXT_LIMIT)
+}
+
+pub fn prd_agent_prompt_with_limit(workdir: &Path, task: &str, prd_limit: usize) -> String {
     let mut prompt = String::new();
 
     // Include the PRD quality standards as the foundation
@@ -1330,19 +1332,38 @@ pub fn prd_agent_prompt(workdir: &Path, task: &str) -> String {
         let _ = writeln!(prompt, "## PRD Index\n{prd_index}\n---\n");
     }
 
-    // Gather existing PRD context
+    // Gather existing PRD context (most recent first, limited to prd_limit)
     let _ = writeln!(
         prompt,
         "## Existing PRDs (for cross-references and consistency)\n"
     );
+    let mut all_prd_files: Vec<PathBuf> = Vec::new();
     for dir in [&published_dir(workdir), &drafts_dir(workdir)] {
-        for path in list_md_files(dir) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                // Include just the frontmatter + first section as context
-                let truncated: String = content.lines().take(30).collect::<Vec<_>>().join("\n");
-                let _ = writeln!(prompt, "### {}\n{truncated}\n---\n", path.display());
-            }
+        all_prd_files.extend(list_md_files(dir));
+    }
+    // Sort by modification time descending so newest PRDs come first
+    all_prd_files.sort_by(|a, b| {
+        let mtime = |p: &Path| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        };
+        mtime(b).cmp(&mtime(a))
+    });
+    let total = all_prd_files.len();
+    for path in all_prd_files.into_iter().take(prd_limit) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            // Include just the frontmatter + first section as context
+            let truncated: String = content.lines().take(30).collect::<Vec<_>>().join("\n");
+            let _ = writeln!(prompt, "### {}\n{truncated}\n---\n", path.display());
         }
+    }
+    if total > prd_limit {
+        let _ = writeln!(
+            prompt,
+            "_({} older PRDs omitted — see .roko/prd/ for full list)_\n",
+            total - prd_limit,
+        );
     }
 
     // Ideas

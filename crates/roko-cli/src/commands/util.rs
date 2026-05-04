@@ -709,8 +709,8 @@ pub(crate) async fn cmd_status(
                 println!(
                     "  {:<16} avg_cost=${:.4}  p95_cost=${:.4}  pass_rate={:.0}%  n={}",
                     p.role,
-                    p.avg_cost_usd,
-                    p.p95_cost_usd,
+                    p.avg_cost_usd.max(0.0),
+                    p.p95_cost_usd.max(0.0),
                     p.pass_rate * 100.0,
                     p.observations,
                 );

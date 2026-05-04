@@ -8,10 +8,7 @@ export function rawSleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
-/** Strip ANSI escape codes from terminal output. */
-export function stripAnsi(s: string): string {
-  return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
-}
+export { stripAnsi } from './strip-ansi';
 
 /** Format current time as compact HH:MM:SS string. */
 export function compactTime(): string {

@@ -92,10 +92,10 @@ impl SessionStatus {
             ));
         }
         if let Some(cost) = self.total_cost_usd {
-            lines.push(format!("total cost: ${cost:.4}"));
+            lines.push(format!("total cost: ${:.4}", cost.max(0.0)));
         }
         if let Some(cost) = self.today_cost_usd {
-            lines.push(format!("today cost: ${cost:.4}"));
+            lines.push(format!("today cost: ${:.4}", cost.max(0.0)));
         }
         if let Some(summary) = &self.process_sessions {
             lines.push(format!(
