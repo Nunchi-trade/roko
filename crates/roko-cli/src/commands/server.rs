@@ -29,14 +29,11 @@ pub(crate) async fn cmd_up(cli: &Cli, workdir: PathBuf) -> Result<i32> {
     let config = resolve_config_for_workdir(cli, &workdir)?;
     let repo_registry = RepoRegistry::load(&config, &workdir).unwrap_or_default();
     let runtime = RokoCliRuntime::new(config, repo_registry).into_arc();
-    let serve_wd = workdir.clone();
-    let serve_handle = tokio::spawn(async move {
-        if let Err(e) = roko_serve::run_server(serve_wd, runtime, None, None).await {
-            eprintln!("roko-serve error: {e}");
-        }
-    });
+    let (serve_state, serve_handle) =
+        roko_serve::start_server_background(workdir.clone(), runtime, None, None).await?;
 
-    // Brief wait for serve to start listening.
+    // `start_server_background` binds before returning; this short pause keeps
+    // the existing startup output order stable while background tasks settle.
     tokio::time::sleep(Duration::from_millis(500)).await;
     println!("  roko-serve     http://{}:{}  \u{2713}", bind, port);
 
@@ -118,9 +115,13 @@ pub(crate) async fn cmd_up(cli: &Cli, workdir: PathBuf) -> Result<i32> {
         }
     }
 
-    // Abort the serve task.
-    serve_handle.abort();
-    let _ = serve_handle.await;
+    // Stop serve through the same cancellation path used by `roko serve`.
+    serve_state.cancel.cancel();
+    match serve_handle.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("warning: roko-serve shutdown error: {e}"),
+        Err(e) => eprintln!("warning: roko-serve task panicked: {e}"),
+    }
 
     println!("All services stopped.");
     Ok(EXIT_SUCCESS)

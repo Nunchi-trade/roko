@@ -223,6 +223,8 @@ pub fn build_router(
     let router = Router::new()
         // Top-level liveness probe — no auth, no /api prefix.
         .route("/health", get(top_level_health))
+        // Top-level readiness probe — no auth, no /api prefix.
+        .route("/ready", get(top_level_ready))
         .merge(webhooks::public_routes())
         // Public share-receipt reader: no auth required so recipients can
         // open share links without a roko API key.
@@ -249,10 +251,38 @@ pub fn build_router(
 
 /// `GET /health` — bare liveness probe for load balancers and external tools.
 ///
-/// Returns `{"status": "ok"}` unconditionally. For richer telemetry use
+/// Returns 200 while the process is alive. For richer telemetry use
 /// `GET /api/health`.
-async fn top_level_health() -> Json<Value> {
-    Json(json!({"status": "ok"}))
+async fn top_level_health(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": state.started_at.elapsed().as_secs(),
+    }))
+}
+
+/// `GET /ready` — readiness probe for platforms that drain shutting-down
+/// instances before stopping them.
+async fn top_level_ready(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    if state.cancel.is_cancelled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "shutting_down",
+                "version": env!("CARGO_PKG_VERSION"),
+                "uptime_secs": state.started_at.elapsed().as_secs(),
+            })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_secs": state.started_at.elapsed().as_secs(),
+        })),
+    )
 }
 
 /// `GET /api/workflow/events` — RuntimeEvent-typed SSE stream for WorkflowEngine.
@@ -315,7 +345,9 @@ mod tests {
     use crate::deploy::create_backend;
     use crate::runtime::NoOpRuntime;
 
-    fn build_test_router(config: RokoConfig) -> (tempfile::TempDir, axum::Router) {
+    fn build_test_state_and_router(
+        config: RokoConfig,
+    ) -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
         let dir = tempdir().expect("tempdir");
         let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let state = Arc::new(
@@ -328,6 +360,11 @@ mod tests {
             .expect("AppState::new"),
         );
         let router = build_router(Arc::clone(&state), &[], config.serve.auth.clone());
+        (dir, state, router)
+    }
+
+    fn build_test_router(config: RokoConfig) -> (tempfile::TempDir, axum::Router) {
+        let (dir, _state, router) = build_test_state_and_router(config);
         (dir, router)
     }
 
@@ -359,6 +396,44 @@ mod tests {
             body["hint"],
             "Set serve.terminal_enabled=true or use --enable-terminal"
         );
+    }
+
+    #[tokio::test]
+    async fn top_level_health_and_ready_are_available_without_auth() {
+        let mut config = RokoConfig::default();
+        config.serve.auth = ServeAuthConfig {
+            enabled: true,
+            api_key: "health-secret".into(),
+            api_keys: Vec::new(),
+            privy_app_id: None,
+        };
+
+        let (_dir, app) = build_test_router(config);
+
+        let (status, body) = get_json(&app, "/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert!(body["uptime_secs"].as_u64().is_some());
+
+        let (status, body) = get_json(&app, "/ready").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert!(body["uptime_secs"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn top_level_ready_reports_shutting_down_after_cancellation() {
+        let (_dir, state, app) = build_test_state_and_router(RokoConfig::default());
+        state.cancel.cancel();
+
+        let (status, body) = get_json(&app, "/ready").await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "shutting_down");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert!(body["uptime_secs"].as_u64().is_some());
     }
 
     #[tokio::test]
