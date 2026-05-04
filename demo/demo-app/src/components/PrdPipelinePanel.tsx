@@ -132,7 +132,6 @@ function connectionDot(status?: string): string {
 function runBtnLabel(status: ServerStatus, running: boolean): string {
   if (running) return 'Running';
   if (status === 'checking') return 'Checking';
-  if (status === 'disconnected') return 'Offline';
   return 'Start live run';
 }
 
@@ -219,9 +218,9 @@ export default function PrdPipelinePanel({
           {onRun && (
             <div className="pp-run-group">
               <button
-                className={`pp-run-btn${serverHealth === 'connected' && !isRunning ? ' pp-run-btn-ready' : ''}`}
+                className={`pp-run-btn${!isRunning ? ' pp-run-btn-ready' : ''}`}
                 onClick={onRun}
-                disabled={isRunning || serverHealth !== 'connected'}
+                disabled={isRunning}
               >
                 {runBtnLabel(serverHealth, isRunning)}
               </button>

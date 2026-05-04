@@ -31,7 +31,6 @@ import {
   getPipelineExample,
   PIPELINE_EXAMPLES,
 } from '../../lib/prd-pipeline-sample';
-import { SERVE_URL } from '../../lib/serve-url';
 import { ConfettiBurst, SuccessRing } from '../../components/Celebration';
 import ScenarioPreview from '../../components/ScenarioPreview';
 import SidebarRenderer from '../../components/SidebarRenderer';
@@ -653,14 +652,12 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     if (runningRef.current) return;
     // Immediate health re-check on play press — don't rely on stale poll
     await checkServeHealth();
-    if (serverHealth !== 'connected') {
-      setProgressLabel('Serve');
-      setProgressText(`roko serve is ${serverHealth}; waiting for ${SERVE_URL}/health`);
+    const serveOnline = serverHealth === 'connected';
+    if (!serveOnline) {
       setLogEntries((prev) => [
         ...prev,
-        { ts: now_ts(), text: `Cannot start the demo until roko serve is reachable at ${SERVE_URL}.`, type: 'error' as const },
+        { ts: now_ts(), text: `roko serve not reachable — running without live workflow projections.`, type: 'info' as const },
       ]);
-      return;
     }
 
     abortRef.current = new AbortController();
@@ -721,14 +718,30 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       setProgressLabel('Workspace');
       setProgressText(`creating live workspace for ${scenario.title}`);
       markStart('workspace-create');
-      const ws = await createWs(`roko-${scenario.id}`);
+      let wsPath: string;
+      if (serveOnline) {
+        const ws = await createWs(`roko-${scenario.id}`);
+        wsPath = ws.path;
+      } else {
+        // Fallback: create workspace via PTY mktemp when roko serve is unavailable
+        const mkResult = await entries[0].execCmd(
+          'DIR=$(mktemp -d /tmp/roko-ws-XXXXXX) && cd "$DIR" && git init -q && echo "WSDIR:$DIR"',
+          8000,
+        );
+        const match = entries[0].outputBuffer.match(/WSDIR:(\S+)/);
+        if (!mkResult.ok || !match) {
+          throw new Error('Failed to create local workspace via mktemp');
+        }
+        wsPath = match[1];
+        console.log('[ScenarioSlot] created local workspace:', wsPath);
+      }
       markEnd('workspace-create');
       const wsMs = measure('workspace-create');
       if (wsMs !== null) {
         console.debug(`[perf] workspace-create: ${wsMs.toFixed(1)}ms`);
       }
-      workspaceDirRef.current = ws.path;
-      const ctx = buildContext(ws.path, entries);
+      workspaceDirRef.current = wsPath;
+      const ctx = buildContext(wsPath, entries);
       markStart('scenario-run');
       await scenario.run(ctx);
       markEnd('scenario-run');

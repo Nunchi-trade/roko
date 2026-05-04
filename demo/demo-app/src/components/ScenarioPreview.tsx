@@ -221,7 +221,7 @@ export default function ScenarioPreview({
 
         <button
           className="sp-start-btn"
-          disabled={isRunning || serverHealth !== 'connected'}
+          disabled={isRunning}
           onClick={(e) => {
             e.stopPropagation();
             onPlay();

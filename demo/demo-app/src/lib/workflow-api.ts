@@ -102,10 +102,21 @@ function workflowQuery(root: string): string {
   return `root=${encodeURIComponent(root)}`;
 }
 
+// Track whether serve is reachable to avoid slow retry loops when offline.
+let serveReachable = true;
+let serveCheckTs = 0;
+
 export async function fetchWorkflowSnapshot(root: string, id = 'latest', retries = 3): Promise<WorkflowSnapshot | null> {
+  // If serve was recently unreachable, skip immediately (re-check every 30s)
+  if (!serveReachable && Date.now() - serveCheckTs < 30_000) return null;
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(`${SERVE_URL}/api/workflows/${encodeURIComponent(id)}?${workflowQuery(root)}`);
+      const res = await fetch(`${SERVE_URL}/api/workflows/${encodeURIComponent(id)}?${workflowQuery(root)}`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      serveReachable = true;
+      serveCheckTs = Date.now();
       if (res.status === 404) return null;
       if (res.status === 400 && attempt < retries) {
         // Workspace may not exist on server yet — wait and retry
@@ -115,7 +126,11 @@ export async function fetchWorkflowSnapshot(root: string, id = 'latest', retries
       if (!res.ok) return null;
       return await res.json() as WorkflowSnapshot;
     } catch {
-      if (attempt >= retries) return null;
+      if (attempt >= retries) {
+        serveReachable = false;
+        serveCheckTs = Date.now();
+        return null;
+      }
       await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
     }
   }

@@ -37,8 +37,10 @@ export interface TerminalHandle {
   status: 'connecting' | 'connected' | 'disconnected';
   /** Bounded output buffer for prompt detection and output scraping */
   outputBuffer: string;
-  /** Send a command and wait for completion via invisible OSC sideband. */
-  execCmd(cmd: string, timeout?: number): Promise<ExecResult>;
+  /** Send a command and wait for completion via invisible OSC sideband.
+   *  When `silent` is true, suppresses terminal echo so the wrapper text
+   *  is not visible. Use for hidden helper commands (cd, exit-check). */
+  execCmd(cmd: string, timeout?: number, opts?: { silent?: boolean }): Promise<ExecResult>;
   /** Type a command char-by-char then wait for prompt */
   typeCmd(cmd: string, speed?: number, timeout?: number): Promise<boolean>;
   /** Wait for a shell prompt to appear in output buffer */
@@ -259,7 +261,7 @@ export function useTerminal(sessionId?: string) {
       return false;
     };
 
-    handle.execCmd = async (cmd: string, timeout = 30000): Promise<ExecResult> => {
+    handle.execCmd = async (cmd: string, timeout = 30000, opts?: { silent?: boolean }): Promise<ExecResult> => {
       const marker = `rk${(++execSeq).toString(36)}${Date.now().toString(36)}`;
       outBuf = '';
       // Wrap command: run it, capture exit code, emit invisible OSC 7777
@@ -270,8 +272,10 @@ export function useTerminal(sessionId?: string) {
       if (wrapped.length > 3000) {
         console.warn(`[useTerminal] execCmd sending large command (${wrapped.length} chars): ${cmd.slice(0, 60)}...`);
       }
+      // Record cursor row before sending so we can erase the echoed text later.
+      const preRow = opts?.silent ? term.buffer.active.cursorY : -1;
       handle.sendRaw(wrapped + '\r');
-      return new Promise<ExecResult>((resolve) => {
+      const result = await new Promise<ExecResult>((resolve) => {
         let settled = false;
         const listener: OscListener = (exitCode, m) => {
           if (m === marker && !settled) {
@@ -290,6 +294,20 @@ export function useTerminal(sessionId?: string) {
           }
         }, timeout);
       });
+
+      // For silent commands, erase the echoed wrapper text from the terminal.
+      // We cursor-up from the current position back to where we started and
+      // clear each line. A short sleep lets the PTY prompt arrive first.
+      if (preRow >= 0) {
+        await sleep(20);
+        try {
+          const postRow = term.buffer.active.cursorY;
+          const lines = Math.max(0, postRow - preRow) + 1;
+          // Move to start of the echoed area and clear each line
+          term.write('\x1b[2K' + '\x1b[1A\x1b[2K'.repeat(Math.min(lines, 8)) + '\r');
+        } catch { /* terminal disposed */ }
+      }
+      return result;
     };
 
     handle.typeCmd = async (cmd: string, charDelay = 12, timeout = 60000): Promise<boolean> => {

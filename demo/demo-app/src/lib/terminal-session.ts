@@ -53,6 +53,7 @@ export async function resolveRoko(handle: TerminalHandle): Promise<string> {
   const result = await handle.execCmd(
     'command -v roko >/dev/null 2>&1 && echo RP || { test -x ./target/release/roko && echo "RR:$PWD/target/release/roko" || { test -x ./target/debug/roko && echo "RD:$PWD/target/debug/roko" || echo RN; }; }',
     4000,
+    { silent: true },
   );
   if (result.ok || result.exitCode >= 0) {
     const buf = handle.outputBuffer;
@@ -99,7 +100,7 @@ export async function ensureWorkspaceCwd(
   dir: string,
   timeout = 5000,
 ): Promise<boolean> {
-  const cdResult = await handle.execCmd(`cd ${shellQuote(dir)}`, timeout);
+  const cdResult = await handle.execCmd(`cd ${shellQuote(dir)}`, timeout, { silent: true });
   if (!cdResult.ok) {
     console.error('[ensureWorkspaceCwd] cd failed:', dir, cdResult);
     return false;
@@ -274,12 +275,24 @@ export async function showCmd(
     return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null };
   }
   handle.ws.send('\r');
-  const ok = await handle.waitForPrompt(timeout, opts?.signal);
+  const promptOk = await handle.waitForPrompt(timeout, opts?.signal);
 
   const elapsed = (Date.now() - startTime) / 1000;
 
   // Detect gates, cost, tokens from output
   const result = detectFromOutput(handle.outputBuffer, opts);
+
+  // Capture the real exit code of the visible command.  `$?` still
+  // holds it because no other command has run since the prompt returned.
+  // The execCmd wrapper preserves $? by design: it reads `$?` first,
+  // emits the OSC marker, then `(exit $__rk_ec)` to restore it.
+  let ok = promptOk;
+  if (promptOk) {
+    const exitCheck = await handle.execCmd('(exit $?)', 5000, { silent: true });
+    if (exitCheck.exitCode >= 0) {
+      ok = exitCheck.ok;
+    }
+  }
 
   // Print a visible separator line directly in the xterm display
   try {

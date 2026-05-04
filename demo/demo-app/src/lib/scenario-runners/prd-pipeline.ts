@@ -214,7 +214,7 @@ export const prdPipeline: Scenario = {
       });
       ctx.appendPipelineEvent(pipelineEvent('draft', 'Generating PRD via LLM agent.'));
       const draftResult = await showCmd(main, draftCmd, {
-        timeout: 180000,
+        timeout: 600000,
         workspaceDir: dir,
         onLog: logCommand,
         onLogComplete: logCommandComplete,
@@ -262,7 +262,7 @@ export const prdPipeline: Scenario = {
       });
       ctx.appendPipelineEvent(pipelineEvent('planning', 'Generating tasks.toml from the published PRD via LLM agent.'));
       const planResult = await showCmd(main, planCmd, {
-        timeout: 300000,
+        timeout: 600000,
         workspaceDir: dir,
         onLog: logCommand,
         onLogComplete: logCommandComplete,

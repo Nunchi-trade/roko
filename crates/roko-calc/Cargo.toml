@@ -1,0 +1,27 @@
+[package]
+name = "roko-calc"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A CLI calculator with expression parsing, evaluation, and interactive REPL."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "roko-calc"
+path = "src/main.rs"
+
+[dependencies]
+roko-calc-engine = { path = "engine" }
+clap = { workspace = true, features = ["derive"] }
+anyhow = { workspace = true }
+rustyline = "15"
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }

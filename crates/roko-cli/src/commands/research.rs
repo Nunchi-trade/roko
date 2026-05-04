@@ -222,7 +222,7 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                         is_embedding_model: false,
                         search_context_size: None,
                         cost_per_request: None,
-                        tier: None,
+                        ..Default::default()
                     });
                     model_profile.supports_grounding = true;
                     model_profile.tool_format = "gemini_native".to_string();
@@ -855,7 +855,7 @@ pub(crate) fn with_perplexity_research_model(
         is_embedding_model: false,
         search_context_size: None,
         cost_per_request: None,
-        tier: None,
+        ..Default::default()
     });
     model_profile.supports_search = true;
     model_profile.supports_citations = true;
