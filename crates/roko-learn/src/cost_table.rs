@@ -142,7 +142,8 @@ impl CostTable {
             ("glm-5", 1.00, 3.20, 0.50, 1.25, 1.05),
             ("kimi-k2.5", 0.60, 3.00, 0.10, 0.75, 0.98),
             ("gpt-5.2", 2.00, 8.00, 0.50, 2.50, 1.0),
-            ("gpt-5.4", 3.00, 12.00, 0.75, 3.75, 1.0),
+            ("gpt-5.4", 2.50, 10.00, 0.63, 3.13, 1.0),
+            ("gpt-5.4-mini", 0.40, 1.60, 0.10, 0.50, 1.0),
         ];
 
         for (slug, input, output, cache_r, cache_w, ratio) in defaults {
@@ -283,7 +284,7 @@ mod tests {
 
         let table = CostTable { models }.with_defaults();
 
-        assert!(table.models.len() >= 8);
+        assert!(table.models.len() >= 9);
 
         let claude_opus = table
             .models

@@ -415,13 +415,27 @@ export function useTerminal(sessionId?: string) {
     // connectWs() is called from the requestAnimationFrame callback above
     // after fit completes, not here — avoids the WS race condition.
 
-    const ro = new ResizeObserver(() => { if (!disposed) { try { fitAddon.fit(); } catch { /* disposed */ } } });
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const ro = new ResizeObserver(() => {
+      if (disposed) return;
+      // Skip zero-size (hidden tab) — don't resize PTY to 0×0
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 10 || rect.height < 10) return;
+      // Debounce to avoid rapid-fire redraws during CSS transitions
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (!disposed) {
+          try { fitAddon.fit(); } catch { /* disposed */ }
+        }
+      }, 50);
+    });
     ro.observe(el);
 
     return () => {
       disposed = true;
       mountedRef.current = false;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (resizeTimer) clearTimeout(resizeTimer);
       ro.disconnect();
       onDataDisposable.dispose();
       onResizeDisposable.dispose();

@@ -1379,6 +1379,91 @@ fn log_tasks_validation_issue(
     }
 }
 
+/// Scan all tasks in a plan for file references to crates that don't exist yet,
+/// then scaffold those crates (Cargo.toml + src/lib.rs) and register them in the
+/// workspace `Cargo.toml` members list. Returns the names of any newly created crates.
+fn scaffold_missing_crates(workdir: &Path, tasks_file: &TasksFile) -> Result<Vec<String>> {
+    let crates_dir = workdir.join("crates");
+    let mut scaffolded: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for task in &tasks_file.tasks {
+        for file_ref in &task.files {
+            let parts: Vec<&str> = file_ref.splitn(3, '/').collect();
+            if parts.len() >= 2 && parts[0] == "crates" {
+                let crate_name = parts[1].to_string();
+                if seen.contains(&crate_name) {
+                    continue;
+                }
+                seen.insert(crate_name.clone());
+                let crate_dir = crates_dir.join(&crate_name);
+                if crate_dir.exists() {
+                    continue;
+                }
+                // Scaffold the crate directory.
+                let src_dir = crate_dir.join("src");
+                std::fs::create_dir_all(&src_dir).with_context(|| {
+                    format!("scaffold: create {}", src_dir.display())
+                })?;
+
+                let cargo_toml = format!(
+                    "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+                );
+                std::fs::write(crate_dir.join("Cargo.toml"), cargo_toml).with_context(|| {
+                    format!("scaffold: write {}/Cargo.toml", crate_dir.display())
+                })?;
+
+                std::fs::write(src_dir.join("lib.rs"), "").with_context(|| {
+                    format!("scaffold: write {}/src/lib.rs", crate_dir.display())
+                })?;
+
+                tracing::info!(
+                    "[orchestrate] scaffolded new crate crates/{crate_name}/"
+                );
+                scaffolded.push(crate_name);
+            }
+        }
+    }
+
+    // Register scaffolded crates in workspace Cargo.toml members.
+    if !scaffolded.is_empty() {
+        let ws_cargo_path = workdir.join("Cargo.toml");
+        let ws_content = std::fs::read_to_string(&ws_cargo_path)
+            .context("scaffold: read workspace Cargo.toml")?;
+
+        let mut new_content = ws_content.clone();
+        for name in &scaffolded {
+            let member_entry = format!("\"crates/{name}\"");
+            if new_content.contains(&member_entry) {
+                continue;
+            }
+            // Insert the new member just before the closing `]` of the
+            // `members = [...]` array.  We find the first `]` that follows
+            // "members" to handle the common workspace layout.
+            if let Some(members_pos) = new_content.find("members") {
+                if let Some(bracket_offset) = new_content[members_pos..].find(']') {
+                    let insert_at = members_pos + bracket_offset;
+                    let indent = "    ";
+                    let insertion = format!("{indent}{member_entry},\n");
+                    new_content.insert_str(insert_at, &insertion);
+                }
+            }
+        }
+
+        if new_content != ws_content {
+            std::fs::write(&ws_cargo_path, &new_content)
+                .context("scaffold: write workspace Cargo.toml")?;
+            tracing::info!(
+                "[orchestrate] added {} new crate(s) to workspace members: {:?}",
+                scaffolded.len(),
+                scaffolded
+            );
+        }
+    }
+
+    Ok(scaffolded)
+}
+
 fn validate_tasks_file_for_execution(
     plan_id: &str,
     plan_base: &str,
@@ -2486,6 +2571,8 @@ pub struct PlanRunner {
     config: Config,
     /// CLI override to disable all re-planning.
     no_replan: bool,
+    /// Skip tasks.toml structure validation (for freshly-generated plans).
+    skip_validate: bool,
     /// The executor state machine.
     executor: ParallelExecutor,
     /// Append-only event log for crash recovery.
@@ -2645,6 +2732,8 @@ struct TaskTracker {
     tasks_file: TasksFile,
     completed: Vec<String>,
     failed: Vec<String>,
+    /// Human-readable failure reason for each failed task (task_id -> reason).
+    failure_reasons: HashMap<String, String>,
     skipped: Vec<String>,
     current_group_index: usize,
     /// When each ready task first entered the queue, in Unix ms.
@@ -3314,6 +3403,7 @@ impl TaskTracker {
             tasks_file,
             completed: Vec::new(),
             failed: Vec::new(),
+            failure_reasons: HashMap::new(),
             skipped,
             current_group_index: 0,
             ready_since_ms: HashMap::new(),
@@ -4210,6 +4300,23 @@ impl PlanRunner {
             let tasks_path = plans_dir.join(&plan_info.base).join("tasks.toml");
             match TasksFile::parse(&tasks_path) {
                 Ok(tf) => {
+                    // Scaffold any crates referenced by tasks but not yet on disk.
+                    match scaffold_missing_crates(workdir, &tf) {
+                        Ok(names) => {
+                            if !names.is_empty() {
+                                eprintln!(
+                                    "  \u{25b8} Scaffolded {} new crate(s): {}",
+                                    names.len(),
+                                    names.join(", ")
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[orchestrate] crate scaffolding failed for plan {plan_id}: {e}"
+                            );
+                        }
+                    }
                     validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
                     let groups = tf.parallel_groups();
                     let model_tiers: Vec<String> = tf
@@ -4272,7 +4379,9 @@ impl PlanRunner {
             let tasks_path = plans_dir.join(&plan_info.base).join("tasks.toml");
             match TasksFile::parse(&tasks_path) {
                 Ok(tf) => {
-                    validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
+                    if !self.skip_validate {
+                        validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
+                    }
                     for task in &tf.tasks {
                         match task.mcp_servers.as_ref() {
                             Some(servers) if !servers.is_empty() => {
@@ -4317,7 +4426,8 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let configured_model_slugs: Vec<String> = roko_config.model_slugs_for_cascade();
+        let configured_model_slugs: Vec<String> =
+            available_model_slugs_with_fallback(&roko_config);
         let mut learning = if configured_model_slugs.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
@@ -4399,6 +4509,7 @@ impl PlanRunner {
             workdir: workdir.to_path_buf(),
             config,
             no_replan,
+            skip_validate: false,
             executor,
             event_log: EventLog::default(),
             agent_calls: 0,
@@ -4542,7 +4653,8 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let configured_model_slugs: Vec<String> = roko_config.model_slugs_for_cascade();
+        let configured_model_slugs: Vec<String> =
+            available_model_slugs_with_fallback(&roko_config);
         let mut learning = if configured_model_slugs.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
@@ -4618,6 +4730,7 @@ impl PlanRunner {
             workdir: workdir.to_path_buf(),
             config,
             no_replan,
+            skip_validate: false,
             executor,
             event_log: EventLog::default(),
             agent_calls: 0,
@@ -4754,7 +4867,8 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let learn_root = workdir.join(".roko").join("learn");
-        let configured_model_slugs: Vec<String> = roko_config.model_slugs_for_cascade();
+        let configured_model_slugs: Vec<String> =
+            available_model_slugs_with_fallback(&roko_config);
         let mut learning = if configured_model_slugs.is_empty() {
             LearningRuntime::open_under(learn_root)
                 .await
@@ -4830,6 +4944,7 @@ impl PlanRunner {
             workdir: workdir.to_path_buf(),
             config,
             no_replan,
+            skip_validate: false,
             executor,
             event_log,
             agent_calls: 0,
@@ -7585,17 +7700,24 @@ impl PlanRunner {
                 let completed_plans_set = self.executor.completed_plans();
                 let counts = self.heartbeat_counts(&completed_plans_set);
                 let active_agents = self.supervisor.count().await;
-                let total_cost: f64 = self
-                    .aggregate_efficiency_events()
+                let events = self.aggregate_efficiency_events();
+                let total_cost: f64 = events.iter().map(|e| e.cost_usd).sum();
+                let total_tokens: u64 = events
                     .iter()
-                    .map(|e| e.cost_usd)
+                    .map(|e| e.input_tokens + e.output_tokens)
                     .sum();
+                let cost_display = if total_cost > 0.0 {
+                    format!("${total_cost:.2}")
+                } else if total_tokens > 0 {
+                    "\u{2014}".to_string()
+                } else {
+                    "$0.00".to_string()
+                };
                 eprintln!(
-                    "  \u{25e6} {}/{} tasks done, {} agents active, ${:.2} spent",
+                    "  \u{25e6} {}/{} tasks done, {} agents active, {cost_display} spent",
                     counts.completed_tasks,
                     counts.completed_tasks + counts.active_tasks + counts.failed_tasks,
                     active_agents,
-                    total_cost,
                 );
                 last_progress_print = std::time::Instant::now();
             }
@@ -7807,10 +7929,76 @@ impl PlanRunner {
             } else {
                 "\u{2717}"
             };
+            let cost_display = if total_cost_usd > 0.0 {
+                format!("${total_cost_usd:.2}")
+            } else if total_input_tokens > 0 || total_output_tokens > 0 {
+                // Tokens were consumed but cost is unknown (no pricing data).
+                "\u{2014}".to_string() // em-dash
+            } else {
+                "$0.00".to_string()
+            };
             eprintln!();
             eprintln!(
-                "\x1b[1m{status} Plan run complete: {tasks_completed} succeeded, {tasks_failed} failed, ${total_cost_usd:.2}, {duration_secs:.0}s\x1b[0m"
+                "\x1b[1m{status} Plan run complete: {tasks_completed} succeeded, {tasks_failed} failed, {cost_display}, {duration_secs:.0}s\x1b[0m"
             );
+            // Print per-task failure details so the user gets actionable output.
+            if tasks_failed > 0 || tasks_completed == 0 {
+                eprintln!();
+                for (plan_id, tracker) in &self.task_trackers {
+                    let multi = self.task_trackers.len() > 1;
+                    // Report explicit failures.
+                    for failed_id in &tracker.failed {
+                        let title = tracker
+                            .tasks_file
+                            .tasks
+                            .iter()
+                            .find(|t| t.id == *failed_id)
+                            .map(|t| t.title.as_str())
+                            .unwrap_or("");
+                        let reason = tracker
+                            .failure_reasons
+                            .get(failed_id)
+                            .map(String::as_str)
+                            .unwrap_or("no failure reason recorded");
+                        if multi {
+                            eprintln!("  \u{2717} [{plan_id}] {failed_id} \"{title}\": {reason}");
+                        } else {
+                            eprintln!("  \u{2717} {failed_id} \"{title}\": {reason}");
+                        }
+                    }
+                    // Report tasks that were never dispatched (blocked or pending).
+                    for task in &tracker.tasks_file.tasks {
+                        if tracker.completed.contains(&task.id)
+                            || tracker.failed.contains(&task.id)
+                            || tracker.skipped.contains(&task.id)
+                        {
+                            continue;
+                        }
+                        let blocked_by: Vec<&str> = task
+                            .depends_on
+                            .iter()
+                            .filter(|dep| !tracker.completed.contains(dep))
+                            .map(String::as_str)
+                            .collect();
+                        let reason = if !blocked_by.is_empty() {
+                            format!("blocked by {}", blocked_by.join(", "))
+                        } else {
+                            "never dispatched".to_string()
+                        };
+                        if multi {
+                            eprintln!(
+                                "  \u{2014} [{plan_id}] {} \"{}\": {reason}",
+                                task.id, task.title
+                            );
+                        } else {
+                            eprintln!(
+                                "  \u{2014} {} \"{}\": {reason}",
+                                task.id, task.title
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         if !self.cancel.is_cancelled() {
@@ -8175,6 +8363,13 @@ impl PlanRunner {
                     .to_string();
                 let tasks_path = plan_dir.join("tasks.toml");
                 if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                    // Scaffold any new crates referenced in task files before
+                    // populating the tracker so that the agent can write into them.
+                    if let Err(e) = scaffold_missing_crates(&self.workdir, &tf) {
+                        tracing::warn!(
+                            "[orchestrate] crate scaffolding failed for plan {name}: {e}"
+                        );
+                    }
                     self.task_trackers
                         .entry(name)
                         .or_insert_with(|| TaskTracker::new(tf, plan_dir.clone()));
@@ -11306,14 +11501,21 @@ impl PlanRunner {
                 .sum();
             let elapsed_secs = wall_ms as f64 / 1000.0;
             let cost = f64::from(result.usage.cost_usd);
+            let cost_str = if cost > 0.0 {
+                format!("${cost:.4}")
+            } else if result.usage.total_tokens() > 0 {
+                "\u{2014}".to_string()
+            } else {
+                "$0.00".to_string()
+            };
             let title = task_def.as_ref().map(|td| td.title.as_str()).unwrap_or("");
             if title.is_empty() {
                 eprintln!(
-                    "  [{completed}/{total}] \u{2713} {task_id} ({elapsed_secs:.1}s, ${cost:.2})"
+                    "  [{completed}/{total}] \u{2713} {task_id} ({elapsed_secs:.1}s, {cost_str})"
                 );
             } else {
                 eprintln!(
-                    "  [{completed}/{total}] \u{2713} {task_id} \"{title}\" ({elapsed_secs:.1}s, ${cost:.2})"
+                    "  [{completed}/{total}] \u{2713} {task_id} \"{title}\" ({elapsed_secs:.1}s, {cost_str})"
                 );
             }
         }
@@ -12974,7 +13176,7 @@ impl PlanRunner {
 
     /// Select the next tier up in the haiku → sonnet → opus chain.
     fn next_tier_model_slug(&self, current_model: &str) -> String {
-        if current_model.contains("haiku") {
+        let candidate = if current_model.contains("haiku") {
             self.config
                 .agent
                 .tier_models
@@ -12995,6 +13197,18 @@ impl PlanRunner {
                 .get("architectural")
                 .cloned()
                 .unwrap_or_else(|| current_model.to_string())
+        };
+        // Only escalate when the target provider is actually available.
+        // If not, stay with the current model rather than failing dispatch.
+        let roko_config = load_roko_config(&self.workdir).unwrap_or_default();
+        if is_model_provider_available(&roko_config, &candidate) {
+            candidate
+        } else {
+            tracing::info!(
+                "cascade: skipping escalation to '{candidate}' — provider not available, \
+                 staying with '{current_model}'"
+            );
+            current_model.to_string()
         }
     }
 
@@ -13356,6 +13570,18 @@ impl PlanRunner {
         }
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.failed.push(task_id.to_string());
+            // Store a human-readable reason for the final summary.
+            let reason_brief: String = error
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or("unknown error")
+                .chars()
+                .take(200)
+                .collect();
+            tracker
+                .failure_reasons
+                .insert(task_id.to_string(), reason_brief);
             tracker.push_activity(ActivityEntry::new(
                 now_unix_ms_i64(),
                 result
@@ -14274,7 +14500,23 @@ impl PlanRunner {
         let max_retries = self
             .max_retries_override
             .unwrap_or(roko_core::defaults::DEFAULT_RETRY_ATTEMPTS);
-        let escalation_models = roko_core::defaults::MODEL_ESCALATION_LADDER;
+        // Filter the static escalation ladder to only models whose providers
+        // are available in the current environment.
+        let roko_config_for_ladder = load_roko_config(&self.workdir).unwrap_or_default();
+        let escalation_models: Vec<&str> = roko_core::defaults::MODEL_ESCALATION_LADDER
+            .iter()
+            .copied()
+            .filter(|slug| {
+                let ok = is_model_provider_available(&roko_config_for_ladder, slug);
+                if !ok {
+                    tracing::info!(
+                        "cascade: skipping model '{slug}' from escalation ladder — \
+                         provider not available"
+                    );
+                }
+                ok
+            })
+            .collect();
         let mut last_error = String::new();
         let mut succeeded = false;
         let started = std::time::Instant::now();
@@ -14283,16 +14525,24 @@ impl PlanRunner {
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let current = self.effective_model();
-                let current_idx = escalation_models
-                    .iter()
-                    .position(|m| *m == current)
-                    .unwrap_or(1);
-                let next_idx = (current_idx + attempt as usize).min(escalation_models.len() - 1);
-                let escalated = escalation_models[next_idx];
-                tracing::info!(
-                    "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task} — escalating to {escalated} (error: {last_error})"
-                );
+                if escalation_models.is_empty() {
+                    tracing::info!(
+                        "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task} — \
+                         no escalation models available, retrying current (error: {last_error})"
+                    );
+                } else {
+                    let current = self.effective_model();
+                    let current_idx = escalation_models
+                        .iter()
+                        .position(|m| *m == current)
+                        .unwrap_or(0);
+                    let next_idx =
+                        (current_idx + attempt as usize).min(escalation_models.len() - 1);
+                    let escalated = escalation_models[next_idx];
+                    tracing::info!(
+                        "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task} — escalating to {escalated} (error: {last_error})"
+                    );
+                }
             }
 
             match self.dispatch_agent(plan_id, role, task).await {
@@ -14878,6 +15128,30 @@ impl PlanRunner {
                             slugs.push(key.clone());
                         }
                     }
+                    // Filter out models whose providers are not available
+                    // (missing API key or binary not on PATH). This prevents
+                    // the cascade router from selecting an escalation target
+                    // whose provider will fail at dispatch time.
+                    let before = slugs.len();
+                    slugs.retain(|slug| {
+                        is_model_provider_available(&roko_config, slug)
+                    });
+                    if slugs.is_empty() && before > 0 {
+                        // Safety valve: if filtering removed everything,
+                        // keep the originally-selected model so dispatch
+                        // can at least attempt it.
+                        tracing::warn!(
+                            "[orchestrate] all {before} cascade candidates filtered \
+                             out by provider availability — keeping selected model"
+                        );
+                        slugs.push(selected_model.clone());
+                    } else if before > slugs.len() {
+                        tracing::info!(
+                            "[orchestrate] cascade candidates: {} of {before} models \
+                             available after provider preflight",
+                            slugs.len()
+                        );
+                    }
                     slugs
                 };
                 let healthy_models =
@@ -15078,7 +15352,14 @@ impl PlanRunner {
                 // Only attempt downgrade from Standard (1) or Premium (2) tiers.
                 if baseline_tier > 0 {
                     let threshold = self.learning_config.lookahead_threshold;
-                    let model_slugs = self.learning.cascade_router().model_slugs().to_vec();
+                    let model_slugs: Vec<String> = self
+                        .learning
+                        .cascade_router()
+                        .model_slugs()
+                        .iter()
+                        .filter(|slug| is_model_provider_available(&roko_config, slug))
+                        .cloned()
+                        .collect();
                     for candidate_slug in &model_slugs {
                         let candidate_tier = routing_extras::tier_rank(candidate_slug);
                         if candidate_tier >= baseline_tier {
@@ -15141,8 +15422,21 @@ impl PlanRunner {
         // ── Dispatch-time skill hint from successful prior tasks ──────
         let prior_skills =
             select_prompt_skills(&self.skill_library, task_def.as_ref(), &task_text, 5);
+        // Run playbook query and search enrichment concurrently — they are
+        // independent I/O operations that each take several seconds.
         let playbook_query = playbook_query_context(role, task, &task_text, task_def.as_ref());
-        let relevant_playbooks = match self.playbook.query(&playbook_query).await {
+        let playbook_fut = self.playbook.query(&playbook_query);
+        let search_fut = async {
+            if let (Some(task), Some(search_client)) =
+                (task_def.as_ref(), self.search_client.as_ref())
+            {
+                enrich_task_context_with_search(task, search_client).await
+            } else {
+                None
+            }
+        };
+        let (playbook_result, search_result) = tokio::join!(playbook_fut, search_fut);
+        let relevant_playbooks = match playbook_result {
             Ok(playbooks) => playbooks,
             Err(err) => {
                 tracing::warn!(
@@ -15151,26 +15445,16 @@ impl PlanRunner {
                 Vec::new()
             }
         };
-
-        let search_context_section = if let (Some(task), Some(search_client)) =
-            (task_def.as_ref(), self.search_client.as_ref())
-        {
-            match enrich_task_context_with_search(task, search_client).await {
-                Some(search_text) => {
-                    let search_text_len = search_text.len();
-                    Some((
-                        PromptSection::new("external-research", search_text)
-                            .with_priority(SectionPriority::Low)
-                            .with_placement(Placement::Middle)
-                            .with_hard_cap(2_048),
-                        search_text_len,
-                    ))
-                }
-                None => None,
-            }
-        } else {
-            None
-        };
+        let search_context_section = search_result.map(|search_text| {
+            let search_text_len = search_text.len();
+            (
+                PromptSection::new("external-research", search_text)
+                    .with_priority(SectionPriority::Low)
+                    .with_placement(Placement::Middle)
+                    .with_hard_cap(2_048),
+                search_text_len,
+            )
+        });
 
         // ── Provider health check ────────────────────────────────────
         let selected_provider =
@@ -19356,6 +19640,43 @@ fn titleize_diagnosis_label(value: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Return model slugs for cascade router init, preferring only models whose
+/// providers have valid API keys.  Falls back to the full config list when
+/// *no* provider passes the preflight check (offline / test environments).
+fn available_model_slugs_with_fallback(roko_config: &RokoConfig) -> Vec<String> {
+    let available = roko_config.available_model_slugs_for_cascade();
+    if available.is_empty() {
+        let all = roko_config.model_slugs_for_cascade();
+        if !all.is_empty() {
+            tracing::warn!(
+                "[orchestrate] no model providers passed preflight — \
+                 falling back to full config list ({} models)",
+                all.len()
+            );
+        }
+        all
+    } else {
+        let all = roko_config.model_slugs_for_cascade();
+        let skipped = all.len().saturating_sub(available.len());
+        if skipped > 0 {
+            for slug in &all {
+                if !available.contains(slug) {
+                    tracing::info!(
+                        "cascade: skipping model '{slug}' — provider not available"
+                    );
+                }
+            }
+        }
+        available
+    }
+}
+
+/// Return `true` when the provider backing `model_key` has valid credentials
+/// in the current runtime environment.
+fn is_model_provider_available(roko_config: &RokoConfig, model_key: &str) -> bool {
+    roko_config.provider_available_for_model_key(model_key)
 }
 
 fn orchestrate_default_model(cfg: &Config) -> String {

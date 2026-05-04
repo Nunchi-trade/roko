@@ -87,9 +87,17 @@ async fn update_config(
     let toml_str = toml::to_string_pretty(&updated)
         .map_err(|e| ApiError::internal(format!("serialize toml: {e}")))?;
     let config_path = state.workdir.join("roko.toml");
-    tokio::fs::write(&config_path, toml_str)
+    tokio::fs::write(&config_path, &toml_str)
         .await
         .map_err(|e| ApiError::internal(format!("write roko.toml: {e}")))?;
+
+    // Propagate to ephemeral workspaces so running scenarios see the change.
+    {
+        let workspaces = state.ephemeral_workspaces.read().await;
+        for ws in workspaces.values() {
+            let _ = tokio::fs::write(ws.path.join("roko.toml"), &toml_str).await;
+        }
+    }
 
     expose_dashboard_config_fields(&mut current, &updated);
     state.store_roko_config(updated);

@@ -1577,9 +1577,14 @@ pub(crate) async fn persist_capture_episode(
 ///
 /// Only providers that have at least one of `api_key_env` or `command` set are
 /// checked — providers with neither are silently skipped (local/mock providers).
+#[allow(dead_code)]
 pub(crate) fn preflight_providers(config: &RokoConfig) -> anyhow::Result<()> {
     for (name, provider) in &config.providers {
         if let Some(ref env_var) = provider.api_key_env {
+            // Skip providers that don't require a key (empty api_key_env = local/mock)
+            if env_var.trim().is_empty() {
+                continue;
+            }
             match std::env::var(env_var) {
                 Ok(val) if val.is_empty() => {
                     anyhow::bail!(
@@ -1612,6 +1617,68 @@ pub(crate) fn preflight_providers(config: &RokoConfig) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Check that the provider for a specific model has its API key set and CLI
+/// binary on PATH. Skips credential checks for local providers (empty
+/// `api_key_env`). Use this instead of `preflight_providers` when only one
+/// model will actually be called.
+pub(crate) fn preflight_provider_for_model(
+    config: &RokoConfig,
+    model_key: &str,
+) -> anyhow::Result<()> {
+    let model = config
+        .models
+        .get(model_key)
+        .ok_or_else(|| anyhow!("model '{}' not found in config", model_key))?;
+    let provider_name = &model.provider;
+    let provider = config
+        .providers
+        .get(provider_name)
+        .ok_or_else(|| {
+            anyhow!(
+                "provider '{}' (for model '{}') not found in config",
+                provider_name,
+                model_key
+            )
+        })?;
+
+    if let Some(ref env_var) = provider.api_key_env {
+        if !env_var.trim().is_empty() {
+            match std::env::var(env_var) {
+                Ok(val) if val.is_empty() => {
+                    anyhow::bail!(
+                        "provider '{}' requires {} but it is empty.\n  hint: export {}=<your-key>",
+                        provider_name,
+                        env_var,
+                        env_var
+                    );
+                }
+                Err(_) => {
+                    anyhow::bail!(
+                        "provider '{}' requires {} but it is not set.\n  hint: export {}=<your-key>",
+                        provider_name,
+                        env_var,
+                        env_var
+                    );
+                }
+                Ok(_) => {}
+            }
+        }
+    }
+
+    if let Some(ref binary) = provider.command {
+        if !binary_on_path(binary) {
+            anyhow::bail!(
+                "provider '{}' requires '{}' on PATH but it was not found.\n  hint: install {} or change provider in roko.toml",
+                provider_name,
+                binary,
+                binary
+            );
+        }
+    }
+
     Ok(())
 }
 

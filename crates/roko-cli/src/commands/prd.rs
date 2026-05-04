@@ -320,15 +320,6 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
         }
         PrdCmd::Draft { cmd: draft_cmd } => match draft_cmd {
             PrdDraftCmd::New { title } => {
-                // Pre-flight: check providers before spending time on context building.
-                {
-                    let prd_config: roko_core::config::schema::RokoConfig =
-                        std::fs::read_to_string(workdir.join("roko.toml"))
-                            .ok()
-                            .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
-                            .unwrap_or_default();
-                    crate::commands::util::preflight_providers(&prd_config)?;
-                }
                 let title = title.join(" ");
                 let slug = roko_cli::prd::slugify(&title);
                 let feature_keywords = extract_keywords_from_slug_and_description(&slug, &title);
@@ -366,6 +357,15 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     Some("scribe"),
                     "prd draft new",
                 )?;
+                // Pre-flight: check only the provider for the resolved model.
+                {
+                    let prd_config: roko_core::config::schema::RokoConfig =
+                        std::fs::read_to_string(workdir.join("roko.toml"))
+                            .ok()
+                            .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
+                            .unwrap_or_default();
+                    crate::commands::util::preflight_provider_for_model(&prd_config, &model_key)?;
+                }
                 // Write scaffold first so agent can read and fill it
                 let frontmatter = roko_cli::prd::new_draft_frontmatter(&slug, &title);
                 let scaffold = format!(
@@ -714,15 +714,6 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             }
         },
         PrdCmd::Plan { slug, dry_run } => {
-            // Pre-flight: check providers before agent dispatch.
-            {
-                let plan_config: roko_core::config::schema::RokoConfig =
-                    std::fs::read_to_string(workdir.join("roko.toml"))
-                        .ok()
-                        .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
-                        .unwrap_or_default();
-                crate::commands::util::preflight_providers(&plan_config)?;
-            }
             let _lock = roko_cli::workspace_lock::acquire_workspace_lock(&workdir.join(".roko"))?;
             let prd_path = find_prd(&workdir, &slug)?;
             let model_key = roko_cli::model_selection::resolve_effective_model_key(
@@ -731,6 +722,15 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 Some("strategist"),
                 "prd plan",
             )?;
+            // Pre-flight: check only the provider for the resolved model.
+            {
+                let plan_config: roko_core::config::schema::RokoConfig =
+                    std::fs::read_to_string(workdir.join("roko.toml"))
+                        .ok()
+                        .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
+                        .unwrap_or_default();
+                crate::commands::util::preflight_provider_for_model(&plan_config, &model_key)?;
+            }
             let _generated_plans_root = roko_cli::prd::generate_plan_from_prd_with_model(
                 &slug,
                 &prd_path,

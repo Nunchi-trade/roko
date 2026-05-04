@@ -187,21 +187,21 @@ Create plan directories with these files:
 ### tasks.toml
 ```toml
 [meta]
-plan = "<slug>"
-total = <N>
+plan = "add-funding-rate"
+total = 3
 done = 0
 status = "ready"
-max_parallel = <N>  # how many can run concurrently
+max_parallel = 2  # how many can run concurrently
 
 [[task]]
 id = "T1"
-title = "<imperative verb phrase>"
-description = "<short outcome description>"
+title = "Add FundingRate struct to core types"
+description = "Define the FundingRate data structure in roko-core for storing funding rate observations."
 status = "ready"
 tier = "mechanical"       # mechanical | focused | integrative | architectural
 model_hint = "claude-haiku-4-5"  # FULL model name required: claude-haiku-4-5 | claude-sonnet-4-6 | claude-opus-4-6
 max_loc = 20              # maximum lines of change
-files = ["<path>"]        # files this task modifies
+files = ["crates/roko-core/src/types.rs"]   # REAL file paths only, never <path> or <crate>
 allowed_tools = ["read_file", "grep"]
 denied_tools = []
 mcp_servers = ["filesystem"] # MCP servers this task needs
@@ -211,28 +211,66 @@ role = "implementer"      # REQUIRED: implementer | architect | researcher | str
 # SURGICAL CONTEXT: exactly what the agent needs to read
 [task.context]
 read_files = [
-    { path = "<file>", lines = "40-80", why = "<reason>" },
+    { path = "crates/roko-core/src/types.rs", lines = "1-50", why = "Find existing type definitions to follow naming conventions." },
 ]
 symbols = [
-    "<TypeName>::<method> — <brief signature description>",
+    "Signal — existing base type to reference",
 ]
 anti_patterns = [
-    "Do NOT create new files. Modify <file> only.",
+    "Do NOT create new files. Modify crates/roko-core/src/types.rs only.",
 ]
 
 # EXECUTABLE VERIFICATION
 [[task.verify]]
 phase = "structural"
-command = "grep -q 'pattern' path/to/file"
-fail_msg = "Pattern not found in file"
+command = "grep -q 'pub struct FundingRate' crates/roko-core/src/types.rs"
+fail_msg = "FundingRate struct not found"
 
 [[task.verify]]
 phase = "compile"
-command = "cargo check -p <crate>"
+command = "cargo check -p roko-core"
 
 [[task.verify]]
 phase = "test"
-command = "cargo test -p <crate> -- <test_name>"
+command = "cargo test -p roko-core"
+
+[[task]]
+id = "T2"
+title = "Wire FundingRate display into CLI status output"
+description = "Import FundingRate from roko-core and add it to the status command output."
+status = "ready"
+tier = "focused"
+model_hint = "claude-sonnet-4-6"
+max_loc = 40
+files = ["crates/roko-cli/src/commands/status.rs"]
+allowed_tools = ["read_file", "grep", "write_file"]
+denied_tools = []
+mcp_servers = ["filesystem"]
+depends_on = ["T1"]
+role = "implementer"
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/commands/status.rs", lines = "1-80", why = "Understand current status output format." },
+    { path = "crates/roko-core/src/types.rs", lines = "1-30", why = "Import the new FundingRate type." },
+]
+symbols = [
+    "StatusOutput — struct that collects status display fields",
+]
+anti_patterns = [
+    "Do NOT modify roko-core. Only change the CLI crate.",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'FundingRate' crates/roko-cli/src/commands/status.rs"
+fail_msg = "FundingRate not referenced in status command"
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli"
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-cli"
 ```
 
 ## Role selection
@@ -292,6 +330,13 @@ Before finalizing, verify your tasks against:
 - [ ] Anti-patterns are specific (not generic "be careful")
 - [ ] Dependencies form a DAG (no cycles)
 - [ ] The cheapest possible model is assigned to each task
+
+CRITICAL: Use CONCRETE file paths and crate names from the repository context below.
+Never output angle-bracket placeholders like <path>, <crate>, <file>, <module>, or <relevant-lib>.
+Every `files` entry, every `path` in `read_files`, and every `cargo` command must reference
+actual files and crates that exist in the workspace or that the plan explicitly creates.
+If the PRD describes a new crate to create, use the PRD's slug as the crate name
+(e.g., for slug "btc-funding-alert", use "crates/btc-funding-alert/src/lib.rs").
 "#;
 
 /// Build the shared system prompt for plan generation and regeneration.

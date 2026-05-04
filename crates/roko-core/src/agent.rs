@@ -1362,8 +1362,7 @@ mod tests {
             is_embedding_model: false,
             search_context_size: None,
             cost_per_request: None,
-            use_max_completion_tokens: false,
-            tier: None,
+            ..Default::default()
         };
 
         let requirements = TaskRequirements {
@@ -1409,8 +1408,7 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
-                use_max_completion_tokens: false,
-                tier: None,
+                ..Default::default()
             },
         );
         config.models.insert(
@@ -1446,8 +1444,7 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
-                use_max_completion_tokens: false,
-                tier: None,
+                ..Default::default()
             },
         );
         let requirements = TaskRequirements {

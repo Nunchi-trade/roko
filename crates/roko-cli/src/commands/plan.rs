@@ -282,8 +282,13 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             )?;
             let early_roko_config = boot.config;
 
-            // Pre-flight: fail fast if providers are misconfigured.
-            crate::commands::util::preflight_providers(&early_roko_config)?;
+            // Pre-flight: fail fast if the default model's provider is misconfigured.
+            {
+                let dm = &early_roko_config.agent.default_model;
+                if !dm.trim().is_empty() {
+                    crate::commands::util::preflight_provider_for_model(&early_roko_config, dm)?;
+                }
+            }
 
             // Pre-flight: warn if gate tools are missing.
             let missing_gate_tools = crate::commands::util::preflight_gate_deps();

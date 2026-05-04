@@ -77,22 +77,27 @@ export default function TerminalPaneWithHandle({
     });
   }, [handleRef, handle, onStatusChange, paneIndex, status]);
 
-  // Detect output activity via DOM mutations on the terminal body
+  // Detect output activity by polling the terminal handle's outputBuffer
+  // (lightweight alternative to MutationObserver on xterm's DOM subtree)
   useEffect(() => {
-    const body = bodyRef.current;
-    if (!body) return;
+    const h = handle.current;
+    if (!h) return;
+    let lastLen = 0;
     let activityTimeout: ReturnType<typeof setTimeout> | null = null;
-    const observer = new MutationObserver(() => {
-      setHasOutput(true);
-      if (activityTimeout) clearTimeout(activityTimeout);
-      activityTimeout = setTimeout(() => setHasOutput(false), 800);
-    });
-    observer.observe(body, { childList: true, subtree: true, characterData: true });
+    const timer = setInterval(() => {
+      const curLen = h.outputBuffer.length;
+      if (curLen !== lastLen) {
+        setHasOutput(true);
+        lastLen = curLen;
+        if (activityTimeout) clearTimeout(activityTimeout);
+        activityTimeout = setTimeout(() => setHasOutput(false), 800);
+      }
+    }, 300);
     return () => {
-      observer.disconnect();
+      clearInterval(timer);
       if (activityTimeout) clearTimeout(activityTimeout);
     };
-  }, []);
+  }, [handle]);
 
   // Command echo: listen for typed commands via custom event
   useEffect(() => {

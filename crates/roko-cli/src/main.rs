@@ -262,6 +262,10 @@ struct Cli {
     #[arg(long, global = true)]
     no_replan: bool,
 
+    /// Skip tasks.toml structure validation (for freshly-generated plans).
+    #[arg(long, global = true)]
+    skip_validate: bool,
+
     /// Run as a headless daemon (background service).
     #[arg(long, global = true)]
     headless: bool,

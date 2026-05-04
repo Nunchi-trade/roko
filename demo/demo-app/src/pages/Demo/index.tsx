@@ -184,7 +184,10 @@ export default function Demo() {
   // ── Keyboard shortcuts ─────────────────────────────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Never intercept keys when a terminal or input has focus
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+      if (e.target instanceof HTMLTextAreaElement) return; // xterm.js uses a hidden textarea
+      if ((e.target as HTMLElement)?.closest?.('.demo-term-body')) return; // inside terminal pane
       if (e.code === 'Space') {
         e.preventDefault();
         if (activeIsRunning) handlePauseResume();

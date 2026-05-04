@@ -2132,6 +2132,36 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
             let serve = layer.serve.get_or_insert_with(ServeLayer::default);
             serve.auto_start = Some(value.parse::<bool>().context("parse auto_start as bool")?);
         }
+        ["learning", "replan_on_gate_failure"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.replan_on_gate_failure =
+                Some(value.parse::<bool>().context("parse replan_on_gate_failure as bool")?);
+        }
+        ["learning", "replan_max_per_plan"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.replan_max_per_plan =
+                Some(value.parse::<u32>().context("parse replan_max_per_plan as u32")?);
+        }
+        ["learning", "replan_gate_attempts"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.replan_gate_attempts =
+                Some(value.parse::<u32>().context("parse replan_gate_attempts as u32")?);
+        }
+        ["learning", "auto_playbook_refresh"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.auto_playbook_refresh =
+                Some(value.parse::<bool>().context("parse auto_playbook_refresh as bool")?);
+        }
+        ["learning", "use_lookahead_router"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.use_lookahead_router =
+                Some(value.parse::<bool>().context("parse use_lookahead_router as bool")?);
+        }
+        ["learning", "lookahead_threshold"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.lookahead_threshold =
+                Some(value.parse::<f64>().context("parse lookahead_threshold as f64")?);
+        }
         _ => return Err(anyhow!("unknown key: {key}")),
     }
 

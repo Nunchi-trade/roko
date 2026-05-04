@@ -20,7 +20,10 @@ pub(crate) async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<i32> {
                         .ok()
                         .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
                         .unwrap_or_default();
-                crate::commands::util::preflight_providers(&chat_config)?;
+                let dm = &chat_config.agent.default_model;
+                if !dm.trim().is_empty() {
+                    crate::commands::util::preflight_provider_for_model(&chat_config, dm)?;
+                }
             }
             let resolved = load_layered(&workdir)?;
             let config = resolved.config;

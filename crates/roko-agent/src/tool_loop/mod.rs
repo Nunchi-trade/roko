@@ -523,7 +523,18 @@ impl ToolLoop {
                 }
             };
             merge_session_state(&mut session, self.backend.extract_session(&response));
-            let turn_usage = response.extract_usage();
+            let mut turn_usage = response.extract_usage();
+
+            // Compute cost from model profile pricing when the provider did not
+            // report a dollar amount (all OpenAI-compat backends).
+            if let Some(profile) = self.model_profile.as_ref() {
+                turn_usage.fill_cost_from_pricing(
+                    profile.cost_input_per_m,
+                    profile.cost_output_per_m,
+                    profile.cost_cache_read_per_m,
+                );
+            }
+
             total_usage.add(&turn_usage);
 
             // LIFE-03: Record turn cost in budget tracker after LLM call.

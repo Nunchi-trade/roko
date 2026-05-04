@@ -3,6 +3,7 @@
 //! Provides routes for creating, querying, and deleting ephemeral workspace
 //! directories used by demo scenarios and bench runs.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -66,7 +67,10 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/workspaces", get(list_workspaces).post(create_workspace))
         .route("/workspaces/default", get(get_default_workspace))
-        .route("/workspaces/{id}", delete(delete_workspace))
+        .route(
+            "/workspaces/{id}",
+            delete(delete_workspace).get(get_workspace_state),
+        )
 }
 
 /// `GET /api/workspaces` -- list all tracked ephemeral workspaces.
@@ -201,4 +205,207 @@ async fn delete_workspace(
             Json(json!({ "error": "workspace not found", "id": id })),
         )),
     }
+}
+
+/// `GET /api/workspaces/:id` -- return a state dump for debugging failed plan runs.
+///
+/// Reads files from the workspace `.roko/` directory and returns whatever is
+/// available. Missing files are silently skipped; read errors are collected in
+/// the `errors` array so the caller always gets a 200 with partial data.
+async fn get_workspace_state(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    let ws = {
+        let map = state.ephemeral_workspaces.read().await;
+        map.get(&id).cloned()
+    };
+
+    let ws = match ws {
+        Some(ws) => ws,
+        None => {
+            return Err((
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({ "error": "workspace not found", "id": id })),
+            ));
+        }
+    };
+
+    let roko_dir = ws.path.join(".roko");
+    let mut errors: Vec<String> = Vec::new();
+
+    // 1. Executor state: .roko/state/executor.json
+    let executor_state = match read_json_file(roko_dir.join("state").join("executor.json")).await {
+        Ok(v) => v,
+        Err(ReadFileError::NotFound) => Value::Null,
+        Err(ReadFileError::Io(e)) => {
+            errors.push(format!("executor.json: {e}"));
+            Value::Null
+        }
+        Err(ReadFileError::Parse(e)) => {
+            errors.push(format!("executor.json parse: {e}"));
+            Value::Null
+        }
+    };
+
+    // 2. Episodes: last 10 lines of .roko/memory/episodes.jsonl
+    let episodes = match read_jsonl_tail(roko_dir.join("memory").join("episodes.jsonl"), 10).await {
+        Ok(v) => Value::Array(v),
+        Err(ReadFileError::NotFound) => Value::Array(Vec::new()),
+        Err(ReadFileError::Io(e)) => {
+            errors.push(format!("episodes.jsonl: {e}"));
+            Value::Array(Vec::new())
+        }
+        Err(ReadFileError::Parse(e)) => {
+            errors.push(format!("episodes.jsonl parse: {e}"));
+            Value::Array(Vec::new())
+        }
+    };
+
+    // 3. Plans: scan .roko/plans/ for subdirectories containing tasks.toml.
+    //    Also check the workspace root for a plans/ directory (common layout
+    //    when `roko plan run plans/` writes tasks.toml at workspace top-level).
+    let plans = collect_plans(&roko_dir.join("plans"), &ws.path.join("plans"), &mut errors).await;
+
+    // 4. Log tail: last 50 lines of .roko/roko.log
+    let roko_log_tail = match read_text_tail(roko_dir.join("roko.log"), 50).await {
+        Ok(text) => Value::String(text),
+        Err(ReadFileError::NotFound) | Err(ReadFileError::Parse(_)) => Value::Null,
+        Err(ReadFileError::Io(e)) => {
+            errors.push(format!("roko.log: {e}"));
+            Value::Null
+        }
+    };
+
+    Ok(Json(json!({
+        "workspace_id": ws.id,
+        "workspace_path": ws.path.display().to_string(),
+        "executor_state": executor_state,
+        "episodes": episodes,
+        "plans": plans,
+        "roko_log_tail": roko_log_tail,
+        "errors": errors,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Internal file-reading helpers
+// ---------------------------------------------------------------------------
+
+/// Categorized file-read error.
+enum ReadFileError {
+    NotFound,
+    Io(String),
+    Parse(String),
+}
+
+/// Read a JSON file and return its parsed value.
+async fn read_json_file(path: PathBuf) -> Result<Value, ReadFileError> {
+    let data = match tokio::fs::read_to_string(&path).await {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ReadFileError::NotFound),
+        Err(e) => return Err(ReadFileError::Io(e.to_string())),
+    };
+    serde_json::from_str(&data).map_err(|e| ReadFileError::Parse(e.to_string()))
+}
+
+/// Read the last `n` lines of a JSONL file, parsing each line as a JSON value.
+async fn read_jsonl_tail(path: PathBuf, n: usize) -> Result<Vec<Value>, ReadFileError> {
+    let data = match tokio::fs::read_to_string(&path).await {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ReadFileError::NotFound),
+        Err(e) => return Err(ReadFileError::Io(e.to_string())),
+    };
+
+    let lines: Vec<&str> = data.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(n);
+    let mut values = Vec::with_capacity(n);
+    for line in &lines[start..] {
+        match serde_json::from_str(line) {
+            Ok(v) => values.push(v),
+            Err(e) => return Err(ReadFileError::Parse(e.to_string())),
+        }
+    }
+    Ok(values)
+}
+
+/// Read the last `n` lines of a text file.
+async fn read_text_tail(path: PathBuf, n: usize) -> Result<String, ReadFileError> {
+    let data = match tokio::fs::read_to_string(&path).await {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ReadFileError::NotFound),
+        Err(e) => return Err(ReadFileError::Io(e.to_string())),
+    };
+
+    let lines: Vec<&str> = data.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    Ok(lines[start..].join("\n"))
+}
+
+/// Scan one or more plan directories for `tasks.toml` files and return a JSON
+/// object keyed by plan name.
+async fn collect_plans(
+    roko_plans: &std::path::Path,
+    workspace_plans: &std::path::Path,
+    errors: &mut Vec<String>,
+) -> Value {
+    let mut plans = serde_json::Map::new();
+
+    for dir in [roko_plans, workspace_plans] {
+        let mut entries = match tokio::fs::read_dir(dir).await {
+            Ok(e) => e,
+            Err(_) => continue, // directory doesn't exist — skip silently
+        };
+
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(e) => {
+                    errors.push(format!("reading plans dir {}: {e}", dir.display()));
+                    break;
+                }
+            };
+
+            let entry_path = entry.path();
+            if !entry_path.is_dir() {
+                continue;
+            }
+
+            let tasks_path = entry_path.join("tasks.toml");
+            let plan_name = entry
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+
+            // Skip if we've already seen this plan name from the other directory.
+            if plans.contains_key(&plan_name) {
+                continue;
+            }
+
+            match tokio::fs::read_to_string(&tasks_path).await {
+                Ok(contents) => {
+                    let task_count = contents
+                        .lines()
+                        .filter(|l| l.trim().starts_with("[[task]]"))
+                        .count();
+                    plans.insert(
+                        plan_name,
+                        json!({
+                            "tasks_toml": contents,
+                            "task_count": task_count,
+                        }),
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Plan directory exists but no tasks.toml — skip.
+                }
+                Err(e) => {
+                    errors.push(format!("reading {}: {e}", tasks_path.display()));
+                }
+            }
+        }
+    }
+
+    Value::Object(plans)
 }

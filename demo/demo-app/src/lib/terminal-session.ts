@@ -125,45 +125,23 @@ export async function ensureWorkspaceCwd(
   return true;
 }
 
-/** Commands that actually dispatch to an LLM and benefit from --model. */
-const LLM_COMMANDS = new Set([
-  'prd draft new',
-  'prd draft edit',
-  'prd plan',
-  'plan run',
-  'run',
-  'research topic',
-  'research search',
-  'research enhance-prd',
-  'research enhance-plan',
-]);
-
 /**
  * Build a roko CLI command string.
  *
  * NOTE: --repo is NOT injected because showCmd() already calls
  * ensureWorkspaceCwd() to cd into the workspace before typing.
  * The CLI defaults to cwd when --repo is omitted.
+ *
+ * --model is injected as belt-and-suspenders: the workspace roko.toml
+ * should have default_model configured, but --model handles the race
+ * window between workspace creation and the first config update.
  */
 export function roko(ctx: ScenarioContext, subcommand: string): string {
   const bin = getRoko();
-  const parts = [bin];
-  // Only inject --model for commands that actually dispatch to an LLM
-  if (ctx.activeModel && needsModel(subcommand)) {
-    parts.push('--model', shellQuote(ctx.activeModel));
+  if (ctx.activeModel) {
+    return `${bin} --model ${ctx.activeModel} ${subcommand}`;
   }
-  parts.push(subcommand);
-  return parts.join(' ');
-}
-
-/** Check if a subcommand dispatches to an LLM (and thus benefits from --model). */
-function needsModel(subcommand: string): boolean {
-  // Strip quoted arguments to get just the subcommand words
-  const base = subcommand.replace(/"[^"]*"|'[^']*'/g, '').trim();
-  for (const cmd of LLM_COMMANDS) {
-    if (base.startsWith(cmd)) return true;
-  }
-  return false;
+  return `${bin} ${subcommand}`;
 }
 
 // ── Workspace entry ──────────────────────────────────────────

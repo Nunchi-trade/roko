@@ -1094,14 +1094,29 @@ async fn generate_plan_from_prd_with_outcome(
             "prd plan: fenced block extraction"
         );
         if let Some(toml_content) = toml_content {
+            // Post-generation validation: fix typos, bad model hints, truncated
+            // slug, and reject structurally broken TOML before writing to disk.
+            let validated_toml = validate_and_fix_generated_plan(
+                toml_content,
+                slug,
+                &resolved.config.models,
+                resolved.config.agent.model.as_deref(),
+            )
+            .with_context(|| {
+                format!(
+                    "post-generation validation failed for plan '{slug}'; \
+                     the agent produced invalid TOML"
+                )
+            })?;
+
             let plan_dir = plans_root.join(slug);
             std::fs::create_dir_all(&plan_dir)
                 .with_context(|| format!("create plan dir {}", plan_dir.display()))?;
-            std::fs::write(plan_dir.join("tasks.toml"), toml_content)
+            std::fs::write(plan_dir.join("tasks.toml"), &validated_toml)
                 .with_context(|| format!("write tasks.toml to {}", plan_dir.display()))?;
             println!(
                 "📋 Wrote tasks.toml ({} bytes) to {}",
-                toml_content.len(),
+                validated_toml.len(),
                 plan_dir.display()
             );
             let plan_md_content = extract_fenced_block(&output, "plan.md")
@@ -1538,6 +1553,408 @@ fn extract_toml_content_fallback(output: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+// ---- post-generation plan TOML validation --------------------------------
+
+/// Known field names for the `[meta]` section.
+const KNOWN_META_FIELDS: &[&str] = &[
+    "plan",
+    "iteration",
+    "total",
+    "done",
+    "status",
+    "max_parallel",
+    "estimated_total_minutes",
+    "skip_enrichment",
+];
+
+/// Required field names for the `[meta]` section.
+const REQUIRED_META_FIELDS: &[&str] = &["plan", "total", "status"];
+
+/// Known field names for a `[[task]]` entry.
+const KNOWN_TASK_FIELDS: &[&str] = &[
+    "id",
+    "title",
+    "description",
+    "role",
+    "status",
+    "tier",
+    "frequency",
+    "model_hint",
+    "replan_strategy",
+    "max_loc",
+    "files",
+    "write_files",
+    "allowed_tools",
+    "denied_tools",
+    "mcp_servers",
+    "depends_on",
+    "depends_on_plan",
+    "split_into",
+    "context",
+    "verify",
+    "timeout_secs",
+    "max_retries",
+    "acceptance",
+    "acceptance_contract",
+    "domain",
+    "gate_rung",
+];
+
+/// Required field names for each `[[task]]`.
+const REQUIRED_TASK_FIELDS: &[&str] = &["id", "title", "status", "role", "tier"];
+
+/// Known field names for each `[[task.verify]]` entry.
+const KNOWN_VERIFY_FIELDS: &[&str] = &["phase", "command", "fail_msg", "timeout_ms"];
+
+/// Required field names for each `[[task.verify]]` entry.
+const REQUIRED_VERIFY_FIELDS: &[&str] = &["phase", "command"];
+
+/// Common typos the LLM produces and their corrections.
+const FIELD_TYPO_CORRECTIONS: &[(&str, &str)] = &[
+    ("pha", "phase"),
+    ("phas", "phase"),
+    ("cmd", "command"),
+    ("comand", "command"),
+    ("commnad", "command"),
+    ("commmand", "command"),
+    ("descrption", "description"),
+    ("descripion", "description"),
+    ("desc", "description"),
+    ("stat", "status"),
+    ("staus", "status"),
+    ("tite", "title"),
+    ("titl", "title"),
+    ("modle_hint", "model_hint"),
+    ("model", "model_hint"),
+    ("modelhint", "model_hint"),
+    ("depnds_on", "depends_on"),
+    ("dependson", "depends_on"),
+    ("depend_on", "depends_on"),
+    ("filse", "files"),
+    ("fles", "files"),
+    ("verfy", "verify"),
+    ("verfiy", "verify"),
+    ("tiemout_secs", "timeout_secs"),
+    ("fail_message", "fail_msg"),
+    ("failure_msg", "fail_msg"),
+    ("timeout", "timeout_ms"),
+];
+
+/// Suggest a correction for a possibly-misspelled field.
+/// Returns an owned `String` to avoid lifetime issues with the caller.
+fn suggest_field_correction(field: &str, known: &[&str]) -> Option<String> {
+    // Check explicit typo table first.
+    for &(typo, correction) in FIELD_TYPO_CORRECTIONS {
+        if field == typo {
+            return Some(correction.to_string());
+        }
+    }
+    // Fallback: find the closest known field by edit distance (threshold <= 2).
+    let mut best: Option<(&str, usize)> = None;
+    for &known_field in known {
+        let dist = strsim_distance(field, known_field);
+        if dist > 0 && dist <= 2 {
+            if best.is_none() || dist < best.unwrap().1 {
+                best = Some((known_field, dist));
+            }
+        }
+    }
+    best.map(|(s, _)| s.to_string())
+}
+
+/// Minimal Levenshtein distance (no allocations for short strings).
+fn strsim_distance(a: &str, b: &str) -> usize {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let m = a_bytes.len();
+    let n = b_bytes.len();
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
+/// Check whether a model identifier is present in the config model table.
+fn model_in_config(
+    model: &str,
+    models: &std::collections::HashMap<String, roko_core::config::schema::ModelProfile>,
+) -> bool {
+    models.contains_key(model) || models.values().any(|p| p.slug == model)
+}
+
+/// Validate and fix a generated plan TOML string.
+///
+/// Checks:
+/// 1. TOML syntax.
+/// 2. Required fields in `[meta]` and `[[task]]`.
+/// 3. Unknown / misspelled fields (with suggested corrections applied).
+/// 4. `model_hint` values validated against the config model table.
+/// 5. `meta.plan` matched against the expected slug.
+///
+/// On fixable issues the TOML is patched and a warning is logged to stderr.
+/// On unfixable issues an error is returned.
+fn validate_and_fix_generated_plan(
+    toml_str: &str,
+    slug: &str,
+    models: &std::collections::HashMap<String, roko_core::config::schema::ModelProfile>,
+    default_model: Option<&str>,
+) -> Result<String> {
+    // 1. Parse syntax.
+    let mut root: toml::Value =
+        toml::from_str(toml_str).map_err(|e| anyhow!("generated plan has invalid TOML: {e}"))?;
+
+    let root_table = root
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("generated plan TOML root is not a table"))?;
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // -- [meta] validation ---------------------------------------------------
+    if let Some(meta_val) = root_table.get_mut("meta") {
+        if let Some(meta) = meta_val.as_table_mut() {
+            // Flag unknown meta fields.
+            let meta_keys: Vec<String> = meta.keys().cloned().collect();
+            for key in &meta_keys {
+                if !KNOWN_META_FIELDS.contains(&key.as_str()) {
+                    if let Some(correction) = suggest_field_correction(key, KNOWN_META_FIELDS) {
+                        if let Some(value) = meta.remove(key.as_str()) {
+                            eprintln!(
+                                "warning: [meta] field '{key}' is unknown; \
+                                 corrected to '{correction}'"
+                            );
+                            meta.insert(correction, value);
+                        }
+                    } else {
+                        eprintln!("warning: [meta] has unknown field '{key}'");
+                    }
+                }
+            }
+            // Check required meta fields.
+            for &required in REQUIRED_META_FIELDS {
+                match meta.get(required) {
+                    None => errors.push(format!("[meta] is missing required field '{required}'")),
+                    Some(v) if v.as_str().is_some_and(|s| s.trim().is_empty()) => {
+                        errors.push(format!("[meta].{required} is empty"));
+                    }
+                    _ => {}
+                }
+            }
+            // Fix meta.plan if truncated or wrong.
+            if let Some(plan_val) = meta.get("plan") {
+                if let Some(plan_str) = plan_val.as_str() {
+                    if plan_str != slug {
+                        if slug.starts_with(plan_str) {
+                            eprintln!(
+                                "warning: meta.plan '{plan_str}' appears truncated; \
+                                 corrected to '{slug}'"
+                            );
+                        } else {
+                            eprintln!(
+                                "warning: meta.plan '{plan_str}' does not match \
+                                 expected slug '{slug}'; corrected"
+                            );
+                        }
+                        meta.insert("plan".to_string(), toml::Value::String(slug.to_string()));
+                    }
+                }
+            }
+        }
+    } else {
+        errors.push("[meta] section is missing".to_string());
+    }
+
+    // -- [[task]] validation --------------------------------------------------
+    if let Some(tasks_val) = root_table.get_mut("task") {
+        if let Some(tasks) = tasks_val.as_array_mut() {
+            if tasks.is_empty() {
+                errors.push("[[task]] array is present but empty".to_string());
+            }
+            for (i, task_val) in tasks.iter_mut().enumerate() {
+                if let Some(task) = task_val.as_table_mut() {
+                    let task_id_label: String = task
+                        .get("id")
+                        .and_then(toml::Value::as_str)
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("task #{}", i + 1));
+
+                    // Flag unknown task fields.
+                    let task_keys: Vec<String> = task.keys().cloned().collect();
+                    for key in &task_keys {
+                        if !KNOWN_TASK_FIELDS.contains(&key.as_str()) {
+                            if let Some(correction) =
+                                suggest_field_correction(key, KNOWN_TASK_FIELDS)
+                            {
+                                if let Some(value) = task.remove(key.as_str()) {
+                                    eprintln!(
+                                        "warning: {task_id_label}: field '{key}' is unknown; \
+                                         corrected to '{correction}'"
+                                    );
+                                    task.insert(correction, value);
+                                }
+                            } else {
+                                eprintln!(
+                                    "warning: {task_id_label}: unknown field '{key}'"
+                                );
+                            }
+                        }
+                    }
+
+                    // Check required task fields.
+                    for &required in REQUIRED_TASK_FIELDS {
+                        match task.get(required) {
+                            None => errors.push(format!(
+                                "{task_id_label} is missing required field '{required}'"
+                            )),
+                            Some(v) if v.as_str().is_some_and(|s| s.trim().is_empty()) => {
+                                errors.push(format!(
+                                    "{task_id_label}: field '{required}' is empty"
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Validate model_hint.
+                    if let Some(hint_val) = task.get("model_hint").cloned() {
+                        if let Some(hint) = hint_val.as_str() {
+                            let normalized = crate::task_parser::normalize_model_alias(hint);
+                            if !model_in_config(normalized, models) {
+                                let replacement = default_model.unwrap_or("claude-sonnet-4-6");
+                                eprintln!(
+                                    "warning: {task_id_label}: model_hint '{hint}' \
+                                     not in config, using '{replacement}'"
+                                );
+                                task.insert(
+                                    "model_hint".to_string(),
+                                    toml::Value::String(replacement.to_string()),
+                                );
+                            } else if normalized != hint {
+                                // Replace short alias with canonical name.
+                                task.insert(
+                                    "model_hint".to_string(),
+                                    toml::Value::String(normalized.to_string()),
+                                );
+                            }
+                        }
+                    }
+
+                    // Validate [[task.verify]] sub-entries.
+                    if let Some(verify_val) = task.get_mut("verify") {
+                        if let Some(steps) = verify_val.as_array_mut() {
+                            for (si, step_val) in steps.iter_mut().enumerate() {
+                                if let Some(step) = step_val.as_table_mut() {
+                                    let step_keys: Vec<String> = step.keys().cloned().collect();
+                                    for key in &step_keys {
+                                        if !KNOWN_VERIFY_FIELDS.contains(&key.as_str()) {
+                                            if let Some(correction) = suggest_field_correction(
+                                                key,
+                                                KNOWN_VERIFY_FIELDS,
+                                            ) {
+                                                if let Some(value) = step.remove(key.as_str()) {
+                                                    eprintln!(
+                                                        "warning: {task_id_label} verify[{si}]: \
+                                                         field '{key}' corrected to '{correction}'"
+                                                    );
+                                                    step.insert(correction, value);
+                                                }
+                                            } else {
+                                                eprintln!(
+                                                    "warning: {task_id_label} verify[{si}]: \
+                                                     unknown field '{key}'"
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    // Check required verify fields.
+                                    for &required in REQUIRED_VERIFY_FIELDS {
+                                        if step
+                                            .get(required)
+                                            .and_then(toml::Value::as_str)
+                                            .is_none_or(|s| s.trim().is_empty())
+                                        {
+                                            errors.push(format!(
+                                                "{task_id_label} verify[{si}]: \
+                                                 missing required field '{required}'"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        errors.push("[[task]] array is missing".to_string());
+    }
+
+    if !errors.is_empty() {
+        let joined = errors.join("\n  - ");
+        return Err(anyhow!(
+            "generated plan TOML has {n} validation error(s):\n  - {joined}",
+            n = errors.len()
+        ));
+    }
+
+    // Serialize the (possibly patched) TOML back to a string.
+    let mut serialized = toml::to_string_pretty(&root)
+        .map_err(|e| anyhow!("failed to re-serialize fixed plan TOML: {e}"))?;
+
+    // -- Angle-bracket placeholder replacement --------------------------------
+    // LLMs sometimes emit literal `<relevant-lib>`, `<crate>`, `<path>` etc.
+    // instead of concrete values. Replace known placeholders with slug-derived
+    // defaults so downstream tooling doesn't choke on them.
+    let path_default = format!("crates/{slug}/src/lib.rs");
+    let replacements: &[(&str, &str)] = &[
+        ("<relevant-lib>", slug),
+        ("<binary-crate>", slug),
+        ("<crate>", slug),
+        ("<module>", "lib"),
+        ("<path>", &path_default),
+        ("<file>", &path_default),
+        ("<test_name>", "test_placeholder"),
+    ];
+    for &(placeholder, replacement) in replacements {
+        if serialized.contains(placeholder) {
+            eprintln!(
+                "plan validation: replaced placeholder '{}' with '{}'",
+                placeholder, replacement
+            );
+            serialized = serialized.replace(placeholder, replacement);
+        }
+    }
+
+    // If we did any replacements, verify the TOML still parses.
+    if replacements
+        .iter()
+        .any(|(ph, _)| toml_str.contains(*ph))
+    {
+        let _: toml::Value = toml::from_str(&serialized)
+            .map_err(|e| anyhow!("TOML became invalid after placeholder replacement: {e}"))?;
+    }
+
+    Ok(serialized)
 }
 
 /// Slugify a title.
@@ -2298,5 +2715,405 @@ mod tests {
         let paths = extract_referenced_paths(text);
         assert!(paths.contains(&"crates/roko-cli/src/prd.rs".to_string()));
         assert!(paths.contains(&"crates/roko-core/src/lib.rs".to_string()));
+    }
+
+    // ---- validate_and_fix_generated_plan tests -------------------------------
+
+    fn empty_models() -> std::collections::HashMap<String, roko_core::config::schema::ModelProfile> {
+        std::collections::HashMap::new()
+    }
+
+    fn sample_models() -> std::collections::HashMap<String, roko_core::config::schema::ModelProfile>
+    {
+        // Build from TOML to avoid enumerating every ModelProfile field.
+        let toml_str = r#"
+[models.claude-sonnet-4-6]
+provider = "anthropic"
+slug = "claude-sonnet-4-6"
+
+[models.claude-haiku-4-5]
+provider = "anthropic"
+slug = "claude-haiku-4-5"
+"#;
+        let cfg: roko_core::config::schema::RokoConfig =
+            roko_core::config::schema::RokoConfig::from_toml(toml_str).unwrap();
+        cfg.models
+    }
+
+    #[test]
+    fn validate_valid_plan_passes() {
+        let toml = r#"
+[meta]
+plan = "my-plan"
+total = 2
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "First task"
+status = "pending"
+role = "implementer"
+tier = "focused"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test"
+
+[[task]]
+id = "T2"
+title = "Second task"
+status = "pending"
+role = "implementer"
+tier = "mechanical"
+depends_on = ["T1"]
+"#;
+        let result = validate_and_fix_generated_plan(toml, "my-plan", &empty_models(), None);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn validate_fixes_truncated_slug() {
+        let toml = r#"
+[meta]
+plan = "my-pl"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+"#;
+        let result =
+            validate_and_fix_generated_plan(toml, "my-plan", &empty_models(), None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["meta"]["plan"].as_str().unwrap(),
+            "my-plan",
+            "slug should be corrected"
+        );
+    }
+
+    #[test]
+    fn validate_fixes_wrong_slug() {
+        let toml = r#"
+[meta]
+plan = "wrong-slug"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+"#;
+        let result =
+            validate_and_fix_generated_plan(toml, "correct-slug", &empty_models(), None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(parsed["meta"]["plan"].as_str().unwrap(), "correct-slug");
+    }
+
+    #[test]
+    fn validate_fixes_verify_field_typo() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+
+[[task.verify]]
+pha = "test"
+command = "cargo test"
+"#;
+        let result =
+            validate_and_fix_generated_plan(toml, "test", &empty_models(), None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        let verify = parsed["task"][0]["verify"][0].as_table().unwrap();
+        assert!(verify.contains_key("phase"), "pha should be corrected to phase");
+        assert!(!verify.contains_key("pha"), "pha should be removed");
+    }
+
+    #[test]
+    fn validate_fixes_unknown_model_hint() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+model_hint = "gpt-nonexistent"
+"#;
+        let models = sample_models();
+        let result = validate_and_fix_generated_plan(
+            toml,
+            "test",
+            &models,
+            Some("claude-sonnet-4-6"),
+        )
+        .unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["task"][0]["model_hint"].as_str().unwrap(),
+            "claude-sonnet-4-6",
+            "unknown model should be replaced with default"
+        );
+    }
+
+    #[test]
+    fn validate_normalizes_model_alias() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+model_hint = "haiku"
+"#;
+        let models = sample_models();
+        let result =
+            validate_and_fix_generated_plan(toml, "test", &models, None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["task"][0]["model_hint"].as_str().unwrap(),
+            "claude-haiku-4-5",
+            "alias should be normalized to full name"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_missing_meta() {
+        let toml = r#"
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+"#;
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("[meta] section is missing"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_missing_task_array() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 0
+status = "pending"
+"#;
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("[[task]] array is missing"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_missing_required_task_fields() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+"#;
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("missing required field 'title'"), "msg: {msg}");
+        assert!(msg.contains("missing required field 'status'"), "msg: {msg}");
+        assert!(msg.contains("missing required field 'role'"), "msg: {msg}");
+        assert!(msg.contains("missing required field 'tier'"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_toml_syntax() {
+        let toml = "this is not valid toml {{{}}}";
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid TOML"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_fixes_task_field_typo() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+stat = "pending"
+role = "implementer"
+tier = "focused"
+"#;
+        let result =
+            validate_and_fix_generated_plan(toml, "test", &empty_models(), None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        let task = parsed["task"][0].as_table().unwrap();
+        assert!(
+            task.contains_key("status"),
+            "stat should be corrected to status"
+        );
+        assert!(!task.contains_key("stat"), "stat should be removed");
+    }
+
+    #[test]
+    fn validate_fixes_placeholder_crate_names() {
+        let toml = r#"
+[meta]
+plan = "btc-funding-alert-cli"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Set up crate structure"
+status = "pending"
+role = "implementer"
+tier = "focused"
+files = ["crates/<relevant-lib>/src/lib.rs"]
+
+[[task.verify]]
+phase = "build"
+command = "cargo check -p <crate>"
+"#;
+        let result = validate_and_fix_generated_plan(
+            toml,
+            "btc-funding-alert-cli",
+            &empty_models(),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !result.contains("<relevant-lib>"),
+            "placeholder <relevant-lib> should be replaced"
+        );
+        assert!(
+            !result.contains("<crate>"),
+            "placeholder <crate> should be replaced"
+        );
+        assert!(
+            result.contains("btc-funding-alert-cli"),
+            "slug should appear in output"
+        );
+        // Verify it's still valid TOML.
+        let _parsed: toml::Value = toml::from_str(&result).unwrap();
+    }
+
+    #[test]
+    fn validate_fixes_placeholder_in_verify_command() {
+        let toml = r#"
+[meta]
+plan = "my-cool-tool"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Implement module"
+status = "pending"
+role = "implementer"
+tier = "focused"
+files = ["crates/<binary-crate>/src/<module>.rs"]
+
+[[task.verify]]
+phase = "build"
+command = "cargo check -p <binary-crate>"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p <crate> -- <test_name>"
+"#;
+        let result = validate_and_fix_generated_plan(
+            toml,
+            "my-cool-tool",
+            &empty_models(),
+            None,
+        )
+        .unwrap();
+        // <binary-crate> and <crate> replaced with slug.
+        assert!(
+            !result.contains("<binary-crate>"),
+            "placeholder <binary-crate> should be replaced"
+        );
+        assert!(
+            !result.contains("<crate>"),
+            "placeholder <crate> should be replaced"
+        );
+        assert!(
+            !result.contains("<module>"),
+            "placeholder <module> should be replaced"
+        );
+        assert!(
+            !result.contains("<test_name>"),
+            "placeholder <test_name> should be replaced"
+        );
+        assert!(
+            result.contains("cargo check -p my-cool-tool"),
+            "verify command should contain slug: {result}"
+        );
+        assert!(
+            result.contains("cargo test -p my-cool-tool"),
+            "verify command should contain slug: {result}"
+        );
+        // Verify it's still valid TOML.
+        let _parsed: toml::Value = toml::from_str(&result).unwrap();
+    }
+
+    #[test]
+    fn strsim_distance_basic() {
+        assert_eq!(strsim_distance("phase", "phase"), 0);
+        assert_eq!(strsim_distance("pha", "phase"), 2);
+        assert_eq!(strsim_distance("stat", "status"), 2);
+        assert_eq!(strsim_distance("", "abc"), 3);
+        assert_eq!(strsim_distance("abc", ""), 3);
+    }
+
+    #[test]
+    fn suggest_correction_finds_typos() {
+        assert_eq!(
+            suggest_field_correction("pha", KNOWN_VERIFY_FIELDS),
+            Some("phase".to_string())
+        );
+        assert_eq!(
+            suggest_field_correction("stat", KNOWN_TASK_FIELDS),
+            Some("status".to_string())
+        );
+        // Unknown field with no close match returns None.
+        assert_eq!(
+            suggest_field_correction("zzzzunknown", KNOWN_TASK_FIELDS),
+            None
+        );
     }
 }
