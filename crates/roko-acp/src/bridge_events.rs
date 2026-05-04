@@ -22,6 +22,8 @@ use roko_core::agent::{AgentRole, ProviderKind, resolve_model};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, RokoConfig};
+#[cfg(test)]
+use roko_core::defaults::{DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::foundation::{
     ChatMessage, MessageRole, ModelCallRequest, ModelCaller, ModelStreamEvent, TokenUsage,
 };
@@ -3241,9 +3243,9 @@ mod tests {
                 api_key_env: Some("TEST_ANTHROPIC_API_KEY".to_string()),
                 command: None,
                 args: None,
-                timeout_ms: Some(120_000),
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
                 ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
-                connect_timeout_ms: Some(5_000),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
                 extra_headers: None,
                 max_concurrent: None,
             },
