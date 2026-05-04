@@ -4,8 +4,7 @@
 //! higher-level orchestration can evaluate with a low-latency policy check.
 
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -23,10 +22,60 @@ const EDIT_TOOLS: &[&str] = &[
     "notebook_edit",
 ];
 
+#[derive(Debug, Clone, Copy)]
+struct BundledContractAsset {
+    role: &'static str,
+    path: &'static str,
+    source: &'static str,
+}
+
+const BUNDLED_CONTRACTS: &[BundledContractAsset] = &[
+    BundledContractAsset {
+        role: "architect",
+        path: "src/safety/contracts/architect.yaml",
+        source: include_str!("contracts/architect.yaml"),
+    },
+    BundledContractAsset {
+        role: "auditor",
+        path: "src/safety/contracts/auditor.yaml",
+        source: include_str!("contracts/auditor.yaml"),
+    },
+    BundledContractAsset {
+        role: "auto-fixer",
+        path: "src/safety/contracts/auto-fixer.yaml",
+        source: include_str!("contracts/auto-fixer.yaml"),
+    },
+    BundledContractAsset {
+        role: "implementer",
+        path: "src/safety/contracts/implementer.yaml",
+        source: include_str!("contracts/implementer.yaml"),
+    },
+    BundledContractAsset {
+        role: "researcher",
+        path: "src/safety/contracts/researcher.yaml",
+        source: include_str!("contracts/researcher.yaml"),
+    },
+    BundledContractAsset {
+        role: "reviewer",
+        path: "src/safety/contracts/reviewer.yaml",
+        source: include_str!("contracts/reviewer.yaml"),
+    },
+    BundledContractAsset {
+        role: "scribe",
+        path: "src/safety/contracts/scribe.yaml",
+        source: include_str!("contracts/scribe.yaml"),
+    },
+    BundledContractAsset {
+        role: "strategist",
+        path: "src/safety/contracts/strategist.yaml",
+        source: include_str!("contracts/strategist.yaml"),
+    },
+];
+
 /// Process-wide cache of parsed agent contracts, keyed by role name.
 ///
-/// Contract assets are baked into the crate via `env!("CARGO_MANIFEST_DIR")`
-/// at build time and never change during a process lifetime. Caching avoids
+/// Contract assets are embedded into the crate at build time and never change
+/// during a process lifetime. Caching avoids
 /// redundant disk reads and JSON parses on every tool dispatch check.
 ///
 /// Uses `RwLock` for thread-safe concurrent reads with exclusive writes on
@@ -114,9 +163,10 @@ impl AgentContract {
 
     /// Load the bundled contract asset for `role`.
     ///
-    /// The loader reads `src/safety/contracts/<role>.yaml` relative to the
-    /// `roko-agent` crate root. The files use a YAML-compatible JSON subset,
-    /// so they can be parsed without adding a new dependency.
+    /// The loader reads the compile-time bundled
+    /// `src/safety/contracts/<role>.yaml` asset. The files use a
+    /// YAML-compatible JSON subset, so they can be parsed without adding a
+    /// new dependency.
     pub fn load_for_role(role: impl AsRef<str>) -> Result<Self, ContractLoadError> {
         let role = role.as_ref().trim();
         validate_role(role)?;
@@ -128,21 +178,16 @@ impl AgentContract {
             }
         }
 
-        // Cache miss: load from disk.
-        let path = contract_asset_path(role);
-        let source = fs::read_to_string(&path).map_err(|source| match source.kind() {
-            std::io::ErrorKind::NotFound => ContractLoadError::MissingAsset {
+        let Some(asset) = bundled_contract_asset(role) else {
+            return Err(ContractLoadError::MissingAsset {
                 role: role.to_owned(),
-                path: path.clone(),
-            },
-            _ => ContractLoadError::ReadAsset {
-                path: path.clone(),
-                source,
-            },
-        })?;
+                path: contract_asset_path(role),
+            });
+        };
+        let path = PathBuf::from(asset.path);
 
         let mut contract: Self =
-            serde_json::from_str(&source).map_err(|source| ContractLoadError::ParseAsset {
+            serde_json::from_str(asset.source).map_err(|source| ContractLoadError::ParseAsset {
                 path: path.clone(),
                 source,
             })?;
@@ -535,9 +580,14 @@ impl RecoveryAction {
 }
 
 fn contract_asset_path(role: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(CONTRACT_DIR)
-        .join(format!("{role}.yaml"))
+    PathBuf::from(CONTRACT_DIR).join(format!("{role}.yaml"))
+}
+
+fn bundled_contract_asset(role: &str) -> Option<BundledContractAsset> {
+    BUNDLED_CONTRACTS
+        .iter()
+        .copied()
+        .find(|asset| asset.role == role)
 }
 
 fn validate_role(role: &str) -> Result<(), ContractLoadError> {
@@ -753,6 +803,57 @@ mod tests {
                 .invariants
                 .contains(&Invariant::RequireGateBeforeCommit)
         );
+    }
+
+    #[test]
+    fn bundled_contract_registry_covers_expected_roles() {
+        let roles: Vec<_> = BUNDLED_CONTRACTS.iter().map(|asset| asset.role).collect();
+
+        assert_eq!(
+            roles,
+            vec![
+                "architect",
+                "auditor",
+                "auto-fixer",
+                "implementer",
+                "researcher",
+                "reviewer",
+                "scribe",
+                "strategist",
+            ]
+        );
+
+        for asset in BUNDLED_CONTRACTS {
+            assert_eq!(PathBuf::from(asset.path), contract_asset_path(asset.role));
+            assert!(
+                asset.source.trim_start().starts_with('{'),
+                "contract asset {} should be embedded source",
+                asset.path
+            );
+        }
+    }
+
+    #[test]
+    fn missing_contract_error_uses_bundle_relative_path() {
+        AgentContract::invalidate_contract_cache();
+
+        let err = AgentContract::load_for_role("does-not-exist")
+            .expect_err("missing bundled contract should fail");
+
+        match err {
+            ContractLoadError::MissingAsset { role, path } => {
+                assert_eq!(role, "does-not-exist");
+                assert_eq!(
+                    path,
+                    PathBuf::from("src/safety/contracts/does-not-exist.yaml")
+                );
+                assert!(
+                    !path.is_absolute(),
+                    "missing-asset path should not leak a build-machine source path"
+                );
+            }
+            other => panic!("unexpected contract load error: {other}"),
+        }
     }
 
     #[test]
