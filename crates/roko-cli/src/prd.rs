@@ -289,9 +289,10 @@ async fn regenerate_old_format_plan(
     let system = crate::plan_generate::build_generation_prompt(workdir, &source_content, "plan");
     let task_prompt = format!(
         "Regenerate the plan at {path} from the source plan document above. \
-         Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
+         Rewrite tasks.toml in place with full modern metadata: tier, \
          max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
-         [task.context], and [[task.verify]]. Preserve the status of any task \
+         [task.context], and [[task.verify]]. Do NOT set model_hint — the runtime \
+         selects models automatically. Preserve the status of any task \
          that is already marked done in the existing file. Do not create new plan \
          directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
         path = tasks_path.display(),
@@ -1748,6 +1749,27 @@ const FIELD_TYPO_CORRECTIONS: &[(&str, &str)] = &[
     ("fail_message", "fail_msg"),
     ("failure_msg", "fail_msg"),
     ("timeout", "timeout_ms"),
+    // Singular/plural variants
+    ("denied_tool", "denied_tools"),
+    ("deni_tools", "denied_tools"),
+    ("allowed_tool", "allowed_tools"),
+    ("mcp_server", "mcp_servers"),
+    ("file", "files"),
+    ("write_file", "write_files"),
+    // Truncated field names
+    ("stus", "status"),
+    ("rol", "role"),
+    ("tie", "tier"),
+    ("tit", "title"),
+    ("max_lo", "max_loc"),
+    ("model_hin", "model_hint"),
+    ("depends_o", "depends_on"),
+    ("timeout_sec", "timeout_secs"),
+    ("max_retrie", "max_retries"),
+    // Common misspellings
+    ("discription", "description"),
+    ("dependancies", "depends_on"),
+    ("dependecies", "depends_on"),
 ];
 
 /// Suggest a correction for a possibly-misspelled field.
@@ -1941,20 +1963,64 @@ fn validate_and_fix_generated_plan(
                         }
                     }
 
-                    // Validate model_hint.
+                    // Validate status value.
+                    if let Some(status_val) = task.get("status").cloned() {
+                        if let Some(s) = status_val.as_str() {
+                            const VALID_STATUSES: &[&str] = &[
+                                "ready",
+                                "pending",
+                                "blocked",
+                                "in_progress",
+                                "done",
+                                "skipped",
+                            ];
+                            if !VALID_STATUSES.contains(&s) {
+                                eprintln!(
+                                    "warning: {task_id_label}: status '{s}' is invalid; \
+                                     defaulting to 'ready'"
+                                );
+                                task.insert(
+                                    "status".to_string(),
+                                    toml::Value::String("ready".to_string()),
+                                );
+                            }
+                        }
+                    }
+
+                    // Validate role value.
+                    if let Some(role_val) = task.get("role").cloned() {
+                        if let Some(r) = role_val.as_str() {
+                            const VALID_ROLES: &[&str] = &[
+                                "implementer",
+                                "architect",
+                                "researcher",
+                                "strategist",
+                                "scribe",
+                                "quick-reviewer",
+                            ];
+                            if !VALID_ROLES.contains(&r) {
+                                eprintln!(
+                                    "warning: {task_id_label}: role '{r}' is invalid; \
+                                     defaulting to 'implementer'"
+                                );
+                                task.insert(
+                                    "role".to_string(),
+                                    toml::Value::String("implementer".to_string()),
+                                );
+                            }
+                        }
+                    }
+
+                    // Validate model_hint: remove if not in config so runtime picks the default.
                     if let Some(hint_val) = task.get("model_hint").cloned() {
                         if let Some(hint) = hint_val.as_str() {
                             let normalized = crate::task_parser::normalize_model_alias(hint);
                             if !model_in_config(normalized, models) {
-                                let replacement = default_model.unwrap_or("claude-sonnet-4-6");
                                 eprintln!(
                                     "warning: {task_id_label}: model_hint '{hint}' \
-                                     not in config, using '{replacement}'"
+                                     not in config, removing (runtime will select)"
                                 );
-                                task.insert(
-                                    "model_hint".to_string(),
-                                    toml::Value::String(replacement.to_string()),
-                                );
+                                task.remove("model_hint");
                             } else if normalized != hint {
                                 // Replace short alias with canonical name.
                                 task.insert(
@@ -3017,7 +3083,7 @@ command = "cargo test"
     }
 
     #[test]
-    fn validate_fixes_unknown_model_hint() {
+    fn validate_removes_unknown_model_hint() {
         let toml = r#"
 [meta]
 plan = "test"
@@ -3041,10 +3107,9 @@ model_hint = "gpt-nonexistent"
         )
         .unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
-        assert_eq!(
-            parsed["task"][0]["model_hint"].as_str().unwrap(),
-            "claude-sonnet-4-6",
-            "unknown model should be replaced with default"
+        assert!(
+            parsed["task"][0].get("model_hint").is_none(),
+            "unknown model_hint should be removed so runtime selects"
         );
     }
 

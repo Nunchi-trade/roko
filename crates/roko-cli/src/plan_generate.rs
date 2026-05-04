@@ -169,7 +169,7 @@ pub const PLAN_GENERATOR_SYSTEM_PROMPT: &str = r#"You are a task decomposition e
 2. **Precise context**: For each task, specify EXACTLY which files and line ranges to read. Not "read the crate" — "read lines 40-80 of src/lib.rs".
 3. **Executable verification**: Every acceptance criterion is a shell command that exits 0 on success, 1 on failure. No subjective criteria.
 4. **Dependency ordering**: Types before implementations. Implementations before wiring. Wiring before tests.
-5. **Model hints**: Omit `model_hint` to let the runtime pick the best model automatically. Only set it when you need to force a specific tier (e.g. a trivial rename that must use the cheapest model).
+5. **Model hints**: NEVER set `model_hint`. The runtime selects the right model based on the task `tier`. Hardcoded model names break across providers.
 
 ## Task tiers
 
@@ -290,14 +290,9 @@ Missing or misspelled roles will be rejected by `roko plan validate`. The `role`
 
 ## Model hints
 
-**Prefer omitting `model_hint`** so the runtime's model-selection chain (cascade router, project default, budget pressure) picks the right model automatically.
+**NEVER set `model_hint`.** The runtime's model-selection chain (cascade router, project config, budget pressure) picks the right model automatically. Setting model_hint hardcodes a provider-specific model name that breaks when users run non-Claude providers.
 
-Only set `model_hint` when you need to pin a tier explicitly:
-- `"claude-haiku-4-5"` — trivial mechanical changes (imports, renames)
-- `"claude-sonnet-4-6"` — focused single-function work
-- `"claude-opus-4-6"` — complex multi-module wiring
-
-If you do set it, use FULL identifiers. Never use short aliases like `"haiku"` or `"sonnet"` — they cause `PLAN_009` warnings.
+Always omit the `model_hint` field entirely. The task `tier` field (mechanical/focused/integrative/architectural) already tells the runtime what capability level is needed.
 
 ## Before generating tasks, you MUST:
 
@@ -337,7 +332,7 @@ Before finalizing, verify your tasks against:
 - [ ] No task requires reading more than 3 files
 - [ ] Anti-patterns are specific (not generic "be careful")
 - [ ] Dependencies form a DAG (no cycles)
-- [ ] `model_hint` is omitted unless a specific tier must be pinned
+- [ ] `model_hint` is NEVER set — runtime selects models from `tier`
 
 CRITICAL RULES for `files` field:
 - Use CONCRETE file paths: `"crates/my-crate/src/lib.rs"` NOT `"crates/"` or `"crates/*/src/*.rs"`
@@ -453,15 +448,15 @@ pub fn build_regeneration_prompt(workdir: &Path, existing_tasks_toml: &str) -> S
     let _ = writeln!(prompt, "## Task: Regenerate plan\n");
     let _ = writeln!(
         prompt,
-        "The following tasks.toml exists but is missing full metadata (description, tier, model_hint, \
+        "The following tasks.toml exists but is missing full metadata (description, tier, \
          read_files, verify, context, max_loc, mcp_servers). Your job is to read the codebase and fill in \
          every field for each task. Keep the existing id, title, description, and depends_on. Add:\n\
          - `tier` (mechanical/focused/integrative/architectural)\n\
-         - `model_hint` (the cheapest model for that tier)\n\
          - `max_loc` (estimated lines of change)\n\
          - `allowed_tools`, `denied_tools`, and `mcp_servers` (per-task tool/MCP constraints)\n\
          - `[task.context]` with read_files, symbols, anti_patterns\n\
-         - `[[task.verify]]` with at least compile + test checks\n\n\
+         - `[[task.verify]]` with at least compile + test checks\n\
+         Do NOT set `model_hint` — the runtime selects models automatically from the task tier.\n\n\
          ## Existing tasks.toml:\n\n```toml\n{existing_tasks_toml}\n```"
     );
     prompt
@@ -543,16 +538,16 @@ mod tests {
     }
 
     #[test]
-    fn build_generator_system_prompt_uses_full_model_names() {
+    fn build_generator_system_prompt_never_suggests_model_names() {
         let prompt = build_generator_system_prompt(std::path::Path::new("/test"));
 
         assert!(prompt.contains("## Model hints"));
-        assert!(prompt.contains("\"claude-haiku-4-5\""));
-        assert!(prompt.contains("\"claude-sonnet-4-6\""));
-        assert!(prompt.contains("\"claude-opus-4-6\""));
-        // Tier table no longer has a model column; model selection is runtime-driven.
+        assert!(prompt.contains("NEVER set `model_hint`"));
+        // Must NOT contain hardcoded model names that break non-Claude providers.
+        assert!(!prompt.contains("claude-haiku-4-5"));
+        assert!(!prompt.contains("claude-sonnet-4-6"));
+        assert!(!prompt.contains("claude-opus-4-6"));
+        // Tier table is still present.
         assert!(prompt.contains("| 0 | Mechanical | 20 |"));
-        // Aliases should still be warned against.
-        assert!(prompt.contains("PLAN_009"));
     }
 }

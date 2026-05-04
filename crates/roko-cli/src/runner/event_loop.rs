@@ -2129,13 +2129,31 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
 
             let dispatch = match ctx.factory.resolve_runtime(&requested_model) {
                 Ok(selection) => selection,
-                Err(message) => {
-                    error!(plan_id = %plan_id, task = %task_id, error = %message, "agent provider resolution failed");
-                    let _ = ctx
-                        .executor
-                        .apply_event(plan_id, &ExecutorEvent::Fatal(message.clone()));
-                    ctx.tui.error(&message);
-                    return;
+                Err(hint_err) => {
+                    // Fall back to default model when model_hint can't be resolved
+                    let default_model = &ctx.config.model;
+                    warn!(
+                        plan_id = %plan_id,
+                        task = %task_id,
+                        hint = %requested_model,
+                        fallback = %default_model,
+                        "model_hint resolution failed, falling back to default model"
+                    );
+                    match ctx.factory.resolve_runtime(default_model) {
+                        Ok(selection) => selection,
+                        Err(default_err) => {
+                            let message = format!(
+                                "model resolution failed: hint '{}': {}; default '{}': {}",
+                                requested_model, hint_err, default_model, default_err
+                            );
+                            error!(plan_id = %plan_id, task = %task_id, error = %message);
+                            let _ = ctx
+                                .executor
+                                .apply_event(plan_id, &ExecutorEvent::Fatal(message.clone()));
+                            ctx.tui.error(&message);
+                            return;
+                        }
+                    }
                 }
             };
 
