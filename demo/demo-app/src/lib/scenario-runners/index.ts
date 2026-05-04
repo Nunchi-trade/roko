@@ -1,5 +1,5 @@
 // --- src/lib/scenario-runners/index.ts ---
-import type { Scenario } from '../scenarios';
+import type { Scenario, ClickableScenario } from '../scenarios';
 
 import { prdPipeline } from './prd-pipeline';
 import { prdResearchLoop } from './prd-research-loop';
@@ -22,7 +22,7 @@ export {
   chainIntelligence, mirage, isfrAgents,
 };
 
-export const allScenarios: Scenario[] = [
+export const allScenarios: (Scenario | ClickableScenario)[] = [
   prdPipeline, prdResearchLoop, race, gateRetry, providers, providerRace,
   explore, knowledgeAccumulation, dreamConsolidation, chat, knowledgeTransfer,
   chainIntelligence, mirage, isfrAgents,

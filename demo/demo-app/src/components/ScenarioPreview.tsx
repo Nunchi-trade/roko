@@ -1,9 +1,9 @@
-import type { Scenario } from '../lib/scenarios';
+import type { Scenario, ClickableScenario } from '../lib/scenarios';
 import type { ServerStatus } from '../hooks/useServerHealth';
 import './ScenarioPreview.css';
 
 interface ScenarioPreviewProps {
-  scenario: Scenario;
+  scenario: Scenario | ClickableScenario;
   onPlay: () => void;
   serverHealth: ServerStatus;
   isRunning: boolean;

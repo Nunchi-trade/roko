@@ -730,6 +730,74 @@
   min-width: 0;
 }
 
+/* ClickableScenario: 2-column layout — terminal 70% / sidebar 30% */
+
+.demo-main-clickable {
+  flex-direction: row;
+}
+
+.demo-clickable-layout {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.demo-clickable-terminal {
+  flex: 70;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.demo-clickable-sidebar {
+  flex: 30;
+  min-width: 220px;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--glass-border);
+  background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.demo-clickable-commands {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 4px;
+  min-height: 0;
+}
+
+.demo-clickable-context {
+  flex-shrink: 0;
+  border-top: 1px solid var(--glass-border);
+  padding: 10px;
+  overflow-y: auto;
+  max-height: 40%;
+}
+
+@media (max-width: 900px) {
+  .demo-clickable-layout {
+    flex-direction: column;
+  }
+
+  .demo-clickable-sidebar {
+    flex: 0 0 auto;
+    max-width: none;
+    max-height: 40%;
+    border-left: none;
+    border-top: 1px solid var(--glass-border);
+  }
+
+  .demo-clickable-terminal {
+    flex: 1;
+    min-height: 200px;
+  }
+}
+
 /* Pipeline scenario: side-by-side — terminals left, dashboard right */
 
 .demo-main-pipeline {

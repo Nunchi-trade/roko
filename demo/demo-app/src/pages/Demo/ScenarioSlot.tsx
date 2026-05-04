@@ -7,8 +7,14 @@ import {
   useImperativeHandle,
   forwardRef,
 } from 'react';
-import type { Scenario, ScenarioContext } from '../../lib/scenarios';
+import type { Scenario, ClickableScenario, ScenarioContext } from '../../lib/scenarios';
+import { isClickableScenario } from '../../lib/scenarios';
+import { CommandList } from '../../components/CommandList';
+import { ContextPanel } from '../../components/ContextPanel';
+import type { ContextPanelStage } from '../../components/ContextPanel';
+import { useCommandList } from '../../hooks/useCommandList';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../../lib/playback-controller';
+import { enterWorkspace } from '../../lib/terminal-session';
 import type { TerminalHandle } from '../../hooks/useTerminal';
 import { markStart, markEnd, measure, clearMarks } from '../../lib/perf-markers';
 import { lookupCmdDesc } from '../../lib/cmd-descriptions';
@@ -116,7 +122,7 @@ export interface ScenarioSlotHandle {
 }
 
 interface ScenarioSlotProps {
-  scenario: Scenario;
+  scenario: Scenario | ClickableScenario;
   scenarioIdx: number;
   active: boolean;
   playbackMode: 'auto' | 'step';
@@ -674,19 +680,25 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       setIntroDismissing(false);
     }, 550);
 
-    for (const n of [3, 2, 1]) {
-      setCountdownNum(n);
-      await sleep(800);
+    // Skip cinematic countdown for click-to-run scenarios
+    if (!isClickable) {
+      for (const n of [3, 2, 1]) {
+        setCountdownNum(n);
+        await sleep(800);
+      }
+      setCountdownNum(null);
+
+      setTermBlackout(true);
+      setIsFullscreen(false);
+      await sleep(600);
+      setTermBlackout(false);
+
+      setTermReveal(true);
+      setTimeout(() => setTermReveal(false), 600);
+    } else {
+      setIsFullscreen(false);
     }
-    setCountdownNum(null);
 
-    setTermBlackout(true);
-    setIsFullscreen(false);
-    await sleep(600);
-    setTermBlackout(false);
-
-    setTermReveal(true);
-    setTimeout(() => setTermReveal(false), 600);
     setIsRunning(true);
     setIsPaused(false);
 
@@ -741,9 +753,25 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
         console.debug(`[perf] workspace-create: ${wsMs.toFixed(1)}ms`);
       }
       workspaceDirRef.current = wsPath;
+
+      // For ClickableScenario: initialise the terminal (roko resolution + cd) but
+      // don't run the scenario automatically. Users click individual commands.
+      if (isClickable) {
+        try {
+          await enterWorkspace(entries[0], wsPath);
+        } catch (err) {
+          console.warn('[ScenarioSlot] ClickableScenario enterWorkspace failed:', err);
+          // Non-fatal — roko binary will fall back to 'roko' on PATH
+        }
+        runningRef.current = false;
+        setIsRunning(false);
+        setIsPaused(false);
+        return;
+      }
+
       const ctx = buildContext(wsPath, entries);
       markStart('scenario-run');
-      await scenario.run(ctx);
+      await (scenario as Scenario).run(ctx);
       markEnd('scenario-run');
       const scenarioMs = measure('scenario-run');
       if (scenarioMs !== null) {
@@ -814,7 +842,8 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     setIntroDismissing(false);
     setTermReveal(false);
     resetSidebarState();
-  }, [playback, timeline, clearCompletionTimers, resetSidebarState]);
+    cmdReset();
+  }, [playback, timeline, clearCompletionTimers, resetSidebarState, cmdReset]);
 
   // ── Imperative handle ──────────────────────────────────────
   useImperativeHandle(ref, () => ({
@@ -844,6 +873,86 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
 
   const gridCols = scenario.panes;
 
+  // ── ClickableScenario state ─────────────────────────────────
+  const isClickable = isClickableScenario(scenario);
+
+  // Hooks must be called unconditionally.
+  // For non-clickable scenarios these are unused but satisfy the Rules of Hooks.
+  const clickableCommands = isClickable ? (scenario as ClickableScenario).commands : [];
+
+  const {
+    items: cmdItems,
+    markRunning: cmdMarkRunning,
+    markSuccess: cmdMarkSuccess,
+    markFailure: cmdMarkFailure,
+    reset: cmdReset,
+  } = useCommandList(clickableCommands);
+
+  // Derive stage from command completion state
+  const clickableStage: ContextPanelStage = (() => {
+    const doneIds = new Set(cmdItems.filter(i => i.status === 'success').map(i => i.id));
+    if (doneIds.has('status')) return 'done';
+    if (doneIds.has('run')) return 'run';
+    if (doneIds.has('validate')) return 'validate';
+    if (doneIds.has('plan')) return 'plan';
+    if (doneIds.has('promote')) return 'promote';
+    if (doneIds.has('draft')) return 'draft';
+    if (doneIds.has('idea')) return 'idea';
+    if (doneIds.has('init')) return 'init';
+    return 'init';
+  })();
+
+  const handleClickableRun = useCallback(async (id: string) => {
+    if (!isClickable) return;
+    const clickable = scenario as ClickableScenario;
+
+    // Build ctx with current entries (must wait for terminals)
+    const entries = getReadyTerminalEntries();
+    if (entries.length === 0) {
+      toast('No terminal connected. Wait for the terminal to be ready.', { type: 'error' });
+      return;
+    }
+
+    // Ensure workspace is available
+    let wsPath = workspaceDirRef.current;
+    if (!wsPath) {
+      try {
+        setProgressLabel('Workspace');
+        setProgressText('creating workspace…');
+        const ws = await createWs(`roko-${scenario.id}`);
+        wsPath = ws.path;
+        workspaceDirRef.current = wsPath;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        toast(`Workspace creation failed: ${msg}`, { type: 'error' });
+        return;
+      }
+    }
+
+    // If we need to initialise the terminal (first command)
+    const ctx = buildContext(wsPath, entries);
+
+    // Dynamically build the commands from ctx so roko() can inject args
+    // We replace the scenario's commands with the runtime-generated ones
+    // by accessing the prdCommands factory indirectly via runCommand.
+    // runCommand receives the commandId and calls prdCommands(ctx) internally.
+    cmdMarkRunning(id);
+    setIsRunning(true);
+    try {
+      const ok = await clickable.runCommand(ctx, id);
+      if (ok) {
+        cmdMarkSuccess(id);
+      } else {
+        cmdMarkFailure(id, 'Command returned non-zero exit code');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      cmdMarkFailure(id, msg);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [isClickable, scenario, getReadyTerminalEntries, createWs, buildContext, cmdMarkRunning, cmdMarkSuccess, cmdMarkFailure, toast]);
+
   // ── Render ─────────────────────────────────────────────────
   return (
     <div style={{ display: active ? 'contents' : 'none' }}>
@@ -865,102 +974,171 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       {/* ── Main content ── */}
       <div className={[
         'demo-main',
-        scenario.id === 'prd-pipeline' ? 'demo-main-pipeline' : '',
-        isFullscreen ? 'demo-main--fullscreen' : '',
+        isClickable ? 'demo-main-clickable' : (scenario.id === 'prd-pipeline' ? 'demo-main-pipeline' : ''),
+        isFullscreen && !isClickable ? 'demo-main--fullscreen' : '',
       ].filter(Boolean).join(' ')}>
-        <div className={[
-          'demo-terminals',
-          isRunning ? 'gradient-border-active' : 'gradient-border-subtle',
-          phaseFlash ? 'phase-flash' : '',
-          scenarioComplete ? 'scenario-complete' : '',
-          termBlackout ? 'term-blackout' : '',
-        ].filter(Boolean).join(' ')}>
-          <ConfettiBurst
-            active={showBurst}
-            count={40}
-            duration={1200}
-            onDone={() => setShowBurst(false)}
-          />
-          <SuccessRing
-            active={showGateRing}
-            onDone={() => setShowGateRing(false)}
-          />
-
-          {countdownNum !== null && (
-            <div className="demo-countdown-overlay">
-              <span key={countdownNum} className="demo-countdown-num">{countdownNum}</span>
-              <span className="demo-countdown-label">launching {scenario.title}</span>
-            </div>
-          )}
-
-          {/* Completion overlay removed — too intrusive for demo flow */}
-
-          {(showIntro || introDismissing) && (
-            <ScenarioPreview
-              scenario={scenario}
-              onPlay={handlePlay}
-              serverHealth={serverHealth}
-              isRunning={isRunning}
-              dismissing={introDismissing}
-            />
-          )}
-
-          <div className={`demo-terminal-grid demo-cols-${gridCols}`}>
-            {Array.from({ length: scenario.panes }).map((_, i) => (
-              <TerminalPaneWithHandle
-                key={sessionIds[i]}
-                sessionId={sessionIds[i]}
-                label={scenario.labels[i] || `pane ${i + 1}`}
-                handleRef={handleRefsRef.current[i]}
-                paneIndex={i}
-                onStatusChange={updateTerminalState}
-                termReveal={termReveal}
-                scenarioId={scenario.id}
-                scenarioCategory={scenario.category}
-                isRunning={isRunning}
+        {/* ── ClickableScenario: 2-column layout ── */}
+        {isClickable ? (
+          <div className="demo-clickable-layout">
+            {/* Left 70%: terminal */}
+            <div className={[
+              'demo-clickable-terminal',
+              isRunning ? 'gradient-border-active' : 'gradient-border-subtle',
+              scenarioComplete ? 'scenario-complete' : '',
+              termBlackout ? 'term-blackout' : '',
+            ].filter(Boolean).join(' ')}>
+              <ConfettiBurst
+                active={showBurst}
+                count={40}
+                duration={1200}
+                onDone={() => setShowBurst(false)}
               />
-            ))}
-          </div>
-        </div>
+              <SuccessRing
+                active={showGateRing}
+                onDone={() => setShowGateRing(false)}
+              />
 
-        {scenario.panel && (
-          <div className="demo-sidebar">
-            <SidebarRenderer
-              scenarioId={scenario.id}
-              isRunning={isRunning}
-              scenarioComplete={scenarioComplete}
-              timelineSteps={timelineDisplay}
-              stats={stats}
-              hasStats={hasStats}
-              inferenceModel={inferenceModel}
-              inferenceTier={inferenceTier}
-              gates={gates}
-              gateEntries={gateEntries}
-              allGatesPass={allGatesPass}
-              logEntries={logEntries}
-              pipeline={pipeline}
-              pipelineExamples={PIPELINE_EXAMPLES}
-              pipelineExampleId={pipelineExampleId}
-              onSelectExample={handlePipelineExampleSelect}
-              onRun={handlePlay}
-              serverHealth={serverHealth}
-              learningStats={learningStats}
-              handoffs={handoffs}
-              activeHandoff={activeHandoff}
-              kfInsights={kfInsights}
-              kfLeftAgent={kfLeftAgent}
-              kfRightAgent={kfRightAgent}
-              kfMetrics={kfMetrics}
-              hasKfMetrics={hasKfMetrics}
-              ciInsights={ciInsights}
-              ciBlocks={ciBlocks}
-              ciPositions={ciPositions}
-              ciMetrics={ciMetrics}
-              ciLeftAgent={ciLeftAgent}
-              ciRightAgent={ciRightAgent}
-              chainConnected={chainWs.connected}
-            />
+              {(showIntro || introDismissing) && (
+                <ScenarioPreview
+                  scenario={scenario}
+                  onPlay={handlePlay}
+                  serverHealth={serverHealth}
+                  isRunning={isRunning}
+                  dismissing={introDismissing}
+                />
+              )}
+
+              <div className="demo-terminal-grid demo-cols-1">
+                <TerminalPaneWithHandle
+                  key={sessionIds[0]}
+                  sessionId={sessionIds[0]}
+                  label={scenario.labels[0] || 'Terminal'}
+                  handleRef={handleRefsRef.current[0]}
+                  paneIndex={0}
+                  onStatusChange={updateTerminalState}
+                  termReveal={termReveal}
+                  scenarioId={scenario.id}
+                  scenarioCategory={scenario.category}
+                  isRunning={isRunning}
+                />
+              </div>
+            </div>
+
+            {/* Right 30%: command list + context panel */}
+            <div className="demo-clickable-sidebar">
+              <div className="demo-clickable-commands">
+                <CommandList
+                  commands={cmdItems}
+                  onRun={handleClickableRun}
+                  onRetry={handleClickableRun}
+                />
+              </div>
+              <div className="demo-clickable-context">
+                <ContextPanel
+                  stage={clickableStage}
+                  gates={gates.map(g => ({ ...g, status: g.status as 'pass' | 'fail' | 'pending' }))}
+                />
+              </div>
+            </div>
           </div>
+        ) : (
+          /* ── Standard scenario: existing layout ── */
+          <>
+            <div className={[
+              'demo-terminals',
+              isRunning ? 'gradient-border-active' : 'gradient-border-subtle',
+              phaseFlash ? 'phase-flash' : '',
+              scenarioComplete ? 'scenario-complete' : '',
+              termBlackout ? 'term-blackout' : '',
+            ].filter(Boolean).join(' ')}>
+              <ConfettiBurst
+                active={showBurst}
+                count={40}
+                duration={1200}
+                onDone={() => setShowBurst(false)}
+              />
+              <SuccessRing
+                active={showGateRing}
+                onDone={() => setShowGateRing(false)}
+              />
+
+              {countdownNum !== null && (
+                <div className="demo-countdown-overlay">
+                  <span key={countdownNum} className="demo-countdown-num">{countdownNum}</span>
+                  <span className="demo-countdown-label">launching {scenario.title}</span>
+                </div>
+              )}
+
+              {/* Completion overlay removed — too intrusive for demo flow */}
+
+              {(showIntro || introDismissing) && (
+                <ScenarioPreview
+                  scenario={scenario}
+                  onPlay={handlePlay}
+                  serverHealth={serverHealth}
+                  isRunning={isRunning}
+                  dismissing={introDismissing}
+                />
+              )}
+
+              <div className={`demo-terminal-grid demo-cols-${gridCols}`}>
+                {Array.from({ length: scenario.panes }).map((_, i) => (
+                  <TerminalPaneWithHandle
+                    key={sessionIds[i]}
+                    sessionId={sessionIds[i]}
+                    label={scenario.labels[i] || `pane ${i + 1}`}
+                    handleRef={handleRefsRef.current[i]}
+                    paneIndex={i}
+                    onStatusChange={updateTerminalState}
+                    termReveal={termReveal}
+                    scenarioId={scenario.id}
+                    scenarioCategory={scenario.category}
+                    isRunning={isRunning}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {scenario.panel && (
+              <div className="demo-sidebar">
+                <SidebarRenderer
+                  scenarioId={scenario.id}
+                  isRunning={isRunning}
+                  scenarioComplete={scenarioComplete}
+                  timelineSteps={timelineDisplay}
+                  stats={stats}
+                  hasStats={hasStats}
+                  inferenceModel={inferenceModel}
+                  inferenceTier={inferenceTier}
+                  gates={gates}
+                  gateEntries={gateEntries}
+                  allGatesPass={allGatesPass}
+                  logEntries={logEntries}
+                  pipeline={pipeline}
+                  pipelineExamples={PIPELINE_EXAMPLES}
+                  pipelineExampleId={pipelineExampleId}
+                  onSelectExample={handlePipelineExampleSelect}
+                  onRun={handlePlay}
+                  serverHealth={serverHealth}
+                  learningStats={learningStats}
+                  handoffs={handoffs}
+                  activeHandoff={activeHandoff}
+                  kfInsights={kfInsights}
+                  kfLeftAgent={kfLeftAgent}
+                  kfRightAgent={kfRightAgent}
+                  kfMetrics={kfMetrics}
+                  hasKfMetrics={hasKfMetrics}
+                  ciInsights={ciInsights}
+                  ciBlocks={ciBlocks}
+                  ciPositions={ciPositions}
+                  ciMetrics={ciMetrics}
+                  ciLeftAgent={ciLeftAgent}
+                  ciRightAgent={ciRightAgent}
+                  chainConnected={chainWs.connected}
+                />
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

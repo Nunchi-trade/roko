@@ -91,6 +91,24 @@ export interface Scenario {
   run(ctx: ScenarioContext): Promise<void>;
 }
 
+// ── ClickableScenario ────────────────────────────────────────
+
+export interface CommandDef {
+  id: string;
+  command: string;
+  description: string;
+  timeout?: number;
+}
+
+export interface ClickableScenario extends Omit<Scenario, 'run'> {
+  commands: CommandDef[];
+  runCommand(ctx: ScenarioContext, commandId: string): Promise<boolean>;
+}
+
+export function isClickableScenario(s: Scenario | ClickableScenario): s is ClickableScenario {
+  return 'commands' in s && 'runCommand' in s;
+}
+
 // ── Re-export ────────────────────────────────────────────────
 
 export { allScenarios as SCENARIOS } from './scenario-runners';
