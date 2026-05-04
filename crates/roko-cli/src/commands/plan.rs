@@ -198,7 +198,13 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         PlanCmd::Validate { dir, strict, json } => {
-            cmd_plan_validate(&dir, strict, json || cli.json)
+            let workdir = resolve_workdir(cli);
+            let plans_dir = if dir.is_absolute() {
+                dir
+            } else {
+                workdir.join(dir)
+            };
+            cmd_plan_validate(&plans_dir, &workdir, strict, json || cli.json)
         }
         PlanCmd::Run {
             plans_dir,
@@ -993,10 +999,13 @@ fn validate_before_run(plans_dir: &Path) -> Option<i32> {
     }
 }
 
-pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> Result<i32> {
-    let current_dir =
-        std::env::current_dir().context("resolve current directory for plan validation")?;
-    let config_path = current_dir.join("roko.toml");
+pub(crate) fn cmd_plan_validate(
+    dir: &Path,
+    workdir: &Path,
+    strict: bool,
+    json_output: bool,
+) -> Result<i32> {
+    let config_path = workdir.join("roko.toml");
     let models = if config_path.is_file() {
         let config_text = std::fs::read_to_string(&config_path)
             .with_context(|| format!("read {}", config_path.display()))?;
@@ -1008,11 +1017,8 @@ pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> 
         None
     };
 
-    let report = plan_validate::validate_plans_dir_with_workdir(
-        dir,
-        models.as_ref(),
-        Some(current_dir.as_path()),
-    )?;
+    let report =
+        plan_validate::validate_plans_dir_with_workdir(dir, models.as_ref(), Some(workdir))?;
     if json_output {
         println!("{}", plan_validate::render_json(&report)?);
     } else {

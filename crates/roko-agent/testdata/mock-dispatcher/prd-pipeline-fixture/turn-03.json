@@ -1,0 +1,12 @@
+{
+  "reply": "```toml\n[meta]\nplan = \"workspace-anchored-feature\"\niteration = 1\ntotal = 1\ndone = 0\nstatus = \"ready\"\nmax_parallel = 1\nestimated_total_minutes = 1\nskip_enrichment = true\n\n[[task]]\nid = \"T1\"\ntitle = \"Verify explicit workspace routing\"\ndescription = \"Check that PRD pipeline artifacts remain in the selected workspace.\"\nrole = \"implementer\"\nstatus = \"ready\"\ntier = \"focused\"\nmodel_hint = \"claude-sonnet-4-6\"\nmax_loc = 10\nfiles = [\"Cargo.toml\", \"src/main.rs\", \".roko/prd\"]\nallowed_tools = [\"read_file\"]\ndenied_tools = []\nmcp_servers = []\ndepends_on = []\ndepends_on_plan = []\nacceptance = [\"cargo check\"]\nverify = [{ phase = \"compile\", command = \"cargo check\" }]\ntimeout_secs = 60\nmax_retries = 1\n\n[task.context]\nread_files = [{ path = \"Cargo.toml\", why = \"confirm the selected workspace\" }, { path = \"src/main.rs\", why = \"confirm the scaffolded project\" }]\nsymbols = []\nanti_patterns = []\nprior_failures = []\n```\n\n```markdown\n# Plan: workspace-anchored-feature\n\nVerify the PRD pipeline uses the explicit workspace for generated artifacts.\n```",
+  "name": "prd-pipeline-fixture-turn-03",
+  "usage": {
+    "input_tokens": 15,
+    "output_tokens": 36,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}
