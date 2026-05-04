@@ -6,6 +6,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -67,7 +68,7 @@ async fn dream_run(
                         bare_mode: true,
                         effort: effort.to_string(),
                         fallback_model: None,
-                        timeout_ms: 120_000,
+                        timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
                         env: Vec::new(),
                     },
                 };
