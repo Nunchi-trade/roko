@@ -16,7 +16,9 @@ use roko_core::config::schema::{
 use roko_core::config::{
     DEFAULT_TTFT_TIMEOUT_MS, ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig,
 };
-use roko_core::defaults::{DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS};
+use roko_core::defaults::{
+    DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_PLAN_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_MS,
+};
 use roko_daimon::StrategySpaceDefinition;
 use roko_orchestrator::ExecutorConfig;
 
@@ -447,7 +449,7 @@ pub struct RunnerConfig {
 
 impl RunnerConfig {
     const fn default_plan_timeout_secs() -> u64 {
-        3_600
+        DEFAULT_PLAN_TIMEOUT_SECS
     }
 }
 
@@ -3087,7 +3089,7 @@ command = "cat"
         assert!(cfg.tools.global_denied.is_empty());
         assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
-        assert_eq!(cfg.runner.plan_timeout_secs, 3_600);
+        assert_eq!(cfg.runner.plan_timeout_secs, DEFAULT_PLAN_TIMEOUT_SECS);
         assert!(cfg.repos.is_empty());
     }
 
@@ -3205,7 +3207,7 @@ use_worktrees = true
         assert!(!cfg.tools.prefer_mcp);
         assert_eq!(cfg.tools.global_denied, vec!["bash".to_string()]);
         assert_eq!(cfg.tools.mcp_timeout_secs, 15);
-        assert_eq!(cfg.runner.plan_timeout_secs, 3_600);
+        assert_eq!(cfg.runner.plan_timeout_secs, DEFAULT_PLAN_TIMEOUT_SECS);
     }
 
     #[test]
@@ -3690,7 +3692,7 @@ base_url = "https://api.z.ai/api/paas/v4"
         assert_eq!(cfg.daimon.strategy_space.domain, "coding");
         assert_eq!(cfg.daimon.strategy_space.dimensions[0], "complexity");
         assert!(cfg.gates.is_empty());
-        assert_eq!(cfg.runner.plan_timeout_secs, 3_600);
+        assert_eq!(cfg.runner.plan_timeout_secs, DEFAULT_PLAN_TIMEOUT_SECS);
         assert!(!cfg.serve.terminal_enabled);
         // Secure-by-default: auth is enabled by default.
         assert!(cfg.serve.auth.enabled);

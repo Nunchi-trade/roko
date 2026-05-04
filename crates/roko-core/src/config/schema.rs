@@ -12,6 +12,7 @@ use std::fmt;
 use std::fmt::Write as _;
 
 use crate::agent::{AgentBackend, ProviderKind};
+use crate::defaults::DEFAULT_PLAN_TIMEOUT_SECS;
 use crate::tool::{ToolFormat, profile_for_model};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1309,7 +1310,7 @@ impl CoreRunnerConfig {
 
     /// Default wall-clock timeout for plan execution: 1 hour.
     pub const fn default_plan_timeout_secs() -> u64 {
-        3_600
+        DEFAULT_PLAN_TIMEOUT_SECS
     }
 
     const fn default_dangerously_skip_permissions() -> bool {

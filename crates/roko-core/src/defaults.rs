@@ -84,6 +84,18 @@ pub const DEFAULT_MAX_MERGE_RETRIES: u32 = 5;
 /// Default max auto-fix iterations in executor state machine.
 pub const DEFAULT_MAX_AUTO_FIX_ITERATIONS: u32 = 5;
 
+/// Default wall-clock timeout for runner plan execution (seconds).
+pub const DEFAULT_PLAN_TIMEOUT_SECS: u64 = 3_600;
+
+/// Base retry delay for runner plan backoff (seconds).
+pub const DEFAULT_PLAN_RETRY_BASE_SECS: u64 = 1;
+
+/// Maximum retry delay for runner plan backoff (seconds).
+pub const DEFAULT_PLAN_RETRY_MAX_SECS: u64 = 30;
+
+/// Maximum exponent shift used while computing runner plan backoff.
+pub const DEFAULT_PLAN_RETRY_BACKOFF_SHIFT_CAP: u32 = 16;
+
 // ── Resource limits ─────────────────────────────────────────────────────
 
 /// Maximum bytes a tool result may return before truncation.
@@ -316,6 +328,9 @@ mod tests {
             DEFAULT_RATE_LIMIT_RETRY_MAX_BACKOFF_MS,
             DEFAULT_RETRY_MAX_BACKOFF_MS
         );
+        assert!(DEFAULT_PLAN_RETRY_BASE_SECS < DEFAULT_PLAN_RETRY_MAX_SECS);
+        assert!(DEFAULT_PLAN_TIMEOUT_SECS > DEFAULT_PLAN_RETRY_MAX_SECS);
+        assert!(DEFAULT_PLAN_RETRY_BACKOFF_SHIFT_CAP < u64::BITS);
     }
 
     #[test]

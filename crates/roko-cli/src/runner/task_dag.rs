@@ -22,6 +22,11 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use roko_core::defaults::{
+    DEFAULT_PLAN_RETRY_BACKOFF_SHIFT_CAP, DEFAULT_PLAN_RETRY_BASE_SECS,
+    DEFAULT_PLAN_RETRY_MAX_SECS, DEFAULT_PLAN_TIMEOUT_SECS,
+};
+
 use crate::task_parser::TaskDef;
 
 // ─── Public ID aliases ─────────────────────────────────────────────────
@@ -88,7 +93,7 @@ impl PlanDag {
 // ─── Plan-level config ──────────────────────────────────────────────────
 
 /// Configuration for the DAG controller. Backoff defaults match
-/// `02-PLAN-EXECUTION.md` (1s, 2s, 4s, capped at 30s).
+/// `02-PLAN-EXECUTION.md`.
 #[derive(Debug, Clone, Copy)]
 pub struct DagConfig {
     /// Wall-clock timeout for a plan (default: 1 hour).
@@ -102,9 +107,9 @@ pub struct DagConfig {
 impl Default for DagConfig {
     fn default() -> Self {
         Self {
-            plan_timeout: Duration::from_secs(3600),
-            retry_base: Duration::from_secs(1),
-            retry_max: Duration::from_secs(30),
+            plan_timeout: Duration::from_secs(DEFAULT_PLAN_TIMEOUT_SECS),
+            retry_base: Duration::from_secs(DEFAULT_PLAN_RETRY_BASE_SECS),
+            retry_max: Duration::from_secs(DEFAULT_PLAN_RETRY_MAX_SECS),
         }
     }
 }
@@ -114,7 +119,7 @@ impl DagConfig {
     #[must_use]
     pub fn backoff_for_attempt(&self, attempt: u32) -> Duration {
         // Attempt 0 is the first retry → 1s. Attempt 1 → 2s. Attempt 2 → 4s.
-        let shift = attempt.min(16);
+        let shift = attempt.min(DEFAULT_PLAN_RETRY_BACKOFF_SHIFT_CAP);
         let factor = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
         let raw = self
             .retry_base
@@ -519,33 +524,50 @@ mod tests {
     #[test]
     fn backoff_grows_exponentially_then_caps() {
         let cfg = DagConfig {
-            retry_base: Duration::from_secs(1),
-            retry_max: Duration::from_secs(30),
+            retry_base: Duration::from_secs(DEFAULT_PLAN_RETRY_BASE_SECS),
+            retry_max: Duration::from_secs(DEFAULT_PLAN_RETRY_MAX_SECS),
             ..DagConfig::default()
         };
         let dag = TaskDag::new(cfg);
-        assert_eq!(dag.backoff_for_attempt(0), Duration::from_secs(1));
-        assert_eq!(dag.backoff_for_attempt(1), Duration::from_secs(2));
-        assert_eq!(dag.backoff_for_attempt(2), Duration::from_secs(4));
-        assert_eq!(dag.backoff_for_attempt(3), Duration::from_secs(8));
-        // Attempt 5 → 32s, but capped at 30s.
-        assert_eq!(dag.backoff_for_attempt(5), Duration::from_secs(30));
-        assert_eq!(dag.backoff_for_attempt(99), Duration::from_secs(30));
+        assert_eq!(
+            dag.backoff_for_attempt(0),
+            Duration::from_secs(DEFAULT_PLAN_RETRY_BASE_SECS)
+        );
+        assert_eq!(
+            dag.backoff_for_attempt(1),
+            Duration::from_secs(DEFAULT_PLAN_RETRY_BASE_SECS * 2)
+        );
+        assert_eq!(
+            dag.backoff_for_attempt(2),
+            Duration::from_secs(DEFAULT_PLAN_RETRY_BASE_SECS * 4)
+        );
+        assert_eq!(
+            dag.backoff_for_attempt(3),
+            Duration::from_secs(DEFAULT_PLAN_RETRY_BASE_SECS * 8)
+        );
+        assert_eq!(
+            dag.backoff_for_attempt(5),
+            Duration::from_secs(DEFAULT_PLAN_RETRY_MAX_SECS)
+        );
+        assert_eq!(
+            dag.backoff_for_attempt(99),
+            Duration::from_secs(DEFAULT_PLAN_RETRY_MAX_SECS)
+        );
     }
 
     #[test]
     fn schedule_retry_records_visible_cooldown() {
         let cfg = DagConfig {
-            retry_base: Duration::from_secs(2),
-            retry_max: Duration::from_secs(30),
+            retry_base: Duration::from_secs(DEFAULT_PLAN_RETRY_BASE_SECS * 2),
+            retry_max: Duration::from_secs(DEFAULT_PLAN_RETRY_MAX_SECS),
             ..DagConfig::default()
         };
         let mut dag = TaskDag::new(cfg);
         dag.schedule_retry("p1", 0);
         let remaining = dag.retry_remaining("p1").expect("retry deadline set");
-        // Should be approximately 2 seconds.
+        // Should be approximately one doubled base-delay window.
         assert!(remaining > Duration::from_millis(500));
-        assert!(remaining <= Duration::from_secs(2));
+        assert!(remaining <= Duration::from_secs(DEFAULT_PLAN_RETRY_BASE_SECS * 2));
 
         // After completing, retry_not_before should be cleared.
         dag.mark_complete("p1", "A");

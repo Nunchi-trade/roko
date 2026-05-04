@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use roko_core::config::schema::RokoConfig;
+use roko_core::defaults::{DEFAULT_MAX_AUTO_FIX_ITERATIONS, DEFAULT_PLAN_TIMEOUT_SECS};
 
 // ─── Agent Events ───────────────────────────────────────────────────────
 
@@ -1384,8 +1385,8 @@ impl Default for RunConfig {
             model: "claude-sonnet-4-6".to_string(),
             cli_model_override: None,
             timeout_secs: 600,
-            plan_timeout_secs: 3_600,
-            max_retries: 5,
+            plan_timeout_secs: DEFAULT_PLAN_TIMEOUT_SECS,
+            max_retries: DEFAULT_MAX_AUTO_FIX_ITERATIONS,
             max_concurrent_tasks: 4,
             approval: false,
             dangerously_skip_permissions: true,
