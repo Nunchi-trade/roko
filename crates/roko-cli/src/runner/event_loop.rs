@@ -31,7 +31,7 @@ use crate::knowledge_helpers::{build_knowledge_routing_advice, neuro_prompt_task
 use crate::task_parser::TaskDef;
 use roko_neuro::KnowledgeStore;
 
-use super::agent_events::handle_agent_event;
+use super::agent_events::{handle_agent_event, AgentStreamBuffer};
 use super::agent_stream::{AgentHandle, AgentSpawnConfig};
 use super::gate_dispatch;
 use super::merge::{MergeDispatch, PlanMerger, PlanMergerConfig};
@@ -282,6 +282,8 @@ pub async fn run(
     // State and TUI bridge.
     let tui = TuiBridge::new(state_hub.sender());
     let mut state = RunState::new(total_tasks);
+    let mut stream_buf = AgentStreamBuffer::new();
+    let stream_to_stderr = config.stream_to_stderr;
     let mut dream_completion_pending = false;
 
     // Compute task fingerprints once at startup so every subsequent
@@ -407,7 +409,7 @@ pub async fn run(
                 let turn_completed_before_event = state.agent_turn_completed;
                 let turn_error = matches!(&event, AgentEvent::TurnCompleted { is_error: true, .. });
 
-                handle_agent_event(&event, &mut state, &tui);
+                handle_agent_event(&event, &mut state, &tui, stream_to_stderr, &mut stream_buf);
                 append_agent_event(&paths, &event, &state);
 
                 // Per-turn budget check.
@@ -580,6 +582,20 @@ pub async fn run(
                         v.passed,
                     );
                 }
+
+                // ── Stream: gate result ─────────────────────────────
+                if stream_to_stderr && completion.kind == GateCompletionKind::Gate {
+                    for v in &completion.verdicts {
+                        let icon = if v.passed { "\u{2713}" } else { "\u{2717}" };
+                        let secs = completion.duration_ms / 1000;
+                        eprintln!(
+                            "     {icon} gate rung {} ({}): {} ({secs}s)",
+                            completion.rung,
+                            v.gate_name,
+                            if v.passed { "pass" } else { "FAIL" },
+                        );
+                    }
+                }
                 if completion.kind == GateCompletionKind::Gate {
                     if let Some(plan_state) = executor.plan_state_mut(&completion.plan_id) {
                         for verdict in &completion.verdicts {
@@ -710,6 +726,15 @@ pub async fn run(
                     let dispatch_ms = state.last_dispatch_ms;
                     let gate_ms = completion.duration_ms;
                     let agent_ms = total_task_ms.saturating_sub(dispatch_ms + gate_ms);
+
+                    // ── Stream: task done ────────────────────────────
+                    if stream_to_stderr {
+                        let secs = total_task_ms / 1000;
+                        eprintln!(
+                            "     \u{2713} Done ({secs}s) [{}/{} tasks]",
+                            state.tasks_completed, state.tasks_total,
+                        );
+                    }
                     info!(
                         task = %completion.task_id,
                         dispatch_ms,
@@ -800,6 +825,16 @@ pub async fn run(
                                     ),
                                 );
                                 tui.phase_transition(&completion.plan_id, "gating", &format!("{phase:?}"));
+
+                                // ── Stream: gate retry ──────────────────────
+                                if stream_to_stderr {
+                                    let delay_s = cooldown_ms / 1000;
+                                    eprintln!(
+                                        "     \u{21bb} Gate failed, retrying (attempt {}, backoff {delay_s}s)",
+                                        next_attempt.unwrap_or(state.iteration + 1),
+                                    );
+                                }
+
                                 info!(
                                     plan_id = %completion.plan_id,
                                     phase = ?phase,
@@ -807,14 +842,24 @@ pub async fn run(
                                     "gate failed — entering auto-fix"
                                 );
 
-                                // On 3rd+ retry, enrich the task prompt with failure analysis.
-                                if state.iteration >= 3 {
+                                // Enrich every retry prompt with failure context so the
+                                // agent understands what went wrong and can adjust.
+                                {
+                                    let attempt_num = state.iteration + 1;
+                                    let gate_output: String = completion.output.chars().take(3000).collect();
+                                    let agent_prev: String = state.agent_output.chars().take(2000).collect();
+                                    let strategy_hint = if state.iteration >= 3 {
+                                        "Your previous approaches have failed multiple times. \
+                                         You MUST try a fundamentally different strategy."
+                                    } else {
+                                        "Try a different approach than your previous attempt."
+                                    };
                                     let replan_context = format!(
-                                        "\n\n## IMPORTANT: Prior attempts failed\n\
-                                         This is attempt {}. Previous gate failures:\n{}\n\
-                                         Analyze WHY previous approaches failed and try a fundamentally different strategy.",
-                                        state.iteration + 1,
-                                        completion.output.chars().take(2000).collect::<String>(),
+                                        "\n\n## IMPORTANT: Your previous attempt failed\n\n\
+                                         This is attempt {attempt_num}.\n\n\
+                                         ### Gate error output\n```\n{gate_output}\n```\n\n\
+                                         ### What you did last time\n```\n{agent_prev}\n```\n\n\
+                                         {strategy_hint}",
                                     );
                                     state.set_replan_context(
                                         &completion.plan_id,
@@ -845,6 +890,12 @@ pub async fn run(
                             )
                         };
                         state.record_task_failure(&completion.plan_id, &completion.task_id, &reason);
+
+                        // ── Stream: task failed ─────────────────────────
+                        if stream_to_stderr {
+                            let summary: String = reason.lines().next().unwrap_or("").chars().take(120).collect();
+                            eprintln!("     \u{2717} Failed: {summary}");
+                        }
                         let run_id = state.run_id().to_string();
                         emit_runner_event(
                             &paths,
@@ -2036,6 +2087,19 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             let role = task_def.role.as_deref().unwrap_or("implementer");
             let role_enum = parse_dispatch_role(role);
             let task_category = neuro_prompt_task_category(role_enum);
+
+            // ── Stream: task start ──────────────────────────────────
+            if ctx.config.stream_to_stderr {
+                let attempt_label = if attempt_num > 1 {
+                    format!(" (attempt {attempt_num})")
+                } else {
+                    String::new()
+                };
+                eprintln!(
+                    "\n  {} [{role}] {}{attempt_label}",
+                    task_id, task_def.title
+                );
+            }
             let bias_weight = knowledge_bias_weight(ctx.config);
             let knowledge_candidates = candidate_model_slugs(ctx.config);
             let knowledge_store = KnowledgeStore::for_workdir(&ctx.config.workdir);

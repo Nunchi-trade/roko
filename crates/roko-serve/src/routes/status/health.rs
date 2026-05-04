@@ -14,12 +14,17 @@ use crate::state::AppState;
 /// `GET /api/health` — liveness check with live telemetry.
 pub async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, Json<Value>) {
     let uptime_secs = state.started_at.elapsed().as_secs();
-    let active_plans = state.active_plans.read().await.len();
-    // Use discovered agents count (includes both local and remote agents).
+    // Use try_read() to avoid blocking on RwLock contention during plan runs,
+    // which caused health-check timeouts and false "SERVE OFFLINE" in the demo UI.
+    let active_plans = state.active_plans.try_read().map(|r| r.len()).unwrap_or(0);
     let supervised = state.supervisor.count().await;
-    let discovered = state.discovered_agents.read().await.len();
+    let discovered = state
+        .discovered_agents
+        .try_read()
+        .map(|r| r.len())
+        .unwrap_or(0);
     let active_agents = supervised.max(discovered);
-    let active_runs = state.active_runs.read().await.len();
+    let active_runs = state.active_runs.try_read().map(|r| r.len()).unwrap_or(0);
 
     // Build a compact provider health summary from the tracker.
     let provider_snapshot = state.provider_health.snapshot();

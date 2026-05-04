@@ -481,6 +481,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 feed_registry: Some(feed_registry),
                 feedback_facade: Some(feedback_facade),
                 projection: Some(projection),
+                stream_to_stderr: !approval && !cli.quiet && !cli.json,
             };
 
             // Optionally spawn the approval TUI.
@@ -528,35 +529,23 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             let total_tasks: usize = plans.iter().map(|p| p.tasks.tasks.len()).sum();
             let plan_count = plans.len();
-            // Only show spinner in non-approval mode (approval mode uses the TUI instead).
-            let run_spinner = if !approval && !cli.quiet && !cli.json {
-                Some(roko_cli::spinner::cli_spinner(format!(
-                    "Running plan{}: {} task{}",
+
+            // Print a header line instead of a spinner — real-time streaming
+            // output from agent events replaces the old static spinner.
+            if !approval && !cli.quiet && !cli.json {
+                let plan_names: Vec<&str> = plans.iter().map(|p| p.id.as_str()).collect();
+                eprintln!(
+                    "\u{25b8} Running plan{} ({} task{}): {}",
                     if plan_count == 1 { "" } else { "s" },
                     total_tasks,
                     if total_tasks == 1 { "" } else { "s" },
-                )))
-            } else {
-                None
-            };
+                    plan_names.join(", "),
+                );
+            }
 
             let setup_ms = t_setup.elapsed().as_millis();
             let v2_report =
                 roko_cli::runner::event_loop::run(plans, &run_config, &state_hub, cancel).await?;
-
-            if let Some(spinner) = run_spinner {
-                if v2_report.all_succeeded() {
-                    spinner.finish_with_message(format!(
-                        "Plan complete: {}/{} tasks",
-                        v2_report.tasks_completed, v2_report.total_tasks
-                    ));
-                } else {
-                    spinner.finish_with_message(format!(
-                        "Plan finished: {}/{} tasks ({} failed)",
-                        v2_report.tasks_completed, v2_report.total_tasks, v2_report.tasks_failed,
-                    ));
-                }
-            }
 
             if cli.json {
                 println!(

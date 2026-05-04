@@ -484,8 +484,8 @@ impl TaskDef {
                         let lines_to_show = if let Some(ref range) = rf.lines {
                             extract_line_range(&content, range)
                         } else {
-                            // Show first 50 lines max
-                            content.lines().take(50).collect::<Vec<_>>().join("\n")
+                            // Show first 100 lines max
+                            content.lines().take(100).collect::<Vec<_>>().join("\n")
                         };
                         prompt.push_str(&format!("```\n{lines_to_show}\n```\n"));
                     }

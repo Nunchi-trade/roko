@@ -13,7 +13,7 @@ export function useServerHealth(intervalMs = 3000) {
 
   const check = useCallback(async () => {
     try {
-      const res = await fetch(`${SERVE_URL}/health`, { signal: AbortSignal.timeout(2000) });
+      const res = await fetch(`${SERVE_URL}/health`, { signal: AbortSignal.timeout(5000) });
       if (!cancelledRef.current) setStatus(res.ok ? 'connected' : 'disconnected');
     } catch {
       if (!cancelledRef.current) setStatus('disconnected');

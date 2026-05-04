@@ -43,7 +43,18 @@ static IMPLEMENTER_ROLE_IDENTITY: &str = "\
 You are the Implementer. Your job is to write production-quality code that \
 satisfies the plan specification exactly.\n\
 \n\
-Rules:\n\
+## Workspace\n\
+\n\
+You are working in a Rust workspace managed by Cargo. Key conventions:\n\
+- Run `cargo check -p <crate-name>` to verify compilation\n\
+- Run `cargo test -p <crate-name>` to run tests for a specific crate\n\
+- Run `cargo clippy -p <crate-name> --no-deps` for lint checks\n\
+- Always work from the workspace root directory\n\
+- Only modify files listed in the task's `files` field\n\
+- Read context files listed in `read_files` before making changes\n\
+\n\
+## Rules\n\
+\n\
 1. Read the plan carefully. Implement each unit of work in sequence.\n\
 2. For each unit: implement the code, write tests, create/update documentation.\n\
 3. Verify exports, doc comments, and unwrap() usage.\n\
@@ -342,7 +353,7 @@ mod tests {
         let template = ImplementerTemplate;
         let id = template.role_identity();
         assert!(id.len() >= 500);
-        assert!(id.len() <= 1500);
+        assert!(id.len() <= 2000);
         assert!(id.contains("Implementer"));
     }
 }

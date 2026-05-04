@@ -1288,6 +1288,10 @@ pub struct RunConfig {
     /// re-emits it as a normalized `ProjectionEvent` for TUI / HTTP / CLI
     /// subscribers. `None` means events are not mirrored.
     pub projection: Option<Arc<super::projection::Projection>>,
+    /// When true, print real-time agent and task lifecycle events to
+    /// stderr instead of showing a spinner. Enabled in non-quiet,
+    /// non-json, non-approval CLI mode.
+    pub stream_to_stderr: bool,
 }
 
 impl RunConfig {
@@ -1366,6 +1370,7 @@ impl RunConfig {
             cascade_router: Some(cascade_router),
             connector_registry: Some(connector_registry),
             feed_registry: Some(feed_registry),
+            stream_to_stderr: false,
             // The runner constructs feedback / projection facades at run
             // start (`event_loop::run`) so they share their lifetime
             // with the run id. `None` here is the safe default for
@@ -1406,6 +1411,7 @@ impl Default for RunConfig {
             feed_registry: None,
             feedback_facade: None,
             projection: None,
+            stream_to_stderr: false,
         }
     }
 }
@@ -1441,6 +1447,7 @@ impl std::fmt::Debug for RunConfig {
                 &self.connector_registry.as_ref().map(|_| ".."),
             )
             .field("feed_registry", &self.feed_registry.as_ref().map(|_| ".."))
+            .field("stream_to_stderr", &self.stream_to_stderr)
             .finish()
     }
 }
