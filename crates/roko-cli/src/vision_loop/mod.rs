@@ -15,6 +15,12 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use roko_core::defaults::{
+    DEFAULT_VISION_LOOP_CONSECUTIVE_TARGET, DEFAULT_VISION_LOOP_MAX_ITERATIONS,
+    DEFAULT_VISION_LOOP_REGRESSION_THRESHOLD, DEFAULT_VISION_LOOP_TARGET_SCORE,
+    DEFAULT_VISION_LOOP_VIEWPORT_HEIGHT, DEFAULT_VISION_LOOP_VIEWPORT_WIDTH,
+    DEFAULT_VISION_LOOP_WAIT_MS,
+};
 use serde::{Deserialize, Serialize};
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -54,25 +60,25 @@ pub struct VisionLoopConfig {
 }
 
 fn default_max_iterations() -> u32 {
-    10
+    DEFAULT_VISION_LOOP_MAX_ITERATIONS
 }
 fn default_target_score() -> f64 {
-    9.0
+    DEFAULT_VISION_LOOP_TARGET_SCORE
 }
 fn default_consecutive_target() -> u32 {
-    2
+    DEFAULT_VISION_LOOP_CONSECUTIVE_TARGET
 }
 fn default_regression_threshold() -> f64 {
-    3.0
+    DEFAULT_VISION_LOOP_REGRESSION_THRESHOLD
 }
 fn default_viewport_width() -> u32 {
-    1280
+    DEFAULT_VISION_LOOP_VIEWPORT_WIDTH
 }
 fn default_viewport_height() -> u32 {
-    720
+    DEFAULT_VISION_LOOP_VIEWPORT_HEIGHT
 }
 fn default_wait_ms() -> u64 {
-    2000
+    DEFAULT_VISION_LOOP_WAIT_MS
 }
 
 impl Default for VisionLoopConfig {
@@ -170,13 +176,19 @@ mod tests {
     #[test]
     fn default_config_has_sensible_values() {
         let cfg = VisionLoopConfig::default();
-        assert_eq!(cfg.max_iterations, 10);
-        assert!((cfg.target_score - 9.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.consecutive_target, 2);
-        assert!((cfg.regression_threshold - 3.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.viewport_width, 1280);
-        assert_eq!(cfg.viewport_height, 720);
-        assert_eq!(cfg.wait_ms, 2000);
+        assert_eq!(cfg.max_iterations, DEFAULT_VISION_LOOP_MAX_ITERATIONS);
+        assert!((cfg.target_score - DEFAULT_VISION_LOOP_TARGET_SCORE).abs() < f64::EPSILON);
+        assert_eq!(
+            cfg.consecutive_target,
+            DEFAULT_VISION_LOOP_CONSECUTIVE_TARGET
+        );
+        assert!(
+            (cfg.regression_threshold - DEFAULT_VISION_LOOP_REGRESSION_THRESHOLD).abs()
+                < f64::EPSILON
+        );
+        assert_eq!(cfg.viewport_width, DEFAULT_VISION_LOOP_VIEWPORT_WIDTH);
+        assert_eq!(cfg.viewport_height, DEFAULT_VISION_LOOP_VIEWPORT_HEIGHT);
+        assert_eq!(cfg.wait_ms, DEFAULT_VISION_LOOP_WAIT_MS);
     }
 
     #[test]

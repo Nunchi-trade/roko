@@ -96,6 +96,27 @@ pub const DEFAULT_PLAN_RETRY_MAX_SECS: u64 = 30;
 /// Maximum exponent shift used while computing runner plan backoff.
 pub const DEFAULT_PLAN_RETRY_BACKOFF_SHIFT_CAP: u32 = 16;
 
+/// Default maximum vision-loop iterations.
+pub const DEFAULT_VISION_LOOP_MAX_ITERATIONS: u32 = 10;
+
+/// Default vision-loop target quality score.
+pub const DEFAULT_VISION_LOOP_TARGET_SCORE: f64 = 9.0;
+
+/// Consecutive target-score hits required before stopping the vision loop.
+pub const DEFAULT_VISION_LOOP_CONSECUTIVE_TARGET: u32 = 2;
+
+/// Score drop from peak that triggers vision-loop rollback.
+pub const DEFAULT_VISION_LOOP_REGRESSION_THRESHOLD: f64 = 3.0;
+
+/// Default browser viewport width for vision-loop screenshots.
+pub const DEFAULT_VISION_LOOP_VIEWPORT_WIDTH: u32 = 1_280;
+
+/// Default browser viewport height for vision-loop screenshots.
+pub const DEFAULT_VISION_LOOP_VIEWPORT_HEIGHT: u32 = 720;
+
+/// Default wait time after file writes before screenshot capture (milliseconds).
+pub const DEFAULT_VISION_LOOP_WAIT_MS: u64 = 2_000;
+
 // ── Resource limits ─────────────────────────────────────────────────────
 
 /// Maximum bytes a tool result may return before truncation.
@@ -331,6 +352,9 @@ mod tests {
         assert!(DEFAULT_PLAN_RETRY_BASE_SECS < DEFAULT_PLAN_RETRY_MAX_SECS);
         assert!(DEFAULT_PLAN_TIMEOUT_SECS > DEFAULT_PLAN_RETRY_MAX_SECS);
         assert!(DEFAULT_PLAN_RETRY_BACKOFF_SHIFT_CAP < u64::BITS);
+        assert!(DEFAULT_VISION_LOOP_MAX_ITERATIONS > 0);
+        assert!(DEFAULT_VISION_LOOP_CONSECUTIVE_TARGET <= DEFAULT_VISION_LOOP_MAX_ITERATIONS);
+        assert!(DEFAULT_VISION_LOOP_TARGET_SCORE > DEFAULT_VISION_LOOP_REGRESSION_THRESHOLD);
     }
 
     #[test]

@@ -9,6 +9,11 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use roko_core::defaults::{
+    DEFAULT_VISION_LOOP_MAX_ITERATIONS, DEFAULT_VISION_LOOP_TARGET_SCORE,
+    DEFAULT_VISION_LOOP_VIEWPORT_HEIGHT, DEFAULT_VISION_LOOP_VIEWPORT_WIDTH,
+    DEFAULT_VISION_LOOP_WAIT_MS,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
@@ -65,19 +70,19 @@ struct StartRequest {
 }
 
 fn default_max_iterations() -> u32 {
-    10
+    DEFAULT_VISION_LOOP_MAX_ITERATIONS
 }
 fn default_target_score() -> f64 {
-    9.0
+    DEFAULT_VISION_LOOP_TARGET_SCORE
 }
 fn default_viewport_width() -> u32 {
-    1280
+    DEFAULT_VISION_LOOP_VIEWPORT_WIDTH
 }
 fn default_viewport_height() -> u32 {
-    720
+    DEFAULT_VISION_LOOP_VIEWPORT_HEIGHT
 }
 fn default_wait_ms() -> u64 {
-    2000
+    DEFAULT_VISION_LOOP_WAIT_MS
 }
 
 impl RequestPayload for StartRequest {
