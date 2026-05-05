@@ -1441,8 +1441,9 @@ async fn proxy_sidecar_stream(
             .insert(header::AUTHORIZATION, header_value);
     }
 
+    let connect_timeout = state.load_roko_config().timeouts.health_check();
     let (mut socket, _response) =
-        tokio::time::timeout(Duration::from_secs(3), connect_async(request))
+        tokio::time::timeout(connect_timeout, connect_async(request))
             .await
             .map_err(|_| "connect sidecar stream timed out".to_string())?
             .map_err(|error| format!("connect sidecar stream: {error}"))?;

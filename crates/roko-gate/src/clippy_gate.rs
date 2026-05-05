@@ -22,6 +22,14 @@ pub struct ClippyGate {
     name: String,
 }
 
+fn timeout_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX).max(1)
+}
+
+fn default_timeout_ms() -> u64 {
+    timeout_ms(roko_core::config::TimeoutConfig::default().gate_clippy())
+}
+
 impl ClippyGate {
     /// Construct a lint gate for `build_system`.
     #[must_use]
@@ -29,7 +37,7 @@ impl ClippyGate {
         Self {
             build_system,
             extra_args: Vec::new(),
-            timeout_ms: 5 * 60 * 1000, // 5 minutes
+            timeout_ms: default_timeout_ms(),
             name: format!("clippy:{}", build_system.program()),
         }
     }

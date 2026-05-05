@@ -63,6 +63,14 @@ pub struct PropertyTestGate {
     name: String,
 }
 
+fn timeout_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX).max(1)
+}
+
+fn default_timeout_ms() -> u64 {
+    timeout_ms(roko_core::config::TimeoutConfig::default().gate_test())
+}
+
 impl PropertyTestGate {
     /// Construct a property-test gate for `build_system` matching tests
     /// whose name begins with `"prop_"`, running 256 cases per property
@@ -81,7 +89,7 @@ impl PropertyTestGate {
             seed: None,
             max_shrink_iters: DEFAULT_MAX_SHRINK_ITERS,
             persist_failures: false,
-            timeout_ms: 15 * 60 * 1000, // 15 minutes
+            timeout_ms: default_timeout_ms(),
             name: format!("property_test:{}", build_system.program()),
         }
     }
