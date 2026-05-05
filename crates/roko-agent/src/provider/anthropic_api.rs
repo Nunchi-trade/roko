@@ -1,3 +1,26 @@
+//! Adapter for the Anthropic Messages API (direct HTTP, not Claude CLI subprocess).
+//!
+//! # Status: experimental — implemented and tested, not wired to production models
+//!
+//! This adapter implements the full Anthropic Messages API tool loop via HTTP
+//! requests to `https://api.anthropic.com/v1/messages`. It is not used in production
+//! because all claude models in `roko.toml` route through `claude_cli` (subprocess).
+//!
+//! ## To activate
+//!
+//! Add a provider entry to `roko.toml`:
+//! ```toml
+//! [providers.anthropic_api_direct]
+//! kind = "anthropic_api"
+//! base_url = "https://api.anthropic.com/v1"
+//! api_key_env = "ANTHROPIC_API_KEY"
+//! timeout_ms = 120000
+//! ttft_timeout_ms = 15000
+//! connect_timeout_ms = 5000
+//! ```
+//! Then add a model entry pointing to it (with `tool_format = "anthropic_blocks"`).
+//! Run `cargo test -p roko-agent -- anthropic` to verify the adapter before enabling.
+
 pub mod tool_loop;
 
 use crate::Agent;

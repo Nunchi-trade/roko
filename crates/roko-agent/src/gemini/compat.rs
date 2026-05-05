@@ -12,7 +12,13 @@ use serde_json::{Map, Value};
 const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_REQUEST_TIMEOUT_MS;
 
 fn compat_base_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
+    // Strip the path suffix if it was already included in base_url (e.g. via roko.toml)
+    // so this function is idempotent regardless of how base_url is configured.
+    let trimmed = base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1beta/openai/v1")
+        .trim_end_matches("/v1beta/openai")
+        .trim_end_matches('/');
     format!("{trimmed}/v1beta/openai")
 }
 
@@ -281,5 +287,30 @@ mod tests {
             .clone()
             .expect("captured request");
         assert!(request.contains("\"cached_content\":\"cachedContents/cache-123\""));
+    }
+
+    #[test]
+    fn compat_base_url_idempotent_with_suffix() {
+        let with_suffix = "https://generativelanguage.googleapis.com/v1beta/openai";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(compat_base_url(with_suffix), compat_base_url(bare));
+        assert_eq!(
+            compat_base_url(with_suffix),
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+    }
+
+    #[test]
+    fn compat_base_url_idempotent_with_trailing_slash() {
+        let with_slash = "https://generativelanguage.googleapis.com/v1beta/openai/";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(compat_base_url(with_slash), compat_base_url(bare));
+    }
+
+    #[test]
+    fn compat_base_url_idempotent_with_v1_suffix() {
+        let with_v1 = "https://generativelanguage.googleapis.com/v1beta/openai/v1";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(compat_base_url(with_v1), compat_base_url(bare));
     }
 }

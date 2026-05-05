@@ -33,6 +33,26 @@ use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 use super::{BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError};
 
+// Tool name sanitization — Ollama uses the same OpenAI-compatible wire format, which
+// requires names matching ^[a-zA-Z0-9_-]+$. Dotted names (e.g. MCP server tools like
+// `chain.balance`) are encoded as `chain__DOT__balance` and reversed on parse.
+// Canonical definition lives in translate/openai.rs.
+fn sanitize_tool_name(name: &str) -> String {
+    if name.contains('.') {
+        name.replace('.', "__DOT__")
+    } else {
+        name.to_string()
+    }
+}
+
+fn unsanitize_tool_name(name: &str) -> String {
+    if name.contains("__DOT__") {
+        name.replace("__DOT__", ".")
+    } else {
+        name.to_string()
+    }
+}
+
 /// Translator for the Ollama `/api/chat` OpenAI-compatible backend.
 ///
 /// Pure, stateless — a zero-sized type. Renders tools as a
@@ -64,7 +84,7 @@ impl Translator for OllamaTranslator {
                 serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": t.name,
+                        "name": sanitize_tool_name(&t.name),
                         "description": t.description,
                         "parameters": t.parameters.as_value(),
                     }
@@ -97,8 +117,8 @@ impl Translator for OllamaTranslator {
             let name = call
                 .pointer("/function/name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| TranslatorError::Malformed("missing function.name".into()))?
-                .to_string();
+                .ok_or_else(|| TranslatorError::Malformed("missing function.name".into()))?;
+            let name = unsanitize_tool_name(name);
 
             let args = match call.pointer("/function/arguments") {
                 // Ollama commonly sends arguments as a JSON-encoded string.
@@ -558,5 +578,77 @@ mod tests {
         assert_eq!(arr[0]["role"], "tool");
         assert_eq!(arr[0]["tool_call_id"], "t42"); // id flowed through
         assert_eq!(arr[0]["content"], "contents-here");
+    }
+
+    // ─── tool name sanitization ──────────────────────────────────────────
+
+    #[test]
+    fn render_tools_sanitizes_dotted_name() {
+        let tool = ToolDef::new(
+            "chain.balance",
+            "Get chain balance",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        );
+        let RenderedTools::JsonArray(v) = OllamaTranslator.render_tools(&[tool]) else {
+            panic!("expected JsonArray");
+        };
+        let arr = v.as_array().expect("expected array");
+        assert_eq!(
+            arr[0]["function"]["name"], "chain__DOT__balance",
+            "dotted name must be sanitized for the wire format"
+        );
+    }
+
+    #[test]
+    fn render_tools_plain_name_unchanged() {
+        let tool = ToolDef::new(
+            "read_file",
+            "Read a file",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        );
+        let RenderedTools::JsonArray(v) = OllamaTranslator.render_tools(&[tool]) else {
+            panic!("expected JsonArray");
+        };
+        let arr = v.as_array().expect("expected array");
+        assert_eq!(
+            arr[0]["function"]["name"], "read_file",
+            "plain name must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn parse_calls_unsanitizes_dotted_name() {
+        let resp = ollama_response_with_call(
+            "call_dot",
+            "chain__DOT__balance",
+            serde_json::Value::String(r#"{"address":"0x123"}"#.to_string()),
+        );
+        let calls = OllamaTranslator
+            .parse_calls(&resp)
+            .expect("parse should succeed");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].name, "chain.balance",
+            "encoded name must be unsanitized back to dotted form"
+        );
+    }
+
+    #[test]
+    fn parse_calls_plain_name_unchanged() {
+        let resp = ollama_response_with_call(
+            "call_plain",
+            "read_file",
+            serde_json::Value::String(r#"{"path":"x.rs"}"#.to_string()),
+        );
+        let calls = OllamaTranslator
+            .parse_calls(&resp)
+            .expect("parse should succeed");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].name, "read_file",
+            "plain name must pass through unchanged"
+        );
     }
 }

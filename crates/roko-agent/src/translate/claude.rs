@@ -90,6 +90,12 @@ impl Translator for ClaudeTranslator {
         Ok(calls)
     }
 
+    /// Claude CLI manages its own multi-turn loop. The ToolLoop never calls this
+    /// for `HandledByBackend` backends — returning `None` here is intentional and correct.
+    fn render_assistant_message(&self, _response: &BackendResponse) -> Option<serde_json::Value> {
+        None
+    }
+
     fn render_results(&self, _results: &[(ToolCall, ToolResult)]) -> RenderedResults {
         RenderedResults::HandledByBackend
     }

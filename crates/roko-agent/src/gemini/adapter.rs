@@ -29,7 +29,13 @@ use std::sync::Arc;
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
 fn gemini_tool_loop_base_url(base_url: &str) -> String {
-    format!("{}/v1beta/openai/v1", base_url.trim_end_matches('/'))
+    // Strip the path suffix if already present in base_url (idempotent).
+    let trimmed = base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1beta/openai/v1")
+        .trim_end_matches("/v1beta/openai")
+        .trim_end_matches('/');
+    format!("{trimmed}/v1beta/openai/v1")
 }
 
 fn gemini_tool_loop_agent(
@@ -438,5 +444,39 @@ mod tests {
             GeminiAdapter.classify_error(503, &Value::Null),
             ProviderError::ServerError(503)
         ));
+    }
+
+    #[test]
+    fn gemini_tool_loop_base_url_idempotent_with_suffix() {
+        let with_suffix = "https://generativelanguage.googleapis.com/v1beta/openai";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(
+            gemini_tool_loop_base_url(with_suffix),
+            gemini_tool_loop_base_url(bare)
+        );
+        assert_eq!(
+            gemini_tool_loop_base_url(with_suffix),
+            "https://generativelanguage.googleapis.com/v1beta/openai/v1"
+        );
+    }
+
+    #[test]
+    fn gemini_tool_loop_base_url_idempotent_with_trailing_slash() {
+        let with_slash = "https://generativelanguage.googleapis.com/v1beta/openai/";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(
+            gemini_tool_loop_base_url(with_slash),
+            gemini_tool_loop_base_url(bare)
+        );
+    }
+
+    #[test]
+    fn gemini_tool_loop_base_url_idempotent_with_v1_suffix() {
+        let with_v1 = "https://generativelanguage.googleapis.com/v1beta/openai/v1";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(
+            gemini_tool_loop_base_url(with_v1),
+            gemini_tool_loop_base_url(bare)
+        );
     }
 }

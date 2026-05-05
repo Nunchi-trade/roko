@@ -90,6 +90,12 @@ impl Translator for ReActTranslator {
         Ok(vec![ToolCall::new("react-0", name, args)])
     }
 
+    /// ReAct reconstructs full conversation context from text prompts on each turn.
+    /// There is no structured assistant message to inject — returning `None` is intentional.
+    fn render_assistant_message(&self, _response: &BackendResponse) -> Option<serde_json::Value> {
+        None
+    }
+
     fn render_results(&self, results: &[(ToolCall, ToolResult)]) -> RenderedResults {
         let mut block = String::new();
         for (_, res) in results {
