@@ -3,7 +3,7 @@
 //! cancellation.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -60,8 +60,8 @@ use super::state::RunState;
 use super::tui_bridge::TuiBridge;
 use super::types::{
     AgentCompletionSummary, AgentDispatchOutcome, AgentEvent, GateCompletion, GateCompletionKind,
-    PlanOutcome, PlanRunSummary, PromptAssemblyDiagnostics, ResumeMarker, ResumeOutcome,
-    RetryAction, RunConfig, RunOutcome, RunTotals, RunnerEvent, RunnerFailureKind,
+    GateVerdictSummary, PlanOutcome, PlanRunSummary, PromptAssemblyDiagnostics, ResumeMarker,
+    ResumeOutcome, RetryAction, RunConfig, RunOutcome, RunTotals, RunnerEvent, RunnerFailureKind,
     TaskAttemptOutcome, TaskAttemptRef, TaskAttemptStatus,
 };
 
@@ -188,6 +188,9 @@ struct RunContext<'a> {
     prompt_cache: &'a Arc<PromptCache>,
     factory: &'a SharedAgentFactory,
     gate_sem: Arc<tokio::sync::Semaphore>,
+    /// Prompt section diagnostics per attempt key — populated at dispatch,
+    /// consumed on gate completion to build SectionOutcomeRecords.
+    section_diagnostics: &'a mut HashMap<String, PromptDiagnostics>,
 }
 
 // ─── Main Entry Point ───────────────────────────────────────────────────
@@ -446,33 +449,26 @@ pub async fn run(
     let mut dream_completion_pending = false;
 
     // Run ledger — optional enhancement for tracking task starts, completions,
-    // and gate outcomes in a typed JSONL file.
-    let mut run_ledger: Option<RunLedger> = match std::panic::catch_unwind(
-        std::panic::AssertUnwindSafe(|| {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            let prompt_summary = plans
-                .first()
-                .map(|p| p.id.clone())
-                .unwrap_or_else(|| "multi-plan".to_string());
-            RunLedger::new(
-                state.run_id(),
-                prompt_summary,
-                WorkflowConfig::default(),
-                now_ms,
-            )
-        }),
-    ) {
-        Ok(ledger) => {
-            debug!("run ledger initialized");
-            Some(ledger)
-        }
-        Err(_) => {
-            warn!("failed to initialize run ledger — continuing without it");
-            None
-        }
+    // and gate outcomes in a typed JSONL file at `.roko/state/run-ledger.jsonl`.
+    // Initialization is infallible; we keep it as Option so downstream code
+    // gracefully no-ops if we ever make init fallible.
+    let mut run_ledger: Option<RunLedger> = {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let prompt_summary = plans
+            .first()
+            .map(|p| p.id.clone())
+            .unwrap_or_else(|| "multi-plan".to_string());
+        let ledger = RunLedger::new(
+            state.run_id(),
+            prompt_summary,
+            WorkflowConfig::default(),
+            now_ms,
+        );
+        debug!("run ledger initialized for run {}", state.run_id());
+        Some(ledger)
     };
 
     // Compute task fingerprints once at startup so every subsequent
@@ -501,6 +497,10 @@ pub async fn run(
 
     let mut agent_handles: HashMap<String, AgentHandle> = HashMap::new();
     let mut feedback_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+    // Track prompt section diagnostics per attempt so gate completions can
+    // build SectionOutcomeRecords joining section presence to pass/fail.
+    let mut section_diagnostics: HashMap<String, PromptDiagnostics> = HashMap::new();
 
     let skip_enrichment: HashMap<String, bool> = plans
         .iter()
@@ -837,6 +837,30 @@ pub async fn run(
                 );
                 record_daimon_gate_result(config, &completion);
 
+                // Record gate outcome in the run ledger.
+                if let Some(ref mut ledger) = run_ledger {
+                    for verdict in &completion.verdicts {
+                        ledger.record_gate_run(
+                            &verdict.gate_name,
+                            verdict.passed,
+                            Some(verdict.summary.clone()),
+                            completion.duration_ms,
+                        );
+                    }
+                    append_ledger_entry(
+                        &paths.run_ledger_jsonl,
+                        "gate_outcome",
+                        &serde_json::json!({
+                            "plan_id": completion.plan_id,
+                            "task_id": completion.task_id,
+                            "rung": completion.rung,
+                            "passed": completion.passed,
+                            "duration_ms": completion.duration_ms,
+                            "gate_kind": format!("{:?}", completion.kind),
+                        }),
+                    );
+                }
+
                 if completion.kind == GateCompletionKind::Merge {
                     emit_runner_event(
                         &paths,
@@ -934,6 +958,37 @@ pub async fn run(
                     continue;
                 }
 
+                // ── SectionOutcome recording ────────────────────────────
+                // Terminal gate result (final rung pass or any fail): join
+                // the prompt section diagnostics captured at dispatch time
+                // to the gate outcome so adaptive policy can learn which
+                // sections correlate with success/failure.
+                {
+                    let attempt_key = completion_attempt.key();
+                    if let Some(diag) = section_diagnostics.remove(&attempt_key) {
+                        let status = if completion.passed {
+                            SectionOutcomeStatus::Passed
+                        } else {
+                            SectionOutcomeStatus::Failed
+                        };
+                        let records = build_section_outcome_records(
+                            &completion.plan_id,
+                            &completion.task_id,
+                            &state.agent_model,
+                            &state.agent_provider,
+                            status,
+                            &diag,
+                            &completion.verdicts,
+                        );
+                        let outcomes_path =
+                            persist::section_outcomes_path(&config.workdir);
+                        feedback_tasks.spawn(append_section_outcomes(
+                            outcomes_path,
+                            records,
+                        ));
+                    }
+                }
+
                 if completion.passed {
                     // Mark this task completed in the DAG and check for more.
                     state.clear_retry_backoff(&completion.plan_id);
@@ -951,6 +1006,29 @@ pub async fn run(
                         output_files,
                     );
                     state.task_completed();
+                    // Record task completion in the run ledger.
+                    if let Some(ref mut ledger) = run_ledger {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        ledger.record_phase_transition(
+                            roko_runtime::Phase::Implementing,
+                            roko_runtime::Phase::Complete,
+                            now_ms,
+                        );
+                        append_ledger_entry(
+                            &paths.run_ledger_jsonl,
+                            "task_completed",
+                            &serde_json::json!({
+                                "plan_id": completion.plan_id,
+                                "task_id": completion.task_id,
+                                "passed": true,
+                                "duration_ms": completion.duration_ms,
+                                "timestamp_ms": now_ms,
+                            }),
+                        );
+                    }
                     let run_id = state.run_id().to_string();
                     let agent_model = state.agent_model.clone();
                     let agent_provider = state.agent_provider.clone();
@@ -1164,6 +1242,30 @@ pub async fn run(
                             )
                         };
                         state.record_task_failure(&completion.plan_id, &completion.task_id, &reason);
+                        // Record task failure in the run ledger.
+                        if let Some(ref mut ledger) = run_ledger {
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            ledger.record_agent_failed(
+                                "implementer",
+                                roko_runtime::EffectErrorKind::Unknown,
+                                &reason,
+                            );
+                            append_ledger_entry(
+                                &paths.run_ledger_jsonl,
+                                "task_failed",
+                                &serde_json::json!({
+                                    "plan_id": completion.plan_id,
+                                    "task_id": completion.task_id,
+                                    "passed": false,
+                                    "reason": reason,
+                                    "duration_ms": completion.duration_ms,
+                                    "timestamp_ms": now_ms,
+                                }),
+                            );
+                        }
 
                         inline.task_failed(&reason);
                         let run_id = state.run_id().to_string();
@@ -1267,12 +1369,36 @@ pub async fn run(
                         prompt_cache: &prompt_cache,
                         factory: &factory,
                         gate_sem: gate_sem.clone(),
+                        section_diagnostics: &mut section_diagnostics,
                     };
                     dispatch_action(&action, &mut ctx).await;
                     let dispatch_ms = t_dispatch.elapsed().as_millis() as u64;
                     if matches!(&action, ExecutorAction::SpawnAgent { .. }) {
                         ctx.state.last_dispatch_ms = dispatch_ms;
                         info!(action = %action_label, dispatch_ms, "agent action dispatched");
+                        // Record task start in the run ledger.
+                        if let Some(ref mut ledger) = run_ledger {
+                            if let ExecutorAction::SpawnAgent { plan_id, task, .. } = &action {
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                ledger.record_phase_transition(
+                                    roko_runtime::Phase::Pending,
+                                    roko_runtime::Phase::Implementing,
+                                    now_ms,
+                                );
+                                append_ledger_entry(
+                                    &paths.run_ledger_jsonl,
+                                    "task_started",
+                                    &serde_json::json!({
+                                        "plan_id": plan_id,
+                                        "task_id": task,
+                                        "timestamp_ms": now_ms,
+                                    }),
+                                );
+                            }
+                        }
                     } else if dispatch_ms > 50 {
                         info!(action = %action_label, dispatch_ms, "action dispatched (slow)");
                     } else {
@@ -1379,6 +1505,8 @@ pub async fn run(
                     "plan summary"
                 );
             }
+            // Persist the run ledger at run completion.
+            persist_run_ledger(&run_ledger, &paths.run_ledger_jsonl);
             break;
         }
     }
@@ -1388,6 +1516,9 @@ pub async fn run(
 
     // Ensure all pending snapshots land on disk before returning.
     snapshot_writer.flush();
+
+    // Persist the run ledger (final write on the general exit path).
+    persist_run_ledger(&run_ledger, &paths.run_ledger_jsonl);
 
     let report = build_report(&executor, &plans, &state);
 
@@ -2983,6 +3114,13 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             }
             let requested_model = dispatch_plan.model.slug.clone();
             let prompt_diagnostics = dispatch_plan.prompt.diagnostics.clone();
+            // Stash section diagnostics keyed by attempt for SectionOutcome
+            // recording when the gate completes (pass or fail).
+            {
+                let attempt_key = format!("{plan_id}:{task_id}:{attempt_num}");
+                ctx.section_diagnostics
+                    .insert(attempt_key, prompt_diagnostics.clone());
+            }
             ctx.tui
                 .model_selected(plan_id, &task_id, &requested_model, &selected_source);
             let mut system_prompt = dispatch_plan.prompt.system_prompt;
@@ -3584,6 +3722,113 @@ fn update_gate_thresholds(thresholds: &mut GateThresholds, path: &Path, rung: u3
 fn emit_gate_thresholds_event(thresholds: &GateThresholds, tui: &TuiBridge) {
     if let Ok(json) = serde_json::to_string(thresholds) {
         tui.gate_thresholds_updated(&json);
+    }
+}
+
+// ─── Section outcome helpers ─────────────────────────────────────────────
+
+/// Build lightweight `SectionOutcomeRecord` entries from prompt diagnostics
+/// and a terminal gate result. Each included/dropped section becomes one
+/// record so the downstream bandit can attribute section presence to
+/// pass/fail.
+fn build_section_outcome_records(
+    plan_id: &str,
+    task_id: &str,
+    model: &str,
+    provider: &str,
+    status: SectionOutcomeStatus,
+    diag: &PromptDiagnostics,
+    verdicts: &[GateVerdictSummary],
+) -> Vec<SectionOutcomeRecord> {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let gate_outcomes = verdicts
+        .iter()
+        .map(|v| roko_learn::section_outcome::SectionGateOutcome {
+            gate_id: v.gate_name.clone(),
+            outcome: if v.passed {
+                "passed".to_string()
+            } else {
+                "failed".to_string()
+            },
+            required: true,
+        })
+        .collect::<Vec<_>>();
+
+    let mut records =
+        Vec::with_capacity(diag.included_sections.len() + diag.dropped_sections.len());
+
+    for section_name in &diag.included_sections {
+        records.push(SectionOutcomeRecord {
+            schema_version: SECTION_OUTCOME_SCHEMA_VERSION,
+            timestamp: timestamp.clone(),
+            workspace_id: String::new(),
+            invocation_id: format!("{plan_id}:{task_id}"),
+            task_id: task_id.to_string(),
+            task_type: "plan_task".to_string(),
+            role_id: String::new(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            section_id: section_name.clone(),
+            section_name: section_name.clone(),
+            action_id: format!("prompt_section:{section_name}"),
+            section_kind: roko_learn::section_outcome::SectionKind::Prompt,
+            included: true,
+            estimated_tokens: 0,
+            tokens_used: 0,
+            token_budget: None,
+            source_type: None,
+            source_id: None,
+            experiment_id: None,
+            status,
+            gate_outcomes: gate_outcomes.clone(),
+            review_verdicts: Vec::new(),
+        });
+    }
+
+    for section_name in &diag.dropped_sections {
+        records.push(SectionOutcomeRecord {
+            schema_version: SECTION_OUTCOME_SCHEMA_VERSION,
+            timestamp: timestamp.clone(),
+            workspace_id: String::new(),
+            invocation_id: format!("{plan_id}:{task_id}"),
+            task_id: task_id.to_string(),
+            task_type: "plan_task".to_string(),
+            role_id: String::new(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            section_id: section_name.clone(),
+            section_name: section_name.clone(),
+            action_id: format!("prompt_section:{section_name}"),
+            section_kind: roko_learn::section_outcome::SectionKind::Prompt,
+            included: false,
+            estimated_tokens: 0,
+            tokens_used: 0,
+            token_budget: None,
+            source_type: None,
+            source_id: None,
+            experiment_id: None,
+            status,
+            gate_outcomes: gate_outcomes.clone(),
+            review_verdicts: Vec::new(),
+        });
+    }
+
+    records
+}
+
+/// Append section outcome records to the JSONL store. Failures are logged
+/// but do not abort the run.
+async fn append_section_outcomes(path: PathBuf, records: Vec<SectionOutcomeRecord>) {
+    if records.is_empty() {
+        return;
+    }
+    match SectionOutcomeStore::open_creating(path).await {
+        Ok(store) => {
+            if let Err(err) = store.append_many(&records).await {
+                warn!(err = %err, "failed to append section outcome records");
+            }
+        }
+        Err(err) => warn!(err = %err, "failed to open section outcome store"),
     }
 }
 
@@ -4195,6 +4440,72 @@ async fn seed_playbooks_if_empty(layout: &RokoLayout) {
         count = seeds.len(),
         "playbook store seeded with starter templates"
     );
+}
+
+
+// ─── Run Ledger Helpers ──────────────────────────────────────────────────
+
+/// Append a single typed entry to the run ledger JSONL file.
+/// Failures are logged but never propagated — the ledger is best-effort.
+fn append_ledger_entry(path: &std::path::Path, kind: &str, data: &serde_json::Value) {
+    let entry = serde_json::json!({
+        "kind": kind,
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "data": data,
+    });
+    let line = match serde_json::to_string(&entry) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize ledger entry");
+            return;
+        }
+    };
+    if let Err(e) = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        writeln!(f, "{}", line)?;
+        Ok(())
+    })() {
+        warn!(error = %e, path = %path.display(), "failed to append to run ledger");
+    }
+}
+
+/// Persist a final summary entry for the run ledger at run completion.
+/// This is a no-op if the ledger was never initialized.
+fn persist_run_ledger(ledger: &Option<RunLedger>, path: &std::path::Path) {
+    let Some(ledger) = ledger else { return };
+    let summary = serde_json::json!({
+        "kind": "run_summary",
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "data": {
+            "run_id": ledger.run_id,
+            "started_at_ms": ledger.started_at_ms,
+            "phase_transitions": ledger.phase_history.len(),
+            "agent_outcomes": ledger.agent_outcomes.len(),
+            "gate_runs": ledger.gate_runs.len(),
+        },
+    });
+    let line = match serde_json::to_string(&summary) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize run ledger summary");
+            return;
+        }
+    };
+    if let Err(e) = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        writeln!(f, "{}", line)?;
+        Ok(())
+    })() {
+        warn!(error = %e, path = %path.display(), "failed to persist run ledger summary");
+    }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

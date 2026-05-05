@@ -400,6 +400,12 @@ impl RokoLayout {
         self.state_dir().join("run-state.json")
     }
 
+    /// `.roko/state/run-ledger.jsonl` — typed run ledger (task starts, completions, gate outcomes).
+    #[must_use]
+    pub fn run_ledger_path(&self) -> PathBuf {
+        self.state_dir().join("run-ledger.jsonl")
+    }
+
     /// `.roko/state/events.json` — event log snapshot for crash recovery.
     #[must_use]
     pub fn event_log_snapshot(&self) -> PathBuf {
