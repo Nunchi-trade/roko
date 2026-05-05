@@ -1,6 +1,7 @@
 //! `roko isfr` subcommand — manage the ISFR keeper.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Subcommand;
 use roko_core::config::schema::RokoConfig;
@@ -24,12 +25,18 @@ pub enum IsfrCmd {
         /// Working directory (default: cwd or --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Output raw JSON (machine-readable).
+        #[arg(long)]
+        json: bool,
     },
     /// List configured ISFR rate sources.
     Sources {
         /// Working directory (default: cwd or --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Output raw JSON (machine-readable).
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -99,15 +106,21 @@ pub(crate) async fn cmd_isfr(cli: &Cli, cmd: IsfrCmd) -> Result<i32> {
                 )
             };
 
-            // Relay publish stub — full wiring happens in A6.
+            // Wire publish callback — prints computed rate to stdout and logs via tracing.
+            // When a relay URL is configured, note that relay transport is deferred (Phase 2).
             if let Some(ref relay_url) = config.relay.url {
-                println!("Relay: {relay_url} (publish stub — full wiring in task A6)");
-                let publish_fn: roko_chain::isfr_keeper::PublishFn =
-                    std::sync::Arc::new(|topic: &str, msg_type: &str, _payload| {
-                        tracing::info!(topic, msg_type, "isfr: relay publish (stub)");
-                    });
-                keeper.set_publish_fn(publish_fn);
+                println!("Relay: {relay_url} (WebSocket relay transport is Phase 2)");
             }
+
+            let publish_fn: roko_chain::isfr_keeper::PublishFn =
+                std::sync::Arc::new(move |topic: &str, msg_type: &str, payload: serde_json::Value| {
+                    if let Some(composite_bps) = payload.get("composite_bps").and_then(|v| v.as_u64()) {
+                        let pct = composite_bps as f64 / 100.0;
+                        println!("ISFR rate: {pct:.2}% (composite) -> topic={topic}");
+                    }
+                    tracing::info!(topic, msg_type, %payload, "isfr: rate published");
+                });
+            keeper.set_publish_fn(publish_fn);
 
             println!(
                 "ISFR keeper '{}' starting (poll every {}s)...",
@@ -127,58 +140,216 @@ pub(crate) async fn cmd_isfr(cli: &Cli, cmd: IsfrCmd) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
 
-        IsfrCmd::Status { workdir } => {
+        IsfrCmd::Status { workdir, json } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let config = load_roko_config(&wd);
 
-            if !config.isfr.enabled {
-                println!("ISFR: disabled");
-                return Ok(EXIT_SUCCESS);
-            }
+            // Try to query a running roko serve instance first.
+            let client = match reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => reqwest::Client::new(),
+            };
 
-            println!("ISFR: enabled");
-            println!("  chain:    {}", config.chain.profile);
-            println!(
-                "  relay:    {}",
-                config.relay.url.as_deref().unwrap_or("not configured")
-            );
-            println!("  sources:  {}", config.isfr.sources.len());
-            println!("  poll:     {}s", config.isfr.poll_interval_secs);
-            println!("  epoch:    {}s", config.isfr.epoch_duration_secs);
+            match client
+                .get("http://localhost:6677/api/isfr/status")
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
 
-            if !config.isfr.sources.is_empty() {
-                println!("\n  Sources:");
-                for src in &config.isfr.sources {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        return Ok(EXIT_SUCCESS);
+                    }
+
+                    // Human-readable live status from serve.
+                    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let running = body.get("keeper_running").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let sources_count = body.get("sources_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let poll_secs = body.get("poll_interval_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let epoch_secs = body.get("epoch_duration_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let rate_bps = body.get("current_rate_bps").and_then(|v| v.as_u64());
+                    let confidence = body.get("current_confidence").and_then(|v| v.as_f64());
+
+                    println!("ISFR status (live from roko serve)");
+                    println!("  enabled:    {enabled}");
+                    println!("  keeper:     {}", if running { "running" } else { "stopped" });
+                    println!("  sources:    {sources_count}");
+                    println!("  poll:       {poll_secs}s");
+                    println!("  epoch:      {epoch_secs}s");
+
+                    match rate_bps {
+                        Some(bps) => {
+                            let pct = bps as f64 / 100.0;
+                            let conf_pct = confidence.unwrap_or(0.0) * 100.0;
+                            println!("  rate:       {pct:.2}% ({bps} bps)");
+                            println!("  confidence: {conf_pct:.1}%");
+                        }
+                        None => {
+                            println!("  rate:       (no rate computed yet)");
+                        }
+                    }
+                }
+                _ => {
+                    // Fall back to config-only display when serve is not running.
+                    if json {
+                        let out = serde_json::json!({
+                            "source": "config",
+                            "enabled": config.isfr.enabled,
+                            "chain": config.chain.profile,
+                            "relay": config.relay.url,
+                            "sources_count": config.isfr.sources.len(),
+                            "poll_interval_secs": config.isfr.poll_interval_secs,
+                            "epoch_duration_secs": config.isfr.epoch_duration_secs,
+                            "sources": config.isfr.sources.iter().map(|s| serde_json::json!({
+                                "name": s.name,
+                                "kind": s.kind,
+                                "class": s.class,
+                                "weight": s.weight,
+                                "rate_bps": s.rate_bps,
+                            })).collect::<Vec<_>>(),
+                        });
+                        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+                        return Ok(EXIT_SUCCESS);
+                    }
+
+                    if !config.isfr.enabled {
+                        println!("ISFR: disabled");
+                        return Ok(EXIT_SUCCESS);
+                    }
+
+                    println!("ISFR status (config only — roko serve not reachable)");
+                    println!("  chain:    {}", config.chain.profile);
                     println!(
-                        "    {} ({}, {}, weight={:.2})",
-                        src.name, src.kind, src.class, src.weight
+                        "  relay:    {}",
+                        config.relay.url.as_deref().unwrap_or("not configured")
                     );
+                    println!("  sources:  {}", config.isfr.sources.len());
+                    println!("  poll:     {}s", config.isfr.poll_interval_secs);
+                    println!("  epoch:    {}s", config.isfr.epoch_duration_secs);
+
+                    if !config.isfr.sources.is_empty() {
+                        println!("\n  Sources:");
+                        for src in &config.isfr.sources {
+                            println!(
+                                "    {} ({}, {}, weight={:.2})",
+                                src.name, src.kind, src.class, src.weight
+                            );
+                        }
+                    }
                 }
             }
 
-            // TODO (A6): Query /api/isfr/current from serve if running.
             Ok(EXIT_SUCCESS)
         }
 
-        IsfrCmd::Sources { workdir } => {
+        IsfrCmd::Sources { workdir, json } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let config = load_roko_config(&wd);
 
-            if config.isfr.sources.is_empty() {
-                println!("No ISFR sources configured.");
-                return Ok(EXIT_SUCCESS);
+            // Try to get live source health from serve first.
+            let client = match reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => reqwest::Client::new(),
+            };
+
+            match client
+                .get("http://localhost:6677/api/isfr/sources")
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        return Ok(EXIT_SUCCESS);
+                    }
+
+                    // Human-readable live source health from serve.
+                    println!("ISFR sources (live from roko serve)");
+                    if let Some(sources) = body.as_array() {
+                        if sources.is_empty() {
+                            println!("  (no sources tracked yet)");
+                        } else {
+                            println!(
+                                "  {:<20} {:<10} {:<8} {:<8} {}",
+                                "NAME", "STATUS", "WEIGHT", "RATE_BPS", "FAILURES"
+                            );
+                            for src in sources {
+                                let name = src.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                                let status = src.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                                let weight = src.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let failures = src
+                                    .get("consecutive_failures")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let rate_bps = src
+                                    .get("last_reading")
+                                    .and_then(|r| r.get("rate_bps"))
+                                    .and_then(|v| v.as_u64());
+                                let rate_str = rate_bps
+                                    .map(|b| b.to_string())
+                                    .unwrap_or_else(|| "-".to_string());
+                                println!(
+                                    "  {:<20} {:<10} {:<8.2} {:<8} {}",
+                                    name, status, weight, rate_str, failures
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Fall back to config-only display.
+                    if config.isfr.sources.is_empty() {
+                        if json {
+                            println!("[]");
+                        } else {
+                            println!("No ISFR sources configured.");
+                        }
+                        return Ok(EXIT_SUCCESS);
+                    }
+
+                    if json {
+                        let out: Vec<_> = config
+                            .isfr
+                            .sources
+                            .iter()
+                            .map(|s| {
+                                serde_json::json!({
+                                    "name": s.name,
+                                    "kind": s.kind,
+                                    "class": s.class,
+                                    "weight": s.weight,
+                                    "rate_bps": s.rate_bps,
+                                    "jitter_bps": s.jitter_bps,
+                                })
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+                        return Ok(EXIT_SUCCESS);
+                    }
+
+                    println!(
+                        "{:<20} {:<10} {:<12} {:>6} {:>8}",
+                        "NAME", "KIND", "CLASS", "WEIGHT", "RATE_BPS"
+                    );
+                    for src in &config.isfr.sources {
+                        println!(
+                            "{:<20} {:<10} {:<12} {:>6.2} {:>8}",
+                            src.name, src.kind, src.class, src.weight, src.rate_bps
+                        );
+                    }
+                }
             }
 
-            println!(
-                "{:<20} {:<10} {:<12} {:>6} {:>8}",
-                "NAME", "KIND", "CLASS", "WEIGHT", "RATE_BPS"
-            );
-            for src in &config.isfr.sources {
-                println!(
-                    "{:<20} {:<10} {:<12} {:>6.2} {:>8}",
-                    src.name, src.kind, src.class, src.weight, src.rate_bps
-                );
-            }
             Ok(EXIT_SUCCESS)
         }
     }
