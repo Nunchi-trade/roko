@@ -4069,6 +4069,20 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_config_providers_available_subcommand() {
+        let cli =
+            Cli::try_parse_from(["roko", "config", "providers", "available"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::Providers {
+                    cmd: ConfigProviderCmd::Available
+                }
+            })
+        ));
+    }
+
+    #[test]
     fn cli_parses_config_models_list_subcommand() {
         let cli = Cli::try_parse_from(["roko", "config", "models", "list"]).unwrap();
         assert!(matches!(

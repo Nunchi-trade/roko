@@ -64,8 +64,8 @@ pub use schema::{
     SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServeDeployConfig,
     ServeDeployWebhookConfig, ServerConfig, SpecDriftConfig, StuckPatternConfig,
     SubscriptionConfig, SubscriptionFilterConfig, SubscriptionTrigger, TestFailureBudgetConfig,
-    TimeOverrunConfig, ToolProfileConfig, ToolsConfig, TuiConfig, WatcherConfig, WatcherPathConfig,
-    WatcherThresholds, WebhooksConfig,
+    TimeOverrunConfig, ToolProfileConfig, ToolsConfig, TuiConfig, ValidationConfig,
+    WatcherConfig, WatcherPathConfig, WatcherThresholds, WebhooksConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.
@@ -95,6 +95,19 @@ pub enum LoadConfigError {
         /// Underlying validation error.
         source: StrictConfigValidationError,
     },
+    /// A model references a provider that does not exist after merging.
+    /// Only triggered when `[validation] strict_validation = true`.
+    #[error("{message}")]
+    ProviderReference {
+        /// Config file path.
+        path: std::path::PathBuf,
+        /// The model key with the dangling reference.
+        model_key: String,
+        /// The missing provider key.
+        provider_key: String,
+        /// Human-readable message.
+        message: String,
+    },
 }
 
 /// Load the workspace configuration from `workdir/roko.toml`.
@@ -122,6 +135,7 @@ pub fn load_config_strict(workdir: &Path) -> Result<ValidatedConfig, LoadConfigE
         &loader::LoadOptions {
             merge_global: true,
             apply_env_overrides: true,
+            apply_hierarchical_env: true,
             strict_validation: true,
         },
     )

@@ -36,7 +36,7 @@ pub(crate) async fn cmd_do(
         return cmd_do_resume_hint(&workdir);
     }
 
-    let preview_config = load_layered(&workdir)
+    let preview_config = load_resolved_config(&workdir)
         .map(|resolved| resolved.config)
         .unwrap_or_default();
     let scope_config = scope_model_config_from_cli_config(&preview_config);
@@ -166,6 +166,8 @@ async fn run_standard_path(
             .and_then(|s| RokoConfig::from_toml(&s).ok())
             .unwrap_or_default();
         crate::commands::util::preflight_provider_for_model(&do_config, &model_key)?;
+        // Aggregate provider readiness: warn/abort if no providers are usable.
+        crate::commands::util::preflight_providers_aggregate(&do_config)?;
     }
 
     // Generate plan from the prompt using the plan generate agent.
@@ -280,6 +282,8 @@ async fn run_complex_path(
             .and_then(|s| RokoConfig::from_toml(&s).ok())
             .unwrap_or_default();
         crate::commands::util::preflight_provider_for_model(&do_config, &model_key)?;
+        // Aggregate provider readiness: warn/abort if no providers are usable.
+        crate::commands::util::preflight_providers_aggregate(&do_config)?;
     }
 
     let title = prompt;
@@ -412,7 +416,7 @@ async fn run_plan_execution(
 ) -> Result<i32> {
     // Load both the CLI Config (for daimon, executor settings) and the
     // unified RokoConfig (for agent/provider/model settings).
-    let cli_config = load_layered(workdir)
+    let cli_config = load_resolved_config(workdir)
         .map(|resolved| resolved.config)
         .unwrap_or_default();
 
@@ -555,7 +559,13 @@ async fn run_plan_execution(
         feedback_facade: Some(feedback_facade),
         projection: Some(projection),
         http_event_sink: None,
-        stream_to_stderr: !cli.quiet && !cli.json,
+        output_sink: if !cli.quiet && !cli.json {
+            std::sync::Arc::new(roko_cli::runner::output_sink::StderrSink::new())
+                as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+        } else {
+            std::sync::Arc::new(roko_cli::runner::output_sink::NoopSink)
+                as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+        },
         warm_cache: true,
     };
 

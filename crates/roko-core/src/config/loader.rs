@@ -30,8 +30,17 @@
 //! | `ROKO_PROVIDER` | synthesized model profile provider |
 //! | `ROKO_MODEL_SLUG` | synthesized model profile slug |
 //!
-//! **Note**: Hierarchical `ROKO__SECTION__FIELD` overrides are not currently
-//! implemented. Only the named variables listed above are supported.
+//! ## Hierarchical `ROKO__SECTION__FIELD` overrides
+//!
+//! In addition to the named variables above, hierarchical overrides using
+//! `ROKO__SECTION__FIELD` syntax are supported. The prefix `ROKO__` is stripped,
+//! and `__` separators are converted to `.` in the config path. The value is then
+//! applied to the serialized TOML representation via structured serde roundtrip.
+//!
+//! Examples:
+//! - `ROKO__AGENT__DEFAULT_MODEL=gpt-4` -> `agent.default_model = "gpt-4"`
+//! - `ROKO__CONDUCTOR__MAX_AGENTS=16` -> `conductor.max_agents = 16`
+//! - `ROKO__GATES__SKIP_TESTS=true` -> `gates.skip_tests = true`
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +57,8 @@ pub struct LoadOptions {
     pub merge_global: bool,
     /// Apply named env var overrides (ROKO_MODEL, ROKO_BACKEND, etc.).
     pub apply_env_overrides: bool,
+    /// Apply hierarchical `ROKO__SECTION__FIELD` env overrides.
+    pub apply_hierarchical_env: bool,
     /// Apply strict safety validation (reject `dangerously_skip_permissions`).
     pub strict_validation: bool,
 }
@@ -57,6 +68,7 @@ impl Default for LoadOptions {
         Self {
             merge_global: true,
             apply_env_overrides: true,
+            apply_hierarchical_env: true,
             strict_validation: false,
         }
     }
@@ -79,6 +91,7 @@ impl LoadOptions {
         Self {
             merge_global: false,
             apply_env_overrides: false,
+            apply_hierarchical_env: false,
             strict_validation: true,
         }
     }
@@ -111,7 +124,7 @@ pub fn load_config_file(path: &Path, opts: &LoadOptions) -> Result<RokoConfig, L
     load_from_resolved_path(&Some(path.to_path_buf()), opts)
 }
 
-/// Load config with full provenance tracking (for CLI `load_layered` compatibility).
+/// Load config with full provenance tracking (for CLI `load_resolved_config` compatibility).
 ///
 /// Returns a [`ValidatedConfig`] with diagnostics and provenance info.
 pub fn load_config_validated(workdir: &Path) -> Result<ValidatedConfig, LoadConfigError> {
@@ -140,18 +153,37 @@ pub fn load_config_validated_with_options(
     if opts.apply_env_overrides {
         migrated.apply_process_env();
     }
+    if opts.apply_hierarchical_env {
+        apply_hierarchical_env_overrides(&mut migrated);
+    }
     migrated.interpolate_env_vars();
     migrated.resolve_file_secrets();
 
+    // Post-merge provider reference validation (same as load_from_resolved_path).
+    if !migrated.models.is_empty() {
+        validate_provider_references(&migrated, &path)?;
+    }
+
     let diagnostics = collect_diagnostics(&migrated);
 
-    let provenance = match &path {
+    let mut provenance = match &path {
         Some(p) => vec![ConfigProvenance::file(p.clone(), "roko.toml")],
         None => vec![ConfigProvenance::default(
             "roko.toml",
             "missing file; using built-in defaults",
         )],
     };
+
+    // Record which hierarchical env overrides were applied.
+    if opts.apply_hierarchical_env {
+        let env_paths = collect_hierarchical_env_paths();
+        for path_key in &env_paths {
+            provenance.push(ConfigProvenance::env(
+                path_key.clone(),
+                format!("ROKO__{} env override", path_key.to_ascii_uppercase().replace('.', "__")),
+            ));
+        }
+    }
 
     Ok(ValidatedConfig {
         raw,
@@ -220,8 +252,18 @@ fn load_from_resolved_path(
     if opts.apply_env_overrides {
         config.apply_process_env();
     }
+    if opts.apply_hierarchical_env {
+        apply_hierarchical_env_overrides(&mut config);
+    }
     config.interpolate_env_vars();
     config.resolve_file_secrets();
+
+    // Post-merge provider reference validation.
+    // When strict_validation is enabled in config, dangling model->provider
+    // references become hard errors instead of warnings.
+    if !config.models.is_empty() {
+        validate_provider_references(&config, path)?;
+    }
 
     // Emit diagnostics as warnings so callers don't need to opt into
     // load_config_validated() to see slug duplicates and orphaned models.
@@ -238,6 +280,182 @@ fn load_from_resolved_path(
     }
 
     Ok(config)
+}
+
+/// Validate that all model profiles reference providers that exist in the
+/// merged config. In strict mode, missing references become hard errors.
+/// In lenient mode (default), they are logged as warnings only — the
+/// `collect_diagnostics()` call handles the lenient warning path.
+fn validate_provider_references(
+    config: &RokoConfig,
+    path: &Option<PathBuf>,
+) -> Result<(), LoadConfigError> {
+    if !config.validation.strict_validation {
+        return Ok(());
+    }
+
+    for (model_key, model_profile) in &config.models {
+        if !config.providers.contains_key(&model_profile.provider) {
+            let msg = format!(
+                "model '{}' references provider '{}' which does not exist in the merged config. \
+                 Check roko.toml [models.{}] and ensure [providers.{}] is defined.",
+                model_key, model_profile.provider, model_key, model_profile.provider
+            );
+            return Err(LoadConfigError::ProviderReference {
+                path: path.clone().unwrap_or_default(),
+                model_key: model_key.clone(),
+                provider_key: model_profile.provider.clone(),
+                message: msg,
+            });
+        }
+    }
+    Ok(())
+}
+
+// ─── Hierarchical env override support ───────────────────────────────────
+
+/// Convert a `ROKO__SECTION__FIELD` env var key to a dotted config path.
+///
+/// Strips the `ROKO__` prefix, lowercases, and replaces `__` with `.`.
+/// Returns `None` if the key does not start with `ROKO__` or is empty after
+/// stripping the prefix.
+fn hierarchical_env_to_path(key: &str) -> Option<String> {
+    let suffix = key.strip_prefix("ROKO__")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    Some(suffix.to_ascii_lowercase().replace("__", "."))
+}
+
+/// Collect all `ROKO__*` env vars that represent hierarchical config paths.
+///
+/// Returns the list of dotted config paths that were found in the environment.
+fn collect_hierarchical_env_paths() -> Vec<String> {
+    collect_hierarchical_env_paths_from(std::env::vars())
+}
+
+/// Collect hierarchical env paths from an iterator (testable).
+fn collect_hierarchical_env_paths_from<I>(vars: I) -> Vec<String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    vars.into_iter()
+        .filter_map(|(key, _)| hierarchical_env_to_path(&key))
+        .collect()
+}
+
+/// Apply hierarchical `ROKO__SECTION__FIELD` env overrides to a config.
+///
+/// This works by serializing the config to TOML, applying the overrides to the
+/// TOML value tree, then deserializing back. This approach uses serde's
+/// structured handling rather than ad-hoc string edits.
+fn apply_hierarchical_env_overrides(config: &mut RokoConfig) {
+    apply_hierarchical_env_overrides_from(config, std::env::vars());
+}
+
+/// Apply hierarchical env overrides from a given set of vars (testable).
+pub(crate) fn apply_hierarchical_env_overrides_from<I>(config: &mut RokoConfig, vars: I)
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    // Collect all ROKO__* vars and convert to dotted paths.
+    let overrides: Vec<(String, String)> = vars
+        .into_iter()
+        .filter_map(|(key, value)| {
+            hierarchical_env_to_path(&key).map(|path| (path, value))
+        })
+        .collect();
+
+    if overrides.is_empty() {
+        return;
+    }
+
+    // Serialize current config to a TOML value tree.
+    let mut toml_value = match toml::Value::try_from(config.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to serialize config for hierarchical env overrides");
+            return;
+        }
+    };
+
+    // Apply each override to the TOML tree.
+    for (path, value) in &overrides {
+        set_toml_value_at_path(&mut toml_value, path, value);
+    }
+
+    // Deserialize back into RokoConfig.
+    match toml_value.try_into::<RokoConfig>() {
+        Ok(updated) => *config = updated,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to deserialize config after hierarchical env overrides; \
+                 overrides will be partially applied"
+            );
+        }
+    }
+}
+
+/// Set a value in a TOML value tree at a dotted path.
+///
+/// Creates intermediate tables as needed. The value is parsed as a TOML
+/// literal (bool, integer, float) or stored as a string.
+fn set_toml_value_at_path(root: &mut toml::Value, path: &str, raw_value: &str) {
+    let segments: Vec<&str> = path.split('.').collect();
+    if segments.is_empty() {
+        return;
+    }
+
+    // Navigate to the parent table, creating intermediate tables if needed.
+    let mut current = root;
+    for segment in &segments[..segments.len() - 1] {
+        let table = match current.as_table_mut() {
+            Some(t) => t,
+            None => return, // Path doesn't resolve to a table; skip this override.
+        };
+        table
+            .entry(*segment)
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        current = table.get_mut(*segment).unwrap();
+    }
+
+    // Set the leaf value.
+    let leaf_key = segments[segments.len() - 1];
+    if let Some(table) = current.as_table_mut() {
+        let parsed_value = parse_env_value_to_toml(raw_value);
+        table.insert(leaf_key.to_string(), parsed_value);
+    }
+}
+
+/// Parse a raw env var value into an appropriate TOML value type.
+///
+/// Attempts to parse as: bool (word-form only), integer, float; falls back to string.
+/// Note: "0" and "1" are treated as integers, NOT booleans, to avoid breaking
+/// numeric config fields. Only explicit words like "true"/"false"/"yes"/"no"
+/// are treated as booleans.
+fn parse_env_value_to_toml(raw: &str) -> toml::Value {
+    // Try bool (word-form only; "0"/"1" are integers).
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => return toml::Value::Boolean(true),
+        "false" | "no" | "off" => return toml::Value::Boolean(false),
+        _ => {}
+    }
+
+    // Try integer.
+    if let Ok(n) = raw.parse::<i64>() {
+        return toml::Value::Integer(n);
+    }
+
+    // Try float (only if it contains a dot to avoid int->float coercion).
+    if raw.contains('.') {
+        if let Ok(f) = raw.parse::<f64>() {
+            return toml::Value::Float(f);
+        }
+    }
+
+    // Fall back to string.
+    toml::Value::String(raw.to_string())
 }
 
 /// Collect semantic diagnostics from a fully-loaded config.
@@ -518,6 +736,7 @@ mod tests {
         let opts = LoadOptions {
             merge_global: false,
             apply_env_overrides: false,
+            apply_hierarchical_env: false,
             strict_validation: false,
         };
         let config = load_config_with_options(dir.path(), &opts).unwrap();
@@ -645,11 +864,203 @@ context_window = 4096
         let opts = LoadOptions {
             merge_global: false,
             apply_env_overrides: false,
+            apply_hierarchical_env: false,
             strict_validation: false,
         };
         let config = load_config_with_options(dir.path(), &opts).unwrap();
         // Without global merge, only project-level providers exist.
         // (No assertion on specific providers since global config varies per machine.)
         assert_eq!(config.config_version, 2);
+    }
+
+    #[test]
+    fn hierarchical_env_to_path_parses_correctly() {
+        assert_eq!(
+            super::hierarchical_env_to_path("ROKO__AGENT__DEFAULT_MODEL"),
+            Some("agent.default_model".to_string())
+        );
+        assert_eq!(
+            super::hierarchical_env_to_path("ROKO__CONDUCTOR__MAX_AGENTS"),
+            Some("conductor.max_agents".to_string())
+        );
+        assert_eq!(super::hierarchical_env_to_path("ROKO__"), None);
+        assert_eq!(super::hierarchical_env_to_path("OTHER_VAR"), None);
+        assert_eq!(super::hierarchical_env_to_path("ROKO_MODEL"), None);
+    }
+
+    #[test]
+    fn parse_env_value_to_toml_types() {
+        use super::parse_env_value_to_toml;
+        assert_eq!(parse_env_value_to_toml("true"), toml::Value::Boolean(true));
+        assert_eq!(parse_env_value_to_toml("false"), toml::Value::Boolean(false));
+        assert_eq!(parse_env_value_to_toml("yes"), toml::Value::Boolean(true));
+        assert_eq!(parse_env_value_to_toml("no"), toml::Value::Boolean(false));
+        // "0" and "1" are integers, not booleans (avoids breaking numeric fields).
+        assert_eq!(parse_env_value_to_toml("0"), toml::Value::Integer(0));
+        assert_eq!(parse_env_value_to_toml("1"), toml::Value::Integer(1));
+        assert_eq!(parse_env_value_to_toml("42"), toml::Value::Integer(42));
+        assert_eq!(parse_env_value_to_toml("3.14"), toml::Value::Float(3.14));
+        assert_eq!(
+            parse_env_value_to_toml("hello"),
+            toml::Value::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn hierarchical_env_overrides_apply_to_config() {
+        let mut config = RokoConfig::default();
+        let vars = vec![
+            ("ROKO__AGENT__DEFAULT_MODEL".to_string(), "test-model".to_string()),
+            ("ROKO__CONDUCTOR__MAX_AGENTS".to_string(), "16".to_string()),
+            ("ROKO__GATES__SKIP_TESTS".to_string(), "true".to_string()),
+        ];
+
+        super::apply_hierarchical_env_overrides_from(&mut config, vars);
+
+        assert_eq!(config.agent.default_model, "test-model");
+        assert_eq!(config.conductor.max_agents, 16);
+        assert!(config.gates.skip_tests);
+    }
+
+    #[test]
+    fn hierarchical_env_and_named_env_precedence() {
+        // Hierarchical overrides run after named overrides in the loader,
+        // so ROKO__AGENT__DEFAULT_MODEL should win over ROKO_MODEL when
+        // both are applied. This test exercises the internal function only.
+        let mut config = RokoConfig::default();
+        config.agent.default_model = "from-named-env".to_string();
+
+        let vars = vec![
+            ("ROKO__AGENT__DEFAULT_MODEL".to_string(), "from-hierarchical".to_string()),
+        ];
+
+        super::apply_hierarchical_env_overrides_from(&mut config, vars);
+        assert_eq!(config.agent.default_model, "from-hierarchical");
+    }
+
+    #[test]
+    fn validated_loader_records_hierarchical_env_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("roko.toml"), "config_version = 2\n").unwrap();
+
+        // Set a hierarchical env var for this test.
+        // Note: this test is isolated so env var pollution is acceptable.
+        std::env::set_var("ROKO__AGENT__DEFAULT_MODEL", "env-test-model");
+        let opts = LoadOptions {
+            merge_global: false,
+            apply_env_overrides: false,
+            apply_hierarchical_env: true,
+            strict_validation: false,
+        };
+        let validated = load_config_validated_with_options(dir.path(), &opts).unwrap();
+        std::env::remove_var("ROKO__AGENT__DEFAULT_MODEL");
+
+        assert_eq!(validated.config().agent.default_model, "env-test-model");
+        // Should have provenance entry for the env override.
+        let has_env_provenance = validated
+            .provenance()
+            .iter()
+            .any(|p| p.key == "agent.default_model");
+        assert!(has_env_provenance, "expected env provenance entry");
+    }
+
+    #[test]
+    fn strict_validation_rejects_dangling_provider_reference() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_text = r#"
+config_version = 2
+
+[validation]
+strict_validation = true
+
+[providers.anthropic]
+kind = "anthropic_api"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[models.fast]
+provider = "nonexistent_provider"
+slug = "claude-sonnet-4-20250514"
+"#;
+        std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
+
+        let result = load_config_with_options(
+            dir.path(),
+            &LoadOptions {
+                merge_global: false,
+                apply_env_overrides: false,
+                apply_hierarchical_env: false,
+                strict_validation: false,
+            },
+        );
+        assert!(result.is_err(), "strict mode should reject dangling provider ref");
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("nonexistent_provider"),
+            "error should mention the missing provider: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("fast"),
+            "error should mention the model key: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn lenient_validation_allows_dangling_provider_reference() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_text = r#"
+config_version = 2
+
+[providers.anthropic]
+kind = "anthropic_api"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[models.fast]
+provider = "nonexistent_provider"
+slug = "claude-sonnet-4-20250514"
+"#;
+        std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
+
+        let result = load_config_with_options(
+            dir.path(),
+            &LoadOptions {
+                merge_global: false,
+                apply_env_overrides: false,
+                apply_hierarchical_env: false,
+                strict_validation: false,
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "lenient mode should allow dangling provider ref: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn empty_models_skips_provider_validation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_text = r#"
+config_version = 2
+
+[validation]
+strict_validation = true
+"#;
+        std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
+
+        let result = load_config_with_options(
+            dir.path(),
+            &LoadOptions {
+                merge_global: false,
+                apply_env_overrides: false,
+                apply_hierarchical_env: false,
+                strict_validation: false,
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "empty models should not trigger validation: {:?}",
+            result.err()
+        );
     }
 }

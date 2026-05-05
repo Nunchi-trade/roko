@@ -67,6 +67,9 @@ pub async fn cmd_unified_chat(
     // 5. Load config for serve (best-effort, respects explicit --config override)
     let config = load_config_or_defaults(config_path, &workdir)?;
 
+    // 5b. Aggregate provider readiness: warn/abort if no providers are usable.
+    crate::commands::util::preflight_providers_aggregate(&config)?;
+
     // 6. Start serve in background only when the resolved config opts in.
     let serve_state = if no_serve {
         None
@@ -242,7 +245,7 @@ fn load_config_or_defaults(
     }
 
     // Try layered resolution; if it fails (no roko.toml at all), use defaults.
-    match crate::config::load_layered(workdir) {
+    match crate::config::load_resolved_config(workdir) {
         Ok(resolved) => Ok(resolved.config),
         Err(_) => Ok(crate::config::Config::default()),
     }

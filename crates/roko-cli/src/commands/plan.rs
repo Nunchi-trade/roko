@@ -276,7 +276,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
 
             prepare_runtime_hooks(&wd, cli.quiet);
-            let config = load_layered(&wd)?.config;
+            let config = load_resolved_config(&wd)?.config;
 
             // Bootstrap: workspace check + unified config load.
             let boot = roko_cli::bootstrap::RokoBootstrap::new(
@@ -296,6 +296,9 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     crate::commands::util::preflight_provider_for_model(&early_roko_config, dm)?;
                 }
             }
+
+            // Aggregate provider readiness: warn/abort if no providers are usable.
+            crate::commands::util::preflight_providers_aggregate(&early_roko_config)?;
 
             // Pre-flight: warn if gate tools are missing.
             let missing_gate_tools = crate::commands::util::preflight_gate_deps();
@@ -509,7 +512,13 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 feedback_facade: Some(feedback_facade),
                 projection: Some(projection),
                 http_event_sink: None,
-                stream_to_stderr: !approval && !cli.quiet && !cli.json,
+                output_sink: if !approval && !cli.quiet && !cli.json {
+                    std::sync::Arc::new(roko_cli::runner::output_sink::StderrSink::new())
+                        as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+                } else {
+                    std::sync::Arc::new(roko_cli::runner::output_sink::NoopSink)
+                        as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+                },
                 warm_cache: true,
             };
 
