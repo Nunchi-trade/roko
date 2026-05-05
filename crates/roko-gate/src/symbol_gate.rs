@@ -307,6 +307,15 @@ fn classify_expectation(
     mismatches: &mut Vec<String>,
 ) {
     let wanted_path = normalize_path(&exp.module_path);
+
+    // When module_path is empty, treat as "find anywhere by name" — skip the
+    // path-qualified lookup and go directly to by_name. This supports inferred
+    // symbols where we don't know the module path.
+    if wanted_path.is_empty() {
+        classify_expectation_by_name(exp, by_name, mismatches);
+        return;
+    }
+
     let key = (exp.name.clone(), wanted_path.clone());
 
     if let Some(symbols) = index.get(&key) {
@@ -386,6 +395,69 @@ fn classify_expectation(
         exp.name,
         wanted_path
     ));
+}
+
+/// Classify an expectation using only the name index (no path constraint).
+/// Used when `module_path` is empty, meaning "find this symbol anywhere".
+fn classify_expectation_by_name(
+    exp: &SymbolExpectation,
+    by_name: &HashMap<String, Vec<DiscoveredSymbol>>,
+    mismatches: &mut Vec<String>,
+) {
+    let Some(candidates) = by_name.get(&exp.name) else {
+        mismatches.push(format!("MISSING: {} {}", exp.kind.as_str(), exp.name));
+        return;
+    };
+    if candidates.is_empty() {
+        mismatches.push(format!("MISSING: {} {}", exp.kind.as_str(), exp.name));
+        return;
+    }
+    // Find a candidate that matches kind and visibility.
+    let best_match = candidates.iter().find(|sym| {
+        sym.kind == exp.kind && sym.visibility == exp.visibility
+    });
+    // Fall back to any match by kind alone.
+    let kind_match = best_match.or_else(|| candidates.iter().find(|sym| sym.kind == exp.kind));
+    // Fall back to any match by name alone (symbol exists but with different kind).
+    let found = kind_match.or(candidates.first());
+    let Some(found) = found else {
+        mismatches.push(format!("MISSING: {} {}", exp.kind.as_str(), exp.name));
+        return;
+    };
+    // Check kind mismatch (only report if no kind match exists).
+    if kind_match.is_none() {
+        mismatches.push(format!(
+            "WRONG_KIND: {} (found: {}, expected: {})",
+            exp.name,
+            found.kind.as_str(),
+            exp.kind.as_str()
+        ));
+        return;
+    }
+    // Check visibility mismatch (only if kind matched).
+    if best_match.is_none() && found.visibility != exp.visibility {
+        mismatches.push(format!(
+            "WRONG_VIS: {} {} (found: {}, expected: {})",
+            exp.kind.as_str(),
+            exp.name,
+            found.visibility.as_str(),
+            exp.visibility.as_str()
+        ));
+        return;
+    }
+    // Check signature if specified.
+    if let Some(sig) = exp.signature.as_deref() {
+        if let Some(matched) = best_match {
+            if !matched.signature_line.contains(sig) {
+                mismatches.push(format!(
+                    "WRONG_SIG: {} {} (missing substring: {})",
+                    exp.kind.as_str(),
+                    exp.name,
+                    sig
+                ));
+            }
+        }
+    }
 }
 
 /// Walk a directory collecting all `.rs` files.

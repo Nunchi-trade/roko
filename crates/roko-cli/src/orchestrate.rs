@@ -90,7 +90,7 @@ use roko_gate::{
     payload::{BuildSystem, GatePayload},
     rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung},
     rung_selector::{PlanComplexity, Rung, RungCaps, select_rungs},
-    symbol_gate::{SymbolExpectation, SymbolKind, SymbolManifest, Visibility},
+    symbol_gate::{SymbolExpectation, SymbolGate, SymbolKind, SymbolManifest, Visibility},
 };
 use roko_learn::anomaly::{Anomaly, AnomalyDetector};
 use roko_learn::budget::{BudgetAction, BudgetGuardrail};
@@ -3566,6 +3566,91 @@ fn fallback_plan_complexity(tasks: &[crate::task_parser::TaskDef]) -> PlanComple
         .unwrap_or(PlanComplexity::Simple)
 }
 
+/// Returns `true` if a task description contains patterns that look like Rust
+/// symbol declarations — e.g. "implement `pub struct Foo`" or "add fn bar()".
+///
+/// This is a cheap heuristic for deciding whether to run the Symbol rung when
+/// no explicit `context.symbols` are configured.
+fn task_description_has_symbols(description: Option<&str>) -> bool {
+    let Some(desc) = description else {
+        return false;
+    };
+    // Look for backtick-quoted identifiers that follow Rust item keywords.
+    // Patterns: `struct Foo`, `fn bar`, `trait Baz`, `enum Qux`, `type Alias`
+    static SYMBOL_PATTERNS: &[&str] = &[
+        "struct ", "fn ", "trait ", "enum ", "type ", "const ", "impl ",
+    ];
+    for pattern in SYMBOL_PATTERNS {
+        // Check for keyword followed by a PascalCase or snake_case identifier
+        // in the description text (possibly inside backticks).
+        if desc.contains(pattern) {
+            return true;
+        }
+        // Also check backtick-quoted: `struct Foo`
+        let backtick_pattern = format!("`{pattern}");
+        if desc.contains(&backtick_pattern) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Extract symbol expectations from a task description using keyword heuristics.
+///
+/// Looks for patterns like:
+/// - "implement `pub struct RateLimiter`"
+/// - "add fn check_rate"
+/// - "create trait Verifiable"
+///
+/// Returns expectations with best-effort kind/visibility inference.
+fn infer_symbols_from_description(description: &str) -> Vec<SymbolExpectation> {
+    let mut expectations = Vec::new();
+    // Regex-free approach: scan for Rust item keyword patterns.
+    let keywords: &[(&str, SymbolKind)] = &[
+        ("struct ", SymbolKind::Struct),
+        ("enum ", SymbolKind::Enum),
+        ("trait ", SymbolKind::Trait),
+        ("fn ", SymbolKind::Function),
+        ("type ", SymbolKind::TypeAlias),
+    ];
+
+    // Scan in backtick-delimited segments first (higher confidence).
+    for segment in description.split('`') {
+        let trimmed = segment.trim();
+        for &(keyword, kind) in keywords {
+            // Try with "pub " prefix
+            let (vis, rest) = if let Some(after_pub) = trimmed.strip_prefix("pub ") {
+                (Visibility::Pub, after_pub)
+            } else if let Some(after_pub_crate) = trimmed.strip_prefix("pub(crate) ") {
+                (Visibility::PubCrate, after_pub_crate)
+            } else {
+                (Visibility::Pub, trimmed)
+            };
+            if let Some(after_keyword) = rest.strip_prefix(keyword) {
+                // Extract the identifier (first word of remaining text)
+                let name = after_keyword
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+                    .unwrap_or("");
+                if !name.is_empty() && name.len() > 1 {
+                    expectations.push(SymbolExpectation {
+                        name: name.to_string(),
+                        kind,
+                        visibility: vis,
+                        module_path: String::new(), // unknown; SymbolGate will find it anywhere
+                        signature: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // Deduplicate by name
+    expectations.sort_by(|a, b| a.name.cmp(&b.name));
+    expectations.dedup_by(|a, b| a.name == b.name);
+    expectations
+}
+
 fn primary_gate_phase_to_rung(phase: &str) -> Option<Rung> {
     match phase {
         gate if gate.starts_with("compile") => Some(Rung::Compile),
@@ -3613,6 +3698,41 @@ impl Gate for RecordingGate {
                 verdict: verdict.clone(),
             });
         verdict
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+}
+
+/// Wrapper gate that injects a pre-built [`SymbolManifest`] signal before
+/// delegating to the inner [`SymbolGate`]. This allows the selected-gate
+/// pipeline (which passes the `GatePayload` signal to all gates) to use
+/// SymbolGate without restructuring the pipeline architecture.
+struct ManifestSymbolGate {
+    manifest: SymbolManifest,
+    inner: SymbolGate,
+}
+
+impl ManifestSymbolGate {
+    fn new(manifest: SymbolManifest, source_roots: Vec<PathBuf>) -> Self {
+        Self {
+            manifest,
+            inner: SymbolGate::new(source_roots),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Gate for ManifestSymbolGate {
+    async fn verify(&self, _signal: &Engram, ctx: &Context) -> Verdict {
+        // Build a signal with the SymbolManifest as its body, which is what
+        // SymbolGate expects.
+        let manifest_signal = Engram::builder(Kind::Task)
+            .body(Body::from_json(&self.manifest).expect("SymbolManifest serializes"))
+            .provenance(Provenance::trusted("orchestrate:symbol-gate"))
+            .build();
+        self.inner.verify(&manifest_signal, ctx).await
     }
 
     fn name(&self) -> &str {
@@ -15889,14 +16009,28 @@ impl PlanRunner {
 
     fn gate_rung_caps(
         &self,
+        plan_id: &str,
         exec_dir: &Path,
         generated_tests: Option<&Arc<dyn GeneratedArtifactStore>>,
     ) -> RungCaps {
         let gate_config = self.runtime_gate_config();
         let build_system = BuildSystem::detect(exec_dir);
+        // GATE-06: Symbol manifest is available when the current task has
+        // context.symbols populated, OR when the task description contains
+        // identifiers that look like Rust symbols (fn/struct/enum/trait names).
+        let has_symbol_manifest = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|tracker| tracker.last_impl_task())
+            .is_some_and(|task| {
+                task.context
+                    .as_ref()
+                    .is_some_and(|ctx| !ctx.symbols.is_empty())
+                    || task_description_has_symbols(task.description.as_deref())
+            });
         RungCaps {
             has_lint_tool: gate_config.clippy_enabled && build_system != BuildSystem::Make,
-            has_symbol_manifest: false,
+            has_symbol_manifest,
             has_generated_tests: generated_tests.is_some(),
             has_property_tests: false,
             has_integration_scenario: false,
@@ -15906,6 +16040,47 @@ impl PlanRunner {
     fn should_skip_selected_rung(&self, rung: Rung) -> bool {
         !matches!(rung, Rung::Compile | Rung::Test)
             && self.adaptive_thresholds.should_skip_rung(rung.as_index())
+    }
+
+    /// Build a [`SymbolManifest`] for the current task in a plan.
+    ///
+    /// Sources of symbol expectations (in priority order):
+    /// 1. Explicit `context.symbols` from the task definition
+    /// 2. Inferred from the task description using keyword heuristics
+    fn build_symbol_manifest_for_plan(&self, plan_id: &str) -> SymbolManifest {
+        let task = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|tracker| tracker.last_impl_task());
+        let mut manifest = SymbolManifest::new(plan_id);
+
+        if let Some(task) = task {
+            // Source 1: explicit context.symbols
+            if let Some(ctx) = task.context.as_ref() {
+                for sym in &ctx.symbols {
+                    let (module_path, name) = match sym.rsplit_once("::") {
+                        Some((module, name)) => (module.to_string(), name.to_string()),
+                        None => (String::new(), sym.clone()),
+                    };
+                    manifest.expectations.push(SymbolExpectation {
+                        name,
+                        kind: SymbolKind::Struct,
+                        visibility: Visibility::Pub,
+                        module_path,
+                        signature: None,
+                    });
+                }
+            }
+            // Source 2: infer from task description if no explicit symbols
+            if manifest.expectations.is_empty() {
+                if let Some(desc) = task.description.as_deref() {
+                    for exp in infer_symbols_from_description(desc) {
+                        manifest.expectations.push(exp);
+                    }
+                }
+            }
+        }
+        manifest
     }
 
     /// Resolve the effective domain for the current task in this plan.
@@ -15933,7 +16108,7 @@ impl PlanRunner {
         let gate_config = self.runtime_gate_config();
         let build_system = BuildSystem::detect(exec_dir);
         let generated_tests = self.generated_test_store_for(exec_dir);
-        let caps = self.gate_rung_caps(exec_dir, generated_tests.as_ref());
+        let caps = self.gate_rung_caps(plan_id, exec_dir, generated_tests.as_ref());
         let mut selected = select_rungs(
             self.gate_plan_complexity(plan_id),
             &caps,
@@ -15961,6 +16136,17 @@ impl PlanRunner {
                 }
                 Rung::Test if !gate_config.skip_tests => {
                     steps.push((rung, Box::new(TestGate::new(build_system))));
+                }
+                Rung::Symbol if caps.has_symbol_manifest => {
+                    // GATE-06: Dispatch SymbolGate via ManifestSymbolGate wrapper.
+                    // Build SymbolManifest from task context symbols or inferred
+                    // symbols from the task description.
+                    let source_roots = vec![self.workdir.clone()];
+                    let manifest = self.build_symbol_manifest_for_plan(plan_id);
+                    steps.push((
+                        rung,
+                        Box::new(ManifestSymbolGate::new(manifest, source_roots)),
+                    ));
                 }
                 Rung::GeneratedTest => {
                     if let Some(store) = generated_tests.clone() {
