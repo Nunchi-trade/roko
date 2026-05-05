@@ -101,117 +101,298 @@ impl SseAdapter {
 
     /// Convert a RuntimeEvent to an SseEvent.
     fn to_sse_event(event: &RuntimeEvent) -> SseEvent {
-        let run_id = event.run_id().to_string();
-        let kind = event.kind().to_string();
-
-        let data = match event {
+        let (kind, run_id, data) = match event {
             RuntimeEvent::WorkflowStarted {
-                template, prompt, ..
-            } => {
+                run_id,
+                template,
+                prompt,
+            } => (
+                "workflow_started",
+                run_id.as_str(),
                 serde_json::json!({
                     "template": template,
                     "prompt": prompt,
-                })
-            }
-            RuntimeEvent::PhaseTransition { from, to, .. } => {
+                }),
+            ),
+            RuntimeEvent::PhaseTransition { run_id, from, to } => (
+                "phase_transition",
+                run_id.as_str(),
                 serde_json::json!({
                     "from": from,
                     "to": to,
-                })
-            }
-            RuntimeEvent::WorkflowCompleted { outcome, .. } => {
+                }),
+            ),
+            RuntimeEvent::WorkflowCompleted { run_id, outcome } => (
+                "workflow_completed",
+                run_id.as_str(),
                 serde_json::json!({
                     "outcome": outcome.to_string(),
-                })
-            }
+                }),
+            ),
             RuntimeEvent::AgentSpawned {
+                run_id,
                 agent_id,
                 role,
                 model,
-                ..
-            } => {
+            } => (
+                "agent_spawned",
+                run_id.as_str(),
                 serde_json::json!({
                     "agent_id": agent_id,
                     "role": role,
                     "model": model,
-                })
-            }
+                }),
+            ),
             RuntimeEvent::AgentOutput {
-                agent_id, chunk, ..
-            } => {
+                run_id,
+                agent_id,
+                chunk,
+            } => (
+                "agent_output",
+                run_id.as_str(),
                 serde_json::json!({
                     "agent_id": agent_id,
                     "chunk": chunk,
-                })
-            }
+                }),
+            ),
             RuntimeEvent::AgentCompleted {
+                run_id,
                 agent_id,
                 tokens_used,
                 cost_usd,
                 ..
-            } => {
+            } => (
+                "agent_completed",
+                run_id.as_str(),
                 serde_json::json!({
                     "agent_id": agent_id,
                     "tokens_used": tokens_used,
                     "cost_usd": cost_usd,
-                })
-            }
+                }),
+            ),
             RuntimeEvent::AgentFailed {
-                agent_id, error, ..
-            } => {
+                run_id,
+                agent_id,
+                error,
+            } => (
+                "agent_failed",
+                run_id.as_str(),
                 serde_json::json!({
                     "agent_id": agent_id,
                     "error": error,
-                })
-            }
+                }),
+            ),
             RuntimeEvent::GateStarted {
-                gate_name, rung, ..
-            } => {
+                run_id,
+                gate_name,
+                rung,
+                ..
+            } => (
+                "gate_started",
+                run_id.as_str(),
                 serde_json::json!({
                     "gate_name": gate_name,
                     "rung": rung,
-                })
-            }
+                }),
+            ),
             RuntimeEvent::GatePassed {
+                run_id,
                 gate_name,
                 duration_ms,
-                ..
-            } => {
+            } => (
+                "gate_passed",
+                run_id.as_str(),
                 serde_json::json!({
                     "gate_name": gate_name,
                     "duration_ms": duration_ms,
-                })
-            }
+                }),
+            ),
             RuntimeEvent::GateFailed {
+                run_id,
                 gate_name,
                 output,
                 duration_ms,
-                ..
-            } => {
+            } => (
+                "gate_failed",
+                run_id.as_str(),
                 serde_json::json!({
                     "gate_name": gate_name,
                     "output": output,
                     "duration_ms": duration_ms,
-                })
-            }
+                }),
+            ),
             RuntimeEvent::FeedbackRecorded {
+                run_id,
                 kind: feedback_kind,
                 summary,
-                ..
-            } => {
+            } => (
+                "feedback_recorded",
+                run_id.as_str(),
                 serde_json::json!({
                     "feedback_kind": feedback_kind,
                     "summary": summary,
-                })
-            }
-            RuntimeEvent::StateCheckpointed { path, .. } => {
+                }),
+            ),
+            RuntimeEvent::StateCheckpointed { run_id, path } => (
+                "state_checkpointed",
+                run_id.as_str(),
                 serde_json::json!({
                     "path": path,
-                })
-            }
+                }),
+            ),
+            RuntimeEvent::InferenceStarted {
+                request_id,
+                model,
+                agent_id,
+                auto_routed,
+                ..
+            } => (
+                "inference_started",
+                "",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "model": model,
+                    "agent_id": agent_id,
+                    "auto_routed": auto_routed,
+                }),
+            ),
+            RuntimeEvent::InferenceCompleted {
+                request_id,
+                model,
+                agent_id,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                duration_ms,
+                ..
+            } => (
+                "inference_completed",
+                "",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "model": model,
+                    "agent_id": agent_id,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cost_usd": cost_usd,
+                    "duration_ms": duration_ms,
+                }),
+            ),
+            RuntimeEvent::InferenceFailed {
+                request_id,
+                model,
+                agent_id,
+                error,
+                ..
+            } => (
+                "inference_failed",
+                "",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "model": model,
+                    "agent_id": agent_id,
+                    "error": error,
+                }),
+            ),
+            RuntimeEvent::AgentTrace {
+                agent_id,
+                turn,
+                tool_calls,
+                reasoning,
+                usage,
+                ..
+            } => (
+                "agent_trace",
+                "",
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "turn": turn,
+                    "tool_calls": tool_calls,
+                    "reasoning": reasoning,
+                    "usage": usage,
+                }),
+            ),
+            RuntimeEvent::TaskFailed {
+                plan_id,
+                task_id,
+                error,
+                gate_failure,
+                ..
+            } => (
+                "task_failed",
+                plan_id.as_str(),
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "task_id": task_id,
+                    "error": error,
+                    "gate_failure": gate_failure,
+                }),
+            ),
+            RuntimeEvent::RunStarted {
+                run_id,
+                prompt,
+                complexity,
+                ..
+            } => (
+                "run_started",
+                run_id.as_str(),
+                serde_json::json!({
+                    "run_id": run_id,
+                    "prompt": prompt,
+                    "complexity": complexity,
+                }),
+            ),
+            RuntimeEvent::RunCompleted {
+                run_id,
+                success,
+                cost_usd,
+                duration_ms,
+                ..
+            } => (
+                "run_completed",
+                run_id.as_str(),
+                serde_json::json!({
+                    "run_id": run_id,
+                    "success": success,
+                    "cost_usd": cost_usd,
+                    "duration_ms": duration_ms,
+                }),
+            ),
+            RuntimeEvent::KnowledgeIngested {
+                entry_id,
+                topic,
+                source_agent,
+                ..
+            } => (
+                "knowledge_ingested",
+                "",
+                serde_json::json!({
+                    "entry_id": entry_id,
+                    "topic": topic,
+                    "source_agent": source_agent,
+                }),
+            ),
+            RuntimeEvent::KnowledgeConsumed {
+                entry_id,
+                topic,
+                consuming_agent,
+                ..
+            } => (
+                "knowledge_consumed",
+                "",
+                serde_json::json!({
+                    "entry_id": entry_id,
+                    "topic": topic,
+                    "consuming_agent": consuming_agent,
+                }),
+            ),
         };
 
-        SseEvent { kind, run_id, data }
+        SseEvent {
+            kind: kind.to_string(),
+            run_id: run_id.to_string(),
+            data,
+        }
     }
 }
 
