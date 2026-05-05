@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use roko_fs::RokoLayout;
 use tracing::info;
 
@@ -30,16 +30,22 @@ pub struct Plan {
 /// Load a single plan from a directory that must contain `tasks.toml`.
 pub fn load_plan(dir: &Path) -> Result<Plan> {
     let tasks_path = dir.join("tasks.toml");
-    if !tasks_path.exists() {
-        bail!("No tasks.toml found in {}", dir.display());
-    }
+    let content = match std::fs::read_to_string(&tasks_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("No tasks.toml found in {}", dir.display());
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("read {}", tasks_path.display())));
+        }
+    };
 
     let id = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "unnamed".to_string());
 
-    let tasks = TasksFile::parse(&tasks_path)
+    let tasks = TasksFile::parse_str(&content)
         .with_context(|| format!("failed to parse {}", tasks_path.display()))?;
     let schema_issues = tasks.validate_against_schema();
     if !schema_issues.is_empty() {
@@ -73,9 +79,13 @@ pub fn load_plan(dir: &Path) -> Result<Plan> {
 /// - Otherwise, scans immediate subdirectories for `tasks.toml` files.
 /// - Never scans `.md` files or modifies anything on disk.
 pub fn load_plans(dir: &Path) -> Result<Vec<Plan>> {
-    // Case 1: dir itself is a plan
-    if dir.join("tasks.toml").exists() {
-        return Ok(vec![load_plan(dir)?]);
+    // Case 1: dir itself is a plan (try reading tasks.toml directly)
+    match std::fs::read_to_string(dir.join("tasks.toml")) {
+        Ok(_) => return Ok(vec![load_plan(dir)?]),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("read {}/tasks.toml", dir.display())));
+        }
     }
 
     // Case 2: scan subdirs
@@ -86,12 +96,20 @@ pub fn load_plans(dir: &Path) -> Result<Vec<Plan>> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() && path.join("tasks.toml").exists() {
-            match load_plan(&path) {
+        if !path.is_dir() {
+            continue;
+        }
+        // Attempt to read tasks.toml — if NotFound, this subdir is not a plan.
+        match std::fs::read_to_string(path.join("tasks.toml")) {
+            Ok(_) => match load_plan(&path) {
                 Ok(plan) => plans.push(plan),
                 Err(e) => {
                     tracing::warn!(dir = %path.display(), err = %e, "skipping plan with parse error");
                 }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                tracing::warn!(dir = %path.display(), err = %e, "failed to probe tasks.toml");
             }
         }
     }
@@ -140,8 +158,8 @@ fn load_prd_excerpt_for_plan(workdir: Option<&Path>, plan_id: &str) -> String {
         prd_base.join("draft").join(format!("{plan_id}.md")),
     ];
     for path in &candidates {
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
                 return if content.len() > PRD_LIMIT {
                     let mut s = content.chars().take(PRD_LIMIT).collect::<String>();
                     s.push_str("\n[truncated]");
@@ -149,6 +167,11 @@ fn load_prd_excerpt_for_plan(workdir: Option<&Path>, plan_id: &str) -> String {
                 } else {
                     content
                 };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "failed to read PRD file");
+                continue;
             }
         }
     }
@@ -329,20 +352,24 @@ pub fn scaffold_missing_crates(workdir: &Path, plans: &[Plan]) -> Result<Vec<Str
     if !scaffolded.is_empty() {
         let ws_cargo_path = workdir.join("Cargo.toml");
 
-        // In ephemeral workspaces there may be no root Cargo.toml yet.
-        // Create a minimal workspace manifest so `cargo check` can succeed.
-        if !ws_cargo_path.exists() {
-            let minimal = "[workspace]\nresolver = \"2\"\nmembers = [\n]\n";
-            std::fs::write(&ws_cargo_path, minimal)
-                .context("scaffold: create workspace Cargo.toml")?;
-            info!(
-                "created minimal workspace Cargo.toml at {}",
-                ws_cargo_path.display()
-            );
-        }
-
-        let ws_content = std::fs::read_to_string(&ws_cargo_path)
-            .context("scaffold: read workspace Cargo.toml")?;
+        // Try to read the existing workspace Cargo.toml. If it doesn't exist,
+        // create a minimal manifest so `cargo check` can succeed.
+        let ws_content = match std::fs::read_to_string(&ws_cargo_path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let minimal = "[workspace]\nresolver = \"2\"\nmembers = [\n]\n".to_string();
+                std::fs::write(&ws_cargo_path, &minimal)
+                    .context("scaffold: create workspace Cargo.toml")?;
+                info!(
+                    "created minimal workspace Cargo.toml at {}",
+                    ws_cargo_path.display()
+                );
+                minimal
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context("scaffold: read workspace Cargo.toml"));
+            }
+        };
 
         let mut new_content = ws_content.clone();
         for name in &scaffolded {

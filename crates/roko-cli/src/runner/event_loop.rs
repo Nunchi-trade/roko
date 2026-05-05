@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
-use roko_core::RuntimeEvent;
 use roko_core::agent::ModelSpec;
 use roko_core::config::GatesConfig;
 use roko_core::defaults::{DEFAULT_AGENT_TURN_LIMIT, DEFAULT_RUNNER_MAX_CONCURRENT_PLANS};
+use roko_core::RuntimeEvent;
 // TimeoutConfig-derived helpers: agent_dispatch_timeout, plan_total_timeout,
 // llm_call_timeout, gate_timeout — see below.
 use roko_core::runtime_event::WorkflowOutcome as RuntimeWorkflowOutcome;
@@ -22,7 +22,7 @@ use roko_daimon::{
     TaskStrategyObservation,
 };
 use roko_fs::RokoLayout;
-use roko_gate::{PlanComplexity, classify_gate_failure, render_failure_classification};
+use roko_gate::{classify_gate_failure, render_failure_classification, PlanComplexity};
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
@@ -45,7 +45,7 @@ use crate::task_parser::TaskDef;
 use roko_learn::playbook::PlaybookStore;
 use roko_learn::post_gate_reflection::{PostGateReflectionStore, ReflectionGateOutcome};
 use roko_learn::section_outcome::{
-    SECTION_OUTCOME_SCHEMA_VERSION, SectionOutcomeRecord, SectionOutcomeStatus, SectionOutcomeStore,
+    SectionOutcomeRecord, SectionOutcomeStatus, SectionOutcomeStore, SECTION_OUTCOME_SCHEMA_VERSION,
 };
 use roko_neuro::KnowledgeStore;
 
@@ -4337,15 +4337,23 @@ async fn seed_playbooks_if_empty(layout: &RokoLayout) {
 
     let pb_dir = layout.playbooks_dir();
 
-    // Quick check: if the directory exists and has any .json files, skip.
-    if pb_dir.exists() {
-        if let Ok(mut entries) = tokio::fs::read_dir(&pb_dir).await {
+    // Quick check: if the directory has any .json files, skip seeding.
+    // Use read_dir directly instead of exists() to avoid TOCTOU race.
+    match tokio::fs::read_dir(&pb_dir).await {
+        Ok(mut entries) => {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
                     debug!("playbook store already has entries, skipping seed");
                     return;
                 }
             }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Directory doesn't exist yet — will be created by PlaybookStore
+        }
+        Err(e) => {
+            warn!(error = %e, dir = %pb_dir.display(), "failed to read playbook dir");
+            return;
         }
     }
 
