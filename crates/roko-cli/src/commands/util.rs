@@ -224,13 +224,9 @@ pub(crate) async fn cmd_run(
     prompt: String,
     serve: bool,
     share: bool,
-    engine: crate::EngineVariant,
     provider: Option<String>,
     max_retries: Option<u32>,
 ) -> Result<i32> {
-    let is_legacy_engine = matches!(engine, crate::EngineVariant::Legacy);
-    roko_cli::run::ensure_share_supported(is_legacy_engine, share)?;
-
     // Build CLI overrides from clap-parsed args instead of re-parsing
     // process args or laundering through env vars.
     let overrides = roko_cli::run::CliOverrides {
@@ -267,182 +263,24 @@ pub(crate) async fn cmd_run(
         None
     };
 
-    // TODO(converge): When --serve is active we should share the server's StateHub
-    // so DashboardEvents flow to the HTTP server's SSE/WebSocket/snapshot endpoints.
-    // Currently roko_serve::StateHub and roko_cli::state_hub::StateHub are distinct
-    // types (same source included via #[path] in both crates). Bridge them once
-    // roko-core re-exports StateHub from its crate root.
-    let external_hub: Option<&roko_cli::state_hub::StateHub> = None;
+    // TODO(R2_G01): Read workflow template from roko.toml once a [pipeline]
+    // config section is added to the Config struct. For now, fall back to "standard".
+    let template = "standard";
 
-    if engine == crate::EngineVariant::V2 {
-        // TODO(R2_G01): Read workflow template from roko.toml once a [pipeline]
-        // config section is added to the Config struct. For now, fall back to "standard".
-        let template = "standard";
+    // Build enabled gates list and typed shell commands from declared gate configs.
+    let enabled_gates = roko_cli::run::workflow_enabled_gate_names(&config.gates);
+    let shell_gates = roko_cli::run::workflow_shell_gate_commands(&config.gates);
 
-        // Build enabled gates list and typed shell commands from declared gate configs.
-        let enabled_gates = roko_cli::run::workflow_enabled_gate_names(&config.gates);
-        let shell_gates = roko_cli::run::workflow_shell_gate_commands(&config.gates);
-
-        let result = roko_cli::run::run_workflow_engine_report_with_hub(
-            &prompt,
-            &workdir,
-            template,
-            enabled_gates,
-            shell_gates,
-            None,
-            &overrides,
-        )
-        .await;
-
-        // Shut down the HTTP server if it was started.
-        if let Some((state, handle)) = server_guard {
-            state.cancel.cancel();
-            let _ = handle.await;
-        }
-
-        return match result {
-            Ok(report) => {
-                if cli.json {
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                } else if !cli.quiet {
-                    roko_cli::run::print_workflow_run_report(&prompt, template, &report);
-                }
-
-                if !report.success {
-                    match roko_cli::run::workflow_report_outcome(&report) {
-                        Some(roko_core::WorkflowOutcome::Halted { reason }) => {
-                            eprintln!("error: workflow halted: {reason}");
-                        }
-                        Some(roko_core::WorkflowOutcome::Cancelled) => {
-                            eprintln!("error: workflow cancelled");
-                        }
-                        Some(roko_core::WorkflowOutcome::Success { .. }) | None => {
-                            eprintln!("error: workflow failed");
-                        }
-                    }
-                }
-
-                if share {
-                    if let Err(err) = roko_cli::run::write_shared_workflow_run(
-                        &workdir,
-                        &prompt,
-                        &config.agent.command,
-                        &config.prompt.role,
-                        &report,
-                    ) {
-                        if !cli.quiet {
-                            eprintln!("share failed: {err}");
-                        }
-                    }
-                }
-
-                if report.success {
-                    Ok(EXIT_SUCCESS)
-                } else {
-                    Ok(EXIT_AGENT_FAILURE)
-                }
-            }
-            Err(e) => {
-                if !cli.quiet {
-                    eprintln!("workflow engine error: {e:#}");
-                }
-                Ok(EXIT_AGENT_FAILURE)
-            }
-        };
-    }
-
-    // Use inline rendering when stdout is a TTY and we're not in --json or --quiet mode.
-    if !cli.json && !cli.quiet && roko_cli::inline::should_use_inline() {
-        let start = std::time::Instant::now();
-        let report =
-            roko_cli::run_inline::run_once_inline(&workdir, &config, &prompt, external_hub).await?;
-
-        // Share the run transcript when --share is active.
-        if share {
-            let elapsed = start.elapsed().as_secs_f64();
-            match roko_cli::share::share_run(
-                &workdir,
-                &report,
-                &prompt,
-                &config.agent.command,
-                &config.prompt.role,
-                elapsed,
-            ) {
-                Ok(result) => {
-                    eprintln!();
-                    eprintln!(
-                        "  {} share  {}",
-                        roko_cli::inline::symbols::PASS,
-                        result.url,
-                    );
-                    if result.backend == "local" {
-                        eprintln!(
-                            "  {} saved to {}",
-                            roko_cli::inline::symbols::INFO,
-                            result.local_path,
-                        );
-                        eprintln!("  (install gh CLI for automatic Gist upload)");
-                    }
-                    eprintln!();
-                }
-                Err(err) => {
-                    eprintln!("  share failed: {err}");
-                }
-            }
-        }
-
-        // Shut down the HTTP server if it was started.
-        if let Some((state, handle)) = server_guard {
-            state.cancel.cancel();
-            let _ = handle.await;
-        }
-
-        return if report.overall_success() {
-            Ok(0)
-        } else {
-            Ok(1)
-        };
-    }
-
-    // Legacy output path (--json, --quiet, or non-TTY)
-    if !cli.quiet {
-        println!(
-            "running agent `{}` with {} gate(s)",
-            config.agent.command,
-            config.gates.len()
-        );
-    }
-    let report = run_once(&workdir, &config, &prompt, None, external_hub).await?;
-
-    if cli.json {
-        println!(
-            r#"{{"success":{},"episode":"{}","prompt":"{}","agent_output":"{}","signals":{}}}"#,
-            report.overall_success(),
-            report.episode_id,
-            report.prompt_id,
-            report.agent_output_id,
-            report.total_signals,
-        );
-    } else if !cli.quiet {
-        println!("---");
-        println!(
-            "agent        : {} (success={})",
-            config.agent.command, report.agent_success
-        );
-        println!("prompt_id    : {}", report.prompt_id);
-        println!("agent_output : {}", report.agent_output_id);
-        if report.gate_verdicts.is_empty() {
-            println!("gates        : (none configured)");
-        } else {
-            println!("gates:");
-            for (name, ok) in &report.gate_verdicts {
-                let marker = if *ok { "PASS" } else { "FAIL" };
-                println!("  [{marker}] {name}");
-            }
-        }
-        println!("episode      : {}", report.episode_id);
-        println!("signals      : {}", report.total_signals);
-    }
+    let result = roko_cli::run::run_workflow_engine_report_with_hub(
+        &prompt,
+        &workdir,
+        template,
+        enabled_gates,
+        shell_gates,
+        None,
+        &overrides,
+    )
+    .await;
 
     // Shut down the HTTP server if it was started.
     if let Some((state, handle)) = server_guard {
@@ -450,10 +288,54 @@ pub(crate) async fn cmd_run(
         let _ = handle.await;
     }
 
-    if report.overall_success() {
-        Ok(EXIT_SUCCESS)
-    } else {
-        Ok(EXIT_AGENT_FAILURE)
+    match result {
+        Ok(report) => {
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if !cli.quiet {
+                roko_cli::run::print_workflow_run_report(&prompt, template, &report);
+            }
+
+            if !report.success {
+                match roko_cli::run::workflow_report_outcome(&report) {
+                    Some(roko_core::WorkflowOutcome::Halted { reason }) => {
+                        eprintln!("error: workflow halted: {reason}");
+                    }
+                    Some(roko_core::WorkflowOutcome::Cancelled) => {
+                        eprintln!("error: workflow cancelled");
+                    }
+                    Some(roko_core::WorkflowOutcome::Success { .. }) | None => {
+                        eprintln!("error: workflow failed");
+                    }
+                }
+            }
+
+            if share {
+                if let Err(err) = roko_cli::run::write_shared_workflow_run(
+                    &workdir,
+                    &prompt,
+                    &config.agent.command,
+                    &config.prompt.role,
+                    &report,
+                ) {
+                    if !cli.quiet {
+                        eprintln!("share failed: {err}");
+                    }
+                }
+            }
+
+            if report.success {
+                Ok(EXIT_SUCCESS)
+            } else {
+                Ok(EXIT_AGENT_FAILURE)
+            }
+        }
+        Err(e) => {
+            if !cli.quiet {
+                eprintln!("workflow engine error: {e:#}");
+            }
+            Ok(EXIT_AGENT_FAILURE)
+        }
     }
 }
 

@@ -144,8 +144,6 @@ timeout_ms = 5000
         &[
             "run",
             "write a hello function",
-            "--engine",
-            "legacy",
             "--workdir",
             tmp.path().to_str().expect("workdir"),
         ],
