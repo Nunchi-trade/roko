@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 roko-primitives = { path = "../roko-primitives" }
-roko-runtime = { path = "../roko-runtime" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

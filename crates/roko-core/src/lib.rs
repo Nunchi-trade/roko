@@ -143,7 +143,6 @@ pub mod prediction;
 pub mod project;
 pub mod provenance;
 pub mod pulse;
-pub mod pulse_bus;
 pub mod query;
 pub mod runtime_event;
 pub mod score;
@@ -152,7 +151,6 @@ pub mod shutdown;
 /// Signal — forward-compatible alias for `Engram` (Phase 1 prep).
 pub mod signal;
 pub mod signal_kinds;
-pub mod state_hub;
 pub mod task;
 pub mod temperament;
 pub mod tool;
@@ -263,14 +261,12 @@ pub use provenance::{
     Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, Taint, TaintInfo,
 };
 pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
-pub use pulse_bus::{PulseBus, PulseBusReceiver};
 pub use query::{Budget, Query};
 pub use roko_primitives::HdcVector;
 pub use runtime_event::{RuntimeEvent, ToolCallSummary, WorkflowOutcome};
 pub use score::Score;
 pub use signal::{Signal, SignalBuilder};
 pub use signal_kinds::*;
-pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use task::{
     GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight,
     TaskDomain, TaskMeta, TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,

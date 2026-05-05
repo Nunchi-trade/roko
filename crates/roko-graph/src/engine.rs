@@ -462,7 +462,7 @@ impl Cell for ShellCell {
             .args(self.args)
             .output()
             .await
-            .map_err(|e| roko_core::error::RokoError::Gate {
+            .map_err(|e| roko_core::error::RokoError::Verify {
                 gate: self.name.to_string(),
                 message: format!("failed to spawn '{}': {}", self.program, e),
             })?;
@@ -483,7 +483,7 @@ impl Cell for ShellCell {
             } else {
                 detail
             };
-            Err(roko_core::error::RokoError::Gate {
+            Err(roko_core::error::RokoError::Verify {
                 gate: self.name.to_string(),
                 message: format!(
                     "{} exited with code {}: {}",

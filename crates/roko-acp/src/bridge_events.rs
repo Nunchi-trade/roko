@@ -1901,7 +1901,7 @@ async fn run_openai_compat_mcp_tool_loop(
         .with_max_iterations(DEFAULT_MAX_TOOL_ITERATIONS)
         .with_context_token_limit(context_limit);
 
-    let (chunk_sender, chunk_receiver) = mpsc::unbounded_channel();
+    let (chunk_sender, chunk_receiver) = mpsc::channel(256);
     let forwarder = tokio::spawn(forward_tool_loop_stream_chunks(
         chunk_receiver,
         event_sender.clone(),
@@ -1990,7 +1990,7 @@ async fn run_openai_compat_mcp_tool_loop(
 }
 
 async fn forward_tool_loop_stream_chunks(
-    mut receiver: mpsc::UnboundedReceiver<StreamChunk>,
+    mut receiver: mpsc::Receiver<StreamChunk>,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) {
     while let Some(chunk) = receiver.recv().await {

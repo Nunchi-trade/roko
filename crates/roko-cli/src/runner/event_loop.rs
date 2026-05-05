@@ -82,6 +82,22 @@ pub struct RunReport {
     pub duration: Duration,
     /// Per-task failure reasons keyed by "plan_id:task_id".
     pub failure_reasons: HashMap<String, String>,
+    /// Per-task cost breakdown.
+    pub task_costs: Vec<TaskCostReport>,
+}
+
+/// Per-task cost report for the RunLedger.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TaskCostReport {
+    pub plan_id: String,
+    pub task_id: String,
+    pub model: String,
+    pub provider: String,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost_usd: f64,
+    pub agent_calls: u32,
+    pub outcome: String,
 }
 
 /// Per-plan report.
@@ -644,6 +660,7 @@ pub async fn run(
         )));
         let costs = Arc::new(roko_learn::costs_db::CostsDb::new());
         let efficiency_path = config.layout.learn_dir().join("efficiency.jsonl");
+        let router_persist_path = Some(config.layout.learn_dir().join("cascade-router.json"));
         tokio::spawn(roko_learn::event_subscriber::run_learning_subscriber(
             learning_subscriber_rx,
             health,
@@ -652,6 +669,7 @@ pub async fn run(
             anomaly,
             costs,
             efficiency_path,
+            router_persist_path,
         ))
     };
 
@@ -4905,6 +4923,7 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
         total_agent_calls: state.total_agent_calls,
         duration: state.elapsed(),
         failure_reasons: state.failure_reasons.clone(),
+        task_costs: Vec::new(),
     }
 }
 
