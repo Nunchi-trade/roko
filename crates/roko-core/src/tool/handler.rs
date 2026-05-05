@@ -80,6 +80,13 @@ impl AuditSink for NoopAuditSink {
 /// without busy-polling. Impls backed by a real notification primitive
 /// (e.g. [`AtomicCancel`]) override it for zero-latency wake-up; the
 /// default falls back to 50 ms polling for foreign impls.
+///
+/// The default implementation polls every 50 ms. Override this method with a
+/// `tokio::sync::Notify`-backed impl for zero-latency cancellation. See
+/// [`AtomicCancel`] for the canonical pattern.
+///
+/// **Required override for owned types.** The default is a compatibility shim
+/// for foreign impls only; any type you fully control MUST override `cancelled()`.
 #[async_trait]
 pub trait CancelToken: Send + Sync {
     /// Returns `true` once cancellation has been requested.
@@ -87,11 +94,32 @@ pub trait CancelToken: Send + Sync {
 
     /// Async wait that resolves as soon as the token is cancelled.
     ///
-    /// The default implementation polls every 50 ms so that foreign
-    /// impls automatically gain async support without any changes.
-    /// Override for zero-latency wake-up when a notification primitive
-    /// is available.
+    /// The default implementation polls every 50 ms — acceptable only for
+    /// foreign impls that cannot use Notify. For owned types, override this
+    /// with a Notify-backed impl (see [`AtomicCancel::cancelled`]).
+    ///
+    /// In debug builds, a warning is logged once per type to surface impls
+    /// that rely on the polling fallback.
     async fn cancelled(&self) {
+        // Default polls every 50ms — acceptable only for foreign impls that cannot
+        // use Notify. For owned types, override this with a Notify-backed impl.
+        // In debug mode, log a warning so that new impls don't silently use polling.
+        #[cfg(debug_assertions)]
+        {
+            use std::collections::HashSet;
+            use std::sync::{Mutex, OnceLock};
+            static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+            let type_name = std::any::type_name::<Self>();
+            let set = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+            if let Ok(mut guard) = set.lock() {
+                if guard.insert(type_name) {
+                    tracing::warn!(
+                        type_name,
+                        "CancelToken: using 50ms polling fallback — consider overriding cancelled() with Notify"
+                    );
+                }
+            }
+        }
         if self.is_cancelled() {
             return;
         }

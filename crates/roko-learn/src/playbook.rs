@@ -648,10 +648,23 @@ fn summarize_inline_call_object(object: &serde_json::Map<String, Value>) -> Opti
 /// [`tokio::sync::Mutex`] to serialize load+save cycles in
 /// [`PlaybookStore::record_outcome`] so concurrent outcomes don't lose
 /// updates.
+///
+/// ## Lock domains
+///
+/// - **`merge_lock`** — serializes all [`PlaybookStore::save_or_merge`] calls.
+///   Held across disk I/O (intentional; merges must be atomic).
+/// - **`id_locks`** — per-id async mutexes used by [`PlaybookStore::record_outcome`]
+///   to serialize load+save for a single playbook id.
+///
+/// These two domains are disjoint: `merge_lock` is never acquired while an
+/// `id_locks` entry is held, and vice-versa. No deadlock is possible.
 #[derive(Debug, Clone)]
 pub struct PlaybookStore {
     root: PathBuf,
     tmp_counter: Arc<Mutex<u64>>,
+    /// Serializes all save_or_merge calls. Held across disk I/O — intentional.
+    /// Per-id record_outcome locks remain in id_locks; this lock covers only merge.
+    merge_lock: Arc<AsyncMutex<()>>,
     id_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
 }
 
@@ -662,6 +675,7 @@ impl PlaybookStore {
         Self {
             root: path.into(),
             tmp_counter: Arc::new(Mutex::new(0)),
+            merge_lock: Arc::new(AsyncMutex::new(())),
             id_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -719,15 +733,18 @@ impl PlaybookStore {
     /// The merge path increments the chosen playbook's success count instead
     /// of creating a duplicate entry for the same task pattern.
     ///
+    /// Lock ordering: `merge_lock` is always acquired BEFORE any `id_locks` entry.
+    /// `record_outcome` acquires only an `id_locks` entry, never `merge_lock`.
+    /// These two lock domains are disjoint — no deadlock is possible.
+    ///
     /// # Errors
     ///
     /// Returns an error for any I/O or serialization failure.
     pub async fn save_or_merge(&self, playbook: &Playbook) -> io::Result<()> {
         validate_playbook_id(&playbook.id)?;
 
-        // Global merge lock serializes all merge operations — no per-ID locks needed
-        let merge_lock = self.id_lock("__playbook_merge__/global");
-        let _merge_guard = merge_lock.lock().await;
+        // Named field — no map lookup, no parking_lot lock during merge.
+        let _merge_guard = self.merge_lock.lock().await;
 
         // Check for exact match (no per-ID lock)
         if let Some(existing) = self.load(&playbook.id).await? {
@@ -1533,6 +1550,52 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].id, first.id);
         assert_eq!(listed[1].id, other.id);
+    }
+
+    #[tokio::test]
+    async fn concurrent_save_or_merge_does_not_lose_updates() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(tmp.path());
+
+        // Seed with initial playbook.
+        let seed = learned_playbook(
+            "merge-race",
+            "Concurrent merge target",
+            vec![("read_file", "Read config")],
+        );
+        store.save(&seed).await.expect("save seed");
+
+        // Spawn 16 concurrent save_or_merge calls with similar playbooks.
+        // Each call should merge (incrementing success_count) rather than
+        // creating a duplicate, and no update should be lost.
+        let mut handles = Vec::new();
+        for i in 0..16u32 {
+            let store = store.clone();
+            let pb = learned_playbook(
+                &format!("merge-race-{i}"),
+                "Concurrent merge target",
+                vec![("read_file", "Read config")],
+            );
+            handles.push(tokio::spawn(async move {
+                store.save_or_merge(&pb).await
+            }));
+        }
+        for h in handles {
+            h.await.expect("join").expect("save_or_merge");
+        }
+
+        // The seed playbook should have accumulated all merges.
+        let loaded = store
+            .load("merge-race")
+            .await
+            .expect("load")
+            .expect("some");
+        // seed started at success_count=1, each merge adds 1 → total 17
+        assert_eq!(
+            loaded.success_count, 17,
+            "expected 17 successes (1 seed + 16 merges), got {}",
+            loaded.success_count
+        );
     }
 
     #[tokio::test]

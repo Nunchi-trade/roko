@@ -9,7 +9,9 @@
 //! implementations can back with a real notification primitive (e.g.
 //! [`AtomicCancel`] uses `tokio::sync::Notify` for instant wake-up).
 //! Foreign impls that only provide `is_cancelled` automatically get a
-//! 50 ms polling fallback via the trait's default implementation.
+//! 50 ms polling fallback via the trait's default implementation. In debug
+//! builds, the default logs a warning once per type to surface impls that
+//! silently rely on polling.
 
 use roko_core::tool::CancelToken;
 
@@ -17,7 +19,8 @@ use roko_core::tool::CancelToken;
 ///
 /// Delegates entirely to [`CancelToken::cancelled`]. Tokens backed by
 /// `tokio::sync::Notify` (e.g. [`AtomicCancel`]) wake instantly with zero
-/// CPU overhead; others fall back to 50 ms polling via the trait default.
+/// CPU overhead; others fall back to 50 ms polling via the trait default
+/// (with a debug-mode warning).
 pub async fn wait_cancelled(token: &dyn CancelToken) {
     token.cancelled().await;
 }
