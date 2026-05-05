@@ -131,7 +131,6 @@ pub struct SubscriptionSummary {
 use crate::config::RepoRegistry;
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
-use roko_core::config::load_config;
 use roko_serve::{self, deploy, dispatch, dreams, feedback, fswatcher, scheduler, state::AppState};
 
 /// State of the headless daemon.
@@ -317,12 +316,13 @@ pub async fn daemon_start(workdir: &Path, foreground: bool, port: u16) -> Result
         return Ok(());
     }
 
-    let core_config = load_config(workdir)?;
-    let cli_config = load_layered(workdir)?.config;
+    let resolved = load_layered(workdir)?;
+    let core_config = resolved.core_config;
+    let cli_config = resolved.config;
     let dream_settings = cli_config.dreams.clone();
     let agent_settings = cli_config.agent.clone();
     let daimon_strategy_space = cli_config.daimon.strategy_space.clone();
-    let repo_registry = RepoRegistry::load(&cli_config, workdir).unwrap_or_default();
+    let repo_registry = resolved.repo_registry;
     let runtime = RokoCliRuntime::new(cli_config, repo_registry).into_arc();
     let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
     let state = Arc::new(AppState::new_with_daimon_strategy(

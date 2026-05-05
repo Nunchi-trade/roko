@@ -2554,6 +2554,11 @@ pub fn resolve_paths(workdir: &Path) -> ConfigPaths {
 pub struct ResolvedConfig {
     /// Merged, default-filled config.
     pub config: Config,
+    /// Core unified config (with env overrides + secret resolution applied).
+    /// Callers that need `RokoConfig` should use this instead of calling
+    /// `roko_core::config::load_config` separately, which would bypass the
+    /// layered merge and lose `ROKO__*` env overrides.
+    pub core_config: RokoConfig,
     /// Loaded runtime repo registry.
     pub repo_registry: RepoRegistry,
     /// Which source supplied each field.
@@ -2609,6 +2614,12 @@ pub struct ConfigSources {
 ///
 /// Precedence (highest first): `ROKO__*` env vars → `ROKO_CONFIG` env var →
 /// project → global → defaults.
+///
+/// This is the **single authoritative loader** for all CLI callsites.  It also
+/// builds a `core_config` (`RokoConfig`) through the same layered merge so
+/// callers that need routing/provider config don't have to call
+/// `roko_core::config::load_config` separately (which would bypass the merge
+/// and discard `ROKO__*` env overrides and global-file inheritance).
 pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
     let paths = resolve_paths(workdir);
     let (env_layer, env_paths) = collect_env_override_layer()?;
@@ -2618,10 +2629,13 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
     if let Some(env_path) = &paths.env_override {
         let layer = ConfigLayer::from_file(env_path)?.merge(env_layer);
         let sources = sources_from_layer(&layer, Source::Env, Source::Default);
-        let config = layer.resolve()?;
+        let mut config = layer.resolve()?;
+        resolve_provider_file_secrets(&mut config.providers);
+        let core_config = build_core_config(workdir, &paths)?;
         let repo_registry = RepoRegistry::load(&config, workdir)?;
         return Ok(ResolvedConfig {
             config,
+            core_config,
             repo_registry,
             sources,
             paths,
@@ -2641,15 +2655,75 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
     let mut sources = compute_sources(&global_layer, &project_layer);
     apply_env_source_overrides(&mut sources, &env_paths);
     let merged = global_layer.merge(project_layer).merge(env_layer);
-    let config = merged.resolve()?;
+    let mut config = merged.resolve()?;
+    resolve_provider_file_secrets(&mut config.providers);
+    let core_config = build_core_config(workdir, &paths)?;
     let repo_registry = RepoRegistry::load(&config, workdir)?;
 
     Ok(ResolvedConfig {
         config,
+        core_config,
         repo_registry,
         sources,
         paths,
     })
+}
+
+/// Resolve `*_file` references in provider `extra_headers`.
+///
+/// For any header key ending in `_file`, read the file at the value path and
+/// store the trimmed contents under the base key (without the `_file` suffix).
+/// This mirrors `RokoConfig::resolve_file_secrets()`.
+fn resolve_provider_file_secrets(providers: &mut HashMap<String, ProviderConfig>) {
+    for provider in providers.values_mut() {
+        if let Some(ref headers) = provider.extra_headers {
+            let mut resolved = HashMap::with_capacity(headers.len());
+            for (key, value) in headers {
+                if key.ends_with("_file") {
+                    let base_key = key.trim_end_matches("_file").to_string();
+                    if let Ok(content) = std::fs::read_to_string(value.trim()) {
+                        resolved.insert(base_key, content.trim().to_string());
+                    }
+                } else {
+                    resolved.insert(key.clone(), value.clone());
+                }
+            }
+            provider.extra_headers = Some(resolved);
+        }
+    }
+}
+
+/// Build the core `RokoConfig` using the same layered merge strategy.
+///
+/// Loads the project-local `roko.toml` (if present), merges global providers,
+/// applies `ROKO_*` env overrides, and runs secret resolution.  This gives
+/// callers a fully-resolved `RokoConfig` consistent with the CLI `Config`
+/// without requiring a separate `roko_core::config::load_config()` call.
+fn build_core_config(workdir: &Path, paths: &ConfigPaths) -> Result<RokoConfig> {
+    // Start with the project roko.toml (or default if missing).
+    let mut core = match roko_core::config::load_config(workdir) {
+        Ok(c) => c,
+        Err(_) => RokoConfig::default(),
+    };
+
+    // Merge global providers/models (same logic as merge_global_providers).
+    if paths.global.is_file() {
+        if let Ok(text) = std::fs::read_to_string(&paths.global) {
+            if let Ok(global) = RokoConfig::from_toml(&text) {
+                for (name, provider) in global.providers {
+                    core.providers.entry(name).or_insert(provider);
+                }
+                for (name, model) in global.models {
+                    core.models.entry(name).or_insert(model);
+                }
+            }
+        }
+    }
+
+    // Apply ROKO_* single-value env overrides (model, backend, effort, etc.)
+    core.apply_process_env();
+
+    Ok(core)
 }
 
 /// Compute per-field provenance from global + project layers.
