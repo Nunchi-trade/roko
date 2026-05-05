@@ -27,6 +27,7 @@ use crate::dispatch::{
     AgentDispatchRequest, DispatchContext, GateFeedback as DispatchGateFeedback, PromptCache,
     ResolvedAgentRuntime, SharedAgentFactory,
 };
+use crate::inline::DiffEntry;
 use crate::knowledge_helpers::{build_knowledge_routing_advice, neuro_prompt_task_category};
 use crate::task_parser::TaskDef;
 use roko_neuro::KnowledgeStore;
@@ -34,6 +35,7 @@ use roko_neuro::KnowledgeStore;
 use super::agent_events::{AgentStreamBuffer, handle_agent_event};
 use super::agent_stream::{AgentHandle, AgentSpawnConfig};
 use super::gate_dispatch;
+use super::inline_output::RunnerInlineTerminal;
 use super::merge::{MergeDispatch, PlanMerger, PlanMergerConfig};
 use super::persist::{self, GateThresholds, PersistPaths};
 use super::plan_loader::Plan;
@@ -90,6 +92,7 @@ struct RunContext<'a> {
     task_index: &'a HashMap<String, HashMap<String, TaskDef>>,
     skip_enrichment: &'a HashMap<String, bool>,
     config: &'a RunConfig,
+    inline: &'a mut RunnerInlineTerminal,
     tui: &'a TuiBridge,
     state: &'a mut RunState,
     agent_handles: &'a mut HashMap<String, AgentHandle>,
@@ -293,14 +296,13 @@ pub async fn run(
     // Dynamic gate channel buffer: max_concurrent_tasks * 7 rungs, clamped to [32, 256].
     let gate_buffer = (config.max_concurrent_tasks * 7).max(32).min(256);
     let (gate_tx, mut gate_rx) = mpsc::channel::<GateCompletion>(gate_buffer);
+    let mut inline = RunnerInlineTerminal::new(config.stream_to_stderr);
 
     // -- Warm cargo cache -------------------------------------------------------
     // Run `cargo check --workspace` once before the main loop so that
     // subsequent per-task compile gates are incremental (2-5s vs 30-120s).
     if config.warm_cache {
-        if config.stream_to_stderr {
-            eprintln!("[plan-run] Warming cargo cache...");
-        }
+        inline.warm_cache_started();
         let warm_start = std::time::Instant::now();
         let warm_result = tokio::process::Command::new("cargo")
             .args(["check", "--workspace", "--message-format=short"])
@@ -313,9 +315,7 @@ pub async fn run(
         match warm_result {
             Ok(status) if status.success() => {
                 info!(warm_ms, "cargo cache warmed successfully");
-                if config.stream_to_stderr {
-                    eprintln!("[plan-run] Cargo cache warm: {warm_ms}ms");
-                }
+                inline.warm_cache_completed(warm_ms);
             }
             Ok(status) => {
                 warn!(
@@ -356,7 +356,6 @@ pub async fn run(
     let tui = TuiBridge::new(state_hub.sender());
     let mut state = RunState::new(total_tasks);
     let mut stream_buf = AgentStreamBuffer::new();
-    let stream_to_stderr = config.stream_to_stderr;
     let mut dream_completion_pending = false;
 
     // Compute task fingerprints once at startup so every subsequent
@@ -499,7 +498,7 @@ pub async fn run(
                 let turn_completed_before_event = state.agent_turn_completed;
                 let turn_error = matches!(&event, AgentEvent::TurnCompleted { is_error: true, .. });
 
-                handle_agent_event(&event, &mut state, &tui, stream_to_stderr, &mut stream_buf);
+                handle_agent_event(&event, &mut state, &tui, &mut inline, &mut stream_buf);
                 append_agent_event(&paths, &event, &state);
 
                 // Per-turn budget enforcement.
@@ -690,19 +689,7 @@ pub async fn run(
                     );
                 }
 
-                // ── Stream: gate result ─────────────────────────────
-                if stream_to_stderr && completion.kind == GateCompletionKind::Gate {
-                    for v in &completion.verdicts {
-                        let icon = if v.passed { "\u{2713}" } else { "\u{2717}" };
-                        let secs = completion.duration_ms / 1000;
-                        eprintln!(
-                            "     {icon} gate rung {} ({}): {} ({secs}s)",
-                            completion.rung,
-                            v.gate_name,
-                            if v.passed { "pass" } else { "FAIL" },
-                        );
-                    }
-                }
+                inline.gate_completed(&completion);
                 if completion.kind == GateCompletionKind::Gate {
                     if let Some(plan_state) = executor.plan_state_mut(&completion.plan_id) {
                         for verdict in &completion.verdicts {
@@ -833,8 +820,11 @@ pub async fn run(
                     state.mark_task_completed(&completion.plan_id, &completion.task_id);
                     // Snapshot which files this task produced so downstream
                     // tasks can be told what their dependencies already created.
-                    let output_files =
-                        git_diff_names_since_task_start(&config.workdir);
+                    let output_diffs = git_diff_entries_since_task_start(&config.workdir);
+                    let output_files = output_diffs
+                        .iter()
+                        .map(|entry| entry.path.clone())
+                        .collect();
                     state.record_task_outputs(
                         &completion.plan_id,
                         &completion.task_id,
@@ -873,14 +863,8 @@ pub async fn run(
                     let gate_ms = completion.duration_ms;
                     let agent_ms = total_task_ms.saturating_sub(dispatch_ms + gate_ms);
 
-                    // ── Stream: task done ────────────────────────────
-                    if stream_to_stderr {
-                        let secs = total_task_ms / 1000;
-                        eprintln!(
-                            "     \u{2713} Done ({secs}s) [{}/{} tasks]",
-                            state.tasks_completed, state.tasks_total,
-                        );
-                    }
+                    inline.diff_block(&output_diffs);
+                    inline.task_done(state.tasks_completed, state.tasks_total, total_task_ms);
                     info!(
                         task = %completion.task_id,
                         dispatch_ms,
@@ -972,14 +956,12 @@ pub async fn run(
                                 );
                                 tui.phase_transition(&completion.plan_id, "gating", &format!("{phase:?}"));
 
-                                // ── Stream: gate retry ──────────────────────
-                                if stream_to_stderr {
-                                    let delay_s = cooldown_ms / 1000;
-                                    eprintln!(
-                                        "     \u{21bb} Gate failed, retrying (attempt {}, backoff {delay_s}s)",
-                                        next_attempt.unwrap_or(state.iteration_for(&completion.plan_id, &completion.task_id) + 1),
-                                    );
-                                }
+                                inline.gate_retry(
+                                    next_attempt.unwrap_or(
+                                        state.iteration_for(&completion.plan_id, &completion.task_id) + 1,
+                                    ),
+                                    cooldown_ms,
+                                );
 
                                 info!(
                                     plan_id = %completion.plan_id,
@@ -1037,11 +1019,7 @@ pub async fn run(
                         };
                         state.record_task_failure(&completion.plan_id, &completion.task_id, &reason);
 
-                        // ── Stream: task failed ─────────────────────────
-                        if stream_to_stderr {
-                            let summary: String = reason.lines().next().unwrap_or("").chars().take(120).collect();
-                            eprintln!("     \u{2717} Failed: {summary}");
-                        }
+                        inline.task_failed(&reason);
                         let run_id = state.run_id().to_string();
                         emit_runner_event(
                             &paths,
@@ -1122,6 +1100,7 @@ pub async fn run(
                         task_index: &task_index,
                         skip_enrichment: &skip_enrichment,
                         config,
+                        inline: &mut inline,
                         tui: &tui,
                         state: &mut state,
                         agent_handles: &mut agent_handles,
@@ -2319,15 +2298,8 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             let role_enum = parse_dispatch_role(role);
             let task_category = neuro_prompt_task_category(role_enum);
 
-            // ── Stream: task start ──────────────────────────────────
-            if ctx.config.stream_to_stderr {
-                let attempt_label = if attempt_num > 1 {
-                    format!(" (attempt {attempt_num})")
-                } else {
-                    String::new()
-                };
-                eprintln!("\n  {} [{role}] {}{attempt_label}", task_id, task_def.title);
-            }
+            ctx.inline
+                .task_started(&task_id, role, &task_def.title, attempt_num);
             let bias_weight = knowledge_bias_weight(ctx.config);
             let knowledge_candidates = candidate_model_slugs(ctx.config);
             let knowledge_store = KnowledgeStore::for_workdir(&ctx.config.workdir);
@@ -3651,33 +3623,46 @@ async fn seed_playbooks_if_empty(workdir: &Path) {
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
-/// Collect the set of files modified or created since the last commit.
+/// Collect files modified or created since the last commit with diff stats.
 ///
 /// Uses two git queries:
-/// - `git diff --name-only HEAD` — tracked files with unstaged/staged changes
-/// - `git status --porcelain` — includes untracked (`??`) and newly added (`A `) files
+/// - `git diff --numstat HEAD` — tracked files with unstaged/staged changes
+/// - `git status --porcelain` — includes untracked (`??`) files
 ///
 /// The combined list is deduped and capped at 50 entries.
-fn git_diff_names_since_task_start(workdir: &Path) -> Vec<String> {
-    let mut files: Vec<String> = Vec::new();
+fn git_diff_entries_since_task_start(workdir: &Path) -> Vec<DiffEntry> {
+    let mut entries: Vec<DiffEntry> = Vec::new();
 
     // Modified tracked files.
     if let Ok(output) = std::process::Command::new("git")
-        .args(["diff", "--name-only", "HEAD"])
+        .args(["diff", "--numstat", "HEAD"])
         .current_dir(workdir)
         .output()
     {
         if output.status.success() {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    files.push(trimmed.to_string());
+                let mut parts = line.splitn(3, '\t');
+                let additions = parts
+                    .next()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+                let deletions = parts
+                    .next()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+                if let Some(path) = parts.next().map(str::trim).filter(|path| !path.is_empty()) {
+                    entries.push(DiffEntry {
+                        path: path.to_string(),
+                        additions,
+                        deletions,
+                        summary: None,
+                    });
                 }
             }
         }
     }
 
-    // Untracked and newly staged files.
+    // Untracked files are not present in `git diff --numstat HEAD`.
     if let Ok(output) = std::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(workdir)
@@ -3686,11 +3671,15 @@ fn git_diff_names_since_task_start(workdir: &Path) -> Vec<String> {
         if output.status.success() {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 let trimmed = line.trim();
-                // Lines starting with `??` (untracked) or `A ` (newly added).
-                if trimmed.starts_with("?? ") || trimmed.starts_with("A ") {
+                if trimmed.starts_with("?? ") {
                     let path = trimmed.splitn(2, ' ').nth(1).unwrap_or("").trim();
                     if !path.is_empty() {
-                        files.push(path.to_string());
+                        entries.push(DiffEntry {
+                            path: path.to_string(),
+                            additions: 0,
+                            deletions: 0,
+                            summary: Some("untracked".to_string()),
+                        });
                     }
                 }
             }
@@ -3699,9 +3688,9 @@ fn git_diff_names_since_task_start(workdir: &Path) -> Vec<String> {
 
     // Dedup while preserving order, cap at 50.
     let mut seen = std::collections::HashSet::new();
-    files.retain(|f| seen.insert(f.clone()));
-    files.truncate(50);
-    files
+    entries.retain(|entry| seen.insert(entry.path.clone()));
+    entries.truncate(50);
+    entries
 }
 
 fn all_plans_terminal(executor: &ParallelExecutor, plans: &[Plan]) -> bool {
