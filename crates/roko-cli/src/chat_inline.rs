@@ -937,8 +937,20 @@ fn active_model_name(session: &ChatSession) -> String {
             AuthMethod::NeedsSetup => String::new(),
         },
         DispatchMode::Http { .. } => "HTTP backend".to_string(),
-        DispatchMode::Session => "session".to_string(),
+        DispatchMode::Session => session
+            .agent_session
+            .as_ref()
+            .map(|s| s.model.clone())
+            .unwrap_or_else(|| "session".to_string()),
     }
+}
+
+/// Format the resolved model selection for display in the startup banner.
+///
+/// Returns a compact label like `"claude-sonnet-4-6 (claude-cli)"` that reflects
+/// what dispatch will actually use, not what auth detection reported upstream.
+fn session_banner_label(selection: &crate::model_selection::EffectiveModelSelection) -> String {
+    format!("{} ({})", selection.effective_model_key, selection.provider_kind)
 }
 
 fn active_system_prompt(session: &ChatSession) -> Option<String> {
@@ -1540,6 +1552,14 @@ fn build_unified_inline_agent_session(
     .map_err(|source| ChatInlineDispatchError::ModelSelection { source })?;
     let agent_session = ChatAgentSession::new(&config, workdir, selection)
         .map_err(|source| ChatInlineDispatchError::ChatSessionInit { source })?;
+
+    tracing::debug!(
+        model = %agent_session.model_selection.effective_model_key,
+        provider = %agent_session.model_selection.provider_key,
+        source = %agent_session.model_selection.source,
+        "resolved effective model for chat session"
+    );
+
     let system_message = Some(agent_session.system_prompt.clone());
 
     Ok((agent_session, system_message, cost_table))
@@ -1549,7 +1569,7 @@ fn build_unified_inline_agent_session(
 ///
 /// This is the primary entry point for `roko` with no subcommand.
 /// Session setup failures are returned instead of downgrading to direct dispatch.
-pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
+pub async fn run_unified_inline(_auth: &AuthMethod) -> Result<()> {
     if !crate::inline::should_use_inline() {
         // Non-TTY one-shot mode is handled by the unified one-shot entry point.
         eprintln!("hint: stdin is not a TTY — use `roko \"prompt\"` for one-shot mode");
@@ -1583,7 +1603,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
         styled::section_start(
             &theme,
             "roko",
-            &format!("v{version}  {}  {}", symbols::SEP, auth.label()),
+            &format!("v{version}  {}  {}", symbols::SEP, session_banner_label(&agent_session.model_selection)),
             None,
         ),
         styled::continuation(&theme, "workspace", &workspace, Some(init_status)),
@@ -2882,11 +2902,7 @@ fn handle_slash_command(
                     .agent_session
                     .as_ref()
                     .map(|agent_session| {
-                        format!(
-                            "{} ({})",
-                            agent_session.model_selection.provider_key,
-                            agent_session.model_selection.provider_kind
-                        )
+                        session_banner_label(&agent_session.model_selection)
                     })
                     .unwrap_or_else(|| "ChatAgentSession".to_string()),
             };
@@ -5529,5 +5545,37 @@ mod tests {
             err.hint.is_some(),
             "ClaudeCli switch should suggest setting an API key"
         );
+    }
+
+    #[test]
+    fn session_banner_label_formats_model_and_provider_kind() {
+        use crate::model_selection::{EffectiveModelSelection, SelectionSource};
+        let selection = EffectiveModelSelection {
+            requested_model: None,
+            effective_model_key: "claude-sonnet-4-6".to_string(),
+            provider_key: "anthropic_prod".to_string(),
+            provider_kind: "anthropic-api".to_string(),
+            backend_slug: "claude-sonnet-4-6".to_string(),
+            source: SelectionSource::ProjectDefault,
+            reason: "test".to_string(),
+        };
+        let label = super::session_banner_label(&selection);
+        assert_eq!(label, "claude-sonnet-4-6 (anthropic-api)");
+    }
+
+    #[test]
+    fn active_model_name_returns_agent_session_model_for_session_dispatch() {
+        let workdir = std::path::PathBuf::from("/tmp/test");
+        let agent_session = make_agent_session(workdir);
+        let session = make_session(DispatchMode::Session, Some(agent_session));
+        let name = super::active_model_name(&session);
+        assert_eq!(name, "model-original");
+    }
+
+    #[test]
+    fn active_model_name_returns_fallback_for_session_dispatch_without_agent_session() {
+        let session = make_session(DispatchMode::Session, None);
+        let name = super::active_model_name(&session);
+        assert_eq!(name, "session");
     }
 }
