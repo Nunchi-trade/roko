@@ -552,6 +552,13 @@ Examples:
         cmd: commands::graph::GraphCmd,
     },
 
+    // ── ISFR keeper ──────────────────────────────────────────────────
+    /// ISFR keeper management (start, status, sources).
+    Isfr {
+        #[command(subcommand)]
+        cmd: commands::isfr::IsfrCmd,
+    },
+
     // ── Server & deployment ─────────────────────────────────────────
     /// Start the dev environment (serve + optional demo frontend).
     #[command(after_help = "\
@@ -2360,6 +2367,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         }
         Command::Index { cmd } => commands::util::cmd_index(cli, cmd),
         Command::Graph { cmd } => commands::graph::cmd_graph(cmd).await,
+        Command::Isfr { cmd } => commands::isfr::cmd_isfr(cli, cmd).await,
         Command::Dev { no_frontend } => commands::dev::cmd_dev(cli, no_frontend).await,
         Command::Up { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));

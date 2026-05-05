@@ -10,6 +10,7 @@ pub mod do_cmd;
 pub mod experiment;
 pub mod graph;
 pub mod init;
+pub mod isfr;
 pub mod job;
 pub mod knowledge;
 pub mod learn;
