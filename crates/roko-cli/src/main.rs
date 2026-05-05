@@ -8,16 +8,7 @@
 //! one-shot mode).
 
 #![allow(clippy::too_many_lines)]
-#![cfg_attr(
-    clippy,
-    allow(
-        clippy::all,
-        clippy::pedantic,
-        clippy::nursery,
-        clippy::restriction,
-        missing_docs
-    )
-)]
+#![allow(missing_docs)]
 
 mod agent_serve;
 mod commands;
@@ -317,6 +308,7 @@ struct Cli {
     command: Option<Command>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Command {
     // ── Core workflow ────────────────────────────────────────────────
