@@ -99,8 +99,10 @@ use roko_learn::conductor::{
     ConductorAction as RetryConductorAction, ConductorBandit,
     ConductorState as RetryConductorState, ErrorPattern as RetryErrorPattern, HintType,
 };
-use roko_learn::costs_db::CostRecord;
+use roko_learn::costs_db::{CostRecord, CostsDb};
 use roko_learn::costs_log::CostsLog;
+use roko_learn::event_subscriber::run_learning_subscriber;
+use roko_learn::provider_health::ProviderHealthRegistry;
 use roko_learn::curriculum::{CurriculumMode, CurriculumScheduler};
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
@@ -8151,6 +8153,38 @@ impl PlanRunner {
         }
         .spawn();
 
+        // ── Spawn the learning event subscriber ──────────────────────────
+        // This background task consumes AgentEvents published to the
+        // learning_event_bus and fans them out to CalibrationPolicy,
+        // VerdictScorer, ProviderHealth, CascadeRouter, CostsDb, and the
+        // efficiency JSONL log.
+        let learning_subscriber_rx = self.learning_event_bus.subscribe();
+        let learning_health = Arc::new(ProviderHealthRegistry::new());
+        let learning_latency = Arc::new(LatencyRegistry::new());
+        let subscriber_model_slugs: Vec<String> = {
+            let slugs = self.learning.cascade_router().model_slugs().to_vec();
+            if slugs.is_empty() {
+                vec!["claude-sonnet-4-5".to_string()]
+            } else {
+                slugs
+            }
+        };
+        let learning_router = Arc::new(roko_learn::cascade_router::CascadeRouter::new(
+            subscriber_model_slugs,
+        ));
+        let learning_anomaly = Arc::new(Mutex::new(AnomalyDetector::new(now_unix_ms_i64())));
+        let learning_costs = Arc::new(CostsDb::new());
+        let learning_efficiency_path = self.learning.paths().efficiency_jsonl.clone();
+        let learning_subscriber_handle = tokio::spawn(run_learning_subscriber(
+            learning_subscriber_rx,
+            learning_health,
+            learning_latency,
+            learning_router,
+            learning_anomaly,
+            learning_costs,
+            learning_efficiency_path,
+        ));
+
         let result = async {
             // Pre-load task trackers for any plans not already tracked
             let plan_dirs = Self::find_plan_dirs(path)?;
@@ -8180,6 +8214,11 @@ impl PlanRunner {
 
         watcher_cancel.cancel();
         let _ = watcher_task.await;
+        // The learning subscriber terminates when the broadcast channel is
+        // dropped (i.e. when `self` is dropped or the bus has no more senders).
+        // We abort it here to ensure deterministic cleanup.
+        learning_subscriber_handle.abort();
+        let _ = learning_subscriber_handle.await;
 
         if let Err(e) = refresh_cfactor_snapshot(self.learning.paths().root.clone()).await {
             tracing::warn!(error = %e, "failed to refresh c-factor snapshot after plan run");
@@ -8345,6 +8384,16 @@ impl PlanRunner {
 
                         // Emit observability metric for gate result.
                         self.emit_gate_metric(&plan_id, effective_rung, passed, wall_ms);
+
+                        // Publish gate result to the learning event bus so the
+                        // background learning subscriber can update VerdictHistory
+                        // and CalibrationPolicy.
+                        self.learning_event_bus.publish(AgentEvent::GateResult {
+                            gate_name: format!("rung-{effective_rung}"),
+                            passed,
+                            score: if passed { 1.0 } else { 0.0 },
+                            duration_ms: wall_ms,
+                        });
 
                         self.emit_server_event(crate::serve::events::ServerEvent::GateResult {
                             plan_id: plan_id.clone(),
