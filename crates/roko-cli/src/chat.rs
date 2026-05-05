@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
-use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -266,9 +265,10 @@ pub async fn run_direct_provider_chat(
     let cascade_model_slugs = capture_runtime_model_slugs(config, &model_slug);
     let feedback_recorder = ModelCallFeedbackRecorder::from_workdir(workdir, cascade_model_slugs);
 
+    let llm_timeout_ms = config.timeouts.llm_call().as_millis() as u64;
     let options = AgentOptions {
         name: agent_id.to_string(),
-        timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+        timeout_ms: Some(llm_timeout_ms),
         ..Default::default()
     };
 

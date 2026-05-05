@@ -4,6 +4,7 @@
  * Extracted from the Analysis section of Bench.tsx (lines 620-687).
  */
 import type { BenchRun, ParetoFrontierResponse } from '../../lib/bench-types';
+import { modelColor } from '../../lib/palette';
 import Pane from '../Pane';
 import ScatterChart from '../Charts/ScatterChart';
 import CostRace from '../CostRace';
@@ -37,9 +38,7 @@ export function ParetoChart({ pareto, history }: ParetoChartProps) {
           x: r.summary!.total_cost_usd,
           y: r.summary!.pass_rate,
           label: r.config.model.split('-').slice(0, 2).join('-'),
-          color: r.config.model.includes('sonnet')
-            ? 'var(--rose-bright)'
-            : 'var(--success)',
+          color: modelColor(r.config.model),
         }));
 
   return (

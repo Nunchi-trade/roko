@@ -347,6 +347,7 @@ impl AcpSession {
             provider.as_deref(),
             effort.as_deref(),
         );
+        validate_mcp_servers(&mcp_servers, &mut warnings);
         let config_options = build_config_options(&config_state, roko_config);
         Self {
             session_id: format!("sess_{}", Uuid::new_v4()),
@@ -825,6 +826,47 @@ fn apply_session_new_overrides(
     }
 }
 
+/// Validate MCP server configurations at session creation time.
+///
+/// For stdio transports, checks that the command binary exists on `$PATH` or
+/// as an absolute path. Pushes a warning for each server that will fail to
+/// spawn so the IDE can surface the issue immediately rather than silently
+/// dropping tools later.
+fn validate_mcp_servers(
+    servers: &[crate::types::McpServerConfig],
+    warnings: &mut Vec<String>,
+) {
+    use crate::types::McpTransport;
+    for server in servers {
+        match &server.transport {
+            McpTransport::Stdio { command, .. } => {
+                let found = if command.contains('/') {
+                    std::path::Path::new(command).exists()
+                } else {
+                    resolve_on_path(command)
+                };
+                if !found {
+                    warnings.push(format!(
+                        "MCP server '{}': command '{}' not found",
+                        server.name, command,
+                    ));
+                }
+            }
+            McpTransport::Http { .. } => {}
+        }
+    }
+}
+
+/// Check whether `name` exists as an executable on `$PATH`.
+fn resolve_on_path(name: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(name))
+        .any(|p| p.is_file())
+}
+
 fn first_model_for_provider(
     roko_config: &roko_core::config::schema::RokoConfig,
     provider_key: &str,
@@ -890,6 +932,32 @@ impl SessionManager {
         for session in self.sessions.values_mut() {
             session.revalidate_config_state(&self.roko_config);
         }
+    }
+
+    /// Re-validate all active sessions against the current roko config.
+    ///
+    /// Call this periodically or on config-change notification to bring all
+    /// sessions in sync with the current config. This is the poll-on-request
+    /// companion to the file-watcher push model (which will use an async
+    /// channel in a follow-on task).
+    pub fn revalidate_all_sessions(&mut self) {
+        for session in self.sessions.values_mut() {
+            session.revalidate_config_state(&self.roko_config);
+        }
+    }
+
+    /// Snapshot each active session's current config options for notification.
+    ///
+    /// Returns `(session_id, config_options)` pairs. Used by the handler to
+    /// push `config_option_update` notifications after a live config reload.
+    #[must_use]
+    pub fn active_session_config_options(
+        &self,
+    ) -> Vec<(String, Vec<crate::types::ConfigOption>)> {
+        self.sessions
+            .iter()
+            .map(|(id, session)| (id.clone(), session.config_options()))
+            .collect()
     }
 
     /// Creates and stores a new ACP session.

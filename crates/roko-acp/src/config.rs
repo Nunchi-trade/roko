@@ -50,24 +50,64 @@ impl AcpConfig {
     }
 
     /// Return config files relevant to this ACP process, in effective load order.
+    ///
+    /// Each entry uses a prefix indicating where the config came from:
+    /// - `"global:"` — explicit `--global-config` path or implicit `~/.roko/config.toml`
+    /// - `"project:"` — workspace `roko.toml` or explicit `--config` path
+    /// - `"env:"` — `ROKO_CONFIG` environment variable
+    /// - `"default:"` — implicit `~/.roko/config.toml` merged by the core loader
+    ///
+    /// Only paths that exist on disk are included. Ordering:
+    /// 1. Explicit global config (`--global-config`)
+    /// 2. Project config (workspace `roko.toml` or explicit `--config`)
+    /// 3. `ROKO_CONFIG` env var
+    /// 4. Implicit canonical global config (`~/.roko/config.toml`) when no
+    ///    explicit `--global-config` was provided and the core loader merged it
     #[must_use]
     pub fn config_sources(&self) -> Vec<String> {
         let mut sources = Vec::new();
+
+        // 1. Explicit --global-config (highest-priority global layer).
         if let Some(path) = self.global_config_path.as_ref() {
-            sources.push(format!("global:{}", display_path(path)));
+            if path.is_file() {
+                sources.push(format!("global:{}", display_path(path)));
+            }
         }
+
+        // 2. Project config: explicit --config or workspace roko.toml.
         match self.config_path.as_ref() {
-            Some(path) => sources.push(format!("config:{}", display_path(path))),
-            None => sources.push(format!(
-                "workspace:{}",
-                display_path(&self.workdir.join("roko.toml"))
-            )),
+            Some(path) => {
+                if path.is_file() {
+                    sources.push(format!("project:{}", display_path(path)));
+                }
+            }
+            None => {
+                let workspace_toml = self.workdir.join("roko.toml");
+                if workspace_toml.is_file() {
+                    sources.push(format!("project:{}", display_path(&workspace_toml)));
+                }
+            }
         }
+
+        // 3. ROKO_CONFIG env var.
         if let Ok(path) = std::env::var("ROKO_CONFIG")
             && !path.trim().is_empty()
         {
-            sources.push(format!("env:{}", path.trim()));
+            let env_path = std::path::Path::new(path.trim());
+            if env_path.is_file() {
+                sources.push(format!("env:{}", display_path(env_path)));
+            }
         }
+
+        // 4. Implicit canonical global config (~/.roko/config.toml) when the
+        //    core loader would merge it (no explicit --global-config provided).
+        if self.global_config_path.is_none() {
+            let implicit = roko_core::config::loader::global_config_path();
+            if implicit.is_file() {
+                sources.push(format!("default:{}", display_path(&implicit)));
+            }
+        }
+
         sources
     }
 
@@ -266,5 +306,127 @@ slug = "global-slug"
         assert_eq!(config.agent.default_effort, "medium");
         assert!(config.providers.contains_key("global-provider"));
         assert!(config.models.contains_key("global-model"));
+    }
+
+    // ---- config_sources tests ----
+
+    #[test]
+    fn config_sources_includes_explicit_global_with_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_path = dir.path().join("global.toml");
+        std::fs::write(&global_path, "config_version = 2\nschema_version = 2\n")
+            .expect("write global");
+
+        let acp = AcpConfig::new(dir.path(), "default", None, dir.path().join("acp.log"))
+            .with_global_config(Some(global_path.clone()));
+        let sources = acp.config_sources();
+
+        assert!(
+            sources.iter().any(|s| s.starts_with("global:")),
+            "expected a global: prefixed entry, got {sources:?}"
+        );
+    }
+
+    #[test]
+    fn config_sources_includes_workspace_toml_with_project_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("roko.toml"),
+            "config_version = 2\nschema_version = 2\n",
+        )
+        .expect("write roko.toml");
+
+        let acp = AcpConfig::new(dir.path(), "default", None, dir.path().join("acp.log"));
+        let sources = acp.config_sources();
+
+        assert!(
+            sources.iter().any(|s| s.starts_with("project:")),
+            "expected a project: prefixed entry, got {sources:?}"
+        );
+    }
+
+    #[test]
+    fn config_sources_includes_explicit_config_path_with_project_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let explicit = dir.path().join("editor.toml");
+        std::fs::write(&explicit, "config_version = 2\nschema_version = 2\n")
+            .expect("write editor.toml");
+
+        let acp = AcpConfig::new(
+            dir.path(),
+            "default",
+            Some(explicit),
+            dir.path().join("acp.log"),
+        );
+        let sources = acp.config_sources();
+
+        assert!(
+            sources.iter().any(|s| s.starts_with("project:")),
+            "expected a project: prefixed entry for explicit --config, got {sources:?}"
+        );
+    }
+
+    #[test]
+    fn config_sources_excludes_missing_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No roko.toml, no global config, no ROKO_CONFIG.
+        let acp = AcpConfig::new(dir.path(), "default", None, dir.path().join("acp.log"));
+
+        // This may contain a `default:` entry if ~/.roko/config.toml exists
+        // on the test machine, but should never contain a project: entry.
+        let sources = acp.config_sources();
+        assert!(
+            !sources.iter().any(|s| s.starts_with("project:")),
+            "missing roko.toml should not produce a project: entry, got {sources:?}"
+        );
+    }
+
+    #[test]
+    fn config_sources_ordering_global_before_project() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_path = dir.path().join("global.toml");
+        std::fs::write(&global_path, "config_version = 2\nschema_version = 2\n")
+            .expect("write global");
+        std::fs::write(
+            dir.path().join("roko.toml"),
+            "config_version = 2\nschema_version = 2\n",
+        )
+        .expect("write roko.toml");
+
+        let acp = AcpConfig::new(dir.path(), "default", None, dir.path().join("acp.log"))
+            .with_global_config(Some(global_path));
+        let sources = acp.config_sources();
+
+        let global_pos = sources.iter().position(|s| s.starts_with("global:"));
+        let project_pos = sources.iter().position(|s| s.starts_with("project:"));
+
+        assert!(
+            global_pos.is_some() && project_pos.is_some(),
+            "expected both global and project entries, got {sources:?}"
+        );
+        assert!(
+            global_pos.unwrap() < project_pos.unwrap(),
+            "global config must come before project config in sources ordering"
+        );
+    }
+
+    #[test]
+    fn config_sources_implicit_global_uses_default_prefix() {
+        // When no --global-config is set, the implicit ~/.roko/config.toml
+        // should appear with a "default:" prefix (if the file exists on disk).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let acp = AcpConfig::new(dir.path(), "default", None, dir.path().join("acp.log"));
+        let sources = acp.config_sources();
+
+        // The implicit global may or may not exist on the test machine.
+        // If it does, it must use the "default:" prefix, never "global:".
+        for s in &sources {
+            if s.contains(".roko/config.toml") || s.contains(".roko\\config.toml") {
+                assert!(
+                    s.starts_with("default:"),
+                    "implicit global config must use default: prefix, got {s}"
+                );
+            }
+        }
     }
 }

@@ -1706,6 +1706,17 @@ enum ConfigCmd {
         yes: bool,
     },
 
+    // ── Export ─────────────────────────────────────────────────────
+    /// Export config as environment variables for a deployment target.
+    Export {
+        /// Working directory (default: current directory).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Deployment target (currently only "railway" is supported).
+        #[arg(long)]
+        env: Option<String>,
+    },
+
     // ── Providers ───────────────────────────────────────────────────
     /// Inspect configured LLM providers.
     Providers {
@@ -2204,7 +2215,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             max_retries,
         } => {
             if !serve && !share && max_retries.is_none() {
-                return commands::util::cmd_do(
+                return commands::do_cmd::cmd_do(
                     cli,
                     workdir,
                     vec![prompt],
@@ -2235,7 +2246,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             no_cascade,
             prompt,
         } => {
-            commands::util::cmd_do(
+            commands::do_cmd::cmd_do(
                 cli,
                 workdir,
                 prompt,

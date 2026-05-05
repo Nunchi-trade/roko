@@ -208,6 +208,18 @@ impl BackendResponse {
                                 ev.pointer("/content_block/text").and_then(|x| x.as_str())
                             {
                                 buf.push_str(text);
+                            } else if let Some(blocks) =
+                                ev.pointer("/message/content").and_then(|x| x.as_array())
+                            {
+                                for block in blocks {
+                                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                        if let Some(text) =
+                                            block.get("text").and_then(|t| t.as_str())
+                                        {
+                                            buf.push_str(text);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

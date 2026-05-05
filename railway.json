@@ -8,7 +8,7 @@
       "crates/**",
       "demo/demo-app/**",
       "docker/start-railway.sh",
-      "docker/railway.roko.toml",
+      "roko.toml",
       "Dockerfile",
       "Cargo.toml",
       "Cargo.lock"

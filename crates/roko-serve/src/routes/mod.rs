@@ -32,7 +32,7 @@ mod run;
 mod runs;
 mod secrets;
 pub mod shared_runs;
-mod sse;
+pub(crate) mod sse;
 mod status;
 mod subscriptions;
 mod swe_bench;
@@ -296,10 +296,11 @@ async fn top_level_ready(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 /// `GET /api/workflow/events` — RuntimeEvent-typed SSE stream for WorkflowEngine.
 async fn workflow_sse_handler(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> impl axum::response::IntoResponse {
     let adapter: &Arc<SseAdapter> = &state.sse_adapter;
     let rx = adapter.subscribe();
-    workflow_sse_from_adapter(rx)
+    let sse = workflow_sse_from_adapter(rx);
+    (sse::sse_response_headers(), sse)
 }
 
 fn workflow_sse_from_adapter(
@@ -322,7 +323,11 @@ fn workflow_sse_from_adapter(
         }
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(8))
+            .text("keepalive"),
+    )
 }
 
 fn bind_is_loopback(bind: &str) -> bool {

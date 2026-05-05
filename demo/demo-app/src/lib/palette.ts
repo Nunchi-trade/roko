@@ -38,3 +38,12 @@ export const MODEL_COLORS: Record<string, string> = {
   'gpt-5.4-mini':     '#D8C098',
   'gemini-2.5-pro':   '#9A8AB8',
 };
+
+/** Resolve a model ID to its palette color using prefix matching. */
+export function modelColor(model: string): string {
+  // Exact match first
+  if (model in MODEL_COLORS) return MODEL_COLORS[model];
+  // Prefix match: model 'claude-sonnet-4-6' should match key 'claude-sonnet-4'
+  const key = Object.keys(MODEL_COLORS).find(k => model.startsWith(k));
+  return MODEL_COLORS[key ?? ''] ?? '#706070';
+}

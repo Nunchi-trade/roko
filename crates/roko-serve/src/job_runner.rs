@@ -125,7 +125,8 @@ async fn poll_and_execute(state: &AppState) -> anyhow::Result<()> {
         }
 
         // Attempt to claim the job via a lock file.
-        if !try_claim_lock(&path).await {
+        let stale_lock_ttl = state.load_roko_config().timeouts.agent_dispatch();
+        if !try_claim_lock(&path, stale_lock_ttl).await {
             continue;
         }
 
@@ -1000,14 +1001,16 @@ fn publish_transition(state: &AppState, job: &MarketplaceJob, prev_status: &str)
 }
 
 /// Simple file-based lock to prevent concurrent execution of the same job.
-async fn try_claim_lock(job_path: &Path) -> bool {
+///
+/// `stale_lock_ttl` controls how old a lock file must be before it's
+/// considered stale and reclaimed. Derived from `TimeoutConfig::agent_dispatch`.
+async fn try_claim_lock(job_path: &Path, stale_lock_ttl: std::time::Duration) -> bool {
     let lock_path = job_path.with_extension("json.lock");
     if lock_path.exists() {
-        // Check if the lock is stale (older than 10 minutes).
         if let Ok(meta) = tokio::fs::metadata(&lock_path).await {
             if let Ok(modified) = meta.modified() {
                 let age = modified.elapsed().unwrap_or_default();
-                if age < std::time::Duration::from_secs(600) {
+                if age < stale_lock_ttl {
                     return false;
                 }
                 // Stale lock — remove and reclaim.

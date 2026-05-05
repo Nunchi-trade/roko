@@ -25,7 +25,7 @@ export const ORACLE_COMMANDS: CommandDef[] = [
     command: 'roko do "Read DeFi rate analysis from knowledge store. Recommend optimal USDC allocation across protocols."',
     description: 'Strategy agent consumes knowledge',
     timeout: 240000,
-    target: { pane: 0 },
+    target: { pane: 1 },
   },
 ];
 
@@ -33,8 +33,8 @@ export const oracleScenario: ClickableScenario = {
   id: 'oracle',
   title: 'Oracle',
   subtitle: 'On-chain data becomes reusable agent knowledge.',
-  panes: 1,
-  labels: ['oracle'],
+  panes: 2,
+  labels: ['data collection', 'strategy synthesis'],
   panel: true,
   promptBar: false,
   mirageBar: true,
@@ -52,7 +52,12 @@ export const oracleScenario: ClickableScenario = {
   commands: ORACLE_COMMANDS,
 
   async runCommand(ctx: ScenarioContext, commandId: string): Promise<{ ok: boolean; error?: string }> {
-    const [entry] = ctx.entries;
+    const command = ORACLE_COMMANDS.find((item) => item.id === commandId);
+    if (!command) return { ok: false, error: 'Unknown command' };
+
+    const target = command.target;
+    const paneIdx = target && typeof target === 'object' && 'pane' in target ? target.pane : 0;
+    const entry = ctx.entries[paneIdx];
     if (!entry) return { ok: false, error: 'Terminal pane is not connected' };
 
     if (commandId === 'chain-check') {
@@ -65,9 +70,6 @@ export const oracleScenario: ClickableScenario = {
       return { ok: result.ok, error: result.error };
     }
 
-    const command = ORACLE_COMMANDS.find((item) => item.id === commandId);
-    if (!command) return { ok: false, error: 'Unknown command' };
-
     const result = await showCmd(entry, roko(ctx, command.command.replace(/^roko /, '')), {
       timeout: command.timeout,
       customDesc: command.description,
@@ -75,8 +77,8 @@ export const oracleScenario: ClickableScenario = {
       signal: ctx.signal,
     });
 
-    if (result.cost) ctx.setMetric('cost', result.cost);
-    if (result.tokens) ctx.setMetric('tokens', result.tokens);
+    if (result.cost) ctx.setMetric(commandId === 'data-agent' ? 'data-cost' : 'strategy-cost', result.cost);
+    if (result.tokens) ctx.setMetric(commandId === 'data-agent' ? 'data-tokens' : 'strategy-tokens', result.tokens);
 
     return { ok: result.ok, error: result.error };
   },

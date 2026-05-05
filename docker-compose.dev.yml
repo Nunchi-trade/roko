@@ -21,8 +21,8 @@ services:
       - ./target/release/agent-relay:/usr/local/bin/agent-relay:ro
       # Persist state across restarts
       - ./.roko:/workspace/.roko
-      # Use local roko.toml
-      - ./docker/railway.roko.toml:/workspace/roko.toml:ro
+      # Use project roko.toml (Railway overrides via ROKO_* env vars)
+      - ./roko.toml:/workspace/roko.toml:ro
     ports:
       - "6677:6677"
     environment:

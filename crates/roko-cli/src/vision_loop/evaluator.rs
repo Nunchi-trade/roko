@@ -11,7 +11,6 @@ use roko_agent::{
 use roko_core::agent::resolve_model;
 use roko_core::chat_types::{ChatMessage, ContentBlock, ImageUrl, MessageContent};
 use roko_core::config::schema::RokoConfig;
-use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{Body, Engram, Kind};
 use roko_learn::model_call_feedback::{ModelCallFeedback, ModelCallFeedbackRecorder};
 
@@ -83,9 +82,10 @@ impl VisionEvaluator {
         // the correct wire format (OpenAI messages, Anthropic blocks, etc.).
         let full_prompt = build_multimodal_prompt(&sys_prompt, &user_text, screenshot_data_uri);
 
+        let llm_timeout_ms = self.config.timeouts.llm_call().as_millis() as u64;
         let options = AgentOptions {
             system_prompt: Some(sys_prompt),
-            timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+            timeout_ms: Some(llm_timeout_ms),
             name: "vision-evaluator".to_string(),
             ..Default::default()
         };

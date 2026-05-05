@@ -77,7 +77,9 @@ COPY --from=builder /tmp/roko /usr/local/bin/roko
 COPY --from=builder /tmp/mirage-rs /usr/local/bin/mirage-rs
 COPY --from=builder /tmp/agent-relay /usr/local/bin/agent-relay
 COPY docker/start-railway.sh /usr/local/bin/start-railway
-COPY docker/railway.roko.toml /workspace/roko.toml
+# Railway config is injected via ROKO_* env vars (see: roko config export --env railway).
+# A default roko.toml is generated at startup by start-railway if absent.
+COPY roko.toml /workspace/roko.toml
 
 RUN chmod +x /usr/local/bin/start-railway \
     && useradd --create-home --shell /bin/bash --uid 1000 roko \

@@ -21,7 +21,6 @@ use roko_serve::runtime::{
 
 use crate::config::{Config, RepoRegistry};
 use crate::prd;
-use crate::run::run_once;
 use crate::runner::types::{GateCompletionKind, RunnerEvent};
 use crate::state_hub::SharedStateHub;
 use crate::status::collect_session_status;
@@ -68,19 +67,15 @@ impl RokoCliRuntime {
 #[async_trait]
 impl CliRuntime for RokoCliRuntime {
     async fn run_once(&self, workdir: &Path, prompt: &str) -> anyhow::Result<RunResult> {
-        let report = run_once(workdir, &self.config, prompt, None, None).await?;
-        let success = report.overall_success();
-        let usage = report.usage.map(|usage| RunResultUsage {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-        });
-        let gate_results = report_gate_results(&report);
-        let output_text = report.output_text;
+        let result = dispatch_bench_prompt(workdir, &self.config, prompt, None).await?;
         Ok(RunResult {
-            success,
-            output_text,
-            usage,
-            gate_results,
+            success: true,
+            output_text: Some(result.text),
+            usage: Some(RunResultUsage {
+                input_tokens: result.input_tokens,
+                output_tokens: result.output_tokens,
+            }),
+            gate_results: Vec::new(),
         })
     }
 
@@ -95,70 +90,79 @@ impl CliRuntime for RokoCliRuntime {
         if let Some(ref model) = overrides.model {
             config.agent.model = Some(model.clone());
         }
-        let report = run_once(workdir, &config, prompt, Some(overrides.strategy), None).await?;
-        let success = report.overall_success();
-        let prompt_id = report.prompt_id.clone();
-        let failed_gate = if !success && !matches!(overrides.strategy, BenchStrategy::Minimal) {
-            Some(report.first_failed_gate().unwrap_or("unknown").to_string())
-        } else {
-            None
-        };
-        let usage = report.usage.map(|usage| RunResultUsage {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-        });
-        let gate_results = report_gate_results(&report);
-        let output_text = report.output_text;
 
-        if let Some(gate_name) = failed_gate.as_deref() {
-            let gate_error = output_text
-                .as_deref()
-                .and_then(non_empty_string)
-                .unwrap_or_else(|| "unknown error".to_string());
-            let knowledge_store = self.knowledge_store(workdir);
+        let model_override = overrides.model.clone();
+        let result = dispatch_bench_prompt(workdir, &config, prompt, model_override.as_deref())
+            .await;
 
-            if let Err(err) = knowledge_store.record_anti_pattern_from_failure(
-                &prompt_id,
-                prompt,
-                gate_name,
-                gate_error.as_str(),
-                output_text.as_deref(),
-            ) {
-                tracing::warn!(
-                    error = %err,
-                    task_id = %prompt_id,
-                    gate = gate_name,
-                    "failed to save anti-pattern"
-                );
+        match result {
+            Ok(dispatch) => {
+                let output_text = Some(dispatch.text);
+
+                // Extract playbook on success (skip for Minimal strategy).
+                if !matches!(overrides.strategy, BenchStrategy::Minimal) {
+                    match crate::run::extract_bench_playbook(
+                        workdir,
+                        prompt,
+                        output_text.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(Some(playbook)) => {
+                            let playbook_store = self.playbook_store(workdir);
+                            if let Err(err) = playbook_store.save_or_merge(&playbook).await {
+                                tracing::warn!(
+                                    error = %err,
+                                    playbook_id = %playbook.id,
+                                    "failed to save extracted playbook"
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!(error = %err, "failed to extract bench playbook");
+                        }
+                    }
+                }
+
+                Ok(RunResult {
+                    success: true,
+                    output_text,
+                    usage: Some(RunResultUsage {
+                        input_tokens: dispatch.input_tokens,
+                        output_tokens: dispatch.output_tokens,
+                    }),
+                    gate_results: Vec::new(),
+                })
             }
-        }
+            Err(err) => {
+                let error_msg = format!("{err:#}");
 
-        if success && !matches!(overrides.strategy, BenchStrategy::Minimal) {
-            match crate::run::extract_bench_playbook(workdir, prompt, output_text.as_deref()).await
-            {
-                Ok(Some(playbook)) => {
-                    let playbook_store = self.playbook_store(workdir);
-                    if let Err(err) = playbook_store.save_or_merge(&playbook).await {
+                // Record anti-pattern on failure (skip for Minimal strategy).
+                if !matches!(overrides.strategy, BenchStrategy::Minimal) {
+                    let knowledge_store = self.knowledge_store(workdir);
+                    if let Err(record_err) = knowledge_store.record_anti_pattern_from_failure(
+                        "bench-dispatch",
+                        prompt,
+                        "model_call",
+                        &error_msg,
+                        Some(&error_msg),
+                    ) {
                         tracing::warn!(
-                            error = %err,
-                            playbook_id = %playbook.id,
-                            "failed to save extracted playbook"
+                            error = %record_err,
+                            "failed to save anti-pattern from bench dispatch failure"
                         );
                     }
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!(error = %err, "failed to extract bench playbook");
-                }
+
+                Ok(RunResult {
+                    success: false,
+                    output_text: Some(error_msg),
+                    usage: None,
+                    gate_results: Vec::new(),
+                })
             }
         }
-
-        Ok(RunResult {
-            success,
-            output_text,
-            usage,
-            gate_results,
-        })
     }
 
     async fn generate_plan_from_prd(
@@ -581,8 +585,8 @@ fn build_runner_config(
         plan_dir: plan_dir.to_path_buf(),
         model,
         cli_model_override: None,
-        timeout_secs: cli_config.executor.task_timeout_secs,
-        plan_timeout_secs: cli_config.runner.plan_timeout_secs,
+        timeout_secs: roko_config.timeouts.agent_dispatch_secs,
+        plan_timeout_secs: roko_config.timeouts.plan_total_secs,
         max_retries: cli_config.executor.max_auto_fix_iterations,
         max_concurrent_tasks,
         gate_concurrency: max_concurrent_tasks,
@@ -614,21 +618,139 @@ fn build_runner_config(
     }
 }
 
-/// Map gate verdicts from a [`RunReport`] to [`RuntimeGateResult`]s.
-fn report_gate_results(report: &crate::run::RunReport) -> Vec<RuntimeGateResult> {
-    report
-        .gate_verdicts
-        .iter()
-        .map(|(gate, passed)| RuntimeGateResult {
-            gate: gate.clone(),
-            passed: *passed,
-            detail: if *passed {
-                "passed".to_string()
-            } else {
-                "failed".to_string()
-            },
-        })
-        .collect()
+/// Dispatch a bench prompt via the v2 `ModelCallService` path.
+///
+/// This replaces the legacy `run_once()` which is feature-gated behind
+/// `legacy-orchestrate`. The v2 path uses the same ModelCallService that
+/// `WorkflowEngine` uses, preserving routing, budget, and feedback behavior.
+async fn dispatch_bench_prompt(
+    workdir: &Path,
+    config: &Config,
+    prompt: &str,
+    model_override: Option<&str>,
+) -> anyhow::Result<BenchDispatchResult> {
+    use crate::learning_helpers::{
+        capture_runtime_model_slugs, provider_id_for_model, record_persisted_provider_health,
+    };
+    use roko_agent::model_call_service::ModelCallService;
+    use roko_core::agent::resolve_model;
+    use roko_core::config::schema::RokoConfig;
+    use roko_core::foundation::{
+        ChatMessage, FeedbackSink, MessageRole, ModelCallRequest, ModelCaller, caller,
+    };
+    use roko_learn::cascade_router::CascadeRouter;
+    use roko_learn::feedback_service::FeedbackService;
+
+    // Build a RokoConfig from CLI config (same pattern as dispatch_v2.rs).
+    let mut model_config = RokoConfig::default();
+    model_config.providers.extend(config.providers.clone());
+    model_config.models.extend(config.models.clone());
+    model_config.agent.command = Some(config.agent.command.clone());
+    model_config.agent.args = Some(config.agent.args.clone());
+    model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
+    model_config.agent.env = Some(config.agent.env.clone());
+    model_config.agent.default_effort = config.agent.effort.clone();
+    model_config.agent.bare_mode = config.agent.bare_mode;
+    model_config.agent.fallback_model = config.agent.fallback_model.clone();
+    model_config.agent.tier_models = config.agent.tier_models.clone();
+    if let Some(ref model) = model_override.map(ToString::to_string).or_else(|| config.agent.model.clone()) {
+        model_config.agent.default_model = model.clone();
+    }
+
+    let model_key = model_override
+        .map(ToString::to_string)
+        .or_else(|| config.agent.model.clone())
+        .unwrap_or_else(|| model_config.agent.default_model.clone());
+    let model = resolve_model(&model_config, &model_key).slug;
+
+    // Set up cascade router for learning.
+    let cascade_path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("cascade-router.json");
+    let cascade_model_slugs = capture_runtime_model_slugs(&model_config, &model);
+    let cascade_router = (!cascade_model_slugs.is_empty()).then(|| {
+        Arc::new(CascadeRouter::load_or_new(
+            &cascade_path,
+            cascade_model_slugs,
+        ))
+    });
+
+    // Build feedback sink.
+    let feedback_service = FeedbackService::from_roko_dir(&workdir.join(".roko"));
+    let feedback_sink: Arc<dyn FeedbackSink> = match &cascade_router {
+        Some(router) => Arc::new(feedback_service.with_cascade_router(Arc::clone(router))),
+        None => Arc::new(feedback_service),
+    };
+
+    // Build and call ModelCallService.
+    let cost_table = roko_agent::CostTable::from_config_with_defaults(&model_config.models);
+    let mut service = ModelCallService::new(model.clone())
+        .with_config(model_config.clone())
+        .with_cost_table(cost_table)
+        .with_feedback_sink(feedback_sink)
+        .with_inference_observer(Arc::new(
+            crate::inference_observer::RuntimeEventInferenceObserver::new(),
+        ));
+    if let Some(ref mcp_path) = config.agent.mcp_config {
+        service = service.with_mcp_config(mcp_path.clone());
+    }
+
+    let request = ModelCallRequest {
+        model: model.clone(),
+        system: None,
+        messages: vec![ChatMessage {
+            role: MessageRole::User,
+            content: prompt.to_string(),
+        }],
+        max_tokens: None,
+        caller: Some(caller::CLI.to_string()),
+        ..Default::default()
+    };
+
+    let call_result = service.call(request).await;
+
+    // Persist cascade router observations.
+    if let Some(router) = &cascade_router
+        && let Err(err) = router.save(&cascade_path)
+    {
+        tracing::warn!(
+            path = %cascade_path.display(),
+            error = %err,
+            "failed to persist bench cascade observation"
+        );
+    }
+
+    let response = match call_result {
+        Ok(response) => {
+            if let Some(provider) = provider_id_for_model(&model_config, &response.model) {
+                let _ = record_persisted_provider_health(workdir, &provider, true);
+            }
+            response
+        }
+        Err(err) => {
+            if let Some(provider) = provider_id_for_model(&model_config, &model) {
+                let _ = record_persisted_provider_health(workdir, &provider, false);
+            }
+            return Err(err).context("ModelCallService bench dispatch failed");
+        }
+    };
+
+    Ok(BenchDispatchResult {
+        text: response.content,
+        model: response.model,
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+    })
+}
+
+/// Result from dispatching a bench prompt via `ModelCallService`.
+struct BenchDispatchResult {
+    text: String,
+    #[allow(dead_code)]
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
 }
 
 fn non_empty_string(value: &str) -> Option<String> {

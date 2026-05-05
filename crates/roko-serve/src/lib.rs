@@ -1335,6 +1335,43 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
         ServerEvent::AgentStopped { agent_id, .. } => Some(DashboardEvent::AgentCompleted {
             agent_id: agent_id.clone(),
         }),
+        // Bridge bench events so the dashboard TUI / SSE clients see bench activity.
+        ServerEvent::BenchRunStarted { bench_id, .. } => Some(DashboardEvent::PlanStarted {
+            plan_id: format!("bench-{bench_id}"),
+        }),
+        ServerEvent::BenchTaskStarted {
+            bench_id,
+            task_id,
+            task_name,
+            ..
+        } => Some(DashboardEvent::TaskStarted {
+            plan_id: format!("bench-{bench_id}"),
+            task_id: task_id.clone(),
+            title: task_name.clone(),
+            phase: "dispatch".to_string(),
+        }),
+        ServerEvent::BenchTaskCompleted {
+            bench_id, task_id, ..
+        } => Some(DashboardEvent::TaskCompleted {
+            plan_id: format!("bench-{bench_id}"),
+            task_id: task_id.clone(),
+            outcome: "completed".to_string(),
+        }),
+        ServerEvent::BenchRunCompleted { bench_id, .. } => Some(DashboardEvent::PlanCompleted {
+            plan_id: format!("bench-{bench_id}"),
+            success: true,
+        }),
+        ServerEvent::BenchProgress {
+            bench_id,
+            completed,
+            total,
+            cost_so_far,
+        } => Some(DashboardEvent::EfficiencyEvent {
+            plan_id: format!("bench-{bench_id}"),
+            task_id: format!("{completed}/{total}"),
+            metric: "cost_usd".to_string(),
+            value: *cost_so_far,
+        }),
         _ => None,
     }
 }

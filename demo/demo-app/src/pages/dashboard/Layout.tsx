@@ -2,6 +2,7 @@ import React, { type CSSProperties } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import FlatIcon, { type FlatIconName } from '../../components/FlatIcon';
 import RevealWhen from '../../components/RevealWhen';
+import ComponentErrorBoundary from '../../components/design/ComponentErrorBoundary';
 
 const VIEWS = [
   { to: '/dashboard', label: 'Cost', icon: 'cost', end: true },
@@ -95,9 +96,11 @@ export default function DashboardLayout() {
         ))}
       </nav>
       <div style={bodyStyle}>
-        <RevealWhen key={pathname} visible mode="slide-up" duration={300}>
-          <Outlet />
-        </RevealWhen>
+        <ComponentErrorBoundary name="Dashboard">
+          <RevealWhen key={pathname} visible mode="slide-up" duration={300}>
+            <Outlet />
+          </RevealWhen>
+        </ComponentErrorBoundary>
       </div>
     </div>
   );

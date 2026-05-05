@@ -14,7 +14,7 @@ use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use futures::stream::{self, Stream};
+use futures::stream::{self};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -642,7 +642,7 @@ async fn cost_summary(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// `GET /api/bench/events` -- SSE stream filtered to bench events.
 async fn bench_events_sse(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
     let rx = state.event_bus.subscribe();
     let stream = stream::unfold(rx, |mut rx| async move {
         loop {
@@ -663,7 +663,7 @@ async fn bench_events_sse(
                     }
                     let data = serde_json::to_string(&envelope.payload).unwrap_or_default();
                     let sse_event = Event::default().data(data).id(envelope.seq.to_string());
-                    return Some((Ok(sse_event), rx));
+                    return Some((Ok::<_, Infallible>(sse_event), rx));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(n, "bench SSE client lagged");
@@ -673,7 +673,12 @@ async fn bench_events_sse(
             }
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    let sse = Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(8))
+            .text("keepalive"),
+    );
+    (super::sse::sse_response_headers(), sse)
 }
 
 // ---------------------------------------------------------------------------

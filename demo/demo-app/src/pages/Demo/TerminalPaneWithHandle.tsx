@@ -11,29 +11,24 @@ export type TerminalPaneState = {
 /** Map scenario + label to a CSS color for scenario-aware label styling */
 function getLabelColor(scenarioId: string, label: string, category: string): string | undefined {
   const lower = label.toLowerCase();
-  if (scenarioId === 'race') {
+  if (scenarioId === 'cost') {
     if (lower.includes('naive')) return 'var(--warning)';
     if (lower.includes('cascade')) return '#6bb8a8';
   }
-  if (scenarioId === 'providers' || scenarioId === 'provider-race') {
-    if (lower.includes('anthropic')) return 'var(--rose-bright)';
-    if (lower.includes('openai')) return '#6bb87a';
-    if (lower.includes('zhipu')) return '#68a8d8';
-    if (lower.includes('gemini')) return '#68a8d8';
-    if (lower.includes('moonshot')) return 'var(--warning)';
-    return 'var(--dream-bright)';
+  if (scenarioId === 'isfr') {
+    if (lower.includes('lending')) return 'var(--rose-bright)';
+    if (lower.includes('staking')) return '#6bb87a';
+    if (lower.includes('aggregat')) return '#68a8d8';
+    if (lower.includes('validat')) return 'var(--warning)';
   }
-  if (scenarioId === 'explore') {
-    if (lower.includes('workspace') || lower.includes('status')) return 'var(--success)';
-    if (lower.includes('learn')) return 'var(--dream-bright)';
-    if (lower.includes('config')) return 'var(--warning)';
-    if (lower.includes('knowledge')) return '#b888d8';
-    return 'var(--rose-glow)';
+  if (scenarioId === 'oracle') {
+    if (lower.includes('data')) return 'var(--dream-bright)';
+    if (lower.includes('strategy')) return '#b888d8';
   }
   if (category === 'comparison') return '#6bb8a8';
   if (category === 'learning') return 'var(--dream-bright)';
   if (category === 'chain') return 'var(--warning)';
-  if (category === 'exploration') return 'var(--success)';
+  if (category === 'pipeline') return 'var(--rose-bright)';
   return undefined;
 }
 

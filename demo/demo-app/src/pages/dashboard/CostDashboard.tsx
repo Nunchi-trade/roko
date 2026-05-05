@@ -150,7 +150,7 @@ export default function CostDashboard() {
   // SSE-triggered refetch
   const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
   useContextEventSubscription(
-    ['efficiency_event', 'gate_result', 'episode', 'inference_completed'],
+    ['efficiency_event', 'gate_result', 'episode', 'inference_completed', 'plan_started', 'plan_completed', 'task_completed'],
     debouncedRefetch,
   );
 

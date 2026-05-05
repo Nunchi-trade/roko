@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useTerminal } from '../hooks/useTerminal';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { enterWorkspace } from '../lib/terminal-session';
+import ComponentErrorBoundary from '../components/design/ComponentErrorBoundary';
 import './Terminal.css';
 
 /* ── Typewriter text (workspace badge) ── */
@@ -241,6 +242,7 @@ export default function Terminal() {
       </div>
 
       <div className="terminal-body">
+        <ComponentErrorBoundary name="TerminalPane">
         {terminals.length > 0 ? (
           <div className={`term-grid cols-${columns}`}>
             {terminals.map((t) => (
@@ -269,6 +271,7 @@ export default function Terminal() {
             <span className="terminal-empty-sub">Click + to add one</span>
           </div>
         )}
+        </ComponentErrorBoundary>
       </div>
     </div>
   );

@@ -27,13 +27,10 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
     const mgr = createEventStreamManager(SERVE_URL);
     managerRef.current = mgr;
 
-    // Poll connected state (EventSource onopen/onerror drive it)
-    const interval = setInterval(() => {
-      setConnected(mgr.connected);
-    }, 500);
+    // Push-based connected state (replaces 500ms polling interval)
+    mgr.onConnectedChange = (c: boolean) => setConnected(c);
 
     return () => {
-      clearInterval(interval);
       mgr.destroy();
       managerRef.current = null;
     };

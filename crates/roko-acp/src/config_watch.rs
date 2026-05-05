@@ -1,7 +1,16 @@
 //! Best-effort live config change detection for ACP.
+//!
+//! `ConfigWatcher` serves two roles:
+//! 1. **Change detection** -- the `changed()` poll used by the ACP handler loop
+//!    to know when to reload config via `AcpConfig::load_roko_config()`.
+//! 2. **Cached current config** -- the `current()` accessor backed by
+//!    [`roko_core::config::ConfigCache`] for zero-copy reads. When the
+//!    underlying file changes, the cache is atomically swapped by the
+//!    `ConfigCache` watcher thread.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
@@ -9,9 +18,15 @@ use tokio::sync::mpsc;
 use crate::config::AcpConfig;
 
 /// Watches ACP config files and reports when they should be reloaded.
+///
+/// Optionally holds a [`roko_core::config::ConfigCache`] that auto-reloads
+/// on file change, providing a zero-copy `current()` accessor.
 pub struct ConfigWatcher {
     _watcher: Option<RecommendedWatcher>,
     rx: mpsc::Receiver<()>,
+    /// Optional config cache for zero-copy reads. When present, `current()`
+    /// returns the latest config without going through `AcpConfig::load_roko_config()`.
+    cache: Option<Arc<roko_core::config::ConfigCache>>,
 }
 
 impl ConfigWatcher {
@@ -30,7 +45,11 @@ impl ConfigWatcher {
             Ok(watcher) => watcher,
             Err(error) => {
                 tracing::warn!(error = %error, "ACP config watch unavailable");
-                return Self { _watcher: None, rx };
+                return Self {
+                    _watcher: None,
+                    rx,
+                    cache: None,
+                };
             }
         };
 
@@ -39,9 +58,22 @@ impl ConfigWatcher {
             watch_config_path(&mut watcher, path, &mut watched_targets);
         }
 
+        // Best-effort: create a ConfigCache for zero-copy reads.
+        let cache = match roko_core::config::ConfigCache::new(&config.workdir) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ACP ConfigCache creation failed; falling back to direct loads"
+                );
+                None
+            }
+        };
+
         Self {
             _watcher: Some(watcher),
             rx,
+            cache,
         }
     }
 
@@ -52,6 +84,14 @@ impl ConfigWatcher {
             changed = true;
         }
         changed
+    }
+
+    /// Return the current config from the cache (zero-copy via `ArcSwap`).
+    ///
+    /// Falls back to `None` if the cache was not created (e.g. initial load
+    /// failed or the watcher could not be started).
+    pub fn current(&self) -> Option<Arc<roko_core::config::schema::RokoConfig>> {
+        self.cache.as_ref().map(|c| c.get())
     }
 }
 
@@ -96,18 +136,31 @@ fn watch_config_path(
 
 fn watched_paths(config: &AcpConfig) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+
+    // 1. Explicit --global-config, or implicit ~/.roko/config.toml when absent.
+    //    The core loader always merges the implicit global config, so we must
+    //    watch it to detect changes even when --global-config is not set.
+    match config.global_config_path.as_ref() {
+        Some(path) => paths.push(path.clone()),
+        None => {
+            let implicit = roko_core::config::loader::global_config_path();
+            paths.push(implicit);
+        }
+    }
+
+    // 2. Project config: explicit --config or workspace roko.toml.
     match config.config_path.as_ref() {
         Some(path) => paths.push(path.clone()),
         None => paths.push(config.workdir.join("roko.toml")),
     }
-    if let Some(path) = config.global_config_path.as_ref() {
-        paths.push(path.clone());
-    }
+
+    // 3. ROKO_CONFIG env var.
     if let Ok(path) = std::env::var("ROKO_CONFIG")
         && !path.trim().is_empty()
     {
         paths.push(PathBuf::from(path));
     }
+
     paths.sort();
     paths.dedup();
     paths

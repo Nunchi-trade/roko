@@ -11,6 +11,10 @@ import type { Scenario, ClickableScenario, ScenarioContext } from '../../lib/sce
 import { isClickableScenario } from '../../lib/scenarios';
 import { CommandList } from '../../components/CommandList';
 import PipelineStagesPanel from '../../components/PipelineStagesPanel';
+import CostComparisonPanel from '../../components/CostComparisonPanel';
+import MemoryTransferPanel from '../../components/MemoryTransferPanel';
+import ISFRPanel from '../../components/ISFRPanel';
+import OracleFlowPanel from '../../components/OracleFlowPanel';
 import { useCommandList } from '../../hooks/useCommandList';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../../lib/playback-controller';
 import { enterWorkspace, resetRokoResolution } from '../../lib/terminal-session';
@@ -1051,6 +1055,29 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
               {scenario.id === 'pipeline' && (
                 <div className="demo-clickable-context demo-clickable-context--pipeline">
                   <PipelineStagesPanel isRunning={isRunning} />
+                </div>
+              )}
+              {scenario.id === 'cost' && (
+                <div className="demo-clickable-context">
+                  <CostComparisonPanel isRunning={isRunning} />
+                </div>
+              )}
+              {scenario.id === 'memory' && (
+                <div className="demo-clickable-context">
+                  <MemoryTransferPanel isRunning={isRunning} />
+                </div>
+              )}
+              {scenario.id === 'isfr' && (
+                <div className="demo-clickable-context">
+                  <ISFRPanel
+                    insights={ciInsights}
+                    connected={chainWs.connected}
+                  />
+                </div>
+              )}
+              {scenario.id === 'oracle' && (
+                <div className="demo-clickable-context">
+                  <OracleFlowPanel isRunning={isRunning} />
                 </div>
               )}
               <InferenceTracePanel

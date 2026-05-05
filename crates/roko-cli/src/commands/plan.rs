@@ -277,7 +277,6 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
-            let task_timeout_secs = config.executor.task_timeout_secs;
 
             // Bootstrap: workspace check + unified config load.
             let boot = roko_cli::bootstrap::RokoBootstrap::new(
@@ -455,8 +454,8 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 plan_dir: resolved_plans_dir.clone(),
                 model: roko_config.agent.default_model.clone(),
                 cli_model_override: cli.model.clone(),
-                timeout_secs: task_timeout_secs,
-                plan_timeout_secs: config.runner.plan_timeout_secs,
+                timeout_secs: roko_config.timeouts.agent_dispatch_secs,
+                plan_timeout_secs: roko_config.timeouts.plan_total_secs,
                 max_retries: max_retries.unwrap_or(2),
                 max_concurrent_tasks,
                 gate_concurrency: max_concurrent_tasks,

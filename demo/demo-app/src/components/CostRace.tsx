@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getCssVar, hexToRgba } from '../lib/color';
-import { MODEL_COLORS } from '../lib/palette';
+import { modelColor as paletteModelColor } from '../lib/palette';
 import { useLiveApi } from '../hooks/useLiveApi';
 import { useBenchSSE } from '../hooks/useBenchSSE';
 import { useCanvasSetup } from '../hooks/useCanvasSetup';
@@ -96,9 +96,8 @@ function hashString(input: string): number {
 
 function getModelColor(model: string, explicit?: string): string {
   if (explicit) return explicit;
-  for (const [needle, color] of Object.entries(MODEL_COLORS)) {
-    if (model.includes(needle)) return color;
-  }
+  const matched = paletteModelColor(model);
+  if (matched !== '#706070') return matched;
   const palette = [
     getCssVar('--bone'), getCssVar('--success'), getCssVar('--rose'),
     getCssVar('--warning'), getCssVar('--status-blocked'), getCssVar('--lane-sage'), getCssVar('--lane-clay'),

@@ -81,3 +81,20 @@ function resolveMirageEventsWs(): string | null {
 }
 
 export const MIRAGE_EVENTS_WS_URL = resolveMirageEventsWs();
+
+/** Canonical timeout values (ms) used across all hooks and session logic. */
+export const TIMEOUTS = {
+  health:      parseInt(viteEnv('VITE_TIMEOUT_HEALTH')    ?? '5000',  10),
+  workspace:   parseInt(viteEnv('VITE_TIMEOUT_WORKSPACE') ?? '10000', 10),
+  command:     parseInt(viteEnv('VITE_TIMEOUT_COMMAND')    ?? '180000',10),
+  terminal:    parseInt(viteEnv('VITE_TIMEOUT_TERMINAL')   ?? '8000',  10),
+  shellPrompt: parseInt(viteEnv('VITE_TIMEOUT_PROMPT')     ?? '8000',  10),
+} as const;
+
+/** WebSocket reconnect backoff parameters used by useTerminal and WS transports. */
+export const RECONNECT_BACKOFF = {
+  baseMs:      parseInt(viteEnv('VITE_RECONNECT_BASE_MS')      ?? '500',   10),
+  maxMs:       parseInt(viteEnv('VITE_RECONNECT_MAX_MS')       ?? '30000', 10),
+  factor:      parseFloat(viteEnv('VITE_RECONNECT_FACTOR')     ?? '2'),
+  maxAttempts: parseInt(viteEnv('VITE_RECONNECT_MAX_ATTEMPTS') ?? '20',    10),
+} as const;

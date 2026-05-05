@@ -12,6 +12,7 @@ import { PulseIcon, SpinnerIcon, CrossIcon } from '../../components/icons/Animat
 import type { TerminalHandle } from '../../hooks/useTerminal';
 import ConfigWidget from '../../components/ConfigWidget';
 import BlockTicker from '../../components/BlockTicker';
+import ComponentErrorBoundary from '../../components/design/ComponentErrorBoundary';
 import ScenarioSlot, { type ScenarioSlotHandle, type SlotStateReport } from './ScenarioSlot';
 import BottomTerminalPane from './BottomTerminalPane';
 import '@xterm/xterm/css/xterm.css';
@@ -342,26 +343,27 @@ export default function Demo() {
       {SCENARIOS.map((s, i) => {
         if (!activated.has(i)) return null;
         return (
-          <ScenarioSlot
-            key={s.id}
-            ref={getSlotRef(i)}
-            scenario={s}
-            scenarioIdx={i}
-            active={activeIdx === i}
-            playbackMode={playbackMode}
-            serverHealth={serverHealth}
-            checkServeHealth={checkServeHealth}
-            defaultModel={defaultModel}
-            learningStats={learningStats}
-            handoffs={handoffs}
-            activeHandoff={activeHandoff}
-            ensureWorkspace={ensureWorkspace}
-            createWorkspace={createWorkspace}
-            toast={toast}
-            onStateChange={handleSlotStateChange}
-            onComplete={handleSlotComplete}
-            onNextScenario={handleNextScenario}
-          />
+          <ComponentErrorBoundary key={s.id} name={`Scenario-${s.id}`}>
+            <ScenarioSlot
+              ref={getSlotRef(i)}
+              scenario={s}
+              scenarioIdx={i}
+              active={activeIdx === i}
+              playbackMode={playbackMode}
+              serverHealth={serverHealth}
+              checkServeHealth={checkServeHealth}
+              defaultModel={defaultModel}
+              learningStats={learningStats}
+              handoffs={handoffs}
+              activeHandoff={activeHandoff}
+              ensureWorkspace={ensureWorkspace}
+              createWorkspace={createWorkspace}
+              toast={toast}
+              onStateChange={handleSlotStateChange}
+              onComplete={handleSlotComplete}
+              onNextScenario={handleNextScenario}
+            />
+          </ComponentErrorBoundary>
         );
       })}
 

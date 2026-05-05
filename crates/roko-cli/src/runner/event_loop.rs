@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use roko_core::RuntimeEvent;
 use roko_core::agent::ModelSpec;
 use roko_core::config::GatesConfig;
-use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
+// TimeoutConfig-derived helpers: agent_dispatch_timeout, plan_total_timeout,
+// llm_call_timeout, gate_timeout — see below.
 use roko_core::runtime_event::WorkflowOutcome as RuntimeWorkflowOutcome;
 use roko_core::{AgentRole, ContentHash, PhaseKind, PlanPhase};
 use roko_daimon::{
@@ -106,28 +107,37 @@ fn duration_millis(duration: Duration) -> u64 {
         .max(1)
 }
 
-fn agent_dispatch_timeout(config: &RunConfig) -> Duration {
+/// Resolve agent dispatch wall-clock timeout from `TimeoutConfig` (preferred)
+/// or the legacy `RunConfig.timeout_secs` scalar.
+pub(crate) fn agent_dispatch_timeout(config: &RunConfig) -> Duration {
     config.roko_config.as_deref().map_or_else(
         || Duration::from_secs(config.timeout_secs),
         |cfg| cfg.timeouts.agent_dispatch(),
     )
 }
 
-fn plan_total_timeout(config: &RunConfig) -> Duration {
+/// Resolve plan-level wall-clock timeout from `TimeoutConfig` (preferred)
+/// or the legacy `RunConfig.plan_timeout_secs` scalar.
+pub(crate) fn plan_total_timeout(config: &RunConfig) -> Duration {
     config.roko_config.as_deref().map_or_else(
         || Duration::from_secs(config.plan_timeout_secs),
         |cfg| cfg.timeouts.plan_total(),
     )
 }
 
-fn llm_call_timeout(config: &RunConfig) -> Duration {
+/// Resolve LLM call timeout from `TimeoutConfig`.
+pub(crate) fn llm_call_timeout(config: &RunConfig) -> Duration {
     config.roko_config.as_deref().map_or_else(
         || roko_core::config::TimeoutConfig::default().llm_call(),
         |cfg| cfg.timeouts.llm_call(),
     )
 }
 
-fn gate_timeout(config: &RunConfig, rung: u32) -> Duration {
+/// Resolve gate rung timeout from `TimeoutConfig`:
+/// - rung 0 -> `gate_compile()`
+/// - rung 1 -> `gate_clippy()`
+/// - rung >= 2 -> `gate_test()`
+pub(crate) fn gate_timeout(config: &RunConfig, rung: u32) -> Duration {
     config.roko_config.as_deref().map_or_else(
         || Duration::from_secs(config.timeout_secs),
         |cfg| match rung {
@@ -135,6 +145,22 @@ fn gate_timeout(config: &RunConfig, rung: u32) -> Duration {
             1 => cfg.timeouts.gate_clippy(),
             _ => cfg.timeouts.gate_test(),
         },
+    )
+}
+
+/// Resolve HTTP request timeout from `TimeoutConfig`.
+pub(crate) fn http_request_timeout(config: &RunConfig) -> Duration {
+    config.roko_config.as_deref().map_or_else(
+        || roko_core::config::TimeoutConfig::default().http_request(),
+        |cfg| cfg.timeouts.http_request(),
+    )
+}
+
+/// Resolve health check timeout from `TimeoutConfig`.
+pub(crate) fn health_check_timeout(config: &RunConfig) -> Duration {
+    config.roko_config.as_deref().map_or_else(
+        || roko_core::config::TimeoutConfig::default().health_check(),
+        |cfg| cfg.timeouts.health_check(),
     )
 }
 

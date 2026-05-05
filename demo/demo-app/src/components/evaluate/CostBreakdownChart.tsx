@@ -21,16 +21,16 @@ type CostSegment = {
 
 function tokenCost(model: string, tokensIn: number, tokensOut: number): [number, number] {
   const rates: Record<string, [number, number]> = {
-    haiku: [0.00025, 0.00125],
-    sonnet: [0.003, 0.015],
-    opus: [0.015, 0.075],
-    'gpt-5.4-mini': [0.00015, 0.0006],
-    'gpt-5.4': [0.005, 0.015],
-    'gpt-5.3-codex': [0.003, 0.012],
-    'o3-mini': [0.0011, 0.0044],
-    gemini: [0.00125, 0.01],
+    'claude-haiku':   [0.00025, 0.00125],
+    'claude-sonnet':  [0.003, 0.015],
+    'claude-opus':    [0.015, 0.075],
+    'gpt-5.4-mini':   [0.00015, 0.0006],
+    'gpt-5.4':        [0.005, 0.015],
+    'gpt-5.3-codex':  [0.003, 0.012],
+    'o3-mini':         [0.0011, 0.0044],
+    'gemini':          [0.00125, 0.01],
   };
-  const key = Object.keys(rates).find((k) => model.includes(k)) ?? 'sonnet';
+  const key = Object.keys(rates).find((k) => model.startsWith(k)) ?? 'claude-sonnet';
   const [inRate, outRate] = rates[key];
   return [(Math.max(tokensIn, 0) * inRate) / 1000, (Math.max(tokensOut, 0) * outRate) / 1000];
 }

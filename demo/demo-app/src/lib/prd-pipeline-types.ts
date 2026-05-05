@@ -148,9 +148,24 @@ export function normalizePipelineRouteTier(
 
   const model = (modelHint ?? '').toLowerCase();
   const roleText = (role ?? '').toLowerCase();
-  if (model.includes('opus') || model.includes('gpt-5') || roleText.includes('security')) return 'T3';
-  if (model.includes('sonnet') || model.includes('codex') || roleText.includes('integr')) return 'T2';
-  if (model.includes('haiku') || roleText.includes('verify') || roleText.includes('test')) return 'T1';
+
+  // Prefix-match map for model tier inference (replaces substring matching)
+  const MODEL_TIER_MAP: Record<string, PipelineRouteTier> = {
+    'claude-opus':    'T3',
+    'claude-sonnet':  'T2',
+    'claude-haiku':   'T1',
+    'gpt-5.4':        'T3',
+    'gpt-5.4-mini':   'T2',
+    'gemini-2.5-pro': 'T3',
+    'gemini-2.5':     'T2',
+    'codex':          'T2',
+  };
+  const modelKey = Object.keys(MODEL_TIER_MAP).find(k => model.startsWith(k));
+  if (modelKey) return MODEL_TIER_MAP[modelKey];
+
+  if (roleText.includes('security')) return 'T3';
+  if (roleText.includes('integr')) return 'T2';
+  if (roleText.includes('verify') || roleText.includes('test')) return 'T1';
 
   if ((maxLoc ?? 0) >= 100 || verifyCount >= 4) return 'T3';
   if ((maxLoc ?? 0) >= 45 || verifyCount >= 2) return 'T2';

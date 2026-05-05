@@ -18,6 +18,9 @@ import KnowledgeFlowPanel from './KnowledgeFlowPanel';
 import EfficiencyBar from './EfficiencyBar';
 import ChainIntelPanel from './ChainIntelPanel';
 import ISFRPanel from './ISFRPanel';
+import CostComparisonPanel from './CostComparisonPanel';
+import MemoryTransferPanel from './MemoryTransferPanel';
+import OracleFlowPanel from './OracleFlowPanel';
 import RevealWhen from './RevealWhen';
 import InferenceTracePanel from './InferenceTracePanel';
 import type { InferenceCall, InferenceTraceTotals } from '../hooks/useInferenceTrace';
@@ -129,7 +132,22 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
     traceCostSeries = [],
   } = props;
 
-  if (scenarioId === 'prd-pipeline') {
+  // ── Cost scenario ────────────────────────────────────────────
+  if (scenarioId === 'cost') {
+    return (
+      <>
+        <CostComparisonPanel isRunning={isRunning} />
+        <InferenceTracePanel
+          calls={traceCalls}
+          totals={traceTotals}
+          costSeries={traceCostSeries}
+        />
+      </>
+    );
+  }
+
+  // ── Pipeline scenario (also matches legacy 'prd-pipeline') ───
+  if (scenarioId === 'pipeline' || scenarioId === 'prd-pipeline') {
     return (
       <>
         <PrdPipelinePanel
@@ -183,9 +201,12 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
     );
   }
 
-  if (scenarioId === 'knowledge-transfer') {
+  // ── Memory scenario (also matches legacy 'knowledge-transfer') ─
+  if (scenarioId === 'memory' || scenarioId === 'knowledge-transfer') {
     return (
       <>
+        <MemoryTransferPanel isRunning={isRunning} />
+
         <RevealWhen visible={activeHandoff !== null} mode="slide-up">
           {activeHandoff && (
             <Pane title="HANDOFF" flat>
@@ -201,12 +222,6 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
               </div>
             </Pane>
           )}
-        </RevealWhen>
-
-        <RevealWhen visible={timelineSteps.length > 0} mode="slide-up">
-          <Pane title="TIMELINE" flat>
-            <Timeline steps={timelineSteps} />
-          </Pane>
         </RevealWhen>
 
         <RevealWhen visible={kfInsights.length > 0} mode="scale">
@@ -247,43 +262,8 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
     );
   }
 
-  if (scenarioId === 'chain-intelligence') {
-    return (
-      <>
-        <RevealWhen visible={timelineSteps.length > 0} mode="slide-up">
-          <Pane title="TIMELINE" flat>
-            <Timeline steps={timelineSteps} />
-          </Pane>
-        </RevealWhen>
-
-        <RevealWhen visible={ciInsights.length > 0 || chainConnected} mode="scale">
-          <ChainIntelPanel
-            leftAgent={ciLeftAgent}
-            rightAgent={ciRightAgent}
-            insights={ciInsights}
-            blocks={ciBlocks}
-            positions={ciPositions}
-            metrics={ciMetrics}
-            mirageConnected={chainConnected}
-          />
-        </RevealWhen>
-
-        <RevealWhen visible={logEntries.length > 0} mode="clip">
-          <Pane title="LOG" flat>
-            <CommandLog entries={logEntries} maxHeight="140px" />
-          </Pane>
-        </RevealWhen>
-
-        <InferenceTracePanel
-          calls={traceCalls}
-          totals={traceTotals}
-          costSeries={traceCostSeries}
-        />
-      </>
-    );
-  }
-
-  if (scenarioId === 'isfr-agents') {
+  // ── ISFR scenario (also matches legacy 'isfr-agents') ────────
+  if (scenarioId === 'isfr' || scenarioId === 'isfr-agents') {
     return (
       <>
         <RevealWhen visible={timelineSteps.length > 0} mode="slide-up">
@@ -314,7 +294,40 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
     );
   }
 
-  // Default sidebar
+  // ── Oracle scenario (also matches legacy 'chain-intelligence') ─
+  if (scenarioId === 'oracle' || scenarioId === 'chain-intelligence') {
+    return (
+      <>
+        <OracleFlowPanel isRunning={isRunning} />
+
+        <RevealWhen visible={ciInsights.length > 0 || chainConnected} mode="scale">
+          <ChainIntelPanel
+            leftAgent={ciLeftAgent}
+            rightAgent={ciRightAgent}
+            insights={ciInsights}
+            blocks={ciBlocks}
+            positions={ciPositions}
+            metrics={ciMetrics}
+            mirageConnected={chainConnected}
+          />
+        </RevealWhen>
+
+        <RevealWhen visible={logEntries.length > 0} mode="clip">
+          <Pane title="LOG" flat>
+            <CommandLog entries={logEntries} maxHeight="140px" />
+          </Pane>
+        </RevealWhen>
+
+        <InferenceTracePanel
+          calls={traceCalls}
+          totals={traceTotals}
+          costSeries={traceCostSeries}
+        />
+      </>
+    );
+  }
+
+  // ── Default sidebar (fallback) ───────────────────────────────
   return (
     <>
       <RevealWhen visible={timelineSteps.length > 0} mode="slide-up">

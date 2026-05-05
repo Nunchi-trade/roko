@@ -12,6 +12,7 @@ use thiserror::Error;
 
 pub mod agent;
 pub mod budget;
+pub mod cache;
 pub mod chain;
 pub mod compat;
 pub mod gates;
@@ -32,6 +33,7 @@ pub mod tui_cfg;
 pub mod validation;
 
 // Re-exports for ergonomic use.
+pub use cache::ConfigCache;
 pub use crate::temperament::Temperament;
 pub use compat::from_mori_toml;
 pub use presets::Preset;

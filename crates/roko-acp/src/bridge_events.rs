@@ -1077,6 +1077,10 @@ where
     let max_iterations = session.config_state.max_iterations;
     let review_strictness = session.config_state.review_strictness.clone();
     let session_mcp_servers = session.mcp_servers.clone();
+    // Effort level from the IDE dropdown (low/medium/high/max). Passed to
+    // config_with_session_effort() at dispatch time so the provider backend
+    // sees it as `agent.default_effort`. See that function's doc comment for
+    // the full effort dispatch flow.
     let session_effort = session.config_state.effort.clone();
 
     let shared_run = session.shared_run.clone();
@@ -1775,6 +1779,31 @@ async fn run_openai_compat_cognitive_task(
         .await
 }
 
+/// Clone the workspace config with the session's effort level applied.
+///
+/// ## Effort dispatch flow
+///
+/// The ACP effort selection flows through the system as follows:
+///
+/// 1. **IDE -> ACP**: User picks effort in the status-bar dropdown (low/medium/high/max).
+///    Stored in `SessionConfigState.effort`.
+///
+/// 2. **ACP -> config**: This function stamps the session effort onto
+///    `RokoConfig.agent.default_effort` so that provider backends see it.
+///
+/// 3. **Config -> provider**: Each provider backend reads `agent.default_effort` to
+///    decide how to pass effort/thinking to the upstream API:
+///    - **Anthropic API**: maps to `thinking.budget_tokens` via the Anthropic model
+///      caller (see `roko-agent/src/model_call/anthropic.rs`).
+///    - **OpenAI-compat**: maps to `reasoning_effort` request field when the
+///      provider supports it.
+///    - **Claude CLI**: maps to the `--thinking` flag.
+///
+/// ## Known gap
+///
+/// Effort is passed through `agent.default_effort` as a string. Providers that
+/// do not yet read this field will silently ignore it. See `.roko/GAPS.md` for
+/// the tracking entry on per-provider effort wiring completeness.
 fn config_with_session_effort(roko_config: &RokoConfig, effort: &str) -> RokoConfig {
     let mut config = roko_config.clone();
     let effort = effort.trim();

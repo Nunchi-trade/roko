@@ -181,7 +181,16 @@ pub struct InitializeResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_info: Option<AgentInfo>,
     /// Config files active for this ACP process, in effective load order.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Each entry is prefixed with its source category:
+    /// - `"global:"` -- explicit `--global-config` path
+    /// - `"project:"` -- workspace `roko.toml` or explicit `--config` path
+    /// - `"env:"` -- `ROKO_CONFIG` environment variable
+    /// - `"default:"` -- implicit `~/.roko/config.toml` merged by the core loader
+    ///
+    /// Always serialized (even as `[]`) so the IDE can distinguish "no config
+    /// files" from "server did not report config sources".
+    #[serde(default)]
     pub config_sources: Vec<String>,
 }
 
@@ -1153,5 +1162,44 @@ mod tests {
             }
             _ => panic!("expected Selected variant"),
         }
+    }
+
+    #[test]
+    fn initialize_result_always_includes_config_sources() {
+        // Empty config_sources should still serialize as "configSources": []
+        let result = InitializeResult {
+            protocol_version: ACP_PROTOCOL_VERSION,
+            agent_capabilities: AgentCapabilities::default(),
+            auth_methods: Vec::new(),
+            agent_info: None,
+            config_sources: Vec::new(),
+        };
+        let serialized = serde_json::to_value(&result).expect("serialize InitializeResult");
+        assert_eq!(
+            serialized.get("configSources"),
+            Some(&json!([])),
+            "configSources must always be present, even when empty"
+        );
+
+        // Non-empty config_sources round-trip.
+        let result_with_sources = InitializeResult {
+            config_sources: vec![
+                "global:/home/user/.roko/config.toml".to_string(),
+                "project:/workspace/roko.toml".to_string(),
+            ],
+            ..result
+        };
+        let serialized =
+            serde_json::to_value(&result_with_sources).expect("serialize InitializeResult");
+        let sources = serialized
+            .get("configSources")
+            .expect("configSources key must exist");
+        assert_eq!(
+            sources,
+            &json!([
+                "global:/home/user/.roko/config.toml",
+                "project:/workspace/roko.toml"
+            ])
+        );
     }
 }

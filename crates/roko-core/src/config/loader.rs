@@ -223,6 +223,20 @@ fn load_from_resolved_path(
     config.interpolate_env_vars();
     config.resolve_file_secrets();
 
+    // Emit diagnostics as warnings so callers don't need to opt into
+    // load_config_validated() to see slug duplicates and orphaned models.
+    for diag in collect_diagnostics(&config) {
+        if diag.key.starts_with('_') {
+            // Skip the env-override meta-note; it's noise on the hot path.
+            continue;
+        }
+        tracing::warn!(
+            config_key = %diag.key,
+            "config warning: {}",
+            diag.message
+        );
+    }
+
     Ok(config)
 }
 
@@ -479,6 +493,18 @@ pub fn merge_global_into(config: &mut RokoConfig) {
             "merged global conductor.max_agents"
         );
         config.conductor.max_agents = global.conductor.max_agents;
+    }
+
+    // Post-merge: validate model->provider references now that both layers are present.
+    for (model_key, profile) in &config.models {
+        if !config.providers.contains_key(&profile.provider) {
+            tracing::warn!(
+                model = %model_key,
+                provider = %profile.provider,
+                "model references provider '{}' which is missing after global+project merge",
+                profile.provider,
+            );
+        }
     }
 }
 

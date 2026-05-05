@@ -1,0 +1,202 @@
+.oracle-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.oracle-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.oracle-panel-title {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim, #666);
+}
+
+.oracle-panel-live {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim, #555);
+}
+
+.oracle-panel-live.connected {
+  color: var(--status-success, #4ade80);
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.oracle-panel-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.oracle-panel-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  transition: border-color 0.3s, background 0.3s;
+}
+
+.oracle-panel-step--active {
+  border-color: rgba(139, 92, 246, 0.3);
+  background: rgba(139, 92, 246, 0.05);
+}
+
+.oracle-panel-step--done {
+  border-color: rgba(74, 222, 128, 0.2);
+}
+
+.oracle-panel-step-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim, #555);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.oracle-panel-step--active .oracle-panel-step-icon {
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--violet, #8b5cf6);
+  border-color: rgba(139, 92, 246, 0.3);
+}
+
+.oracle-panel-step--done .oracle-panel-step-icon {
+  background: rgba(74, 222, 128, 0.1);
+  color: var(--status-success, #4ade80);
+  border-color: rgba(74, 222, 128, 0.2);
+}
+
+.oracle-panel-step-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.oracle-panel-step-label {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-mid, #999);
+}
+
+.oracle-panel-step--active .oracle-panel-step-label {
+  color: var(--violet, #8b5cf6);
+}
+
+.oracle-panel-step--done .oracle-panel-step-label {
+  color: var(--status-success, #4ade80);
+}
+
+.oracle-panel-step-desc {
+  font-size: 11px;
+  color: var(--text-dim, #666);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oracle-panel-step-connector {
+  width: 1px;
+  height: 12px;
+  background: var(--border-subtle, rgba(255, 255, 255, 0.06));
+  margin-left: 23px;
+}
+
+.oracle-panel-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.oracle-panel-metric {
+  padding: 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.oracle-panel-metric-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim, #555);
+  margin-bottom: 4px;
+}
+
+.oracle-panel-metric-value {
+  font-family: var(--font-mono, monospace);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary, #eee);
+}
+
+.oracle-panel-metric-value--empty {
+  color: var(--text-dim, #444);
+}
+
+.oracle-panel-knowledge {
+  margin-top: 4px;
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  padding-top: 12px;
+}
+
+.oracle-panel-knowledge-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim, #666);
+  margin-bottom: 6px;
+}
+
+.oracle-panel-knowledge-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.oracle-panel-knowledge-type {
+  font-family: var(--font-mono, monospace);
+  font-size: 9px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+  min-width: 55px;
+}
+
+.oracle-panel-knowledge-type--ingested {
+  color: var(--violet, #8b5cf6);
+}
+
+.oracle-panel-knowledge-type--consumed {
+  color: var(--status-success, #4ade80);
+}
+
+.oracle-panel-knowledge-content {
+  color: var(--text-dim, #666);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

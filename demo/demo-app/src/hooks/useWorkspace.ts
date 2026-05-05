@@ -40,6 +40,8 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [serverWorkdir, setServerWorkdir] = useState<string | null>(null);
+  const serverWorkdirRef = useRef(serverWorkdir);
+  useEffect(() => { serverWorkdirRef.current = serverWorkdir; }, [serverWorkdir]);
   const cacheRef = useRef<Map<string, WorkspaceInfo>>(new Map());
 
   // Fetch server's default workdir on mount

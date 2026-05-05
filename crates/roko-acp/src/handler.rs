@@ -83,9 +83,36 @@ where
 {
     let roko_config = config.load_roko_config();
     if !config.workdir.join("roko.toml").is_file() {
+        let global_note = match config.global_config_path.as_ref() {
+            Some(path) if path.is_file() => {
+                format!("using global config from {}", path.display())
+            }
+            Some(path) => {
+                format!(
+                    "--global-config was set to {} but that file does not exist; \
+                     falling back to built-in defaults",
+                    path.display()
+                )
+            }
+            None => {
+                let implicit = roko_core::config::loader::global_config_path();
+                if implicit.is_file() {
+                    format!(
+                        "using implicit global config from {}",
+                        implicit.display()
+                    )
+                } else {
+                    "no global config found either; using built-in defaults only. \
+                     Run `roko init` in this directory or pass --global-config ~/.roko/config.toml"
+                        .to_owned()
+                }
+            }
+        };
         warn!(
             workdir = %config.workdir.display(),
-            "no roko.toml found in ACP workdir; using defaults and inherited config"
+            "no roko.toml found in ACP workdir — {global_note}. \
+             To configure: add roko.toml to the project root, \
+             or set --global-config in your editor's ACP settings."
         );
     }
     info!(
@@ -132,6 +159,44 @@ where
                         "ACP config changed; reloaded roko.toml"
                     );
                     sessions.replace_roko_config(refreshed);
+
+                    // Recompute configSources and notify the IDE if they changed.
+                    let new_sources = config.config_sources();
+                    let sources_changed = sessions.config_sources != new_sources;
+                    sessions.config_sources = new_sources;
+
+                    if sources_changed {
+                        if let Err(e) = send_config_sources_notification(
+                            transport,
+                            &sessions.config_sources,
+                        )
+                        .await
+                        {
+                            warn!(
+                                error = %e,
+                                "failed to push configSources reload notification to IDE"
+                            );
+                        }
+                    }
+
+                    // Notify the IDE about updated config options for each
+                    // active session so dropdowns reflect the new state.
+                    let session_snapshots: Vec<(String, Vec<crate::types::ConfigOption>)> =
+                        sessions.active_session_config_options();
+                    for (session_id, options) in session_snapshots {
+                        let options_value = serde_json::to_value(&options)
+                            .unwrap_or_else(|_| serde_json::json!([]));
+                        if let Err(e) =
+                            send_config_options_notification(transport, &session_id, options_value)
+                                .await
+                        {
+                            warn!(
+                                session_id = %session_id,
+                                error = %e,
+                                "failed to push config reload notification to IDE"
+                            );
+                        }
+                    }
                 }
                 handle_request(transport, &mut sessions, request).await?;
             }
@@ -422,6 +487,25 @@ async fn send_config_options_notification(
         .send_notification("session/update", update)
         .await
         .context("failed to send config options notification")
+}
+
+/// Notify the IDE that the set of active config files has changed.
+///
+/// This is a server-level notification (not session-scoped) sent when a
+/// config file is created, removed, or modified and the effective source
+/// list differs from the previous reload. The IDE can use this to update
+/// any status-bar indicator or "configure roko" prompt.
+async fn send_config_sources_notification(
+    transport: &mut StdioTransport<impl AsyncRead + Unpin, impl AsyncWrite + Unpin>,
+    config_sources: &[String],
+) -> Result<()> {
+    let params = serde_json::json!({
+        "configSources": config_sources,
+    });
+    transport
+        .send_notification("server/config_sources_update", params)
+        .await
+        .context("failed to send configSources update notification")
 }
 
 fn json_rpc_error(code: i32, message: String) -> (i32, String) {

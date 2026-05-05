@@ -1765,7 +1765,7 @@ default_model = "claude-sonnet-4-6"
     #[test]
     fn project_model_profiles_have_explicit_max_output() {
         assert_configured_models_have_max_output("roko.toml");
-        assert_configured_models_have_max_output("docker/railway.roko.toml");
+        // docker/railway.roko.toml was removed -- Railway uses ROKO_* env var overrides.
     }
 
     #[test]

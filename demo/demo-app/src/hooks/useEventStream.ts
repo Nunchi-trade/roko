@@ -33,6 +33,8 @@ const KNOWN_SSE_EVENT_TYPES = [
 
 export interface EventStreamManager {
   connected: boolean;
+  /** Callback invoked whenever the connected state changes. */
+  onConnectedChange: ((connected: boolean) => void) | null;
   subscribe(types: string[], handler: EventHandler): () => void;
   destroy(): void;
 }
@@ -67,6 +69,7 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let connected = false;
   let destroyed = false;
+  let onConnectedChange: ((connected: boolean) => void) | null = null;
 
   const handlers = new Map<string, Set<EventHandler>>();
   const connectListeners = new Set<() => void>();
@@ -74,6 +77,7 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
 
   function notifyConnect() {
     for (const fn of connectListeners) fn();
+    if (onConnectedChange) onConnectedChange(connected);
   }
 
   function dispatch(type: string, event: unknown) {
@@ -145,7 +149,8 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
       for (const type of listenedTypes) attachNamedListener(source, type);
     }
 
-    source.onerror = () => {
+    source.onerror = (ev) => {
+      console.warn('[SSE] Connection error, reconnecting...', ev);
       if (destroyed || !sources.has(source)) {
         source.close();
         return;
@@ -172,6 +177,13 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
   return {
     get connected() {
       return connected;
+    },
+
+    get onConnectedChange() {
+      return onConnectedChange;
+    },
+    set onConnectedChange(cb: ((connected: boolean) => void) | null) {
+      onConnectedChange = cb;
     },
 
     subscribe(types: string[], handler: EventHandler): () => void {

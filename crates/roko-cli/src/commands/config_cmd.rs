@@ -98,6 +98,11 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             config_cmd::cmd_check_secrets(&wd)
         }
+        ConfigCmd::Export { workdir, env } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_export(&wd, env.as_deref())?;
+            Ok(())
+        }
         ConfigCmd::Validate { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             config_cmd::cmd_validate(&wd).await
@@ -265,6 +270,45 @@ impl ProviderLatencySummary {
 
         None
     }
+}
+
+fn cmd_export(workdir: &Path, env: Option<&str>) -> Result<()> {
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    match env {
+        Some("railway") | Some("Railway") => {
+            println!("# Roko config export for Railway deployment");
+            println!("# Set these as Railway environment variables.");
+            println!();
+            if !config.agent.default_model.is_empty() {
+                println!("ROKO_MODEL={}", config.agent.default_model);
+            }
+            if !config.agent.default_backend.is_empty() {
+                println!("ROKO_BACKEND={}", config.agent.default_backend);
+            }
+            if !config.agent.default_effort.is_empty() {
+                println!("ROKO_EFFORT={}", config.agent.default_effort);
+            }
+            println!("ROKO_BUDGET_USD={:.2}", config.budget.max_plan_usd);
+            println!("ROKO_MAX_AGENTS={}", config.conductor.max_agents);
+            println!("ROKO_PARALLEL={}", config.conductor.parallel_enabled);
+            println!();
+            println!("# Provider API keys (set to actual values in Railway dashboard):");
+            for (name, provider) in &config.providers {
+                if let Some(ref key_env) = provider.api_key_env {
+                    println!("# {name}: {key_env}=<your-key>");
+                }
+            }
+        }
+        Some(target) => {
+            anyhow::bail!("unknown export target '{}'; supported: railway", target);
+        }
+        None => {
+            anyhow::bail!("--env <target> is required; supported targets: railway");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn cmd_provider_list(workdir: &Path) -> Result<()> {

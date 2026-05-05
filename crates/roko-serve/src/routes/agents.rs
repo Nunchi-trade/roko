@@ -39,7 +39,19 @@ use crate::runtime::RunResult;
 use crate::sanitize::sanitize_agent_content;
 use crate::state::{AgentRegistrationRecord, AppState, DiscoveredAgent, OperationStatus};
 
-const AGENT_MESSAGE_INLINE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Fallback inline timeout when no config is loaded.
+const AGENT_MESSAGE_INLINE_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
+
+/// Derive the agent message inline timeout from config, falling back to the default.
+fn agent_message_inline_timeout(state: &AppState) -> Duration {
+    let cfg = state.load_roko_config();
+    let t = cfg.timeouts.http_request();
+    if t.is_zero() {
+        AGENT_MESSAGE_INLINE_TIMEOUT_DEFAULT
+    } else {
+        t
+    }
+}
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -246,7 +258,7 @@ fn agent_dashboard_payload(
             "message_endpoint": message_endpoint,
             "streaming_supported": stream_url.is_some(),
             "stream_endpoint": stream_url,
-            "inline_timeout_ms": AGENT_MESSAGE_INLINE_TIMEOUT.as_millis(),
+            "inline_timeout_ms": config.timeouts.http_request().as_millis(),
             "correlation": "run_id",
         },
     })
@@ -1208,7 +1220,7 @@ async fn send_message(
         if let Some(ws_url) = stream_url_for_agent(&agent) {
             let (run_id, rx) =
                 spawn_sidecar_stream(Arc::clone(&state), agent_id.clone(), ws_url, &agent, &req);
-            match wait_for_sidecar_stream(rx, AGENT_MESSAGE_INLINE_TIMEOUT).await {
+            match wait_for_sidecar_stream(rx, agent_message_inline_timeout(&state)).await {
                 Some(Ok(response_text)) => {
                     return Ok((
                         StatusCode::OK,
@@ -1323,7 +1335,7 @@ async fn send_message(
     let run_id = spawn_background_run(&state, prompt, None, Some(agent_id.clone())).await;
 
     if let Some(completion) =
-        wait_for_background_run(&state, &run_id, AGENT_MESSAGE_INLINE_TIMEOUT).await
+        wait_for_background_run(&state, &run_id, agent_message_inline_timeout(&state)).await
     {
         return match completion {
             RunCompletion::Completed { response } => Ok((

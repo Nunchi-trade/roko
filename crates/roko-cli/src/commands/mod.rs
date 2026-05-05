@@ -5,6 +5,7 @@ pub mod auth;
 pub mod bench;
 pub mod config_cmd;
 pub mod dashboard;
+pub mod do_cmd;
 pub mod experiment;
 pub mod init;
 pub mod job;

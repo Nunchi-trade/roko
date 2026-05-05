@@ -6077,6 +6077,7 @@ name = "roko-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "blake3",
  "chrono",
@@ -6085,6 +6086,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "indexmap 2.14.0",
+ "notify 6.1.1",
  "parking_lot",
  "proptest",
  "regex",

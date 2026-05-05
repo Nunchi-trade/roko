@@ -26,6 +26,7 @@ import MatrixBuilder from '../components/MatrixBuilder';
 import MatrixRaceTrack from '../components/MatrixRaceTrack';
 import MatrixDetailView from '../components/MatrixDetailView';
 import { ComponentErrorBoundary, DataSurface } from '../components/design';
+import { modelColor } from '../lib/palette';
 import { Sparkle } from '../components/Celebration';
 import { PulseIcon, SpinnerIcon, CheckmarkIcon, CrossIcon } from '../components/icons/AnimatedIcons';
 import { useMatrixBench } from '../hooks/useMatrixBench';
@@ -766,7 +767,7 @@ export default function Bench() {
                   const histPts = history.filter((r) => r.summary);
                   const scatterData = pts.length > 0
                     ? pts.map((p) => ({ x: p.cost_usd, y: p.pass_rate, label: p.label ?? p.run_id.slice(0, 8), color: p.provider?.includes('Anthropic') ? 'var(--rose-bright)' : 'var(--success)' }))
-                    : histPts.map((r) => ({ x: r.summary!.total_cost_usd, y: r.summary!.pass_rate, label: r.config.model.split('-').slice(0, 2).join('-'), color: r.config.model.includes('sonnet') ? 'var(--rose-bright)' : 'var(--success)' }));
+                    : histPts.map((r) => ({ x: r.summary!.total_cost_usd, y: r.summary!.pass_rate, label: r.config.model.split('-').slice(0, 2).join('-'), color: modelColor(r.config.model) }));
                   return scatterData.length > 0
                     ? <ScatterChart points={scatterData} xLabel="Cost (USD)" yLabel="Pass Rate" showTrendLine height={400} />
                     : <p className="bench-empty-text">Run benchmarks to see the Pareto frontier.</p>;
