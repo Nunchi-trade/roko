@@ -20,11 +20,15 @@ struct TestHarness {
 
 impl TestHarness {
     async fn new() -> Self {
+        Self::new_with_config(AcpConfig::default()).await
+    }
+
+    async fn new_with_config(config: AcpConfig) -> Self {
         let (client_input, server_input) = duplex(16 * 1024);
         let (server_output, client_output) = duplex(16 * 1024);
         let mut transport = StdioTransport::from_io(server_input, server_output);
         let server_task = tokio::spawn(async move {
-            run_acp_server_with_transport(AcpConfig::default(), &mut transport).await
+            run_acp_server_with_transport(config, &mut transport).await
         });
 
         Self {
@@ -399,6 +403,119 @@ async fn test_malformed_json() -> Result<()> {
 
     assert_eq!(response_error(&response)["code"], json!(PARSE_ERROR));
     assert!(response["id"].is_null());
+
+    harness.shutdown().await
+}
+
+// --- Startup resilience tests (task 073) ---
+
+#[tokio::test]
+async fn initialize_with_no_roko_toml_returns_empty_warnings() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    // No roko.toml in dir -- use defaults.
+    // Use a nonexistent global config to isolate from the developer machine.
+    let config = AcpConfig::new(
+        dir.path(),
+        "default",
+        None,
+        dir.path().join(".roko/acp.log"),
+    )
+    .with_global_config(Some(dir.path().join("nonexistent-global.toml")));
+
+    let mut harness = TestHarness::new_with_config(config).await;
+    let response = harness.client.initialize().await?;
+    let result = response_result(&response);
+
+    // No roko.toml = no config parse warnings. Provider warning may or may not
+    // be present depending on env, but configWarnings must be absent (empty) or
+    // an array per the skip_serializing_if contract.
+    let warnings = &result["configWarnings"];
+    assert!(
+        warnings.is_null() || warnings.is_array(),
+        "configWarnings must be null (omitted) or an array, got: {warnings}"
+    );
+
+    harness.shutdown().await
+}
+
+#[tokio::test]
+async fn initialize_with_malformed_roko_toml_returns_config_warning() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    // Write invalid TOML.
+    std::fs::write(dir.path().join("roko.toml"), "this is { not valid toml")?;
+
+    let config = AcpConfig::new(
+        dir.path(),
+        "default",
+        None,
+        dir.path().join(".roko/acp.log"),
+    )
+    .with_global_config(Some(dir.path().join("nonexistent-global.toml")));
+
+    let mut harness = TestHarness::new_with_config(config).await;
+    let response = harness.client.initialize().await?;
+    let result = response_result(&response);
+
+    let warnings = result["configWarnings"]
+        .as_array()
+        .expect("configWarnings must be a non-empty array");
+    assert!(
+        !warnings.is_empty(),
+        "expected a config parse warning for malformed roko.toml"
+    );
+    let warning_text = warnings[0].as_str().unwrap_or_default();
+    assert!(
+        warning_text.contains("parse error"),
+        "warning should mention parse error, got: {warning_text}"
+    );
+
+    harness.shutdown().await
+}
+
+#[tokio::test]
+async fn initialize_with_unavailable_provider_credentials_returns_warning() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    // Write a valid roko.toml with a provider that references a missing env var.
+    std::fs::write(
+        dir.path().join("roko.toml"),
+        r#"
+config_version = 2
+schema_version = 2
+
+[providers.test-provider]
+kind = "openai_compat"
+base_url = "https://api.example.com/v1"
+api_key_env = "ROKO_TEST_MISSING_KEY_XYZ_DOES_NOT_EXIST"
+"#,
+    )?;
+
+    let config = AcpConfig::new(
+        dir.path(),
+        "default",
+        None,
+        dir.path().join(".roko/acp.log"),
+    )
+    .with_global_config(Some(dir.path().join("nonexistent-global.toml")));
+
+    let mut harness = TestHarness::new_with_config(config).await;
+    let response = harness.client.initialize().await?;
+    let result = response_result(&response);
+
+    let warnings = result["configWarnings"]
+        .as_array()
+        .expect("configWarnings must be a non-empty array");
+    assert!(
+        !warnings.is_empty(),
+        "expected a provider readiness warning"
+    );
+    let has_credential_warning = warnings.iter().any(|w| {
+        let text = w.as_str().unwrap_or_default();
+        text.contains("credentials") || text.contains("api_key_env")
+    });
+    assert!(
+        has_credential_warning,
+        "expected a provider credentials warning in: {warnings:?}"
+    );
 
     harness.shutdown().await
 }

@@ -81,7 +81,10 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let roko_config = config.load_roko_config();
+    let (roko_config, config_load_warning) = config.load_roko_config_with_warning();
+    if let Some(ref warning) = config_load_warning {
+        warn!("{warning}");
+    }
     if !config.workdir.join("roko.toml").is_file() {
         let global_note = match config.global_config_path.as_ref() {
             Some(path) if path.is_file() => {
@@ -120,8 +123,20 @@ where
         models = roko_config.models.len(),
         "loaded roko.toml configuration"
     );
+    let provider_warning = check_provider_readiness(&roko_config);
+    if let Some(ref warning) = provider_warning {
+        warn!("{warning}");
+    }
+
+    // Collect all startup warnings for the initialize response.
+    let startup_warnings: Vec<String> = [config_load_warning, provider_warning]
+        .into_iter()
+        .flatten()
+        .collect();
+
     let mut sessions = SessionManager::new(config.workdir.clone(), roko_config);
     sessions.config_sources = config.config_sources();
+    sessions.startup_warnings = startup_warnings;
     let mut config_watcher = ConfigWatcher::start(&config);
 
     // GC old persisted sessions at startup (7 days).
@@ -152,12 +167,23 @@ where
         match message {
             JsonRpcMessage::Request(request) => {
                 if config_watcher.changed() {
-                    let refreshed = config.load_roko_config();
+                    let (refreshed, reload_warning) = config.load_roko_config_with_warning();
+                    if let Some(warning) = &reload_warning {
+                        warn!("config reload warning: {warning}");
+                    }
                     info!(
                         providers = refreshed.providers.len(),
                         models = refreshed.models.len(),
                         "ACP config changed; reloaded roko.toml"
                     );
+                    let reload_provider_warning = check_provider_readiness(&refreshed);
+                    if let Some(ref warning) = reload_provider_warning {
+                        warn!("config reload: {warning}");
+                    }
+                    sessions.startup_warnings = [reload_warning, reload_provider_warning]
+                        .into_iter()
+                        .flatten()
+                        .collect();
                     sessions.replace_roko_config(refreshed);
 
                     // Recompute configSources and notify the IDE if they changed.
@@ -210,6 +236,40 @@ where
     }
 }
 
+/// Returns a human-readable warning string if no configured provider has credentials,
+/// or `None` if at least one provider appears ready for dispatch.
+fn check_provider_readiness(config: &roko_core::config::schema::RokoConfig) -> Option<String> {
+    use roko_core::ProviderKind;
+
+    if config.providers.is_empty() {
+        return Some(
+            "no providers configured in roko.toml \u{2014} agent dispatch will fail; \
+             set ANTHROPIC_API_KEY or install the claude CLI"
+                .to_string(),
+        );
+    }
+    for (_name, provider) in &config.providers {
+        if provider.kind == ProviderKind::ClaudeCli {
+            // Claude CLI providers don't need an API key env var.
+            return None;
+        }
+        if let Some(env_var) = &provider.api_key_env {
+            if std::env::var(env_var)
+                .ok()
+                .filter(|k| !k.is_empty())
+                .is_some()
+            {
+                return None;
+            }
+        }
+    }
+    Some(
+        "no provider has resolvable credentials \u{2014} check api_key_env vars in roko.toml \
+         or set ANTHROPIC_API_KEY"
+            .to_string(),
+    )
+}
+
 async fn handle_request(
     transport: &mut StdioTransport<impl AsyncRead + Unpin, impl AsyncWrite + Unpin>,
     sessions: &mut SessionManager,
@@ -247,6 +307,7 @@ async fn handle_request(
                     title: Some("Roko".to_owned()),
                 }),
                 config_sources: sessions.config_sources.clone(),
+                config_warnings: sessions.startup_warnings.clone(),
             };
             send_success(transport, id, result).await
         }

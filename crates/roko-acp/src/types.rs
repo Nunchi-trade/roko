@@ -192,6 +192,10 @@ pub struct InitializeResult {
     /// files" from "server did not report config sources".
     #[serde(default)]
     pub config_sources: Vec<String>,
+    /// Human-readable warnings about the server configuration, surfaced at init time.
+    /// Editors should display these to the user immediately after connection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_warnings: Vec<String>,
 }
 
 /// Capabilities reported by the ACP agent.
@@ -1173,12 +1177,18 @@ mod tests {
             auth_methods: Vec::new(),
             agent_info: None,
             config_sources: Vec::new(),
+            config_warnings: Vec::new(),
         };
         let serialized = serde_json::to_value(&result).expect("serialize InitializeResult");
         assert_eq!(
             serialized.get("configSources"),
             Some(&json!([])),
             "configSources must always be present, even when empty"
+        );
+        // config_warnings should be omitted when empty (skip_serializing_if)
+        assert!(
+            serialized.get("configWarnings").is_none(),
+            "empty configWarnings must be omitted from serialization"
         );
 
         // Non-empty config_sources round-trip.

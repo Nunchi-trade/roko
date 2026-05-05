@@ -111,6 +111,96 @@ impl AcpConfig {
         sources
     }
 
+    /// Load the workspace `RokoConfig` and return a warning string if the config
+    /// file exists but failed to parse or contains unknown fields.
+    ///
+    /// Returns `(RokoConfig, None)` when no config file exists (normal, use defaults).
+    /// Returns `(RokoConfig, Some(reason))` when a file exists but loading failed.
+    /// Returns `(RokoConfig, None)` on success.
+    pub fn load_roko_config_with_warning(
+        &self,
+    ) -> (roko_core::config::schema::RokoConfig, Option<String>) {
+        let opts = roko_core::config::loader::LoadOptions::acp();
+
+        // Check project config (explicit or implicit workspace roko.toml).
+        let project_warning = match self.config_path.as_deref() {
+            Some(path) => {
+                // Explicit --config path: warn if it exists but fails to load.
+                if path.is_file() {
+                    let mut check_opts = opts.clone();
+                    check_opts.merge_global = false;
+                    match roko_core::config::loader::load_config_file(path, &check_opts) {
+                        Ok(_) => None,
+                        Err(e) => Some(format!(
+                            "roko.toml parse error ({}): {e:#}",
+                            path.display()
+                        )),
+                    }
+                } else {
+                    None
+                }
+            }
+            None => {
+                // Implicit workspace file: warn only if file exists and fails.
+                let candidate = self.workdir.join("roko.toml");
+                if candidate.is_file() {
+                    let mut check_opts = opts.clone();
+                    check_opts.merge_global = false;
+                    match roko_core::config::loader::load_config_file(&candidate, &check_opts) {
+                        Ok(_) => None,
+                        Err(e) => Some(format!(
+                            "roko.toml parse error ({}): {e:#}",
+                            candidate.display()
+                        )),
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+
+        // Check global config (explicit or implicit ~/.roko/config.toml).
+        let global_warning = if let Some(global_path) = self.global_config_path.as_deref() {
+            if global_path.is_file() {
+                let mut check_opts = opts.clone();
+                check_opts.merge_global = false;
+                match roko_core::config::loader::load_config_file(global_path, &check_opts) {
+                    Ok(_) => None,
+                    Err(e) => Some(format!(
+                        "global config parse error ({}): {e:#}",
+                        global_path.display()
+                    )),
+                }
+            } else {
+                None
+            }
+        } else {
+            let implicit = roko_core::config::loader::global_config_path();
+            if implicit.is_file() {
+                let mut check_opts = opts;
+                check_opts.merge_global = false;
+                match roko_core::config::loader::load_config_file(&implicit, &check_opts) {
+                    Ok(_) => None,
+                    Err(e) => Some(format!(
+                        "global config parse error ({}): {e:#}",
+                        implicit.display()
+                    )),
+                }
+            } else {
+                None
+            }
+        };
+
+        // Combine warnings from project and global config.
+        let warning = match (project_warning, global_warning) {
+            (Some(pw), Some(gw)) => Some(format!("{pw}; {gw}")),
+            (Some(w), None) | (None, Some(w)) => Some(w),
+            (None, None) => None,
+        };
+
+        (self.load_roko_config(), warning)
+    }
+
     /// Load the workspace `RokoConfig`.
     ///
     /// If an explicit `--config` path is set, loads from that path (lenient,

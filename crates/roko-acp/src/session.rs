@@ -912,6 +912,8 @@ pub struct SessionManager {
     pub roko_config: roko_core::config::schema::RokoConfig,
     /// Config source paths surfaced in the initialize response.
     pub config_sources: Vec<String>,
+    /// Human-readable startup warnings surfaced in the initialize response.
+    pub startup_warnings: Vec<String>,
 }
 
 impl SessionManager {
@@ -923,6 +925,7 @@ impl SessionManager {
             workdir,
             roko_config,
             config_sources: Vec::new(),
+            startup_warnings: Vec::new(),
         }
     }
 
