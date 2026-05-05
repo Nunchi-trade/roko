@@ -1,6 +1,7 @@
-import { createContext, createElement, useContext, useCallback, useEffect, useRef, useState } from 'react';
+import { createContext, createElement, useContext, useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useLiveApi } from './useLiveApi';
+import { useContextEventSubscription } from '../contexts/EventStreamContext';
 import {
   providerForModelKey,
   rawModelsToOptions,
@@ -97,11 +98,13 @@ function applyConfig(
 }
 
 /**
- * Hook that manages fetching + polling + writing config. Used inside RokoConfigProvider.
+ * Hook that manages fetching + writing config. Used inside RokoConfigProvider.
  *
- * @deprecated The 15-second config poll here duplicates the initial fetch in
- *   `bootstrapTransport()` and SSE-triggered refetch via the `config_reloaded`
- *   event in DataHub. New consumers should use `useConfigSlice()` from
+ * Previous implementation polled `/api/config` every 15 seconds. Now performs a
+ * single initial fetch on mount and subscribes to the `config_reloaded` SSE event
+ * for subsequent updates (pushed by the server whenever config changes).
+ *
+ * @deprecated New consumers should use `useConfigSlice()` from
  *   `src/data/selectors.ts`.
  */
 export function useRokoConfigState(): RokoConfigState {
@@ -111,7 +114,6 @@ export function useRokoConfigState(): RokoConfigState {
   const [defaultBackend, setDefaultBackend] = useState('');
   const [providers, setProviders] = useState<ProviderGroup[]>([]);
   const [lastSaved, setLastSaved] = useState<number | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
   const fetchConfig = useCallback(async () => {
     try {
@@ -122,12 +124,15 @@ export function useRokoConfigState(): RokoConfigState {
     }
   }, [get]);
 
-  // Initial fetch + 15s poll
+  // Initial fetch only (no polling)
   useEffect(() => {
     fetchConfig();
-    intervalRef.current = setInterval(fetchConfig, 15_000);
-    return () => clearInterval(intervalRef.current);
   }, [fetchConfig]);
+
+  // Subscribe to SSE `config_reloaded` events for live updates
+  useContextEventSubscription(['config_reloaded'], () => {
+    fetchConfig();
+  });
 
   const updateModelConfig = useCallback(
     async (model: string, backend: string): Promise<boolean> => {
