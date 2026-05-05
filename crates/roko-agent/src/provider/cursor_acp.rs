@@ -1,6 +1,9 @@
 use crate::Agent;
 use crate::cursor_agent::{CursorAgent, DEFAULT_BASE_URL};
-use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
+use crate::provider::{
+    AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, current_safety_layer,
+};
+use crate::safety::SafetyLayer;
 use roko_core::agent::ProviderKind;
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
@@ -46,9 +49,13 @@ impl ProviderAdapter for CursorAcpAdapter {
             .or(provider.timeout_ms)
             .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
 
-        let mut agent = CursorAgent::new(api_key, model.slug.clone())
-            .with_base_url(Self::base_url(provider))
-            .with_timeout_ms(timeout_ms);
+        let mut agent = CursorAgent::new(
+            api_key,
+            model.slug.clone(),
+            current_safety_layer().unwrap_or_else(SafetyLayer::with_defaults),
+        )
+        .with_base_url(Self::base_url(provider))
+        .with_timeout_ms(timeout_ms);
 
         if let Some(headers) = &provider.extra_headers {
             agent = agent.with_extra_headers(headers.clone());

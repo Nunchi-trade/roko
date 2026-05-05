@@ -12,8 +12,9 @@ use crate::http::ReqwestPoster;
 use crate::provider::openai_compat::{max_tokens_for_model, tool_registry_for_options};
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
-    tool_loop_max_iterations,
+    current_safety_layer, tool_loop_max_iterations,
 };
+use crate::safety::SafetyLayer;
 use crate::tool_loop::backends::create_tool_loop_backend;
 use crate::tool_loop::{OpenAiCompatBackend, ToolLoop, ToolLoopAgent};
 use crate::translate::{GeminiTranslator, OpenAiTranslator, Translator};
@@ -176,6 +177,7 @@ impl ProviderAdapter for GeminiAdapter {
                 base_url,
                 model.clone(),
                 &options,
+                current_safety_layer().unwrap_or_else(SafetyLayer::with_defaults),
             )))
         } else if model.supports_tools && model.tool_format == "gemini_native" {
             gemini_native_tool_loop_agent(provider, model, &options)

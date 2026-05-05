@@ -136,7 +136,7 @@ pub fn full_lineage(input: &Engram) -> impl Iterator<Item = ContentHash> + '_ {
 /// # Example
 ///
 /// ```ignore
-/// let agent = ExecAgent::new("echo", vec![]);
+/// let agent = ExecAgent::new("echo", vec![], SafetyLayer::with_defaults());
 /// let prompt = Engram::builder(Kind::Prompt).body(Body::text("hello")).build();
 /// let result = agent.run(&prompt, &Context::now()).await;
 /// assert!(result.success);

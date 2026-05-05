@@ -10,10 +10,10 @@ use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 
 use crate::http::{HttpPostError, HttpPoster};
-use crate::provider::AgentCreationError;
 use crate::provider::openai_compat::{
     base_url_for_tool_loop, build_extra_body_params, max_tokens_for_model, resolve_api_key,
 };
+use crate::provider::{AgentCreationError, current_safety_layer};
 use crate::tool_loop::LlmBackend;
 
 /// Tail-latency hedging for latency-sensitive requests.
@@ -153,6 +153,7 @@ pub fn create_tool_loop_backend(
                     .unwrap_or("https://generativelanguage.googleapis.com"),
                 model.clone(),
                 options,
+                current_safety_layer().unwrap_or_else(crate::safety::SafetyLayer::with_defaults),
             )))
         }
         ProviderKind::GeminiApi => Err(AgentCreationError::MissingConfig(

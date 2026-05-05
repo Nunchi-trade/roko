@@ -165,11 +165,8 @@ pub fn create_agent_for_model(
     if let Some(mock_agent) = mock_agent_from_env(&options)? {
         return Ok(mock_agent);
     }
-    let safety_layer = current_safety_layer().or_else(|| Some(SafetyLayer::from_config(config)));
-    let effective_temperament = safety_layer
-        .as_ref()
-        .map(|layer| config.agent.temperament_for_role(&layer.role))
-        .unwrap_or(config.agent.temperament);
+    let safety_layer = current_safety_layer().unwrap_or_else(|| SafetyLayer::from_config(config));
+    let effective_temperament = config.agent.temperament_for_role(&safety_layer.role);
     let resolved = resolve_model(config, model_key);
     let profile = resolved
         .profile
@@ -216,10 +213,12 @@ pub fn create_agent_for_model(
                 "no provider found — falling back to ExecAgent (no tool support)"
             );
 
-            let mut agent =
-                ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
-                    .with_safety_layer(safety_layer)
-                    .with_timeout_ms(options.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS));
+            let mut agent = ExecAgent::new(
+                legacy_command.unwrap_or("cat"),
+                options.extra_args.clone(),
+                safety_layer,
+            )
+            .with_timeout_ms(options.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS));
             if !options.name.is_empty() {
                 agent = agent.with_name(options.name.clone());
             }
@@ -245,7 +244,7 @@ pub fn create_agent_for_model(
 
     let adapter = adapter_for_kind(provider_config.kind);
     with_temperament(Some(effective_temperament), || {
-        with_safety_layer(safety_layer, || {
+        with_safety_layer(Some(safety_layer), || {
             adapter.create_agent(&provider_config, &profile, &options)
         })
     })
@@ -307,11 +306,8 @@ pub fn build_tool_dispatcher(
     registry: Arc<dyn ToolRegistry>,
     resolver: Arc<dyn HandlerResolver>,
 ) -> Arc<ToolDispatcher> {
-    let dispatcher = ToolDispatcher::new(registry, resolver);
-    match current_safety_layer() {
-        Some(layer) => Arc::new(dispatcher.with_safety(layer)),
-        None => Arc::new(dispatcher),
-    }
+    let layer = current_safety_layer().unwrap_or_else(SafetyLayer::with_defaults);
+    Arc::new(ToolDispatcher::new(registry, resolver).with_safety(layer))
 }
 
 /// Return the safety layer currently scoped to provider-backed construction, if any.
