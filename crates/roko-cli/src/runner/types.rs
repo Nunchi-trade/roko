@@ -11,7 +11,7 @@ use roko_core::config::TimeoutConfig;
 use roko_core::config::schema::RokoConfig;
 use roko_core::defaults::{
     DEFAULT_MAX_AUTO_FIX_ITERATIONS, DEFAULT_PLAN_TIMEOUT_SECS, DEFAULT_RUNNER_CONFIG_MAX_RETRIES,
-    DEFAULT_RUNNER_GATE_CONCURRENCY, DEFAULT_RUNNER_MAX_CONCURRENT_TASKS,
+    DEFAULT_RUNNER_GATE_CONCURRENCY, DEFAULT_RUNNER_MAX_CONCURRENT_TASKS, MODEL_FOCUSED,
 };
 use roko_fs::RokoLayout;
 
@@ -1300,10 +1300,9 @@ pub struct RunConfig {
     /// Optional non-blocking HTTP sink for forwarding canonical RuntimeEvents
     /// to a running `roko serve` process.
     pub http_event_sink: Option<roko_runtime::HttpEventSink>,
-    /// When true, print real-time agent and task lifecycle events to
-    /// stderr instead of showing a spinner. Enabled in non-quiet,
-    /// non-json, non-approval CLI mode.
-    pub stream_to_stderr: bool,
+    /// Output sink for streaming progress events. `StderrSink` renders
+    /// rich inline output; `NoopSink` discards everything (quiet/json/serve).
+    pub output_sink: Arc<dyn super::output_sink::RunOutputSink>,
     /// When true, run `cargo check --workspace` before the main event loop
     /// to warm the incremental cache. Makes subsequent compile gates fast.
     /// Default: true.
@@ -1338,7 +1337,7 @@ impl RunConfig {
     #[must_use]
     pub fn from_roko_config(workdir: PathBuf, plan_dir: PathBuf, roko_config: RokoConfig) -> Self {
         let model = if roko_config.agent.default_model.trim().is_empty() {
-            "claude-sonnet-4-6".to_string()
+            MODEL_FOCUSED.to_string()
         } else {
             roko_config.agent.default_model.clone()
         };
@@ -1417,7 +1416,7 @@ impl RunConfig {
             daimon_state: Some(daimon_state),
             connector_registry: Some(connector_registry),
             feed_registry: Some(feed_registry),
-            stream_to_stderr: false,
+            output_sink: Arc::new(super::output_sink::NoopSink),
             warm_cache: true,
             // The runner constructs feedback / projection facades at run
             // start (`event_loop::run`) so they share their lifetime
@@ -1438,7 +1437,7 @@ impl Default for RunConfig {
             layout: RokoLayout::for_project("."),
             workdir: PathBuf::from("."),
             plan_dir: PathBuf::from("plans"),
-            model: "claude-sonnet-4-6".to_string(),
+            model: MODEL_FOCUSED.to_string(),
             cli_model_override: None,
             timeout_secs: timeouts.agent_dispatch().as_secs(),
             plan_timeout_secs: timeouts.plan_total().as_secs(),
@@ -1465,7 +1464,7 @@ impl Default for RunConfig {
             feedback_facade: None,
             projection: None,
             http_event_sink: None,
-            stream_to_stderr: false,
+            output_sink: Arc::new(super::output_sink::NoopSink),
             warm_cache: true,
         }
     }
@@ -1508,7 +1507,7 @@ impl std::fmt::Debug for RunConfig {
                 "http_event_sink",
                 &self.http_event_sink.as_ref().map(|_| ".."),
             )
-            .field("stream_to_stderr", &self.stream_to_stderr)
+            .field("output_sink", &self.output_sink)
             .field("warm_cache", &self.warm_cache)
             .finish()
     }

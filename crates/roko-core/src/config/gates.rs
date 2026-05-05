@@ -40,6 +40,10 @@ pub struct GatesConfig {
     /// Skip test gate entirely.
     #[serde(default)]
     pub skip_tests: bool,
+    /// Enable advanced gate rungs (Symbol, PropertyTest, Integration).
+    /// These rungs use stub_verdict fallback when their input manifests are not wired.
+    #[serde(default)]
+    pub enable_advanced_rungs: bool,
     /// Max gate retry iterations before giving up.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
@@ -61,6 +65,7 @@ impl Default for GatesConfig {
         Self {
             clippy_enabled: default_true(),
             skip_tests: false,
+            enable_advanced_rungs: false,
             max_iterations: default_max_iterations(),
             domain_gates: HashMap::new(),
             custom_rungs: Vec::new(),

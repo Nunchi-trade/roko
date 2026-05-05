@@ -48,11 +48,11 @@ use roko_learn::section_outcome::{
 };
 use roko_neuro::KnowledgeStore;
 
-use super::agent_events::{AgentStreamBuffer, handle_agent_event};
+use super::agent_events::handle_agent_event;
 use super::agent_stream::{AgentHandle, AgentSpawnConfig};
 use super::gate_dispatch;
-use super::inline_output::RunnerInlineTerminal;
 use super::merge::{MergeDispatch, PlanMerger, PlanMergerConfig};
+use super::output_sink::RunOutputSink;
 use super::persist::{self, GateThresholds, PersistPaths};
 use super::plan_loader::Plan;
 use super::snapshot_writer::{SnapshotPayload, SnapshotWriter};
@@ -137,16 +137,21 @@ pub(crate) fn llm_call_timeout(config: &RunConfig) -> Duration {
 }
 
 /// Resolve gate rung timeout from `TimeoutConfig`:
-/// - rung 0 -> `gate_compile()`
-/// - rung 1 -> `gate_clippy()`
-/// - rung >= 2 -> `gate_test()`
+/// - Compile rung -> `gate_compile()`
+/// - Lint rung -> `gate_clippy()`
+/// - all other rungs -> `gate_test()`
 pub(crate) fn gate_timeout(config: &RunConfig, rung: u32) -> Duration {
+    use roko_gate::rung_selector::Rung;
     config.roko_config.as_deref().map_or_else(
         || Duration::from_secs(config.timeout_secs),
-        |cfg| match rung {
-            0 => cfg.timeouts.gate_compile(),
-            1 => cfg.timeouts.gate_clippy(),
-            _ => cfg.timeouts.gate_test(),
+        |cfg| {
+            if rung == Rung::Compile.as_index() {
+                cfg.timeouts.gate_compile()
+            } else if rung == Rung::Lint.as_index() {
+                cfg.timeouts.gate_clippy()
+            } else {
+                cfg.timeouts.gate_test()
+            }
         },
     )
 }
@@ -175,7 +180,7 @@ struct RunContext<'a> {
     task_index: &'a HashMap<String, HashMap<String, TaskDef>>,
     skip_enrichment: &'a HashMap<String, bool>,
     config: &'a RunConfig,
-    inline: &'a mut RunnerInlineTerminal,
+    sink: &'a dyn RunOutputSink,
     tui: &'a TuiBridge,
     state: &'a mut RunState,
     agent_handles: &'a mut HashMap<String, AgentHandle>,
@@ -386,13 +391,13 @@ pub async fn run(
     // Dynamic gate channel buffer: max_concurrent_tasks * 7 rungs, clamped to [32, 256].
     let gate_buffer = (config.max_concurrent_tasks * 7).max(32).min(256);
     let (gate_tx, mut gate_rx) = mpsc::channel::<GateCompletion>(gate_buffer);
-    let mut inline = RunnerInlineTerminal::new(config.stream_to_stderr);
+    let sink = config.output_sink.as_ref();
 
     // -- Warm cargo cache -------------------------------------------------------
     // Run `cargo check --workspace` once before the main loop so that
     // subsequent per-task compile gates are incremental (2-5s vs 30-120s).
     if config.warm_cache {
-        inline.warm_cache_started();
+        sink.warm_cache_started();
         let warm_start = std::time::Instant::now();
         let warm_result = tokio::process::Command::new("cargo")
             .args(["check", "--workspace", "--message-format=short"])
@@ -405,7 +410,7 @@ pub async fn run(
         match warm_result {
             Ok(status) if status.success() => {
                 info!(warm_ms, "cargo cache warmed successfully");
-                inline.warm_cache_completed(warm_ms);
+                sink.warm_cache_completed(warm_ms);
             }
             Ok(status) => {
                 warn!(
@@ -445,7 +450,6 @@ pub async fn run(
     // State and TUI bridge.
     let tui = TuiBridge::new(state_hub.sender());
     let mut state = RunState::new(total_tasks);
-    let mut stream_buf = AgentStreamBuffer::new();
     let mut dream_completion_pending = false;
 
     // Run ledger — optional enhancement for tracking task starts, completions,
@@ -528,7 +532,7 @@ pub async fn run(
         plan_timeout_secs = duration_secs(plan_timeout_duration),
         clippy_enabled = config.clippy_enabled,
         skip_tests = config.skip_tests,
-        stream_to_stderr = config.stream_to_stderr,
+        output_sink = ?config.output_sink,
         has_mcp_config = config.mcp_config.is_some(),
         has_cascade_router = config.cascade_router.is_some(),
         "starting runner v2 event loop"
@@ -617,7 +621,7 @@ pub async fn run(
                 let turn_completed_before_event = state.agent_turn_completed;
                 let turn_error = matches!(&event, AgentEvent::TurnCompleted { is_error: true, .. });
 
-                handle_agent_event(&event, &mut state, &tui, &mut inline, &mut stream_buf);
+                handle_agent_event(&event, &mut state, &tui, sink);
                 append_agent_event(&paths, &event, &state);
 
                 // Per-turn budget enforcement.
@@ -808,7 +812,22 @@ pub async fn run(
                     );
                 }
 
-                inline.gate_completed(&completion);
+                // Render gate verdicts through the output sink.
+                if completion.kind == GateCompletionKind::Gate {
+                    for v in &completion.verdicts {
+                        sink.gate_result(
+                            &completion.plan_id,
+                            &completion.task_id,
+                            &super::output_sink::GateResultSummary {
+                                rung: completion.rung,
+                                passed: v.passed,
+                                gate_name: v.gate_name.clone(),
+                                summary: v.summary.clone(),
+                                duration_ms: completion.duration_ms,
+                            },
+                        );
+                    }
+                }
                 if completion.kind == GateCompletionKind::Gate {
                     if let Some(plan_state) = executor.plan_state_mut(&completion.plan_id) {
                         for verdict in &completion.verdicts {
@@ -1069,8 +1088,14 @@ pub async fn run(
                     let gate_ms = completion.duration_ms;
                     let agent_ms = total_task_ms.saturating_sub(dispatch_ms + gate_ms);
 
-                    inline.diff_block(&output_diffs);
-                    inline.task_done(state.tasks_completed, state.tasks_total, total_task_ms);
+                    sink.diff_block(&completion.plan_id, &completion.task_id, &output_diffs);
+                    sink.task_completed(
+                        &completion.plan_id,
+                        &completion.task_id,
+                        state.tasks_completed,
+                        state.tasks_total,
+                        total_task_ms,
+                    );
                     info!(
                         task = %completion.task_id,
                         dispatch_ms,
@@ -1162,7 +1187,9 @@ pub async fn run(
                                 );
                                 tui.phase_transition(&completion.plan_id, "gating", &format!("{phase:?}"));
 
-                                inline.gate_retry(
+                                sink.gate_retry(
+                                    &completion.plan_id,
+                                    &completion.task_id,
                                     next_attempt.unwrap_or(
                                         state.iteration_for(&completion.plan_id, &completion.task_id) + 1,
                                     ),
@@ -1267,7 +1294,7 @@ pub async fn run(
                             );
                         }
 
-                        inline.task_failed(&reason);
+                        sink.task_failed(&completion.plan_id, &completion.task_id, &reason);
                         let run_id = state.run_id().to_string();
                         emit_runner_event(
                             &paths,
@@ -1356,7 +1383,7 @@ pub async fn run(
                         task_index: &task_index,
                         skip_enrichment: &skip_enrichment,
                         config,
-                        inline: &mut inline,
+                        sink,
                         tui: &tui,
                         state: &mut state,
                         agent_handles: &mut agent_handles,
@@ -2971,8 +2998,8 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             let role_enum = parse_dispatch_role(role);
             let task_category = neuro_prompt_task_category(role_enum);
 
-            ctx.inline
-                .task_started(&task_id, role, &task_def.title, attempt_num);
+            ctx.sink
+                .task_started(plan_id, &task_id, role, &task_def.title, attempt_num);
             let bias_weight = knowledge_bias_weight(ctx.config);
             let knowledge_candidates = candidate_model_slugs(ctx.config);
             let knowledge_store = KnowledgeStore::for_workdir(&ctx.config.workdir);

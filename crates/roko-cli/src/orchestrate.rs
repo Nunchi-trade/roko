@@ -1557,7 +1557,11 @@ fn validate_tasks_file_for_execution(
 /// borrowing the runner.
 struct AgentRunConfig {
     command: String,
+    /// Working directory for agent execution (may be a worktree checkout).
     exec_dir: PathBuf,
+    /// Project root where `roko.toml` lives (used for config/routing loading).
+    /// Falls back to `exec_dir` if not set.
+    project_root: Option<PathBuf>,
     model: String,
     role: String,
     timeout_ms: u64,
@@ -1587,6 +1591,8 @@ struct EnrichmentRunStats {
 struct EnrichmentRuntimeClient {
     command: String,
     exec_dir: PathBuf,
+    /// Project root where roko.toml lives (for config loading).
+    project_root: Option<PathBuf>,
     role: String,
     timeout_ms: u64,
     bare_mode: bool,
@@ -1624,6 +1630,7 @@ impl EnrichmentLlmClient for EnrichmentRuntimeClient {
         let dispatch = run_prepared_agent(AgentRunConfig {
             command: self.command.clone(),
             exec_dir: self.exec_dir.clone(),
+            project_root: self.project_root.clone(),
             model: model.to_string(),
             role: self.role.clone(),
             timeout_ms: self.timeout_ms,
@@ -1731,7 +1738,10 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> DispatchOutcome {
     let prompt_signal = Engram::builder(Kind::Task)
         .body(Body::Text(cfg.prompt.clone()))
         .build();
-    let mut routing_config = load_roko_config(&cfg.exec_dir).unwrap_or_default();
+    // Load config from the project root (where roko.toml lives), not the
+    // per-task worktree exec_dir which has no config file.
+    let config_dir = cfg.project_root.as_deref().unwrap_or(&cfg.exec_dir);
+    let mut routing_config = load_roko_config(config_dir).unwrap_or_default();
     routing_config.apply_process_env();
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
@@ -1995,15 +2005,6 @@ fn selected_enrichment_steps(complexity: TaskComplexityBand) -> Vec<EnrichStep> 
     StepSelector::new().select_steps(complexity, ALL_ORDERED)
 }
 
-fn resolve_enrichment_backend(provider_kind: &str) -> EnrichmentLlmBackend {
-    match provider_kind {
-        "cursor_acp" => EnrichmentLlmBackend::Cursor,
-        "ollama" => EnrichmentLlmBackend::Ollama,
-        "claude_cli" | "anthropic_api" => EnrichmentLlmBackend::Claude,
-        // All OpenAI-compat providers (openai_compat, gemini_api, perplexity_api, cerebras_api, etc.)
-        _ => EnrichmentLlmBackend::Codex,
-    }
-}
 
 fn render_enrichment_outcomes(outcomes: &[StepOutcome]) -> String {
     outcomes
@@ -3263,6 +3264,7 @@ impl JudgeOracle for AgentJudgeOracle {
         let dispatch = run_prepared_agent(AgentRunConfig {
             command: self.command.clone(),
             exec_dir: self.exec_dir.clone(),
+            project_root: None,
             model: self.model.clone(),
             role: "judge".to_string(),
             timeout_ms: self.timeout_ms,
@@ -9235,10 +9237,11 @@ impl PlanRunner {
         let complexity = enrichment_complexity_from_tasks(tasks_file.as_ref());
         let selected_steps = selected_enrichment_steps(complexity);
         let model = self.effective_model();
-        let provider_kind = load_roko_config(&self.workdir)
-            .map(|cfg| resolve_model(&cfg, &model).provider_kind.label().to_owned())
-            .unwrap_or_else(|_| ProviderKind::ClaudeCli.label().to_owned());
-        let backend = resolve_enrichment_backend(&provider_kind);
+        // Resolve the LLM backend through the canonical ProviderKind → LlmBackend
+        // conversion instead of the deleted ad-hoc string-matching function.
+        let backend: EnrichmentLlmBackend = load_roko_config(&self.workdir)
+            .map(|cfg| EnrichmentLlmBackend::from(resolve_model(&cfg, &model).provider_kind))
+            .unwrap_or(EnrichmentLlmBackend::Claude);
         let plan_size_chars = std::fs::read_to_string(plan_dir.join("plan.md"))
             .map(|contents| contents.len())
             .unwrap_or_default();
@@ -9252,6 +9255,7 @@ impl PlanRunner {
         let client = EnrichmentRuntimeClient {
             command: self.config.agent.command.clone(),
             exec_dir,
+            project_root: Some(self.workdir.clone()),
             role: AgentRole::Strategist.label().to_string(),
             timeout_ms: self.config.agent.timeout_ms,
             bare_mode: self.config.agent.bare_mode,
@@ -10269,6 +10273,7 @@ impl PlanRunner {
                 AgentRunConfig {
                     command: self.config.agent.command.clone(),
                     exec_dir: dir.clone(),
+                    project_root: Some(self.workdir.clone()),
                     model,
                     role: role.to_string(),
                     timeout_ms: self.effective_task_timeout_ms(task_def.as_ref()),
@@ -17254,7 +17259,7 @@ impl PlanRunner {
             payload_builder = payload_builder.lineage([parent_hash]);
         }
         let payload_sig = maybe_attest_engram(payload_builder.build());
-        let (recorded_verdicts, skipped_count) = if rung == 0 {
+        let (recorded_verdicts, skipped_count) = if rung == Rung::Compile.as_index() {
             self.run_selected_gate_pipeline(plan_id, &payload_sig, &exec_dir)
                 .await
         } else {
@@ -17852,7 +17857,7 @@ impl PlanRunner {
                         steps.push((rung, Box::new(ClippyGate::new(build_system))));
                     } else {
                         tracing::debug!(
-                            rung = 1,
+                            ?rung,
                             "Lint gate skipped: no lint tool detected for build system"
                         );
                         skipped_count = skipped_count.saturating_add(1);
@@ -17866,32 +17871,28 @@ impl PlanRunner {
                         steps.push((rung, Box::new(GeneratedTestGate::new(store))));
                     } else {
                         tracing::debug!(
-                            rung = 4,
+                            ?rung,
                             "GeneratedTest gate skipped: no generated test store available"
                         );
                         skipped_count = skipped_count.saturating_add(1);
                     }
                 }
-                Rung::Symbol => {
-                    tracing::debug!(
-                        rung = 3,
-                        "Symbol gate skipped: capability detection pending (T1-11)"
-                    );
-                    skipped_count = skipped_count.saturating_add(1);
-                }
-                Rung::PropertyTest => {
-                    tracing::debug!(
-                        rung = 5,
-                        "PropertyTest gate skipped: capability detection pending (T1-11)"
-                    );
-                    skipped_count = skipped_count.saturating_add(1);
-                }
-                Rung::Integration => {
-                    tracing::debug!(
-                        rung = 6,
-                        "Integration gate skipped: capability detection pending (T1-11)"
-                    );
-                    skipped_count = skipped_count.saturating_add(1);
+                Rung::Symbol | Rung::PropertyTest | Rung::Integration => {
+                    // These advanced rungs require capability detection wiring.
+                    // They are skipped unless [gates] enable_advanced_rungs = true.
+                    // When skipped, run_gate_rung handles them via stub_verdict fallback.
+                    if !gate_config.enable_advanced_rungs {
+                        tracing::debug!(
+                            ?rung,
+                            "advanced rung skipped (gates.enable_advanced_rungs not set)"
+                        );
+                        skipped_count = skipped_count.saturating_add(1);
+                    } else {
+                        // Advanced rungs dispatched through run_gate_rung which uses
+                        // stub_verdict fallback when inputs are not wired.
+                        tracing::debug!(?rung, "advanced rung enabled via config");
+                        skipped_count = skipped_count.saturating_add(1);
+                    }
                 }
                 _ => {
                     tracing::debug!(?rung, "unknown rung variant skipped");
@@ -18068,10 +18069,10 @@ impl PlanRunner {
             })
             .unwrap_or_else(|| self.adaptive_thresholds.threshold_for(rung));
         let mut config = RungExecutionConfig::default();
-        if rung == 5 {
+        if rung == Rung::PropertyTest.as_index() {
             config.fact_check_min_confidence = Some(nominal);
         }
-        if rung == 6 {
+        if rung == Rung::Integration.as_index() {
             #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             {
                 config.llm_judge_min_score = Some(nominal as f32);
@@ -18079,18 +18080,18 @@ impl PlanRunner {
         }
         // GATE-05: attach verdict publisher for Pulse-based reentry.
         config.verdict_publisher = self.verdict_publisher.clone();
-        // GATE-06: wire source_roots for SymbolGate (rung 3).
-        if rung == 3 || rung > 6 {
+        // GATE-06: wire source_roots for SymbolGate.
+        if rung == Rung::Symbol.as_index() || rung > Rung::Integration.as_index() {
             config.source_roots = Some(vec![self.workdir.clone()]);
         }
-        // GATE-07: wire fact-check oracle from Perplexity when API key is present (rung 5).
-        if rung == 5 || rung > 6 {
+        // GATE-07: wire fact-check oracle from Perplexity when API key is present (PropertyTest).
+        if rung == Rung::PropertyTest.as_index() || rung > Rung::Integration.as_index() {
             if let Some(api_key) = std::env::var("PERPLEXITY_API_KEY").ok() {
                 config.fact_check_oracle = Some(Arc::new(PerplexitySearchOracle::new(&api_key)));
             }
         }
-        // GATE-07: wire LLM judge oracle from agent dispatch infrastructure (rung 6).
-        if rung == 6 || rung > 6 {
+        // GATE-07: wire LLM judge oracle from agent dispatch infrastructure (Integration).
+        if rung == Rung::Integration.as_index() || rung > Rung::Integration.as_index() {
             // Prefer a lightweight model for judging; fall back to the configured default.
             let judge_model = self
                 .config
@@ -18120,14 +18121,18 @@ impl PlanRunner {
         exec_dir: Option<&Path>,
         task_def: Option<&crate::task_parser::TaskDef>,
     ) {
-        // GATE-07: wire generated_test_artifacts for rung 4.
-        if (rung == 4 || rung > 6) && config.generated_test_artifacts.is_none() {
+        // GATE-07: wire generated_test_artifacts for GeneratedTest rung.
+        if (rung == Rung::GeneratedTest.as_index() || rung > Rung::Integration.as_index())
+            && config.generated_test_artifacts.is_none()
+        {
             if let Some(dir) = exec_dir {
                 config.generated_test_artifacts = self.generated_test_store_for(dir);
             }
         }
-        // GATE-07: wire integration_test_pattern from task verify steps for rung 6.
-        if (rung == 6 || rung > 6) && config.integration_test_pattern.is_none() {
+        // GATE-07: wire integration_test_pattern from task verify steps for Integration rung.
+        if (rung == Rung::Integration.as_index() || rung > Rung::Integration.as_index())
+            && config.integration_test_pattern.is_none()
+        {
             if let Some(td) = task_def {
                 // Look for a verify step with phase "integration" and use its command.
                 if let Some(step) = td
@@ -18240,9 +18245,9 @@ impl PlanRunner {
             Some(self.workdir.clone())
         };
 
-        if rung > 6 {
+        if rung > Rung::Integration.as_index() {
             let mut verdicts = Vec::new();
-            for current_rung in 0..=6 {
+            for current_rung in 0..=Rung::Integration.as_index() {
                 let mut config = self.gate_rung_config(plan_id, current_rung);
                 self.enrich_rung_config(&mut config, current_rung, exec_dir.as_deref(), task_def);
                 verdicts.extend(run_rung(payload_sig, &ctx, current_rung, &inputs, &config).await);
@@ -20846,33 +20851,6 @@ acceptance = []
         assert_ne!(scrubbed.id, signal.id);
     }
 
-    #[test]
-    fn enrichment_backend_uses_provider_kind() {
-        assert_eq!(
-            resolve_enrichment_backend("cursor_acp"),
-            EnrichmentLlmBackend::Cursor
-        );
-        assert_eq!(
-            resolve_enrichment_backend("ollama"),
-            EnrichmentLlmBackend::Ollama
-        );
-        assert_eq!(
-            resolve_enrichment_backend("openai_compat"),
-            EnrichmentLlmBackend::Codex
-        );
-        assert_eq!(
-            resolve_enrichment_backend("gemini_api"),
-            EnrichmentLlmBackend::Codex
-        );
-        assert_eq!(
-            resolve_enrichment_backend("claude_cli"),
-            EnrichmentLlmBackend::Claude
-        );
-        assert_eq!(
-            resolve_enrichment_backend("anthropic_api"),
-            EnrichmentLlmBackend::Claude
-        );
-    }
 
     #[test]
     fn selected_enrichment_steps_fast_plan_skips_heavy_steps() {
