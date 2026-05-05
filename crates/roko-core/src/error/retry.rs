@@ -5,6 +5,17 @@
 //! [`RetryPolicy`] encodes exponential backoff with optional jitter.
 //! [`CircuitBreaker`] tracks consecutive failures and prevents cascading
 //! calls to a failing downstream service.
+//!
+//! # Design note (Task 054)
+//!
+//! This module provides the *config-level* retry policy: `should_retry()` and
+//! `delay_for()` compute whether/when to retry, but **do not execute** the
+//! retry loop themselves. The actual retry loop lives in
+//! `roko_agent::retry::RetryPolicy` which adds provider-aware error
+//! classification (`ErrorClass`), `Retry-After` header support, and full-jitter
+//! randomized backoff via `rand`. If you need to *run* a retryable operation,
+//! use the agent-side `RetryPolicy` or build your own loop around these
+//! primitives.
 
 use std::time::{Duration, Instant};
 
@@ -97,43 +108,6 @@ impl RetryPolicy {
         };
 
         Duration::from_millis(ms)
-    }
-
-    /// Execute an async fallible operation with exponential backoff.
-    ///
-    /// Calls `f` repeatedly until it succeeds, or until the retry budget is
-    /// exhausted. Between attempts it sleeps for the duration returned by
-    /// [`delay_for`](Self::delay_for).
-    ///
-    /// # Type parameters
-    ///
-    /// - `F` -- closure that produces the future (called once per attempt).
-    /// - `Fut` -- the future returned by `F`.
-    /// - `T` -- success type.
-    /// - `E` -- error type (must implement `Display` for logging).
-    pub async fn execute<F, Fut, T, E>(&self, mut f: F) -> Result<T, E>
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<T, E>>,
-        E: std::fmt::Display,
-    {
-        let mut attempt = 0u32;
-        loop {
-            match f().await {
-                Ok(v) => return Ok(v),
-                Err(e) if !self.should_retry(attempt) => return Err(e),
-                Err(e) => {
-                    let delay = self.delay_for(attempt);
-                    tracing::warn!(
-                        attempt = attempt,
-                        max = self.max_attempts,
-                        "retryable error: {e}, backing off {delay:?}"
-                    );
-                    tokio::time::sleep(delay).await;
-                    attempt += 1;
-                }
-            }
-        }
     }
 
     /// Simple deterministic hash for jitter, seeded by attempt number.
@@ -452,60 +426,5 @@ mod tests {
         assert_eq!(cb.consecutive_failures(), 2);
         cb.record_success();
         assert_eq!(cb.consecutive_failures(), 0);
-    }
-
-    // -- RetryPolicy::execute() tests --
-
-    #[tokio::test]
-    async fn execute_succeeds_on_first_try() {
-        let policy = RetryPolicy::new(3, 10, 1_000, false);
-        let result: Result<&str, String> = policy.execute(|| async { Ok("hello") }).await;
-        assert_eq!(result.unwrap(), "hello");
-    }
-
-    #[tokio::test]
-    async fn execute_succeeds_after_transient_failures() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        let policy = RetryPolicy::new(5, 1, 10, false);
-        let calls = AtomicU32::new(0);
-
-        let result: Result<u32, String> = policy
-            .execute(|| {
-                let n = calls.fetch_add(1, Ordering::SeqCst);
-                async move {
-                    if n < 2 {
-                        Err(format!("transient failure #{n}"))
-                    } else {
-                        Ok(n)
-                    }
-                }
-            })
-            .await;
-
-        assert_eq!(result.unwrap(), 2);
-        assert_eq!(calls.load(Ordering::SeqCst), 3); // 2 failures + 1 success
-    }
-
-    #[tokio::test]
-    async fn execute_fails_after_max_attempts_exhausted() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        let policy = RetryPolicy::new(3, 1, 10, false);
-        let calls = AtomicU32::new(0);
-
-        let result: Result<(), String> = policy
-            .execute(|| {
-                let n = calls.fetch_add(1, Ordering::SeqCst);
-                async move { Err(format!("permanent failure #{n}")) }
-            })
-            .await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // The last error is returned (attempt index 2 = 3rd attempt).
-        assert_eq!(err, "permanent failure #2");
-        // Total calls = max_attempts = 3.
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 }

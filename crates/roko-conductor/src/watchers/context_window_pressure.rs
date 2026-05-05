@@ -1,5 +1,18 @@
 //! Context window pressure watcher: fires when token usage exceeds threshold.
 //!
+//! # STATUS: WIRED (via Conductor)
+//!
+//! This watcher IS active at runtime. It is instantiated by `Conductor::new()`
+//! (see `conductor.rs` line ~102) and executed on every conductor check cycle
+//! from `orchestrate.rs::run_conductor_check()`. It fires when token usage
+//! exceeds 80% of the model's context window, producing a
+//! `conductor.intervention` signal that triggers restart/fail decisions.
+//!
+//! The watcher requires `Kind::TokenUsage` signals in the conductor's signal
+//! stream. These are emitted by the orchestrator after each agent dispatch
+//! (via `emit_conductor_signal`). Without those signals, the watcher is inert
+//! but harmless.
+//!
 //! Monitors `TokenUsage` signals derived from agent efficiency events and
 //! fires when usage exceeds [`MAX_CONTEXT_USAGE_RATIO`].
 

@@ -1,10 +1,21 @@
 //! Adapter for the Anthropic Messages API (direct HTTP, not Claude CLI subprocess).
 //!
-//! # Status: experimental — implemented and tested, not wired to production models
+//! # STATUS: WIRED but GATED by config (not active in default `roko.toml`)
 //!
 //! This adapter implements the full Anthropic Messages API tool loop via HTTP
-//! requests to `https://api.anthropic.com/v1/messages`. It is not used in production
-//! because all claude models in `roko.toml` route through `claude_cli` (subprocess).
+//! requests to `https://api.anthropic.com/v1/messages`. The code path is fully
+//! reachable at runtime: `ProviderRegistry` dispatches to `AnthropicApiAdapter`
+//! when a provider has `kind = "anthropic_api"`, and the tool loop activates
+//! when the model profile has `supports_tools = true`.
+//!
+//! It is NOT active in the default configuration because all Claude models in
+//! the shipped `roko.toml` route through `claude_cli` (subprocess-based).
+//! This is intentional: the CLI backend supports MCP passthrough, `--resume`,
+//! and prompt caching, which the direct HTTP path does not yet replicate.
+//!
+//! The tool loop sub-module (`tool_loop.rs`) IS exercised by integration tests
+//! and proven functional. It is NOT dead code -- it just requires explicit
+//! opt-in via config.
 //!
 //! ## To activate
 //!

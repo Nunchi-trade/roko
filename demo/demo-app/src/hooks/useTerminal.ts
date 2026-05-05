@@ -10,6 +10,17 @@ import { rosedustTheme } from '../lib/rosedust-theme';
 import { WS_BASE } from '../lib/serve-url';
 import { stripAnsi } from '../lib/strip-ansi';
 
+// STATUS: WIRED — active diagnostic for demo terminal readiness detection.
+//
+// The shell prompt regex below drives the "connected" state transition: the
+// terminal hook waits up to 8s for a prompt to appear after the WebSocket opens.
+// If the prompt is not detected (common when .zshrc is slow or the shell uses a
+// non-standard prompt char), a console.warn fires and the hook proceeds anyway.
+// This warning is NOT dead code — it is a legitimate fallback path that:
+//   1. Surfaces PTY readiness issues in browser DevTools during demos.
+//   2. Prevents the demo from hanging indefinitely on slow shell startup.
+// The regex covers: $ % # > and common powerline/starship chars.
+
 // Match common shell prompts. The key chars are: $ % # > ❯ → ➜ ➤ ›
 // Also matches bash's default `bash-5.2$ ` and zsh's `user@host% ` patterns.
 // Tested against the tail of a stripped output buffer (multiline).
