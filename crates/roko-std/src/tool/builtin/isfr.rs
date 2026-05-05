@@ -1,13 +1,16 @@
 //! ISFR domain tools — read rates, check source status, query oracle state.
 //!
 //! Tools follow the same `ToolDef` + `ToolHandler` pattern as other builtins.
-//! Handlers currently return mock/stub data; real data flows once the
-//! ISFRKeeper is running and state-sharing is wired (post-C2).
+//! When an `ISFRKeeper` is provided via `with_keeper()`, handlers return live
+//! data. Without a keeper, handlers return a clear error instead of stub data.
 //!
 //! Registration: add `isfr::tool_def_*()` calls to `ROKO_BUILTIN_TOOLS` in
 //! `builtin/mod.rs`, and add handler cases in the dispatcher's tool lookup.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use roko_chain::isfr_keeper::ISFRKeeper;
 use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolHandler,
     ToolPermission, ToolResult, ToolSchema,
@@ -148,19 +151,43 @@ pub const ISFR_TOOL_NAMES: [&str; 4] = [
 
 /// Handler for all ISFR tools.
 ///
-/// Currently returns stub/mock data for all tools. Real data flows once:
-/// - The ISFRKeeper is running (provides live readings via `current_rate()`).
-/// - State-sharing is wired (keeper instance accessible from handler context).
+/// Without a keeper (`keeper: None`) every call returns a clear error so
+/// callers know the keeper has not been initialised, rather than silently
+/// returning stale stub data.
 ///
-/// To wire live data: store `Arc<ISFRKeeper>` in this struct and call
-/// `self.keeper.current_rate()` / `self.keeper.source_metas()` in `execute`.
-#[derive(Debug, Clone, Default)]
-pub struct ISFRHandler;
+/// Wire live data by constructing with [`ISFRHandler::with_keeper`] and
+/// passing the same `Arc<ISFRKeeper>` that is running in the server.
+#[derive(Clone)]
+pub struct ISFRHandler {
+    keeper: Option<Arc<ISFRKeeper>>,
+}
+
+impl std::fmt::Debug for ISFRHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ISFRHandler")
+            .field("keeper", &self.keeper.as_ref().map(|k| &k.keeper_id))
+            .finish()
+    }
+}
+
+impl Default for ISFRHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ISFRHandler {
-    /// Create a new stub `ISFRHandler`.
+    /// Create a handler with no keeper. All tool calls will return an error
+    /// indicating that the keeper has not been initialised.
     pub fn new() -> Self {
-        Self
+        Self { keeper: None }
+    }
+
+    /// Create a handler backed by a live `ISFRKeeper`.
+    pub fn with_keeper(keeper: Arc<ISFRKeeper>) -> Self {
+        Self {
+            keeper: Some(keeper),
+        }
     }
 }
 
@@ -175,81 +202,92 @@ impl ToolHandler for ISFRHandler {
     async fn execute(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
         match call.name.as_str() {
             ISFR_READ_RATES => {
-                let epoch = call.arguments.get("epoch").and_then(|v| v.as_u64());
-                ToolResult::structured(
-                    serde_json::json!({
-                        "epoch": epoch.unwrap_or(1),
-                        "composite_bps": 580,
-                        "lending_bps": 620,
-                        "structured_bps": 850,
-                        "funding_bps": 0,
-                        "staking_bps": 350,
-                        "confidence_bps": 10_000,
-                        "source_count": 4,
-                        "note": "Stub — wire ISFRKeeper.current_rate() for live data."
-                    })
-                    .to_string(),
-                )
+                let Some(keeper) = &self.keeper else {
+                    return ToolResult::Err(ToolError::Other(
+                        "ISFRKeeper not initialized".to_string(),
+                    ));
+                };
+
+                match keeper.current_rate() {
+                    Some(rate) => ToolResult::structured(
+                        serde_json::json!({
+                            "composite_bps": rate.composite_bps,
+                            "lending_bps": rate.lending_bps,
+                            "structured_bps": rate.structured_bps,
+                            "funding_bps": rate.funding_bps,
+                            "staking_bps": rate.staking_bps,
+                            "confidence_bps": rate.confidence_bps,
+                            "source_count": rate.readings.len(),
+                            "timestamp_ms": rate.timestamp_ms,
+                        })
+                        .to_string(),
+                    ),
+                    None => ToolResult::Err(ToolError::Other(
+                        "ISFRKeeper has not yet completed a poll cycle; no rate available"
+                            .to_string(),
+                    )),
+                }
             }
 
             ISFR_READ_RATE_HISTORY => {
-                let _from = call
-                    .arguments
-                    .get("from_epoch")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1);
-                let _limit = call
-                    .arguments
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(10);
+                // Rate history is accumulated in AppState (serve layer), not in the
+                // keeper itself, which only stores the most recent composite. Return
+                // a clear error so callers know to use the HTTP API instead.
+                ToolResult::Err(ToolError::Other(
+                    "Rate history requires serve integration; query /api/isfr/history via the HTTP control plane".to_string(),
+                ))
+            }
+
+            ISFR_ORACLE_STATUS => {
+                let Some(keeper) = &self.keeper else {
+                    return ToolResult::Err(ToolError::Other(
+                        "ISFRKeeper not initialized".to_string(),
+                    ));
+                };
+
+                let metas = keeper.source_metas();
+                let source_count = metas.len();
+                let running = keeper.current_rate().is_some();
+
                 ToolResult::structured(
                     serde_json::json!({
-                        "rates": [],
-                        "note": "Rate history not yet populated — keeper must run for at least one epoch."
+                        "keeper_id": keeper.keeper_id,
+                        "running": running,
+                        "source_count": source_count,
                     })
                     .to_string(),
                 )
             }
 
-            ISFR_ORACLE_STATUS => ToolResult::structured(
-                serde_json::json!({
-                    "current_epoch": 1,
-                    "clearing_phase": false,
-                    "voter_count": 4,
-                    "pending_ranges": 0,
-                    "bounty_balance": "10000.0",
-                    "note": "Stub — wire ISFRRegistry for live oracle state."
-                })
-                .to_string(),
-            ),
-
             ISFR_SOURCE_STATUS => {
-                let filter = call.arguments.get("source").and_then(|v| v.as_str());
-                let all_sources = serde_json::json!([
-                    { "name": "mock-aave-v3", "class": "lending", "status": "live", "weight": 0.30, "rate_bps": 620 },
-                    { "name": "mock-compound-v3", "class": "lending", "status": "live", "weight": 0.25, "rate_bps": 580 },
-                    { "name": "mock-ethena-susde", "class": "structured", "status": "live", "weight": 0.20, "rate_bps": 850 },
-                    { "name": "mock-eth-staking", "class": "staking", "status": "live", "weight": 0.25, "rate_bps": 350 }
-                ]);
-                let sources = if let Some(name) = filter {
-                    let filtered: Vec<serde_json::Value> = if let Some(arr) = all_sources.as_array()
-                    {
-                        arr.iter()
-                            .filter(|s| s.get("name").and_then(|n| n.as_str()) == Some(name))
-                            .cloned()
-                            .collect()
-                    } else {
-                        vec![]
-                    };
-                    serde_json::Value::Array(filtered)
-                } else {
-                    all_sources
+                let Some(keeper) = &self.keeper else {
+                    return ToolResult::Err(ToolError::Other(
+                        "ISFRKeeper not initialized".to_string(),
+                    ));
                 };
+
+                let filter = call.arguments.get("source").and_then(|v| v.as_str());
+                let metas = keeper.source_metas();
+
+                let sources: Vec<serde_json::Value> = metas
+                    .iter()
+                    .filter(|m| filter.map_or(true, |name| m.name == name))
+                    .map(|m| {
+                        serde_json::json!({
+                            "name": m.name,
+                            "class": m.class.as_str(),
+                            "weight": m.weight,
+                            "status": format!("{:?}", m.status).to_lowercase(),
+                            "consecutive_failures": m.consecutive_failures,
+                            "last_rate_bps": m.last_reading.as_ref().map(|r| r.rate_bps),
+                            "last_timestamp_ms": m.last_reading.as_ref().map(|r| r.timestamp_ms),
+                        })
+                    })
+                    .collect();
+
                 ToolResult::structured(
                     serde_json::json!({
                         "sources": sources,
-                        "note": "Stub — wire ISFRKeeper.source_metas() for live status."
                     })
                     .to_string(),
                 )
@@ -302,36 +340,126 @@ mod tests {
         }
     }
 
+    // ── No-keeper path: every keeper-dependent tool returns an error ───────────
+
     #[tokio::test]
-    async fn read_rates_returns_structured() {
+    async fn read_rates_without_keeper_returns_err() {
         let handler = ISFRHandler::new();
         let ctx = make_ctx();
         let call = make_call(ISFR_READ_RATES, serde_json::json!({}));
         let result = handler.execute(call, &ctx).await;
-        assert!(matches!(result, ToolResult::Ok { .. }));
-    }
-
-    #[tokio::test]
-    async fn source_status_filters_by_name() {
-        let handler = ISFRHandler::new();
-        let ctx = make_ctx();
-        let call = make_call(
-            ISFR_SOURCE_STATUS,
-            serde_json::json!({ "source": "mock-aave-v3" }),
-        );
-        let result = handler.execute(call, &ctx).await;
-        assert!(matches!(result, ToolResult::Ok { .. }));
-        if let ToolResult::Ok { content, .. } = result {
-            let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-            let sources = v["sources"].as_array().unwrap();
-            assert_eq!(sources.len(), 1);
-            assert_eq!(sources[0]["name"], "mock-aave-v3");
+        assert!(matches!(result, ToolResult::Err(_)));
+        if let ToolResult::Err(ToolError::Other(msg)) = result {
+            assert!(msg.contains("not initialized"), "unexpected message: {msg}");
         }
     }
 
     #[tokio::test]
-    async fn source_status_returns_all_when_no_filter() {
+    async fn oracle_status_without_keeper_returns_err() {
         let handler = ISFRHandler::new();
+        let ctx = make_ctx();
+        let call = make_call(ISFR_ORACLE_STATUS, serde_json::json!({}));
+        let result = handler.execute(call, &ctx).await;
+        assert!(matches!(result, ToolResult::Err(_)));
+    }
+
+    #[tokio::test]
+    async fn source_status_without_keeper_returns_err() {
+        let handler = ISFRHandler::new();
+        let ctx = make_ctx();
+        let call = make_call(ISFR_SOURCE_STATUS, serde_json::json!({}));
+        let result = handler.execute(call, &ctx).await;
+        assert!(matches!(result, ToolResult::Err(_)));
+    }
+
+    /// Rate history always returns an error regardless of keeper state because
+    /// the history ring is tracked in AppState (roko-serve), not in the keeper.
+    #[tokio::test]
+    async fn read_rate_history_returns_err() {
+        let handler = ISFRHandler::new();
+        let ctx = make_ctx();
+        let call = make_call(
+            ISFR_READ_RATE_HISTORY,
+            serde_json::json!({ "from_epoch": 1, "limit": 10 }),
+        );
+        let result = handler.execute(call, &ctx).await;
+        assert!(matches!(result, ToolResult::Err(_)));
+        if let ToolResult::Err(ToolError::Other(msg)) = result {
+            assert!(
+                msg.contains("serve integration"),
+                "unexpected message: {msg}"
+            );
+        }
+    }
+
+    // ── Live keeper path ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_rates_with_keeper_before_tick_returns_err() {
+        use roko_chain::isfr_keeper::{ISFRKeeper, ISFRKeeperConfig};
+        let keeper = Arc::new(ISFRKeeper::mock_keeper(
+            "test-keeper",
+            ISFRKeeperConfig::default(),
+        ));
+        let handler = ISFRHandler::with_keeper(keeper);
+        let ctx = make_ctx();
+        let call = make_call(ISFR_READ_RATES, serde_json::json!({}));
+        let result = handler.execute(call, &ctx).await;
+        // No tick yet — current_rate() returns None.
+        assert!(matches!(result, ToolResult::Err(_)));
+    }
+
+    #[tokio::test]
+    async fn read_rates_with_keeper_after_tick_returns_structured() {
+        use roko_chain::isfr_keeper::{ISFRKeeper, ISFRKeeperConfig};
+        let keeper = Arc::new(ISFRKeeper::mock_keeper(
+            "test-keeper",
+            ISFRKeeperConfig::default(),
+        ));
+        keeper.tick().await;
+        let handler = ISFRHandler::with_keeper(keeper);
+        let ctx = make_ctx();
+        let call = make_call(ISFR_READ_RATES, serde_json::json!({}));
+        let result = handler.execute(call, &ctx).await;
+        assert!(matches!(result, ToolResult::Ok { .. }));
+        if let ToolResult::Ok { content, .. } = result {
+            let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert!(v["composite_bps"].as_u64().unwrap() > 0);
+            assert_eq!(v["confidence_bps"], 10_000u64);
+            assert_eq!(v["source_count"], 4u64);
+        }
+    }
+
+    #[tokio::test]
+    async fn oracle_status_with_keeper_after_tick_returns_structured() {
+        use roko_chain::isfr_keeper::{ISFRKeeper, ISFRKeeperConfig};
+        let keeper = Arc::new(ISFRKeeper::mock_keeper(
+            "test-keeper",
+            ISFRKeeperConfig::default(),
+        ));
+        keeper.tick().await;
+        let handler = ISFRHandler::with_keeper(keeper);
+        let ctx = make_ctx();
+        let call = make_call(ISFR_ORACLE_STATUS, serde_json::json!({}));
+        let result = handler.execute(call, &ctx).await;
+        assert!(matches!(result, ToolResult::Ok { .. }));
+        if let ToolResult::Ok { content, .. } = result {
+            let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert_eq!(v["keeper_id"], "test-keeper");
+            assert_eq!(v["running"], true);
+            assert_eq!(v["source_count"], 4u64);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_status_with_keeper_returns_all_sources() {
+        use roko_chain::isfr_keeper::{ISFRKeeper, ISFRKeeperConfig};
+        let keeper = Arc::new(ISFRKeeper::mock_keeper(
+            "test-keeper",
+            ISFRKeeperConfig::default(),
+        ));
+        keeper.tick().await;
+        let handler = ISFRHandler::with_keeper(keeper);
         let ctx = make_ctx();
         let call = make_call(ISFR_SOURCE_STATUS, serde_json::json!({}));
         let result = handler.execute(call, &ctx).await;
@@ -340,36 +468,39 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(&content).unwrap();
             let sources = v["sources"].as_array().unwrap();
             assert_eq!(sources.len(), 4);
+            // All mock sources should be live after a successful tick.
+            for src in sources {
+                assert_eq!(src["status"], "live");
+                assert!(src["last_rate_bps"].as_u64().unwrap() > 0);
+            }
         }
     }
 
     #[tokio::test]
-    async fn oracle_status_returns_structured() {
-        let handler = ISFRHandler::new();
-        let ctx = make_ctx();
-        let call = make_call(ISFR_ORACLE_STATUS, serde_json::json!({}));
-        let result = handler.execute(call, &ctx).await;
-        assert!(matches!(result, ToolResult::Ok { .. }));
-        if let ToolResult::Ok { content, .. } = result {
-            let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-            assert_eq!(v["current_epoch"], 1);
-            assert_eq!(v["voter_count"], 4);
-        }
-    }
+    async fn source_status_filters_by_name() {
+        use roko_chain::isfr_keeper::{ISFRKeeper, ISFRKeeperConfig};
+        let keeper = Arc::new(ISFRKeeper::mock_keeper(
+            "test-keeper",
+            ISFRKeeperConfig::default(),
+        ));
+        keeper.tick().await;
+        // Get actual source names from the keeper so the test isn't brittle.
+        let metas = keeper.source_metas();
+        let target_name = metas[0].name.clone();
 
-    #[tokio::test]
-    async fn read_rate_history_returns_structured() {
-        let handler = ISFRHandler::new();
+        let handler = ISFRHandler::with_keeper(keeper);
         let ctx = make_ctx();
         let call = make_call(
-            ISFR_READ_RATE_HISTORY,
-            serde_json::json!({ "from_epoch": 1, "limit": 10 }),
+            ISFR_SOURCE_STATUS,
+            serde_json::json!({ "source": target_name }),
         );
         let result = handler.execute(call, &ctx).await;
         assert!(matches!(result, ToolResult::Ok { .. }));
         if let ToolResult::Ok { content, .. } = result {
             let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-            assert!(v["rates"].is_array());
+            let sources = v["sources"].as_array().unwrap();
+            assert_eq!(sources.len(), 1);
+            assert_eq!(sources[0]["name"], target_name);
         }
     }
 
