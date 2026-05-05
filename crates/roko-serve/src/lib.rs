@@ -394,18 +394,14 @@ impl ServerBuilder {
                     .append(true)
                     .open(&log_path)
                 {
-                    let f2 = f.try_clone().unwrap_or_else(|e| {
-                        warn!("failed to clone log file handle: {e}; stderr will be suppressed");
-                        // Return a handle to /dev/null via a pipe-to-nowhere trick:
-                        // Stdio::null() is the spawn-level API, so for the File slot we
-                        // open /dev/null explicitly, falling back to piped-null.
-                        std::fs::File::open("/dev/null").unwrap_or_else(|_| {
-                            // On platforms without /dev/null, create a temp file as last resort.
-                            let tmp = std::env::temp_dir().join(".roko-null");
-                            std::fs::File::create(&tmp).unwrap_or_else(|_| f.try_clone().unwrap_or(f))
-                        })
-                    });
-                    (std::process::Stdio::from(f), std::process::Stdio::from(f2))
+                    let stderr_file = match f.try_clone() {
+                        Ok(f2) => std::process::Stdio::from(f2),
+                        Err(e) => {
+                            warn!("failed to clone log file handle: {e}; stderr will be null");
+                            std::process::Stdio::null()
+                        }
+                    };
+                    (std::process::Stdio::from(f), stderr_file)
                 } else {
                     (std::process::Stdio::null(), std::process::Stdio::null())
                 };

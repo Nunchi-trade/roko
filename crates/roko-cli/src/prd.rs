@@ -1954,7 +1954,7 @@ fn suggest_field_correction(field: &str, known: &[&str]) -> Option<String> {
     for &known_field in known {
         let dist = strsim_distance(field, known_field);
         if dist > 0 && dist <= 2 {
-            if best.is_none() || dist < best.unwrap().1 {
+            if best.map_or(true, |(_, best_dist)| dist < best_dist) {
                 best = Some((known_field, dist));
             }
         }

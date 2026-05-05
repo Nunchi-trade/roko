@@ -378,7 +378,7 @@ impl LlmBackend for AnthropicMessagesBackend {
     ) -> Result<BackendResponse, LlmError> {
         let _permit = match (&self.provider_id, &self.provider_semaphores) {
             (provider_id, Some(provider_semaphores)) => {
-                Some(provider_semaphores.acquire(provider_id).await)
+                provider_semaphores.acquire(provider_id).await.ok()
             }
             _ => None,
         };

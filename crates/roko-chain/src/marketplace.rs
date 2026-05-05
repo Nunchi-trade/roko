@@ -466,7 +466,7 @@ impl Marketplace {
             escrow.released = true;
         }
 
-        let job = self.jobs.get_mut(job_id).unwrap();
+        let job = self.jobs.get_mut(job_id).ok_or(MarketplaceError::NotFound)?;
         job.state = JobState::Settled;
 
         Ok(SettlementResult {
@@ -511,7 +511,7 @@ impl Marketplace {
             escrow.released = true;
         }
 
-        let job = self.jobs.get_mut(job_id).unwrap();
+        let job = self.jobs.get_mut(job_id).ok_or(MarketplaceError::NotFound)?;
         job.state = JobState::Expired;
 
         Ok(ExpirationResult {
