@@ -45,10 +45,29 @@ pub struct TurnProgress {
     pub tool_results: Vec<String>,
     /// Any text the LLM produced alongside tool calls (often empty).
     pub text_output: String,
+    /// Optional reasoning/thinking content the backend exposed for this turn.
+    pub reasoning: Option<String>,
+    /// Token usage reported for this backend turn.
+    pub usage: Usage,
 }
 
 /// Type-erased callback invoked after each tool-dispatch iteration.
 pub type OnTurnCallback = Arc<dyn Fn(&TurnProgress) + Send + Sync>;
+
+/// Metadata captured for one backend turn of the tool loop.
+#[derive(Debug, Clone)]
+pub struct ToolLoopTurnTrace {
+    /// One-based turn number within this tool loop run.
+    pub turn: u32,
+    /// Tool calls dispatched during this turn.
+    pub tool_calls: Vec<ToolCall>,
+    /// Brief text summaries of tool results, index-aligned with `tool_calls`.
+    pub tool_results: Vec<String>,
+    /// Optional reasoning/thinking content the backend exposed for this turn.
+    pub reasoning: Option<String>,
+    /// Token usage reported for this backend turn.
+    pub usage: Usage,
+}
 
 pub mod agent_wrapper;
 pub mod backends;
@@ -163,6 +182,8 @@ pub struct ToolLoopOutput {
     pub stop_reason: StopReason,
     /// Resumable snapshot — populated when `stop_reason != Stop`.
     pub checkpoint: Option<Checkpoint>,
+    /// Per-turn trace metadata captured during the loop.
+    pub turn_traces: Vec<ToolLoopTurnTrace>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +191,36 @@ enum OverflowAction {
     Ok,
     CompactRecommended,
     CompactRequired,
+}
+
+fn trace_turn(iterations: usize) -> u32 {
+    let capped = iterations
+        .saturating_add(1)
+        .min(u32::MAX as usize);
+    capped as u32
+}
+
+fn tool_result_previews(results: &[(ToolCall, roko_core::tool::ToolResult)]) -> Vec<String> {
+    results
+        .iter()
+        .map(|(_call, result)| match result {
+            roko_core::tool::ToolResult::Ok { content, .. } => truncate_preview(content, 120),
+            roko_core::tool::ToolResult::Err(err) => {
+                truncate_preview(&format!("error: {err}"), 120)
+            }
+        })
+        .collect()
+}
+
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(3);
+    let mut preview = text.chars().take(keep).collect::<String>();
+    preview.push_str("...");
+    preview
 }
 
 // ─── ToolLoop ────────────────────────────────────────────────────────
@@ -334,6 +385,7 @@ impl ToolLoop {
                                 path.display()
                             )),
                             checkpoint: None,
+                            turn_traces: Vec::new(),
                         };
                     }
                     // NotFound: no checkpoint yet, continue with fresh run
@@ -447,6 +499,7 @@ impl ToolLoop {
         let rendered_tools = self.translator.render_tools(tools);
         let mut session = initial_session;
         let mut turn_history: Vec<Turn> = Vec::new();
+        let mut turn_traces: Vec<ToolLoopTurnTrace> = Vec::new();
 
         loop {
             self.prune_context_if_needed(&mut messages);
@@ -462,6 +515,7 @@ impl ToolLoop {
                     total_usage,
                     stop_reason: StopReason::MaxIterations,
                     checkpoint: Some(cp),
+                    turn_traces,
                 };
             }
 
@@ -476,6 +530,7 @@ impl ToolLoop {
                     total_usage,
                     stop_reason: StopReason::Cancelled,
                     checkpoint: Some(cp),
+                    turn_traces,
                 };
             }
 
@@ -492,6 +547,7 @@ impl ToolLoop {
                         total_usage,
                         stop_reason: StopReason::BudgetExhausted,
                         checkpoint: Some(cp),
+                        turn_traces,
                     };
                 }
             }
@@ -519,10 +575,12 @@ impl ToolLoop {
                         total_usage,
                         stop_reason: StopReason::BackendError(e.to_string()),
                         checkpoint: Some(cp),
+                        turn_traces,
                     };
                 }
             };
             merge_session_state(&mut session, self.backend.extract_session(&response));
+            let turn_reasoning = response.extract_reasoning();
             let mut turn_usage = response.extract_usage();
 
             // Compute cost from model profile pricing when the provider did not
@@ -575,6 +633,7 @@ impl ToolLoop {
                         total_usage,
                         stop_reason: StopReason::BackendError(format!("parse: {e}")),
                         checkpoint: Some(cp),
+                        turn_traces,
                     };
                 }
             };
@@ -583,6 +642,13 @@ impl ToolLoop {
             if calls.is_empty() {
                 self.clear_checkpoint_file();
                 let final_text = response.extract_text();
+                turn_traces.push(ToolLoopTurnTrace {
+                    turn: trace_turn(iterations),
+                    tool_calls: Vec::new(),
+                    tool_results: Vec::new(),
+                    reasoning: turn_reasoning,
+                    usage: turn_usage,
+                });
                 let finish_reason_raw = response.extract_finish_reason_raw();
                 let hit_length_limit = finish_reason_raw
                     .as_deref()
@@ -625,6 +691,7 @@ impl ToolLoop {
                     total_usage,
                     stop_reason,
                     checkpoint: None,
+                    turn_traces,
                 };
             }
 
@@ -644,33 +711,30 @@ impl ToolLoop {
             let current_calls = calls.clone();
             let results = self.dispatcher.dispatch_batch(calls, ctx).await;
             all_calls.extend(current_calls.clone());
+            let tool_results = tool_result_previews(&results);
 
             // §36.56 — shape results into messages for the next turn.
             let rendered_results = self.translator.render_results(&results);
             result_msg::append_results(&mut messages, rendered_results);
 
+            turn_traces.push(ToolLoopTurnTrace {
+                turn: trace_turn(iterations),
+                tool_calls: current_calls.clone(),
+                tool_results: tool_results.clone(),
+                reasoning: turn_reasoning.clone(),
+                usage: turn_usage,
+            });
+
             // Fire on_turn callback with a snapshot of this iteration.
             if let Some(ref cb) = self.on_turn {
                 let text_output = response.extract_text();
-                let tool_results: Vec<String> = results
-                    .iter()
-                    .map(|(_call, result)| {
-                        let s = match result {
-                            roko_core::tool::ToolResult::Ok { content, .. } => content.clone(),
-                            roko_core::tool::ToolResult::Err(e) => format!("error: {e}"),
-                        };
-                        if s.len() > 120 {
-                            format!("{}…", &s[..119])
-                        } else {
-                            s
-                        }
-                    })
-                    .collect();
                 cb(&TurnProgress {
                     iteration: iterations,
                     tool_calls: current_calls.clone(),
                     tool_results,
                     text_output,
+                    reasoning: turn_reasoning,
+                    usage: turn_usage,
                 });
             }
 
@@ -701,6 +765,7 @@ impl ToolLoop {
                                     "metacognitive intervention: {intervention:?}"
                                 )),
                                 checkpoint: Some(cp),
+                                turn_traces,
                             };
                         }
                     }

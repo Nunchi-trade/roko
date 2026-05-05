@@ -12,7 +12,7 @@ use crate::agent::{Agent, AgentResult, derived_output};
 use crate::streaming::StreamChunk;
 use crate::task_runner::task_id_from_context;
 
-use super::{StopReason, ToolLoop};
+use super::{StopReason, ToolLoop, ToolLoopOutput, ToolLoopTurnTrace};
 
 use tokio::sync::mpsc;
 
@@ -87,6 +87,50 @@ impl ToolLoopAgent {
                 .join(format!("tool-loop-{safe_task_id}.json")),
         )
     }
+
+    fn attach_trace_metadata(
+        mut result: AgentResult,
+        input: &Engram,
+        output: &ToolLoopOutput,
+    ) -> AgentResult {
+        result
+            .trace
+            .extend(output.turn_traces.iter().map(|trace| Self::trace_signal(input, trace)));
+        result
+    }
+
+    fn trace_signal(input: &Engram, trace: &ToolLoopTurnTrace) -> Engram {
+        let tool_calls = trace
+            .tool_calls
+            .iter()
+            .enumerate()
+            .map(|(idx, call)| {
+                serde_json::json!({
+                    "name": call.name.as_str(),
+                    "result_preview": trace.tool_results.get(idx).cloned().unwrap_or_default(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        derived_output(
+            input,
+            Kind::Custom("agent.trace".to_string()),
+            Body::Json(serde_json::json!({
+                "turn": trace.turn,
+                "tool_calls": tool_calls,
+                "reasoning": trace.reasoning.clone(),
+                "usage": {
+                    "input_tokens": trace.usage.input_tokens,
+                    "output_tokens": trace.usage.output_tokens,
+                    "cache_read_tokens": trace.usage.cache_read_tokens,
+                    "cache_write_tokens": trace.usage.cache_create_tokens,
+                    "total_tokens": trace.usage.total_tokens(),
+                    "cost_usd": trace.usage.cost_usd,
+                },
+            })),
+        )
+        .build()
+    }
 }
 
 #[async_trait]
@@ -107,7 +151,7 @@ impl Agent for ToolLoopAgent {
             )
             .await;
 
-        match output.stop_reason {
+        let result = match &output.stop_reason {
             StopReason::Stop => AgentResult::ok(Self::output_signal(
                 input,
                 &output.final_text,
@@ -131,7 +175,7 @@ impl Agent for ToolLoopAgent {
             .with_usage(output.total_usage),
             StopReason::BackendError(err) => AgentResult::fail(Self::output_signal(
                 input,
-                &err,
+                err,
                 "backend_error",
                 output.iterations,
             ))
@@ -143,7 +187,9 @@ impl Agent for ToolLoopAgent {
                 output.iterations,
             ))
             .with_usage(output.total_usage),
-        }
+        };
+
+        Self::attach_trace_metadata(result, input, &output)
     }
 
     fn name(&self) -> &str {
@@ -180,7 +226,7 @@ impl Agent for ToolLoopAgent {
             )
             .await;
 
-        match output.stop_reason {
+        let result = match &output.stop_reason {
             StopReason::Stop => AgentResult::ok(Self::output_signal(
                 input,
                 &output.final_text,
@@ -204,7 +250,7 @@ impl Agent for ToolLoopAgent {
             .with_usage(output.total_usage),
             StopReason::BackendError(err) => AgentResult::fail(Self::output_signal(
                 input,
-                &err,
+                err,
                 "backend_error",
                 output.iterations,
             ))
@@ -216,7 +262,9 @@ impl Agent for ToolLoopAgent {
                 output.iterations,
             ))
             .with_usage(output.total_usage),
-        }
+        };
+
+        Self::attach_trace_metadata(result, input, &output)
     }
 }
 

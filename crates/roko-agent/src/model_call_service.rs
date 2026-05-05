@@ -15,7 +15,8 @@ use roko_core::foundation::{
     ModelCallRequest, ModelCallResponse, ModelCaller, TokenBudget, TokenUsage,
 };
 use roko_core::{
-    Body, Context, Engram, EventConsumer, Kind, Result, RokoError, RuntimeEvent, Usage,
+    Body, Context, Engram, EventConsumer, Kind, Result, RokoError, RuntimeEvent, ToolCallSummary,
+    Usage,
 };
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -397,6 +398,34 @@ impl ModelCallService {
     fn inference_failed(&self, request_id: &str, model: &str, agent_id: &str, error: &str) {
         if let Some(observer) = &self.inference_observer {
             observer.on_error(request_id, model, agent_id, error);
+        }
+    }
+
+    fn emit_agent_trace_events(
+        &self,
+        agent_id: &str,
+        traces: &[AgentTracePayload],
+        fallback_usage: &TokenUsage,
+    ) {
+        if traces.is_empty() {
+            self.emit(RuntimeEvent::AgentTrace {
+                agent_id: agent_id.to_string(),
+                turn: 1,
+                tool_calls: Vec::new(),
+                reasoning: None,
+                usage: fallback_usage.clone(),
+            });
+            return;
+        }
+
+        for trace in traces {
+            self.emit(RuntimeEvent::AgentTrace {
+                agent_id: agent_id.to_string(),
+                turn: trace.turn,
+                tool_calls: trace.tool_calls.clone(),
+                reasoning: trace.reasoning.clone(),
+                usage: trace.usage.clone(),
+            });
         }
     }
 
@@ -797,6 +826,92 @@ fn token_usage(usage: &Usage, cost_usd: f64) -> TokenUsage {
         input_tokens: u64::from(usage.input_tokens),
         output_tokens: u64::from(usage.output_tokens),
         total_tokens: u64::from(usage.total_tokens()),
+        cost_usd,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AgentTracePayload {
+    turn: u32,
+    tool_calls: Vec<ToolCallSummary>,
+    reasoning: Option<String>,
+    usage: TokenUsage,
+}
+
+fn agent_trace_payloads(result: &crate::agent::AgentResult) -> Vec<AgentTracePayload> {
+    result.trace.iter().filter_map(agent_trace_payload).collect()
+}
+
+fn agent_trace_payload(signal: &Engram) -> Option<AgentTracePayload> {
+    if signal.kind.as_str() != "agent.trace" {
+        return None;
+    }
+
+    let Body::Json(value) = &signal.body else {
+        return None;
+    };
+
+    let turn = value
+        .get("turn")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1)
+        .min(u64::from(u32::MAX)) as u32;
+
+    Some(AgentTracePayload {
+        turn,
+        tool_calls: agent_trace_tool_calls(value),
+        reasoning: value
+            .get("reasoning")
+            .and_then(serde_json::Value::as_str)
+            .filter(|reasoning| !reasoning.is_empty())
+            .map(ToString::to_string),
+        usage: agent_trace_usage(value),
+    })
+}
+
+fn agent_trace_tool_calls(value: &serde_json::Value) -> Vec<ToolCallSummary> {
+    value
+        .get("tool_calls")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let name = item.get("name").and_then(serde_json::Value::as_str)?;
+            let result_preview = item
+                .get("result_preview")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Some(ToolCallSummary {
+                name: name.to_string(),
+                result_preview: result_preview.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn agent_trace_usage(value: &serde_json::Value) -> TokenUsage {
+    let usage = value.get("usage");
+    let input_tokens = usage
+        .and_then(|usage| usage.get("input_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    let output_tokens = usage
+        .and_then(|usage| usage.get("output_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    let total_tokens = usage
+        .and_then(|usage| usage.get("total_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
+    let cost_usd = usage
+        .and_then(|usage| usage.get("cost_usd"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_default();
+
+    TokenUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
         cost_usd,
     }
 }
@@ -1263,6 +1378,7 @@ impl ProviderCallCell {
             } else {
                 f64::from(result.usage.cost_usd)
             };
+            let agent_traces = agent_trace_payloads(&result);
 
             if result.success {
                 return Ok(CellOutput {
@@ -1272,6 +1388,7 @@ impl ProviderCallCell {
                     cost_usd,
                     latency_ms: (total_start.elapsed().as_millis() as u64).max(1),
                     fallback_used: attempt_index > 0,
+                    agent_traces,
                 });
             }
 
@@ -1302,6 +1419,7 @@ struct CellOutput {
     cost_usd: f64,
     latency_ms: u64,
     fallback_used: bool,
+    agent_traces: Vec<AgentTracePayload>,
 }
 
 /// Classified cell-level error.
@@ -1587,9 +1705,13 @@ impl ModelCaller for ModelCallService {
             },
         );
 
+        let agent_id = format!("model-call:{}", output.model_used);
+        // ToolLoopAgent attaches per-turn state as trace metadata; emit it
+        // separately from AgentOutput before the completion event.
+        self.emit_agent_trace_events(&agent_id, &output.agent_traces, &usage);
         self.emit(RuntimeEvent::AgentCompleted {
             run_id: self.run_id.clone(),
-            agent_id: format!("model-call:{}", output.model_used),
+            agent_id,
             output: output.content.clone(),
             tokens_used: usage.total_tokens,
             cost_usd: usage.cost_usd,
