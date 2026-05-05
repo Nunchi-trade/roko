@@ -149,6 +149,10 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
                 }
                 Ok(())
             }
+            ConfigProviderCmd::Available => {
+                cmd_provider_available();
+                Ok(())
+            }
         },
         // ── Models ──────────────────────────────────────────────────
         ConfigCmd::Models { cmd } => match cmd {
@@ -309,6 +313,50 @@ fn cmd_export(workdir: &Path, env: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// List all supported provider kinds with required credentials and setup instructions.
+///
+/// This command does NOT require a loaded config. It works from any directory
+/// with no `roko.toml` present.
+pub(crate) fn cmd_provider_available() {
+    println!("Available provider kinds:");
+    println!();
+    println!("  anthropic_api      Anthropic Messages API");
+    println!("                     Env: ANTHROPIC_API_KEY");
+    println!("                     Base: https://api.anthropic.com/v1");
+    println!("                     Add: edit roko.toml [providers.anthropic], kind = \"anthropic_api\"");
+    println!();
+    println!("  claude_cli         Claude CLI (local subprocess)");
+    println!("                     Install: npm install -g @anthropic-ai/claude-cli && claude login");
+    println!("                     Add: edit roko.toml [providers.claude], kind = \"claude_cli\"");
+    println!();
+    println!("  openai_compat      OpenAI-compatible HTTP API");
+    println!("                     Env: OPENAI_API_KEY");
+    println!("                     Base: https://api.openai.com/v1");
+    println!("                     Works with: OpenAI, Azure, Moonshot, Cerebras, Perplexity, local servers");
+    println!("                     Add: edit roko.toml [providers.openai], kind = \"openai_compat\"");
+    println!();
+    println!("  cursor_acp         Cursor IDE Agent Control Protocol");
+    println!("                     Auth: Cursor IDE handles authentication");
+    println!("                     Add: edit roko.toml [providers.cursor], kind = \"cursor_acp\"");
+    println!();
+    println!("  perplexity_api     Perplexity API");
+    println!("                     Env: PPLX_API_KEY");
+    println!("                     Base: https://api.perplexity.ai");
+    println!("                     Add: edit roko.toml [providers.perplexity], kind = \"perplexity_api\"");
+    println!();
+    println!("  gemini_api         Google Gemini native API (grounding, code execution)");
+    println!("                     Env: GEMINI_API_KEY");
+    println!("                     Base: https://generativelanguage.googleapis.com/v1beta");
+    println!("                     Add: edit roko.toml [providers.gemini], kind = \"gemini_api\"");
+    println!();
+    println!("  cerebras_api       Cerebras fast inference API");
+    println!("                     Env: CEREBRAS_API_KEY");
+    println!("                     Base: https://api.cerebras.ai/v1");
+    println!("                     Add: edit roko.toml [providers.cerebras], kind = \"cerebras_api\"");
+    println!();
+    println!("Run `roko config providers list` to see what is currently configured.");
 }
 
 pub(crate) async fn cmd_provider_list(workdir: &Path) -> Result<()> {

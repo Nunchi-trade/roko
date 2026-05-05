@@ -1609,3 +1609,29 @@ fn binary_on_path(name: &str) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+/// Run aggregate provider readiness checks and report issues to stderr.
+///
+/// Returns `Err` only when ALL referenced providers have issues (none are
+/// ready), meaning the operation should abort. When at least one provider
+/// is ready, issues are printed as warnings and `Ok(())` is returned so
+/// fallback-capable configurations can proceed.
+pub(crate) fn preflight_providers_aggregate(
+    config: &roko_core::config::schema::RokoConfig,
+) -> anyhow::Result<()> {
+    let issues = roko_agent::provider::check_provider_readiness(config);
+    if issues.is_empty() {
+        return Ok(());
+    }
+
+    let all_blocked = roko_agent::provider::report_readiness_issues(&issues, config);
+
+    if all_blocked {
+        anyhow::bail!(
+            "no usable providers: all referenced providers have configuration issues. \
+             Run `roko config providers available` for setup instructions."
+        );
+    }
+
+    Ok(())
+}
