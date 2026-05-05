@@ -360,6 +360,29 @@ Examples:
         #[arg(long)]
         surfaces: bool,
     },
+    /// Inspect workspace state from `.roko/`.
+    #[command(after_help = "\
+Examples:
+  roko show                         Overview: work items, agents, costs, learning
+  roko show costs                   Cost breakdown by model, task, and day
+  roko show agents                  Agent status from executor and efficiency state
+  roko show knowledge               Durable knowledge entries
+  roko show plans                   Plans in progress and recent plan state
+  roko show learning                Routing, experiments, gates, and C-Factor
+  roko show history                 Recent chronological state events
+  roko show auth-redesign           Detail for a work item or plan id
+  roko show --live                  Open the dashboard/TUI")]
+    Show {
+        /// Delegate to the existing dashboard/TUI.
+        #[arg(long)]
+        live: bool,
+        /// Override the working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// One of: costs, agents, knowledge, plans, learning, history, or a work id.
+        #[arg(value_name = "SUBCOMMAND_OR_WORK_ID")]
+        subject: Option<String>,
+    },
     /// Diagnose self-hosted workspace bootstrap state.
     Doctor {
         /// Directory containing `roko.toml` and `.roko/` (default: cwd / --repo).
@@ -2076,6 +2099,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             commands::status::cmd_status(cli, workdir, cfactor, surfaces).await?;
             Ok(EXIT_SUCCESS)
         }
+        Command::Show {
+            live,
+            workdir,
+            subject,
+        } => commands::show::cmd_show(cli, workdir, live, subject).await,
         Command::Doctor { workdir, serve_url } => {
             commands::util::cmd_doctor(cli, workdir, serve_url).await
         }
