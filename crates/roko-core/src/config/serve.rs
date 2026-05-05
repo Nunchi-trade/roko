@@ -232,10 +232,17 @@ pub struct ServerConfig {
     /// Allow all origins when `cors_origins` is empty.
     #[serde(default)]
     pub unsafe_public_cors: bool,
+    /// Workspace GC interval in seconds. Defaults to 300 (5 minutes).
+    #[serde(default = "default_workspace_gc_interval_secs")]
+    pub workspace_gc_interval_secs: u64,
 }
 
 fn default_bind() -> String {
     "127.0.0.1".into()
+}
+
+fn default_workspace_gc_interval_secs() -> u64 {
+    crate::defaults::DEFAULT_WORKSPACE_GC_INTERVAL_SECS
 }
 
 const fn default_port() -> u16 {
@@ -250,6 +257,7 @@ impl Default for ServerConfig {
             cors_origins: Vec::new(),
             auth_token: None,
             unsafe_public_cors: false,
+            workspace_gc_interval_secs: default_workspace_gc_interval_secs(),
         }
     }
 }

@@ -131,6 +131,21 @@ pub struct RokoConfig {
     pub runner: CoreRunnerConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentDefinition>,
+    #[serde(default)]
+    pub validation: ValidationConfig,
+}
+
+/// Validation behavior configuration.
+///
+/// Controls how strictly the config loader treats issues like dangling
+/// provider references and other semantic errors.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ValidationConfig {
+    /// When true, missing provider references and other config issues
+    /// become hard errors instead of warnings. Useful for CI and
+    /// strict production environments.
+    #[serde(default)]
+    pub strict_validation: bool,
 }
 
 const fn default_schema_version() -> u32 {
@@ -172,6 +187,7 @@ impl Default for RokoConfig {
             relay: RelayConfig::default(),
             runner: CoreRunnerConfig::default(),
             agents: Vec::new(),
+            validation: ValidationConfig::default(),
         }
     }
 }
@@ -279,6 +295,7 @@ impl RokoConfig {
         // ProviderKind for this slug. Prefer config-based providers over the
         // slug heuristic so the provider key in the synthesized profile is
         // actually resolvable at dispatch time.
+        #[allow(deprecated)]
         let backend = AgentBackend::from_model(slug);
         let expected_kind: ProviderKind = backend.into();
         let provider = match self
@@ -893,6 +910,11 @@ impl RokoConfig {
         let _ = writeln!(out, "[server]");
         let _ = writeln!(out, "bind = \"{}\"", c.server.bind);
         let _ = writeln!(out, "port = {}", c.server.port);
+        let _ = writeln!(
+            out,
+            "workspace_gc_interval_secs = {}",
+            c.server.workspace_gc_interval_secs
+        );
         let _ = writeln!(out, "\n# -- Cloud deployment --");
         let _ = writeln!(out, "[serve.deploy]");
         let _ = writeln!(out, "provider = \"{}\"", c.serve.deploy.provider);

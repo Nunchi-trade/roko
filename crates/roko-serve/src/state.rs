@@ -5,7 +5,7 @@
 //! layout, configuration, runtime services, and tracking maps for active
 //! runs, plans, and operations.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -470,6 +470,15 @@ pub struct MatrixRunHandle {
     pub lane_handles: Vec<JoinHandle<()>>,
 }
 
+/// Status of an ephemeral workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceStatus {
+    /// Workspace directory exists on disk.
+    Active,
+    /// Workspace directory is missing or inaccessible.
+    Stale,
+}
+
 /// Metadata for an ephemeral workspace created via the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
@@ -479,6 +488,69 @@ pub struct WorkspaceInfo {
     pub path: PathBuf,
     /// Unix timestamp (seconds) when the workspace was created.
     pub created_at: u64,
+    /// Unix timestamp (seconds) when the workspace was last accessed.
+    #[serde(default)]
+    pub last_accessed_at: u64,
+    /// Current status of the workspace on disk.
+    #[serde(default = "default_workspace_status")]
+    pub status: WorkspaceStatus,
+}
+
+fn default_workspace_status() -> WorkspaceStatus {
+    WorkspaceStatus::Active
+}
+
+/// Persisted workspace registry (serialized to `.roko/workspaces.json`).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkspaceRegistry {
+    pub workspaces: BTreeMap<String, WorkspaceInfo>,
+}
+
+/// Return the path to the workspace registry file for a given workdir.
+pub fn workspace_registry_path_for(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("workspaces.json")
+}
+
+/// Load the workspace registry from disk. Returns an empty map if the file
+/// does not exist or is corrupt (in which case a warning is logged).
+pub fn load_workspace_registry(workdir: &Path) -> HashMap<String, WorkspaceInfo> {
+    let path = workspace_registry_path_for(workdir);
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to read workspace registry, starting with empty map"
+            );
+            return HashMap::new();
+        }
+    };
+
+    let registry: WorkspaceRegistry = match serde_json::from_str(&data) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "workspace registry is corrupt, starting with empty map"
+            );
+            return HashMap::new();
+        }
+    };
+
+    // Validate each entry: mark Active if path exists, Stale if not.
+    let mut map = HashMap::with_capacity(registry.workspaces.len());
+    for (id, mut entry) in registry.workspaces {
+        if entry.path.exists() {
+            entry.status = WorkspaceStatus::Active;
+        } else {
+            entry.status = WorkspaceStatus::Stale;
+        }
+        map.insert(id, entry);
+    }
+    map
 }
 
 impl AppState {
@@ -651,7 +723,7 @@ impl AppState {
             terminal_sessions,
             active_bench_runs: RwLock::new(HashMap::new()),
             active_matrix_runs: RwLock::new(HashMap::new()),
-            ephemeral_workspaces: RwLock::new(HashMap::new()),
+            ephemeral_workspaces: RwLock::new(load_workspace_registry(&workdir)),
             mirage_url: std::env::var("ROKO_MIRAGE_URL")
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -812,6 +884,100 @@ impl AppState {
         }
         tracing::info!(path = %path.display(), "restored server state from snapshot");
         Ok(())
+    }
+
+    /// Persist the current workspace registry to `.roko/workspaces.json`.
+    ///
+    /// Takes a brief read-lock snapshot of the map, then writes outside the lock.
+    pub async fn persist_workspace_registry(&self) -> anyhow::Result<()> {
+        let snapshot: BTreeMap<String, WorkspaceInfo> = {
+            let map = self.ephemeral_workspaces.read().await;
+            map.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let registry = WorkspaceRegistry {
+            workspaces: snapshot,
+        };
+        let json = serde_json::to_string_pretty(&registry)
+            .map_err(|e| anyhow::anyhow!("serialize workspace registry: {e}"))?;
+        let path = workspace_registry_path_for(&self.workdir);
+        roko_core::io::atomic_write_async(&path, json.as_bytes())
+            .await
+            .map_err(|e| anyhow::anyhow!("write workspace registry: {e}"))?;
+        Ok(())
+    }
+
+    /// Insert a workspace into the in-memory map and persist to disk.
+    ///
+    /// On persistence failure the entry is removed from the map and an error
+    /// is returned so the caller can clean up the directory.
+    pub async fn insert_workspace(&self, info: WorkspaceInfo) -> anyhow::Result<()> {
+        let id = info.id.clone();
+        {
+            let mut map = self.ephemeral_workspaces.write().await;
+            map.insert(id.clone(), info);
+        }
+        if let Err(e) = self.persist_workspace_registry().await {
+            // Rollback: remove the entry we just inserted.
+            let mut map = self.ephemeral_workspaces.write().await;
+            map.remove(&id);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Remove a workspace from the in-memory map and persist to disk.
+    ///
+    /// Returns the removed entry on success. On persistence failure the entry
+    /// is reinserted and an error is returned.
+    pub async fn remove_workspace(&self, id: &str) -> anyhow::Result<Option<WorkspaceInfo>> {
+        let removed = {
+            let mut map = self.ephemeral_workspaces.write().await;
+            map.remove(id)
+        };
+        if removed.is_some() {
+            if let Err(e) = self.persist_workspace_registry().await {
+                // Rollback: reinsert the removed entry.
+                if let Some(ref info) = removed {
+                    let mut map = self.ephemeral_workspaces.write().await;
+                    map.insert(id.to_owned(), info.clone());
+                }
+                return Err(e);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Look up a workspace by ID.
+    pub async fn get_workspace_info(&self, id: &str) -> Option<WorkspaceInfo> {
+        let map = self.ephemeral_workspaces.read().await;
+        map.get(id).cloned()
+    }
+
+    /// Update `last_accessed_at` for a workspace and persist.
+    ///
+    /// Returns `None` if the workspace does not exist.
+    pub async fn touch_workspace(&self, id: &str) -> anyhow::Result<Option<WorkspaceInfo>> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let updated = {
+            let mut map = self.ephemeral_workspaces.write().await;
+            match map.get_mut(id) {
+                Some(ws) => {
+                    ws.last_accessed_at = now;
+                    Some(ws.clone())
+                }
+                None => None,
+            }
+        };
+        if updated.is_some() {
+            // Best-effort persist; don't fail the request over a touch.
+            let _ = self.persist_workspace_registry().await;
+        }
+        Ok(updated)
     }
 
     /// Insert or update a discovery entry and return the stored snapshot.
