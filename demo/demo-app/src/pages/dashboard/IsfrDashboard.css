@@ -1,0 +1,207 @@
+/* ISFR Dashboard page styles */
+
+/* ── Tab bar ─────────────────────────────────────────────── */
+
+.isfr-tab-bar {
+  display: flex;
+  gap: 4px;
+  padding: var(--sp-1) 0;
+}
+
+.isfr-tab-btn {
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-family: var(--mono, var(--font-mono));
+  font-size: var(--text-sm);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  color: var(--text-muted);
+  background: transparent;
+  transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+
+.isfr-tab-btn:hover {
+  color: var(--text-primary);
+  background: var(--glass-1);
+}
+
+.isfr-tab-btn--active {
+  color: var(--rose-bright);
+  background: var(--rose-deep);
+  border-color: var(--rose-dim);
+  box-shadow: var(--glow-rose-soft);
+}
+
+/* ── Confidence meter ────────────────────────────────────── */
+
+.isfr-confidence-meter {
+  padding: var(--sp-2) 0;
+}
+
+.isfr-confidence-track {
+  height: 8px;
+  background: var(--glass-1);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.isfr-confidence-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1), background 0.4s ease;
+  box-shadow: 0 0 12px color-mix(in srgb, currentColor 40%, transparent);
+}
+
+.isfr-confidence-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--sp-1);
+  font-family: var(--mono, var(--font-mono));
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+}
+
+.isfr-confidence-sub {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--glass-1);
+}
+
+.isfr-meta-value {
+  font-family: var(--mono, var(--font-mono));
+  font-size: var(--text-sm);
+  color: var(--bone-bright);
+}
+
+/* ── Source health table ─────────────────────────────────── */
+
+.isfr-source-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  font-size: var(--text-sm);
+}
+
+.isfr-source-header {
+  display: grid;
+  grid-template-columns: 2fr 1fr 0.7fr 1fr 1.2fr;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  font-family: var(--mono, var(--font-mono));
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-ghost);
+  border-bottom: 1px solid var(--glass-2-border);
+}
+
+.isfr-source-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 0.7fr 1fr 1.2fr;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  align-items: center;
+  border-bottom: 1px solid var(--glass-1);
+  transition: background 0.15s ease;
+}
+
+.isfr-source-row:hover {
+  background: var(--glass-1);
+}
+
+.isfr-source-row:last-child {
+  border-bottom: none;
+}
+
+.isfr-source-name {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.isfr-source-class {
+  color: var(--text-soft);
+  font-family: var(--mono, var(--font-mono));
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+}
+
+.isfr-source-weight {
+  color: var(--bone-bright);
+  font-family: var(--mono, var(--font-mono));
+}
+
+.isfr-source-rate {
+  color: var(--rose-bright);
+}
+
+.isfr-source-health {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-soft);
+  font-family: var(--mono, var(--font-mono));
+  font-size: var(--text-xs);
+}
+
+.isfr-source-empty {
+  padding: var(--sp-4);
+  text-align: center;
+  color: var(--text-ghost);
+  font-style: italic;
+}
+
+/* ── Relay message log ───────────────────────────────────── */
+
+.isfr-relay-info {
+  margin-bottom: var(--sp-2);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+}
+
+.isfr-relay-log {
+  max-height: 65vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.isfr-relay-empty {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-style: italic;
+  margin: 0;
+}
+
+.isfr-relay-row {
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-deeper);
+  border: 1px solid var(--glass-2-border);
+  font-family: var(--mono, var(--font-mono));
+  font-size: var(--text-xs);
+}
+
+.isfr-relay-row-header {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+}
+
+.isfr-relay-topic {
+  color: var(--rose-bright);
+}
+
+.isfr-relay-meta {
+  color: var(--text-ghost);
+}
+
+.isfr-relay-body {
+  color: var(--text-secondary, var(--text-soft));
+  margin-top: 2px;
+}
