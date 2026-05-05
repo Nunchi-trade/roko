@@ -31,7 +31,7 @@ use roko_cli::tui::App;
 use roko_cli::{
     Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode, PageId,
     PipeMode, Plan, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs, config_cmd,
-    load_layered, run_init_wizard, run_once,
+    load_resolved_config, run_init_wizard, run_once,
 };
 pub use roko_cli::{model_selection, repo_context};
 use roko_core::agent::{AgentRole, ProviderKind};
@@ -546,6 +546,16 @@ Examples:
     },
 
     // ── Server & deployment ─────────────────────────────────────────
+    /// Start the dev environment (serve + optional demo frontend).
+    #[command(after_help = "\
+Examples:
+  roko dev                          Start serve + demo frontend
+  roko dev --no-frontend            Start serve only (skip npm dev server)")]
+    Dev {
+        /// Skip the demo frontend dev server.
+        #[arg(long)]
+        no_frontend: bool,
+    },
     /// Start roko serve + all configured [[agents]] in one command.
     #[command(after_help = "\
 Examples:
@@ -1785,6 +1795,8 @@ enum ConfigProviderCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// List all supported provider kinds with required credentials and setup instructions.
+    Available,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2340,6 +2352,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Command::Index { cmd } => commands::util::cmd_index(cli, cmd),
+        Command::Dev { no_frontend } => commands::dev::cmd_dev(cli, no_frontend).await,
         Command::Up { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             commands::server::cmd_up(cli, wd).await
@@ -2824,7 +2837,7 @@ fn resolve_config_for_workdir(cli: &Cli, workdir: &Path) -> Result<Config> {
     let (mut config, repo_base) = if let Some(p) = &cli.config {
         (Config::from_file(p)?, p.parent().unwrap_or(workdir))
     } else {
-        let resolved = load_layered(workdir)?;
+        let resolved = load_resolved_config(workdir)?;
         let fully_default = resolved.sources.agent_command == Source::Default
             && resolved.sources.prompt_token_budget == Source::Default;
         if fully_default && resolved.config.agent.command == "cat" {
