@@ -150,6 +150,13 @@ impl AgentBackend {
     /// This heuristic is a legacy fallback. Production code should resolve
     /// models via [`resolve_model()`] which reads provider from config.
     /// `from_model()` is only hit when a slug isn't in config at all.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Resolve model via config and use ProviderKind::to_backend() instead. \
+                This heuristic fires only for slugs not present in [models.*] config, \
+                which is an error in production. Use resolve_model() and check that \
+                resolved.profile is Some before dispatching."
+    )]
     #[must_use]
     pub fn from_model(slug: &str) -> Self {
         let slug = slug.trim();
@@ -242,6 +249,9 @@ impl ModelSpec {
     #[must_use]
     pub fn from_slug(slug: impl Into<String>) -> Self {
         let slug = slug.into();
+        // Legacy fallback: slug not in config. Call sites that know the slug is configured
+        // should call resolve_model() and use the provider-authoritative backend instead.
+        #[allow(deprecated)]
         let backend = AgentBackend::from_model(&slug);
         Self {
             slug,
@@ -316,6 +326,9 @@ pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
         }
     }
 
+    // Unconfigured slug — heuristic fallback. This path fires when a model
+    // key is not in config and must not be silently accepted in dispatch paths.
+    #[allow(deprecated)]
     let backend = AgentBackend::from_model(model_key);
     ResolvedModel {
         model_key: model_key.to_owned(),
@@ -340,6 +353,9 @@ fn resolved_from_profile(
     let (provider_kind, backend) = match &provider_config {
         Some(provider) => (provider.kind, provider.kind.to_backend()),
         None => {
+            // Legacy fallback: provider entry missing from config. The slug
+            // heuristic is the last resort for determining the backend.
+            #[allow(deprecated)]
             let backend = AgentBackend::from_model(&profile.slug);
             (provider_kind_from_backend(backend), backend)
         }
@@ -1031,6 +1047,9 @@ mod tests {
     use crate::config::DEFAULT_TTFT_TIMEOUT_MS;
     use crate::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 
+    // These tests intentionally exercise the deprecated `AgentBackend::from_model()`
+    // heuristic to ensure backwards-compatibility for the legacy slug-routing path.
+    #[allow(deprecated)]
     #[test]
     fn backend_from_claude_slug() {
         assert_eq!(
@@ -1039,6 +1058,7 @@ mod tests {
         );
     }
 
+    #[allow(deprecated)]
     #[test]
     fn backend_from_cursor_slug() {
         assert_eq!(AgentBackend::from_model("composer-1"), AgentBackend::Cursor);
@@ -1047,6 +1067,7 @@ mod tests {
         assert_eq!(AgentBackend::from_model("gpt-5-high"), AgentBackend::Cursor);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn backend_from_ollama_slug() {
         assert_eq!(
@@ -1056,12 +1077,14 @@ mod tests {
         assert_eq!(AgentBackend::from_model("llama3-8b"), AgentBackend::Ollama);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn backend_from_codex_slug() {
         assert_eq!(AgentBackend::from_model("gpt-5"), AgentBackend::Codex);
         assert_eq!(AgentBackend::from_model("o3-mini"), AgentBackend::Codex);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn backend_from_perplexity_slug() {
         assert_eq!(AgentBackend::from_model("sonar"), AgentBackend::Perplexity);
@@ -1079,6 +1102,7 @@ mod tests {
         );
     }
 
+    #[allow(deprecated)]
     #[test]
     fn kimi_not_cursor() {
         assert!(!is_cursor_slug("kimi-k2.5"));

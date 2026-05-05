@@ -28,7 +28,7 @@ use crate::http::ReqwestPoster;
 use crate::mcp::{DynamicToolRegistry, McpConfig, discover_mcp_tools};
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
-    tool_limit_for_temperament, tool_loop_max_iterations,
+    tool_limit_for_temperament, tool_loop_max_iterations_for_profile,
 };
 use crate::tool_loop::backends::create_openai_compat_backend;
 use crate::tool_loop::{ToolLoop, ToolLoopAgent};
@@ -390,7 +390,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             let backend = create_openai_compat_backend(&tool_loop_provider, model, poster)?;
 
             let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-                .with_max_iterations(tool_loop_max_iterations())
+                .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
                 .with_context_token_limit(
                     usize::try_from(model.context_window).unwrap_or(usize::MAX),
                 )

@@ -293,7 +293,7 @@ fn persist_validation_sidecar(
 
 pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
-    use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
+    use roko_cli::agent_exec::{AgentExecOpts, persist_capture_episode, run_agent_capture_silent};
 
     let workdir = resolve_workdir(cli);
     let gw = load_gateway_env(&workdir);
@@ -367,6 +367,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                             .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
                             .unwrap_or_default();
                     crate::commands::util::preflight_provider_for_model(&prd_config, &model_key)?;
+                    // Aggregate provider readiness: warn/abort if no providers are usable.
+                    crate::commands::util::preflight_providers_aggregate(&prd_config)?;
                 }
                 // Write scaffold first so agent can read and fill it
                 let frontmatter = roko_cli::prd::new_draft_frontmatter(&slug, &title);
@@ -598,12 +600,12 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 }
                 let post_ms = t_phase.elapsed().as_millis();
                 let t_phase = Instant::now();
-                let _ = crate::commands::util::persist_capture_episode(
+                let _ = persist_capture_episode(
                     &workdir,
                     &agent_command,
                     Some(model_key.as_str()),
                     "prd-draft-new",
-                    &format!("prd:draft:new:{slug}"),
+                    &format!("prd:draft:{slug}"),
                     &task_prompt,
                     &output,
                     artifact_success,
@@ -706,7 +708,7 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 } else if !output.is_empty() {
                     print!("{output}");
                 }
-                let _ = crate::commands::util::persist_capture_episode(
+                let _ = persist_capture_episode(
                     &workdir,
                     &agent_command,
                     model_ref,
@@ -758,6 +760,8 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
                         .unwrap_or_default();
                 crate::commands::util::preflight_provider_for_model(&plan_config, &model_key)?;
+                // Aggregate provider readiness: warn/abort if no providers are usable.
+                crate::commands::util::preflight_providers_aggregate(&plan_config)?;
             }
             let init_ms = t_phase.elapsed().as_millis();
             let t_phase = Instant::now();
@@ -815,12 +819,12 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             if !output.is_empty() {
                 print!("{output}");
             }
-            let _ = crate::commands::util::persist_capture_episode(
+            let _ = persist_capture_episode(
                 &workdir,
                 &agent_command,
                 model_ref,
                 "prd-consolidate",
-                "prd:draft:consolidate",
+                "prd:consolidate",
                 &task_prompt,
                 &output,
                 exit_code == 0,

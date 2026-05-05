@@ -319,6 +319,7 @@ fn build_mock_config(base_url: &str, timeout_ms: u64) -> RokoConfig {
             thinking_level: None,
             use_max_completion_tokens: false,
             max_tools: Some(64),
+            max_tool_iterations: None,
             tokenizer_ratio: Some(1.0),
             supports_search: false,
             supports_citations: false,

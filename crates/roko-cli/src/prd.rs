@@ -22,9 +22,10 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::agent_config::command_from_config;
 use crate::agent_exec::{
-    AgentExecEpisode, AgentExecOpts, run_agent_capture_logged, run_agent_capture_silent,
-    run_agent_logged,
+    AgentExecEpisode, AgentExecOpts, persist_capture_episode, run_agent_capture_logged,
+    run_agent_capture_silent, run_agent_logged,
 };
 use crate::task_parser::TasksFile;
 use crate::workspace_paths::{
@@ -951,7 +952,7 @@ fn auto_plan_enabled(workdir: &Path) -> Result<bool> {
         }
     }
 
-    Ok(crate::load_layered(workdir)?.config.auto_plan)
+    Ok(crate::load_resolved_config(workdir)?.config.auto_plan)
 }
 
 /// Generate implementation plans from a published PRD file.
@@ -1017,7 +1018,7 @@ async fn generate_plan_from_prd_with_outcome(
             .as_ref()
             .map_or(workdir.as_path(), |temp| temp.path());
 
-        let resolved = crate::load_layered(workdir_ref)?;
+        let resolved = crate::load_resolved_config(workdir_ref)?;
         let system = augment_generator_system_prompt(
             crate::plan_generate::build_generator_system_prompt(workdir_ref),
             failure_context,
@@ -1121,11 +1122,15 @@ async fn generate_plan_from_prd_with_outcome(
         let prompt_ms = t_phase.elapsed().as_millis();
         let t_phase = Instant::now();
         let task_id = format!("prd:plan:{slug}");
+        let effective_model = model.or_else(|| resolved.config.agent.model.as_deref());
+        let plan_agent_command =
+            command_from_config(workdir_ref).unwrap_or_else(|| "claude".to_string());
+        let plan_started = Instant::now();
         eprintln!("  Generating plan from PRD: {slug}");
         let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
             prompt: &task_prompt,
             workdir: workdir_ref,
-            model: model.or_else(|| resolved.config.agent.model.as_deref()),
+            model: effective_model,
             effort: Some(resolved.config.agent.effort.as_str()),
             system_prompt: Some(&system),
             resume_session: None,
@@ -1148,6 +1153,19 @@ async fn generate_plan_from_prd_with_outcome(
             "prd plan: agent returned"
         );
         if exit_code != 0 {
+            let _ = persist_capture_episode(
+                workdir_ref,
+                &plan_agent_command,
+                effective_model,
+                "prd-plan-generate",
+                &task_id,
+                &task_prompt,
+                &output,
+                false,
+                plan_started.elapsed().as_millis() as u64,
+                None,
+            )
+            .await;
             return Err(anyhow!(
                 "plan generation agent failed with exit code {exit_code} \
                  ({} bytes of output)",
@@ -1155,6 +1173,19 @@ async fn generate_plan_from_prd_with_outcome(
             ));
         }
         if output.trim().is_empty() {
+            let _ = persist_capture_episode(
+                workdir_ref,
+                &plan_agent_command,
+                effective_model,
+                "prd-plan-generate",
+                &task_id,
+                &task_prompt,
+                &output,
+                false,
+                plan_started.elapsed().as_millis() as u64,
+                None,
+            )
+            .await;
             return Err(anyhow!(
                 "plan generation agent returned empty output for {slug} — \
                  the model may not support the required output format"
@@ -1215,7 +1246,7 @@ async fn generate_plan_from_prd_with_outcome(
                 let retry_result = run_agent_capture_silent(AgentExecOpts {
                     prompt: &retry_prompt,
                     workdir: workdir_ref,
-                    model: model.or_else(|| resolved.config.agent.model.as_deref()),
+                    model: effective_model,
                     effort: Some(resolved.config.agent.effort.as_str()),
                     system_prompt: Some(&system),
                     resume_session: None,
@@ -1311,6 +1342,19 @@ async fn generate_plan_from_prd_with_outcome(
             } else {
                 ""
             };
+            let _ = persist_capture_episode(
+                workdir_ref,
+                &plan_agent_command,
+                effective_model,
+                "prd-plan-generate",
+                &task_id,
+                &task_prompt,
+                &output,
+                false,
+                plan_started.elapsed().as_millis() as u64,
+                None,
+            )
+            .await;
             return Err(anyhow!(
                 "Plan generation failed after retries: no valid tasks.toml was produced.\n\
                  Last error: {final_err}\n\
@@ -1422,6 +1466,20 @@ async fn generate_plan_from_prd_with_outcome(
             artifact_valid,
             validation_report,
         };
+
+        let _ = persist_capture_episode(
+            workdir_ref,
+            &plan_agent_command,
+            effective_model,
+            "prd-plan-generate",
+            &task_id,
+            &task_prompt,
+            &output,
+            outcome.fully_successful(),
+            plan_started.elapsed().as_millis() as u64,
+            None,
+        )
+        .await;
 
         Ok((
             workspace_plans_dir(&workdir),

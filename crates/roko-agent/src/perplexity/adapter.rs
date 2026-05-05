@@ -15,7 +15,7 @@ use crate::perplexity::types::SearchOptions;
 use crate::provider::openai_compat::tool_registry_for_options;
 use crate::provider::{
     AgentCreationError, AgentOptions, PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX, ProviderAdapter,
-    ProviderError, build_tool_dispatcher, tool_loop_max_iterations,
+    ProviderError, build_tool_dispatcher, tool_loop_max_iterations_for_profile,
 };
 use crate::tool_loop::ToolLoop;
 use crate::translate::{OpenAiTranslator, Translator};
@@ -184,7 +184,7 @@ fn perplexity_tool_loop_agent(
     ));
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend.clone())
-        .with_max_iterations(tool_loop_max_iterations())
+        .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -308,6 +308,7 @@ mod tests {
             cost_cache_write_per_m: None,
             thinking_level: None,
             max_tools: None,
+            max_tool_iterations: None,
             tokenizer_ratio: None,
             supports_search: true,
             supports_citations: true,

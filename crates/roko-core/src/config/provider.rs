@@ -427,6 +427,17 @@ pub struct ModelProfile {
     /// Maximum number of tools before behavior degrades.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tools: Option<u32>,
+    /// Per-model tool-loop iteration cap.
+    ///
+    /// When set, overrides the workspace default (`DEFAULT_MAX_TOOL_ITERATIONS`)
+    /// before the temperament adjustment is applied. Use this to raise the cap for
+    /// models known to need many sequential tool calls (e.g. complex Opus plans) or
+    /// lower it for fast-tier models where runaway loops are more costly.
+    ///
+    /// `None` means use the workspace default. The final cap is:
+    ///   `(max_tool_iterations.unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS) adjusted by temperament)`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_iterations: Option<u32>,
     /// Tokenizer ratio vs OpenAI `o200k_base`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_ratio: Option<f64>,
@@ -575,5 +586,55 @@ impl Default for PerplexityConfig {
             return_images: false,
             return_related_questions: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod model_profile_tests {
+    use super::*;
+
+    #[test]
+    fn model_profile_max_tool_iterations_roundtrips_through_toml() {
+        let profile = ModelProfile {
+            provider: "test".to_string(),
+            slug: "test-model".to_string(),
+            max_tool_iterations: Some(25),
+            ..Default::default()
+        };
+
+        let toml_str = toml::to_string_pretty(&profile).expect("serialize ModelProfile");
+        assert!(
+            toml_str.contains("max_tool_iterations = 25"),
+            "TOML should contain max_tool_iterations field: {toml_str}"
+        );
+
+        let back: ModelProfile = toml::from_str(&toml_str).expect("deserialize ModelProfile");
+        assert_eq!(back.max_tool_iterations, Some(25));
+    }
+
+    #[test]
+    fn model_profile_max_tool_iterations_defaults_to_none() {
+        let toml_str = r#"
+            provider = "test"
+            slug = "test-model"
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(profile.max_tool_iterations, None);
+    }
+
+    #[test]
+    fn model_profile_max_tool_iterations_none_omitted_in_serialization() {
+        let profile = ModelProfile {
+            provider: "test".to_string(),
+            slug: "test-model".to_string(),
+            max_tool_iterations: None,
+            ..Default::default()
+        };
+
+        let toml_str = toml::to_string_pretty(&profile).expect("serialize");
+        assert!(
+            !toml_str.contains("max_tool_iterations"),
+            "None field should be skipped: {toml_str}"
+        );
     }
 }

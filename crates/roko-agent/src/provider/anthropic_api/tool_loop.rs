@@ -11,7 +11,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::openai_compat::tool_registry_for_options;
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderSemaphores, build_tool_dispatcher,
-    tool_loop_max_iterations,
+    tool_loop_max_iterations_for_profile,
 };
 use crate::tool_loop::{LlmBackend, LlmError, ToolLoop, ToolLoopAgent};
 use crate::translate::{
@@ -41,7 +41,7 @@ pub(super) fn create_tool_loop_agent(
     )?;
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-        .with_max_iterations(tool_loop_max_iterations())
+        .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 

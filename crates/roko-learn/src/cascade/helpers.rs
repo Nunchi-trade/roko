@@ -24,6 +24,11 @@ use crate::model_router::COLD_START_THRESHOLD;
 /// Fast-tier roles prefer Gemini Flash-Lite, Standard-tier roles prefer
 /// Gemini Flash, and Premium-tier roles prefer Opus with Gemini Pro Preview
 /// as the premium fallback.
+///
+/// Candidate lists intentionally include older slugs (e.g. `claude-sonnet-4-5`)
+/// as trailing fallbacks. `pick_static_slug` only returns a candidate when it
+/// appears in `model_slugs` (the configured model set), so stale candidates
+/// harmlessly fall through to the next entry and do not cause mis-routing.
 pub(crate) fn default_role_model_table(model_slugs: &[String]) -> HashMap<AgentRole, String> {
     let mut table = HashMap::new();
 

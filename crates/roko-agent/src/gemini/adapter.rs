@@ -12,7 +12,7 @@ use crate::http::ReqwestPoster;
 use crate::provider::openai_compat::{max_tokens_for_model, tool_registry_for_options};
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
-    current_safety_layer, tool_loop_max_iterations,
+    current_safety_layer, tool_loop_max_iterations_for_profile,
 };
 use crate::safety::SafetyLayer;
 use crate::tool_loop::backends::create_tool_loop_backend;
@@ -70,7 +70,7 @@ fn gemini_tool_loop_agent(
         .with_poster(Box::new(ReqwestPoster::new()));
 
     let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend))
-        .with_max_iterations(tool_loop_max_iterations())
+        .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -107,7 +107,7 @@ fn gemini_native_tool_loop_agent(
         create_tool_loop_backend(provider, model, options, Arc::new(ReqwestPoster::new()))?;
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-        .with_max_iterations(tool_loop_max_iterations())
+        .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -271,6 +271,7 @@ mod tests {
             cost_cache_write_per_m: None,
             thinking_level: None,
             max_tools: None,
+            max_tool_iterations: None,
             tokenizer_ratio: None,
             supports_search: false,
             supports_citations: false,

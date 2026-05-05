@@ -281,6 +281,7 @@ mod tests {
             cost_cache_write_per_m: None,
             thinking_level: Some("dynamic".to_string()),
             max_tools: None,
+            max_tool_iterations: None,
             tokenizer_ratio: None,
             supports_search: false,
             supports_citations: false,

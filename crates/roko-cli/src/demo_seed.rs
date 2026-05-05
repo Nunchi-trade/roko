@@ -1370,6 +1370,7 @@ fn model_for_slot(model_pool: &[String], slot: usize) -> String {
     model_pool[index].clone()
 }
 
+#[allow(deprecated)]
 fn backend_for_model(model: &str) -> &'static str {
     match AgentBackend::from_model(model) {
         AgentBackend::Claude => "claude",

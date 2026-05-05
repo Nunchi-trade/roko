@@ -69,6 +69,7 @@ pub mod claude_cli;
 pub mod cursor_acp;
 pub mod openai_compat;
 pub mod openrouter_meta;
+pub mod pre_flight;
 
 pub use anthropic_api::AnthropicApiAdapter;
 pub use cerebras::CerebrasAdapter;
@@ -76,6 +77,7 @@ pub use claude_cli::ClaudeCliAdapter;
 pub use cursor_acp::CursorAcpAdapter;
 pub use openai_compat::OpenAiCompatAdapter;
 pub use openrouter_meta::fetch_model_metadata;
+pub use pre_flight::{ProviderReadinessIssue, check_provider_readiness, report_readiness_issues};
 
 use crate::perplexity::{PerplexityAdapter, SearchOptions};
 
@@ -380,15 +382,38 @@ pub(crate) fn tool_limit_for_temperament(limit: usize) -> usize {
     adjusted.max(1)
 }
 
+/// Apply the temperament adjustment to a base iteration cap.
+///
+/// - Balanced: no change
+/// - Conservative: +10
+/// - Aggressive: -15 (floor at 10)
+/// - Exploratory: +20
+fn apply_temperament_to_iteration_cap(base: usize) -> usize {
+    match current_temperament().unwrap_or_default() {
+        Temperament::Conservative => base.saturating_add(10),
+        Temperament::Balanced => base,
+        Temperament::Aggressive => base.saturating_sub(15).max(10),
+        Temperament::Exploratory => base.saturating_add(20),
+    }
+}
+
 #[must_use]
 pub(crate) fn tool_loop_max_iterations() -> usize {
-    let default_limit = DEFAULT_MAX_TOOL_ITERATIONS;
-    match current_temperament().unwrap_or_default() {
-        Temperament::Conservative => default_limit.saturating_add(10),
-        Temperament::Balanced => default_limit,
-        Temperament::Aggressive => default_limit.saturating_sub(15).max(10),
-        Temperament::Exploratory => default_limit.saturating_add(20),
-    }
+    tool_loop_max_iterations_for_profile(None)
+}
+
+/// Per-model iteration cap with temperament adjustment.
+///
+/// When a `ModelProfile` is provided and has `max_tool_iterations` set,
+/// that value is used as the base before the temperament adjustment.
+/// Otherwise falls back to `DEFAULT_MAX_TOOL_ITERATIONS`.
+#[must_use]
+pub(crate) fn tool_loop_max_iterations_for_profile(profile: Option<&ModelProfile>) -> usize {
+    let base = profile
+        .and_then(|p| p.max_tool_iterations)
+        .map(|n| n as usize)
+        .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS);
+    apply_temperament_to_iteration_cap(base)
 }
 
 #[must_use]
@@ -567,6 +592,98 @@ impl AgentOptions {
         }
         self
     }
+}
+
+// ─── Human-readable provider error mapping ──────────────────────────────
+
+/// Map a raw provider error string into a human-readable message with
+/// actionable instructions.
+///
+/// This function inspects the error text for known patterns using simple
+/// case-insensitive string matching. It does NOT depend on reqwest or std
+/// internal types.
+///
+/// # Arguments
+/// - `kind`: The provider kind (for context in the message).
+/// - `provider_name`: The config key for this provider (e.g. "anthropic").
+/// - `api_key_env`: The environment variable name for the API key, if any.
+/// - `base_url`: The provider base URL, if known.
+/// - `err`: The error to inspect (any displayable error).
+///
+/// # Returns
+/// A human-readable error message. If no known pattern is matched, returns
+/// a generic message wrapping the original error text.
+#[must_use]
+pub fn map_provider_error(
+    kind: ProviderKind,
+    provider_name: &str,
+    api_key_env: Option<&str>,
+    base_url: Option<&str>,
+    err: &dyn std::fmt::Display,
+) -> String {
+    let err_text = err.to_string();
+    let err_lower = err_text.to_lowercase();
+
+    let env_var = api_key_env.unwrap_or("(none)");
+    let url = base_url.unwrap_or("(unknown)");
+
+    if err_lower.contains("401")
+        || err_lower.contains("authentication_error")
+        || err_lower.contains("unauthorized")
+    {
+        return format!(
+            "API key invalid for provider '{}'. Check ${} or roko.toml [providers.{}].",
+            provider_name, env_var, provider_name
+        );
+    }
+
+    if err_lower.contains("429")
+        || err_lower.contains("rate_limit")
+        || err_lower.contains("too many requests")
+    {
+        return format!(
+            "Rate limited by provider '{}'. Wait and retry, or switch providers.",
+            provider_name
+        );
+    }
+
+    if err_lower.contains("404")
+        || err_lower.contains("model_not_found")
+        || err_lower.contains("model not found")
+    {
+        return format!(
+            "Model not found on provider '{}'. Verify the slug in roko.toml [models.*].",
+            provider_name
+        );
+    }
+
+    if err_lower.contains("connection refused")
+        || err_lower.contains("connecterror")
+        || err_lower.contains("tcp connect error")
+    {
+        return format!(
+            "Cannot reach provider '{}' at {}. Is the server running?",
+            provider_name, url
+        );
+    }
+
+    if err_lower.contains("no such file or directory")
+        || err_lower.contains("program not found")
+        || err_lower.contains("enoent")
+    {
+        return format!(
+            "Provider binary not found on PATH for '{}'. Install it or configure a different provider in roko.toml.",
+            provider_name
+        );
+    }
+
+    // No known pattern matched — return a generic wrapper.
+    format!(
+        "Provider '{}' ({}) error: {}",
+        provider_name,
+        kind.label(),
+        err_text
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -842,6 +959,7 @@ mod tests {
                 cost_cache_write_per_m: None,
                 thinking_level: None,
                 max_tools: None,
+                max_tool_iterations: None,
                 tokenizer_ratio: None,
                 supports_search: true,
                 supports_citations: true,
@@ -870,6 +988,59 @@ mod tests {
         assert_eq!(
             with_temperament(Some(Temperament::Exploratory), tool_loop_max_iterations),
             DEFAULT_MAX_TOOL_ITERATIONS + 20
+        );
+    }
+
+    #[test]
+    fn tool_loop_iterations_respect_per_model_override() {
+        let profile = ModelProfile {
+            max_tool_iterations: Some(20),
+            ..Default::default()
+        };
+
+        // Balanced: base unchanged → 20
+        assert_eq!(
+            with_temperament(Some(Temperament::Balanced), || {
+                tool_loop_max_iterations_for_profile(Some(&profile))
+            }),
+            20
+        );
+        // Conservative: base + 10 → 30
+        assert_eq!(
+            with_temperament(Some(Temperament::Conservative), || {
+                tool_loop_max_iterations_for_profile(Some(&profile))
+            }),
+            30
+        );
+        // Aggressive: max(10, base - 15) → max(10, 5) = 10
+        assert_eq!(
+            with_temperament(Some(Temperament::Aggressive), || {
+                tool_loop_max_iterations_for_profile(Some(&profile))
+            }),
+            10
+        );
+        // Exploratory: base + 20 → 40
+        assert_eq!(
+            with_temperament(Some(Temperament::Exploratory), || {
+                tool_loop_max_iterations_for_profile(Some(&profile))
+            }),
+            40
+        );
+
+        // None profile falls back to DEFAULT_MAX_TOOL_ITERATIONS
+        assert_eq!(
+            tool_loop_max_iterations_for_profile(None),
+            DEFAULT_MAX_TOOL_ITERATIONS
+        );
+
+        // Profile without max_tool_iterations also falls back
+        let profile_none = ModelProfile {
+            max_tool_iterations: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            tool_loop_max_iterations_for_profile(Some(&profile_none)),
+            DEFAULT_MAX_TOOL_ITERATIONS
         );
     }
 
@@ -1359,5 +1530,87 @@ mod tests {
         drop(permit_two);
         drop(permit_three);
         drop(permit_four);
+    }
+
+    // ─── map_provider_error tests ─────────────────────────────────────
+
+    #[test]
+    fn map_provider_error_401_produces_api_key_message() {
+        let msg = map_provider_error(
+            ProviderKind::AnthropicApi,
+            "anthropic",
+            Some("ANTHROPIC_API_KEY"),
+            Some("https://api.anthropic.com/v1"),
+            &"status 401: authentication_error",
+        );
+        assert!(msg.contains("API key invalid"), "got: {msg}");
+        assert!(msg.contains("anthropic"), "got: {msg}");
+        assert!(msg.contains("ANTHROPIC_API_KEY"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_429_produces_rate_limit_message() {
+        let msg = map_provider_error(
+            ProviderKind::OpenAiCompat,
+            "openai",
+            Some("OPENAI_API_KEY"),
+            Some("https://api.openai.com/v1"),
+            &"429 Too Many Requests",
+        );
+        assert!(msg.contains("Rate limited"), "got: {msg}");
+        assert!(msg.contains("openai"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_404_produces_model_not_found_message() {
+        let msg = map_provider_error(
+            ProviderKind::AnthropicApi,
+            "anthropic",
+            Some("ANTHROPIC_API_KEY"),
+            None,
+            &"404: model_not_found",
+        );
+        assert!(msg.contains("Model not found"), "got: {msg}");
+        assert!(msg.contains("anthropic"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_connection_refused_produces_server_message() {
+        let msg = map_provider_error(
+            ProviderKind::OpenAiCompat,
+            "local-llm",
+            None,
+            Some("http://localhost:8080"),
+            &"tcp connect error: connection refused",
+        );
+        assert!(msg.contains("Cannot reach"), "got: {msg}");
+        assert!(msg.contains("local-llm"), "got: {msg}");
+        assert!(msg.contains("http://localhost:8080"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_enoent_produces_binary_not_found_message() {
+        let msg = map_provider_error(
+            ProviderKind::ClaudeCli,
+            "claude",
+            None,
+            None,
+            &"No such file or directory (os error 2)",
+        );
+        assert!(msg.contains("binary not found"), "got: {msg}");
+        assert!(msg.contains("claude"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_unknown_pattern_wraps_original() {
+        let msg = map_provider_error(
+            ProviderKind::GeminiApi,
+            "gemini",
+            Some("GEMINI_API_KEY"),
+            None,
+            &"some unknown error happened",
+        );
+        assert!(msg.contains("some unknown error happened"), "got: {msg}");
+        assert!(msg.contains("gemini"), "got: {msg}");
     }
 }

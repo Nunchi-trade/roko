@@ -41,7 +41,7 @@ use crate::post_gate_reflection::{
     PostGateReflectionStore, ReflectionInput, ReflectionPromotionConfig,
 };
 use crate::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
-use crate::provider_health::ProviderHealthTracker;
+use crate::provider_health::{CircuitState, ProviderHealthRegistry, ProviderHealthTracker};
 use crate::provider_model_outcome::{
     ProviderModelOutcomeRecord, ProviderModelOutcomeStore, ProviderModelPassRateReport,
     read_provider_model_outcomes, summarize_provider_model_outcomes,
@@ -1267,6 +1267,32 @@ pub struct LearningRuntime {
     episode_completion_hook: Option<EpisodeCompletionHook>,
 }
 
+/// Bootstrap a [`ProviderHealthTracker`] from the persisted provider-health
+/// registry on disk. Providers with `CircuitState::Open` are replayed as
+/// failures (hitting the threshold) so `is_healthy` returns false immediately.
+/// Closed/HalfOpen providers are recorded as successes so they start healthy.
+fn provider_health_tracker_from_persisted(root: &Path) -> ProviderHealthTracker {
+    let health_path = root.join("provider-health.json");
+    let registry = ProviderHealthRegistry::load_or_new(&health_path);
+    let snapshot = registry.snapshot();
+    let tracker = ProviderHealthTracker::new();
+    for (provider_id, health) in &snapshot {
+        match health.state {
+            CircuitState::Open => {
+                // Record 3 failures (the default threshold) so the tracker
+                // transitions to Unhealthy immediately.
+                tracker.record_failure(provider_id);
+                tracker.record_failure(provider_id);
+                tracker.record_failure(provider_id);
+            }
+            CircuitState::Closed | CircuitState::HalfOpen => {
+                tracker.record_success(provider_id);
+            }
+        }
+    }
+    tracker
+}
+
 impl LearningRuntime {
     /// Open a runtime at `paths` and preload persisted state.
     ///
@@ -1320,7 +1346,7 @@ impl LearningRuntime {
             affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
-            provider_health: ProviderHealthTracker::new(),
+            provider_health: provider_health_tracker_from_persisted(&paths.root),
             skill_library,
             playbook_store,
             playbook_rules,
@@ -1388,7 +1414,7 @@ impl LearningRuntime {
             affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
-            provider_health: ProviderHealthTracker::new(),
+            provider_health: provider_health_tracker_from_persisted(&paths.root),
             skill_library,
             playbook_store,
             playbook_rules,
@@ -5073,5 +5099,43 @@ mod tests {
         assert!(!snapshot.episodes[0].success);
         assert!(snapshot.knowledge_seeds.is_empty());
         assert_eq!(snapshot.provider_model_outcomes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_health_tracker_bootstraps_from_persisted_state() {
+        use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
+
+        let tmp = TempDir::new().unwrap();
+        let learn_root = tmp.path().join("learn");
+        std::fs::create_dir_all(&learn_root).unwrap();
+
+        // Write a persisted registry with provider "zai" in Open state
+        // (3 failures trips the circuit).
+        let health_path = learn_root.join("provider-health.json");
+        let registry = ProviderHealthRegistry::load_or_new(&health_path);
+        registry.record_failure("zai", ErrorClass::Unknown);
+        registry.record_failure("zai", ErrorClass::Unknown);
+        registry.record_failure("zai", ErrorClass::Unknown);
+        registry.save(&health_path).unwrap();
+
+        // Open a LearningRuntime and verify the in-memory tracker reflects
+        // the persisted Open state.
+        let runtime = LearningRuntime::open_under(&learn_root).await.unwrap();
+        assert!(
+            !runtime.provider_health().is_healthy("zai"),
+            "provider with persisted Open state should be unhealthy on construction"
+        );
+
+        // Now record a manual success in the registry, save, reopen, and
+        // verify the tracker reflects the healthy state.
+        let registry2 = ProviderHealthRegistry::load_or_new(&health_path);
+        registry2.record_success("zai");
+        registry2.save(&health_path).unwrap();
+
+        let runtime2 = LearningRuntime::open_under(&learn_root).await.unwrap();
+        assert!(
+            runtime2.provider_health().is_healthy("zai"),
+            "provider with persisted Closed state should be healthy on construction"
+        );
     }
 }

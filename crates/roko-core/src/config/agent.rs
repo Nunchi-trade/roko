@@ -66,6 +66,10 @@ pub struct AgentConfig {
     #[serde(default)]
     pub roles: HashMap<String, RoleOverride>,
 
+    /// Default agent behavior overrides under `[agent.defaults]`.
+    #[serde(default)]
+    pub defaults: AgentDefaults,
+
     /// Reserved for future CaMeL dual-LLM isolation. The DataLlmConfig
     /// type and DataLlmRouter implementation are substantial enough to
     /// keep around, but no production dispatch path currently consults
@@ -98,7 +102,7 @@ pub enum AgentMode {
 }
 
 fn default_model() -> String {
-    "claude-sonnet-4-6".into()
+    crate::defaults::MODEL_FOCUSED.to_string()
 }
 
 fn default_backend() -> String {
@@ -129,11 +133,25 @@ impl Default for AgentConfig {
             tier_models: HashMap::new(),
             fallback_model: None,
             roles: HashMap::new(),
+            defaults: AgentDefaults::default(),
             data_llm: None,
             mode: AgentMode::default(),
             extensions: Vec::new(),
         }
     }
+}
+
+/// Default agent behavior overrides. All fields are optional config-key references.
+/// Lives under `[agent.defaults]` in `roko.toml`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentDefaults {
+    /// Default model key for generic agent dispatch (references `[models.*]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generic_agent_model: Option<String>,
+    /// Model key for gate judging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_judge_model: Option<String>,
 }
 
 /// Per-role spend and token caps under `[agent.roles.<role>]`.
@@ -236,7 +254,7 @@ pub struct DataLlmConfig {
 }
 
 fn default_data_llm_model() -> String {
-    "claude-haiku-4-5".into()
+    crate::defaults::MODEL_FAST.to_string()
 }
 
 const fn default_data_llm_max_tokens() -> u64 {
