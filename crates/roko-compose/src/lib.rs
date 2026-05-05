@@ -17,6 +17,8 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::pedantic, clippy::nursery)]
 
+pub mod error;
+
 pub mod agents_md;
 pub mod attention;
 pub mod auction;
@@ -45,6 +47,7 @@ pub mod templates;
 pub mod token_counter;
 
 pub use agents_md::AgentsMd;
+pub use error::ComposeError;
 pub use attention::{
     ModelAttentionCurves, PositionAttentionModel, dynamic_placement, placement_adjusted_score,
 };

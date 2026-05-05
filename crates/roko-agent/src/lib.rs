@@ -44,6 +44,7 @@
 pub mod agent;
 /// Short-lived content-addressed response cache for identical backend requests.
 pub mod cache;
+pub mod error;
 pub mod chat_types;
 pub mod claude_agent;
 pub mod claude_cli_agent;
@@ -103,6 +104,7 @@ pub mod ollama_backend {
 }
 
 pub use agent::{Agent, AgentResult};
+pub use error::AgentError;
 pub use chat_types::{ChatRequest, RequestOptions, ResponseFormat, ToolChoice};
 pub use claude_cli_agent::ClaudeCliAgent;
 pub use composition::{AgentComposition, CompositeAgent, MergeStrategy, SkillSelector};

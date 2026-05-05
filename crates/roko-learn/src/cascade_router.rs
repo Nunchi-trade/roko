@@ -814,14 +814,22 @@ impl CascadeRouter {
     }
 
     /// Load static routing overrides from a JSON map of role labels to model slugs.
-    pub fn load_static_overrides(&self, path: &Path) -> std::io::Result<usize> {
+    pub fn load_static_overrides(&self, path: &Path) -> Result<usize, crate::error::LearnError> {
         let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(err) => return Err(err),
+            Err(err) => {
+                return Err(crate::error::LearnError::Io {
+                    path: path.display().to_string(),
+                    source: err,
+                });
+            }
         };
         let overrides = serde_json::from_str::<HashMap<String, String>>(&contents)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+            .map_err(|err| crate::error::LearnError::Corrupt {
+                path: path.display().to_string(),
+                reason: err.to_string(),
+            })?;
 
         let mut applied = 0usize;
         for (parameter, winning_value) in overrides {
@@ -1651,15 +1659,23 @@ impl CascadeRouter {
     }
 
     /// Save confidence stats, model slugs, and total observation count to a JSON file.
-    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
+    pub fn save(&self, path: &Path) -> Result<(), crate::error::LearnError> {
         let json = self.snapshot_json();
         if json.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "failed to serialize cascade snapshot",
-            ));
+            return Err(crate::error::LearnError::Io {
+                path: path.display().to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "failed to serialize cascade snapshot",
+                ),
+            });
         }
-        roko_core::io::atomic_write_str(path, &json)
+        roko_core::io::atomic_write_str(path, &json).map_err(|source| {
+            crate::error::LearnError::Io {
+                path: path.display().to_string(),
+                source,
+            }
+        })
     }
 
     fn from_snapshot(snapshot: CascadeSnapshot, model_slugs: Vec<String>) -> Self {
@@ -1735,7 +1751,7 @@ impl CascadeRouter {
     pub fn from_snapshot_json(
         json: &str,
         model_slugs: Vec<String>,
-    ) -> Result<Self, serde_json::Error> {
+    ) -> Result<Self, crate::error::LearnError> {
         let snapshot: CascadeSnapshot = serde_json::from_str(json)?;
         Ok(Self::from_snapshot(snapshot, model_slugs))
     }

@@ -3,6 +3,7 @@
 //! These checks are consumed by gate orchestration only. The implementer agent
 //! never sees the generated symbols or test bodies.
 
+use crate::error::GateError;
 use crate::symbol_gate::{
     SymbolKind, Visibility, first_identifier, normalize_path, parse_visibility, rust_module_path,
     skip_modifiers,
@@ -14,9 +15,6 @@ use std::process::Command;
 
 const GENERATED_SYMBOL_GATE: &str = "generated_symbol";
 const GENERATED_TAUTOLOGY_TEST: &str = "generated_tautology_check";
-
-/// Verify-generation errors reuse the crate's canonical core error type.
-pub type GateError = roko_core::RokoError;
 
 /// Produces verifier artifacts from acceptance criteria and task context.
 pub trait GateGenerator: Send + Sync {

@@ -75,6 +75,8 @@
     clippy::use_self
 )]
 
+/// Crate-level error types.
+pub mod error;
 /// Active inference helpers for tier routing support.
 pub mod active_inference;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
@@ -156,4 +158,5 @@ pub mod task_metric;
 /// Verdict-aware scoring and routing history for gate-verdict re-entry (GATE-05).
 pub mod verdict_scorer;
 
+pub use error::LearnError;
 pub use feedback_service::{FeedbackService, KnowledgeOutcome};

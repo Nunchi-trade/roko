@@ -82,6 +82,7 @@
 pub mod adaptive_threshold;
 
 pub mod acceptance_contract;
+pub mod error;
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod code_exec;
@@ -161,7 +162,8 @@ pub use forensic::{
 };
 pub use gate_pipeline::{ComposedGatePipeline, GateComposition, GatePipeline};
 pub use gate_service::GateService;
-pub use generated::{GateError, GateGenerator, GeneratedCheck};
+pub use error::GateError;
+pub use generated::{GateGenerator, GeneratedCheck};
 pub use hotelling::{HotellingDetector, JointAnomalyResult};
 pub use payload::{BuildSystem, GatePayload, TestSelector};
 pub use process_reward::{
