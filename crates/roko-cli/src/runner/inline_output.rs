@@ -1,8 +1,8 @@
 //! Inline terminal wiring for the plan runner.
 //!
-//! This is intentionally runner-local glue around the existing
-//! `crate::inline` primitives. It does not introduce a second output sink
-//! abstraction; `stream_to_stderr = false` maps to a disabled renderer.
+//! This is runner-local glue around the existing `crate::inline` primitives.
+//! `RunnerInlineTerminal` is owned by `StderrSink` (in `output_sink.rs`)
+//! and is not used directly by the event loop.
 
 use std::collections::HashMap;
 use std::io::{self, Write as _};
@@ -41,9 +41,9 @@ pub(crate) struct RunnerInlineTerminal {
 }
 
 impl RunnerInlineTerminal {
-    pub(crate) fn new(stream_to_stderr: bool) -> Self {
+    pub(crate) fn new(enabled: bool) -> Self {
         let mut theme = Theme::from_env();
-        let target = if stream_to_stderr {
+        let target = if enabled {
             match InlineTerminal::new() {
                 Ok(term) => {
                     theme = *term.theme();

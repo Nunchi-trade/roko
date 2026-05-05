@@ -2,12 +2,12 @@
 //! to `AgentEvent`s from the stream parser.
 //!
 //! When streaming output is enabled, key events are rendered through the
-//! runner's inline terminal so the operator sees what the agent is doing
-//! instead of a static spinner.
+//! runner's output sink (`RunOutputSink`) so the operator sees what the
+//! agent is doing instead of a static spinner.
 
 use tracing::{debug, info};
 
-use super::inline_output::RunnerInlineTerminal;
+use super::output_sink::{RunOutputSink, TokenUsage};
 use super::state::RunState;
 use super::tui_bridge::TuiBridge;
 use super::types::AgentEvent;
@@ -17,62 +17,20 @@ use super::types::AgentEvent;
 /// context and diagnostics need.
 const MAX_AGENT_OUTPUT: usize = 32_768;
 
-/// Buffered inline streamer for agent text output.
-///
-/// Accumulates `MessageDelta` text and flushes the last few lines when a
-/// structural event (tool call, turn completion) arrives. This avoids
-/// flooding the terminal while still showing recent context.
-#[derive(Debug, Default)]
-pub struct AgentStreamBuffer {
-    buf: String,
-}
-
-impl AgentStreamBuffer {
-    pub fn new() -> Self {
-        Self { buf: String::new() }
-    }
-
-    /// Append a text delta to the buffer.
-    pub fn push(&mut self, text: &str) {
-        self.buf.push_str(text);
-    }
-
-    /// Drain the last N non-empty lines, truncating each to `max_chars`.
-    pub fn drain_lines(&mut self, max_lines: usize, max_chars: usize) -> Vec<String> {
-        if self.buf.trim().is_empty() {
-            self.buf.clear();
-            return Vec::new();
-        }
-
-        let lines: Vec<&str> = self.buf.lines().filter(|l| !l.trim().is_empty()).collect();
-        let start = lines.len().saturating_sub(max_lines);
-        let drained = lines[start..]
-            .iter()
-            .map(|line| truncate_chars(line.trim(), max_chars))
-            .filter(|line| !line.is_empty())
-            .collect();
-        self.buf.clear();
-        drained
-    }
-
-    /// Discard accumulated text without printing.
-    pub fn clear(&mut self) {
-        self.buf.clear();
-    }
-}
-
 /// Process a single agent event, updating state and publishing to TUI.
 ///
-/// When streaming output is enabled, structural events are rendered through
-/// the inline terminal. `stream_buf` accumulates `MessageDelta` text and is
-/// flushed on tool calls / turn completion.
+/// Output rendering is delegated to the provided `sink`. The sink handles
+/// text buffering internally (e.g., `StderrSink` accumulates deltas and
+/// flushes on structural boundaries).
 pub(crate) fn handle_agent_event(
     event: &AgentEvent,
     state: &mut RunState,
     tui: &TuiBridge,
-    inline: &mut RunnerInlineTerminal,
-    stream_buf: &mut AgentStreamBuffer,
+    sink: &dyn RunOutputSink,
 ) {
+    let plan_id = &state.plan_id;
+    let task_id = &state.current_task;
+
     match event {
         AgentEvent::Started {
             agent_id: _,
@@ -84,7 +42,7 @@ pub(crate) fn handle_agent_event(
             state.agent_model = model.clone();
             state.agent_provider = provider.clone();
             state.agent_pid = *pid;
-            inline.agent_started(provider, model, *pid);
+            sink.agent_started(plan_id, task_id, provider, model, *pid);
         }
 
         AgentEvent::SystemInit { session_id, model } => {
@@ -112,17 +70,14 @@ pub(crate) fn handle_agent_event(
             let agent_id = agent_id_for_state(state);
             tui.agent_output(&agent_id, text);
 
-            if inline.is_enabled() {
-                stream_buf.push(text);
-            }
+            sink.agent_text_delta(plan_id, task_id, text);
         }
 
         AgentEvent::ToolCall { id, name } => {
             let marker = format!("\n[tool: {name}]\n");
             state.agent_output.push_str(&marker);
 
-            inline.agent_text(stream_buf.drain_lines(3, 120));
-            inline.tool_call_started(id, name);
+            sink.tool_call(plan_id, task_id, id, name);
         }
 
         AgentEvent::ToolOutput { id, output } => {
@@ -136,7 +91,7 @@ pub(crate) fn handle_agent_event(
             state.agent_output.push_str(truncated);
             state.agent_output.push('\n');
 
-            inline.tool_output(id, output);
+            sink.tool_output(plan_id, task_id, id, output);
         }
 
         AgentEvent::TokenUsage {
@@ -152,13 +107,12 @@ pub(crate) fn handle_agent_event(
             // Token counts are accumulated here; authoritative cost comes from
             // TurnCompleted.total_cost_usd which overwrites state.cost_usd.
 
-            inline.token_usage(
-                *input_tokens,
-                *output_tokens,
-                *cache_read_tokens,
-                *cache_write_tokens,
-                &state.agent_model,
-            );
+            sink.token_usage(plan_id, task_id, TokenUsage {
+                input_tokens: *input_tokens,
+                output_tokens: *output_tokens,
+                cache_read_tokens: *cache_read_tokens,
+                cache_write_tokens: *cache_write_tokens,
+            });
         }
 
         AgentEvent::TurnCompleted {
@@ -195,8 +149,9 @@ pub(crate) fn handle_agent_event(
                 "agent turn completed"
             );
 
-            inline.agent_text(stream_buf.drain_lines(3, 120));
-            inline.agent_turn_completed(
+            sink.agent_turn_completed(
+                plan_id,
+                task_id,
                 *total_cost_usd,
                 *is_error,
                 &state.agent_model,
@@ -211,16 +166,13 @@ pub(crate) fn handle_agent_event(
                 .push_str(&format!("\n[error: {message}]\n"));
             tui.error(message);
 
-            inline.agent_text(stream_buf.drain_lines(3, 120));
-            inline.agent_error(message);
+            sink.agent_error(plan_id, task_id, message);
         }
 
         AgentEvent::Exited { exit_code } => {
             state.agent_active = false;
             state.agent_pid = None;
             debug!(exit_code = ?exit_code, task = %state.current_task, "agent process exited");
-
-            stream_buf.clear();
         }
     }
 }
@@ -228,12 +180,4 @@ pub(crate) fn handle_agent_event(
 /// Derive an agent identifier from the current state.
 fn agent_id_for_state(state: &RunState) -> String {
     format!("{}/{}", state.plan_id, state.current_task)
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    let mut out: String = value.chars().take(max_chars).collect();
-    if value.chars().count() > max_chars {
-        out.push_str("...");
-    }
-    out
 }

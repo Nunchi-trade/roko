@@ -613,7 +613,7 @@ fn build_runner_config(
         feedback_facade: Some(feedback_facade),
         projection: Some(projection),
         http_event_sink: None,
-        stream_to_stderr: false,
+        output_sink: Arc::new(crate::runner::output_sink::NoopSink),
         warm_cache: true,
     }
 }
