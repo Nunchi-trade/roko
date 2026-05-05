@@ -20,7 +20,6 @@ export MIRAGE_RPC_URL="${MIRAGE_RPC_URL:-${ROKO_MIRAGE_URL}}"
 
 CHILD_PIDS=()
 CORE_PIDS=()
-ISFR_AGENT_PIDS=()
 declare -A CHILD_NAMES=()
 SHUTTING_DOWN=0
 
@@ -115,17 +114,6 @@ start_child() {
   log "${name} started pid=${pid}"
 }
 
-spawn_isfr_agent() {
-  local name="$1"
-  local prompt="$2"
-
-  app_cmd roko do "${prompt}" --workdir "${WORKDIR}" &
-  local pid=$!
-  CHILD_PIDS+=("${pid}")
-  ISFR_AGENT_PIDS+=("${pid}")
-  CHILD_NAMES["${pid}"]="${name}"
-  log "isfr-agent/${name} spawned pid=${pid}"
-}
 
 child_exited() {
   local pid="$1"
@@ -257,51 +245,56 @@ start_child roko roko serve \
 roko_pid="${CHILD_PIDS[-1]}"
 wait_http roko "http://127.0.0.1:${PUBLIC_PORT}/health" "${roko_pid}" 60
 
-# ---------- ISFR agent fleet (fire-and-forget) ----------
+# ---------- ISFR agent fleet (fire-and-forget, serialized) ----------
+# Agents run one-at-a-time to avoid OOM on small Railway containers.
+# Each `roko do` loads the full config + creates an LLM client; 15 at once
+# easily exceeds the container memory limit and OOM-kills core processes.
 if [ "${ISFR_AGENTS_ENABLED:-1}" != "0" ]; then
-  log "spawning ISFR agent fleet (15 agents, 5 roles)"
+  log "spawning ISFR agent fleet (15 agents, 5 roles, serialized)"
 
-  # Lending analysts (3)
-  spawn_isfr_agent "lending-aave" \
-    "Analyze Aave V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Write findings to the knowledge store."
-  spawn_isfr_agent "lending-compound" \
-    "Analyze Compound V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Write findings to the knowledge store."
-  spawn_isfr_agent "lending-comparative" \
-    "Compare lending rates across Aave V3 and Compound V3 on Ethereum mainnet. Identify the best supply and borrow rates for major assets (USDC, USDT, ETH, WBTC). Highlight rate spreads and arbitrage opportunities. Write findings to the knowledge store."
+  ISFR_PROMPTS=(
+    # Lending analysts (3)
+    "lending-aave|Analyze Aave V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Write findings to the knowledge store."
+    "lending-compound|Analyze Compound V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Write findings to the knowledge store."
+    "lending-comparative|Compare lending rates across Aave V3 and Compound V3 on Ethereum mainnet. Identify the best supply and borrow rates for major assets (USDC, USDT, ETH, WBTC). Highlight rate spreads and arbitrage opportunities. Write findings to the knowledge store."
+    # Staking analysts (3)
+    "staking-lido|Analyze Lido stETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, validator count, and total ETH staked. Write findings to the knowledge store."
+    "staking-rocketpool|Analyze Rocket Pool rETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, minipool count, and total ETH staked. Write findings to the knowledge store."
+    "staking-comparative|Compare ETH liquid staking yields across Lido, Rocket Pool, and Coinbase cbETH. Rank by net APR after fees. Assess liquidity depth and redemption times. Write findings to the knowledge store."
+    # Funding rate analysts (3)
+    "funding-eth-perps|Analyze ETH perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Identify funding rate arbitrage. Write findings to the knowledge store."
+    "funding-btc-perps|Analyze BTC perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Identify funding rate arbitrage. Write findings to the knowledge store."
+    "funding-cross-asset|Compare funding rates across ETH, BTC, SOL, and ARB perpetuals. Identify cross-asset funding rate dislocations and basis trade opportunities. Write findings to the knowledge store."
+    # Structured yield analysts (3)
+    "structured-ethena|Analyze Ethena USDe yield: current sUSDe APY, backing composition, delta-neutral strategy health, and insurance fund status. Write findings to the knowledge store."
+    "structured-pendle|Analyze Pendle yield markets: top 5 pools by TVL, current fixed vs variable yields, and implied yield curves. Write findings to the knowledge store."
+    "structured-survey|Survey the top 5 structured yield products by TVL on Ethereum. For each: report current APY, strategy type, risk tier, and TVL. Write findings to the knowledge store."
+    # Oracle / synthesis agents (3)
+    "oracle-composite|Compute the ISFR composite rate: weighted average of lending rates, staking yields, funding rates, and structured yields. Use knowledge store entries from peer agents. Apply the ISFR weighting formula. Write the composite rate to the knowledge store."
+    "oracle-confidence|Compute confidence intervals for the ISFR composite rate. Analyze variance across data sources, flag stale or outlier readings, and produce a quality score (0-100). Write findings to the knowledge store."
+    "oracle-summary|Produce an executive summary of the current ISFR state. Pull all agent findings from the knowledge store. Include: composite rate, confidence band, top opportunities, risk flags, and data freshness. Write the summary to the knowledge store."
+  )
 
-  # Staking analysts (3)
-  spawn_isfr_agent "staking-lido" \
-    "Analyze Lido stETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, validator count, and total ETH staked. Write findings to the knowledge store."
-  spawn_isfr_agent "staking-rocketpool" \
-    "Analyze Rocket Pool rETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, minipool count, and total ETH staked. Write findings to the knowledge store."
-  spawn_isfr_agent "staking-comparative" \
-    "Compare ETH liquid staking yields across Lido, Rocket Pool, and Coinbase cbETH. Rank by net APR after fees. Assess liquidity depth and redemption times. Write findings to the knowledge store."
-
-  # Funding rate analysts (3)
-  spawn_isfr_agent "funding-eth-perps" \
-    "Analyze ETH perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Identify funding rate arbitrage. Write findings to the knowledge store."
-  spawn_isfr_agent "funding-btc-perps" \
-    "Analyze BTC perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Identify funding rate arbitrage. Write findings to the knowledge store."
-  spawn_isfr_agent "funding-cross-asset" \
-    "Compare funding rates across ETH, BTC, SOL, and ARB perpetuals. Identify cross-asset funding rate dislocations and basis trade opportunities. Write findings to the knowledge store."
-
-  # Structured yield analysts (3)
-  spawn_isfr_agent "structured-ethena" \
-    "Analyze Ethena USDe yield: current sUSDe APY, backing composition, delta-neutral strategy health, and insurance fund status. Write findings to the knowledge store."
-  spawn_isfr_agent "structured-pendle" \
-    "Analyze Pendle yield markets: top 5 pools by TVL, current fixed vs variable yields, and implied yield curves. Write findings to the knowledge store."
-  spawn_isfr_agent "structured-survey" \
-    "Survey the top 5 structured yield products by TVL on Ethereum. For each: report current APY, strategy type, risk tier, and TVL. Write findings to the knowledge store."
-
-  # Oracle / synthesis agents (3)
-  spawn_isfr_agent "oracle-composite" \
-    "Compute the ISFR composite rate: weighted average of lending rates, staking yields, funding rates, and structured yields. Use knowledge store entries from peer agents. Apply the ISFR weighting formula. Write the composite rate to the knowledge store."
-  spawn_isfr_agent "oracle-confidence" \
-    "Compute confidence intervals for the ISFR composite rate. Analyze variance across data sources, flag stale or outlier readings, and produce a quality score (0-100). Write findings to the knowledge store."
-  spawn_isfr_agent "oracle-summary" \
-    "Produce an executive summary of the current ISFR state. Pull all agent findings from the knowledge store. Include: composite rate, confidence band, top opportunities, risk flags, and data freshness. Write the summary to the knowledge store."
-
-  log "ISFR fleet: ${#ISFR_AGENT_PIDS[@]} agents spawned"
+  # Run agents sequentially in a background subshell so the main loop can
+  # start watching core PIDs immediately.
+  (
+    agent_idx=0
+    total=${#ISFR_PROMPTS[@]}
+    for entry in "${ISFR_PROMPTS[@]}"; do
+      name="${entry%%|*}"
+      prompt="${entry#*|}"
+      agent_idx=$((agent_idx + 1))
+      log "isfr-agent [${agent_idx}/${total}] starting: ${name}"
+      app_cmd roko do "${prompt}" --workdir "${WORKDIR}" || \
+        log "isfr-agent/${name} failed (non-fatal)"
+      log "isfr-agent [${agent_idx}/${total}] finished: ${name}"
+    done
+    log "ISFR fleet: all ${total} agents completed"
+  ) &
+  ISFR_RUNNER_PID=$!
+  CHILD_PIDS+=("${ISFR_RUNNER_PID}")
+  CHILD_NAMES["${ISFR_RUNNER_PID}"]="isfr-runner"
+  log "ISFR fleet runner started pid=${ISFR_RUNNER_PID} (15 agents, serialized)"
 fi
 
 # ---------- Watch core processes only ----------
