@@ -75,6 +75,9 @@ members = [
 
     # Code intelligence — parsing, symbol graphs, PageRank, HDC fingerprints.
     "crates/roko-index",
+
+    # Graph execution engine — DAG types, TOML loader, CellRegistry, topo sort.
+    "crates/roko-graph",
 ]
 default-members = [
     # Ordinary root builds target the main CLI plus the MCP servers we ship.
