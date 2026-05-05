@@ -78,6 +78,7 @@ plan = "good"
 id = "T1"
 title = "Implement the validator"
 role = "implementer"
+files = ["src/lib.rs"]
 depends_on = []
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 "#,
@@ -89,6 +90,32 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
         stdout.contains("0 diagnostics in 1 plan"),
         "unexpected stdout: {stdout}"
     );
+}
+
+#[test]
+fn plan_validate_reports_schema_validation_errors() {
+    let temp = TempDir::new().unwrap();
+    write_plan(
+        temp.path(),
+        "schema",
+        r#"
+[meta]
+plan = "schema"
+
+[[task]]
+id = "T1"
+title = "Missing implementer files"
+role = "implementer"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).failure();
+    assert_eq!(assert.get_output().status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("PLAN_035"), "missing PLAN_035: {stdout}");
+    assert!(stdout.contains("missing 'files'"), "missing files diagnostic: {stdout}");
 }
 
 #[test]
@@ -106,6 +133,7 @@ plan = "aliases"
 id = "T1"
 title = "Mechanical alias"
 role = "implementer"
+files = ["src/lib.rs"]
 model_hint = "haiku"
 depends_on = []
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
@@ -114,6 +142,7 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 id = "T2"
 title = "Focused alias"
 role = "implementer"
+files = ["src/lib.rs"]
 model_hint = "sonnet"
 depends_on = []
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
@@ -122,6 +151,7 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 id = "T3"
 title = "Architectural alias"
 role = "implementer"
+files = ["src/lib.rs"]
 model_hint = "opus"
 depends_on = []
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
@@ -164,6 +194,7 @@ plan = "mystery-model"
 id = "T1"
 title = "Unknown model"
 role = "implementer"
+files = ["src/lib.rs"]
 model_hint = "definitely-not-a-model"
 depends_on = []
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
@@ -197,6 +228,7 @@ plan = "cycle"
 id = "T1"
 title = "First"
 role = "implementer"
+files = ["src/lib.rs"]
 depends_on = ["T2"]
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 
@@ -204,6 +236,7 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 id = "T2"
 title = "Second"
 role = "implementer"
+files = ["src/lib.rs"]
 depends_on = ["T1"]
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 "#,
@@ -254,6 +287,7 @@ plan = "bad-rung"
 id = "T1"
 title = "Use an invalid rung"
 role = "implementer"
+files = ["src/lib.rs"]
 gate_rung = 9
 depends_on = []
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
@@ -280,6 +314,7 @@ plan = "contract"
 id = "T1"
 title = "Define a done gate"
 role = "implementer"
+files = ["crates/roko-gate/src/acceptance_contract.rs"]
 depends_on = []
 verify = [{ phase = "compile", command = "cargo check -p roko-gate" }]
 
@@ -337,6 +372,7 @@ plan = "bad-contract"
 id = "T1"
 title = "Define a bad done gate"
 role = "implementer"
+files = ["crates/roko-gate/src/acceptance_contract.rs"]
 depends_on = []
 verify = [{ phase = "compile", command = "cargo check -p roko-gate" }]
 

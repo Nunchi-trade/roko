@@ -313,14 +313,27 @@ fn validate_tasks_file(
     // Try parsing with the runtime parser — if this fails, `plan run` would
     // also fail on the same file.  Report any deserialization error so that
     // `plan validate` and `plan run` agree on whether a file is acceptable.
-    if let Err(runtime_err) = roko_cli::task_parser::TasksFile::parse_str(&content) {
-        diagnostics.push(Diagnostic {
-            severity: Severity::Error,
-            rule_id: "PLAN_034".to_string(),
-            plan_id: Some(plan_id.clone()),
-            task_id: None,
-            message: format!("plan would fail at runtime: {runtime_err}"),
-        });
+    match roko_cli::task_parser::TasksFile::parse_str(&content) {
+        Ok(tasks_file) => {
+            for schema_issue in tasks_file.validate_against_schema() {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    rule_id: "PLAN_035".to_string(),
+                    plan_id: Some(plan_id.clone()),
+                    task_id: None,
+                    message: format!("schema validation failed: {schema_issue}"),
+                });
+            }
+        }
+        Err(runtime_err) => {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                rule_id: "PLAN_034".to_string(),
+                plan_id: Some(plan_id.clone()),
+                task_id: None,
+                message: format!("plan would fail at runtime: {runtime_err}"),
+            });
+        }
     }
     let tasks = parsed
         .get("task")

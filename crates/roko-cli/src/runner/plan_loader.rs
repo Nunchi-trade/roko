@@ -41,6 +41,19 @@ pub fn load_plan(dir: &Path) -> Result<Plan> {
 
     let tasks = TasksFile::parse(&tasks_path)
         .with_context(|| format!("failed to parse {}", tasks_path.display()))?;
+    let schema_issues = tasks.validate_against_schema();
+    if !schema_issues.is_empty() {
+        let details = schema_issues
+            .iter()
+            .map(|issue| format!("  - {issue}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "schema validation failed for {}:\n{}",
+            tasks_path.display(),
+            details
+        );
+    }
 
     let workdir = find_workspace_root(dir);
     let prd_excerpt = load_prd_excerpt_for_plan(workdir.as_deref(), &id);
@@ -400,6 +413,7 @@ plan = "test-plan"
 [[task]]
 id = "T1"
 title = "Do something"
+role = "researcher"
 "#;
 
     #[test]
@@ -419,6 +433,29 @@ title = "Do something"
         let tmp = tempfile::tempdir().unwrap();
         let result = load_plan(tmp.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_plan_rejects_schema_issues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan_dir = tmp.path().join("bad-plan");
+        write_tasks_toml(
+            &plan_dir,
+            r#"
+[meta]
+plan = "bad-plan"
+
+[[task]]
+id = "T1"
+title = "Missing implementer fields"
+role = "implementer"
+"#,
+        );
+
+        let error = load_plan(&plan_dir).unwrap_err().to_string();
+        assert!(error.contains("schema validation failed"));
+        assert!(error.contains("missing 'verify'"));
+        assert!(error.contains("missing 'files'"));
     }
 
     #[test]
@@ -459,6 +496,7 @@ plan = "test-plan"
 [[task]]
 id = "T1"
 title = "Create new crate"
+role = "researcher"
 files = ["crates/my-new-crate/src/lib.rs", "crates/my-new-crate/Cargo.toml"]
 "#;
 
@@ -505,6 +543,7 @@ plan = "test-plan"
 [[task]]
 id = "T1"
 title = "Edit root file"
+role = "researcher"
 files = ["src/main.rs", "README.md"]
 "#;
         let plan_dir = tmp.path().join("plan");
@@ -525,6 +564,7 @@ plan = "test-plan"
 [[task]]
 id = "T1"
 title = "Create CLI crate"
+role = "researcher"
 files = ["crates/my-cli/src/main.rs", "crates/my-cli/Cargo.toml"]
 "#;
         let plan_dir = tmp.path().join("plan");

@@ -845,14 +845,26 @@ impl TasksFile {
 
         let mut issues = Vec::new();
 
-        for task in &self.tasks {
-            let tid = &task.id;
+        for (index, task) in self.tasks.iter().enumerate() {
+            let tid = task.id.trim();
+            let task_label = if tid.is_empty() {
+                format!("task #{}", index + 1)
+            } else {
+                tid.to_string()
+            };
             let role = task.role.as_deref().unwrap_or("implementer");
+
+            if tid.is_empty() {
+                issues.push(format!("{task_label}: missing 'id'"));
+            }
+            if task.title.trim().is_empty() {
+                issues.push(format!("{task_label}: missing 'title'"));
+            }
 
             // Check role is valid.
             if !VALID_ROLES.contains(&role) {
                 issues.push(format!(
-                    "{tid}: unknown role '{role}' (valid: {})",
+                    "{task_label}: unknown role '{role}' (valid: {})",
                     VALID_ROLES.join(", ")
                 ));
             }
@@ -867,7 +879,7 @@ impl TasksFile {
                     };
                     if missing {
                         issues.push(format!(
-                            "{tid}: missing '{field}' (required for role '{role}')"
+                            "{task_label}: missing '{field}' (required for role '{role}')"
                         ));
                     }
                 }
@@ -879,7 +891,7 @@ impl TasksFile {
                 && !VALID_TIERS.contains(&task.tier.as_str())
             {
                 issues.push(format!(
-                    "{tid}: unknown tier '{}' (valid: {})",
+                    "{task_label}: unknown tier '{}' (valid: {})",
                     task.tier,
                     VALID_TIERS.join(", ")
                 ));
@@ -888,7 +900,7 @@ impl TasksFile {
             // Check status is valid.
             if !task.status.is_empty() && !VALID_STATUSES.contains(&task.status.as_str()) {
                 issues.push(format!(
-                    "{tid}: unknown status '{}' (valid: {})",
+                    "{task_label}: unknown status '{}' (valid: {})",
                     task.status,
                     VALID_STATUSES.join(", ")
                 ));
@@ -896,10 +908,10 @@ impl TasksFile {
 
             // Check numeric bounds.
             if task.timeout_secs == 0 {
-                issues.push(format!("{tid}: timeout_secs must be > 0"));
+                issues.push(format!("{task_label}: timeout_secs must be > 0"));
             }
             if task.max_loc.is_some_and(|m| m == 0) {
-                issues.push(format!("{tid}: max_loc must be > 0"));
+                issues.push(format!("{task_label}: max_loc must be > 0"));
             }
         }
 
