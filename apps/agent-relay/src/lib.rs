@@ -261,6 +261,27 @@ fn handle_agent_frame(
             });
             true
         }
+        // Pub/sub frames — relay-side bus not yet wired (A2/A3 task).
+        // Acknowledge subscribe/unsubscribe so clients don't stall; silently
+        // drop publish until the TopicBus is available.
+        Ok(AgentInboundFrame::Subscribe { topic }) => {
+            tracing::debug!(%agent_id, %topic, "subscribe (bus not wired)");
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: "subscribe".to_string(),
+            });
+            true
+        }
+        Ok(AgentInboundFrame::Unsubscribe { topic }) => {
+            tracing::debug!(%agent_id, %topic, "unsubscribe (bus not wired)");
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: "unsubscribe".to_string(),
+            });
+            true
+        }
+        Ok(AgentInboundFrame::Publish { topic, .. }) => {
+            tracing::debug!(%agent_id, %topic, "publish dropped (bus not wired)");
+            true
+        }
         Err(error) => {
             let _ = outbound_tx.send(RelayOutboundFrame::Error {
                 message_id: None,

@@ -87,10 +87,24 @@ pub enum AgentInboundFrame {
         error: String,
     },
     Ping,
+    /// Subscribe to a topic. Relay will forward matching TopicMessages.
+    Subscribe { topic: String },
+    /// Unsubscribe from a previously subscribed topic.
+    Unsubscribe { topic: String },
+    /// Publish a message to a topic. Relay fans out to all subscribers.
+    Publish {
+        topic: String,
+        msg_type: String,
+        payload: serde_json::Value,
+    },
 }
 
 /// Frames the relay sends to agents.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Note: `Eq` is intentionally NOT derived — `TopicMessage.payload` is
+/// `serde_json::Value` which does not implement `Eq` (floats).
+/// `PartialEq` is sufficient for any comparison needs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RelayOutboundFrame {
     Ack {
@@ -106,6 +120,14 @@ pub enum RelayOutboundFrame {
         error: String,
     },
     Pong,
+    /// A message published to a topic this agent is subscribed to.
+    TopicMessage {
+        topic: String,
+        msg_type: String,
+        payload: serde_json::Value,
+        publisher_id: Option<String>,
+        seq: u64,
+    },
 }
 
 /// Workspace hello frame sent by roko-serve on startup.

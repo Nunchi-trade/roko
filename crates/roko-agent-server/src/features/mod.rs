@@ -5,5 +5,6 @@ pub mod logs;
 pub mod messaging;
 pub mod predictions;
 pub mod relay_client;
+pub mod relay_subscriber;
 pub mod research;
 pub mod tasks;
