@@ -26,6 +26,7 @@ terminal.
 5. [Exit codes](#exit-codes)
 6. [Core workflow commands](#core-workflow-commands)
    - [roko init](#roko-init)
+   - [roko do](#roko-do)
    - [roko run](#roko-run)
    - [roko status](#roko-status)
    - [roko doctor](#roko-doctor)
@@ -92,8 +93,8 @@ Here is the fastest path to seeing Roko do something real.
 # Step 1: Initialize a workspace (if you haven't already)
 roko init
 
-# Step 2: Run a single prompt through the full loop
-roko run "Add input validation to the login form"
+# Step 2: Run a single prompt through the classified WorkflowEngine path
+roko do "Add input validation to the login form"
 
 # Step 3: Check what happened
 roko status
@@ -102,10 +103,9 @@ roko status
 roko dashboard
 ```
 
-`roko run` invokes the universal loop: it composes a prompt, dispatches an agent, runs the
-gate pipeline (compile → test → clippy → diff), and persists the result. For a one-off
-task that is all you need. For sustained multi-step work, use the PRD-to-plan-to-run
-workflow described next.
+`roko do` is the preferred intent entry point. It classifies the prompt, selects the matching
+WorkflowEngine template, and then runs the engine. For sustained multi-step work, the
+PRD-to-plan-to-run workflow remains available while the full `roko do` pipeline is completed.
 
 You can also run a prompt without a subcommand — these two lines are equivalent:
 
@@ -265,16 +265,59 @@ roko init --demo                   # Initialize and seed demo data
 
 ---
 
+### `roko do`
+
+**When to use this:** The default command for "take this intent and do the appropriate amount
+of work." It classifies the prompt and dispatches through the existing WorkflowEngine.
+
+Current implementation status: `roko do` is wired as a WorkflowEngine template selector. The
+full medium/complex PRD -> plan -> execute pipeline and complete work-item resume semantics
+are still in progress.
+
+```
+roko do <prompt> [--plan] [--complexity simple|medium|complex] [--dry-run]
+        [--workdir <path>] [--provider <name>] [--yes] [--ghost]
+        [--compare] [--continue] [--no-cascade]
+```
+
+| Arg/Flag | Default | Description |
+|---|---|---|
+| `<prompt>` | required | Natural-language task description. |
+| `--complexity <level>` | auto | Force simple, medium, or complex classification. |
+| `--dry-run` | false | Show classification/template without executing. |
+| `--plan` | false | Request plan-oriented execution. |
+| `--workdir <path>` | cwd | Override the working directory. |
+| `--provider <name>` | config | Override provider for this run. |
+| `--yes` | false | Approval-bypass surface; behavior still needs final audit. |
+| `--ghost` | false | Preview-oriented run mode. |
+| `--compare` | false | Preview comparison surface; full side-by-side execution is not complete. |
+| `--continue` | false | Reports resumable state and points to resume flow. |
+| `--no-cascade` | false | Disable cascade routing for the run. |
+
+<details>
+<summary>Examples</summary>
+
+```bash
+roko do "Fix the typo in README.md" --dry-run
+roko do "Add a health check endpoint"
+roko do "Refactor database sharding" --complexity complex --dry-run
+```
+
+</details>
+
+---
+
 ### `roko run`
 
 **When to use this:** When you have a single, well-defined task and want Roko to handle it
 end to end without writing a PRD or plan. Good for bug fixes, isolated refactors, and
 quick experiments.
 
-`roko run` seeds a prompt and runs the universal loop: compose → agent → gate → persist.
+For classified task execution, prefer `roko do`. `roko run` is retained as the direct prompt
+path and, in the common no-serve/no-share path, routes through the `roko do` handler.
 
 ```
-roko run <prompt> [--workdir <path>] [--serve] [--share] [--engine v2|legacy]
+roko run <prompt> [--workdir <path>] [--serve] [--share]
 ```
 
 | Arg/Flag | Default | Description |
@@ -283,7 +326,6 @@ roko run <prompt> [--workdir <path>] [--serve] [--share] [--engine v2|legacy]
 | `--workdir <path>` | cwd | Override the working directory. |
 | `--serve` | false | Start the HTTP control plane alongside the run. |
 | `--share` | false | Generate a shareable URL (starts serve if needed). |
-| `--engine v2\|legacy` | `v2` | Execution engine: `v2` (WorkflowEngine, event-driven) or `legacy` (run_once / PlanRunner). |
 
 <details>
 <summary>Examples</summary>

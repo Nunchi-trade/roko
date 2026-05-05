@@ -488,7 +488,8 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     setKfRightAgent(INITIAL_KF_RIGHT);
     setKfMetrics(initialKfMetrics());
     inferenceTrace.reset();
-  }, [scenario.id, selectedPipelineExample, inferenceTrace]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scenario.id, selectedPipelineExample, inferenceTrace.reset]);
 
   // ── Build scenario context ─────────────────────────────────
   const patchPipeline = useCallback((patch: Partial<PipelineDemoState>) => {

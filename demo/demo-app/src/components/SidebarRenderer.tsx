@@ -173,6 +173,12 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
             />
           </div>
         </RevealWhen>
+
+        <InferenceTracePanel
+          calls={traceCalls}
+          totals={traceTotals}
+          costSeries={traceCostSeries}
+        />
       </>
     );
   }
@@ -231,6 +237,12 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
             <CommandLog entries={logEntries} maxHeight="180px" />
           </Pane>
         </RevealWhen>
+
+        <InferenceTracePanel
+          calls={traceCalls}
+          totals={traceTotals}
+          costSeries={traceCostSeries}
+        />
       </>
     );
   }
@@ -261,6 +273,12 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
             <CommandLog entries={logEntries} maxHeight="140px" />
           </Pane>
         </RevealWhen>
+
+        <InferenceTracePanel
+          calls={traceCalls}
+          totals={traceTotals}
+          costSeries={traceCostSeries}
+        />
       </>
     );
   }
@@ -286,6 +304,12 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
             <CommandLog entries={logEntries} maxHeight="140px" />
           </Pane>
         </RevealWhen>
+
+        <InferenceTracePanel
+          calls={traceCalls}
+          totals={traceTotals}
+          costSeries={traceCostSeries}
+        />
       </>
     );
   }

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useEventStreamContext } from '../contexts/EventStreamContext';
 
 // ── Types ────────────────────────────────────────────────────
@@ -91,14 +91,12 @@ function eventType(event: unknown): string | null {
 export function useInferenceTrace(): InferenceTraceState {
   const [calls, setCalls] = useState<InferenceCall[]>([]);
   const [costSeries, setCostSeries] = useState<number[]>([]);
-  const totalLatencyRef = useRef(0);
 
   const { subscribe } = useEventStreamContext();
 
   const reset = useCallback(() => {
     setCalls([]);
     setCostSeries([]);
-    totalLatencyRef.current = 0;
   }, []);
 
   useEffect(() => {
@@ -125,18 +123,19 @@ export function useInferenceTrace(): InferenceTraceState {
         timestamp: Date.now(),
       };
 
-      totalLatencyRef.current += latencyMs;
-
       setCalls((prev) => [...prev.slice(-(MAX_CALLS - 1)), call]);
       setCostSeries((prev) => [...prev.slice(-(MAX_SPARKLINE_POINTS - 1)), cost]);
     });
   }, [subscribe]);
 
+  // Derive totals from the calls buffer (not a separate accumulator)
   const totals: InferenceTraceTotals = {
     cost: calls.reduce((s, c) => s + c.cost, 0),
     tokens: calls.reduce((s, c) => s + c.inputTokens + c.outputTokens, 0),
     calls: calls.length,
-    avgLatencyMs: calls.length > 0 ? totalLatencyRef.current / calls.length : 0,
+    avgLatencyMs: calls.length > 0
+      ? calls.reduce((s, c) => s + c.latencyMs, 0) / calls.length
+      : 0,
   };
 
   return { calls, totals, costSeries, reset };
