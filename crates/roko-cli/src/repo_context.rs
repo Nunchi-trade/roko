@@ -408,12 +408,9 @@ pub async fn build_repo_context(
 fn extend_do_not_create(do_not_create: &mut Vec<String>, root: &Path) {
     for dir_name in ["crates", "packages", "libs"] {
         let dir = root.join(dir_name);
-        if !dir.is_dir() {
-            continue;
-        }
-
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
         };
 
         for entry in entries.flatten() {
@@ -1783,12 +1780,9 @@ pub fn find_related_prds(root: &Path, keywords: &[&str], max_results: usize) -> 
     }
 
     let prd_dir = root.join(".roko").join("prd").join("drafts");
-    if !prd_dir.exists() {
-        return Vec::new();
-    }
-
-    let Ok(entries) = std::fs::read_dir(&prd_dir) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(&prd_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
     };
 
     let mut scored: Vec<(u8, PathBuf)> = Vec::new();
@@ -1873,12 +1867,9 @@ pub fn find_related_plans(root: &Path, keywords: &[&str], max_results: usize) ->
     let mut scored: Vec<(u8, PathBuf)> = Vec::new();
 
     for plan_dir in &plan_dirs {
-        if !plan_dir.exists() {
-            continue;
-        }
-
-        let Ok(entries) = std::fs::read_dir(plan_dir) else {
-            continue;
+        let entries = match std::fs::read_dir(plan_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
         };
 
         for entry in entries.flatten() {

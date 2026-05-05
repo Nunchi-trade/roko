@@ -789,11 +789,14 @@ impl AppState {
     /// Restore discovered agents and template run records from disk.
     pub async fn restore_snapshot(&self) -> anyhow::Result<()> {
         let path = self.snapshot_path();
-        if !path.exists() {
-            tracing::debug!("no server state snapshot found; starting fresh");
-            return Ok(());
-        }
-        let data = tokio::fs::read_to_string(&path).await?;
+        let data = match tokio::fs::read_to_string(&path).await {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!("no server state snapshot found; starting fresh");
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
         let snapshot: ServerStateSnapshot = serde_json::from_str(&data)?;
         {
             let mut agents = self.discovered_agents.write().await;

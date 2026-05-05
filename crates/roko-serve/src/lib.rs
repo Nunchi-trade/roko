@@ -1763,7 +1763,7 @@ fn start_cold_archival_timer(state: Arc<AppState>) -> JoinHandle<()> {
 
             let workdir = &state.workdir;
             let roko_dir = workdir.join(".roko");
-            if !roko_dir.exists() {
+            if !roko_dir.is_dir() {
                 continue;
             }
 
@@ -1888,10 +1888,11 @@ fn load_stored_credential() -> Result<Option<serde_json::Value>> {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".roko")
         .join("credentials.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let data = std::fs::read_to_string(&path)?;
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     let store: serde_json::Value = serde_json::from_str(&data)?;
     Ok(store.get("default").cloned())
 }

@@ -513,10 +513,11 @@ pub async fn save_bench_run(workdir: &Path, run: &BenchRun) -> anyhow::Result<()
 /// Load a bench run from disk.
 pub async fn load_bench_run(workdir: &Path, run_id: &str) -> anyhow::Result<Option<BenchRun>> {
     let path = run_path(workdir, run_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let data = tokio::fs::read_to_string(&path).await?;
+    let data = match tokio::fs::read_to_string(&path).await {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     let run: BenchRun = serde_json::from_str(&data)?;
     Ok(Some(run))
 }
@@ -524,10 +525,11 @@ pub async fn load_bench_run(workdir: &Path, run_id: &str) -> anyhow::Result<Opti
 /// Delete a bench run from disk.
 pub async fn delete_bench_run(workdir: &Path, run_id: &str) -> anyhow::Result<()> {
     let path = run_path(workdir, run_id);
-    if path.exists() {
-        tokio::fs::remove_file(&path).await?;
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
     }
-    Ok(())
 }
 
 /// Append an index entry to the JSONL index file.
@@ -1361,14 +1363,28 @@ pub async fn ensure_builtin_suites(workdir: &Path) {
         ("safety.toml", SAFETY_SUITE_TOML),
     ] {
         let path = dir.join(filename);
-        if !path.exists() {
-            let _ = tokio::fs::write(&path, content).await;
+        // Use create_new to atomically skip if already present (no TOCTOU race).
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(mut file) => {
+                let _ = file.write_all(content.as_bytes()).await;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => {}
         }
     }
 
     let learnable_path = dir.join("learnable-rust.toml");
-    if !learnable_path.exists() {
-        let _ = save_suite(workdir, &builtin_learnable_rust_suite()).await;
+    // Only write if the file does not already exist.
+    match tokio::fs::metadata(&learnable_path).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = save_suite(workdir, &builtin_learnable_rust_suite()).await;
+        }
+        _ => {}
     }
 }
 
@@ -1461,10 +1477,11 @@ pub async fn save_matrix_run(workdir: &Path, run: &MatrixRun) -> anyhow::Result<
 /// Load a matrix run from disk.
 pub async fn load_matrix_run(workdir: &Path, matrix_id: &str) -> anyhow::Result<Option<MatrixRun>> {
     let path = matrix_path(workdir, matrix_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let data = tokio::fs::read_to_string(&path).await?;
+    let data = match tokio::fs::read_to_string(&path).await {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     let run: MatrixRun = serde_json::from_str(&data)?;
     Ok(Some(run))
 }

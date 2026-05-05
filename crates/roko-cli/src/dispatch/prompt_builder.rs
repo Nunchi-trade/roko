@@ -132,9 +132,6 @@ const PRD_EXCERPT_LIMIT: usize = 2_000;
 /// never balloons the system prompt on large workspaces.
 fn generate_workspace_map(workdir: &Path) -> String {
     let crates_dir = workdir.join("crates");
-    if !crates_dir.is_dir() {
-        return String::new();
-    }
 
     let mut out = String::from("# Workspace crate map\n");
     let mut entries: Vec<_> = match std::fs::read_dir(&crates_dir) {
@@ -155,9 +152,8 @@ fn generate_workspace_map(workdir: &Path) -> String {
         out.push_str(&format!("crates/{crate_name}/\n"));
 
         let src_dir = crate_path.join("src");
-        if src_dir.is_dir() {
-            out.push_str(&walk_src_tree(&src_dir, "  ", 0));
-        }
+        // walk_src_tree handles missing dirs gracefully via read_dir error.
+        out.push_str(&walk_src_tree(&src_dir, "  ", 0));
 
         if out.len() >= WORKSPACE_MAP_LIMIT {
             out.truncate(WORKSPACE_MAP_LIMIT);
@@ -227,16 +223,19 @@ fn load_tasks_toml(workdir: &Path, plan_id: &str) -> String {
         workdir.join("plans").join(plan_id).join("tasks.toml"),
     ];
     for path in &candidates {
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
                 return if content.len() > TASKS_TOML_LIMIT {
-                    let mut truncated = content.chars().take(TASKS_TOML_LIMIT).collect::<String>();
+                    let mut truncated =
+                        content.chars().take(TASKS_TOML_LIMIT).collect::<String>();
                     truncated.push_str("\n[truncated]");
                     truncated
                 } else {
                     content
                 };
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
         }
     }
     String::new()
@@ -256,16 +255,19 @@ fn load_prd_excerpt(workdir: &Path, plan_id: &str) -> String {
         prd_base.join("draft").join(format!("{plan_id}.md")),
     ];
     for path in &candidates {
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
                 return if content.len() > PRD_EXCERPT_LIMIT {
-                    let mut truncated = content.chars().take(PRD_EXCERPT_LIMIT).collect::<String>();
+                    let mut truncated =
+                        content.chars().take(PRD_EXCERPT_LIMIT).collect::<String>();
                     truncated.push_str("\n[truncated]");
                     truncated
                 } else {
                     content
                 };
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
         }
     }
     String::new()
@@ -823,10 +825,7 @@ impl PromptSectionSource for SectionEffectivenessSource {
             let path = ctx
                 .workdir
                 .join(roko_learn::section_effect::DEFAULT_SECTION_EFFECTS_PATH);
-            if !path.exists() {
-                return Vec::new();
-            }
-            // Fallback: load from disk (no cache available).
+            // load_or_new handles missing files gracefully (returns empty registry).
             let loaded =
                 roko_learn::section_effect::SectionEffectivenessRegistry::load_or_new(&path);
             return render_effectiveness_section(&loaded, &ctx.role);
@@ -859,9 +858,7 @@ fn render_effectiveness_section(
 
 fn collect_neuro_knowledge(task: &TaskDef, ctx: &PromptContext) -> Option<PromptSection> {
     let store = roko_neuro::KnowledgeStore::for_workdir(&ctx.workdir);
-    if !store.path().exists() {
-        return None;
-    }
+    // store.query -> read_all handles NotFound internally (returns empty Vec).
     let query = task_query_text(task, ctx);
     let entries = store.query(&query, 5).ok()?;
     if entries.is_empty() {
@@ -895,7 +892,10 @@ fn collect_episode_knowledge(task: &TaskDef, ctx: &PromptContext) -> Option<Prom
 
     let mut scored = Vec::new();
     for path in episode_paths(&ctx.workdir) {
-        let file = std::fs::File::open(path).ok()?;
+        let file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
         let reader = std::io::BufReader::new(file);
         for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
             let trimmed = line.trim();
@@ -975,12 +975,13 @@ fn collect_episode_knowledge(task: &TaskDef, ctx: &PromptContext) -> Option<Prom
 
 fn collect_playbooks(task: &TaskDef, ctx: &PromptContext) -> Option<PromptSection> {
     let root = ctx.workdir.join(".roko").join("learn").join("playbooks");
-    if !root.is_dir() {
-        return None;
-    }
     let query = query_keywords(&task_query_text(task, ctx));
     let mut scored = Vec::new();
-    for entry in std::fs::read_dir(root).ok()? {
+    let read_dir = match std::fs::read_dir(&root) {
+        Ok(rd) => rd,
+        Err(_) => return None,
+    };
+    for entry in read_dir {
         let entry = entry.ok()?;
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
@@ -1253,9 +1254,7 @@ fn collect_playbooks_cached(
 
 fn apply_section_effectiveness(workdir: &Path, role: &str, sections: &mut [PromptSection]) {
     let path = workdir.join(roko_learn::section_effect::DEFAULT_SECTION_EFFECTS_PATH);
-    if !path.exists() {
-        return;
-    }
+    // load_or_new handles missing files gracefully (returns empty registry).
     let registry = roko_learn::section_effect::SectionEffectivenessRegistry::load_or_new(&path);
     for section in sections {
         match registry.recommend_priority_change(&section.name, role) {
@@ -1290,14 +1289,11 @@ fn query_keywords(text: &str) -> HashSet<String> {
 }
 
 fn episode_paths(workdir: &Path) -> Vec<PathBuf> {
-    [
+    vec![
         workdir.join(".roko").join("episodes.jsonl"),
         workdir.join(".roko").join("learn").join("episodes.jsonl"),
         workdir.join(".roko").join("memory").join("episodes.jsonl"),
     ]
-    .into_iter()
-    .filter(|path| path.exists())
-    .collect()
 }
 
 fn playbook_text(playbook: &roko_learn::playbook::Playbook) -> String {

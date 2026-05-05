@@ -267,12 +267,16 @@ impl TemplateRegistry {
         report: &mut TemplateLoadReport,
         configured_mcp_servers: Option<&HashSet<String>>,
     ) -> Result<()> {
-        if !dir.exists() {
-            return Ok(());
-        }
-
         let mut entries = Vec::new();
-        let read_dir = std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("read {}", dir.display()))
+                );
+            }
+        };
         for entry in read_dir {
             match entry {
                 Ok(entry) => entries.push(entry.path()),
@@ -392,9 +396,14 @@ impl TemplateRegistry {
                 .join(".roko")
                 .join("templates")
                 .join(format!("{name}.toml"));
-            if path.exists() {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("remove {}", path.display()))?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(
+                        anyhow::Error::new(e).context(format!("remove {}", path.display()))
+                    );
+                }
             }
             Ok(true)
         } else {

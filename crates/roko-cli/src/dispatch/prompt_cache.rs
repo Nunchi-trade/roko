@@ -103,10 +103,7 @@ impl PromptCache {
 
 fn load_neuro_entries(workdir: &Path) -> Vec<KnowledgeEntry> {
     let store = roko_neuro::KnowledgeStore::for_workdir(workdir);
-    if !store.path().exists() {
-        return Vec::new();
-    }
-    // Load all entries so we can do in-memory filtering per-task.
+    // query -> read_all handles NotFound internally (returns empty Vec).
     store.query("", 500).unwrap_or_default()
 }
 
@@ -130,23 +127,17 @@ fn load_episodes(workdir: &Path) -> Vec<Episode> {
 }
 
 fn episode_paths(workdir: &Path) -> Vec<PathBuf> {
-    [
+    vec![
         workdir.join(".roko").join("episodes.jsonl"),
         workdir.join(".roko").join("learn").join("episodes.jsonl"),
         workdir.join(".roko").join("memory").join("episodes.jsonl"),
     ]
-    .into_iter()
-    .filter(|path| path.exists())
-    .collect()
 }
 
 fn load_playbooks(workdir: &Path) -> Vec<Playbook> {
     let root = workdir.join(".roko").join("learn").join("playbooks");
-    if !root.is_dir() {
-        return Vec::new();
-    }
     let mut playbooks = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(root) {
+    if let Ok(entries) = std::fs::read_dir(&root) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
@@ -164,9 +155,7 @@ fn load_playbooks(workdir: &Path) -> Vec<Playbook> {
 
 fn load_effectiveness(workdir: &Path) -> SectionEffectivenessRegistry {
     let path = workdir.join(roko_learn::section_effect::DEFAULT_SECTION_EFFECTS_PATH);
-    if !path.exists() {
-        return SectionEffectivenessRegistry::new();
-    }
+    // load_or_new handles missing files gracefully (returns empty registry).
     SectionEffectivenessRegistry::load_or_new(&path)
 }
 

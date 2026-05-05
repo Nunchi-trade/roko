@@ -64,20 +64,18 @@ impl WorkspaceContext {
 
                 // Enumerate recent PRDs (up to 3)
                 let prd_dir = candidate.join("prd");
-                if prd_dir.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&prd_dir) {
-                        let mut prds: Vec<_> = entries
-                            .filter_map(|e| e.ok())
-                            .filter(|e| e.path().is_dir())
-                            .filter_map(|e| {
-                                let name = e.file_name().to_string_lossy().to_string();
-                                let mtime = e.metadata().ok()?.modified().ok()?;
-                                Some((name, mtime))
-                            })
-                            .collect();
-                        prds.sort_by(|a, b| b.1.cmp(&a.1));
-                        ctx.recent_prds = prds.into_iter().take(3).map(|(n, _)| n).collect();
-                    }
+                if let Ok(entries) = std::fs::read_dir(&prd_dir) {
+                    let mut prds: Vec<_> = entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.path().is_dir())
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            let mtime = e.metadata().ok()?.modified().ok()?;
+                            Some((name, mtime))
+                        })
+                        .collect();
+                    prds.sort_by(|a, b| b.1.cmp(&a.1));
+                    ctx.recent_prds = prds.into_iter().take(3).map(|(n, _)| n).collect();
                 }
 
                 // Check for interrupted executor snapshot
@@ -88,20 +86,18 @@ impl WorkspaceContext {
 
                 // Enumerate recent plans (up to 3)
                 let plans_dir = dir.join("plans");
-                if plans_dir.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&plans_dir) {
-                        let mut plans: Vec<_> = entries
-                            .filter_map(|e| e.ok())
-                            .filter(|e| e.path().is_dir())
-                            .filter_map(|e| {
-                                let name = e.file_name().to_string_lossy().to_string();
-                                let mtime = e.metadata().ok()?.modified().ok()?;
-                                Some((name, mtime))
-                            })
-                            .collect();
-                        plans.sort_by(|a, b| b.1.cmp(&a.1));
-                        ctx.recent_plans = plans.into_iter().take(3).map(|(n, _)| n).collect();
-                    }
+                if let Ok(entries) = std::fs::read_dir(&plans_dir) {
+                    let mut plans: Vec<_> = entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.path().is_dir())
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            let mtime = e.metadata().ok()?.modified().ok()?;
+                            Some((name, mtime))
+                        })
+                        .collect();
+                    plans.sort_by(|a, b| b.1.cmp(&a.1));
+                    ctx.recent_plans = plans.into_iter().take(3).map(|(n, _)| n).collect();
                 }
 
                 break;

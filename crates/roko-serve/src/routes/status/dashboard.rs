@@ -21,16 +21,16 @@ pub async fn session_status(State(state): State<Arc<AppState>>) -> Result<Json<V
     let ss = state.runtime.session_status(state.workdir.clone());
     let supervised_processes = state.supervisor.snapshots().await;
     let process_ledger_path = default_process_session_ledger_path(&state.workdir);
-    let process_sessions = if process_ledger_path.is_file() {
+    let process_sessions = {
         let ledger = ProcessSessionLedger::load(&process_ledger_path).map_err(|err| {
             ApiError::internal(format!(
                 "load process session ledger {}: {err}",
                 process_ledger_path.display()
             ))
         })?;
+        // load() returns a default (empty) ledger when the file does not exist,
+        // so we always have a valid summary — no separate existence check needed.
         Some(ledger.state_summary(Some(24 * 60 * 60 * 1_000), unix_ms()))
-    } else {
-        None
     };
     Ok(Json(json!({
         "session_id": ss.session_id,
