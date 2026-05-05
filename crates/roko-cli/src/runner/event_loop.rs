@@ -12,10 +12,7 @@ use anyhow::{Context, Result};
 use roko_core::RuntimeEvent;
 use roko_core::agent::ModelSpec;
 use roko_core::config::GatesConfig;
-use roko_core::defaults::{
-    DEFAULT_AGENT_TURN_LIMIT, DEFAULT_RUNNER_MAX_CONCURRENT_PLANS,
-    DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT,
-};
+use roko_core::defaults::{DEFAULT_AGENT_TURN_LIMIT, DEFAULT_RUNNER_MAX_CONCURRENT_PLANS};
 // TimeoutConfig-derived helpers: agent_dispatch_timeout, plan_total_timeout,
 // llm_call_timeout, gate_timeout — see below.
 use roko_core::runtime_event::WorkflowOutcome as RuntimeWorkflowOutcome;
