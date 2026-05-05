@@ -119,7 +119,6 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         isfr: ISFRSection::default(),
         runner: CoreRunnerConfig::default(),
         timeouts: super::timeouts::TimeoutConfig::default(),
-        isfr: ISFRSection::default(),
         agents: Vec::new(),
         validation: ValidationConfig::default(),
     }
