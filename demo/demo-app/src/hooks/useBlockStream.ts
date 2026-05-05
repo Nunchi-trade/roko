@@ -80,10 +80,10 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
 
     if (!directMirageWs) {
       pollViaServe();
-      reconnectTimer.current = setInterval(pollViaServe, 2000) as unknown as ReturnType<typeof setTimeout>;
+      pollIntervalRef.current = setInterval(pollViaServe, 2000);
       return () => {
         disposed = true;
-        clearInterval(reconnectTimer.current);
+        clearInterval(pollIntervalRef.current);
       };
     }
 
@@ -163,7 +163,7 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
           if (!disposed && attempt < MAX_ATTEMPTS) {
             const delay = Math.min(2000 * 2 ** attempt, 10000);
             attempt++;
-            reconnectTimer.current = setTimeout(tryConnect, delay);
+            reconnectTimerRef.current = setTimeout(tryConnect, delay);
           }
         };
 
@@ -179,7 +179,7 @@ export function useBlockStream(enabled = true): UseBlockStreamResult {
 
     return () => {
       disposed = true;
-      clearTimeout(reconnectTimer.current);
+      clearTimeout(reconnectTimerRef.current);
       if (rafId.current) cancelAnimationFrame(rafId.current);
       wsRef.current?.close();
       wsRef.current = null;
