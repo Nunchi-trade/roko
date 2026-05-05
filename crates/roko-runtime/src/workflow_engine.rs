@@ -772,15 +772,24 @@ fn event_source(event: &RuntimeEvent) -> &'static str {
         RuntimeEvent::WorkflowStarted { .. }
         | RuntimeEvent::PhaseTransition { .. }
         | RuntimeEvent::WorkflowCompleted { .. }
-        | RuntimeEvent::GateStarted { .. } => "workflow_engine",
+        | RuntimeEvent::GateStarted { .. }
+        | RuntimeEvent::RunStarted { .. }
+        | RuntimeEvent::RunCompleted { .. } => "workflow_engine",
         RuntimeEvent::AgentSpawned { .. }
         | RuntimeEvent::AgentOutput { .. }
         | RuntimeEvent::AgentCompleted { .. }
         | RuntimeEvent::AgentFailed { .. }
+        | RuntimeEvent::InferenceStarted { .. }
+        | RuntimeEvent::InferenceCompleted { .. }
+        | RuntimeEvent::InferenceFailed { .. }
+        | RuntimeEvent::AgentTrace { .. }
+        | RuntimeEvent::TaskFailed { .. }
         | RuntimeEvent::GatePassed { .. }
         | RuntimeEvent::GateFailed { .. }
         | RuntimeEvent::FeedbackRecorded { .. }
-        | RuntimeEvent::StateCheckpointed { .. } => "effect_driver",
+        | RuntimeEvent::StateCheckpointed { .. }
+        | RuntimeEvent::KnowledgeIngested { .. }
+        | RuntimeEvent::KnowledgeConsumed { .. } => "effect_driver",
     }
 }
 

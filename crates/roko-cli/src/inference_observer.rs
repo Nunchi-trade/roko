@@ -15,8 +15,16 @@ impl RuntimeEventInferenceObserver {
 }
 
 impl InferenceObserver for RuntimeEventInferenceObserver {
-    fn on_start(&self, request_id: &str, model: &str, agent_id: &str, auto_routed: bool) {
+    fn on_start(
+        &self,
+        run_id: &str,
+        request_id: &str,
+        model: &str,
+        agent_id: &str,
+        auto_routed: bool,
+    ) {
         roko_runtime::event_bus::emit_runtime_event(RuntimeEvent::InferenceStarted {
+            run_id: run_id.to_string(),
             request_id: request_id.to_string(),
             model: model.to_string(),
             agent_id: agent_id.to_string(),
@@ -26,6 +34,7 @@ impl InferenceObserver for RuntimeEventInferenceObserver {
 
     fn on_complete(
         &self,
+        run_id: &str,
         request_id: &str,
         model: &str,
         agent_id: &str,
@@ -35,6 +44,7 @@ impl InferenceObserver for RuntimeEventInferenceObserver {
         duration_ms: u64,
     ) {
         roko_runtime::event_bus::emit_runtime_event(RuntimeEvent::InferenceCompleted {
+            run_id: run_id.to_string(),
             request_id: request_id.to_string(),
             model: model.to_string(),
             agent_id: agent_id.to_string(),
@@ -45,8 +55,9 @@ impl InferenceObserver for RuntimeEventInferenceObserver {
         });
     }
 
-    fn on_error(&self, request_id: &str, model: &str, agent_id: &str, error: &str) {
+    fn on_error(&self, run_id: &str, request_id: &str, model: &str, agent_id: &str, error: &str) {
         roko_runtime::event_bus::emit_runtime_event(RuntimeEvent::InferenceFailed {
+            run_id: run_id.to_string(),
             request_id: request_id.to_string(),
             model: model.to_string(),
             agent_id: agent_id.to_string(),

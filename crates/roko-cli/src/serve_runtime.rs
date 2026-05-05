@@ -554,12 +554,11 @@ fn build_runner_config(
     let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
     let run_uuid = uuid::Uuid::new_v4().to_string();
     let projection = Arc::new(crate::runner::projection::Projection::new(run_uuid));
-    let episodes_path = workdir.join(".roko").join("episodes.jsonl");
-    let knowledge_path = workdir
-        .join(".roko")
-        .join("learn")
+    let episodes_path = layout.root_episodes_path();
+    let knowledge_path = layout
+        .learn_dir()
         .join(roko_neuro::admission::DEFAULT_KNOWLEDGE_CANDIDATES_FILE);
-    let _ = std::fs::create_dir_all(workdir.join(".roko").join("learn"));
+    let _ = std::fs::create_dir_all(layout.learn_dir());
     let feedback_facade = Arc::new(
         crate::runtime_feedback::FeedbackFacade::new()
             .with_sink(Arc::new(crate::runtime_feedback::EpisodeSink::at(

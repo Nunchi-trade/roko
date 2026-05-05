@@ -42,12 +42,12 @@ export type ServerEvent =
   | { type: 'gate_result'; planId: string; taskId: string;
        gate: string; rung: number; passed: boolean }
   // Inference tracking
-  | { type: 'inference_started'; requestId: string; model: string;
+  | { type: 'inference_started'; runId: string; requestId: string; model: string;
        agentId: string; autoRouted: boolean }
-  | { type: 'inference_completed'; requestId: string; model: string;
+  | { type: 'inference_completed'; runId: string; requestId: string; model: string;
        agentId: string; inputTokens: number; outputTokens: number;
        costUsd: number; durationMs: number }
-  | { type: 'inference_failed'; requestId: string; model: string;
+  | { type: 'inference_failed'; runId: string; requestId: string; model: string;
        agentId: string; error: string }
   // One-shot runs
   | { type: 'run_started'; runId: string; prompt: string;
@@ -55,9 +55,9 @@ export type ServerEvent =
   | { type: 'run_completed'; runId: string; success: boolean;
        costUsd: number; durationMs: number }
   // Knowledge
-  | { type: 'knowledge_ingested'; entryId: string; topic: string;
+  | { type: 'knowledge_ingested'; runId: string; entryId: string; topic: string;
        sourceAgent: string }
-  | { type: 'knowledge_consumed'; entryId: string; topic: string;
+  | { type: 'knowledge_consumed'; runId: string; entryId: string; topic: string;
        consumingAgent: string }
   // Generic operations
   | { type: 'operation_started'; opId: string; kind: string }
@@ -181,12 +181,20 @@ function snakeToCamelObj(obj: Record<string, unknown>): Record<string, unknown> 
 export function parseServerEvent(
   raw: Record<string, unknown>,
 ): ServerEvent | null {
-  if (typeof raw.type !== 'string') return null;
+  const type = typeof raw.type === 'string'
+    ? raw.type
+    : typeof raw.kind === 'string'
+      ? raw.kind
+      : null;
+  if (!type) return null;
 
-  const converted = snakeToCamelObj(raw);
+  const payload = raw.data !== null && typeof raw.data === 'object' && !Array.isArray(raw.data)
+    ? raw.data as Record<string, unknown>
+    : {};
+  const converted = snakeToCamelObj({ ...payload, ...raw });
   // Preserve the original `type` tag (do NOT camelCase it -- Bench events
   // use PascalCase like `BenchRunStarted`, and snake_case events like
   // `plan_started` must stay as-is).
-  converted.type = raw.type;
+  converted.type = type;
   return converted as unknown as ServerEvent;
 }

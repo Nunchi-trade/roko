@@ -370,7 +370,7 @@ impl ModelCallService {
         auto_routed: bool,
     ) {
         if let Some(observer) = &self.inference_observer {
-            observer.on_start(request_id, model, agent_id, auto_routed);
+            observer.on_start(&self.run_id, request_id, model, agent_id, auto_routed);
         }
     }
 
@@ -384,6 +384,7 @@ impl ModelCallService {
     ) {
         if let Some(observer) = &self.inference_observer {
             observer.on_complete(
+                &self.run_id,
                 request_id,
                 model,
                 agent_id,
@@ -397,7 +398,7 @@ impl ModelCallService {
 
     fn inference_failed(&self, request_id: &str, model: &str, agent_id: &str, error: &str) {
         if let Some(observer) = &self.inference_observer {
-            observer.on_error(request_id, model, agent_id, error);
+            observer.on_error(&self.run_id, request_id, model, agent_id, error);
         }
     }
 
@@ -409,6 +410,7 @@ impl ModelCallService {
     ) {
         if traces.is_empty() {
             self.emit(RuntimeEvent::AgentTrace {
+                run_id: self.run_id.clone(),
                 agent_id: agent_id.to_string(),
                 turn: 1,
                 tool_calls: Vec::new(),
@@ -420,6 +422,7 @@ impl ModelCallService {
 
         for trace in traces {
             self.emit(RuntimeEvent::AgentTrace {
+                run_id: self.run_id.clone(),
                 agent_id: agent_id.to_string(),
                 turn: trace.turn,
                 tool_calls: trace.tool_calls.clone(),

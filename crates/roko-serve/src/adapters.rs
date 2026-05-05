@@ -241,6 +241,7 @@ impl SseAdapter {
                 }),
             ),
             RuntimeEvent::InferenceStarted {
+                run_id,
                 request_id,
                 model,
                 agent_id,
@@ -248,8 +249,9 @@ impl SseAdapter {
                 ..
             } => (
                 "inference_started",
-                "",
+                run_id.as_str(),
                 serde_json::json!({
+                    "run_id": run_id,
                     "request_id": request_id,
                     "model": model,
                     "agent_id": agent_id,
@@ -257,6 +259,7 @@ impl SseAdapter {
                 }),
             ),
             RuntimeEvent::InferenceCompleted {
+                run_id,
                 request_id,
                 model,
                 agent_id,
@@ -267,8 +270,9 @@ impl SseAdapter {
                 ..
             } => (
                 "inference_completed",
-                "",
+                run_id.as_str(),
                 serde_json::json!({
+                    "run_id": run_id,
                     "request_id": request_id,
                     "model": model,
                     "agent_id": agent_id,
@@ -279,6 +283,7 @@ impl SseAdapter {
                 }),
             ),
             RuntimeEvent::InferenceFailed {
+                run_id,
                 request_id,
                 model,
                 agent_id,
@@ -286,8 +291,9 @@ impl SseAdapter {
                 ..
             } => (
                 "inference_failed",
-                "",
+                run_id.as_str(),
                 serde_json::json!({
+                    "run_id": run_id,
                     "request_id": request_id,
                     "model": model,
                     "agent_id": agent_id,
@@ -295,6 +301,7 @@ impl SseAdapter {
                 }),
             ),
             RuntimeEvent::AgentTrace {
+                run_id,
                 agent_id,
                 turn,
                 tool_calls,
@@ -303,8 +310,9 @@ impl SseAdapter {
                 ..
             } => (
                 "agent_trace",
-                "",
+                run_id.as_str(),
                 serde_json::json!({
+                    "run_id": run_id,
                     "agent_id": agent_id,
                     "turn": turn,
                     "tool_calls": tool_calls,
@@ -359,28 +367,32 @@ impl SseAdapter {
                 }),
             ),
             RuntimeEvent::KnowledgeIngested {
+                run_id,
                 entry_id,
                 topic,
                 source_agent,
                 ..
             } => (
                 "knowledge_ingested",
-                "",
+                run_id.as_str(),
                 serde_json::json!({
+                    "run_id": run_id,
                     "entry_id": entry_id,
                     "topic": topic,
                     "source_agent": source_agent,
                 }),
             ),
             RuntimeEvent::KnowledgeConsumed {
+                run_id,
                 entry_id,
                 topic,
                 consuming_agent,
                 ..
             } => (
                 "knowledge_consumed",
-                "",
+                run_id.as_str(),
                 serde_json::json!({
+                    "run_id": run_id,
                     "entry_id": entry_id,
                     "topic": topic,
                     "consuming_agent": consuming_agent,

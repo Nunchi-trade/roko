@@ -108,4 +108,3 @@ export function cmdForAll(
 ): CommandDef {
   return { id, command, description, timeout, target: 'all' };
 }
-

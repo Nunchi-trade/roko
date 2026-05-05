@@ -10,6 +10,14 @@ import './PipelineStagesPanel.css';
 const PIPELINE_PROMPT = 'Build a Rust CLI that converts temperatures between Celsius and Fahrenheit';
 
 const PIPELINE_EVENT_TYPES = [
+  'workflow_started',
+  'phase_transition',
+  'agent_spawned',
+  'agent_completed',
+  'gate_started',
+  'gate_passed',
+  'gate_failed',
+  'workflow_completed',
   'run_started',
   'task_started',
   'task_completed',
@@ -143,7 +151,7 @@ function metricFromEvents(metricEvents: PipelineEvent[]) {
       model = readString(event, ['model']) ?? model;
       inferenceDurationMs += readNumber(event, ['duration_ms', 'durationMs']) ?? 0;
     }
-    if (type === 'run_completed') {
+    if (type === 'run_completed' || type === 'workflow_completed') {
       runDurationMs = readNumber(event, ['duration_ms', 'durationMs']) ?? runDurationMs;
     }
   }
@@ -164,7 +172,7 @@ export default function PipelineStagesPanel({
   const opId = operationId ?? discoveredOpId;
   const progress = usePipelineProgress(opId);
   const costs = useInferenceCosts(opId);
-  const metricEvents = useOperationEvents(opId, ['inference_completed', 'run_completed']) as PipelineEvent[];
+  const metricEvents = useOperationEvents(opId, ['inference_completed', 'run_completed', 'workflow_completed']) as PipelineEvent[];
 
   useEffect(() => {
     if (operationId) {

@@ -74,6 +74,15 @@ export interface PipelineProgress {
 const MAX_OPERATION_EVENTS = 500;
 
 const PIPELINE_EVENT_TYPES: OperationEventType[] = [
+  'workflow_started',
+  'phase_transition',
+  'agent_spawned',
+  'agent_completed',
+  'agent_failed',
+  'gate_started',
+  'gate_passed',
+  'gate_failed',
+  'workflow_completed',
   'run_started',
   'plan_started',
   'task_started',
@@ -262,10 +271,34 @@ function derivePipelineProgress(events: OperationEvent[]): PipelineProgress {
   for (const event of events) {
     const type = logicalEventType(event);
 
-    if (type === 'run_started') {
+    if (type === 'workflow_started' || type === 'run_started') {
       started = true;
       completeThrough(stages, ['classify']);
       setStage(stages, 'plan', 'active');
+      continue;
+    }
+
+    if (type === 'phase_transition') {
+      started = true;
+      const phase = readStringFrom(event, ['to', 'phase'])
+        ?? readStringFrom(nestedRecord(event, 'data'), ['to', 'phase']);
+
+      if (phase === 'strategizing' || phase === 'planning') {
+        completeThrough(stages, ['classify']);
+        setStage(stages, 'plan', 'active');
+      } else if (phase === 'implementing') {
+        completeThrough(stages, ['classify', 'plan']);
+        setStage(stages, 'execute', 'active');
+      } else if (phase === 'gating') {
+        completeThrough(stages, ['classify', 'plan', 'execute']);
+        setStage(stages, 'gate', 'active');
+      } else if (phase === 'reviewing' || phase === 'committing' || phase === 'complete') {
+        completeThrough(stages, ['classify', 'plan', 'execute', 'gate']);
+        setStage(stages, 'done', phase === 'complete' ? 'complete' : 'active');
+      } else if (phase === 'halted' || phase === 'cancelled') {
+        setStage(stages, 'done', 'failed');
+        success = false;
+      }
       continue;
     }
 
@@ -276,7 +309,7 @@ function derivePipelineProgress(events: OperationEvent[]): PipelineProgress {
       continue;
     }
 
-    if (type === 'task_started') {
+    if (type === 'agent_spawned' || type === 'task_started') {
       started = true;
       completeThrough(stages, ['classify', 'plan']);
       setStage(stages, 'execute', 'active');
@@ -294,7 +327,7 @@ function derivePipelineProgress(events: OperationEvent[]): PipelineProgress {
       continue;
     }
 
-    if (type === 'task_completed') {
+    if (type === 'agent_completed' || type === 'task_completed') {
       completeThrough(stages, ['classify', 'plan', 'execute']);
       setStage(stages, 'gate', 'active');
 
@@ -311,7 +344,7 @@ function derivePipelineProgress(events: OperationEvent[]): PipelineProgress {
       continue;
     }
 
-    if (type === 'task_failed') {
+    if (type === 'agent_failed' || type === 'task_failed') {
       completeThrough(stages, ['classify', 'plan']);
       setStage(stages, 'execute', 'failed');
       setStage(stages, 'done', 'failed');
@@ -330,11 +363,22 @@ function derivePipelineProgress(events: OperationEvent[]): PipelineProgress {
       continue;
     }
 
-    if (type === 'gate_result') {
+    if (type === 'gate_started') {
       completeThrough(stages, ['classify', 'plan', 'execute']);
-      const gate = readGate(event);
+      setStage(stages, 'gate', 'active');
+      continue;
+    }
+
+    if (type === 'gate_passed' || type === 'gate_failed' || type === 'gate_result') {
+      completeThrough(stages, ['classify', 'plan', 'execute']);
+      const gate = type === 'gate_failed'
+        ? { ...readGate(event), passed: false }
+        : type === 'gate_passed'
+          ? { ...readGate(event), passed: true }
+          : readGate(event);
       gates.push(gate);
       setStage(stages, 'gate', gate.passed ? 'complete' : 'failed');
+      if (!gate.passed) success = false;
 
       if (gate.taskId) {
         const existing = tasks.get(gate.taskId);
@@ -354,9 +398,12 @@ function derivePipelineProgress(events: OperationEvent[]): PipelineProgress {
       continue;
     }
 
-    if (type === 'run_completed') {
+    if (type === 'workflow_completed' || type === 'run_completed') {
       completed = true;
-      success = readBoolean(event, ['success', 'passed']);
+      const outcome = readStringFrom(event, ['outcome'])
+        ?? readStringFrom(nestedRecord(event, 'data'), ['outcome']);
+      success = readBoolean(event, ['success', 'passed'])
+        ?? (outcome ? !(outcome.includes('halted') || outcome.includes('cancelled')) : null);
       completeThrough(stages, ['classify', 'plan', 'execute', 'gate']);
       setStage(stages, 'done', success === false ? 'failed' : 'complete');
     }

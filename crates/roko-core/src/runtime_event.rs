@@ -136,12 +136,14 @@ pub enum RuntimeEvent {
 
     // Inference tracking
     InferenceStarted {
+        run_id: String,
         request_id: String,
         model: String,
         agent_id: String,
         auto_routed: bool,
     },
     InferenceCompleted {
+        run_id: String,
         request_id: String,
         model: String,
         agent_id: String,
@@ -151,6 +153,7 @@ pub enum RuntimeEvent {
         duration_ms: u64,
     },
     InferenceFailed {
+        run_id: String,
         request_id: String,
         model: String,
         agent_id: String,
@@ -159,6 +162,7 @@ pub enum RuntimeEvent {
 
     // Agent traces
     AgentTrace {
+        run_id: String,
         agent_id: String,
         turn: u32,
         tool_calls: Vec<ToolCallSummary>,
@@ -187,11 +191,13 @@ pub enum RuntimeEvent {
 
     // Knowledge flow
     KnowledgeIngested {
+        run_id: String,
         entry_id: String,
         topic: String,
         source_agent: String,
     },
     KnowledgeConsumed {
+        run_id: String,
         entry_id: String,
         topic: String,
         consuming_agent: String,
@@ -214,15 +220,15 @@ impl RuntimeEvent {
             | Self::GateFailed { run_id, .. }
             | Self::FeedbackRecorded { run_id, .. }
             | Self::StateCheckpointed { run_id, .. }
+            | Self::InferenceStarted { run_id, .. }
+            | Self::InferenceCompleted { run_id, .. }
+            | Self::InferenceFailed { run_id, .. }
+            | Self::AgentTrace { run_id, .. }
             | Self::RunStarted { run_id, .. }
-            | Self::RunCompleted { run_id, .. } => run_id,
+            | Self::RunCompleted { run_id, .. }
+            | Self::KnowledgeIngested { run_id, .. }
+            | Self::KnowledgeConsumed { run_id, .. } => run_id,
             Self::TaskFailed { plan_id, .. } => plan_id,
-            Self::InferenceStarted { .. }
-            | Self::InferenceCompleted { .. }
-            | Self::InferenceFailed { .. }
-            | Self::AgentTrace { .. }
-            | Self::KnowledgeIngested { .. }
-            | Self::KnowledgeConsumed { .. } => "",
         }
     }
 
@@ -303,6 +309,7 @@ mod tests {
         let events = vec![
             (
                 RuntimeEvent::InferenceStarted {
+                    run_id: "run-1".into(),
                     request_id: "req-1".into(),
                     model: "claude-sonnet".into(),
                     agent_id: "agent-1".into(),
@@ -312,6 +319,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::InferenceCompleted {
+                    run_id: "run-1".into(),
                     request_id: "req-1".into(),
                     model: "claude-sonnet".into(),
                     agent_id: "agent-1".into(),
@@ -324,6 +332,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::InferenceFailed {
+                    run_id: "run-1".into(),
                     request_id: "req-2".into(),
                     model: "claude-sonnet".into(),
                     agent_id: "agent-1".into(),
@@ -333,6 +342,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::AgentTrace {
+                    run_id: "run-1".into(),
                     agent_id: "agent-1".into(),
                     turn: 2,
                     tool_calls: vec![ToolCallSummary {
@@ -377,6 +387,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::KnowledgeIngested {
+                    run_id: "run-1".into(),
                     entry_id: "entry-1".into(),
                     topic: "event architecture".into(),
                     source_agent: "agent-1".into(),
@@ -385,6 +396,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::KnowledgeConsumed {
+                    run_id: "run-1".into(),
                     entry_id: "entry-1".into(),
                     topic: "event architecture".into(),
                     consuming_agent: "agent-2".into(),

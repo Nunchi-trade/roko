@@ -6,11 +6,19 @@
 /// enqueue internally and return immediately.
 pub trait InferenceObserver: Send + Sync {
     /// Called immediately before a backend inference request starts.
-    fn on_start(&self, request_id: &str, model: &str, agent_id: &str, auto_routed: bool);
+    fn on_start(
+        &self,
+        run_id: &str,
+        request_id: &str,
+        model: &str,
+        agent_id: &str,
+        auto_routed: bool,
+    );
 
     /// Called after a backend inference request completes successfully.
     fn on_complete(
         &self,
+        run_id: &str,
         request_id: &str,
         model: &str,
         agent_id: &str,
@@ -21,7 +29,7 @@ pub trait InferenceObserver: Send + Sync {
     );
 
     /// Called after a backend inference request fails.
-    fn on_error(&self, request_id: &str, model: &str, agent_id: &str, error: &str);
+    fn on_error(&self, run_id: &str, request_id: &str, model: &str, agent_id: &str, error: &str);
 }
 
 /// No-op observer for call sites that do not have an event pipeline.
@@ -29,10 +37,19 @@ pub trait InferenceObserver: Send + Sync {
 pub struct NoopInferenceObserver;
 
 impl InferenceObserver for NoopInferenceObserver {
-    fn on_start(&self, _request_id: &str, _model: &str, _agent_id: &str, _auto_routed: bool) {}
+    fn on_start(
+        &self,
+        _run_id: &str,
+        _request_id: &str,
+        _model: &str,
+        _agent_id: &str,
+        _auto_routed: bool,
+    ) {
+    }
 
     fn on_complete(
         &self,
+        _run_id: &str,
         _request_id: &str,
         _model: &str,
         _agent_id: &str,
@@ -43,5 +60,13 @@ impl InferenceObserver for NoopInferenceObserver {
     ) {
     }
 
-    fn on_error(&self, _request_id: &str, _model: &str, _agent_id: &str, _error: &str) {}
+    fn on_error(
+        &self,
+        _run_id: &str,
+        _request_id: &str,
+        _model: &str,
+        _agent_id: &str,
+        _error: &str,
+    ) {
+    }
 }

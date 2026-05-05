@@ -2,24 +2,75 @@ import { useEffect, useRef, useCallback } from 'react';
 
 type EventHandler = (event: unknown) => void;
 
+const KNOWN_SSE_EVENT_TYPES = [
+  'workflow_started',
+  'phase_transition',
+  'workflow_completed',
+  'agent_spawned',
+  'agent_output',
+  'agent_completed',
+  'agent_failed',
+  'gate_started',
+  'gate_passed',
+  'gate_failed',
+  'feedback_recorded',
+  'state_checkpointed',
+  'inference_started',
+  'inference_completed',
+  'inference_failed',
+  'agent_trace',
+  'task_failed',
+  'run_started',
+  'run_completed',
+  'knowledge_ingested',
+  'knowledge_consumed',
+  'plan_started',
+  'plan_completed',
+  'task_started',
+  'task_completed',
+  'gate_result',
+] as const;
+
 export interface EventStreamManager {
   connected: boolean;
   subscribe(types: string[], handler: EventHandler): () => void;
   destroy(): void;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeEvent(parsed: Record<string, unknown>, fallbackType?: string): Record<string, unknown> {
+  const nested = isRecord(parsed.data) ? parsed.data : {};
+  const type = typeof parsed.type === 'string'
+    ? parsed.type
+    : typeof parsed.kind === 'string'
+      ? parsed.kind
+      : fallbackType ?? 'unknown';
+
+  return {
+    ...nested,
+    ...parsed,
+    type,
+  };
+}
+
 /**
  * Singleton EventSource manager. Connects to the SSE endpoint once and
- * dispatches parsed events to subscribers by `type` field.
+ * dispatches parsed events to subscribers by `type` field. The server sends
+ * named SSE events, so wildcard subscribers are backed by known runtime event
+ * names plus the default message channel.
  */
 export function createEventStreamManager(baseUrl: string): EventStreamManager {
-  let es: EventSource | null = null;
+  let sources = new Set<EventSource>();
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let connected = false;
   let destroyed = false;
 
   const handlers = new Map<string, Set<EventHandler>>();
   const connectListeners = new Set<() => void>();
+  const listenedTypes = new Set<string>();
 
   function notifyConnect() {
     for (const fn of connectListeners) fn();
@@ -37,42 +88,83 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
     }
   }
 
-  function connect() {
-    if (destroyed) return;
-    es?.close();
+  function handleEventData(data: string, fallbackType?: string) {
+    try {
+      const parsed = JSON.parse(data) as Record<string, unknown>;
+      const event = normalizeEvent(parsed, fallbackType);
+      const type = typeof event.type === 'string' ? event.type : 'unknown';
+      dispatch(type, event);
+    } catch {
+      // Ignore unparseable events
+    }
+  }
 
-    const source = new EventSource(`${baseUrl}/api/events`);
-    es = source;
+  function attachNamedListener(source: EventSource, type: string) {
+    source.addEventListener(type, (event) => {
+      handleEventData((event as MessageEvent).data, type);
+    });
+  }
+
+  function ensureListening(type: string) {
+    if (type === '*') {
+      for (const knownType of KNOWN_SSE_EVENT_TYPES) ensureListening(knownType);
+      return;
+    }
+    if (listenedTypes.has(type)) return;
+    listenedTypes.add(type);
+    for (const source of sources) attachNamedListener(source, type);
+  }
+
+  function closeSources() {
+    for (const source of sources) source.close();
+    sources = new Set<EventSource>();
+  }
+
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 3_000);
+  }
+
+  function openSource(path: string, namedEvents: boolean) {
+    if (destroyed) return;
+
+    const source = new EventSource(`${baseUrl}${path}`);
+    sources.add(source);
 
     source.onopen = () => {
-      if (destroyed || es !== source) return;
+      if (destroyed || !sources.has(source)) return;
       connected = true;
       notifyConnect();
     };
 
     source.onmessage = (e) => {
-      if (destroyed || es !== source) return;
-      try {
-        const parsed = JSON.parse(e.data) as Record<string, unknown>;
-        const type = typeof parsed.type === 'string' ? parsed.type : 'unknown';
-        dispatch(type, parsed);
-      } catch {
-        // Ignore unparseable events
-      }
+      if (destroyed || !sources.has(source)) return;
+      handleEventData(e.data);
     };
+    if (namedEvents) {
+      for (const type of listenedTypes) attachNamedListener(source, type);
+    }
 
     source.onerror = () => {
-      if (destroyed || es !== source) {
+      if (destroyed || !sources.has(source)) {
         source.close();
         return;
       }
-      connected = false;
-      notifyConnect();
       source.close();
-      es = null;
-      clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(connect, 3_000);
+      sources.delete(source);
+      connected = sources.size > 0;
+      notifyConnect();
+      scheduleReconnect();
     };
+  }
+
+  function connect() {
+    if (destroyed) return;
+    closeSources();
+    connected = false;
+    notifyConnect();
+    openSource('/api/events', false);
+    openSource('/api/workflow/events', true);
   }
 
   connect();
@@ -84,6 +176,7 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
 
     subscribe(types: string[], handler: EventHandler): () => void {
       for (const t of types) {
+        ensureListening(t);
         let set = handlers.get(t);
         if (!set) {
           set = new Set();
@@ -110,10 +203,7 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
     destroy() {
       destroyed = true;
       clearTimeout(reconnectTimer);
-      if (es) {
-        es.close();
-        es = null;
-      }
+      closeSources();
       handlers.clear();
       connectListeners.clear();
       connected = false;

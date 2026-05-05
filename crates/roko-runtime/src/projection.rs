@@ -144,6 +144,15 @@ fn apply_event(summary: &mut RunSummary, event: &RuntimeEvent) {
         RuntimeEvent::GateStarted { .. } => {
             // GateStarted is informational; pass/fail events update gate summary fields.
         }
+        RuntimeEvent::InferenceStarted { .. }
+        | RuntimeEvent::InferenceCompleted { .. }
+        | RuntimeEvent::InferenceFailed { .. }
+        | RuntimeEvent::AgentTrace { .. }
+        | RuntimeEvent::TaskFailed { .. }
+        | RuntimeEvent::RunStarted { .. }
+        | RuntimeEvent::RunCompleted { .. }
+        | RuntimeEvent::KnowledgeIngested { .. }
+        | RuntimeEvent::KnowledgeConsumed { .. } => {}
     }
 }
 

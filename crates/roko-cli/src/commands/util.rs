@@ -330,9 +330,10 @@ pub(crate) async fn cmd_do(
 }
 
 async fn cmd_do_continue(workdir: &Path, work_id: Option<String>) -> Result<i32> {
+    let layout = roko_fs::RokoLayout::for_project(workdir);
     let snapshot = match work_id {
-        Some(id) => workdir.join(format!(".roko/state/{id}.json")),
-        None => workdir.join(".roko/state/executor.json"),
+        Some(id) => layout.state_dir().join(format!("{id}.json")),
+        None => layout.executor_snapshot(),
     };
 
     if snapshot.exists() {
@@ -348,7 +349,7 @@ async fn cmd_do_continue(workdir: &Path, work_id: Option<String>) -> Result<i32>
 }
 
 fn cmd_do_resume_hint(workdir: &Path) -> Result<i32> {
-    let snapshot = workdir.join(".roko/state/executor.json");
+    let snapshot = roko_fs::RokoLayout::for_project(workdir).executor_snapshot();
     if snapshot.exists() {
         eprintln!("interrupted work found at {}", snapshot.display());
         eprintln!("resume with: roko do --continue");
