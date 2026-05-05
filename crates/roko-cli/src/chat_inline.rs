@@ -950,7 +950,10 @@ fn active_model_name(session: &ChatSession) -> String {
 /// Returns a compact label like `"claude-sonnet-4-6 (claude-cli)"` that reflects
 /// what dispatch will actually use, not what auth detection reported upstream.
 fn session_banner_label(selection: &crate::model_selection::EffectiveModelSelection) -> String {
-    format!("{} ({})", selection.effective_model_key, selection.provider_kind)
+    format!(
+        "{} ({})",
+        selection.effective_model_key, selection.provider_kind
+    )
 }
 
 fn active_system_prompt(session: &ChatSession) -> Option<String> {
@@ -1603,7 +1606,11 @@ pub async fn run_unified_inline(_auth: &AuthMethod) -> Result<()> {
         styled::section_start(
             &theme,
             "roko",
-            &format!("v{version}  {}  {}", symbols::SEP, session_banner_label(&agent_session.model_selection)),
+            &format!(
+                "v{version}  {}  {}",
+                symbols::SEP,
+                session_banner_label(&agent_session.model_selection)
+            ),
             None,
         ),
         styled::continuation(&theme, "workspace", &workspace, Some(init_status)),
@@ -2901,9 +2908,7 @@ fn handle_slash_command(
                 DispatchMode::Session => session
                     .agent_session
                     .as_ref()
-                    .map(|agent_session| {
-                        session_banner_label(&agent_session.model_selection)
-                    })
+                    .map(|agent_session| session_banner_label(&agent_session.model_selection))
                     .unwrap_or_else(|| "ChatAgentSession".to_string()),
             };
             term.push_lines(&[styled::continuation(theme, "provider", &info, None)])?;
@@ -5414,7 +5419,7 @@ mod tests {
             input: InputState::new(),
             streaming: StreamingState::new(""),
             cost: CostMeter::new(),
-            cost_table: CostTable::from_config(&HashMap::new()).with_defaults(),
+            cost_table: CostTable::from_config(&indexmap::IndexMap::new()).with_defaults(),
             agent_id: "test".to_string(),
             tick: 0,
             started_at: Instant::now(),

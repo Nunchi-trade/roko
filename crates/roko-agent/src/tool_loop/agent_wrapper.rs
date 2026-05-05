@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use roko_core::tool::{ToolContext, ToolDef};
-use roko_core::{Body, Context, Signal, Kind};
+use roko_core::{Body, Context, Kind, Signal};
 use roko_fs::RokoLayout;
 
 use crate::agent::{Agent, AgentResult, derived_output};

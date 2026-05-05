@@ -23,7 +23,7 @@ use crate::translate::openai::parse_usage_observation;
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
-use roko_core::{Body, Context, Signal, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Instant;

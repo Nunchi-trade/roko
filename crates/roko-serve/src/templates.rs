@@ -272,9 +272,7 @@ impl TemplateRegistry {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => {
-                return Err(
-                    anyhow::Error::new(e).context(format!("read {}", dir.display()))
-                );
+                return Err(anyhow::Error::new(e).context(format!("read {}", dir.display())));
             }
         };
         for entry in read_dir {
@@ -400,9 +398,7 @@ impl TemplateRegistry {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    return Err(
-                        anyhow::Error::new(e).context(format!("remove {}", path.display()))
-                    );
+                    return Err(anyhow::Error::new(e).context(format!("remove {}", path.display())));
                 }
             }
             Ok(true)

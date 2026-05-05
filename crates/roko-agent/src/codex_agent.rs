@@ -24,7 +24,7 @@ use crate::provider::ProviderSemaphores;
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
-use roko_core::{Body, Context, Signal, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -893,7 +893,7 @@ mod tests {
 
     #[tokio::test]
     async fn semaphore_wired_blocks_second_openai_compat_request() {
-        let mut configs = HashMap::new();
+        let mut configs = indexmap::IndexMap::new();
         configs.insert(
             "zai".to_string(),
             ProviderConfig {

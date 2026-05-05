@@ -304,7 +304,7 @@ fn render_knowledge(state: &ShowState) -> String {
         );
     } else {
         let mut sorted = entries.clone();
-        sorted.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        sorted.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         for entry in sorted.iter().take(12) {
             let tags = if entry.tags.is_empty() {
                 String::from("no tags")

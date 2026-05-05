@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::prompt::{PromptSection, SectionPriority};
 use roko_core::traits::Score as ScoreFn;
-use roko_core::{Context, Signal, Score};
+use roko_core::{Context, Score, Signal};
 
 /// Ranks `Signal<PromptSection>` inputs by importance.
 ///

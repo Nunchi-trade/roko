@@ -107,12 +107,16 @@ pub(crate) fn handle_agent_event(
             // Token counts are accumulated here; authoritative cost comes from
             // TurnCompleted.total_cost_usd which overwrites state.cost_usd.
 
-            sink.token_usage(plan_id, task_id, TokenUsage {
-                input_tokens: *input_tokens,
-                output_tokens: *output_tokens,
-                cache_read_tokens: *cache_read_tokens,
-                cache_write_tokens: *cache_write_tokens,
-            });
+            sink.token_usage(
+                plan_id,
+                task_id,
+                TokenUsage {
+                    input_tokens: *input_tokens,
+                    output_tokens: *output_tokens,
+                    cache_read_tokens: *cache_read_tokens,
+                    cache_write_tokens: *cache_write_tokens,
+                },
+            );
         }
 
         AgentEvent::TurnCompleted {

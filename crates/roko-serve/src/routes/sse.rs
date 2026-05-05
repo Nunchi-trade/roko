@@ -38,10 +38,7 @@ pub(crate) fn sse_response_headers() -> HeaderMap {
 }
 
 /// `GET /api/events` and `GET /api/sse` — SSE stream of dashboard events.
-async fn sse_handler(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn sse_handler(headers: HeaderMap, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let last_event_id = headers
         .get("Last-Event-ID")
         .and_then(|value| value.to_str().ok())

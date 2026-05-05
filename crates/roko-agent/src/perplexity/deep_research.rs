@@ -12,7 +12,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::perplexity::types::{AgentResponse, PerplexityMetadata};
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Signal, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 

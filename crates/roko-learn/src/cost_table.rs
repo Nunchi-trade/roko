@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn from_config_loads_pricing_rows() {
-        let mut profiles = HashMap::new();
+        let mut profiles = indexmap::IndexMap::new();
         profiles.insert("glm-5.1".into(), glm_5_1_profile());
 
         let table = CostTable::from_config(&profiles);

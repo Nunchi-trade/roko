@@ -33,8 +33,8 @@ pub mod tui_cfg;
 pub mod validation;
 
 // Re-exports for ergonomic use.
-pub use cache::ConfigCache;
 pub use crate::temperament::Temperament;
+pub use cache::ConfigCache;
 pub use compat::from_mori_toml;
 pub use presets::Preset;
 pub use provenance::{
@@ -64,8 +64,8 @@ pub use schema::{
     SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServeDeployConfig,
     ServeDeployWebhookConfig, ServerConfig, SpecDriftConfig, StuckPatternConfig,
     SubscriptionConfig, SubscriptionFilterConfig, SubscriptionTrigger, TestFailureBudgetConfig,
-    TimeOverrunConfig, ToolProfileConfig, ToolsConfig, TuiConfig, ValidationConfig,
-    WatcherConfig, WatcherPathConfig, WatcherThresholds, WebhooksConfig,
+    TimeOverrunConfig, ToolProfileConfig, ToolsConfig, TuiConfig, ValidationConfig, WatcherConfig,
+    WatcherPathConfig, WatcherThresholds, WebhooksConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.

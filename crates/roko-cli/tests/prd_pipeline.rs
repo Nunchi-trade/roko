@@ -92,14 +92,11 @@ fn materialize_agent_markdown_output_prepends_scaffold_when_frontmatter_absent()
     let title = "Recovery Test";
     let slug = roko_cli::prd::slugify(title);
     let frontmatter = roko_cli::prd::new_draft_frontmatter(&slug, title);
-    let scaffold = format!(
-        "{frontmatter}# {title}\n\n## Overview\n\n## Requirements\n"
-    );
+    let scaffold = format!("{frontmatter}# {title}\n\n## Overview\n\n## Requirements\n");
 
     // Simulate agent output without frontmatter
     let agent_output = "This is the agent-generated content.\n\nIt has multiple paragraphs.";
-    let result =
-        roko_cli::prd::materialize_agent_markdown_output(agent_output, Some(&scaffold));
+    let result = roko_cli::prd::materialize_agent_markdown_output(agent_output, Some(&scaffold));
 
     assert!(result.is_some(), "should produce materialized output");
     let materialized = result.unwrap();
@@ -119,8 +116,10 @@ fn materialize_agent_markdown_output_prepends_scaffold_when_frontmatter_absent()
 
 #[test]
 fn materialize_agent_markdown_output_preserves_existing_frontmatter() {
-    let agent_output = "---\nid: prd-custom\ntitle: Custom\nstatus: draft\n---\n\n# Custom PRD\n\nContent here.";
-    let result = roko_cli::prd::materialize_agent_markdown_output(agent_output, Some("ignored scaffold"));
+    let agent_output =
+        "---\nid: prd-custom\ntitle: Custom\nstatus: draft\n---\n\n# Custom PRD\n\nContent here.";
+    let result =
+        roko_cli::prd::materialize_agent_markdown_output(agent_output, Some("ignored scaffold"));
 
     assert!(result.is_some());
     let materialized = result.unwrap();
@@ -161,7 +160,10 @@ fn materialize_agent_markdown_output_returns_none_for_empty() {
     assert!(result.is_none(), "empty input should return None");
 
     let result2 = roko_cli::prd::materialize_agent_markdown_output("   \n\n  ", None);
-    assert!(result2.is_none(), "whitespace-only input should return None");
+    assert!(
+        result2.is_none(),
+        "whitespace-only input should return None"
+    );
 }
 
 #[test]

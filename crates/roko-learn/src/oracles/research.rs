@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    Context, Signal, Oracle, OracleDomain, OracleQuery, PredictedValue, Prediction,
-    PredictionAccuracy, PredictionInterval, PredictionProvenance, QueryPayload, ResearchMetric,
+    Context, Oracle, OracleDomain, OracleQuery, PredictedValue, Prediction, PredictionAccuracy,
+    PredictionInterval, PredictionProvenance, QueryPayload, ResearchMetric, Signal,
 };
 use std::collections::HashMap;
 

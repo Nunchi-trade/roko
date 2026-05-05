@@ -226,8 +226,7 @@ fn load_tasks_toml(workdir: &Path, plan_id: &str) -> String {
         match std::fs::read_to_string(path) {
             Ok(content) => {
                 return if content.len() > TASKS_TOML_LIMIT {
-                    let mut truncated =
-                        content.chars().take(TASKS_TOML_LIMIT).collect::<String>();
+                    let mut truncated = content.chars().take(TASKS_TOML_LIMIT).collect::<String>();
                     truncated.push_str("\n[truncated]");
                     truncated
                 } else {
@@ -258,8 +257,7 @@ fn load_prd_excerpt(workdir: &Path, plan_id: &str) -> String {
         match std::fs::read_to_string(path) {
             Ok(content) => {
                 return if content.len() > PRD_EXCERPT_LIMIT {
-                    let mut truncated =
-                        content.chars().take(PRD_EXCERPT_LIMIT).collect::<String>();
+                    let mut truncated = content.chars().take(PRD_EXCERPT_LIMIT).collect::<String>();
                     truncated.push_str("\n[truncated]");
                     truncated
                 } else {

@@ -17,7 +17,7 @@ use roko_agent::gemini::{CodeExecutionResultPart, GroundingMetadata};
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::{
-    BehavioralState, Body, DaimonPolicy, Signal, Kind, OperatingFrequency, Temperament,
+    BehavioralState, Body, DaimonPolicy, Kind, OperatingFrequency, Signal, Temperament,
 };
 use std::collections::HashMap;
 use std::sync::Arc;

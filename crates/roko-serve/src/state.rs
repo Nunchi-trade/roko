@@ -894,9 +894,7 @@ impl AppState {
     pub async fn persist_workspace_registry(&self) -> anyhow::Result<()> {
         let snapshot: BTreeMap<String, WorkspaceInfo> = {
             let map = self.ephemeral_workspaces.read().await;
-            map.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
+            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
         let registry = WorkspaceRegistry {
             workspaces: snapshot,

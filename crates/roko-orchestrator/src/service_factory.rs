@@ -204,8 +204,11 @@ impl ServiceFactory {
         let mut prompt_service = PromptAssemblyService::new()
             .with_model_context_window(model_context_window_tokens)
             .with_model_context_window_resolver(move |role| {
-                let selected_model =
-                    routed_model_for_role(&prompt_routing_config, prompt_model_router.as_ref(), role);
+                let selected_model = routed_model_for_role(
+                    &prompt_routing_config,
+                    prompt_model_router.as_ref(),
+                    role,
+                );
                 context_window_tokens_for_model(&prompt_routing_config, &selected_model)
             })
             .with_knowledge_store(knowledge_store)

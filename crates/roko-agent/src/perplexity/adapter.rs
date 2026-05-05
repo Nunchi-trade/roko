@@ -25,7 +25,7 @@ use roko_core::agent::ProviderKind;
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
-use roko_core::{Body, Context, Signal, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::Value;
 use std::sync::Arc;
 

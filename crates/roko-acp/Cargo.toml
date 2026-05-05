@@ -31,6 +31,7 @@ roko-neuro = { path = "../roko-neuro" }
 tempfile = "3"
 
 [dev-dependencies]
+indexmap = { workspace = true }
 
 [package.metadata.roko]
 layer = 4

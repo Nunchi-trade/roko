@@ -240,6 +240,9 @@ pub fn new_jwks_cache(http: reqwest::Client) -> Arc<JwksCache> {
 }
 
 /// Create a new `JwksCache` with a configurable fetch timeout (from `TimeoutConfig::http_request`).
-pub fn new_jwks_cache_with_timeout(http: reqwest::Client, fetch_timeout: Duration) -> Arc<JwksCache> {
+pub fn new_jwks_cache_with_timeout(
+    http: reqwest::Client,
+    fetch_timeout: Duration,
+) -> Arc<JwksCache> {
     Arc::new(JwksCache::with_timeout(http, fetch_timeout))
 }

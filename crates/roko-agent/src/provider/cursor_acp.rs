@@ -87,7 +87,7 @@ impl ProviderAdapter for CursorAcpAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Signal, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};

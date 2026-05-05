@@ -374,7 +374,7 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roko_core::{Body, Context, Signal, Kind, Verdict, Verify};
+    use roko_core::{Body, Context, Kind, Signal, Verdict, Verify};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

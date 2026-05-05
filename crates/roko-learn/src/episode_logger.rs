@@ -1262,7 +1262,7 @@ mod tests {
     use crate::hdc_fingerprint::{
         decode as decode_hdc_fingerprint, encode as encode_hdc_fingerprint, fingerprint_episode,
     };
-    use roko_core::{Body, Signal, Kind};
+    use roko_core::{Body, Kind, Signal};
     use tempfile::TempDir;
 
     fn tmp_log() -> (TempDir, PathBuf) {

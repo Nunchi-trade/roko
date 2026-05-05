@@ -723,7 +723,7 @@ impl KillReport {
 mod tests {
     use super::*;
     use crate::mock::MockAgent;
-    use roko_core::{Body, Context, Signal, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
 
     fn prompt(text: &str) -> Signal {
         Signal::builder(Kind::Prompt).body(Body::text(text)).build()

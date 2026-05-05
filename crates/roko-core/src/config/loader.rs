@@ -180,7 +180,10 @@ pub fn load_config_validated_with_options(
         for path_key in &env_paths {
             provenance.push(ConfigProvenance::env(
                 path_key.clone(),
-                format!("ROKO__{} env override", path_key.to_ascii_uppercase().replace('.', "__")),
+                format!(
+                    "ROKO__{} env override",
+                    path_key.to_ascii_uppercase().replace('.', "__")
+                ),
             ));
         }
     }
@@ -361,9 +364,7 @@ where
     // Collect all ROKO__* vars and convert to dotted paths.
     let overrides: Vec<(String, String)> = vars
         .into_iter()
-        .filter_map(|(key, value)| {
-            hierarchical_env_to_path(&key).map(|path| (path, value))
-        })
+        .filter_map(|(key, value)| hierarchical_env_to_path(&key).map(|path| (path, value)))
         .collect();
 
     if overrides.is_empty() {
@@ -726,6 +727,7 @@ pub fn merge_global_into(config: &mut RokoConfig) {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
 
@@ -891,7 +893,10 @@ context_window = 4096
     fn parse_env_value_to_toml_types() {
         use super::parse_env_value_to_toml;
         assert_eq!(parse_env_value_to_toml("true"), toml::Value::Boolean(true));
-        assert_eq!(parse_env_value_to_toml("false"), toml::Value::Boolean(false));
+        assert_eq!(
+            parse_env_value_to_toml("false"),
+            toml::Value::Boolean(false)
+        );
         assert_eq!(parse_env_value_to_toml("yes"), toml::Value::Boolean(true));
         assert_eq!(parse_env_value_to_toml("no"), toml::Value::Boolean(false));
         // "0" and "1" are integers, not booleans (avoids breaking numeric fields).
@@ -909,7 +914,10 @@ context_window = 4096
     fn hierarchical_env_overrides_apply_to_config() {
         let mut config = RokoConfig::default();
         let vars = vec![
-            ("ROKO__AGENT__DEFAULT_MODEL".to_string(), "test-model".to_string()),
+            (
+                "ROKO__AGENT__DEFAULT_MODEL".to_string(),
+                "test-model".to_string(),
+            ),
             ("ROKO__CONDUCTOR__MAX_AGENTS".to_string(), "16".to_string()),
             ("ROKO__GATES__SKIP_TESTS".to_string(), "true".to_string()),
         ];
@@ -929,9 +937,10 @@ context_window = 4096
         let mut config = RokoConfig::default();
         config.agent.default_model = "from-named-env".to_string();
 
-        let vars = vec![
-            ("ROKO__AGENT__DEFAULT_MODEL".to_string(), "from-hierarchical".to_string()),
-        ];
+        let vars = vec![(
+            "ROKO__AGENT__DEFAULT_MODEL".to_string(),
+            "from-hierarchical".to_string(),
+        )];
 
         super::apply_hierarchical_env_overrides_from(&mut config, vars);
         assert_eq!(config.agent.default_model, "from-hierarchical");
@@ -944,7 +953,8 @@ context_window = 4096
 
         // Set a hierarchical env var for this test.
         // Note: this test is isolated so env var pollution is acceptable.
-        std::env::set_var("ROKO__AGENT__DEFAULT_MODEL", "env-test-model");
+        // SAFETY: test is single-threaded; no other thread reads this env var.
+        unsafe { std::env::set_var("ROKO__AGENT__DEFAULT_MODEL", "env-test-model") };
         let opts = LoadOptions {
             merge_global: false,
             apply_env_overrides: false,
@@ -952,7 +962,8 @@ context_window = 4096
             strict_validation: false,
         };
         let validated = load_config_validated_with_options(dir.path(), &opts).unwrap();
-        std::env::remove_var("ROKO__AGENT__DEFAULT_MODEL");
+        // SAFETY: test is single-threaded; no other thread reads this env var.
+        unsafe { std::env::remove_var("ROKO__AGENT__DEFAULT_MODEL") };
 
         assert_eq!(validated.config().agent.default_model, "env-test-model");
         // Should have provenance entry for the env override.
@@ -991,7 +1002,10 @@ slug = "claude-sonnet-4-20250514"
                 strict_validation: false,
             },
         );
-        assert!(result.is_err(), "strict mode should reject dangling provider ref");
+        assert!(
+            result.is_err(),
+            "strict mode should reject dangling provider ref"
+        );
         let err = result.unwrap_err();
         let err_msg = err.to_string();
         assert!(

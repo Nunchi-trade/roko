@@ -1576,20 +1576,14 @@ mod tests {
                 "Concurrent merge target",
                 vec![("read_file", "Read config")],
             );
-            handles.push(tokio::spawn(async move {
-                store.save_or_merge(&pb).await
-            }));
+            handles.push(tokio::spawn(async move { store.save_or_merge(&pb).await }));
         }
         for h in handles {
             h.await.expect("join").expect("save_or_merge");
         }
 
         // The seed playbook should have accumulated all merges.
-        let loaded = store
-            .load("merge-race")
-            .await
-            .expect("load")
-            .expect("some");
+        let loaded = store.load("merge-race").await.expect("load").expect("some");
         // seed started at success_count=1, each merge adds 1 → total 17
         assert_eq!(
             loaded.success_count, 17,

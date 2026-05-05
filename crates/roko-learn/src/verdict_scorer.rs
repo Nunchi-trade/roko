@@ -13,7 +13,7 @@
 //! with other scorers in a `SumScorer` or `MulScorer` chain.
 
 use roko_core::traits::Score as ScoreFn;
-use roko_core::{Context, Signal, Kind, Score};
+use roko_core::{Context, Kind, Score, Signal};
 
 /// Weights for verdict scoring dimensions.
 #[derive(Debug, Clone)]
@@ -328,7 +328,7 @@ impl VerdictHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Signal, Kind, Score};
+    use roko_core::{Body, Context, Kind, Score, Signal};
 
     fn verdict_engram(gate: &str, passed: bool, age_ms: i64) -> Signal {
         let now = chrono::Utc::now().timestamp_millis();

@@ -16,7 +16,7 @@ use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::tool::ToolResult;
-use roko_core::{Body, Context, Signal, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;

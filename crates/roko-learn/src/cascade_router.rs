@@ -825,10 +825,12 @@ impl CascadeRouter {
                 });
             }
         };
-        let overrides = serde_json::from_str::<HashMap<String, String>>(&contents)
-            .map_err(|err| crate::error::LearnError::Corrupt {
-                path: path.display().to_string(),
-                reason: err.to_string(),
+        let overrides =
+            serde_json::from_str::<HashMap<String, String>>(&contents).map_err(|err| {
+                crate::error::LearnError::Corrupt {
+                    path: path.display().to_string(),
+                    reason: err.to_string(),
+                }
             })?;
 
         let mut applied = 0usize;

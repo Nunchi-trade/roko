@@ -80,7 +80,8 @@ fn check_single_provider(
             if !binary_on_path(command) {
                 issues.push(ProviderReadinessIssue {
                     provider_name: provider_name.to_string(),
-                    message: "claude CLI not found on PATH. Install: https://claude.ai/cli".to_string(),
+                    message: "claude CLI not found on PATH. Install: https://claude.ai/cli"
+                        .to_string(),
                 });
             }
         }
@@ -91,10 +92,7 @@ fn check_single_provider(
                 if !binary_on_path(command) {
                     issues.push(ProviderReadinessIssue {
                         provider_name: provider_name.to_string(),
-                        message: format!(
-                            "Cursor command '{}' not found on PATH.",
-                            command
-                        ),
+                        message: format!("Cursor command '{}' not found on PATH.", command),
                     });
                 }
             }
@@ -200,10 +198,8 @@ pub fn report_readiness_issues(issues: &[ProviderReadinessIssue], config: &RokoC
         .map(|m| m.provider.as_str())
         .collect();
 
-    let blocked_providers: HashSet<&str> = issues
-        .iter()
-        .map(|i| i.provider_name.as_str())
-        .collect();
+    let blocked_providers: HashSet<&str> =
+        issues.iter().map(|i| i.provider_name.as_str()).collect();
 
     // If every referenced provider has at least one issue, all are blocked.
     referenced_providers
@@ -212,6 +208,7 @@ pub fn report_readiness_issues(issues: &[ProviderReadinessIssue], config: &RokoC
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use roko_core::config::schema::ModelProfile;
@@ -266,10 +263,15 @@ mod tests {
             },
         );
         // Ensure the env var is NOT set.
-        std::env::remove_var("ROKO_TEST_NONEXISTENT_KEY_XYZ_090");
+        // SAFETY: test is single-threaded; no other thread reads this env var.
+        unsafe { std::env::remove_var("ROKO_TEST_NONEXISTENT_KEY_XYZ_090") };
         let issues = check_provider_readiness(&config);
         assert!(!issues.is_empty());
-        assert!(issues[0].message.contains("ROKO_TEST_NONEXISTENT_KEY_XYZ_090"));
+        assert!(
+            issues[0]
+                .message
+                .contains("ROKO_TEST_NONEXISTENT_KEY_XYZ_090")
+        );
         assert!(issues[0].message.contains("test-api"));
     }
 
@@ -323,9 +325,13 @@ mod tests {
                 max_concurrent: None,
             },
         );
-        std::env::remove_var("ROKO_NONEXISTENT_UNUSED_KEY_090");
+        // SAFETY: test is single-threaded; no other thread reads this env var.
+        unsafe { std::env::remove_var("ROKO_NONEXISTENT_UNUSED_KEY_090") };
         let issues = check_provider_readiness(&config);
-        assert!(issues.is_empty(), "unreferenced providers should not be checked");
+        assert!(
+            issues.is_empty(),
+            "unreferenced providers should not be checked"
+        );
     }
 
     #[test]

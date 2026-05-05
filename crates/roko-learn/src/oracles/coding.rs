@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    CodingMetric, Context, Signal, Oracle, OracleDomain, OracleQuery, PredictedValue, Prediction,
-    PredictionAccuracy, PredictionInterval, PredictionProvenance, QueryPayload,
+    CodingMetric, Context, Oracle, OracleDomain, OracleQuery, PredictedValue, Prediction,
+    PredictionAccuracy, PredictionInterval, PredictionProvenance, QueryPayload, Signal,
 };
 use std::collections::VecDeque;
 

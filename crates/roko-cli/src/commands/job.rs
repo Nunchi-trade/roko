@@ -418,7 +418,7 @@ pub(crate) fn resolve_job_path(jobs_dir: &Path, id: &str) -> Result<std::path::P
             "job '{id}' not found — no files in {} match that prefix",
             jobs_dir.display()
         ),
-        1 => Ok(matches.into_iter().next().unwrap()),
+        1 => Ok(matches.into_iter().next().expect("len checked")),
         n => {
             let ids: Vec<String> = matches
                 .iter()

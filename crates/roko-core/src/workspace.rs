@@ -368,14 +368,8 @@ mod tests {
             ws.task_trackers_path(),
             tmp.path().join(".roko/state/task-trackers.json")
         );
-        assert_eq!(
-            ws.playbooks_dir(),
-            tmp.path().join(".roko/learn/playbooks")
-        );
-        assert_eq!(
-            ws.archive_dir(),
-            tmp.path().join(".roko/learn/archive")
-        );
+        assert_eq!(ws.playbooks_dir(), tmp.path().join(".roko/learn/playbooks"));
+        assert_eq!(ws.archive_dir(), tmp.path().join(".roko/learn/archive"));
         assert_eq!(ws.mcp_config_path(), tmp.path().join(".roko/mcp.json"));
         assert_eq!(
             ws.runner_stderr_log(),
@@ -385,14 +379,8 @@ mod tests {
             ws.learn_episodes_path(),
             tmp.path().join(".roko/learn/episodes.jsonl")
         );
-        assert_eq!(
-            ws.engrams_path(),
-            tmp.path().join(".roko/engrams.jsonl")
-        );
-        assert_eq!(
-            ws.serve_pid_file(),
-            tmp.path().join(".roko/serve.pid")
-        );
+        assert_eq!(ws.engrams_path(), tmp.path().join(".roko/engrams.jsonl"));
+        assert_eq!(ws.serve_pid_file(), tmp.path().join(".roko/serve.pid"));
     }
 
     #[test]

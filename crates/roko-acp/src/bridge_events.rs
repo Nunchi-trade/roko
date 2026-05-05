@@ -1779,22 +1779,21 @@ async fn run_openai_compat_cognitive_task(
     // For providers that don't support the OpenAI-compat tool loop (e.g.
     // ClaudeCli), write session MCP servers to a temp config file so the
     // subprocess can discover them natively via --mcp-config.
-    let _mcp_tempfile = if !mcp_servers.is_empty()
-        && !openai_compat_tool_loop_supported(resolved.provider_kind)
-    {
-        match write_mcp_servers_to_tempfile(mcp_servers) {
-            Ok(tmpfile) => {
-                caller = caller.with_mcp_config(tmpfile.path());
-                Some(tmpfile)
+    let _mcp_tempfile =
+        if !mcp_servers.is_empty() && !openai_compat_tool_loop_supported(resolved.provider_kind) {
+            match write_mcp_servers_to_tempfile(mcp_servers) {
+                Ok(tmpfile) => {
+                    caller = caller.with_mcp_config(tmpfile.path());
+                    Some(tmpfile)
+                }
+                Err(err) => {
+                    warn!(error = %err, "failed to write MCP config tempfile");
+                    None
+                }
             }
-            Err(err) => {
-                warn!(error = %err, "failed to write MCP config tempfile");
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     let request = model_call_request_from_acp_messages(model_key, messages);
     stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)

@@ -68,11 +68,14 @@ impl<T: Transport + 'static> HandlerResolver for McpHandlerResolver<T> {
         let (server_name, remote_name) = split_prefixed_tool_name(name)?;
         let client = self.mcp_clients.get(server_name)?;
 
-        Some(Arc::new(McpToolHandler::new(
-            Arc::clone(client),
-            name.to_string(),
-            remote_name.to_string(),
-        ).with_error_accumulator_opt(self.error_accumulator.clone())))
+        Some(Arc::new(
+            McpToolHandler::new(
+                Arc::clone(client),
+                name.to_string(),
+                remote_name.to_string(),
+            )
+            .with_error_accumulator_opt(self.error_accumulator.clone()),
+        ))
     }
 }
 

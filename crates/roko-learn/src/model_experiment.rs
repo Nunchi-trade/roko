@@ -457,7 +457,9 @@ impl ModelExperimentStore {
             );
         }
 
-        router.save(&router_path).map_err(|e| std::io::Error::other(e.to_string()))
+        router
+            .save(&router_path)
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
 

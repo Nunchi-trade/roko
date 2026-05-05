@@ -300,7 +300,9 @@ pub use tool::{
     ToolTrace, ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
     classify_tool_error, compute_reward, galileo_tsq, profile_for_model,
 };
-pub use traits::{Bus, ColdStore, Compose, Connect, Observe, React, Route, Store, Trigger, Verify};
+pub use traits::{
+    Bus, ColdStore, Compose, Connect, Observe, React, Route, Store, Substrate, Trigger, Verify,
+};
 // Note: The `Score` protocol trait (formerly `Scorer`) is NOT re-exported at
 // the crate root to avoid colliding with the `Score` value struct. Access it
 // via `roko_core::traits::Score` or import with an alias.

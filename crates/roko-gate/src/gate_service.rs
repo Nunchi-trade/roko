@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use roko_core::foundation::{GateConfig, GateReport, GateRunner, GateVerdict, ShellGateCommand};
-use roko_core::{Body, Context, Signal, Kind, Result, RokoError, Verdict, Verify};
+use roko_core::{Body, Context, Kind, Result, RokoError, Signal, Verdict, Verify};
 use std::sync::{Arc, Mutex};
 
 use crate::adaptive_threshold::AdaptiveThresholds;

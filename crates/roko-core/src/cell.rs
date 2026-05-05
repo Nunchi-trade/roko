@@ -12,7 +12,6 @@ use crate::error::{Result, RokoError};
 use crate::traits::Substrate;
 use crate::{Engram, Kind};
 
-
 /// Stable identifier for a Cell instance.
 pub type CellId = String;
 

@@ -16,7 +16,7 @@ use crate::process::{
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
-use roko_core::{Body, Context, Signal, Kind, OperatingFrequency, Provenance};
+use roko_core::{Body, Context, Kind, OperatingFrequency, Provenance, Signal};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Stdio;

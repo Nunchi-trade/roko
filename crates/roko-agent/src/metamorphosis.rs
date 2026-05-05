@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use roko_core::{AgentRole, Body, Context, Signal, Provenance};
+use roko_core::{AgentRole, Body, Context, Provenance, Signal};
 
 use crate::agent::{Agent, AgentResult, derived_output};
 use crate::introspection::AgentIdentity;
@@ -210,7 +210,7 @@ fn default_transition_matrix() -> HashMap<AgentRole, Vec<AgentRole>> {
 mod tests {
     use super::*;
     use crate::mock::MockAgent;
-    use roko_core::{Body, Context, Signal, Kind, Temperament};
+    use roko_core::{Body, Context, Kind, Signal, Temperament};
 
     fn prompt(text: &str) -> Signal {
         Signal::builder(Kind::Prompt).body(Body::text(text)).build()

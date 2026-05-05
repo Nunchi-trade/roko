@@ -76,7 +76,15 @@ pub trait RunOutputSink: Send + Sync + fmt::Debug {
     // ─── Agent events ───────────────────────────────────────────────────
 
     /// Agent process started.
-    fn agent_started(&self, _plan_id: &str, _task_id: &str, _provider: &str, _model: &str, _pid: Option<u32>) {}
+    fn agent_started(
+        &self,
+        _plan_id: &str,
+        _task_id: &str,
+        _provider: &str,
+        _model: &str,
+        _pid: Option<u32>,
+    ) {
+    }
 
     /// A text delta was received from the agent (buffered internally).
     fn agent_text_delta(&self, _plan_id: &str, _task_id: &str, _text: &str) {}
@@ -203,14 +211,7 @@ impl fmt::Debug for StderrSink {
 }
 
 impl RunOutputSink for StderrSink {
-    fn task_started(
-        &self,
-        _plan_id: &str,
-        task_id: &str,
-        role: &str,
-        title: &str,
-        attempt: u32,
-    ) {
+    fn task_started(&self, _plan_id: &str, task_id: &str, role: &str, title: &str, attempt: u32) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.task_started(task_id, role, title, attempt);
     }
@@ -298,7 +299,13 @@ impl RunOutputSink for StderrSink {
         let lines = self.drain_lines(3, 120);
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.agent_text(lines);
-        inner.agent_turn_completed(total_cost_usd, is_error, model, total_input_tokens, total_output_tokens);
+        inner.agent_turn_completed(
+            total_cost_usd,
+            is_error,
+            model,
+            total_input_tokens,
+            total_output_tokens,
+        );
     }
 
     fn agent_error(&self, _plan_id: &str, _task_id: &str, message: &str) {
@@ -414,20 +421,36 @@ mod tests {
         sink.flush_agent_text("plan-1", "task-1");
         sink.tool_call("plan-1", "task-1", "tc-1", "Read");
         sink.tool_output("plan-1", "task-1", "tc-1", "file contents...");
-        sink.token_usage("plan-1", "task-1", TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_read_tokens: 10,
-            cache_write_tokens: 5,
-        });
-        sink.agent_turn_completed("plan-1", "task-1", Some(0.01), false, "claude-sonnet-4-6", 100, 50);
-        sink.gate_result("plan-1", "task-1", &GateResultSummary {
-            rung: 0,
-            passed: true,
-            gate_name: "compile".to_string(),
-            summary: "ok".to_string(),
-            duration_ms: 1200,
-        });
+        sink.token_usage(
+            "plan-1",
+            "task-1",
+            TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 10,
+                cache_write_tokens: 5,
+            },
+        );
+        sink.agent_turn_completed(
+            "plan-1",
+            "task-1",
+            Some(0.01),
+            false,
+            "claude-sonnet-4-6",
+            100,
+            50,
+        );
+        sink.gate_result(
+            "plan-1",
+            "task-1",
+            &GateResultSummary {
+                rung: 0,
+                passed: true,
+                gate_name: "compile".to_string(),
+                summary: "ok".to_string(),
+                duration_ms: 1200,
+            },
+        );
         sink.gate_retry("plan-1", "task-1", 2, 5000);
         sink.warm_cache_started();
         sink.warm_cache_completed(1500);

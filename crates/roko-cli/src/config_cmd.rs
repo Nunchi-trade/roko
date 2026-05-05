@@ -1913,7 +1913,7 @@ command = "claude"
             .unwrap();
         let mut config = RokoConfig::default();
         config.agent.default_model = "kimi-k2-5".to_string();
-        config.providers = HashMap::from([(
+        config.providers = indexmap::IndexMap::from([(
             "moonshot".to_string(),
             ProviderConfig {
                 kind: ProviderKind::OpenAiCompat,

@@ -1,6 +1,6 @@
 //! Regression coverage for truthful gate verdicts.
 
-use roko_core::{Body, Context, Signal, GateConfig, GateRunner, Kind, ShellGateCommand, Verify};
+use roko_core::{Body, Context, GateConfig, GateRunner, Kind, ShellGateCommand, Signal, Verify};
 use roko_gate::{GateService, ShellGate};
 use std::path::Path;
 use tempfile::TempDir;

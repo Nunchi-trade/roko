@@ -8,7 +8,7 @@
 //! the enrichment agent fails.
 
 use roko_agent::Agent;
-use roko_core::{Body, Context, Signal, Kind};
+use roko_core::{Body, Context, Kind, Signal};
 
 const RAW_ERROR_LIMIT: usize = 4_000;
 const TASK_CONTEXT_LIMIT: usize = 1_000;

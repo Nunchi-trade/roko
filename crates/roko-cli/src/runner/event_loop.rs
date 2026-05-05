@@ -44,7 +44,7 @@ use crate::knowledge_helpers::{build_knowledge_routing_advice, neuro_prompt_task
 use crate::task_parser::TaskDef;
 use roko_learn::post_gate_reflection::{PostGateReflectionStore, ReflectionGateOutcome};
 use roko_learn::section_outcome::{
-    SectionOutcomeRecord, SectionOutcomeStatus, SectionOutcomeStore, SECTION_OUTCOME_SCHEMA_VERSION,
+    SECTION_OUTCOME_SCHEMA_VERSION, SectionOutcomeRecord, SectionOutcomeStatus, SectionOutcomeStore,
 };
 use roko_neuro::KnowledgeStore;
 
@@ -4469,7 +4469,6 @@ async fn seed_playbooks_if_empty(layout: &RokoLayout) {
     );
 }
 
-
 // ─── Run Ledger Helpers ──────────────────────────────────────────────────
 
 /// Append a single typed entry to the run ledger JSONL file.
@@ -4637,7 +4636,11 @@ fn gate_effect_key(plan_id: &str, task_id: &str, rung: u32, kind: GateCompletion
 /// Uses structured error classification from `roko_gate` to provide the agent
 /// with a machine-readable analysis of what went wrong, alongside truncated
 /// excerpts of the raw gate output and previous agent output.
-fn build_gate_retry_context(gate_output: &str, prev_agent_output: &str, attempt_num: u32) -> String {
+fn build_gate_retry_context(
+    gate_output: &str,
+    prev_agent_output: &str,
+    attempt_num: u32,
+) -> String {
     let classification = classify_gate_failure("gate", gate_output);
     let analysis = render_failure_classification(&classification);
 
@@ -4935,12 +4938,7 @@ mod tests_post_gate_reflection_lessons {
                     0.8,
                     "Good approach",
                 ),
-                make_record(
-                    "compile",
-                    ReflectionGateOutcome::Failed,
-                    0.5,
-                    "Fix the bug",
-                ),
+                make_record("compile", ReflectionGateOutcome::Failed, 0.5, "Fix the bug"),
             ],
             candidates: vec![],
         };

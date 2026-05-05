@@ -7,18 +7,18 @@ use tokio_util::sync::CancellationToken;
 
 use roko_core::error::{Result, RokoError};
 use roko_core::{
-    Body, BusErased, Cell, CellContext, CellVersion, ContentHash, Context, Engram, HdcVector,
-    Kind, MemoryBus, Query, Substrate, TypeSchema,
+    Body, BusErased, Cell, CellContext, CellVersion, ContentHash, Context, Engram, HdcVector, Kind,
+    MemoryBus, Query, Store, Substrate, TypeSchema,
 };
 
 // ─── TestStore ──────────────────────────────────────────────────────────────
 
-/// A minimal no-op Substrate implementation for testing.
+/// A minimal no-op Store implementation for testing.
 #[derive(Default)]
 struct TestStore;
 
 #[async_trait]
-impl Substrate for TestStore {
+impl Store for TestStore {
     async fn put(&self, engram: Engram) -> Result<ContentHash> {
         Ok(engram.id)
     }
@@ -104,7 +104,9 @@ fn make_context() -> CellContext {
 }
 
 fn test_engram() -> Engram {
-    Engram::builder(Kind::Task).body(Body::text("hello")).build()
+    Engram::builder(Kind::Task)
+        .body(Body::text("hello"))
+        .build()
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

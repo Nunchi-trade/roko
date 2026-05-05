@@ -47,7 +47,6 @@ pub mod templates;
 pub mod token_counter;
 
 pub use agents_md::AgentsMd;
-pub use error::ComposeError;
 pub use attention::{
     ModelAttentionCurves, PositionAttentionModel, dynamic_placement, placement_adjusted_score,
 };
@@ -75,6 +74,7 @@ pub use context_provider::{
 };
 pub use conventions::{ProjectConventions, detect_conventions};
 pub use cost_attribution::{CostAttribution, SectionCost};
+pub use error::ComposeError;
 pub use foraging::{
     MultiPatchForager, RetrievalSignal, SourceForagingProfile, estimate_context_sufficiency,
     should_stop_searching, social_foraging_boost,

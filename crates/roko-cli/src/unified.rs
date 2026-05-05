@@ -71,8 +71,7 @@ pub async fn cmd_unified_chat(
     {
         let issues = roko_agent::provider::check_provider_readiness(&boot.config);
         if !issues.is_empty() {
-            let all_blocked =
-                roko_agent::provider::report_readiness_issues(&issues, &boot.config);
+            let all_blocked = roko_agent::provider::report_readiness_issues(&issues, &boot.config);
             if all_blocked {
                 anyhow::bail!(
                     "no usable providers: all referenced providers have configuration issues. \

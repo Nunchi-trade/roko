@@ -107,12 +107,18 @@ mod tests {
 
     #[test]
     fn trivial_rename() {
-        assert_eq!(classify("Rename variable foo to bar"), PlanComplexity::Trivial);
+        assert_eq!(
+            classify("Rename variable foo to bar"),
+            PlanComplexity::Trivial
+        );
     }
 
     #[test]
     fn trivial_update_comment() {
-        assert_eq!(classify("Update comment in lib.rs"), PlanComplexity::Trivial);
+        assert_eq!(
+            classify("Update comment in lib.rs"),
+            PlanComplexity::Trivial
+        );
     }
 
     #[test]
@@ -321,10 +327,7 @@ mod tests {
 
     #[test]
     fn case_insensitive_standard() {
-        assert_eq!(
-            classify("IMPLEMENT the feature"),
-            PlanComplexity::Standard,
-        );
+        assert_eq!(classify("IMPLEMENT the feature"), PlanComplexity::Standard,);
     }
 
     // ── resolve() async wrapper ────────────────────────────────────

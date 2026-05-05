@@ -10,7 +10,7 @@
 //! `tool_outcomes`.
 
 use roko_agent::Agent;
-use roko_core::{Body, Context, Signal, Kind};
+use roko_core::{Body, Context, Kind, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;

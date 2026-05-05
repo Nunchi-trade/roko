@@ -8,7 +8,7 @@
 //! scale and returns that value for routing feedback.
 
 use roko_agent::Agent;
-use roko_core::{Body, Context, Signal, Kind};
+use roko_core::{Body, Context, Kind, Signal};
 
 /// Ask a cheap judge model to score a response in `[0.0, 1.0]`.
 ///

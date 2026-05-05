@@ -27,9 +27,10 @@ impl TestHarness {
         let (client_input, server_input) = duplex(16 * 1024);
         let (server_output, client_output) = duplex(16 * 1024);
         let mut transport = StdioTransport::from_io(server_input, server_output);
-        let server_task = tokio::spawn(async move {
-            run_acp_server_with_transport(config, &mut transport).await
-        });
+        let server_task =
+            tokio::spawn(
+                async move { run_acp_server_with_transport(config, &mut transport).await },
+            );
 
         Self {
             client: TestClient::new(client_input, client_output),

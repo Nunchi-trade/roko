@@ -1695,7 +1695,10 @@ mod tests {
         assert_eq!(config.plan_timeout_secs, 120);
 
         // The roko_config is threaded through so event_loop helpers can read it.
-        let cfg = config.roko_config.as_ref().expect("roko_config should be set");
+        let cfg = config
+            .roko_config
+            .as_ref()
+            .expect("roko_config should be set");
         assert_eq!(cfg.timeouts.agent_dispatch_secs, 45);
         assert_eq!(cfg.timeouts.plan_total_secs, 120);
         assert_eq!(cfg.timeouts.gate_compile_secs, 200);
@@ -1708,8 +1711,8 @@ mod tests {
 
     #[test]
     fn event_loop_timeout_helpers_use_roko_config() {
+        use crate::runner::event_loop;
         use std::time::Duration;
-        use super::event_loop;
 
         let roko_config = RokoConfig::from_toml(
             r#"
@@ -1779,8 +1782,8 @@ mod tests {
 
     #[test]
     fn event_loop_timeout_helpers_fallback_without_roko_config() {
+        use crate::runner::event_loop;
         use std::time::Duration;
-        use super::event_loop;
 
         // Create a RunConfig without roko_config to test the legacy fallback.
         let config = RunConfig {
@@ -1814,10 +1817,7 @@ mod tests {
 
         // LLM call, http_request, health_check fall back to TimeoutConfig defaults.
         let defaults = TimeoutConfig::default();
-        assert_eq!(
-            event_loop::llm_call_timeout(&config),
-            defaults.llm_call()
-        );
+        assert_eq!(event_loop::llm_call_timeout(&config), defaults.llm_call());
         assert_eq!(
             event_loop::http_request_timeout(&config),
             defaults.http_request()

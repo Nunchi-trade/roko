@@ -444,16 +444,16 @@ mod tests {
     #[test]
     fn allowed_path_prefix_permits_command_under_prefix() {
         let prefixes = vec!["/home/user/project".to_string()];
-        assert!(
-            check_path_confinement("cat /home/user/project/src/main.rs", &prefixes).is_ok()
-        );
+        assert!(check_path_confinement("cat /home/user/project/src/main.rs", &prefixes).is_ok());
     }
 
     #[test]
     fn path_outside_allowed_prefixes_is_rejected() {
         let prefixes = vec!["/home/user/project".to_string()];
         let res = check_path_confinement("cat /etc/passwd", &prefixes);
-        assert!(matches!(res, Err(ToolError::CommandNotAllowed(ref msg)) if msg.contains("/etc/passwd")));
+        assert!(
+            matches!(res, Err(ToolError::CommandNotAllowed(ref msg)) if msg.contains("/etc/passwd"))
+        );
     }
 
     #[test]

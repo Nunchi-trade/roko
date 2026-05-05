@@ -462,31 +462,23 @@ tool_format = "openai_json"
 
     #[test]
     fn dispatch_surfaces_provide_episodes() {
-        let commands_prd = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands/prd.rs"),
-        )
-        .unwrap();
+        let commands_prd =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands/prd.rs"))
+                .unwrap();
         assert!(
             !commands_prd.contains("crate::commands::util::persist_capture_episode"),
             "PRD commands must use roko_cli::agent_exec::persist_capture_episode"
         );
         assert!(
-            commands_prd
-                .matches("persist_capture_episode")
-                .count()
-                >= commands_prd
-                    .matches("run_agent_capture_silent")
-                    .count(),
+            commands_prd.matches("persist_capture_episode").count()
+                >= commands_prd.matches("run_agent_capture_silent").count(),
             "every silent PRD dispatch needs canonical episode persistence"
         );
 
-        let prd_rs = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/prd.rs"),
-        )
-        .unwrap();
+        let prd_rs =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/prd.rs")).unwrap();
         assert!(
-            prd_rs.contains("prd-plan-generate")
-                && prd_rs.contains("persist_capture_episode"),
+            prd_rs.contains("prd-plan-generate") && prd_rs.contains("persist_capture_episode"),
             "generate_plan_from_prd_with_model must persist a prd-plan-generate episode"
         );
     }

@@ -641,7 +641,7 @@ fn build_aggregate_verdict(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roko_core::{Body, Context, Signal, Kind, TestCount, Verdict, Verify};
+    use roko_core::{Body, Context, Kind, Signal, TestCount, Verdict, Verify};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

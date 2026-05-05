@@ -337,11 +337,12 @@ async fn no_policy_means_pass_through() {
         Arc::new(NoopHandler { tool_name: "bash" }) as Arc<dyn ToolHandler>,
     )]);
 
-    // No safety layer attached: calls pass through for backward compatibility.
+    // No safety layer attached — but built-in denylist still blocks dangerous
+    // commands. This is the correct security-first behavior.
     let dispatcher = ToolDispatcher::new(registry, resolver);
 
-    // This dangerous command would be blocked with policies, but passes
-    // through without them (backward compatibility).
+    // Dangerous commands are blocked by the built-in denylist even without
+    // an explicit safety policy.
     let call = ToolCall::new(
         "danger",
         "bash",
@@ -349,7 +350,7 @@ async fn no_policy_means_pass_through() {
     );
     let result = dispatcher.dispatch(call, &ctx_with_exec()).await;
     assert!(
-        result.is_ok(),
-        "without safety policy, even dangerous calls reach the handler, got {result:?}"
+        result.is_err(),
+        "built-in denylist should block dangerous commands even without explicit policy"
     );
 }

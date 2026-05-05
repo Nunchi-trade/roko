@@ -826,7 +826,8 @@ impl AgentDispatcherV2 {
             .await;
 
         // Set up streaming channel: chunks flow from agent -> forwarder -> event_tx.
-        let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamChunk>(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
+        let (chunk_tx, mut chunk_rx) =
+            mpsc::channel::<StreamChunk>(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
         let forwarder_tx = event_tx.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(chunk) = chunk_rx.recv().await {

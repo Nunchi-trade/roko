@@ -171,8 +171,7 @@ async fn run_standard_path(
     }
 
     // Generate plan from the prompt using the plan generate agent.
-    let system =
-        roko_cli::plan_generate::build_generation_prompt(workdir, prompt, "prompt");
+    let system = roko_cli::plan_generate::build_generation_prompt(workdir, prompt, "prompt");
     let task_prompt = format!(
         "Read the source below and generate implementation plan directories under .roko/plans/. \
          Search the codebase first to understand what exists. \
@@ -210,7 +209,10 @@ async fn run_standard_path(
     // Find the generated plans directory.
     let plans_dir = roko_cli::plan::plans_dir(workdir);
     if !plans_dir.is_dir() {
-        eprintln!("\u{25b8} No plans directory found after generation at {}", plans_dir.display());
+        eprintln!(
+            "\u{25b8} No plans directory found after generation at {}",
+            plans_dir.display()
+        );
         return Ok(EXIT_AGENT_FAILURE);
     }
 
@@ -245,9 +247,7 @@ async fn run_complex_path(
     use roko_cli::agent_config::{command_from_config, load_gateway_env};
     use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
 
-    eprintln!(
-        "\u{25b8} Complexity: complex (auto-detected, override with --complexity simple)"
-    );
+    eprintln!("\u{25b8} Complexity: complex (auto-detected, override with --complexity simple)");
 
     prepare_runtime_hooks(workdir, cli.quiet);
 
@@ -343,9 +343,8 @@ async fn run_complex_path(
             draft_written = true;
         }
     } else if !output.trim().is_empty() {
-        let content =
-            roko_cli::prd::materialize_agent_markdown_output(&output, Some(&scaffold))
-                .unwrap_or_else(|| scaffold.clone());
+        let content = roko_cli::prd::materialize_agent_markdown_output(&output, Some(&scaffold))
+            .unwrap_or_else(|| scaffold.clone());
         if roko_cli::prd::has_substantive_markdown_content(&content) {
             std::fs::write(&draft_path, content)?;
             draft_written = true;
@@ -411,7 +410,7 @@ async fn run_plan_execution(
     cli: &Cli,
     workdir: &Path,
     plans_dir: &Path,
-    no_cascade: bool,
+    _no_cascade: bool,
     _provider: Option<String>,
 ) -> Result<i32> {
     // Load both the CLI Config (for daimon, executor settings) and the
@@ -438,8 +437,8 @@ async fn run_plan_execution(
     }
 
     // Build run config from the workspace config.
-    let roko_config: RokoConfig = roko_core::config::loader::load_config_unified(workdir)
-        .unwrap_or_default();
+    let roko_config: RokoConfig =
+        roko_core::config::loader::load_config_unified(workdir).unwrap_or_default();
 
     let layout = roko_fs::RokoLayout::for_project(workdir);
     let state_hub = roko_cli::state_hub::shared_state_hub();
@@ -496,16 +495,13 @@ async fn run_plan_execution(
     );
 
     let run_uuid = uuid::Uuid::new_v4().to_string();
-    let projection = std::sync::Arc::new(roko_cli::runner::projection::Projection::new(
-        run_uuid,
-    ));
+    let projection = std::sync::Arc::new(roko_cli::runner::projection::Projection::new(run_uuid));
     let extension_chain = std::sync::Arc::new(tokio::sync::Mutex::new(
         roko_core::extension::ExtensionChain::new(),
     ));
     let connector_registry =
         std::sync::Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
-    let feed_registry =
-        std::sync::Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
+    let feed_registry = std::sync::Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
 
     let run_config = roko_cli::runner::RunConfig {
         layout: layout.clone(),
@@ -639,7 +635,7 @@ async fn run_standard_path_inner(
     no_cascade: bool,
     provider: Option<String>,
 ) -> Result<i32> {
-    use roko_cli::agent_config::{command_from_config, load_gateway_env};
+    use roko_cli::agent_config::load_gateway_env;
     use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
 
     let gw = load_gateway_env(workdir);
@@ -650,8 +646,7 @@ async fn run_standard_path_inner(
         "roko do (fallback plan)",
     )?;
 
-    let system =
-        roko_cli::plan_generate::build_generation_prompt(workdir, prompt, "prompt");
+    let system = roko_cli::plan_generate::build_generation_prompt(workdir, prompt, "prompt");
     let task_prompt = format!(
         "Read the source below and generate implementation plan directories under .roko/plans/. \
          Search the codebase first to understand what exists. \

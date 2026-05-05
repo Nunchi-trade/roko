@@ -5848,6 +5848,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "indexmap 2.14.0",
  "notify 6.1.1",
  "reqwest 0.12.28",
  "roko-agent",

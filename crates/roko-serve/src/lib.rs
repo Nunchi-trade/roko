@@ -1607,8 +1607,7 @@ fn start_workspace_gc(state: Arc<AppState>) -> JoinHandle<()> {
     };
 
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         // Skip the first immediate tick — let the server warm up.
         interval.tick().await;
 
@@ -1717,8 +1716,7 @@ fn start_demurrage_timer(state: Arc<AppState>) -> JoinHandle<()> {
                 _ = interval.tick() => {}
             }
 
-            let store =
-                roko_neuro::knowledge_store::KnowledgeStore::for_workdir(&state.workdir);
+            let store = roko_neuro::knowledge_store::KnowledgeStore::for_workdir(&state.workdir);
             match store.apply_demurrage() {
                 Ok(0) => {
                     debug!("demurrage pass: no entries taxed");

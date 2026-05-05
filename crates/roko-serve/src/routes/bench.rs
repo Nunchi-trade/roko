@@ -676,9 +676,7 @@ async fn cost_summary(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// `GET /api/bench/events` -- SSE stream filtered to bench events.
-async fn bench_events_sse(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn bench_events_sse(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rx = state.event_bus.subscribe();
     let stream = stream::unfold(rx, |mut rx| async move {
         loop {

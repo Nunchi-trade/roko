@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use futures::future::join_all;
 use roko_core::{
-    Body, Context, Signal, Kind, Provenance, Task, TaskCategory, TaskComplexityBand,
+    Body, Context, Kind, Provenance, Signal, Task, TaskCategory, TaskComplexityBand,
     TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority,
 };
 use std::collections::HashMap;
@@ -508,7 +508,7 @@ impl std::fmt::Debug for CompositeAgent {
 mod tests {
     use super::*;
     use crate::mock::MockAgent;
-    use roko_core::{Body, Context, Signal, Kind, TaskCategory, TaskComplexityBand};
+    use roko_core::{Body, Context, Kind, Signal, TaskCategory, TaskComplexityBand};
 
     fn prompt(text: &str) -> Signal {
         Signal::builder(Kind::Prompt).body(Body::text(text)).build()

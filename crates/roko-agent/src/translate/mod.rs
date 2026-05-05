@@ -352,10 +352,7 @@ impl BackendResponse {
                 // Fall back to the last assistant event's usage (partial stream).
                 for ev in events.iter().rev() {
                     if ev.get("type").and_then(|t| t.as_str()) == Some("assistant") {
-                        if let Some(usage) = ev
-                            .get("message")
-                            .and_then(|msg| msg.get("usage"))
-                        {
+                        if let Some(usage) = ev.get("message").and_then(|msg| msg.get("usage")) {
                             return Usage {
                                 input_tokens: usage
                                     .get("input_tokens")
@@ -410,9 +407,7 @@ impl BackendResponse {
                 for ev in events.iter().rev() {
                     if ev.get("type").and_then(|t| t.as_str()) == Some("result") {
                         // is_error: true maps to a terminal error condition.
-                        if ev.get("is_error").and_then(serde_json::Value::as_bool)
-                            == Some(true)
-                        {
+                        if ev.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
                             return Some("error".to_string());
                         }
                         // Explicit stop_reason field (Claude CLI >= 1.0.16)
@@ -428,8 +423,7 @@ impl BackendResponse {
                         // assistant message content blocks.
                         let has_tool = events.iter().any(|e| {
                             // content_block_start with type=tool_use
-                            if e.get("type").and_then(|t| t.as_str())
-                                == Some("content_block_start")
+                            if e.get("type").and_then(|t| t.as_str()) == Some("content_block_start")
                             {
                                 if let Some(block) = e.get("content_block") {
                                     return block.get("type").and_then(|t| t.as_str())
@@ -450,9 +444,7 @@ impl BackendResponse {
                             }
                             false
                         });
-                        return Some(
-                            if has_tool { "tool_use" } else { "end_turn" }.to_string(),
-                        );
+                        return Some(if has_tool { "tool_use" } else { "end_turn" }.to_string());
                     }
                 }
                 None
@@ -990,10 +982,7 @@ mod tests {
             serde_json::json!({"type": "content_block_delta", "delta": {"text": ""}}),
             serde_json::json!({"type": "result", "is_error": false}),
         ]);
-        assert_eq!(
-            r.extract_finish_reason_raw(),
-            Some("tool_use".to_string())
-        );
+        assert_eq!(r.extract_finish_reason_raw(), Some("tool_use".to_string()));
     }
 
     #[test]

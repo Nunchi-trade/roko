@@ -75,8 +75,6 @@
     clippy::use_self
 )]
 
-/// Crate-level error types.
-pub mod error;
 /// Active inference helpers for tier routing support.
 pub mod active_inference;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
@@ -106,6 +104,8 @@ pub mod costs_log;
 pub mod curriculum;
 pub mod efficiency;
 pub mod episode_logger;
+/// Crate-level error types.
+pub mod error;
 /// Cheap pre-processing of noisy gate failures into retry-ready diagnoses.
 pub mod error_enrichment;
 /// Persistent storage for error patterns discovered during plan execution.

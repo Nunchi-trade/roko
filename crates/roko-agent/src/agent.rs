@@ -3,7 +3,7 @@
 use crate::streaming::StreamChunk;
 use crate::usage::{Usage, UsageObservation};
 use async_trait::async_trait;
-use roko_core::{Body, ContentHash, Context, Signal, SignalBuilder, Kind};
+use roko_core::{Body, ContentHash, Context, Kind, Signal, SignalBuilder};
 use tokio::sync::mpsc;
 
 /// The result of running an agent once.
@@ -180,7 +180,9 @@ pub trait Agent: Send + Sync {
         let result = self.run(input, ctx).await;
         if let Ok(text) = result.output.body.as_text() {
             if !text.is_empty() {
-                let _ = event_tx.send(StreamChunk::ContentDelta(text.to_string())).await;
+                let _ = event_tx
+                    .send(StreamChunk::ContentDelta(text.to_string()))
+                    .await;
             }
         }
         if result.usage.total_tokens() > 0 {

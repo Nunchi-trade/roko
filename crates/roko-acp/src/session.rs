@@ -832,10 +832,7 @@ fn apply_session_new_overrides(
 /// as an absolute path. Pushes a warning for each server that will fail to
 /// spawn so the IDE can surface the issue immediately rather than silently
 /// dropping tools later.
-fn validate_mcp_servers(
-    servers: &[crate::types::McpServerConfig],
-    warnings: &mut Vec<String>,
-) {
+fn validate_mcp_servers(servers: &[crate::types::McpServerConfig], warnings: &mut Vec<String>) {
     use crate::types::McpTransport;
     for server in servers {
         match &server.transport {
@@ -954,9 +951,7 @@ impl SessionManager {
     /// Returns `(session_id, config_options)` pairs. Used by the handler to
     /// push `config_option_update` notifications after a live config reload.
     #[must_use]
-    pub fn active_session_config_options(
-        &self,
-    ) -> Vec<(String, Vec<crate::types::ConfigOption>)> {
+    pub fn active_session_config_options(&self) -> Vec<(String, Vec<crate::types::ConfigOption>)> {
         self.sessions
             .iter()
             .map(|(id, session)| (id.clone(), session.config_options()))

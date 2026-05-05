@@ -321,8 +321,8 @@ pub(crate) fn tool_registry_for_options(
                 mcp_config_path.display()
             ))
         })?;
-        let mcp_tools = block_on(async move { discover_mcp_tools(&mcp_config).await })?
-            .map_err(|err| {
+        let mcp_tools =
+            block_on(async move { discover_mcp_tools(&mcp_config).await })?.map_err(|err| {
                 AgentCreationError::MissingConfig(format!(
                     "mcp tool discovery from {} failed: {err}",
                     mcp_config_path.display()
@@ -462,7 +462,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
 mod tests {
     use super::*;
     use crate::http::{HttpPostError, HttpPoster};
-    use roko_core::{Body, Context, Signal, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;

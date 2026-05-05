@@ -82,7 +82,6 @@
 pub mod adaptive_threshold;
 
 pub mod acceptance_contract;
-pub mod error;
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod code_exec;
@@ -93,6 +92,7 @@ pub mod compile_errors;
 pub mod composition;
 pub mod diff_gate;
 pub mod env_builder;
+pub mod error;
 pub mod error_patterns;
 pub mod eval_generator;
 pub mod fact_check;
@@ -150,6 +150,7 @@ pub use compile_errors::{
 pub use composition::{FallbackGate, ParallelGate, VotingGate};
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
 pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
+pub use error::GateError;
 pub use error_patterns::{
     FailurePatternRecord, error_key, extract_error_digest, records_from_classification,
     records_from_parsed_review_verdict,
@@ -162,7 +163,6 @@ pub use forensic::{
 };
 pub use gate_pipeline::{ComposedGatePipeline, GateComposition, GatePipeline};
 pub use gate_service::GateService;
-pub use error::GateError;
 pub use generated::{GateGenerator, GeneratedCheck};
 pub use hotelling::{HotellingDetector, JointAnomalyResult};
 pub use payload::{BuildSystem, GatePayload, TestSelector};

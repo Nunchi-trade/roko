@@ -136,7 +136,7 @@ impl ProviderAdapter for ClaudeCliAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Signal, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use std::fs;
     use tempfile::tempdir;
 

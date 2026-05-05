@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use roko_agent::Agent;
 use roko_agent::gemini::{CodeExecutionResultPart, GeminiMetadata, GeminiNativeAgent};
-use roko_core::{Body, Context, Signal, Kind, Verdict, Verify};
+use roko_core::{Body, Context, Kind, Signal, Verdict, Verify};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 

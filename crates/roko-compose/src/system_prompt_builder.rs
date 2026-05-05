@@ -42,7 +42,7 @@ use crate::token_counter::TokenCounter;
 use crate::{ContextChunk, GateFeedback, PadState};
 use roko_core::tool::ToolDef;
 use roko_core::traits::Score as ScoreFn;
-use roko_core::{AgentRole, Budget, Compose, Context, Signal, Result};
+use roko_core::{AgentRole, Budget, Compose, Context, Result, Signal};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;

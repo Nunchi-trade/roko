@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn observe_signal_marks_tainted_provenance() {
-        use roko_core::{Body, Signal, Kind};
+        use roko_core::{Body, Kind, Signal};
 
         let tainted_signal = Signal::builder(Kind::AgentOutput)
             .body(Body::text("external payload"))
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn observe_signal_prefers_provenance_taint_info() {
-        use roko_core::{Body, Signal, Kind, Provenance, TaintInfo};
+        use roko_core::{Body, Kind, Provenance, Signal, TaintInfo};
 
         let tainted_signal = Signal::builder(Kind::AgentOutput)
             .body(Body::text("external payload"))

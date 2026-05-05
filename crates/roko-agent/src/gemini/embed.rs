@@ -10,7 +10,7 @@ use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::{Agent, AgentResult, Usage};
 use async_trait::async_trait;
-use roko_core::{Body, Context, Signal, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::{Value, json};
 
 /// Default Gemini embedding model.

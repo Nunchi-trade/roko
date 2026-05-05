@@ -13,7 +13,7 @@ use crate::tool_loop::{LlmBackend, LlmError, StopReason, ToolLoop};
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
 use async_trait::async_trait;
 use roko_core::tool::{ToolContext, ToolDef};
-use roko_core::{Body, Context, Signal, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use roko_fs::RokoLayout;
 use serde_json::Value;
 
@@ -317,7 +317,7 @@ mod tests {
         ToolCall, ToolCategory, ToolContext, ToolDef, ToolFormat, ToolHandler, ToolPermission,
         ToolResult, ToolSchema, VecToolRegistry,
     };
-    use roko_core::{Body, Context, Signal, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use serde_json::{Value, json};
     use std::sync::{
         Arc, Mutex,

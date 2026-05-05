@@ -335,7 +335,9 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     };
                     let standard = layout.executor_snapshot();
                     if snap_path != standard && snap_path.exists() {
-                        let _ = std::fs::create_dir_all(standard.parent().unwrap());
+                        if let Some(parent) = standard.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
                         let _ = std::fs::copy(&snap_path, &standard);
                     }
                 }

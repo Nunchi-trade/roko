@@ -94,9 +94,7 @@ pub(crate) async fn cmd_dev(cli: &Cli, no_frontend: bool) -> Result<i32> {
     println!();
 
     // 7. Signal handling: wait for SIGINT/SIGTERM.
-    tokio::signal::ctrl_c()
-        .await
-        .context("listen for ctrl+c")?;
+    tokio::signal::ctrl_c().await.context("listen for ctrl+c")?;
 
     println!("\nShutting down...");
 
@@ -373,10 +371,7 @@ mod tests {
         // Probing the same port should fail.
         let result = probe_addr_available("127.0.0.1", port);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("already in use"));
+        assert!(result.unwrap_err().to_string().contains("already in use"));
 
         drop(listener);
     }

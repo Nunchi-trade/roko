@@ -92,8 +92,8 @@ impl CliRuntime for RokoCliRuntime {
         }
 
         let model_override = overrides.model.clone();
-        let result = dispatch_bench_prompt(workdir, &config, prompt, model_override.as_deref())
-            .await;
+        let result =
+            dispatch_bench_prompt(workdir, &config, prompt, model_override.as_deref()).await;
 
         match result {
             Ok(dispatch) => {
@@ -653,7 +653,10 @@ async fn dispatch_bench_prompt(
     model_config.agent.bare_mode = config.agent.bare_mode;
     model_config.agent.fallback_model = config.agent.fallback_model.clone();
     model_config.agent.tier_models = config.agent.tier_models.clone();
-    if let Some(ref model) = model_override.map(ToString::to_string).or_else(|| config.agent.model.clone()) {
+    if let Some(ref model) = model_override
+        .map(ToString::to_string)
+        .or_else(|| config.agent.model.clone())
+    {
         model_config.agent.default_model = model.clone();
     }
 

@@ -134,6 +134,7 @@ impl ToolHandler for Handler {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use roko_core::tool::ToolContext;

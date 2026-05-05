@@ -15,7 +15,7 @@ use crate::{Agent, AgentResult};
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
 use roko_core::tool::{ToolCall, ToolContext, ToolDef, ToolResult};
-use roko_core::{Body, Context, Signal, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::{Value, json};
 
 use super::types::{

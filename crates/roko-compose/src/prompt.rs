@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use roko_core::{
-    Body, Budget, Compose, Context, Signal, Kind, PromptSectionAudit, Provenance,
+    Body, Budget, Compose, Context, Kind, PromptSectionAudit, Provenance, Signal,
     error::{Result, RokoError},
 };
 use serde::{Deserialize, Serialize};

@@ -23,7 +23,7 @@ use crate::ContextChunk;
 use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
-use roko_core::{Body, Signal, InclusionMode, Kind, OperatingFrequency, PromptPolicy, RoleProfile};
+use roko_core::{Body, InclusionMode, Kind, OperatingFrequency, PromptPolicy, RoleProfile, Signal};
 use roko_learn::error_pattern_store::{ErrorPatternStore, FailurePatternQuery};
 use roko_learn::section_effect::{
     DEFAULT_SECTION_EFFECTS_PATH, SectionEffect, SectionEffectivenessRegistry,

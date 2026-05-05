@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::agent::{Agent, AgentResult};
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Signal, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde::Deserialize;
 use thiserror::Error;
 

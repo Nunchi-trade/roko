@@ -117,7 +117,9 @@ static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     {
         Ok(client) => client,
         Err(e) => {
-            tracing::warn!("failed to build shared HTTP client with pool settings: {e}; using default client");
+            tracing::warn!(
+                "failed to build shared HTTP client with pool settings: {e}; using default client"
+            );
             reqwest::Client::new()
         }
     }
@@ -485,9 +487,7 @@ impl ProviderSemaphores {
             .unwrap_or_else(|| Arc::new(Semaphore::new(self.default_permits)));
 
         semaphore.acquire_owned().await.map_err(|_| {
-            ProviderError::Other(format!(
-                "provider semaphore for '{provider_id}' closed"
-            ))
+            ProviderError::Other(format!("provider semaphore for '{provider_id}' closed"))
         })
     }
 }
@@ -773,7 +773,7 @@ pub enum AgentCreationError {
 mod tests {
     use super::*;
     use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
-    use roko_core::{Body, Context, Signal, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1488,7 +1488,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn provider_semaphore_blocks_fourth_request_when_limit_is_three() {
-        let mut configs = HashMap::new();
+        let mut configs = indexmap::IndexMap::new();
         configs.insert(
             "zai".to_string(),
             ProviderConfig {

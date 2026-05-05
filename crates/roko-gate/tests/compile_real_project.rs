@@ -5,7 +5,7 @@
 //! the failure path works too.
 
 use async_trait::async_trait;
-use roko_core::{Body, Context, Signal, Kind, Store, Verify};
+use roko_core::{Body, Context, Kind, Signal, Store, Verify};
 use roko_gate::{BuildSystem, CompileGate, GatePayload};
 use roko_std::MemorySubstrate;
 use std::path::Path;

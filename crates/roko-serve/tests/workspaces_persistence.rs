@@ -14,7 +14,7 @@ use roko_core::config::schema::RokoConfig;
 use roko_serve::deploy::create_backend;
 use roko_serve::routes::build_router;
 use roko_serve::runtime::{CliRuntime, DashboardInfo, RunResult, SessionStatusInfo};
-use roko_serve::state::{workspace_registry_path_for, AppState};
+use roko_serve::state::{AppState, workspace_registry_path_for};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
@@ -63,13 +63,8 @@ fn build_app_at(workdir: &std::path::Path) -> (Arc<AppState>, axum::Router) {
     let config = RokoConfig::default();
     let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
     let state = Arc::new(
-        AppState::new(
-            workdir.to_path_buf(),
-            Arc::new(TestRuntime),
-            config,
-            deploy,
-        )
-        .expect("AppState::new"),
+        AppState::new(workdir.to_path_buf(), Arc::new(TestRuntime), config, deploy)
+            .expect("AppState::new"),
     );
     let auth = ServeAuthConfig {
         enabled: false,
@@ -165,17 +160,13 @@ async fn create_workspace_persists_registry() {
     assert!(registry_path.exists(), "workspaces.json should exist");
 
     let registry_data = std::fs::read_to_string(&registry_path).expect("read registry");
-    let registry: serde_json::Value =
-        serde_json::from_str(&registry_data).expect("parse registry");
+    let registry: serde_json::Value = serde_json::from_str(&registry_data).expect("parse registry");
 
     assert!(
         registry["workspaces"][ws_id].is_object(),
         "workspace entry should be in registry"
     );
-    assert_eq!(
-        registry["workspaces"][ws_id]["id"].as_str(),
-        Some(ws_id),
-    );
+    assert_eq!(registry["workspaces"][ws_id]["id"].as_str(), Some(ws_id),);
 }
 
 /// Workspace survives construction of a new AppState with the same workdir.
@@ -271,7 +262,12 @@ async fn get_workspace_returns_gone_when_recreate_fails() {
     // GET should return 410 Gone.
     let (status, body) = get_json(&router, "/api/workspaces/gone-test-ws").await;
     assert_eq!(status, StatusCode::GONE, "expected 410 Gone: {body:?}");
-    assert!(body["error"].as_str().unwrap_or("").contains("create a new workspace"));
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("create a new workspace")
+    );
     assert_eq!(body["id"].as_str(), Some("gone-test-ws"));
 }
 

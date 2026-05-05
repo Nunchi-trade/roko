@@ -11,8 +11,7 @@ use notify::{Event, EventKind, RecommendedWatcher, Watcher};
 
 use super::LoadConfigError;
 use super::loader::{
-    LoadOptions, discover_project_config, global_config_path,
-    load_config_with_options,
+    LoadOptions, discover_project_config, global_config_path, load_config_with_options,
 };
 use super::schema::RokoConfig;
 
@@ -54,28 +53,27 @@ impl ConfigCache {
         let workdir_owned = workdir.to_path_buf();
         let opts_clone = opts.clone();
 
-        let watcher =
-            notify::recommended_watcher(move |res: notify::Result<Event>| {
-                let Ok(event) = res else { return };
-                if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                    match load_config_with_options(&workdir_owned, &opts_clone) {
-                        Ok(new_config) => {
-                            tracing::info!(
-                                workdir = %workdir_owned.display(),
-                                "roko.toml changed \u{2014} config reloaded"
-                            );
-                            swap_clone.store(Arc::new(new_config));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                workdir = %workdir_owned.display(),
-                                error = %e,
-                                "roko.toml changed but reload failed \u{2014} keeping previous config"
-                            );
-                        }
+        let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            let Ok(event) = res else { return };
+            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                match load_config_with_options(&workdir_owned, &opts_clone) {
+                    Ok(new_config) => {
+                        tracing::info!(
+                            workdir = %workdir_owned.display(),
+                            "roko.toml changed \u{2014} config reloaded"
+                        );
+                        swap_clone.store(Arc::new(new_config));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            workdir = %workdir_owned.display(),
+                            error = %e,
+                            "roko.toml changed but reload failed \u{2014} keeping previous config"
+                        );
                     }
                 }
-            });
+            }
+        });
 
         let watcher = match watcher {
             Ok(mut w) => {

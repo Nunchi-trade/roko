@@ -12,7 +12,9 @@ pub(crate) fn cmd_explain(topic: &str, depth: u8) -> bool {
     if topic == "topics" || topic == "list" {
         println!("available topics:");
         for name in explain::topic_names() {
-            let entry = explain::find_topic(name).unwrap();
+            let Some(entry) = explain::find_topic(name) else {
+                continue;
+            };
             println!("  {:<12} {}", name, entry.title);
         }
         return true;

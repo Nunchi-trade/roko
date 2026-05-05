@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolHandler, ToolRegistry, ToolResult};
-use roko_core::{Body, Signal, Kind, Provenance, ToolPermissions};
+use roko_core::{Body, Kind, Provenance, Signal, ToolPermissions};
 use serde_json::{Value, json};
 
 use crate::safety::SafetyLayer;
@@ -1293,7 +1293,8 @@ mod tests {
             ToolConcurrency::Parallel,
         )]);
         let registry: Arc<dyn ToolRegistry> = Arc::new(RejectingRegistry { inner });
-        let resolver = resolver_from([("read_file", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
+        let resolver =
+            resolver_from([("read_file", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new_unguarded(registry, resolver);
 
         let raw_fragment = "{ \"path\": \"/some/very/long/path/that/got/cut/off/by/token/lim";

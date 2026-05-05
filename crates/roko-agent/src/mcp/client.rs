@@ -6,7 +6,9 @@
 //! mock transport via the [`Transport`] trait.
 
 use async_trait::async_trait;
-use roko_core::defaults::{DEFAULT_MCP_RESPONSE_TIMEOUT_SECS, DEFAULT_MCP_STDIN_WRITE_TIMEOUT_SECS};
+use roko_core::defaults::{
+    DEFAULT_MCP_RESPONSE_TIMEOUT_SECS, DEFAULT_MCP_STDIN_WRITE_TIMEOUT_SECS,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -230,7 +232,7 @@ impl Transport for StdioTransport {
             Err(_) => {
                 return Err(McpError::Transport(
                     "MCP server stdin write timed out after 5s".into(),
-                ))
+                ));
             }
             Ok(Err(e)) => return Err(McpError::Transport(format!("write to stdin: {e}"))),
             Ok(Ok(())) => {}
@@ -251,7 +253,7 @@ impl Transport for StdioTransport {
             Err(_) => {
                 return Err(McpError::Transport(
                     "MCP server response timed out after 30s".into(),
-                ))
+                ));
             }
             Ok(Err(e)) => return Err(McpError::Transport(format!("read from stdout: {e}"))),
             Ok(Ok(line)) => line,

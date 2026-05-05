@@ -2005,7 +2005,6 @@ fn selected_enrichment_steps(complexity: TaskComplexityBand) -> Vec<EnrichStep> 
     StepSelector::new().select_steps(complexity, ALL_ORDERED)
 }
 
-
 fn render_enrichment_outcomes(outcomes: &[StepOutcome]) -> String {
     outcomes
         .iter()
@@ -20850,7 +20849,6 @@ acceptance = []
         );
         assert_ne!(scrubbed.id, signal.id);
     }
-
 
     #[test]
     fn selected_enrichment_steps_fast_plan_skips_heavy_steps() {

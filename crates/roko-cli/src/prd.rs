@@ -2678,7 +2678,8 @@ mod tests {
 
     #[test]
     fn parse_frontmatter_colons_in_values() {
-        let content = "---\nid: prd-wire\ntitle: \"Wire: the thing\"\nstatus: draft\n---\n\n# Body\n";
+        let content =
+            "---\nid: prd-wire\ntitle: \"Wire: the thing\"\nstatus: draft\n---\n\n# Body\n";
         let meta = PrdMeta::parse(content).unwrap();
         assert_eq!(meta.id, "prd-wire");
         assert_eq!(meta.title, "Wire: the thing");
@@ -2687,8 +2688,7 @@ mod tests {
 
     #[test]
     fn parse_frontmatter_yaml_lists() {
-        let content =
-            "---\nid: prd-lists\ntitle: List Test\ntags: [\"infra\", \"prd\"]\ndepends_on:\n  - prd-alpha\n  - prd-beta\n---\n\n# Body\n";
+        let content = "---\nid: prd-lists\ntitle: List Test\ntags: [\"infra\", \"prd\"]\ndepends_on:\n  - prd-alpha\n  - prd-beta\n---\n\n# Body\n";
         let meta = PrdMeta::parse(content).unwrap();
         assert_eq!(meta.tags, vec!["infra", "prd"]);
         assert_eq!(meta.depends_on, vec!["prd-alpha", "prd-beta"]);
