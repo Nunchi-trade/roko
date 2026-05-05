@@ -51,7 +51,7 @@ export interface IsfrSourceResponse {
 /** @alias IsfrStatusResponse */
 export type IsfrStatus = IsfrStatusResponse;
 /** @alias IsfrRateResponse */
-export type IsfrRate = IsfrRateResponse & { readings: unknown[] };
+export type IsfrRate = IsfrRateResponse;
 /** @alias IsfrSourceResponse */
 export type IsfrSource = IsfrSourceResponse;
 

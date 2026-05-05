@@ -26,7 +26,7 @@ function usePhosphorDecay(value: number): boolean {
   useEffect(() => {
     if (prevRef.current !== value && value !== 0) {
       setFlashing(true);
-      const id = setTimeout(() => setFlashing(false), 300);
+      const id = setTimeout(() => setFlashing(false), 800);
       prevRef.current = value;
       return () => clearTimeout(id);
     }
@@ -76,16 +76,23 @@ export default function IsfrDashboard() {
   const [initialLoading, setInitialLoading] = useState(true);
 
   const fetchAll = useCallback(async () => {
-    const [s, r, src, h] = await Promise.all([
-      get<IsfrStatus>('/api/isfr/status'),
-      get<IsfrRate | null>('/api/isfr/current'),
-      get<IsfrSource[]>('/api/isfr/sources'),
-      get<IsfrRate[]>('/api/isfr/history?limit=' + MAX_HISTORY),
-    ]);
-    setStatus(s);
-    setCurrentRate(r);
-    setSources(src);
-    setHistory(h);
+    try {
+      const [s, r, src, rawHistory] = await Promise.all([
+        get<IsfrStatus>('/api/isfr/status'),
+        get<IsfrRate | null>('/api/isfr/current'),
+        get<IsfrSource[]>('/api/isfr/sources'),
+        get<unknown>('/api/isfr/history?limit=' + MAX_HISTORY),
+      ]);
+      setStatus(s);
+      setCurrentRate(r);
+      setSources(Array.isArray(src) ? src : []);
+      const historyArr: IsfrRate[] = Array.isArray(rawHistory)
+        ? (rawHistory as IsfrRate[])
+        : ((rawHistory as { rates?: IsfrRate[] } | null)?.rates ?? []);
+      setHistory(historyArr);
+    } catch {
+      // Network or parse error — keep stale state, let poll retry
+    }
   }, [get]);
 
   // Initial fetch + 30s fallback poll
@@ -98,7 +105,7 @@ export default function IsfrDashboard() {
   // SSE-triggered refetch (debounced 2s)
   const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
   useContextEventSubscription(
-    ['isfr_rate_computed', 'isfr_source_health'],
+    ['isfr_rate_computed', 'isfr_source_health_changed'],
     debouncedRefetch,
   );
 
@@ -157,10 +164,12 @@ export default function IsfrDashboard() {
   const confidenceFlash = usePhosphorDecay(confidenceBps);
 
   /* Sparkline data */
-  const sparklineData = history.map((r) => r.composite_bps);
+  const safeHistory = Array.isArray(history) ? history : [];
+  const sparklineData = safeHistory.map((r) => r.composite_bps);
 
   /* Source health summary */
-  const healthyCt = sources.filter((s) => s.health === 'healthy').length;
+  const safeSources = Array.isArray(sources) ? sources : [];
+  const healthyCt = safeSources.filter((s) => s.health === 'healthy').length;
 
   const TABS: { id: TabId; label: string }[] = [
     { id: 'overview', label: 'Overview' },
@@ -257,24 +266,21 @@ export default function IsfrDashboard() {
         ))}
       </div>
 
-      {/* TAB CONTENT — if/else-if chain (not switch) */}
-      {tab === 'overview' && (
+      {/* TAB CONTENT — if/else-if chain (not switch, not nested ternary) */}
+      {tab === 'overview' ? (
         <OverviewTab
           currentRate={currentRate}
           compositeBps={compositeBps}
-          history={history}
+          history={safeHistory}
           status={status}
         />
-      )}
-      {tab === 'overview' ? null : tab === 'sources' && (
-        <SourcesTab sources={sources} sourcesCount={sourcesCount} healthyCt={healthyCt} />
-      )}
-      {tab === 'overview' ? null : tab === 'sources' ? null : tab === 'history' && (
-        <HistoryTab sparklineData={sparklineData} history={history} />
-      )}
-      {tab === 'overview' ? null : tab === 'sources' ? null : tab === 'history' ? null : tab === 'relay' && (
+      ) : tab === 'sources' ? (
+        <SourcesTab sources={safeSources} sourcesCount={sourcesCount} healthyCt={healthyCt} />
+      ) : tab === 'history' ? (
+        <HistoryTab sparklineData={sparklineData} history={safeHistory} />
+      ) : tab === 'relay' ? (
         <RelayTab connected={relayConnected} messages={relayMessages} />
-      )}
+      ) : null}
     </div>
   );
 }
