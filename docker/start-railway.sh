@@ -19,6 +19,8 @@ export ROKO_MIRAGE_URL="${ROKO_MIRAGE_URL:-http://${MIRAGE_HEALTH_HOST}:${MIRAGE
 export MIRAGE_RPC_URL="${MIRAGE_RPC_URL:-${ROKO_MIRAGE_URL}}"
 
 CHILD_PIDS=()
+CORE_PIDS=()
+ISFR_AGENT_PIDS=()
 declare -A CHILD_NAMES=()
 SHUTTING_DOWN=0
 
@@ -108,8 +110,21 @@ start_child() {
   (run_as_app "$@") &
   local pid=$!
   CHILD_PIDS+=("${pid}")
+  CORE_PIDS+=("${pid}")
   CHILD_NAMES["${pid}"]="${name}"
   log "${name} started pid=${pid}"
+}
+
+spawn_isfr_agent() {
+  local name="$1"
+  local prompt="$2"
+
+  app_cmd roko do "${prompt}" --workdir "${WORKDIR}" &
+  local pid=$!
+  CHILD_PIDS+=("${pid}")
+  ISFR_AGENT_PIDS+=("${pid}")
+  CHILD_NAMES["${pid}"]="${name}"
+  log "isfr-agent/${name} spawned pid=${pid}"
 }
 
 child_exited() {
@@ -232,9 +247,58 @@ start_child roko roko serve \
 roko_pid="${CHILD_PIDS[-1]}"
 wait_http roko "http://127.0.0.1:${PUBLIC_PORT}/health" "${roko_pid}" 60
 
+# ---------- ISFR agent fleet (fire-and-forget) ----------
+if [ "${ISFR_AGENTS_ENABLED:-1}" != "0" ]; then
+  log "spawning ISFR agent fleet (15 agents, 5 roles)"
+
+  # Lending analysts (3)
+  spawn_isfr_agent "lending-aave" \
+    "Analyze Aave V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Write findings to the knowledge store."
+  spawn_isfr_agent "lending-compound" \
+    "Analyze Compound V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Write findings to the knowledge store."
+  spawn_isfr_agent "lending-comparative" \
+    "Compare lending rates across Aave V3 and Compound V3 on Ethereum mainnet. Identify the best supply and borrow rates for major assets (USDC, USDT, ETH, WBTC). Highlight rate spreads and arbitrage opportunities. Write findings to the knowledge store."
+
+  # Staking analysts (3)
+  spawn_isfr_agent "staking-lido" \
+    "Analyze Lido stETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, validator count, and total ETH staked. Write findings to the knowledge store."
+  spawn_isfr_agent "staking-rocketpool" \
+    "Analyze Rocket Pool rETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, minipool count, and total ETH staked. Write findings to the knowledge store."
+  spawn_isfr_agent "staking-comparative" \
+    "Compare ETH liquid staking yields across Lido, Rocket Pool, and Coinbase cbETH. Rank by net APR after fees. Assess liquidity depth and redemption times. Write findings to the knowledge store."
+
+  # Funding rate analysts (3)
+  spawn_isfr_agent "funding-eth-perps" \
+    "Analyze ETH perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Identify funding rate arbitrage. Write findings to the knowledge store."
+  spawn_isfr_agent "funding-btc-perps" \
+    "Analyze BTC perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Identify funding rate arbitrage. Write findings to the knowledge store."
+  spawn_isfr_agent "funding-cross-asset" \
+    "Compare funding rates across ETH, BTC, SOL, and ARB perpetuals. Identify cross-asset funding rate dislocations and basis trade opportunities. Write findings to the knowledge store."
+
+  # Structured yield analysts (3)
+  spawn_isfr_agent "structured-ethena" \
+    "Analyze Ethena USDe yield: current sUSDe APY, backing composition, delta-neutral strategy health, and insurance fund status. Write findings to the knowledge store."
+  spawn_isfr_agent "structured-pendle" \
+    "Analyze Pendle yield markets: top 5 pools by TVL, current fixed vs variable yields, and implied yield curves. Write findings to the knowledge store."
+  spawn_isfr_agent "structured-survey" \
+    "Survey the top 5 structured yield products by TVL on Ethereum. For each: report current APY, strategy type, risk tier, and TVL. Write findings to the knowledge store."
+
+  # Oracle / synthesis agents (3)
+  spawn_isfr_agent "oracle-composite" \
+    "Compute the ISFR composite rate: weighted average of lending rates, staking yields, funding rates, and structured yields. Use knowledge store entries from peer agents. Apply the ISFR weighting formula. Write the composite rate to the knowledge store."
+  spawn_isfr_agent "oracle-confidence" \
+    "Compute confidence intervals for the ISFR composite rate. Analyze variance across data sources, flag stale or outlier readings, and produce a quality score (0-100). Write findings to the knowledge store."
+  spawn_isfr_agent "oracle-summary" \
+    "Produce an executive summary of the current ISFR state. Pull all agent findings from the knowledge store. Include: composite rate, confidence band, top opportunities, risk flags, and data freshness. Write the summary to the knowledge store."
+
+  log "ISFR fleet: ${#ISFR_AGENT_PIDS[@]} agents spawned"
+fi
+
+# ---------- Watch core processes only ----------
+# Agent exits are fire-and-forget; only core service exits bring down the container.
 while :; do
   exited_pid=""
-  if wait -n -p exited_pid "${CHILD_PIDS[@]}"; then
+  if wait -n -p exited_pid "${CORE_PIDS[@]}"; then
     status=0
   else
     status=$?
@@ -244,7 +308,21 @@ while :; do
     shutdown 0
   fi
 
+  # Check if this was a core process or an agent
+  is_core=0
+  for cpid in "${CORE_PIDS[@]}"; do
+    if [ "${cpid}" = "${exited_pid}" ]; then
+      is_core=1
+      break
+    fi
+  done
+
   name="${CHILD_NAMES[${exited_pid}]:-child}"
-  log "${name} exited status=${status}; stopping service"
-  shutdown "${status}"
+
+  if [ "${is_core}" = "1" ]; then
+    log "CORE ${name} exited status=${status}; stopping service"
+    shutdown "${status}"
+  else
+    log "agent ${name} exited status=${status} (non-fatal)"
+  fi
 done
