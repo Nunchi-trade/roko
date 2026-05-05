@@ -674,4 +674,152 @@ mod tests {
         ));
         assert!(err.to_string().contains("explicit [models.*]"));
     }
+
+    // ── Task 064: IDE/ACP fallback scenario tests ────────────────────────
+
+    /// Fallback scenario 1: `--provider` CLI override selects a model by provider
+    /// key, bypassing task hint and role config.
+    #[test]
+    fn provider_override_selects_model_for_named_provider() {
+        let mut config = config_with_claude_models();
+        config.agent.default_model = "claude-opus-4-6".to_string();
+        config
+            .agent
+            .roles
+            .insert("implementer".to_string(), role_model("claude-opus-4-6"));
+
+        let selection = resolve_effective_model(
+            None,
+            Some("claude-opus-4-6".to_string()),
+            Some("implementer".to_string()),
+            None,
+            &config,
+            Some("claude_cli".to_string()),
+        )
+        .expect("selection should succeed");
+
+        assert_eq!(selection.source, SelectionSource::ProviderOverride);
+        assert!(
+            selection.reason.contains("provider override"),
+            "reason should mention provider override"
+        );
+    }
+
+    /// Fallback scenario 2: `--provider` with unknown provider name falls through
+    /// to the next precedence level (task hint).
+    #[test]
+    fn provider_override_unknown_provider_falls_through_to_task_hint() {
+        let config = config_with_claude_models();
+
+        let selection = resolve_effective_model(
+            None,
+            Some("claude-sonnet-4-6".to_string()),
+            None,
+            None,
+            &config,
+            Some("nonexistent_provider".to_string()),
+        )
+        .expect("selection should succeed via task hint fallback");
+
+        assert_eq!(selection.source, SelectionSource::TaskModel);
+    }
+
+    /// Fallback scenario 3: empty `--model ""` produces an EmptyModel error
+    /// (the precedence chain should NOT silently fall through).
+    #[test]
+    fn empty_cli_model_string_is_an_error() {
+        let config = config_with_claude_models();
+
+        let err = resolve_effective_model(Some("".to_string()), None, None, None, &config, None)
+            .expect_err("empty model should error");
+
+        assert!(matches!(
+            err,
+            Error::EmptyModel {
+                selection_source: SelectionSource::CliOverride
+            }
+        ));
+    }
+
+    /// Fallback scenario 4: whitespace-only `--model` is treated as empty.
+    #[test]
+    fn whitespace_only_cli_model_is_an_error() {
+        let config = config_with_claude_models();
+
+        let err = resolve_effective_model(Some("   ".to_string()), None, None, None, &config, None)
+            .expect_err("whitespace-only model should error");
+
+        assert!(matches!(
+            err,
+            Error::EmptyModel {
+                selection_source: SelectionSource::CliOverride
+            }
+        ));
+    }
+
+    /// Fallback scenario 5: role config with empty model falls through to
+    /// cascade router or project default (does not error).
+    #[test]
+    fn role_with_empty_model_falls_through() {
+        let mut config = config_with_claude_models();
+        config.agent.default_model = "claude-sonnet-4-6".to_string();
+        config
+            .agent
+            .roles
+            .insert("architect".to_string(), role_model(""));
+
+        let selection = resolve_effective_model(
+            None,
+            None,
+            Some("architect".to_string()),
+            None,
+            &config,
+            None,
+        )
+        .expect("should fall through to project default");
+
+        assert_eq!(selection.source, SelectionSource::ProjectDefault);
+    }
+
+    /// Fallback scenario 6: provider override with multiple matching models
+    /// picks alphabetically first to ensure deterministic selection.
+    #[test]
+    fn provider_override_picks_alphabetically_first_model() {
+        let mut config = RokoConfig::default();
+        config.providers.clear();
+        config.models.clear();
+        config
+            .providers
+            .insert("shared_provider".to_string(), claude_provider());
+        config.models.insert(
+            "z-model".to_string(),
+            explicit_profile("shared_provider", "z-slug"),
+        );
+        config.models.insert(
+            "a-model".to_string(),
+            explicit_profile("shared_provider", "a-slug"),
+        );
+        config.models.insert(
+            "m-model".to_string(),
+            explicit_profile("shared_provider", "m-slug"),
+        );
+
+        let selection = resolve_effective_model(
+            None,
+            None,
+            None,
+            None,
+            &config,
+            Some("shared_provider".to_string()),
+        )
+        .expect("should pick alphabetically first model");
+
+        assert_eq!(selection.source, SelectionSource::ProviderOverride);
+        // "a-model" is alphabetically first among the three.
+        assert_eq!(
+            selection.requested_model.as_deref(),
+            Some("a-model"),
+            "should select alphabetically first model for the provider"
+        );
+    }
 }

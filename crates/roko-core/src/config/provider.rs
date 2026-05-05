@@ -637,4 +637,104 @@ mod model_profile_tests {
             "None field should be skipped: {toml_str}"
         );
     }
+
+    // ── Task 061: effective_max_output() edge case tests ─────────────────
+
+    #[test]
+    fn effective_max_output_uses_explicit_value_when_set() {
+        let profile = ModelProfile {
+            provider: "test".to_string(),
+            slug: "claude-opus".to_string(),
+            max_output: Some(128_000),
+            ..Default::default()
+        };
+        assert_eq!(profile.effective_max_output(), 128_000);
+    }
+
+    #[test]
+    fn effective_max_output_falls_back_to_default_when_none() {
+        let profile = ModelProfile {
+            provider: "test".to_string(),
+            slug: "claude-haiku".to_string(),
+            max_output: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            profile.effective_max_output(),
+            u64::from(DEFAULT_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn effective_max_output_handles_zero_explicit_value() {
+        // A model configured with max_output = 0 should return 0, not the default.
+        // This tests that the function respects Some(0) as intentional.
+        let profile = ModelProfile {
+            provider: "test".to_string(),
+            slug: "embedding-model".to_string(),
+            max_output: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(profile.effective_max_output(), 0);
+    }
+
+    #[test]
+    fn effective_max_output_handles_minimum_value() {
+        let profile = ModelProfile {
+            provider: "test".to_string(),
+            slug: "tiny-model".to_string(),
+            max_output: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(profile.effective_max_output(), 1);
+    }
+
+    #[test]
+    fn effective_max_output_handles_u64_max() {
+        let profile = ModelProfile {
+            provider: "test".to_string(),
+            slug: "unlimited-model".to_string(),
+            max_output: Some(u64::MAX),
+            ..Default::default()
+        };
+        assert_eq!(profile.effective_max_output(), u64::MAX);
+    }
+
+    #[test]
+    fn effective_max_output_default_profile_uses_default_constant() {
+        // The Default impl sets max_output to None, so effective_max_output
+        // must return DEFAULT_MAX_OUTPUT_TOKENS for a fully default profile.
+        let profile = ModelProfile::default();
+        assert_eq!(
+            profile.effective_max_output(),
+            u64::from(DEFAULT_MAX_OUTPUT_TOKENS)
+        );
+        // Sanity: the default is a known sane value.
+        assert_eq!(profile.effective_max_output(), 16_384);
+    }
+
+    #[test]
+    fn effective_max_output_deserialized_from_toml_with_explicit_value() {
+        let toml_str = r#"
+            provider = "anthropic"
+            slug = "claude-opus-4"
+            max_output = 65536
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(profile.effective_max_output(), 65_536);
+    }
+
+    #[test]
+    fn effective_max_output_deserialized_from_toml_without_field() {
+        let toml_str = r#"
+            provider = "anthropic"
+            slug = "claude-sonnet-4"
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(
+            profile.effective_max_output(),
+            u64::from(DEFAULT_MAX_OUTPUT_TOKENS),
+            "missing max_output in TOML should fall back to DEFAULT_MAX_OUTPUT_TOKENS"
+        );
+    }
 }

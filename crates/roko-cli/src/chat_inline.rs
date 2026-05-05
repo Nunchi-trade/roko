@@ -5568,6 +5568,126 @@ mod tests {
         assert_eq!(label, "claude-sonnet-4-6 (anthropic-api)");
     }
 
+    // ── Task 072: session_banner_label() edge case tests ─────────────────
+
+    #[test]
+    fn session_banner_label_with_claude_cli_provider() {
+        use crate::model_selection::{EffectiveModelSelection, SelectionSource};
+        let selection = EffectiveModelSelection {
+            requested_model: Some("claude-opus-4-6".to_string()),
+            effective_model_key: "claude-opus-4-6".to_string(),
+            provider_key: "claude_cli".to_string(),
+            provider_kind: "claude_cli".to_string(),
+            backend_slug: "claude-opus-4-6".to_string(),
+            source: SelectionSource::CliOverride,
+            reason: "cli override".to_string(),
+        };
+        let label = super::session_banner_label(&selection);
+        assert_eq!(label, "claude-opus-4-6 (claude_cli)");
+    }
+
+    #[test]
+    fn session_banner_label_with_openai_compat_provider() {
+        use crate::model_selection::{EffectiveModelSelection, SelectionSource};
+        let selection = EffectiveModelSelection {
+            requested_model: Some("gpt-5.4-mini".to_string()),
+            effective_model_key: "gpt-5.4-mini".to_string(),
+            provider_key: "openai_prod".to_string(),
+            provider_kind: "openai_compat".to_string(),
+            backend_slug: "gpt-5.4-mini".to_string(),
+            source: SelectionSource::ProjectDefault,
+            reason: "project default".to_string(),
+        };
+        let label = super::session_banner_label(&selection);
+        assert_eq!(label, "gpt-5.4-mini (openai_compat)");
+    }
+
+    #[test]
+    fn session_banner_label_uses_effective_model_key_not_requested() {
+        use crate::model_selection::{EffectiveModelSelection, SelectionSource};
+        // When requested_model differs from effective_model_key (alias resolution),
+        // the banner shows the effective (resolved) key.
+        let selection = EffectiveModelSelection {
+            requested_model: Some("sonnet".to_string()),
+            effective_model_key: "claude-sonnet-4-6".to_string(),
+            provider_key: "anthropic_api".to_string(),
+            provider_kind: "anthropic_api".to_string(),
+            backend_slug: "claude-sonnet-4-6-20250514".to_string(),
+            source: SelectionSource::CliOverride,
+            reason: "cli override".to_string(),
+        };
+        let label = super::session_banner_label(&selection);
+        // Must show effective_model_key, NOT the original alias.
+        assert_eq!(label, "claude-sonnet-4-6 (anthropic_api)");
+        assert!(!label.contains("sonnet ("), "should not use the raw alias");
+    }
+
+    #[test]
+    fn session_banner_label_with_ollama_provider() {
+        use crate::model_selection::{EffectiveModelSelection, SelectionSource};
+        let selection = EffectiveModelSelection {
+            requested_model: Some("llama3:70b".to_string()),
+            effective_model_key: "llama3:70b".to_string(),
+            provider_key: "local_ollama".to_string(),
+            provider_kind: "ollama".to_string(),
+            backend_slug: "llama3:70b".to_string(),
+            source: SelectionSource::BuiltInDefault,
+            reason: "built-in default".to_string(),
+        };
+        let label = super::session_banner_label(&selection);
+        assert_eq!(label, "llama3:70b (ollama)");
+    }
+
+    #[test]
+    fn session_banner_label_with_empty_strings_does_not_panic() {
+        use crate::model_selection::{EffectiveModelSelection, SelectionSource};
+        // Edge case: defensive against empty fields (should produce " ()" but not panic).
+        let selection = EffectiveModelSelection {
+            requested_model: None,
+            effective_model_key: String::new(),
+            provider_key: String::new(),
+            provider_kind: String::new(),
+            backend_slug: String::new(),
+            source: SelectionSource::BuiltInDefault,
+            reason: String::new(),
+        };
+        let label = super::session_banner_label(&selection);
+        assert_eq!(label, " ()");
+    }
+
+    #[test]
+    fn session_banner_label_source_does_not_affect_output() {
+        use crate::model_selection::{EffectiveModelSelection, SelectionSource};
+        // The banner label only depends on effective_model_key and provider_kind,
+        // not on the selection source. Verify all sources produce the same format.
+        let sources = [
+            SelectionSource::CliOverride,
+            SelectionSource::ProviderOverride,
+            SelectionSource::TaskModel,
+            SelectionSource::RoleConfig,
+            SelectionSource::CascadeRouter,
+            SelectionSource::ProjectDefault,
+            SelectionSource::BuiltInDefault,
+        ];
+        for source in sources {
+            let selection = EffectiveModelSelection {
+                requested_model: None,
+                effective_model_key: "test-model".to_string(),
+                provider_key: "test_provider".to_string(),
+                provider_kind: "test_kind".to_string(),
+                backend_slug: "test-slug".to_string(),
+                source,
+                reason: "test".to_string(),
+            };
+            let label = super::session_banner_label(&selection);
+            assert_eq!(
+                label, "test-model (test_kind)",
+                "label should be independent of source {:?}",
+                source
+            );
+        }
+    }
+
     #[test]
     fn active_model_name_returns_agent_session_model_for_session_dispatch() {
         let workdir = std::path::PathBuf::from("/tmp/test");
