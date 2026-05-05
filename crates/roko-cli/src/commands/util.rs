@@ -3,6 +3,7 @@
 
 use crate::*;
 use roko_core::config::schema::RokoConfig;
+use roko_gate::PlanComplexity;
 
 /// Returns `true` on success, `false` when the topic is not recognised.
 pub(crate) fn cmd_explain(topic: &str, depth: u8) -> bool {
@@ -218,6 +219,231 @@ pub(crate) async fn cmd_init(
     Ok(())
 }
 
+pub(crate) async fn cmd_do(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    prompt_args: Vec<String>,
+    plan: bool,
+    yes: bool,
+    ghost: bool,
+    compare: bool,
+    continue_work: Option<Option<String>>,
+    no_cascade: bool,
+    provider: Option<String>,
+) -> Result<i32> {
+    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    let prompt = prompt_args.join(" ").trim().to_string();
+
+    if let Some(work_id) = continue_work {
+        return cmd_do_continue(&workdir, work_id).await;
+    }
+
+    if prompt.is_empty() {
+        return cmd_do_resume_hint(&workdir);
+    }
+
+    let preview_config = load_layered(&workdir)
+        .map(|resolved| resolved.config)
+        .unwrap_or_default();
+    let scope_config = scope_model_config_from_cli_config(&preview_config);
+    let resolved_complexity = roko_cli::scope_resolver::ScopeResolver::resolve(
+        &prompt,
+        &scope_config,
+    )
+    .await;
+    let complexity = if plan {
+        promote_to_planned_complexity(resolved_complexity)
+    } else {
+        resolved_complexity
+    };
+    let workflow_template = workflow_template_for_complexity(complexity);
+
+    if ghost || compare {
+        print_do_preview(
+            &prompt,
+            complexity,
+            workflow_template,
+            yes,
+            no_cascade,
+            &preview_config,
+        );
+        if compare {
+            println!("compare     : cascade-enabled vs --no-cascade");
+            println!("execution   : skipped; compare mode is a dry preview in this worktree");
+        }
+        return Ok(EXIT_SUCCESS);
+    }
+
+    prepare_runtime_hooks(&workdir, cli.quiet);
+    let mut config = resolve_config_for_workdir(cli, &workdir)?;
+    apply_resume_session_override(&mut config, cli.resume.clone());
+
+    let enabled_gates = roko_cli::run::workflow_enabled_gate_names(&config.gates);
+    let shell_gates = roko_cli::run::workflow_shell_gate_commands(&config.gates);
+    let overrides = roko_cli::run::CliOverrides {
+        model: cli.model.clone(),
+        role: cli.role.clone(),
+        provider,
+        cascade_enabled: Some(!no_cascade),
+    };
+
+    tracing::debug!(
+        complexity = complexity_label(complexity),
+        workflow_template,
+        auto_approve = yes,
+        cascade_enabled = !no_cascade,
+        "dispatching roko do through WorkflowEngine"
+    );
+
+    let result = roko_cli::run::run_workflow_engine_report_with_hub(
+        &prompt,
+        &workdir,
+        workflow_template,
+        enabled_gates,
+        shell_gates,
+        None,
+        &overrides,
+    )
+    .await;
+
+    match result {
+        Ok(report) => {
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if !cli.quiet {
+                roko_cli::run::print_workflow_run_report(&prompt, workflow_template, &report);
+            }
+
+            if report.success {
+                Ok(EXIT_SUCCESS)
+            } else {
+                Ok(EXIT_AGENT_FAILURE)
+            }
+        }
+        Err(error) => {
+            if !cli.quiet {
+                eprintln!("workflow engine error: {error:#}");
+            }
+            Ok(EXIT_AGENT_FAILURE)
+        }
+    }
+}
+
+async fn cmd_do_continue(workdir: &Path, work_id: Option<String>) -> Result<i32> {
+    let snapshot = match work_id {
+        Some(id) => workdir.join(format!(".roko/state/{id}.json")),
+        None => workdir.join(".roko/state/executor.json"),
+    };
+
+    if snapshot.exists() {
+        eprintln!(
+            "found resumable snapshot at {}; use `roko resume` until first-class work items land",
+            snapshot.display()
+        );
+        Ok(EXIT_SUCCESS)
+    } else {
+        eprintln!("no resumable work found at {}", snapshot.display());
+        Ok(EXIT_AGENT_FAILURE)
+    }
+}
+
+fn cmd_do_resume_hint(workdir: &Path) -> Result<i32> {
+    let snapshot = workdir.join(".roko/state/executor.json");
+    if snapshot.exists() {
+        eprintln!("interrupted work found at {}", snapshot.display());
+        eprintln!("resume with: roko do --continue");
+        Ok(EXIT_AGENT_FAILURE)
+    } else {
+        eprintln!("no prompt supplied");
+        eprintln!("usage: roko do \"fix the bug\"");
+        Ok(EXIT_AGENT_FAILURE)
+    }
+}
+
+fn print_do_preview(
+    prompt: &str,
+    complexity: PlanComplexity,
+    workflow_template: &str,
+    yes: bool,
+    no_cascade: bool,
+    config: &Config,
+) {
+    let gate_count = roko_cli::run::workflow_enabled_gate_names(&config.gates).len();
+    println!("roko do");
+    println!("prompt      : {}", truncate_for_preview(prompt, 80));
+    println!("complexity  : {}", complexity_label(complexity));
+    println!("workflow    : {workflow_template}");
+    println!("cost        : {}", estimated_cost_range(complexity));
+    println!("gates       : {gate_count}");
+    println!("approval    : {}", if yes { "auto" } else { "workflow" });
+    println!(
+        "cascade     : {}",
+        if no_cascade { "disabled" } else { "enabled" }
+    );
+    println!("execution   : skipped");
+}
+
+fn promote_to_planned_complexity(complexity: PlanComplexity) -> PlanComplexity {
+    match complexity {
+        PlanComplexity::Trivial | PlanComplexity::Simple => PlanComplexity::Standard,
+        PlanComplexity::Standard | PlanComplexity::Complex => complexity,
+    }
+}
+
+fn workflow_template_for_complexity(complexity: PlanComplexity) -> &'static str {
+    match complexity {
+        PlanComplexity::Trivial => "mechanical",
+        PlanComplexity::Simple => "focused",
+        PlanComplexity::Standard => "integrative",
+        PlanComplexity::Complex => "architectural",
+    }
+}
+
+fn complexity_label(complexity: PlanComplexity) -> &'static str {
+    match complexity {
+        PlanComplexity::Trivial => "trivial",
+        PlanComplexity::Simple => "simple",
+        PlanComplexity::Standard => "standard",
+        PlanComplexity::Complex => "complex",
+    }
+}
+
+fn estimated_cost_range(complexity: PlanComplexity) -> &'static str {
+    match complexity {
+        PlanComplexity::Trivial => "<$0.01",
+        PlanComplexity::Simple => "$0.01-$0.05",
+        PlanComplexity::Standard => "$0.05-$0.25",
+        PlanComplexity::Complex => "$0.25+",
+    }
+}
+
+fn truncate_for_preview(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut truncated = value.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn scope_model_config_from_cli_config(config: &Config) -> RokoConfig {
+    let mut model_config = RokoConfig::default();
+    model_config.providers.extend(config.providers.clone());
+    model_config.models.extend(config.models.clone());
+    model_config.agent.command = Some(config.agent.command.clone());
+    model_config.agent.args = Some(config.agent.args.clone());
+    model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
+    model_config.agent.env = Some(config.agent.env.clone());
+    model_config.agent.default_effort = config.agent.effort.clone();
+    model_config.agent.bare_mode = config.agent.bare_mode;
+    model_config.agent.fallback_model = config.agent.fallback_model.clone();
+    model_config.agent.tier_models = config.agent.tier_models.clone();
+    if let Some(model) = config.agent.model.clone() {
+        model_config.agent.default_model = model;
+    }
+    model_config
+}
+
 pub(crate) async fn cmd_run(
     cli: &Cli,
     workdir: Option<PathBuf>,
@@ -233,6 +459,7 @@ pub(crate) async fn cmd_run(
         model: cli.model.clone(),
         role: cli.role.clone(),
         provider,
+        cascade_enabled: None,
     };
 
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
