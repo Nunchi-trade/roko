@@ -6,6 +6,7 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::bus::{TopicBus, TopicBusConfig};
 use crate::protocol::{
     AgentHello, ConnectedAgent, ConnectedWorkspace, RelayEvent, RelayMessageRequest,
     RelayMessageResponse, RelayOutboundFrame, WorkspaceHello,
@@ -34,6 +35,8 @@ struct RelayStateInner {
 pub struct RelayState {
     inner: RwLock<RelayStateInner>,
     events_tx: broadcast::Sender<RelayEvent>,
+    /// Topic-based pub/sub bus. Agents subscribe/publish via WebSocket frames.
+    pub bus: TopicBus,
 }
 
 impl Default for RelayState {
@@ -49,6 +52,7 @@ impl RelayState {
         Self {
             inner: RwLock::new(RelayStateInner::default()),
             events_tx,
+            bus: TopicBus::new(TopicBusConfig::default()),
         }
     }
 
@@ -167,6 +171,8 @@ impl RelayState {
         for pending in pending {
             let _ = pending.tx.send(Err("agent disconnected".to_string()));
         }
+        // Clean up all topic subscriptions for this agent.
+        self.bus.unsubscribe_all(agent_id);
         let _ = self.events_tx.send(RelayEvent::AgentDisconnected {
             agent_id: agent_id.to_string(),
         });
@@ -328,6 +334,19 @@ impl RelayState {
             });
         }
         expired
+    }
+
+    /// Send a frame to a connected agent by ID.
+    ///
+    /// Returns `true` if the agent was found and the send succeeded,
+    /// `false` if the agent is unknown or has disconnected.
+    pub fn send_to_agent(&self, agent_id: &str, frame: RelayOutboundFrame) -> bool {
+        let inner = self.inner.read();
+        if let Some(handle) = inner.agents.get(agent_id) {
+            handle.tx.send(frame).is_ok()
+        } else {
+            false
+        }
     }
 }
 

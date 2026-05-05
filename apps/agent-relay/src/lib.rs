@@ -19,10 +19,15 @@ use tokio::sync::mpsc;
 use tower_http::trace::TraceLayer;
 use tracing::warn;
 
+pub mod bus;
 pub mod protocol;
 pub mod state;
 
-use protocol::{AgentInboundFrame, RelayEvent, RelayMessageRequest, RelayOutboundFrame};
+pub use bus::{TopicBus, TopicBusConfig};
+
+use protocol::{
+    AgentInboundFrame, RelayEvent, RelayMessageRequest, RelayOutboundFrame, TopicEnvelope,
+};
 use state::{AwaitMessageError, BeginMessageError, RegisteredAgent, RelayState};
 
 pub fn app(state: Arc<RelayState>) -> Router {
@@ -258,6 +263,63 @@ fn handle_agent_frame(
             let _ = outbound_tx.send(RelayOutboundFrame::Error {
                 message_id: None,
                 error: "agent already registered on this socket".to_string(),
+            });
+            true
+        }
+        // ── Pub/sub frames (bus dispatch) ────────────────────────────────────
+        Ok(AgentInboundFrame::Subscribe { topic }) => {
+            tracing::debug!(%agent_id, %topic, "subscribe");
+            let replay = state.bus.subscribe(agent_id, &topic);
+            for envelope in replay {
+                let frame = RelayOutboundFrame::TopicMessage {
+                    topic: envelope.topic,
+                    msg_type: envelope.msg_type,
+                    payload: envelope.payload,
+                    publisher_id: envelope.publisher_id,
+                    seq: envelope.seq,
+                };
+                if outbound_tx.send(frame).is_err() {
+                    tracing::warn!(%agent_id, "replay send failed — agent disconnected");
+                    break;
+                }
+            }
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: format!("subscribed:{topic}"),
+            });
+            true
+        }
+        Ok(AgentInboundFrame::Unsubscribe { topic }) => {
+            tracing::debug!(%agent_id, %topic, "unsubscribe");
+            state.bus.unsubscribe(agent_id, &topic);
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: format!("unsubscribed:{topic}"),
+            });
+            true
+        }
+        Ok(AgentInboundFrame::Publish {
+            topic,
+            msg_type,
+            payload,
+        }) => {
+            tracing::debug!(%agent_id, %topic, %msg_type, "publish");
+            let envelope = TopicEnvelope::new(&topic, &msg_type, payload).with_publisher(agent_id);
+            let (seq, subscribers) = state.bus.publish(envelope.clone());
+            for sub_id in &subscribers {
+                if sub_id == agent_id {
+                    // Don't echo back to the publisher.
+                    continue;
+                }
+                let frame = RelayOutboundFrame::TopicMessage {
+                    topic: envelope.topic.clone(),
+                    msg_type: envelope.msg_type.clone(),
+                    payload: envelope.payload.clone(),
+                    publisher_id: envelope.publisher_id.clone(),
+                    seq,
+                };
+                state.send_to_agent(sub_id, frame);
+            }
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: format!("published:{topic}:{seq}"),
             });
             true
         }
