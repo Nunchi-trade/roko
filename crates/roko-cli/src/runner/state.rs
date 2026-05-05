@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use roko_core::defaults::{
     DEFAULT_RUNNER_RETRY_BACKOFF_MAX_SECS, DEFAULT_RUNNER_RETRY_BACKOFF_MULTIPLIER_FALLBACK,
-    DEFAULT_RUNNER_RETRY_BACKOFF_SHIFT_CAP,
+    DEFAULT_RUNNER_RETRY_BACKOFF_SHIFT_CAP, DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT,
 };
 use roko_learn::model_router::RoutingContext;
 
@@ -557,10 +557,13 @@ impl RunState {
         self.snapshot_fail_streak = 0;
     }
 
-    /// Record a failed snapshot save. After 3 consecutive failures, sets degraded flag.
+    /// Record a failed snapshot save. After consecutive failures past the pivot
+    /// threshold, sets degraded flag.
     pub fn snapshot_failed(&mut self) {
         self.snapshot_fail_streak += 1;
-        if self.snapshot_fail_streak >= 3 && !self.snapshot_degraded {
+        if self.snapshot_fail_streak >= DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT
+            && !self.snapshot_degraded
+        {
             self.snapshot_degraded = true;
             tracing::warn!(
                 streak = self.snapshot_fail_streak,
