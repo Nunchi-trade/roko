@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/prd-research-loop.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { showCmd, roko, trackMetrics } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { showCmd, roko, trackMetrics } from '../../terminal-session';
 
 // ── Static command definitions (display layer, no ctx needed) ─
 

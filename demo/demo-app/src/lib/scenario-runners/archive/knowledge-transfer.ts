@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/knowledge-transfer.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { showCmd, roko, trackMetrics } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { showCmd, roko, trackMetrics } from '../../terminal-session';
 
 // Module-level state to track the Beta workspace across runCommand calls
 let betaWorkspaceDir: string | null = null;

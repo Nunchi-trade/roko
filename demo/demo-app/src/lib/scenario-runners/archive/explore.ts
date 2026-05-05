@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/explore.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { showCmd, roko } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { showCmd, roko } from '../../terminal-session';
 
 export const EXPLORE_COMMANDS: CommandDef[] = [
   { id: 'status',           command: 'roko status',                   description: 'Workspace status',        timeout: 45000, target: { pane: 0 } },

@@ -1,6 +1,6 @@
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { showCmd, roko, trackMetrics } from '../terminal-session';
-import { castBlockNumber } from '../isfr-helpers';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { showCmd, roko, trackMetrics } from '../../terminal-session';
+import { castBlockNumber } from '../../isfr-helpers';
 
 // ── Static command definitions ────────────────────────────────
 

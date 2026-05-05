@@ -1,7 +1,7 @@
 // --- src/lib/scenario-runners/dream-consolidation.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { stripAnsi } from '../scenario-helpers';
-import { showCmd, roko } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { stripAnsi } from '../../scenario-helpers';
+import { showCmd, roko } from '../../terminal-session';
 
 // ── Static command definitions (display layer, no ctx needed) ─
 

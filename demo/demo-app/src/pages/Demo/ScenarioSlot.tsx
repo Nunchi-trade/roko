@@ -10,10 +10,7 @@ import {
 import type { Scenario, ClickableScenario, ScenarioContext } from '../../lib/scenarios';
 import { isClickableScenario } from '../../lib/scenarios';
 import { CommandList } from '../../components/CommandList';
-import { ContextPanel } from '../../components/ContextPanel';
-import type { ContextPanelStage } from '../../components/ContextPanel';
 import { useCommandList } from '../../hooks/useCommandList';
-import { PRD_IDEA } from '../../lib/scenario-runners/prd-pipeline';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../../lib/playback-controller';
 import { enterWorkspace, resetRokoResolution } from '../../lib/terminal-session';
 import type { TerminalHandle } from '../../hooks/useTerminal';
@@ -226,7 +223,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
   const [kfMetrics, setKfMetrics] = useState<EfficiencyMetric[]>(initialKfMetrics);
 
   // Chain Intelligence panel state
-  const chainWs = useChainWs(scenario.id === 'chain-intelligence');
+  const chainWs = useChainWs(scenario.category === 'chain');
   const [ciBlocks] = useState<BlockData[]>([]);
   const [ciPositions] = useState<AgentPosition[]>(INITIAL_CI_POSITIONS);
 
@@ -901,20 +898,6 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
 
   const gridCols = scenario.panes;
 
-  // Derive stage from command completion state
-  const clickableStage: ContextPanelStage = (() => {
-    const doneIds = new Set(cmdItems.filter(i => i.status === 'success').map(i => i.id));
-    if (doneIds.has('status')) return 'done';
-    if (doneIds.has('run')) return 'run';
-    if (doneIds.has('validate')) return 'validate';
-    if (doneIds.has('plan')) return 'plan';
-    if (doneIds.has('promote')) return 'promote';
-    if (doneIds.has('draft')) return 'draft';
-    if (doneIds.has('idea')) return 'idea';
-    if (doneIds.has('init')) return 'init';
-    return 'init';
-  })();
-
   const handleClickableRun = useCallback(async (id: string) => {
     if (!isClickable) return;
     const clickable = scenario as ClickableScenario;
@@ -1057,15 +1040,6 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                   onRetry={handleClickableRun}
                 />
               </div>
-              {scenario.id === 'prd-pipeline' && (
-                <div className="demo-clickable-context">
-                  <ContextPanel
-                    stage={clickableStage}
-                    idea={PRD_IDEA}
-                    gates={gates.map(g => ({ ...g, status: g.status as 'pass' | 'fail' | 'pending' }))}
-                  />
-                </div>
-              )}
             </div>
           </div>
         ) : (

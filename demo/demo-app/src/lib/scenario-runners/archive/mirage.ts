@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/mirage.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { enterWorkspace, showCmd } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { enterWorkspace, showCmd } from '../../terminal-session';
 
 // ── Static command definitions (display layer, no ctx needed) ─
 

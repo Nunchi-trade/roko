@@ -1,7 +1,7 @@
 // --- src/lib/scenario-runners/prd-pipeline.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { showCmd, roko, getRoko } from '../terminal-session';
-import { fetchWorkflowSnapshot } from '../workflow-api';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { showCmd, roko, getRoko } from '../../terminal-session';
+import { fetchWorkflowSnapshot } from '../../workflow-api';
 
 // ── PRD pipeline idea ────────────────────────────────────────
 

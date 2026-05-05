@@ -22,20 +22,11 @@ const SPEEDS = [0.5, 1, 2, 4];
 
 /** Category color mapping for tab bar accent dots and active styling */
 const TAB_CATEGORY: Record<string, string> = {
-  'prd-pipeline': 'pipeline',
-  'prd-research-loop': 'pipeline',
-  'race': 'comparison',
-  'gate-retry': 'comparison',
-  'providers': 'comparison',
-  'provider-race': 'comparison',
-  'explore': 'exploration',
-  'knowledge-accumulation': 'learning',
-  'dream-consolidation': 'learning',
-  'chat': 'learning',
-  'knowledge-transfer': 'learning',
-  'chain-intelligence': 'chain',
-  'mirage': 'chain',
-  'isfr-agents': 'chain',
+  cost: 'comparison',
+  pipeline: 'pipeline',
+  memory: 'learning',
+  isfr: 'chain',
+  oracle: 'chain',
 };
 
 /** Color values per category (used for the sliding indicator) */
