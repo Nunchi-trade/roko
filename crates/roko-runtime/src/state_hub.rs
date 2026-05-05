@@ -76,6 +76,7 @@ impl EventLogWriter {
 ///    Shared event log handle that can be cloned into `StateHubSender`s.
 type SharedEventLog = Arc<Mutex<EventLogWriter>>;
 
+/// Central state management hub for dashboard snapshots, events, and projections.
 pub struct StateHub {
     snapshot_tx: watch::Sender<DashboardSnapshot>,
     snapshot_rx: watch::Receiver<DashboardSnapshot>,

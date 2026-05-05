@@ -1999,7 +1999,7 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
     };
     use roko_chain::isfr_sources::SourceStatus;
     use state::ISFRSourceSnapshot;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     let roko_config = state.load_roko_config();
     let isfr_section = roko_config.isfr.clone();
@@ -2045,6 +2045,11 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
     {
         let state_cb = Arc::clone(&state);
         let keeper_cb = Arc::clone(&keeper);
+
+        // Track the last epoch we successfully submitted on-chain to avoid
+        // re-submitting on every tick within the same epoch.
+        let last_submitted_epoch = Arc::new(AtomicU64::new(u64::MAX));
+
         keeper.set_publish_fn(std::sync::Arc::new(
             move |_topic: &str, _msg_type: &str, _payload: serde_json::Value| {
                 // Grab the freshly computed composite from the keeper.
@@ -2067,6 +2072,11 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
                     .isfr
                     .current_epoch
                     .store(epoch, std::sync::atomic::Ordering::Relaxed);
+
+                // Determine if we should submit on-chain this tick (new epoch).
+                let prev_epoch = last_submitted_epoch.swap(epoch, Ordering::AcqRel);
+                let should_submit = prev_epoch != epoch;
+                let last_submitted_epoch_clone = Arc::clone(&last_submitted_epoch);
 
                 // Build source snapshots synchronously from metas (no async needed).
                 let source_snapshots: Vec<ISFRSourceSnapshot> = metas
@@ -2130,6 +2140,57 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
                         source_count,
                         timestamp_ms,
                     });
+
+                    // 5. Submit on-chain if this is a new epoch and chain is configured.
+                    if should_submit {
+                        let oracle_addr = state_async
+                            .isfr
+                            .contract_addresses
+                            .read()
+                            .await
+                            .as_ref()
+                            .and_then(|a| a.isfr_oracle.clone());
+
+                        if let Some(oracle_address) = oracle_addr {
+                            let roko_config = state_async.load_roko_config();
+                            let rpc_url = roko_config
+                                .chain
+                                .rpc_url
+                                .clone()
+                                .unwrap_or_else(|| "http://127.0.0.1:8545".to_string());
+                            let wallet_key = roko_config
+                                .chain
+                                .wallet_key
+                                .clone()
+                                .unwrap_or_default();
+
+                            if !wallet_key.is_empty() {
+                                let config = roko_chain::isfr_oracle_submit::OracleSubmitConfig {
+                                    oracle_address,
+                                    rpc_url,
+                                    wallet_key,
+                                    chain_id: roko_config.chain.chain_id.unwrap_or(31337),
+                                };
+                                tokio::spawn(async move {
+                                    roko_chain::isfr_oracle_submit::submit_rate_on_chain(
+                                        &config,
+                                        epoch,
+                                        composite_bps,
+                                        lending_bps,
+                                        structured_bps,
+                                        funding_bps,
+                                        staking_bps,
+                                        confidence_bps,
+                                    )
+                                    .await;
+                                });
+                            }
+                        } else {
+                            // No oracle address yet — reset so we retry next tick.
+                            last_submitted_epoch_clone
+                                .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                 });
             },
         ));

@@ -35,11 +35,11 @@ impl Default for TaskExecutorCell {
 
 #[async_trait::async_trait]
 impl Cell for TaskExecutorCell {
-    fn cell_id(&self) -> &str {
+    fn cell_id(&self) -> &'static str {
         "task-executor"
     }
 
-    fn cell_name(&self) -> &str {
+    fn cell_name(&self) -> &'static str {
         "TaskExecutorCell"
     }
 

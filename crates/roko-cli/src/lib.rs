@@ -68,6 +68,7 @@ pub mod dispatch;
 pub mod dispatch_direct;
 pub(crate) mod dispatch_helpers;
 pub mod dispatch_v2;
+pub mod dry_run;
 pub mod doctor;
 pub mod episode;
 pub mod event_sources;

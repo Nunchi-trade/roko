@@ -10096,6 +10096,24 @@ impl PlanRunner {
                         break;
                     }
 
+                    // ── Rate-limit backoff ────────────────────────────────
+                    // When the failure is a provider rate limit, apply
+                    // exponential backoff (2s / 4s / 8s) before the next
+                    // dispatch attempt so we don't hammer the provider.
+                    if matches!(state.error_pattern, RetryErrorPattern::RateLimit) {
+                        let backoff_base_ms: u64 = 2_000;
+                        let exp = consecutive_failures.saturating_sub(1).min(4);
+                        let delay_ms = backoff_base_ms.saturating_mul(1u64 << exp);
+                        tracing::warn!(
+                            plan_id = %plan_id,
+                            task_id = %task_id,
+                            delay_ms,
+                            attempt = total_dispatches,
+                            "[orchestrate] rate limited; backing off before retry"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+
                     match action {
                         RetryConductorAction::Continue => {
                             // Always include failure context in the retry prompt so
@@ -10898,8 +10916,11 @@ impl PlanRunner {
             .unwrap_or_else(|| {
                 format!("Plan: {plan_id}\nTask: {task_id}\n\nImplement the task described above.")
             });
+        let failing_command = task_def
+            .and_then(|td| td.verify.iter().find(|v| v.phase == gate).map(|v| v.command.as_str()))
+            .unwrap_or("unknown");
         let prompt = task_def
-            .map(|task| task.build_fix_prompt(&base_prompt, gate, error_output))
+            .map(|task| task.build_fix_prompt(&base_prompt, gate, failing_command, error_output))
             .unwrap_or_else(|| {
                 format!(
                     "{base_prompt}\n\n---\n\n## Verification Failed\n\nPhase: {gate}\n\nError output:\n```text\n{}\n```",
@@ -14178,9 +14199,13 @@ impl PlanRunner {
                 _ => roko_core::defaults::MODEL_FOCUSED.into(),
             });
 
-        let mut fix_prompt = if let Some(td) = task_def {
+        let mut fix_prompt = if let Some(ref td) = task_def {
             let original_prompt = td.build_prompt(plan_id, &self.workdir);
-            td.build_fix_prompt(&original_prompt, &gate_phase, &gate_context)
+            let failing_command = td.verify.iter()
+                .find(|v| v.phase == gate_phase)
+                .map(|v| v.command.as_str())
+                .unwrap_or("unknown");
+            td.build_fix_prompt(&original_prompt, &gate_phase, failing_command, &gate_context)
         } else {
             let truncated = gate_context.chars().take(4000).collect::<String>();
             format!(

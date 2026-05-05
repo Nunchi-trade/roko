@@ -29,7 +29,7 @@ use roko_cli::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
 use roko_cli::{
-    Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode, PageId,
+    Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, PageId,
     PipeMode, Plan, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs, config_cmd,
     load_resolved_config, run_init_wizard, run_once,
 };
@@ -1231,21 +1231,16 @@ enum CompletionShell {
 // (CustodyCmd, DreamCmd, DreamsCmd moved into KnowledgeCmd above)
 
 /// Execution engine for `roko plan run`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum PlanEngine {
     /// Graph Engine (default). Converts plans to graphs and executes via the Engine.
+    #[default]
     #[value(name = "graph")]
     Graph,
     /// Runner v2 (legacy). Uses the streaming event-loop plan executor.
     #[cfg(feature = "legacy-runner-v2")]
     #[value(name = "runner-v2")]
     RunnerV2,
-}
-
-impl Default for PlanEngine {
-    fn default() -> Self {
-        Self::Graph
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -2886,12 +2881,6 @@ fn confirm_destructive(message: &str, quiet: bool) -> bool {
     } else {
         false
     }
-}
-
-/// Resolve the config, applying CLI overrides for --role, --model, --effort.
-fn resolve_config(cli: &Cli) -> Result<Config> {
-    let workdir = resolve_workdir(cli);
-    resolve_config_for_workdir(cli, &workdir)
 }
 
 /// Resolve config from a specific workdir, applying CLI overrides.

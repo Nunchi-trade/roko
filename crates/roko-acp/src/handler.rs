@@ -188,16 +188,15 @@ where
                     let sources_changed = sessions.config_sources != new_sources;
                     sessions.config_sources = new_sources;
 
-                    if sources_changed {
-                        if let Err(e) =
+                    if sources_changed
+                        && let Err(e) =
                             send_config_sources_notification(transport, &sessions.config_sources)
                                 .await
-                        {
-                            warn!(
-                                error = %e,
-                                "failed to push configSources reload notification to IDE"
-                            );
-                        }
+                    {
+                        warn!(
+                            error = %e,
+                            "failed to push configSources reload notification to IDE"
+                        );
                     }
 
                     // Notify the IDE about updated config options for each
@@ -248,14 +247,13 @@ fn check_provider_readiness(config: &roko_core::config::schema::RokoConfig) -> O
             // Claude CLI providers don't need an API key env var.
             return None;
         }
-        if let Some(env_var) = &provider.api_key_env {
-            if std::env::var(env_var)
+        if let Some(env_var) = &provider.api_key_env
+            && std::env::var(env_var)
                 .ok()
                 .filter(|k| !k.is_empty())
                 .is_some()
-            {
-                return None;
-            }
+        {
+            return None;
         }
     }
     Some(

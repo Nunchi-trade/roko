@@ -208,14 +208,11 @@ cmd_up() {
     echo -n "."
   done
 
-  # Start ISFR scout agents (one-shot, exercise agent → knowledge store path)
+  # ISFR on-chain submission: the keeper auto-submits rates to ISFROracle on
+  # each new epoch via the publish callback in start_isfr_keeper(). No separate
+  # agent processes needed — roko serve handles it all.
   if $chain; then
-    info "Starting ISFR scout agents..."
-    $bin do "Analyze current USDC lending rates across Aave V3 and Compound. Compare APYs, utilization rates, and recommend the best lending strategy." &
-    LENDING_SCOUT_PID=$!
-
-    $bin do "Research ETH staking yields across major liquid staking protocols. Compare validator APR, slashing risk, and withdrawal times." &
-    STAKING_SCOUT_PID=$!
+    info "ISFR keeper will auto-submit rates to ISFROracle on-chain each epoch"
   fi
 
   # Start vite
@@ -232,7 +229,7 @@ cmd_up() {
   $no_vite || echo "  demo-app    → http://localhost:$VITE_PORT"
   if $chain; then
     echo "  ISFR data   → LIVE (on-chain via mirage-rs)"
-    echo "  ISFR scouts → lending + staking (background)"
+    echo "  ISFR oracle → keeper auto-submits each epoch"
   else
     echo "  ISFR data   → MOCK (use --chain for live data)"
   fi

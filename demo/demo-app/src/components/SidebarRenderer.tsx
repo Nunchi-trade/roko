@@ -52,7 +52,7 @@ export interface SidebarRendererProps {
   allGatesPass: boolean;
 
   // Log
-  logEntries: { ts: string; text: string; type?: 'info' | 'success' | 'error' }[];
+  logEntries: { ts: string; text: string; type?: 'info' | 'success' | 'error' | 'warning' | 'dim' }[];
 
   // Pipeline (PRD)
   pipeline: PipelineDemoState;

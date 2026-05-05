@@ -1068,7 +1068,9 @@ contracts_dir = "contracts"
 [isfr]
 enabled = true
 poll_interval_secs = 10
-epoch_duration_secs = 28800
+# Dev: 60s epochs → on-chain oracle submission every ~60s.
+# Production would use 28800 (8h) or similar.
+epoch_duration_secs = 60
 min_submissions = 2
 outlier_sigma = 3.0
 

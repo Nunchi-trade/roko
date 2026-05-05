@@ -40,8 +40,9 @@ pub const MODEL_TAG: &str = "model";
 const SMALL_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const OPUS_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
 
-/// Number of recent `TokenUsage` signals to consider when deciding whether
-/// to fire. Using the maximum utilization over this window prevents noisy
+/// Recent `TokenUsage` signal lookback window size.
+///
+/// Uses the maximum utilization over this window to prevent noisy
 /// alternating high/low utilization from triggering repeatedly.
 pub const PRESSURE_LOOKBACK: usize = 3;
 

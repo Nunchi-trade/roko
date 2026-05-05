@@ -107,7 +107,7 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(axum::body::Body::empty())
-                .unwrap()
+                .expect("building a status-only response should never fail")
         })
 }
 

@@ -1532,8 +1532,10 @@ impl ProviderCallCell {
     /// 1. Calls `create_agent_for_model()` to get a `Box<dyn Agent>`.
     /// 2. Runs `agent.run()` with the prompt.
     /// 3. Classifies the result as success or failure.
-    /// 4. On retryable failure, tries the next model in `fallback_models` (if any).
-    /// 5. Returns the response or the final error.
+    /// 4. On rate-limit failure, applies exponential backoff (2s / 4s / 8s)
+    ///    before trying the next fallback model.
+    /// 5. On other retryable failures, tries the next model immediately.
+    /// 6. Returns the response or the final error.
     async fn execute(
         &self,
         model: &str,
@@ -1542,16 +1544,37 @@ impl ProviderCallCell {
         options: AgentOptions,
         fallback_models: &[String],
     ) -> std::result::Result<CellOutput, CellError> {
+        use crate::retry::RetryPolicy;
+
         let total_start = Instant::now();
         let prompt = Signal::builder(Kind::Prompt)
             .body(Body::text(user_content))
             .build();
         let mut last_error = None;
+        let rate_limit_policy = RetryPolicy::for_rate_limit();
 
         for (attempt_index, attempt_model) in std::iter::once(model)
             .chain(fallback_models.iter().map(String::as_str))
             .enumerate()
         {
+            // On rate-limit errors, apply exponential backoff before the next
+            // attempt so we don't hammer the provider in a tight loop.
+            if attempt_index > 0 {
+                if let Some(CellError::Retryable { ref message }) = last_error {
+                    if is_rate_limit_message(message) {
+                        let delay_ms =
+                            rate_limit_policy.rate_limit_delay(attempt_index as u32 - 1, None);
+                        tracing::warn!(
+                            model = %attempt_model,
+                            delay_ms,
+                            attempt = attempt_index,
+                            "rate limited; backing off before fallback attempt"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                }
+            }
+
             let mut attempt_options = options.clone();
             attempt_options.system_prompt = system_prompt.map(ToOwned::to_owned);
 
@@ -1600,6 +1623,15 @@ impl ProviderCallCell {
             message: "provider call failed with no fallback model available".to_string(),
         }))
     }
+}
+
+/// Returns `true` if the error message looks like a provider rate-limit rejection.
+fn is_rate_limit_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("429")
+        || lower.contains("too many requests")
 }
 
 struct CellOutput {

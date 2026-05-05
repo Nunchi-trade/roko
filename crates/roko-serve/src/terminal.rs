@@ -86,7 +86,7 @@ pub(crate) struct TerminalStateFile {
 }
 
 /// Result of attempting to attach to a session.
-pub(crate) enum AttachResult {
+pub enum AttachResult {
     /// Reattached to an existing session within the grace period.
     Reattached {
         sess_generation: u64,
@@ -405,15 +405,14 @@ impl SessionManager {
                         receiver: rx,
                         scrollback_snapshot,
                     };
-                } else {
-                    // Grace period expired — remove and create fresh
-                    let old = sessions.remove(id);
-                    drop(sessions);
-                    if let Some(old_session) = old {
-                        self.finish_session(id, old_session, "grace period expired on reattach");
-                    }
-                    self.session_info.lock().remove(id);
                 }
+                // Grace period expired — remove and create fresh
+                let old = sessions.remove(id);
+                drop(sessions);
+                if let Some(old_session) = old {
+                    self.finish_session(id, old_session, "grace period expired on reattach");
+                }
+                self.session_info.lock().remove(id);
             } else {
                 // Session is still actively connected (shouldn't normally happen
                 // but handle gracefully by subscribing as an additional viewer).

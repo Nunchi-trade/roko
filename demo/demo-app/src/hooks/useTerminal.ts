@@ -202,6 +202,9 @@ export function useTerminal(sessionId?: string) {
 
     // Internal output buffer, capped high enough for artifact scraping.
     let outBuf = '';
+    // When true, PTY output is captured to outBuf but NOT rendered to xterm.
+    // Used by execCmd({ silent: true }) to hide helper commands completely.
+    let muted = false;
 
     function appendOutput(text: string) {
       outBuf += text;
@@ -291,12 +294,27 @@ export function useTerminal(sessionId?: string) {
       // sequence, then propagate the original exit code to the shell.
       // The printf produces an OSC escape that xterm.js intercepts and
       // swallows — nothing visible appears in the terminal.
-      const wrapped = `${cmd}; __rk_ec=$?; printf '\\033]7777;D;%d;${marker}\\033\\\\' "$__rk_ec"; (exit $__rk_ec)`;
+      //
+      // For silent commands, wrap with `stty -echo` to suppress shell input
+      // echo and enable the mute flag to prevent PTY output from rendering.
+      const isSilent = opts?.silent ?? false;
+      const coreWrapped = `${cmd}; __rk_ec=$?; printf '\\033]7777;D;%d;${marker}\\033\\\\' "$__rk_ec"; (exit $__rk_ec)`;
+      // stty -echo prevents the shell from echoing the command text back
+      // through the PTY, and stty echo restores normal echo afterwards.
+      // Combined with the mute flag (which suppresses term.write during
+      // execution), this makes silent commands truly invisible.
+      //
+      // We save $? before stty -echo so the actual command sees the
+      // correct prior exit code (important for `(exit $?)` checks).
+      const wrapped = isSilent
+        ? `__rk_save=$?; stty -echo 2>/dev/null; (exit $__rk_save); ${coreWrapped}; stty echo 2>/dev/null`
+        : coreWrapped;
       if (wrapped.length > 3000) {
         console.warn(`[useTerminal] execCmd sending large command (${wrapped.length} chars): ${cmd.slice(0, 60)}...`);
       }
-      // Record cursor row before sending so we can erase the echoed text later.
-      const preRow = opts?.silent ? term.buffer.active.cursorY : -1;
+      // Mute terminal rendering for silent commands so nothing flashes
+      // on screen while the helper command runs.
+      if (isSilent) muted = true;
       handle.sendRaw(wrapped + '\r');
       const result = await new Promise<ExecResult>((resolve) => {
         let settled = false;
@@ -318,17 +336,11 @@ export function useTerminal(sessionId?: string) {
         }, timeout);
       });
 
-      // For silent commands, erase the echoed wrapper text from the terminal.
-      // We cursor-up from the current position back to where we started and
-      // clear each line. A short sleep lets the PTY prompt arrive first.
-      if (preRow >= 0) {
-        await sleep(20);
-        try {
-          const postRow = term.buffer.active.cursorY;
-          const lines = Math.max(0, postRow - preRow) + 1;
-          // Move to start of the echoed area and clear each line
-          term.write('\x1b[2K' + '\x1b[1A\x1b[2K'.repeat(Math.min(lines, 8)) + '\r');
-        } catch { /* terminal disposed */ }
+      if (isSilent) {
+        // Wait briefly for any trailing PTY output (e.g. restored prompt)
+        // to arrive while still muted, then unmute.
+        await sleep(30);
+        muted = false;
       }
       return result;
     };
@@ -448,12 +460,23 @@ export function useTerminal(sessionId?: string) {
       const OSC_7777_RE = /\x1b\]7777;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
       const PRINTF_WRAPPER_RE = /printf\s+'\\033\]7777[^']*'[^;\r\n]*/g;
       const RK_WRAPPER_RE = /; __rk_ec=\$\?; printf[^;]*; \(exit \$__rk_ec\)/g;
+      // Strip the silent-mode stty wrapper added around silent execCmd calls.
+      const STTY_WRAPPER_RE = /__rk_save=\$\?; stty -echo[^;]*; \(exit \$__rk_save\); /g;
+      const STTY_RESTORE_RE = /; stty echo 2>\/dev\/null/g;
+      // Strip __ROKO_ internal probe variable assignments/reads.
+      const ROKO_PROBE_RE = /__ROKO_[A-Z_]*[^\r\n]*/g;
+      // Strip standalone exit wrapper echo: (exit $__rk_ec)
+      const EXIT_WRAPPER_RE = /\(exit \$__rk_ec\)/g;
 
       function stripTerminalNoise(text: string): string {
         return text
           .replace(OSC_7777_RE, '')
           .replace(PRINTF_WRAPPER_RE, '')
-          .replace(RK_WRAPPER_RE, '');
+          .replace(RK_WRAPPER_RE, '')
+          .replace(STTY_WRAPPER_RE, '')
+          .replace(STTY_RESTORE_RE, '')
+          .replace(ROKO_PROBE_RE, '')
+          .replace(EXIT_WRAPPER_RE, '');
       }
 
       ws.onmessage = (e: MessageEvent) => {
@@ -462,21 +485,23 @@ export function useTerminal(sessionId?: string) {
           const text = new TextDecoder().decode(e.data);
           const cleaned = stripTerminalNoise(text);
           if (!ready) {
-            pendingMessages.push(new TextEncoder().encode(cleaned));
+            if (!muted) pendingMessages.push(new TextEncoder().encode(cleaned));
+            appendOutput(cleaned);
             return;
           }
           if (cleaned.length > 0) {
-            term.write(cleaned);
+            if (!muted) term.write(cleaned);
             appendOutput(cleaned);
           }
         } else if (typeof e.data === 'string') {
           const cleaned = stripTerminalNoise(e.data);
           if (!ready) {
-            pendingMessages.push(new TextEncoder().encode(cleaned));
+            if (!muted) pendingMessages.push(new TextEncoder().encode(cleaned));
+            appendOutput(cleaned);
             return;
           }
           if (cleaned.length > 0) {
-            term.write(cleaned);
+            if (!muted) term.write(cleaned);
             appendOutput(cleaned);
           }
         }

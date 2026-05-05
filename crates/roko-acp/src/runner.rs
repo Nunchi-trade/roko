@@ -716,12 +716,11 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
             CoreRuntimeEvent::AgentTrace {
                 run_id, reasoning, ..
             } => {
-                if self.accepts_run(run_id) {
-                    if let Some(reasoning) = reasoning {
-                        if !reasoning.trim().is_empty() {
-                            self.publish(CognitiveEvent::ThinkingChunk(reasoning.clone()));
-                        }
-                    }
+                if self.accepts_run(run_id)
+                    && let Some(reasoning) = reasoning
+                    && !reasoning.trim().is_empty()
+                {
+                    self.publish(CognitiveEvent::ThinkingChunk(reasoning.clone()));
                 }
             }
             CoreRuntimeEvent::WorkflowCompleted { run_id, outcome } => {

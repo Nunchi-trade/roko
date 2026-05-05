@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { stripAnsi } from '../../lib/strip-ansi';
 import './AgentFeed.css';
 
 interface AgentEvent {
@@ -23,6 +24,27 @@ const TYPE_LABELS: Record<AgentEvent['type'], string> = {
   error: 'error',
   status: 'status',
 };
+
+/** Icon per event type for visual scanning. */
+const TYPE_ICONS: Record<AgentEvent['type'], string> = {
+  inference: '\u2726',  // four-pointed star
+  tool_call: '\u2192',  // right arrow
+  gate:      '\u2713',  // checkmark
+  error:     '\u2717',  // X mark
+  status:    '\u00B7',  // middle dot
+};
+
+/** Refine gate type: a gate event whose summary mentions "fail" is an error. */
+function resolveGateType(ev: AgentEvent): { type: AgentEvent['type']; icon: string } {
+  if (ev.type === 'gate') {
+    const text = ev.summary.toLowerCase();
+    if (/fail/i.test(text)) {
+      return { type: 'error', icon: '\u2717' };
+    }
+    return { type: 'gate', icon: '\u2713' };
+  }
+  return { type: ev.type, icon: TYPE_ICONS[ev.type] };
+}
 
 function formatTs(ms: number): string {
   const d = new Date(ms);
@@ -70,18 +92,27 @@ export default function AgentFeed({
         {events.length === 0 ? (
           <div className="agent-feed__empty">No events</div>
         ) : (
-          events.map((ev) => (
-            <div key={ev.id} className="agent-feed__event">
-              <span className="agent-feed__ts">{formatTs(ev.timestamp)}</span>
-              <span className={`agent-feed__type agent-feed__type--${ev.type}`}>
-                {TYPE_LABELS[ev.type]}
-              </span>
-              <span className="agent-feed__summary">{ev.summary}</span>
-              {ev.detail && (
-                <div className="agent-feed__detail">{ev.detail}</div>
-              )}
-            </div>
-          ))
+          events.map((ev) => {
+            const { type: resolvedType, icon } = resolveGateType(ev);
+            const cleanSummary = stripAnsi(ev.summary);
+            const cleanDetail = ev.detail ? stripAnsi(ev.detail) : undefined;
+
+            return (
+              <div key={ev.id} className={`agent-feed__event agent-feed__event--${resolvedType}`}>
+                <span className={`agent-feed__icon agent-feed__icon--${resolvedType}`}>
+                  {icon}
+                </span>
+                <span className="agent-feed__ts">{formatTs(ev.timestamp)}</span>
+                <span className={`agent-feed__type agent-feed__type--${resolvedType}`}>
+                  {TYPE_LABELS[ev.type]}
+                </span>
+                <span className="agent-feed__summary">{cleanSummary}</span>
+                {cleanDetail && (
+                  <div className="agent-feed__detail">{cleanDetail}</div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
       <div className="agent-feed__fade" />

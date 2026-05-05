@@ -1,12 +1,13 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { lookupCmdDesc } from '../lib/cmd-descriptions';
+import { stripAnsi } from '../lib/strip-ansi';
 import { TraceAnnotation } from './inference';
 import './CommandLog.css';
 
 interface LogEntry {
   ts: string;
   text: string;
-  type?: 'info' | 'success' | 'error' | 'dim';
+  type?: 'info' | 'success' | 'error' | 'warning' | 'dim';
   /** T7.60: Optional trace metadata for inference-related log lines. */
   trace?: {
     agentName?: string;
@@ -15,6 +16,20 @@ interface LogEntry {
     confidence?: number;
     cost?: number;
   };
+}
+
+/** Internal probe/noise patterns to filter from the log. */
+const NOISE_PATTERNS = [
+  /^.*__rk_ec=\$\?/,
+  /^.*__ROKO_/,
+  /^.*printf\s+'\\033\]7777/,
+  /^\s*\(exit\s+\$__rk_ec\)/,
+  /^.*\\033\]7777;D;/,
+];
+
+function isNoiseLine(text: string): boolean {
+  const clean = stripAnsi(text);
+  return NOISE_PATTERNS.some((p) => p.test(clean));
 }
 
 interface CommandLogProps {
@@ -147,10 +162,23 @@ function XIcon() {
   );
 }
 
+function WarningIcon() {
+  return (
+    <span className="log-status-icon">
+      <svg viewBox="0 0 14 14" fill="none" className="log-icon-warning">
+        <path d="M7 2L1 12h12L7 2z" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        <line x1="7" y1="6" x2="7" y2="9" strokeWidth="1.2" strokeLinecap="round" />
+        <circle cx="7" cy="10.5" r="0.6" fill="currentColor" stroke="none" />
+      </svg>
+    </span>
+  );
+}
+
 function StatusIcon({ type }: { type: LogEntry['type'] }) {
   switch (type) {
     case 'success': return <CheckIcon />;
     case 'error': return <XIcon />;
+    case 'warning': return <WarningIcon />;
     case 'dim': return null;
     case 'info':
     default: return <DotIcon />;
@@ -350,9 +378,11 @@ function LogEntryRow({ entry, index, isNewest, isExiting }: {
   isNewest: boolean;
   isExiting: boolean;
 }) {
-  const trace = entry.trace ?? extractTrace(entry.text);
+  // Strip ANSI escape codes from the display text
+  const cleanText = stripAnsi(entry.text);
+  const trace = entry.trace ?? extractTrace(cleanText);
   const entryType = entry.type ?? 'info';
-  const isCommand = entry.text.startsWith('$ ');
+  const isCommand = cleanText.startsWith('$ ');
 
   const className = [
     'log-entry',
@@ -368,10 +398,10 @@ function LogEntryRow({ entry, index, isNewest, isExiting }: {
       <span className="log-ts" title={entry.ts}>{relativeTime(entry.ts)}</span>
       <div className="log-entry-content">
         <div className="log-entry-main">
-          <TypewriterText text={entry.text} />
-          {isCommand && <CopyButton text={entry.text} />}
+          <TypewriterText text={cleanText} />
+          {isCommand && <CopyButton text={cleanText} />}
         </div>
-        {isCommand && <EntryDescription text={entry.text} />}
+        {isCommand && <EntryDescription text={cleanText} />}
       </div>
       {trace && trace.tier && trace.model && (
         <TraceAnnotation
@@ -421,27 +451,31 @@ export default function CommandLog({ entries, maxHeight = '300px' }: CommandLogP
 
   const showTopShadow = useScrollShadow(containerRef);
 
+  // Filter out internal probe noise, then build grouped render items
+  const filteredEntries = useMemo(
+    () => entries.filter((e) => !isNoiseLine(e.text)),
+    [entries],
+  );
+  const renderItems = useMemo(() => groupEntries(filteredEntries), [filteredEntries]);
+
   // Track the newest entry index for glow highlight
-  const newestIndex = entries.length - 1;
+  const newestIndex = filteredEntries.length - 1;
 
   // Smooth scroll to newest entry
   useEffect(() => {
-    if (entries.length > prevLengthRef.current) {
+    if (filteredEntries.length > prevLengthRef.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-    prevLengthRef.current = entries.length;
-  }, [entries.length]);
+    prevLengthRef.current = filteredEntries.length;
+  }, [filteredEntries.length]);
 
   // Cascade-out animation when entries are cleared
   useEffect(() => {
-    if (prevLengthRef.current > 0 && entries.length === 0) {
+    if (prevLengthRef.current > 0 && filteredEntries.length === 0) {
       // Already cleared, nothing to animate
       setExitingSet(new Set());
     }
-  }, [entries.length]);
-
-  // Build grouped render items
-  const renderItems = useMemo(() => groupEntries(entries), [entries]);
+  }, [filteredEntries.length]);
 
   return (
     <div className={`command-log-wrapper${showTopShadow ? ' has-scroll-shadow' : ''}`}>

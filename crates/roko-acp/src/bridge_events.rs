@@ -1457,6 +1457,7 @@ where
 
 /// Dispatches a prompt via the Anthropic adapter through the shared model stream contract.
 /// Used for explicitly AnthropicApi-configured models in ACP.
+#[allow(clippy::too_many_arguments)]
 async fn run_anthropic_cognitive_task(
     session_id: &str,
     messages: &[serde_json::Value],

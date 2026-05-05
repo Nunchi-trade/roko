@@ -48,15 +48,6 @@ pub(crate) fn cmd_repl(cli: &Cli) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-/// One-shot prompt dispatch via the v2 inline path.
-///
-/// Delegates to [`roko_cli::unified::cmd_oneshot_inline`] which uses
-/// `ChatAgentSession` for full system prompt, tools, MCP, and safety.
-/// The legacy `run_once()` path is no longer called.
-pub(crate) async fn cmd_oneshot(cli: &Cli, prompt: &str) -> Result<i32> {
-    roko_cli::unified::cmd_oneshot_inline(prompt, cli.quiet).await
-}
-
 /// Read piped stdin and dispatch as a one-shot prompt.
 ///
 /// Routes through the v2 inline path, not the legacy `run_once()` stub.
@@ -1616,6 +1607,7 @@ pub(crate) fn preflight_provider_for_model(
 /// Check that the gate pipeline tools (cargo, git, clippy) are available.
 /// Returns the names of any missing tools. The caller should warn but not
 /// necessarily abort — some gate rungs may not need all tools.
+#[cfg(feature = "legacy-runner-v2")]
 pub(crate) fn preflight_gate_deps() -> Vec<String> {
     let mut missing = Vec::new();
     for tool in &["cargo", "git"] {

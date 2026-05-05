@@ -587,7 +587,9 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
         });
 
         // Route to panel-specific metric state
-        const num = parseFloat(value) || 0;
+        // Strip currency symbols ($) and commas before parsing —
+        // result.cost arrives as "$0.12", result.tokens as "1,234"
+        const num = parseFloat(value.replace(/[$,]/g, '')) || 0;
         const updateMetric = (setter: React.Dispatch<React.SetStateAction<RunMetrics>>, field: keyof RunMetrics) => {
           setter((prev) => ({ ...prev, [field]: field === 'calls' ? prev.calls + 1 : num }));
         };

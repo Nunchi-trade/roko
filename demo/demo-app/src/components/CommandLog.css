@@ -144,6 +144,8 @@
 .log-success .log-text-typewriter { color: var(--success); }
 .log-error .log-text,
 .log-error .log-text-typewriter { color: var(--rose-bright); }
+.log-warning .log-text,
+.log-warning .log-text-typewriter { color: var(--warning); }
 .log-dim .log-text,
 .log-dim .log-text-typewriter { color: var(--text-soft); }
 
@@ -244,6 +246,18 @@
 
 .log-copy-btn.log-copy-ok {
   opacity: 1;
+}
+
+/* ── Warning left-border ─────────────────────────────── */
+
+.log-warning {
+  border-left-color: var(--warning);
+}
+
+/* Warning icon */
+.log-icon-warning {
+  stroke: var(--warning);
+  color: var(--warning);
 }
 
 /* ── Error left-border pulse ─────────────────────────── */

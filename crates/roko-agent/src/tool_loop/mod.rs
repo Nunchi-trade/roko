@@ -982,9 +982,13 @@ impl ToolLoop {
             // Send current conversation to the backend.
             let response = match match &event_tx {
                 Some(event_tx) => {
-                    self.backend
-                        .send_turn_streaming(&messages, &rendered_tools, &session, event_tx.clone())
-                        .await
+                    self.send_turn_streaming_with_retry(
+                        &messages,
+                        &rendered_tools,
+                        &session,
+                        event_tx.clone(),
+                    )
+                    .await
                 }
                 None => {
                     self.send_turn_with_retry(&messages, &rendered_tools, &session)
@@ -1271,6 +1275,51 @@ impl ToolLoop {
                     let delay = self
                         .retry_policy
                         .delay_with_retry_after(attempt, error.retry_after_ms());
+                    tracing::warn!(
+                        attempt,
+                        delay_ms = delay,
+                        error = %error,
+                        "backing off before retry"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(LlmError::RetriesExhausted)
+    }
+
+    /// Streaming variant of [`send_turn_with_retry`](Self::send_turn_with_retry).
+    ///
+    /// Applies the same retry policy with exponential backoff when the
+    /// streaming backend returns a retryable `LlmError::Provider` error.
+    async fn send_turn_streaming_with_retry(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+        session: &SessionState,
+        event_tx: mpsc::Sender<StreamChunk>,
+    ) -> Result<BackendResponse, LlmError> {
+        for attempt in 0..self.retry_policy.max_attempts {
+            match self
+                .backend
+                .send_turn_streaming(messages, tools, session, event_tx.clone())
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(LlmError::Provider(ref error))
+                    if self.retry_policy.should_retry(error, attempt) =>
+                {
+                    let delay = self
+                        .retry_policy
+                        .delay_with_retry_after(attempt, error.retry_after_ms());
+                    tracing::warn!(
+                        attempt,
+                        delay_ms = delay,
+                        error = %error,
+                        "backing off streaming turn before retry"
+                    );
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
                 Err(error) => return Err(error),

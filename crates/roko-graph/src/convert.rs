@@ -14,7 +14,6 @@
 
 use std::collections::HashSet;
 
-use serde_json::json;
 use tracing::warn;
 
 use crate::types::{Edge, Graph, GraphError, GraphMetadata, Node};
@@ -221,6 +220,7 @@ pub fn plan_to_graph_with_endpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn make_task(id: &str, depends_on: &[&str]) -> (String, PlanTaskInfo) {
         (

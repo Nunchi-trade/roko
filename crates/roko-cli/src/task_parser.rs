@@ -560,12 +560,18 @@ impl TaskDef {
         prompt
     }
 
-    /// Build a fix prompt for retry after verification failure.
-    /// Appends failure context to the original task prompt.
+    /// Build a focused prompt asking the agent to fix a specific verify failure.
+    ///
+    /// # Arguments
+    /// * `original_prompt` – the full prompt that was sent for the original task run
+    /// * `failing_phase`   – phase string of the step that failed ("compile", "test", …)
+    /// * `failing_command` – the shell command that failed
+    /// * `error_output`    – captured stdout+stderr (will be truncated to 4000 chars)
     pub fn build_fix_prompt(
         &self,
         original_prompt: &str,
         failing_phase: &str,
+        failing_command: &str,
         error_output: &str,
     ) -> String {
         let truncated = if error_output.len() > 4000 {
@@ -575,11 +581,16 @@ impl TaskDef {
         };
 
         format!(
-            "{}\n\n---\n\n## ⚠️ Verification Failed\n\n\
-            Phase: {}\n\n\
-            Error output:\n```\n{}\n```\n\n\
-            Fix the issue and ensure all verification steps pass.",
-            original_prompt, failing_phase, truncated
+            "## Auto-fix request\n\n\
+            ## Original task\n\n\
+            {}\n\n\
+            ## Failing verification step\n\n\
+            Phase: {}, Command: `{}`\n\n\
+            ## Error output\n\n\
+            ```\n{}\n```\n\n\
+            ## Instructions\n\n\
+            Fix the code so that `{}` exits 0. Do not change other behaviour.",
+            original_prompt, failing_phase, failing_command, truncated, failing_command
         )
     }
 
@@ -1872,11 +1883,12 @@ depends_on = ["other-plan:T3"]
         };
         let original = "Original task prompt";
         let error_msg = "compilation failed: undefined symbol";
-        let prompt = task.build_fix_prompt(original, "compile", error_msg);
+        let prompt = task.build_fix_prompt(original, "compile", "cargo check", error_msg);
 
         assert!(prompt.contains(original));
         assert!(prompt.contains(error_msg));
         assert!(prompt.contains("compile"));
+        assert!(prompt.contains("cargo check"));
     }
 
     #[test]
@@ -1910,7 +1922,7 @@ depends_on = ["other-plan:T3"]
         };
         let original = "Original prompt";
         let long_error = "x".repeat(5000);
-        let prompt = task.build_fix_prompt(original, "test", &long_error);
+        let prompt = task.build_fix_prompt(original, "test", "cargo test", &long_error);
 
         // The prompt should contain truncated error (4000 chars max)
         assert!(prompt.contains(original));

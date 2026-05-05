@@ -12,6 +12,7 @@ import {
   formatBps,
   formatPercent,
 } from '../../lib/isfr-api';
+import { stripAnsi } from '../../lib/strip-ansi';
 import { WS_BASE } from '../../lib/serve-url';
 import { useLiveApi } from '../../hooks/useLiveApi';
 import ChainTab from './ChainTab';
@@ -150,6 +151,7 @@ export default function IsfrDashboard() {
     { id: 'sources', label: 'Sources' },
     { id: 'history', label: 'History' },
     { id: 'events', label: 'Events' },
+    { id: 'agents', label: 'Agents' },
     { id: 'chain', label: 'Chain' },
     { id: 'onchain', label: 'On-Chain', hidden: !showOnChain },
   ];
@@ -348,22 +350,26 @@ export default function IsfrDashboard() {
       </div>
 
       {/* ── TAB CONTENT ──────────────────────────────── */}
-      {tab === 'sources' ? (
-        <SourcesTab
-          sources={sources}
-          sourceHistory={sourceHistory}
-          readingsCache={readingsCache}
-          compositeBps={compositeBps}
-        />
-      ) : tab === 'history' ? (
-        <HistoryTab history={isfrHistory} />
-      ) : tab === 'events' ? (
-        <EventsTab eventLog={eventLog} />
-      ) : tab === 'chain' ? (
-        <ChainTab />
-      ) : tab === 'onchain' ? (
-        <OnChainTab />
-      ) : null}
+      <div key={tab} className="isfr-tab-content-enter">
+        {tab === 'sources' ? (
+          <SourcesTab
+            sources={sources}
+            sourceHistory={sourceHistory}
+            readingsCache={readingsCache}
+            compositeBps={compositeBps}
+          />
+        ) : tab === 'history' ? (
+          <HistoryTab history={isfrHistory} />
+        ) : tab === 'events' ? (
+          <EventsTab eventLog={eventLog} />
+        ) : tab === 'agents' ? (
+          <AgentsTab />
+        ) : tab === 'chain' ? (
+          <ChainTab />
+        ) : tab === 'onchain' ? (
+          <OnChainTab />
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -477,7 +483,7 @@ function SourcesTab({
 
   return (
     <div className="isfr-source-grid dash-stagger" style={{ '--stagger-i': 2 } as React.CSSProperties}>
-      {sources.map((src) => {
+      {sources.map((src, idx) => {
         const history = sourceHistory[src.name] ?? [];
         const historyBps = history.map((h) => h.bps);
         const meta = readingsCache[src.name] ?? null;
@@ -497,6 +503,7 @@ function SourcesTab({
           <div
             key={src.id}
             className="isfr-source-card"
+            style={{ '--card-i': idx } as React.CSSProperties}
             onClick={() => setExpandedId(expanded ? null : src.id)}
           >
             {/* Row 1: icon, name, class badge, weight bar, health dot */}
@@ -1021,15 +1028,373 @@ function EventsTab({ eventLog }: { eventLog: IsfrEventEntry[] }) {
         {merged.length === 0 && (
           <div className="isfr-events-empty">Waiting for events&hellip;</div>
         )}
-        {merged.map((evt, i) => (
-          <div key={`${evt.ts}-${i}`} className="isfr-events-row">
-            <span className="isfr-events-ts">{formatTs(evt.ts)}</span>
-            <span className={`isfr-events-type isfr-events-type--${evt.type}`}>
-              [{evt.type}]
-            </span>
-            <span className="isfr-events-msg">{evt.message}</span>
+        {merged.map((evt, i) => {
+          const icon = evt.type === 'rate' ? '\u2713'
+            : evt.type === 'source' ? '\u2192'
+            : evt.type === 'keeper' ? '\u00B7'
+            : '\u00B7';
+          return (
+            <div key={`${evt.ts}-${i}`} className="isfr-events-row">
+              <span className={`isfr-events-icon isfr-events-icon--${evt.type}`}>
+                {icon}
+              </span>
+              <span className="isfr-events-ts">{formatTs(evt.ts)}</span>
+              <span className={`isfr-events-type isfr-events-type--${evt.type}`}>
+                [{evt.type}]
+              </span>
+              <span className="isfr-events-msg">{stripAnsi(evt.message)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ── Agents Tab ──────────────────────────────────────────────── */
+
+const AGENT_EVENT_TYPES = [
+  'agent_spawned',
+  'agent_output',
+  'agent_completed',
+  'agent_failed',
+  'agent_trace',
+  'task_started',
+  'task_completed',
+  'task_failed',
+  'gate_started',
+  'gate_passed',
+  'gate_failed',
+  'gate_result',
+] as const;
+
+const MAX_AGENT_LOG_LINES = 500;
+
+type AgentStatus = 'running' | 'completed' | 'failed';
+
+interface TrackedAgent {
+  id: string;
+  name: string;
+  role: string;
+  model: string;
+  status: AgentStatus;
+  spawnedAt: number;
+  lines: AgentLogLine[];
+}
+
+interface AgentLogLine {
+  ts: number;
+  type: 'output' | 'trace' | 'gate' | 'task' | 'lifecycle';
+  level: 'info' | 'success' | 'error' | 'warning' | 'muted';
+  text: string;
+}
+
+function classifyLogLevel(type: string, event: Record<string, unknown>): AgentLogLine['level'] {
+  switch (type) {
+    case 'agent_completed':
+    case 'task_completed':
+    case 'gate_passed':
+      return 'success';
+    case 'gate_result':
+      return event.passed || event.ok ? 'success' : 'error';
+    case 'agent_failed':
+    case 'task_failed':
+    case 'gate_failed':
+      return 'error';
+    case 'agent_trace':
+      return 'muted';
+    default:
+      return 'info';
+  }
+}
+
+function formatLogLine(type: string, event: Record<string, unknown>): string {
+  switch (type) {
+    case 'agent_output': {
+      const text = event.text ?? event.output ?? event.content ?? '';
+      return String(text).slice(0, 500);
+    }
+    case 'agent_trace': {
+      const tool = event.tool_name ?? event.tool ?? '';
+      const reasoning = event.reasoning ?? '';
+      if (tool && reasoning) return `[${tool}] ${String(reasoning).slice(0, 300)}`;
+      if (tool) return `tool_call: ${tool}`;
+      if (reasoning) return String(reasoning).slice(0, 300);
+      return JSON.stringify(event).slice(0, 200);
+    }
+    case 'agent_completed': {
+      const tokens = event.total_tokens ?? event.tokens ?? '';
+      const cost = event.cost ?? '';
+      const parts = ['Agent completed'];
+      if (tokens) parts.push(`tokens=${tokens}`);
+      if (cost) parts.push(`cost=$${typeof cost === 'number' ? cost.toFixed(4) : cost}`);
+      return parts.join(' ');
+    }
+    case 'agent_failed':
+      return `Agent failed: ${event.error ?? event.message ?? 'unknown'}`;
+    case 'task_started':
+      return `Task ${event.task_id ?? event.task ?? ''} started${event.phase ? ` (${event.phase})` : ''}`;
+    case 'task_completed':
+      return `Task ${event.task_id ?? event.task ?? ''} completed [${event.status ?? 'ok'}]`;
+    case 'task_failed':
+      return `Task ${event.task_id ?? event.task ?? ''} failed: ${event.error ?? event.message ?? ''}`;
+    case 'gate_started':
+      return `Gate ${event.gate ?? event.name ?? ''} started`;
+    case 'gate_passed':
+      return `Gate ${event.gate ?? event.name ?? ''} passed`;
+    case 'gate_failed':
+      return `Gate ${event.gate ?? event.name ?? ''} failed: ${event.reason ?? event.message ?? ''}`;
+    case 'gate_result':
+      return `Gate ${event.gate ?? event.name ?? ''} ${(event.passed || event.ok) ? 'PASS' : 'FAIL'}`;
+    default:
+      return JSON.stringify(event).slice(0, 200);
+  }
+}
+
+function lineTypeFromEvent(type: string): AgentLogLine['type'] {
+  if (type.startsWith('agent_output')) return 'output';
+  if (type.startsWith('agent_trace')) return 'trace';
+  if (type.startsWith('gate_')) return 'gate';
+  if (type.startsWith('task_')) return 'task';
+  return 'lifecycle';
+}
+
+function AgentsTab() {
+  const [agents, setAgents] = useState<Map<string, TrackedAgent>>(new Map());
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const agentsRef = useRef(agents);
+  agentsRef.current = agents;
+
+  useContextEventSubscription(
+    AGENT_EVENT_TYPES as unknown as string[],
+    useCallback((event: unknown) => {
+      if (!event || typeof event !== 'object') return;
+      const ev = event as Record<string, unknown>;
+      const type = typeof ev.type === 'string' ? ev.type : 'unknown';
+      const agentId = String(ev.agentId ?? ev.agent_id ?? ev.agent_name ?? ev.name ?? '');
+      if (!agentId) return;
+      const ts = typeof ev.timestamp_ms === 'number' ? ev.timestamp_ms : Date.now();
+
+      setAgents((prev) => {
+        const next = new Map(prev);
+
+        if (type === 'agent_spawned') {
+          next.set(agentId, {
+            id: agentId,
+            name: String(ev.agent_name ?? ev.name ?? agentId),
+            role: String(ev.role ?? ''),
+            model: String(ev.model ?? ''),
+            status: 'running',
+            spawnedAt: ts,
+            lines: [{ ts, type: 'lifecycle', level: 'info', text: `Agent spawned (model=${ev.model ?? '?'}, role=${ev.role ?? '?'})` }],
+          });
+          return next;
+        }
+
+        const existing = next.get(agentId);
+        if (!existing) {
+          // Create agent entry on first non-spawn event
+          const agent: TrackedAgent = {
+            id: agentId,
+            name: String(ev.agent_name ?? ev.name ?? agentId),
+            role: '',
+            model: '',
+            status: 'running',
+            spawnedAt: ts,
+            lines: [],
+          };
+          next.set(agentId, agent);
+        }
+
+        const agent = next.get(agentId)!;
+        const line: AgentLogLine = {
+          ts,
+          type: lineTypeFromEvent(type),
+          level: classifyLogLevel(type, ev),
+          text: formatLogLine(type, ev),
+        };
+        const newLines = [...agent.lines, line].slice(-MAX_AGENT_LOG_LINES);
+
+        let status = agent.status;
+        if (type === 'agent_completed') status = 'completed';
+        if (type === 'agent_failed') status = 'failed';
+
+        next.set(agentId, { ...agent, status, lines: newLines });
+        return next;
+      });
+    }, []),
+  );
+
+  const agentList = useMemo(() =>
+    Array.from(agents.values()).sort((a, b) => b.spawnedAt - a.spawnedAt),
+    [agents],
+  );
+
+  const expanded = expandedId ? agents.get(expandedId) ?? null : null;
+
+  return (
+    <div className="isfr-agents-wrap dash-stagger" style={{ '--stagger-i': 2 } as React.CSSProperties}>
+      <div className="isfr-agents-header">
+        <div className="isfr-agents-meta">
+          <span className="isfr-agents-count">
+            {agentList.filter((a) => a.status === 'running').length} running
+          </span>
+          <span className="isfr-agents-count">{agentList.length} total</span>
+        </div>
+      </div>
+
+      {agentList.length === 0 ? (
+        <div className="isfr-events-empty">Waiting for agent activity&hellip;</div>
+      ) : expanded ? (
+        /* ── Expanded single-agent view ─── */
+        <AgentLogPanel agent={expanded} onBack={() => setExpandedId(null)} />
+      ) : (
+        /* ── Grid of agent cards ─── */
+        <div className="isfr-agents-grid">
+          {agentList.map((agent, idx) => (
+            <AgentCard key={agent.id} agent={agent} index={idx} onExpand={() => setExpandedId(agent.id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Agent Card (summary with live mini-log) ─── */
+
+function AgentCard({ agent, index, onExpand }: { agent: TrackedAgent; index: number; onExpand: () => void }) {
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const recentLines = useMemo(() => agent.lines.slice(-20), [agent.lines]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [recentLines.length]);
+
+  const statusColor =
+    agent.status === 'running' ? 'var(--success)' :
+    agent.status === 'completed' ? 'var(--text-dim)' :
+    'var(--rose-bright)';
+
+  return (
+    <div
+      className={`agent-card${agent.status === 'running' ? ' agent-card--running' : ''}`}
+      style={{ '--card-i': index } as React.CSSProperties}
+      onClick={onExpand}
+    >
+      <div className="agent-card-header">
+        <span className="agent-card-dot" style={{ background: statusColor }} />
+        <span className="agent-card-name">{agent.name}</span>
+        <span className="agent-card-status">{agent.status}</span>
+      </div>
+      {(agent.role || agent.model) && (
+        <div className="agent-card-meta">
+          {agent.role && <span className="agent-card-tag">{agent.role}</span>}
+          {agent.model && <span className="agent-card-tag">{agent.model}</span>}
+        </div>
+      )}
+      <div className="agent-card-log">
+        {recentLines.map((line, i) => (
+          <div key={`${line.ts}-${i}`} className={`agent-card-line agent-card-line--${line.level}`}>
+            {line.text}
           </div>
         ))}
+        <div ref={bottomRef} />
+      </div>
+      <div className="agent-card-footer">
+        <span className="agent-card-lines-count">{agent.lines.length} lines</span>
+        <span className="agent-card-expand-hint">click to expand</span>
+      </div>
+    </div>
+  );
+}
+
+/* ── Expanded Agent Log Panel ─── */
+
+const LOG_LEVEL_ICONS: Record<AgentLogLine['level'], string> = {
+  success: '\u2713',
+  error:   '\u2717',
+  warning: '\u21BB',
+  info:    '\u2192',
+  muted:   '\u00B7',
+};
+
+function AgentLogPanel({ agent, onBack }: { agent: TrackedAgent; onBack: () => void }) {
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [typeFilter, setTypeFilter] = useState<AgentLogLine['type'] | 'all'>('all');
+
+  const filtered = useMemo(() => {
+    if (typeFilter === 'all') return agent.lines;
+    return agent.lines.filter((l) => l.type === typeFilter);
+  }, [agent.lines, typeFilter]);
+
+  useEffect(() => {
+    if (autoScroll) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [filtered.length, autoScroll]);
+
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    setAutoScroll(nearBottom);
+  }, []);
+
+  const statusColor =
+    agent.status === 'running' ? 'var(--success)' :
+    agent.status === 'completed' ? 'var(--text-dim)' :
+    'var(--rose-bright)';
+
+  const TYPES: Array<AgentLogLine['type'] | 'all'> = ['all', 'output', 'trace', 'gate', 'task', 'lifecycle'];
+
+  return (
+    <div className="agent-panel">
+      <div className="agent-panel-header">
+        <button className="agent-panel-back" onClick={onBack}>&larr; All Agents</button>
+        <span className="agent-card-dot" style={{ background: statusColor }} />
+        <span className="agent-panel-name">{agent.name}</span>
+        {agent.role && <span className="agent-card-tag">{agent.role}</span>}
+        {agent.model && <span className="agent-card-tag">{agent.model}</span>}
+        <span className="agent-panel-count">{filtered.length} lines</span>
+      </div>
+      <div className="agent-panel-filters">
+        {TYPES.map((t) => (
+          <button
+            key={t}
+            className={`isfr-events-filter-btn${typeFilter === t ? ' isfr-events-filter-btn--active' : ''}`}
+            onClick={() => setTypeFilter(t)}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+      <div ref={containerRef} className="agent-panel-log" onScroll={handleScroll}>
+        {!autoScroll && (
+          <button
+            className="isfr-events-jump"
+            style={{ position: 'sticky', top: 0, zIndex: 2 }}
+            onClick={() => {
+              bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+              setAutoScroll(true);
+            }}
+          >
+            &darr; Jump to latest
+          </button>
+        )}
+        {filtered.length === 0 && (
+          <div className="isfr-events-empty">No {typeFilter} output yet&hellip;</div>
+        )}
+        {filtered.map((line, i) => (
+          <div key={`${line.ts}-${i}`} className={`agent-panel-line agent-panel-line--${line.level}`}>
+            <span className="agent-panel-line-icon">{LOG_LEVEL_ICONS[line.level]}</span>
+            <span className="agent-panel-line-ts">{formatTs(line.ts)}</span>
+            <span className={`agent-panel-line-type agent-panel-line-type--${line.type}`}>[{line.type}]</span>
+            <span className="agent-panel-line-text">{line.text}</span>
+          </div>
+        ))}
+        <div ref={bottomRef} />
       </div>
     </div>
   );
