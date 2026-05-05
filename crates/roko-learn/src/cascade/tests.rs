@@ -17,7 +17,7 @@ use roko_agent::gemini::{CodeExecutionResultPart, GroundingMetadata};
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::{
-    BehavioralState, Body, DaimonPolicy, Engram, Kind, OperatingFrequency, Temperament,
+    BehavioralState, Body, DaimonPolicy, Signal, Kind, OperatingFrequency, Temperament,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,7 +65,7 @@ impl ShadowModelRunner for StubShadowRunner {
 }
 
 fn agent_result(text: &str, success: bool, model: &str, wall_ms: u64) -> AgentResult {
-    let output = Engram::builder(Kind::AgentOutput)
+    let output = Signal::builder(Kind::AgentOutput)
         .body(Body::text(text))
         .tag("model", model)
         .build();

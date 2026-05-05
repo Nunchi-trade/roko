@@ -1,6 +1,6 @@
 //! Regression coverage for truthful gate verdicts.
 
-use roko_core::{Body, Context, Engram, GateConfig, GateRunner, Kind, ShellGateCommand, Verify};
+use roko_core::{Body, Context, Signal, GateConfig, GateRunner, Kind, ShellGateCommand, Verify};
 use roko_gate::{GateService, ShellGate};
 use std::path::Path;
 use tempfile::TempDir;
@@ -32,8 +32,8 @@ async fn run_gate_service(
         .expect("gate service should produce a report")
 }
 
-fn empty_signal() -> Engram {
-    Engram::builder(Kind::Task).body(Body::empty()).build()
+fn empty_signal() -> Signal {
+    Signal::builder(Kind::Task).body(Body::empty()).build()
 }
 
 fn scaffold_cargo_project(root: &Path) {

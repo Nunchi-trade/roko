@@ -136,12 +136,12 @@ impl ProviderAdapter for ClaudeCliAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Signal, Kind};
     use std::fs;
     use tempfile::tempdir;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn write_script(path: &std::path::Path, body: &str) {

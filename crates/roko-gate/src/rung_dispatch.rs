@@ -25,7 +25,7 @@ use crate::test_gate::TestGate;
 use crate::verify_chain_gate::{VERIFY_SCRIPT_TAG, VerifyChainGate};
 use async_trait::async_trait;
 use roko_core::config::{GateRungConfig, GatesConfig};
-use roko_core::{Context, Engram, Verdict, Verify};
+use roko_core::{Context, Signal, Verdict, Verify};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,11 +46,11 @@ const DEFAULT_INTEGRATION_TIMEOUT_SECS: u64 = 120;
 #[derive(Clone, Debug, Default)]
 pub struct RungExecutionInputs {
     /// `SymbolGate` expects a `SymbolManifest` body.
-    pub symbol_signal: Option<Engram>,
+    pub symbol_signal: Option<Signal>,
     /// `FactCheckGate` expects text or claim-like content.
-    pub fact_check_signal: Option<Engram>,
+    pub fact_check_signal: Option<Signal>,
     /// `LlmJudgeGate` expects a `JudgePayload` or text diff.
-    pub llm_judge_signal: Option<Engram>,
+    pub llm_judge_signal: Option<Signal>,
     /// INT-16: Code-intelligence context from `roko-index` used to enrich
     /// verification decisions.  Symbol and LLM-judge gates may use these
     /// hints to focus checks on relevant symbols / files.
@@ -215,7 +215,7 @@ impl GatePipelineBuilder {
 /// Any `rung > 6` executes every rung in order and flattens the resulting
 /// verdicts.
 pub async fn run_rung(
-    base_signal: &Engram,
+    base_signal: &Signal,
     ctx: &Context,
     rung: u32,
     inputs: &RungExecutionInputs,
@@ -241,7 +241,7 @@ fn gate_timeout_ms(config: &RungExecutionConfig) -> Option<u64> {
 
 /// Execute one [`Rung`] using the canonical 7-rung runtime mapping.
 pub async fn run_canonical_rung(
-    base_signal: &Engram,
+    base_signal: &Signal,
     ctx: &Context,
     rung: Rung,
     inputs: &RungExecutionInputs,
@@ -321,7 +321,7 @@ async fn run_symbol_gate(
 }
 
 async fn run_generated_test_gate(
-    base_signal: &Engram,
+    base_signal: &Signal,
     ctx: &Context,
     config: &RungExecutionConfig,
 ) -> Verdict {
@@ -336,7 +336,7 @@ async fn run_generated_test_gate(
 }
 
 async fn run_verify_chain_gate(
-    base_signal: &Engram,
+    base_signal: &Signal,
     ctx: &Context,
     config: &RungExecutionConfig,
 ) -> Verdict {
@@ -375,7 +375,7 @@ async fn run_fact_check_gate(
 }
 
 async fn run_property_test_gate(
-    base_signal: &Engram,
+    base_signal: &Signal,
     ctx: &Context,
     config: &RungExecutionConfig,
 ) -> Verdict {
@@ -404,7 +404,7 @@ async fn run_llm_judge_gate(
 }
 
 async fn run_integration_gate(
-    base_signal: &Engram,
+    base_signal: &Signal,
     ctx: &Context,
     config: &RungExecutionConfig,
 ) -> Verdict {
@@ -491,7 +491,7 @@ struct OptionalGate {
 
 #[async_trait]
 impl Verify for OptionalGate {
-    async fn verify(&self, engram: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, engram: &Signal, ctx: &Context) -> Verdict {
         let verdict = self.inner.verify(engram, ctx).await;
         if verdict.passed {
             verdict
@@ -519,7 +519,7 @@ struct CanonicalRungGate {
 
 #[async_trait]
 impl Verify for CanonicalRungGate {
-    async fn verify(&self, engram: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, engram: &Signal, ctx: &Context) -> Verdict {
         let verdicts =
             run_canonical_rung(engram, ctx, self.rung, &self.inputs, &self.execution).await;
         aggregate_rung_verdict(&self.name, &verdicts)

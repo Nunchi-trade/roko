@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    Context, Engram, Oracle, OracleDomain, OracleQuery, PredictedValue, Prediction,
+    Context, Signal, Oracle, OracleDomain, OracleQuery, PredictedValue, Prediction,
     PredictionAccuracy, PredictionInterval, PredictionProvenance, QueryPayload, ResearchMetric,
 };
 use std::collections::HashMap;
@@ -201,7 +201,7 @@ impl Oracle for ResearchOracle {
     async fn evaluate(
         &self,
         prediction: &Prediction,
-        outcome: &Engram,
+        outcome: &Signal,
     ) -> roko_core::error::Result<PredictionAccuracy> {
         let predicted = prediction.value.as_f64().unwrap_or(0.5);
         let actual = outcome

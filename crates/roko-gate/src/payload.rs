@@ -1,4 +1,4 @@
-//! Engram body payloads consumed and emitted by gates.
+//! Signal body payloads consumed and emitted by gates.
 //!
 //! These are structured types that round-trip through [`Body::Json`]. They
 //! live here (not in a shared `roko-types` crate) until a second crate needs
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// # Example
 ///
 /// ```
-/// use roko_core::{Engram, Kind, Body};
+/// use roko_core::{Signal, Kind, Body};
 /// use roko_gate::GatePayload;
 /// use std::path::PathBuf;
 ///
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 ///     extra_env: vec![],
 ///     label: Some("check-login-module".into()),
 /// };
-/// let sig = Engram::builder(Kind::Task)
+/// let sig = Signal::builder(Kind::Task)
 ///     .body(Body::from_json(&payload).expect("example payload should serialize"))
 ///     .build();
 /// ```

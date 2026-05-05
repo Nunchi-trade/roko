@@ -723,10 +723,10 @@ impl KillReport {
 mod tests {
     use super::*;
     use crate::mock::MockAgent;
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Signal, Kind};
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn ctx() -> Context {

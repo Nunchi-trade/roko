@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::agent::{Agent, AgentResult};
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Signal, Kind, Provenance};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -216,7 +216,7 @@ impl MockAgent {
 
 #[async_trait]
 impl Agent for MockAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let (reply, fail, usage, name) = match &self.mode {
             MockMode::Fixed { reply, fail } => (
                 reply.clone(),
@@ -386,8 +386,8 @@ fn ensure_non_empty(turns: Vec<MockFixtureTurn>) -> Vec<MockFixtureTurn> {
 mod tests {
     use super::*;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[tokio::test]

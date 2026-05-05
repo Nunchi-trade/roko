@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use roko_agent::{Agent, nl_to_format::NlToFormatConverter};
-use roko_core::{Body, Context, Engram, Kind};
+use roko_core::{Body, Context, Signal, Kind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -563,7 +563,7 @@ pub async fn extract_skill_candidates(
         .filter(|episode| episode_is_skill_candidate(episode))
     {
         let prompt = build_skill_candidate_prompt(episode);
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text(prompt))
             .build();
         let result = judge_agent.run(&input, &Context::now()).await;

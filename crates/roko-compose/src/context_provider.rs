@@ -23,7 +23,7 @@ use crate::ContextChunk;
 use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
-use roko_core::{Body, Engram, InclusionMode, Kind, OperatingFrequency, PromptPolicy, RoleProfile};
+use roko_core::{Body, Signal, InclusionMode, Kind, OperatingFrequency, PromptPolicy, RoleProfile};
 use roko_learn::error_pattern_store::{ErrorPatternStore, FailurePatternQuery};
 use roko_learn::section_effect::{
     DEFAULT_SECTION_EFFECTS_PATH, SectionEffect, SectionEffectivenessRegistry,
@@ -1416,7 +1416,7 @@ pub struct ContextProvider {
     /// Guardrails for learned section-effectiveness attention controls.
     learning_attention_config: LearningAttentionConfig,
     /// Recent pheromone signals available for enrichment.
-    pheromone_signals: Vec<Engram>,
+    pheromone_signals: Vec<Signal>,
 }
 
 impl ContextProvider {
@@ -1465,7 +1465,7 @@ impl ContextProvider {
 
     /// Attach a snapshot of recent pheromone signals to enrich future context.
     #[must_use]
-    pub fn with_pheromone_signals(mut self, pheromone_signals: Vec<Engram>) -> Self {
+    pub fn with_pheromone_signals(mut self, pheromone_signals: Vec<Signal>) -> Self {
         self.pheromone_signals = pheromone_signals;
         self
     }
@@ -1822,7 +1822,7 @@ fn add_verification(
 /// The `scope` filter accepts an exact plan/scope identifier or `all`.
 /// Signals without explicit scope metadata are treated as globally visible.
 #[must_use]
-pub fn pheromone_context(field: &[Engram], scope: &str) -> Vec<ContextChunk> {
+pub fn pheromone_context(field: &[Signal], scope: &str) -> Vec<ContextChunk> {
     let requested_scope = scope.to_ascii_lowercase();
     let mut chunks = field
         .iter()
@@ -2295,7 +2295,7 @@ const fn sibling_depends_on_me(_sibling: &SiblingTask, _task: &TaskInput) -> boo
     false
 }
 
-fn pheromone_chunk(signal: &Engram, scope: &str) -> ContextChunk {
+fn pheromone_chunk(signal: &Signal, scope: &str) -> ContextChunk {
     let kind = pheromone_kind(signal);
     let intensity = signal
         .tag("pheromone_intensity")
@@ -2347,7 +2347,7 @@ fn pheromone_priority(chunk: &ContextChunk) -> SectionPriority {
     }
 }
 
-fn pheromone_kind(signal: &Engram) -> &'static str {
+fn pheromone_kind(signal: &Signal) -> &'static str {
     let from_tag = signal
         .tag("pheromone_kind")
         .or_else(|| signal.tag("kind"))
@@ -2364,7 +2364,7 @@ fn pheromone_kind(signal: &Engram) -> &'static str {
     }
 }
 
-fn pheromone_matches_scope(signal: &Engram, requested_scope: &str) -> bool {
+fn pheromone_matches_scope(signal: &Signal, requested_scope: &str) -> bool {
     let scope = signal
         .tag("pheromone_scope")
         .or_else(|| signal.tag("scope"))
@@ -2374,7 +2374,7 @@ fn pheromone_matches_scope(signal: &Engram, requested_scope: &str) -> bool {
     requested_scope == "all" || scope == "global" || scope == requested_scope
 }
 
-fn render_signal_body(signal: &Engram) -> String {
+fn render_signal_body(signal: &Signal) -> String {
     match &signal.body {
         Body::Text(text) => text.trim().to_string(),
         Body::Json(value) => {
@@ -2734,21 +2734,21 @@ mod tests {
     #[test]
     fn pheromone_context_filters_by_scope_and_kind() {
         let signals = vec![
-            Engram::builder(Kind::Pheromone)
+            Signal::builder(Kind::Pheromone)
                 .body(Body::text("Reduce routing latency"))
                 .tag("pheromone_kind", "threat")
                 .tag("pheromone_scope", "plan-alpha")
                 .tag("pheromone_intensity", "0.92")
                 .tag("pheromone_confidence", "0.81")
                 .build(),
-            Engram::builder(Kind::Pheromone)
+            Signal::builder(Kind::Pheromone)
                 .body(Body::text("Reuse known-good prompt paths"))
                 .tag("pheromone_kind", "opportunity")
                 .tag("pheromone_scope", "global")
                 .tag("pheromone_intensity", "0.72")
                 .tag("pheromone_confidence", "0.88")
                 .build(),
-            Engram::builder(Kind::Task)
+            Signal::builder(Kind::Task)
                 .body(Body::text("Not a pheromone"))
                 .build(),
         ];
@@ -2769,7 +2769,7 @@ mod tests {
     fn resolve_includes_pheromone_sections_when_signals_are_present() {
         let workdir = PathBuf::from("/tmp/test");
         let provider = ContextProvider::new(workdir).with_pheromone_signals(vec![
-            Engram::builder(Kind::Pheromone)
+            Signal::builder(Kind::Pheromone)
                 .body(Body::text("Context assembly is too slow"))
                 .tag("pheromone_kind", "warning")
                 .tag("pheromone_scope", "plan-42")

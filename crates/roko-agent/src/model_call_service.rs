@@ -15,7 +15,7 @@ use roko_core::foundation::{
     ModelCallRequest, ModelCallResponse, ModelCaller, TokenBudget, TokenUsage,
 };
 use roko_core::{
-    Body, Context, Engram, EventConsumer, Kind, Result, RokoError, RuntimeEvent, ToolCallSummary,
+    Body, Context, Signal, EventConsumer, Kind, Result, RokoError, RuntimeEvent, ToolCallSummary,
     Usage,
 };
 use std::collections::HashMap;
@@ -811,7 +811,7 @@ fn knowledge_is_anti(entry: &serde_json::Value) -> bool {
         })
 }
 
-fn output_text(output: &Engram) -> String {
+fn output_text(output: &Signal) -> String {
     match &output.body {
         Body::Text(text) => text.clone(),
         Body::Json(value) => value.to_string(),
@@ -845,7 +845,7 @@ fn agent_trace_payloads(result: &crate::agent::AgentResult) -> Vec<AgentTracePay
         .collect()
 }
 
-fn agent_trace_payload(signal: &Engram) -> Option<AgentTracePayload> {
+fn agent_trace_payload(signal: &Signal) -> Option<AgentTracePayload> {
     if signal.kind.as_str() != "agent.trace" {
         return None;
     }
@@ -1356,7 +1356,7 @@ impl ProviderCallCell {
         fallback_models: &[String],
     ) -> std::result::Result<CellOutput, CellError> {
         let total_start = Instant::now();
-        let prompt = Engram::builder(Kind::Prompt)
+        let prompt = Signal::builder(Kind::Prompt)
             .body(Body::text(user_content))
             .build();
         let mut last_error = None;

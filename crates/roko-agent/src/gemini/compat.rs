@@ -6,7 +6,7 @@ use crate::provider::AgentOptions;
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
 use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
-use roko_core::{Context, Engram};
+use roko_core::{Context, Signal};
 use serde_json::{Map, Value};
 
 const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_REQUEST_TIMEOUT_MS;
@@ -71,7 +71,7 @@ impl GeminiCompatAgent {
 
 #[async_trait]
 impl Agent for GeminiCompatAgent {
-    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         self.inner.run(input, ctx).await
     }
 
@@ -223,7 +223,7 @@ mod tests {
             base_model(),
             &AgentOptions::default(),
         );
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text("Say hi"))
             .build();
 
@@ -266,7 +266,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text("Say hi"))
             .build();
 

@@ -25,7 +25,7 @@ use roko_core::agent::ProviderKind;
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Signal, Kind, Provenance};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -36,7 +36,7 @@ const DEFAULT_BASE_URL: &str = "https://api.perplexity.ai";
 
 /// `Agent` wrapper around the real Perplexity `/v1/embeddings` client.
 ///
-/// Extracts text from the input `Engram`, calls `embed::PerplexityEmbedAgent`
+/// Extracts text from the input `Signal`, calls `embed::PerplexityEmbedAgent`
 /// for real embeddings, and returns the float vectors as a JSON body.
 pub struct PerplexityEmbedAgentAdapter {
     inner: embed::PerplexityEmbedAgent,
@@ -61,7 +61,7 @@ impl PerplexityEmbedAgentAdapter {
 
 #[async_trait]
 impl Agent for PerplexityEmbedAgentAdapter {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let text = input.body.as_text().unwrap_or_default();
         match self.inner.embed(&[text]).await {
             Ok(vectors) => {

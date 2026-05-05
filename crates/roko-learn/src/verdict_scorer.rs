@@ -11,7 +11,7 @@
 //! with other scorers in a `SumScorer` or `MulScorer` chain.
 
 use roko_core::traits::Score as ScoreFn;
-use roko_core::{Context, Engram, Kind, Score};
+use roko_core::{Context, Signal, Kind, Score};
 
 /// Weights for verdict scoring dimensions.
 #[derive(Debug, Clone)]
@@ -74,7 +74,7 @@ impl VerdictAwareScorer {
     ///
     /// Severity ordering: compile error (1.0) > test failure (0.8) >
     /// lint warning (0.5) > pass (0.1).
-    fn severity_factor(&self, signal: &Engram) -> f32 {
+    fn severity_factor(&self, signal: &Signal) -> f32 {
         let gate_name = signal.tag("gate").unwrap_or("");
 
         let passed = signal
@@ -100,7 +100,7 @@ impl VerdictAwareScorer {
     ///
     /// Checks for matching `task_type`, `crate`, and `task_category` tags
     /// between the verdict engram and the current context.
-    fn relevance_factor(&self, signal: &Engram, ctx: &Context) -> f32 {
+    fn relevance_factor(&self, signal: &Signal, ctx: &Context) -> f32 {
         let mut relevance: f32 = 0.0;
         let mut checks: f32 = 0.0;
 
@@ -142,7 +142,7 @@ impl Default for VerdictAwareScorer {
 }
 
 impl ScoreFn for VerdictAwareScorer {
-    fn score(&self, signal: &Engram, ctx: &Context) -> Score {
+    fn score(&self, signal: &Signal, ctx: &Context) -> Score {
         // Only score GateVerdict engrams.
         if signal.kind != Kind::GateVerdict {
             return Score::ZERO;
@@ -326,11 +326,11 @@ impl VerdictHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Engram, Kind, Score};
+    use roko_core::{Body, Context, Signal, Kind, Score};
 
-    fn verdict_engram(gate: &str, passed: bool, age_ms: i64) -> Engram {
+    fn verdict_engram(gate: &str, passed: bool, age_ms: i64) -> Signal {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut e = Engram::builder(Kind::GateVerdict)
+        let mut e = Signal::builder(Kind::GateVerdict)
             .body(Body::empty())
             .build();
         e.created_at_ms = now - age_ms;
@@ -340,8 +340,8 @@ mod tests {
         e
     }
 
-    fn non_verdict_engram() -> Engram {
-        Engram::builder(Kind::Task).body(Body::empty()).build()
+    fn non_verdict_engram() -> Signal {
+        Signal::builder(Kind::Task).body(Body::empty()).build()
     }
 
     fn ctx_at_now() -> Context {

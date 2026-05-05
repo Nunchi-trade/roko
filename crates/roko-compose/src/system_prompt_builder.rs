@@ -42,7 +42,7 @@ use crate::token_counter::TokenCounter;
 use crate::{ContextChunk, GateFeedback, PadState};
 use roko_core::tool::ToolDef;
 use roko_core::traits::Score as ScoreFn;
-use roko_core::{AgentRole, Budget, Compose, Context, Engram, Result};
+use roko_core::{AgentRole, Budget, Compose, Context, Signal, Result};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;
@@ -873,11 +873,11 @@ impl SystemPromptBuilder {
 impl Compose for SystemPromptBuilder {
     fn compose(
         &self,
-        signals: &[Engram],
+        signals: &[Signal],
         budget: &Budget,
         scorer: &dyn ScoreFn,
         ctx: &Context,
-    ) -> Result<Engram> {
+    ) -> Result<Signal> {
         let mut built_sections = self
             .build_sections()
             .into_iter()
@@ -1413,7 +1413,7 @@ mod tests {
     struct ConstScorer;
 
     impl ScoreFn for ConstScorer {
-        fn score(&self, _signal: &Engram, _ctx: &Context) -> Score {
+        fn score(&self, _signal: &Signal, _ctx: &Context) -> Score {
             Score::NEUTRAL
         }
     }

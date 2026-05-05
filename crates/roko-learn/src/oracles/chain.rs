@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    ChainMetric, ChainQueryPayload, Context, Engram, Oracle, OracleDomain, OracleQuery,
+    ChainMetric, ChainQueryPayload, Context, Signal, Oracle, OracleDomain, OracleQuery,
     PredictedValue, Prediction, PredictionAccuracy, PredictionInterval, PredictionProvenance,
     QueryPayload,
 };
@@ -362,7 +362,7 @@ impl Oracle for ChainOracle {
     async fn evaluate(
         &self,
         prediction: &Prediction,
-        outcome: &Engram,
+        outcome: &Signal,
     ) -> roko_core::error::Result<PredictionAccuracy> {
         let predicted = prediction.value.as_f64().unwrap_or(0.5);
 

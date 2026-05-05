@@ -10,7 +10,7 @@
 //! | [`FallbackGate`] | Try primary; on failure try fallback | first passing verdict |
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verdict, Verify};
+use roko_core::{Context, Signal, Verdict, Verify};
 use std::fmt;
 
 // ─── ParallelGate ────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ impl fmt::Debug for ParallelGate {
 
 #[async_trait]
 impl Verify for ParallelGate {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
         let started = std::time::Instant::now();
 
         if self.gates.is_empty() {
@@ -203,7 +203,7 @@ impl fmt::Debug for VotingGate {
 
 #[async_trait]
 impl Verify for VotingGate {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
         let started = std::time::Instant::now();
 
         if self.gates.is_empty() {
@@ -315,7 +315,7 @@ impl fmt::Debug for FallbackGate {
 
 #[async_trait]
 impl Verify for FallbackGate {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
         let started = std::time::Instant::now();
 
         // Try primary first.
@@ -374,7 +374,7 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roko_core::{Body, Context, Engram, Kind, Verdict, Verify};
+    use roko_core::{Body, Context, Signal, Kind, Verdict, Verify};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -400,7 +400,7 @@ mod tests {
 
     #[async_trait]
     impl Verify for MockGate {
-        async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
+        async fn verify(&self, _signal: &Signal, _ctx: &Context) -> Verdict {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.pass {
                 Verdict::pass(&self.gate_name).with_score(0.9)
@@ -414,8 +414,8 @@ mod tests {
         }
     }
 
-    fn signal() -> Engram {
-        Engram::builder(Kind::Task).body(Body::empty()).build()
+    fn signal() -> Signal {
+        Signal::builder(Kind::Task).body(Body::empty()).build()
     }
 
     fn ctx() -> Context {

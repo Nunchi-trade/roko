@@ -5,7 +5,7 @@
 
 use crate::payload::GatePayload;
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Signal, Verify, Verdict};
 use std::time::Instant;
 use tokio::process::Command;
 
@@ -32,7 +32,7 @@ impl roko_core::Cell for FormatCheckGate {
 }
 
 impl Verify for FormatCheckGate {
-    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: Option<GatePayload> = signal.body.as_json().ok();
         let working_dir = payload.as_ref().map(|p| p.working_dir.clone());
@@ -83,8 +83,8 @@ mod tests {
     use super::*;
     use roko_core::{Body, Kind};
 
-    fn signal() -> Engram {
-        Engram::builder(Kind::Task).body(Body::empty()).build()
+    fn signal() -> Signal {
+        Signal::builder(Kind::Task).body(Body::empty()).build()
     }
 
     fn ctx() -> Context {

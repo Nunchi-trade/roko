@@ -1,6 +1,6 @@
 //! Scorers for prompt sections.
 //!
-//! `SectionScorer` ranks `Engram<PromptSection>` inputs by priority, recency,
+//! `SectionScorer` ranks `Signal<PromptSection>` inputs by priority, recency,
 //! and cache-layer fit. `GoalDirectedHeuristicScorer` adds goal-directed
 //! heuristic scoring for router-facing composition surfaces so budget pressure
 //! keeps sections that are both goal-aligned and information-bearing.
@@ -10,9 +10,9 @@ use std::hash::{Hash, Hasher};
 
 use crate::prompt::{PromptSection, SectionPriority};
 use roko_core::traits::Score as ScoreFn;
-use roko_core::{Context, Engram, Score};
+use roko_core::{Context, Signal, Score};
 
-/// Ranks `Engram<PromptSection>` inputs by importance.
+/// Ranks `Signal<PromptSection>` inputs by importance.
 ///
 /// Score breakdown:
 /// - **confidence**: priority mapped to `[0.2, 0.4, 0.8, 1.0]`
@@ -44,7 +44,7 @@ impl SectionScorer {
 }
 
 impl ScoreFn for SectionScorer {
-    fn score(&self, signal: &Engram, ctx: &Context) -> Score {
+    fn score(&self, signal: &Signal, ctx: &Context) -> Score {
         let Ok(section) = PromptSection::from_signal(signal) else {
             return Score::ZERO;
         };
@@ -152,7 +152,7 @@ impl GoalDirectedHeuristicScorer {
         self
     }
 
-    fn section_embedding(&self, signal: &Engram) -> Vec<f32> {
+    fn section_embedding(&self, signal: &Signal) -> Vec<f32> {
         let section = PromptSection::from_signal(signal).ok();
         let mut text = String::new();
         if let Some(section) = section {
@@ -169,7 +169,7 @@ impl GoalDirectedHeuristicScorer {
         embed_text(&text, self.embedding_dimensions)
     }
 
-    fn topic_belief(&self, signal: &Engram, section: Option<&PromptSection>) -> f64 {
+    fn topic_belief(&self, signal: &Signal, section: Option<&PromptSection>) -> f64 {
         let mut keys = Vec::new();
         if let Some(section) = section {
             keys.push(section.name.as_str());
@@ -193,7 +193,7 @@ impl GoalDirectedHeuristicScorer {
         0.5
     }
 
-    fn pragmatic_value(&self, signal: &Engram, section: Option<&PromptSection>) -> f32 {
+    fn pragmatic_value(&self, signal: &Signal, section: Option<&PromptSection>) -> f32 {
         let section_embedding = self.section_embedding(signal);
         let embedding_similarity = cosine_similarity(&self.goal_embeddings, &section_embedding);
         let lexical_similarity = section
@@ -213,7 +213,7 @@ impl GoalDirectedHeuristicScorer {
         (goal_similarity + priority_bonus).clamp(0.0, 1.0)
     }
 
-    fn epistemic_value(&self, signal: &Engram, section: Option<&PromptSection>) -> f32 {
+    fn epistemic_value(&self, signal: &Signal, section: Option<&PromptSection>) -> f32 {
         let belief = self.topic_belief(signal, section);
         let uncertainty = (1.0 - belief as f32).clamp(0.0, 1.0);
         let novelty_hint = signal.score.novelty.clamp(0.0, 1.0);
@@ -229,7 +229,7 @@ impl GoalDirectedHeuristicScorer {
 }
 
 impl ScoreFn for GoalDirectedHeuristicScorer {
-    fn score(&self, signal: &Engram, _ctx: &Context) -> Score {
+    fn score(&self, signal: &Signal, _ctx: &Context) -> Score {
         let Ok(section) = PromptSection::from_signal(signal) else {
             return Score::ZERO;
         };
@@ -370,7 +370,7 @@ mod tests {
     use crate::prompt::{CacheLayer, Placement};
     use std::collections::HashMap;
 
-    fn make_signal(priority: SectionPriority, content: &str, created_at_ms: i64) -> Engram {
+    fn make_signal(priority: SectionPriority, content: &str, created_at_ms: i64) -> Signal {
         PromptSection::new("x", content)
             .with_priority(priority)
             .with_cache_layer(CacheLayer::Plan)
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn non_section_signals_get_zero_score() {
         let scorer = SectionScorer::new();
-        let not_a_section = Engram::builder(roko_core::Kind::Task)
+        let not_a_section = Signal::builder(roko_core::Kind::Task)
             .body(roko_core::Body::text("not a section"))
             .build();
         let score = scorer.score(&not_a_section, &Context::at(0));

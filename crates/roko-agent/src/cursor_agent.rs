@@ -52,7 +52,7 @@ use crate::usage::{Usage, UsageObservation, UsageSource};
 use async_trait::async_trait;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::tool::{ToolCall, ToolContext, ToolResult};
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Signal, Kind, Provenance};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -409,7 +409,7 @@ impl CursorAgent {
         Ok(json)
     }
 
-    fn fail(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
+    fn fail(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -467,7 +467,7 @@ impl CursorAgent {
 
 #[async_trait]
 impl Agent for CursorAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -803,8 +803,8 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(poster: Arc<dyn HttpPoster>) -> CursorAgent {

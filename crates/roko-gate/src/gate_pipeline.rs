@@ -24,7 +24,7 @@
 //! *independent* pipelines is a concern one level up.
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, TestCount, Verdict, Verify};
+use roko_core::{Context, Signal, TestCount, Verdict, Verify};
 use std::fmt;
 use std::time::Instant;
 
@@ -206,7 +206,7 @@ impl roko_core::Cell for GatePipeline {
 
 #[async_trait]
 impl Verify for GatePipeline {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
         let started = Instant::now();
 
         // Empty pipeline trivially passes.
@@ -380,7 +380,7 @@ impl ComposedGatePipeline {
     async fn run_parallel(
         &self,
         indices: &[usize],
-        signal: &Engram,
+        signal: &Signal,
         ctx: &Context,
     ) -> Vec<Verdict> {
         let mut verdicts = Vec::with_capacity(indices.len());
@@ -395,7 +395,7 @@ impl ComposedGatePipeline {
 
 #[async_trait]
 impl Verify for ComposedGatePipeline {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
         let started = Instant::now();
 
         if self.gates.is_empty() {
@@ -641,7 +641,7 @@ fn build_aggregate_verdict(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roko_core::{Body, Context, Engram, Kind, TestCount, Verdict, Verify};
+    use roko_core::{Body, Context, Signal, Kind, TestCount, Verdict, Verify};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -695,7 +695,7 @@ mod tests {
 
     #[async_trait]
     impl Verify for MockGate {
-        async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
+        async fn verify(&self, _signal: &Signal, _ctx: &Context) -> Verdict {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mut v = if self.pass {
                 Verdict::pass(&self.name)
@@ -714,8 +714,8 @@ mod tests {
         }
     }
 
-    fn signal() -> Engram {
-        Engram::builder(Kind::Task).body(Body::empty()).build()
+    fn signal() -> Signal {
+        Signal::builder(Kind::Task).body(Body::empty()).build()
     }
 
     fn ctx() -> Context {
@@ -836,7 +836,7 @@ mod tests {
 
     #[async_trait]
     impl Verify for OrderedGate {
-        async fn verify(&self, _s: &Engram, _c: &Context) -> Verdict {
+        async fn verify(&self, _s: &Signal, _c: &Context) -> Verdict {
             let position = self.counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
                 position, self.expected_position,

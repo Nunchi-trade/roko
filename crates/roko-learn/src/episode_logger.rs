@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex as SyncMutex;
-use roko_core::{EmotionalTag, Engram};
+use roko_core::{EmotionalTag, Signal};
 use roko_primitives::hdc::{HdcVector, text_fingerprint};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -595,7 +595,7 @@ fn fnv1a_64(data: &[u8]) -> u64 {
     hash
 }
 
-fn suggest_template_from_episodes(episodes: &[Episode], signal: &Engram) -> Option<String> {
+fn suggest_template_from_episodes(episodes: &[Episode], signal: &Signal) -> Option<String> {
     let cutoff = Utc::now() - chrono::Duration::days(TEMPLATE_SUGGESTION_MAX_AGE_DAYS);
     let signal_fingerprint = text_fingerprint(&signal_fingerprint_text(signal));
 
@@ -730,7 +730,7 @@ fn normalized_template(template: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn signal_fingerprint_text(signal: &Engram) -> String {
+fn signal_fingerprint_text(signal: &Signal) -> String {
     let body_bytes = signal.body.canonical_bytes();
     let body = String::from_utf8_lossy(&body_bytes);
     let agent_template = signal
@@ -1123,7 +1123,7 @@ impl EpisodeLogger {
     /// Returns a logger error if the episode log cannot be read.
     pub async fn suggest_template_from_recent_episodes(
         path: impl AsRef<Path>,
-        signal: &Engram,
+        signal: &Signal,
     ) -> Result<Option<String>, LoggerError> {
         let episodes = Self::read_all_lossy(path).await?;
         Ok(suggest_template_from_episodes(&episodes, signal))
@@ -1262,7 +1262,7 @@ mod tests {
     use crate::hdc_fingerprint::{
         decode as decode_hdc_fingerprint, encode as encode_hdc_fingerprint, fingerprint_episode,
     };
-    use roko_core::{Body, Engram, Kind};
+    use roko_core::{Body, Signal, Kind};
     use tempfile::TempDir;
 
     fn tmp_log() -> (TempDir, PathBuf) {
@@ -1279,11 +1279,11 @@ mod tests {
         ep
     }
 
-    fn suggestion_signal(kind: Kind, body: &str) -> Engram {
-        Engram::builder(kind).body(Body::text(body)).build()
+    fn suggestion_signal(kind: Kind, body: &str) -> Signal {
+        Signal::builder(kind).body(Body::text(body)).build()
     }
 
-    fn episode_for_signal(template: &str, signal: &Engram, completed_at: DateTime<Utc>) -> Episode {
+    fn episode_for_signal(template: &str, signal: &Signal, completed_at: DateTime<Utc>) -> Episode {
         let mut episode = Episode::new("agent-a", "task-a");
         episode.agent_template = template.to_string();
         episode.timestamp = completed_at;

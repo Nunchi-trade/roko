@@ -16,7 +16,7 @@ use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::tool::ToolResult;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Signal, Kind, Provenance};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ use tokio::time::timeout;
 /// ```ignore
 /// // Echo the prompt back (degenerate but demonstrates flow):
 /// let agent = ExecAgent::new("cat", vec![], SafetyLayer::with_defaults());
-/// let prompt = Engram::builder(Kind::Prompt).body(Body::text("ping")).build();
+/// let prompt = Signal::builder(Kind::Prompt).body(Body::text("ping")).build();
 /// let result = agent.run(&prompt, &Context::now()).await;
 /// assert_eq!(result.output.body.as_text().unwrap().trim(), "ping");
 /// ```
@@ -118,7 +118,7 @@ impl ExecAgent {
 #[async_trait]
 #[allow(clippy::too_many_lines)]
 impl Agent for ExecAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
         if let Err(err) = self.safety.check_exec_command(&self.program, &self.args) {
             return self.failure_signal(
@@ -370,7 +370,7 @@ impl Agent for ExecAgent {
 }
 
 impl ExecAgent {
-    fn failure_signal(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
+    fn failure_signal(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = derived_output(input, Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
@@ -406,13 +406,13 @@ fn maybe_warn_and_filter_benign(name: &str, line: &str) -> bool {
     false
 }
 
-fn stderr_trace(name: &str, stderr: &str) -> Vec<Engram> {
+fn stderr_trace(name: &str, stderr: &str) -> Vec<Signal> {
     stderr
         .lines()
         .filter(|line| !line.trim().is_empty())
         .filter(|line| !maybe_warn_and_filter_benign(name, line))
         .map(|line| {
-            Engram::builder(Kind::AgentMessage)
+            Signal::builder(Kind::AgentMessage)
                 .body(Body::text(line))
                 .provenance(Provenance::agent(name))
                 .tag("stream", "stderr")
@@ -439,8 +439,8 @@ where
 mod tests {
     use super::*;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn exec_agent(program: impl Into<String>, args: Vec<String>) -> ExecAgent {

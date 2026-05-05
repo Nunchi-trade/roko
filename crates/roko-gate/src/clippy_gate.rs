@@ -9,7 +9,7 @@
 use crate::compile_errors::{render_failure_classification, structured_gate_failure};
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verdict, Verify};
+use roko_core::{Context, Signal, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -79,7 +79,7 @@ impl roko_core::Cell for ClippyGate {
 
 #[async_trait]
 impl Verify for ClippyGate {
-    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {
             Ok(p) => p,

@@ -6,7 +6,7 @@
 //! scale and returns that value for routing feedback.
 
 use roko_agent::Agent;
-use roko_core::{Body, Context, Engram, Kind};
+use roko_core::{Body, Context, Signal, Kind};
 
 /// Ask a cheap judge model to score a response in `[0.0, 1.0]`.
 ///
@@ -22,7 +22,7 @@ pub async fn judge_quality(agent: &dyn Agent, prompt: &str, response: &str, rubr
          Response: {response}\n\
          Score (0.0-1.0):"
     );
-    let input = Engram::builder(Kind::Prompt)
+    let input = Signal::builder(Kind::Prompt)
         .body(Body::text(judge_prompt))
         .build();
     let result = agent.run(&input, &Context::now()).await;

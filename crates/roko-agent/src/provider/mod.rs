@@ -95,7 +95,7 @@ pub const PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX: &str = "pplx.search_options=";
 /// provider adapters, avoiding redundant handshakes when new backends are
 /// constructed for the same process.
 static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
+    match reqwest::Client::builder()
         // Keep at most 10 idle connections per host so a burst of parallel
         // agent requests does not accumulate unbounded sockets.
         .pool_max_idle_per_host(10)
@@ -112,7 +112,13 @@ static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         // can be correlated back to the roko-agent version in use.
         .user_agent(concat!("roko-agent/", env!("CARGO_PKG_VERSION")))
         .build()
-        .expect("failed to build shared HTTP client")
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("failed to build shared HTTP client with pool settings: {e}; using default client");
+            reqwest::Client::new()
+        }
+    }
 });
 
 /// Return the process-wide shared HTTP client.
@@ -446,14 +452,18 @@ impl ProviderSemaphores {
         }
     }
 
-    pub async fn acquire(&self, provider_id: &str) -> OwnedSemaphorePermit {
+    pub async fn acquire(&self, provider_id: &str) -> Result<OwnedSemaphorePermit, ProviderError> {
         let semaphore = self
             .semaphores
             .get(provider_id)
             .cloned()
             .unwrap_or_else(|| Arc::new(Semaphore::new(self.default_permits)));
 
-        semaphore.acquire_owned().await.expect("semaphore closed")
+        semaphore.acquire_owned().await.map_err(|_| {
+            ProviderError::Other(format!(
+                "provider semaphore for '{provider_id}' closed"
+            ))
+        })
     }
 }
 
@@ -546,10 +556,15 @@ impl AgentOptions {
     /// Append Perplexity search options as a structured `extra_args` payload.
     #[must_use]
     pub fn with_perplexity_search_options(mut self, search_options: SearchOptions) -> Self {
-        let encoded = serde_json::to_string(&search_options)
-            .expect("Perplexity search options must serialize");
-        self.extra_args
-            .push(format!("{PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX}{encoded}"));
+        match serde_json::to_string(&search_options) {
+            Ok(encoded) => {
+                self.extra_args
+                    .push(format!("{PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX}{encoded}"));
+            }
+            Err(e) => {
+                tracing::warn!("failed to serialize Perplexity search options: {e}; skipping");
+            }
+        }
         self
     }
 }
@@ -641,7 +656,7 @@ pub enum AgentCreationError {
 mod tests {
     use super::*;
     use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Signal, Kind};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -651,8 +666,8 @@ mod tests {
     use tempfile::tempdir;
     use tokio::time::timeout;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn write_script(path: &std::path::Path, body: &str) {

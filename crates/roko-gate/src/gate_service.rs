@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use roko_core::foundation::{GateConfig, GateReport, GateRunner, GateVerdict, ShellGateCommand};
-use roko_core::{Body, Context, Engram, Kind, Result, RokoError, Verdict, Verify};
+use roko_core::{Body, Context, Signal, Kind, Result, RokoError, Verdict, Verify};
 use std::sync::{Arc, Mutex};
 
 use crate::adaptive_threshold::AdaptiveThresholds;
@@ -181,7 +181,7 @@ impl roko_core::Cell for FormatCheckGate {
 
 #[async_trait]
 impl Verify for FormatCheckGate {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
         self.inner.verify(signal, ctx).await
     }
 
@@ -212,7 +212,7 @@ impl roko_core::Cell for StubJudgeGate {
 
 #[async_trait]
 impl Verify for StubJudgeGate {
-    async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
+    async fn verify(&self, _signal: &Signal, _ctx: &Context) -> Verdict {
         Verdict::fail(
             "stub-llm-judge",
             "LLM judge gate not yet implemented — enable a real judge or remove from enabled_gates",
@@ -234,7 +234,7 @@ impl Default for GateService {
 impl GateRunner for GateService {
     async fn run_gates(&self, config: GateConfig) -> Result<GateReport> {
         let payload = GatePayload::in_dir(config.workdir.clone());
-        let signal = Engram::builder(Kind::Task)
+        let signal = Signal::builder(Kind::Task)
             .body(Body::from_json(&payload)?)
             .build();
         let ctx = Context::now().with_attr("workdir", config.workdir.to_string_lossy());
@@ -430,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_gate_for_config_runs_true_false_and_captures_stderr() {
-        let signal = Engram::builder(Kind::Task).body(Body::empty()).build();
+        let signal = Signal::builder(Kind::Task).body(Body::empty()).build();
         let ctx = Context::at(0);
 
         let true_gate = GateService::shell_gate_for_config(&ShellGateCommand {

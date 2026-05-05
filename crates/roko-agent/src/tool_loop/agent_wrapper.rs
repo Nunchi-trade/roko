@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use roko_core::tool::{ToolContext, ToolDef};
-use roko_core::{Body, Context, Engram, Kind};
+use roko_core::{Body, Context, Signal, Kind};
 use roko_fs::RokoLayout;
 
 use crate::agent::{Agent, AgentResult, derived_output};
@@ -67,7 +67,7 @@ impl ToolLoopAgent {
         self
     }
 
-    fn output_signal(input: &Engram, text: &str, stop_reason: &str, iterations: usize) -> Engram {
+    fn output_signal(input: &Signal, text: &str, stop_reason: &str, iterations: usize) -> Signal {
         derived_output(input, Kind::AgentOutput, Body::text(text))
             .tag("stop_reason", stop_reason)
             .tag("iterations", iterations.to_string())
@@ -90,7 +90,7 @@ impl ToolLoopAgent {
 
     fn attach_trace_metadata(
         mut result: AgentResult,
-        input: &Engram,
+        input: &Signal,
         output: &ToolLoopOutput,
     ) -> AgentResult {
         result.trace.extend(
@@ -102,7 +102,7 @@ impl ToolLoopAgent {
         result
     }
 
-    fn trace_signal(input: &Engram, trace: &ToolLoopTurnTrace) -> Engram {
+    fn trace_signal(input: &Signal, trace: &ToolLoopTurnTrace) -> Signal {
         let tool_calls = trace
             .tool_calls
             .iter()
@@ -138,7 +138,7 @@ impl ToolLoopAgent {
 
 #[async_trait]
 impl Agent for ToolLoopAgent {
-    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         let prompt = input.body.as_text().unwrap_or_default();
         let tool_ctx = ToolContext::testing(&self.worktree_path);
         let tool_loop = match self.checkpoint_path(ctx) {
@@ -209,7 +209,7 @@ impl Agent for ToolLoopAgent {
 
     async fn run_streaming(
         &self,
-        input: &Engram,
+        input: &Signal,
         ctx: &Context,
         event_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> AgentResult {
@@ -442,10 +442,10 @@ mod tests {
             .with_system_prompt("system prompt")
             .with_tools(test_tools())
             .with_worktree_path("/tmp");
-        let ancestor = Engram::builder(Kind::Prompt)
+        let ancestor = Signal::builder(Kind::Prompt)
             .body(Body::text("ancestor"))
             .build();
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text("call the tool"))
             .lineage([ancestor.id])
             .build();
@@ -469,7 +469,7 @@ mod tests {
         let agent = ToolLoopAgent::new(make_tool_loop(Arc::new(ErrorBackend)))
             .with_tools(test_tools())
             .with_worktree_path("/tmp");
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text("fail"))
             .build();
 

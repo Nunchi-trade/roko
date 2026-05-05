@@ -18,7 +18,7 @@ use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolHandler, ToolPermission,
     ToolRegistry, ToolResult, VecToolRegistry,
 };
-use roko_core::{Body, Context, Engram, Kind};
+use roko_core::{Body, Context, Signal, Kind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -1104,8 +1104,8 @@ fn prompt_messages(text: &str) -> Vec<Value> {
     vec![json!({ "role": "user", "content": text })]
 }
 
-fn prompt_signal(text: &str) -> Engram {
-    Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+fn prompt_signal(text: &str) -> Signal {
+    Signal::builder(Kind::Prompt).body(Body::text(text)).build()
 }
 
 fn empty_tools() -> RenderedTools {

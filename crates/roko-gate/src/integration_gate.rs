@@ -43,7 +43,7 @@
 
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, TestCount, Verdict, Verify};
+use roko_core::{Context, Signal, TestCount, Verdict, Verify};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -79,7 +79,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 #[async_trait]
 pub trait IntegrationScenarioFn: Send + Sync {
     /// Execute the scenario; returns the verdict to attribute to the gate.
-    async fn run(&self, signal: &Engram, ctx: &Context) -> Verdict;
+    async fn run(&self, signal: &Signal, ctx: &Context) -> Verdict;
 }
 
 type BoxedScenarioFuture = Pin<Box<dyn Future<Output = Verdict> + Send + 'static>>;
@@ -88,7 +88,7 @@ type BoxedScenarioFuture = Pin<Box<dyn Future<Output = Verdict> + Send + 'static
 /// [`IntegrationScenarioFn`].
 struct FnScenario<F>
 where
-    F: Fn(Engram, Context) -> BoxedScenarioFuture + Send + Sync + 'static,
+    F: Fn(Signal, Context) -> BoxedScenarioFuture + Send + Sync + 'static,
 {
     f: F,
 }
@@ -96,9 +96,9 @@ where
 #[async_trait]
 impl<F> IntegrationScenarioFn for FnScenario<F>
 where
-    F: Fn(Engram, Context) -> BoxedScenarioFuture + Send + Sync + 'static,
+    F: Fn(Signal, Context) -> BoxedScenarioFuture + Send + Sync + 'static,
 {
-    async fn run(&self, signal: &Engram, ctx: &Context) -> Verdict {
+    async fn run(&self, signal: &Signal, ctx: &Context) -> Verdict {
         (self.f)(signal.clone(), ctx.clone()).await
     }
 }
@@ -202,7 +202,7 @@ impl IntegrationGate {
     #[must_use]
     pub fn from_fn<F, Fut>(f: F) -> Self
     where
-        F: Fn(Engram, Context) -> Fut + Send + Sync + 'static,
+        F: Fn(Signal, Context) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Verdict> + Send + 'static,
     {
         let scenario = Arc::new(FnScenario {
@@ -260,7 +260,7 @@ impl roko_core::Cell for IntegrationGate {
 
 #[async_trait]
 impl Verify for IntegrationGate {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
         let started = Instant::now();
 
         let warmup = self.effective_warmup_ms();
@@ -300,7 +300,7 @@ async fn run_build_test(
     gate_name: &str,
     build: BuildSystem,
     pattern: &str,
-    signal: &Engram,
+    signal: &Signal,
     remaining: Duration,
 ) -> Verdict {
     if remaining.is_zero() {
@@ -379,7 +379,7 @@ async fn run_build_test(
 async fn run_script(
     gate_name: &str,
     path: &std::path::Path,
-    signal: &Engram,
+    signal: &Signal,
     remaining: Duration,
 ) -> Verdict {
     if remaining.is_zero() {
@@ -431,7 +431,7 @@ async fn run_script(
 async fn run_custom(
     gate_name: &str,
     scenario: &dyn IntegrationScenarioFn,
-    signal: &Engram,
+    signal: &Signal,
     ctx: &Context,
     remaining: Duration,
 ) -> Verdict {
@@ -540,13 +540,13 @@ mod tests {
         }
     }
 
-    fn empty_signal() -> Engram {
-        Engram::builder(Kind::Task).body(Body::empty()).build()
+    fn empty_signal() -> Signal {
+        Signal::builder(Kind::Task).body(Body::empty()).build()
     }
 
-    fn script_signal(dir: &std::path::Path) -> Engram {
+    fn script_signal(dir: &std::path::Path) -> Signal {
         let payload = GatePayload::in_dir(dir);
-        Engram::builder(Kind::Task)
+        Signal::builder(Kind::Task)
             .body(Body::from_json(&payload).unwrap())
             .build()
     }
@@ -585,7 +585,7 @@ mod tests {
         struct Noop;
         #[async_trait]
         impl IntegrationScenarioFn for Noop {
-            async fn run(&self, _s: &Engram, _c: &Context) -> Verdict {
+            async fn run(&self, _s: &Signal, _c: &Context) -> Verdict {
                 Verdict::pass("noop")
             }
         }
@@ -808,7 +808,7 @@ test foo::c ... ok";
         // Point at a working dir that exists but has no Cargo project.
         let tmp = std::env::temp_dir();
         let payload = GatePayload::in_dir(&tmp);
-        let sig = Engram::builder(Kind::Task)
+        let sig = Signal::builder(Kind::Task)
             .body(Body::from_json(&payload).unwrap())
             .build();
         let gate = IntegrationGate::build_test(BuildSystem::Cargo, "__no_such_test")

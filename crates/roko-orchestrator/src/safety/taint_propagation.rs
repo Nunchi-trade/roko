@@ -27,7 +27,7 @@
 //! ```
 
 use parking_lot::Mutex;
-use roko_core::{ContentHash, Engram, TaintInfo};
+use roko_core::{ContentHash, Signal, TaintInfo};
 use std::collections::HashMap;
 
 /// Why a particular [`ContentHash`] is considered tainted.
@@ -177,12 +177,12 @@ impl TaintTracker {
         })
     }
 
-    /// Inspect a [`Engram`] and, if its provenance is tainted, mark it in
+    /// Inspect a [`Signal`] and, if its provenance is tainted, mark it in
     /// the tracker with a reason derived from the provenance's [`Taint`] variant.
     ///
     /// Returns `true` if the signal was (or already was) tainted, `false`
     /// if the signal's provenance is clean.
-    pub fn observe_signal(&self, signal: &Engram) -> bool {
+    pub fn observe_signal(&self, signal: &Signal) -> bool {
         if signal.provenance.is_tainted() {
             // Prefer the legacy taint_info if present (for old serialized data),
             // otherwise derive from the typed Taint enum.
@@ -413,13 +413,13 @@ mod tests {
 
     #[test]
     fn observe_signal_marks_tainted_provenance() {
-        use roko_core::{Body, Engram, Kind};
+        use roko_core::{Body, Signal, Kind};
 
-        let tainted_signal = Engram::builder(Kind::AgentOutput)
+        let tainted_signal = Signal::builder(Kind::AgentOutput)
             .body(Body::text("external payload"))
             .provenance(roko_core::Provenance::external("webhook"))
             .build();
-        let clean_signal = Engram::builder(Kind::AgentOutput)
+        let clean_signal = Signal::builder(Kind::AgentOutput)
             .body(Body::text("internal payload"))
             .provenance(roko_core::Provenance::trusted("orchestrator"))
             .build();
@@ -436,9 +436,9 @@ mod tests {
 
     #[test]
     fn observe_signal_prefers_provenance_taint_info() {
-        use roko_core::{Body, Engram, Kind, Provenance, TaintInfo};
+        use roko_core::{Body, Signal, Kind, Provenance, TaintInfo};
 
-        let tainted_signal = Engram::builder(Kind::AgentOutput)
+        let tainted_signal = Signal::builder(Kind::AgentOutput)
             .body(Body::text("external payload"))
             .provenance(
                 Provenance::trusted("gateway")
