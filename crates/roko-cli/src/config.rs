@@ -2900,18 +2900,27 @@ pub fn load_resolved_config(workdir: &Path) -> Result<ResolvedConfig> {
     // This handles: ancestor walk, ROKO_CONFIG env, global merge, named env
     // overrides (ROKO_MODEL etc.), hierarchical ROKO__* overrides,
     // interpolation, and file secret resolution.
-    let _core_validated = roko_core::config::loader::load_config_validated_with_options(
+    let core_validated = roko_core::config::loader::load_config_validated_with_options(
         workdir,
         &roko_core::config::loader::LoadOptions::default(),
     )
     .map_err(|e| anyhow!("core config loader: {e}"))?;
 
-    // Build CLI config from the legacy layer system for compatibility fields.
-    // The core-loaded config is authoritative for providers/models/agent/env.
+    // The core loader's `migrated` field is the fully-resolved RokoConfig
+    // (env overrides applied, secrets interpolated, file secrets resolved).
+    let core_cfg = core_validated.into_config();
+
+    // Build CLI config from the legacy layer system for CLI-only fields
+    // (auto_plan, repos, gates, dreams, daimon, runner, runtime, serve, learning).
+    // Providers and models come from the core loader to ensure env overrides
+    // (ROKO__PROVIDERS__*, ROKO_PROVIDER, ROKO_MODEL_SLUG) are not lost.
     if let Some(env_path) = &paths.env_override {
         let layer = ConfigLayer::from_file(env_path)?.merge(env_layer);
         let sources = sources_from_layer(&layer, Source::Env, Source::Default);
-        let config = layer.resolve()?;
+        let mut config = layer.resolve()?;
+        // Override providers/models with core-resolved values.
+        config.providers = core_cfg.providers;
+        config.models = core_cfg.models;
         let repo_registry = RepoRegistry::load(&config, workdir)?;
         return Ok(ResolvedConfig {
             config,
@@ -2939,7 +2948,13 @@ pub fn load_resolved_config(workdir: &Path) -> Result<ResolvedConfig> {
     let mut sources = compute_sources(&global_layer, &project_layer);
     apply_env_source_overrides(&mut sources, &env_paths);
     let merged = global_layer.merge(project_layer).merge(env_layer);
-    let config = merged.resolve()?;
+    let mut config = merged.resolve()?;
+    // Override providers/models with core-resolved values.
+    // The core loader properly handles: global merge, ROKO__PROVIDERS__* env
+    // overrides, ${VAR} interpolation, and _file secret resolution -- all of
+    // which the legacy ConfigLayer path was silently discarding.
+    config.providers = core_cfg.providers;
+    config.models = core_cfg.models;
     let repo_registry = RepoRegistry::load(&config, workdir)?;
 
     Ok(ResolvedConfig {
