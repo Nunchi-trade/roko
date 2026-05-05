@@ -280,6 +280,7 @@ mod tests {
             model_source: ModelChoiceSource::Router,
             succeeded: true,
             routing_context: None,
+            prompt_text: None,
         })
         .await
         .unwrap();
@@ -300,6 +301,7 @@ mod tests {
             model_source: ModelChoiceSource::Router,
             succeeded: false,
             routing_context: None,
+            prompt_text: None,
         })
         .await
         .unwrap();
@@ -319,6 +321,7 @@ mod tests {
             model_source: ModelChoiceSource::Router,
             succeeded: true,
             routing_context: None,
+            prompt_text: None,
         })
         .await
         .unwrap();

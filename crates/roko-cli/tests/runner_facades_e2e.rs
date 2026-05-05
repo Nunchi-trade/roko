@@ -123,6 +123,7 @@ async fn run_config_facades_receive_runner_events() {
         model_source: roko_cli::dispatch::ModelChoiceSource::Default,
         succeeded: true,
         routing_context: None,
+        prompt_text: None,
     };
     let fb_gate = FeedbackEvent::GateOutcome {
         plan_id: "p-e2e".into(),

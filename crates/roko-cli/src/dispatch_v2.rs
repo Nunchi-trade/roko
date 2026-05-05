@@ -378,6 +378,10 @@ impl CliProviderConfig {
             args.push("--append-system-prompt".to_string());
             args.push(request.system_prompt.clone());
         }
+        if let Some(effort) = request.effort.as_ref().filter(|effort| !effort.trim().is_empty()) {
+            args.push("--effort".to_string());
+            args.push(effort.clone());
+        }
         if let Some(mcp_config) = &request.mcp_config {
             args.push("--mcp-config".to_string());
             args.push(mcp_config.to_string_lossy().to_string());
@@ -448,6 +452,8 @@ pub struct CliDispatchRequest {
     pub workdir: PathBuf,
     /// Maximum agent turns when the provider supports it.
     pub max_turns: u32,
+    /// Optional reasoning effort hint when the provider supports it.
+    pub effort: Option<String>,
     /// Whether to bypass provider permission prompts/sandboxing.
     pub dangerously_skip_permissions: bool,
     /// Optional MCP config path.
@@ -1352,6 +1358,7 @@ mod tests {
             model: "gpt-5".to_string(),
             workdir: std::env::current_dir().unwrap(),
             max_turns: 50,
+            effort: None,
             dangerously_skip_permissions: false,
             mcp_config: None,
             resume_session: None,

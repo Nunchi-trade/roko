@@ -11,7 +11,11 @@ use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
 use roko_core::agent::ModelSpec;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
-use roko_core::{AgentRole, PhaseKind, PlanPhase};
+use roko_core::{AgentRole, ContentHash, PhaseKind, PlanPhase};
+use roko_daimon::{
+    AffectEngine as _, AffectEvent, DispatchParams, SomaticSignal, StrategyCoordinates,
+    TaskStrategyObservation,
+};
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
@@ -46,6 +50,8 @@ use super::types::{
     RetryAction, RunConfig, RunOutcome, RunTotals, RunnerEvent, RunnerFailureKind,
     TaskAttemptOutcome, TaskAttemptRef, TaskAttemptStatus,
 };
+
+const DEFAULT_AGENT_TURN_LIMIT: u32 = 50;
 
 // ─── RunReport ──────────────────────────────────────────────────────────
 
@@ -729,6 +735,7 @@ pub async fn run(
                         &completion,
                     ),
                 );
+                record_daimon_gate_result(config, &completion);
 
                 if completion.kind == GateCompletionKind::Merge {
                     emit_runner_event(
@@ -858,6 +865,14 @@ pub async fn run(
                             agent_model,
                             agent_provider,
                         ),
+                    );
+                    record_daimon_task_outcome(
+                        config,
+                        state.current_daimon_strategy,
+                        &completion.plan_id,
+                        &completion.task_id,
+                        true,
+                        &format!("gate-rung-{}", completion.rung),
                     );
                     tui.task_completed(&completion.plan_id, &completion.task_id, "passed");
 
@@ -1083,6 +1098,14 @@ pub async fn run(
                                 agent_model,
                                 agent_provider,
                             ),
+                        );
+                        record_daimon_task_outcome(
+                            config,
+                            state.current_daimon_strategy,
+                            &completion.plan_id,
+                            &completion.task_id,
+                            false,
+                            &reason,
                         );
                         let _ = executor.apply_event(
                             &completion.plan_id,
@@ -1654,6 +1677,9 @@ fn emit_runner_event_with_facades(
             tokens_out: state.tokens_out,
             cost_usd: state.cost_usd,
             duration_ms: state.task_elapsed_ms(),
+            prompt_text: (!state.current_prompt_text.trim().is_empty())
+                .then(|| state.current_prompt_text.clone()),
+            agent_output: state.agent_output.clone(),
         };
         if let Some(feedback) = runner_event_to_feedback(&event, &state.routing_context, &usage) {
             if let Some(tasks) = feedback_tasks {
@@ -1704,6 +1730,193 @@ struct TaskUsageSnapshot {
     tokens_out: u64,
     cost_usd: f64,
     duration_ms: u64,
+    prompt_text: Option<String>,
+    agent_output: String,
+}
+
+#[derive(Debug, Clone)]
+struct DaimonTaskHook {
+    strategy: StrategyCoordinates,
+    signal: SomaticSignal,
+    affect_confidence: f64,
+    behavioral_state: roko_core::BehavioralState,
+    pleasure: f64,
+    arousal: f64,
+    dominance: f64,
+}
+
+#[derive(Debug, Clone)]
+struct DaimonDispatchModulation {
+    model: String,
+    turn_limit: u32,
+    effort: String,
+}
+
+fn with_daimon_state<T>(
+    config: &RunConfig,
+    f: impl FnOnce(&mut roko_daimon::DaimonState) -> T,
+) -> Option<T> {
+    let daimon_state = config.daimon_state.as_ref()?;
+    match daimon_state.lock() {
+        Ok(mut guard) => Some(f(&mut guard)),
+        Err(err) => {
+            warn!(error = %err, "daimon state lock poisoned; skipping affect hook");
+            None
+        }
+    }
+}
+
+fn daimon_task_hook(
+    config: &RunConfig,
+    task_def: &TaskDef,
+    attempt_num: u32,
+) -> Option<DaimonTaskHook> {
+    with_daimon_state(config, |daimon| {
+        let affect = daimon.query();
+        let observation = TaskStrategyObservation {
+            task_tier: task_def.tier.clone(),
+            file_count: task_def.files.len(),
+            verification_count: task_def.verify.len(),
+            dependency_count: task_def.depends_on.len(),
+            max_loc: task_def.max_loc.unwrap_or(50),
+            familiarity: 0.5,
+            confidence: affect.confidence,
+            failure_pressure: f64::from(attempt_num.saturating_sub(1).min(5)) / 5.0,
+            urgency_pressure: if attempt_num > 1 { 1.0 } else { 0.0 },
+        };
+        let strategy = daimon.strategy_space().computer().task_coords(&observation);
+        let signal = daimon.query_somatic(strategy);
+        if signal.should_emit_event() {
+            info!(
+                task_id = %task_def.id,
+                valence = signal.valence,
+                intensity = signal.intensity,
+                source_episodes = signal.source_episodes.len(),
+                "daimon somatic marker fired"
+            );
+        }
+        DaimonTaskHook {
+            strategy,
+            signal,
+            affect_confidence: affect.confidence,
+            behavioral_state: affect.behavioral_state,
+            pleasure: affect.pad.pleasure,
+            arousal: affect.pad.arousal,
+            dominance: affect.pad.dominance,
+        }
+    })
+}
+
+fn daimon_policy_for_hook(hook: Option<&DaimonTaskHook>) -> roko_core::DaimonPolicy {
+    hook.map(|hook| roko_core::DaimonPolicy::new(hook.affect_confidence, hook.behavioral_state))
+        .unwrap_or_default()
+}
+
+fn daimon_dispatch_modulation(
+    config: &RunConfig,
+    hook: &DaimonTaskHook,
+    selected_model: &str,
+    allow_model_modulation: bool,
+) -> Option<DaimonDispatchModulation> {
+    with_daimon_state(config, |daimon| {
+        let mut params = DispatchParams::new(selected_model.to_string(), DEFAULT_AGENT_TURN_LIMIT);
+        params.effort = default_effort_label(config);
+        daimon.modulate_with_strategy(&mut params, hook.strategy);
+        if !allow_model_modulation {
+            params.model = selected_model.to_string();
+        }
+        DaimonDispatchModulation {
+            model: params.model,
+            turn_limit: params.turn_limit.max(1),
+            effort: params.effort,
+        }
+    })
+}
+
+fn default_effort_label(config: &RunConfig) -> String {
+    config
+        .roko_config
+        .as_ref()
+        .map(|config| config.agent.default_effort.trim())
+        .filter(|effort| !effort.is_empty())
+        .unwrap_or("medium")
+        .to_string()
+}
+
+fn render_daimon_prompt_context(hook: &DaimonTaskHook) -> Option<String> {
+    let pad_magnitude =
+        hook.pleasure.abs() + hook.arousal.abs() + hook.dominance.abs() + hook.signal.intensity;
+    if pad_magnitude < 0.35 {
+        return None;
+    }
+
+    let mut content = format!(
+        "# Daimon state\nBehavioral state: {:?}\nPAD: pleasure={:.2}, arousal={:.2}, dominance={:.2}",
+        hook.behavioral_state, hook.pleasure, hook.arousal, hook.dominance
+    );
+    if hook.signal.intensity >= 0.15 {
+        content.push_str(&format!(
+            "\nSomatic hint: valence={:.2}, intensity={:.2}",
+            hook.signal.valence, hook.signal.intensity
+        ));
+        if hook.signal.valence <= -0.2 {
+            content.push_str(
+                "\nInterpretation: slow down, prefer caution, and verify risky moves.",
+            );
+        } else if hook.signal.valence >= 0.2 {
+            content.push_str(
+                "\nInterpretation: this strategy region has positive prior outcomes; keep momentum without skipping checks.",
+            );
+        }
+    }
+    Some(content)
+}
+
+fn record_daimon_gate_result(config: &RunConfig, completion: &GateCompletion) {
+    with_daimon_state(config, |daimon| {
+        daimon.appraise(AffectEvent::GateResult {
+            plan_id: completion.plan_id.clone(),
+            task_id: completion.task_id.clone(),
+            passed: completion.passed,
+            rung: completion.rung,
+        });
+    });
+}
+
+fn record_daimon_task_outcome(
+    config: &RunConfig,
+    strategy: Option<StrategyCoordinates>,
+    plan_id: &str,
+    task_id: &str,
+    succeeded: bool,
+    discriminator: &str,
+) {
+    with_daimon_state(config, |daimon| {
+        daimon.appraise(AffectEvent::TaskOutcome {
+            task_id: task_id.to_string(),
+            succeeded,
+        });
+        if let Some(strategy) = strategy {
+            daimon.record_somatic_outcome(
+                strategy,
+                somatic_episode_hash(
+                    plan_id,
+                    task_id,
+                    if succeeded { "success" } else { "failure" },
+                    discriminator,
+                ),
+            );
+        }
+    });
+}
+
+fn somatic_episode_hash(
+    plan_id: &str,
+    task_id: &str,
+    outcome: &str,
+    discriminator: &str,
+) -> ContentHash {
+    ContentHash::of(format!("somatic:{plan_id}:{task_id}:{outcome}:{discriminator}").as_bytes())
 }
 
 /// Translate a [`RunnerEvent`] into a [`FeedbackEvent`] when the runner
@@ -1735,7 +1948,7 @@ fn runner_event_to_feedback(
                 plan_id: attempt.plan_id.clone(),
                 model: model.clone(),
                 provider: provider.clone(),
-                output: String::new(),
+                output: usage.agent_output.clone(),
                 tokens_in: usage.tokens_in,
                 tokens_out: usage.tokens_out,
                 cost_usd: usage.cost_usd,
@@ -1750,6 +1963,7 @@ fn runner_event_to_feedback(
                 model_source: ModelChoiceSource::Default,
                 succeeded,
                 routing_context: routing_ctx.clone(),
+                prompt_text: usage.prompt_text.clone(),
             })
         }
         RunnerEvent::GateCompleted {
@@ -2347,8 +2561,9 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 "knowledge store consulted for routing"
             );
             let gate_feedback = DispatchGateFeedback::from_raw(&previous_gate_output);
+            let daimon_hook = daimon_task_hook(ctx.config, task_def, attempt_num);
+            ctx.state.current_daimon_strategy = daimon_hook.as_ref().map(|hook| hook.strategy);
             let routing_context = {
-                use roko_core::{BehavioralState, DaimonPolicy};
                 use roko_learn::model_router::RoutingContext;
                 RoutingContext {
                     task_category,
@@ -2361,12 +2576,14 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     active_agents: 0,
                     ready_queue_depth: 0,
                     max_queue_wait_hours: 0.0,
-                    daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
-                    thinking_level: None,
+                    daimon_policy: daimon_policy_for_hook(daimon_hook.as_ref()),
+                    thinking_level: daimon_hook.as_ref().map(|_| default_effort_label(ctx.config)),
                     temperament: None,
                     previous_model: None,
                     plan_context_tokens: None,
-                    tier_thresholds: None,
+                    tier_thresholds: daimon_hook
+                        .as_ref()
+                        .map(|hook| roko_daimon::adjusted_thresholds(&hook.behavioral_state)),
                 }
             };
             let dispatch_ctx = DispatchContext {
@@ -2407,7 +2624,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             };
             let baseline_model = dispatch_plan.model.slug.clone();
             let baseline_score = knowledge_advice.score_for(&baseline_model);
-            let mut selected_source = "dispatcher";
+            let mut selected_source = "dispatcher".to_string();
             if let Some(best_hint) = knowledge_advice
                 .hints
                 .iter()
@@ -2430,20 +2647,53 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         "knowledge store nudged model selection"
                     );
                     dispatch_plan.model = ModelSpec::from_slug(best_hint.model_slug.clone());
-                    selected_source = "dispatcher+knowledge";
+                    selected_source = "dispatcher+knowledge".to_string();
+                }
+            }
+            let mut dispatch_turn_limit = DEFAULT_AGENT_TURN_LIMIT;
+            let mut dispatch_effort = None;
+            let daimon_modulation = daimon_hook.as_ref().and_then(|hook| {
+                daimon_dispatch_modulation(
+                    ctx.config,
+                    hook,
+                    &dispatch_plan.model.slug,
+                    !dispatch_plan.forced,
+                )
+            });
+            if let Some(modulation) = &daimon_modulation {
+                dispatch_turn_limit = modulation.turn_limit;
+                dispatch_effort = Some(modulation.effort.clone());
+                if modulation.model != dispatch_plan.model.slug {
+                    debug!(
+                        from = %dispatch_plan.model.slug,
+                        to = %modulation.model,
+                        effort = %modulation.effort,
+                        turn_limit = modulation.turn_limit,
+                        "daimon modulated dispatch"
+                    );
+                    dispatch_plan.model = ModelSpec::from_slug(modulation.model.clone());
+                    selected_source = if selected_source == "dispatcher+knowledge" {
+                        "dispatcher+knowledge+daimon".to_string()
+                    } else {
+                        "dispatcher+daimon".to_string()
+                    };
                 }
             }
             let requested_model = dispatch_plan.model.slug.clone();
             let prompt_diagnostics = dispatch_plan.prompt.diagnostics.clone();
             ctx.tui
-                .model_selected(plan_id, &task_id, &requested_model, selected_source);
-            let system_prompt = dispatch_plan.prompt.system_prompt;
+                .model_selected(plan_id, &task_id, &requested_model, &selected_source);
+            let mut system_prompt = dispatch_plan.prompt.system_prompt;
+            if let Some(section) = daimon_hook.as_ref().and_then(render_daimon_prompt_context) {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&section);
+            }
             let mut final_prompt = dispatch_plan.prompt.user_prompt;
             info!(
                 plan_id = %plan_id,
                 task = %task_id,
                 model = %requested_model,
-                source = selected_source,
+                source = %selected_source,
                 system_prompt_len = system_prompt.len(),
                 user_prompt_len = final_prompt.len(),
                 estimated_tokens = prompt_diagnostics.estimated_tokens,
@@ -2466,6 +2716,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             if let Some(replan) = ctx.state.take_replan_context(plan_id, &task_id) {
                 final_prompt.push_str(&replan);
             }
+            ctx.state.current_prompt_text = format!("{system_prompt}\n\n{final_prompt}");
 
             // Extension: pre-inference hook.
             let task_role = task_def.role.as_deref().unwrap_or("implementer");
@@ -2572,6 +2823,8 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         model,
                         agent_id.clone(),
                     );
+                    spawn_config.max_turns = dispatch_turn_limit;
+                    spawn_config.effort = dispatch_effort.clone();
                     if let Some(provider) = cli_provider {
                         spawn_config = spawn_config.with_cli_provider(provider);
                     }
@@ -2644,6 +2897,14 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                     agent_provider,
                                 ),
                             );
+                            record_daimon_task_outcome(
+                                ctx.config,
+                                ctx.state.current_daimon_strategy,
+                                plan_id,
+                                &task_id,
+                                false,
+                                &message,
+                            );
                             ctx.tui.error(&message);
                             if let Err(e2) = ctx.executor.apply_event(
                                 plan_id,
@@ -2677,7 +2938,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                             ("CARGO_BUILD_JOBS".to_string(), "2".to_string()),
                         ],
                         extra_args: Vec::new(),
-                        effort: None,
+                        effort: dispatch_effort.clone(),
                         tools: None,
                         bare_mode: false,
                         dangerously_skip_permissions: ctx.config.dangerously_skip_permissions,

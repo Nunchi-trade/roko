@@ -203,6 +203,7 @@ mod tests {
             model_source: ModelChoiceSource::Router,
             succeeded: true,
             routing_context: None,
+            prompt_text: None,
         };
         sink.on_event(&event).await.unwrap();
         let snap = r.confidence_snapshot();
@@ -229,6 +230,7 @@ mod tests {
             model_source: ModelChoiceSource::Override,
             succeeded: false,
             routing_context: None,
+            prompt_text: None,
         };
         sink.on_event(&event).await.unwrap();
         let (trials, successes) = r
@@ -258,6 +260,7 @@ mod tests {
             model_source: ModelChoiceSource::Router,
             succeeded: true,
             routing_context: None,
+            prompt_text: None,
         };
         sink.on_event(&event).await.unwrap();
         assert!(
@@ -289,6 +292,7 @@ mod tests {
             model_source: ModelChoiceSource::Router,
             succeeded: true,
             routing_context: Some(ctx),
+            prompt_text: None,
         };
         sink.on_event(&event).await.unwrap();
         assert!(
@@ -317,6 +321,7 @@ mod tests {
             model_source: ModelChoiceSource::Router,
             succeeded: true,
             routing_context: None,
+            prompt_text: None,
         };
         sink.on_event(&event).await.unwrap();
         assert!(

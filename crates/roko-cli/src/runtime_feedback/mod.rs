@@ -71,6 +71,9 @@ pub enum FeedbackEvent {
         /// The dispatch-time routing context, when available. Enables the
         /// routing sink to feed real task features into the LinUCB bandit.
         routing_context: Option<RoutingContext>,
+        /// Full prompt text for HDC episode fingerprinting, when emitted by
+        /// runner v2.
+        prompt_text: Option<String>,
     },
     /// A gate verdict landed for a task.
     GateOutcome {

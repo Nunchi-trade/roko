@@ -499,6 +499,10 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 roko_config: Some(std::sync::Arc::new(roko_config.clone())),
                 extension_chain: Some(extension_chain),
                 cascade_router: Some(cascade_router),
+                daimon_state: Some(roko_cli::runner::RunConfig::daimon_state_with_strategy(
+                    &wd,
+                    config.daimon.strategy_space.clone(),
+                )),
                 connector_registry: Some(connector_registry),
                 feed_registry: Some(feed_registry),
                 feedback_facade: Some(feedback_facade),
