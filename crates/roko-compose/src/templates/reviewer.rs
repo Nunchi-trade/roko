@@ -4,7 +4,7 @@
 //! template with enum dispatch. All three share a common context prefix (plan,
 //! workspace map, prd2, brief) and differ only in role identity and instructions.
 
-use super::common::{self, budget_for};
+use super::common::{self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -112,10 +112,19 @@ impl RolePromptTemplate for ReviewerTemplate {
     type Input = ReviewerInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
-        let budget = budget_for(match self.variant {
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let role = match self.variant {
             Reviewer::Architect => AgentRole::Architect,
             Reviewer::Auditor | Reviewer::Combined => AgentRole::Auditor,
-        });
+        };
+        let budget = adaptive_budget_for(role, context_window_tokens);
         let mut sections = Vec::with_capacity(8);
 
         // 1. agents_instructions — System / Critical / Start

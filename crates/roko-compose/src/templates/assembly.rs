@@ -202,6 +202,21 @@ impl PromptAssembler {
         let sections = template.sections(input);
         self.assemble(template.role_identity(), sections, budget_tokens, strategy)
     }
+
+    /// Convenience: call `template.sections_with_context_window(input, ...)`
+    /// then `assemble()`.
+    #[must_use]
+    pub fn assemble_from_with_context_window<T: RolePromptTemplate>(
+        &self,
+        template: &T,
+        input: &T::Input,
+        context_window_tokens: usize,
+        budget_tokens: Option<usize>,
+        strategy: ContextStrategy,
+    ) -> PromptBuild {
+        let sections = template.sections_with_context_window(input, context_window_tokens);
+        self.assemble(template.role_identity(), sections, budget_tokens, strategy)
+    }
 }
 
 const fn placement_order(p: Placement) -> u8 {

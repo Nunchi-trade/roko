@@ -110,7 +110,9 @@ impl ServiceFactory {
                 "model is not configured for service factory",
             ));
         }
-        let model = resolve_model(&workspace_config, &model_key).slug;
+        let resolved_model = resolve_model(&workspace_config, &model_key);
+        let model_context_window_tokens = context_window_tokens_from_resolved(&resolved_model);
+        let model = resolved_model.slug;
         if model.trim().is_empty() {
             return Err(RokoError::invalid(format!(
                 "model key {model_key:?} resolved to an empty model slug"
@@ -150,6 +152,8 @@ impl ServiceFactory {
         });
         let model_router = Arc::clone(&cascade_router);
         let routing_config = workspace_config.clone();
+        let prompt_model_router = Arc::clone(&cascade_router);
+        let prompt_routing_config = workspace_config.clone();
         let mut model_call_service = ModelCallService::new(model.clone())
             .with_config(workspace_config)
             .with_feedback_sink(Arc::clone(&feedback_sink))
@@ -158,17 +162,11 @@ impl ServiceFactory {
             .with_knowledge_store(gateway_knowledge_query)
             .with_cascade_router(Arc::clone(&cascade_router))
             .with_model_router(move |role| {
-                let ctx = RoutingContext {
-                    role: agent_role_from_label(role.unwrap_or("implementer")),
-                    ..Default::default()
-                };
-                let mut candidates = routing_config.available_model_slugs_for_cascade();
-                if candidates.is_empty() {
-                    candidates = routing_config.model_slugs_for_cascade();
-                }
-                model_router
-                    .explain_routing(&ctx, &candidates)
-                    .selected_model
+                routed_model_for_role(
+                    &routing_config,
+                    &model_router,
+                    agent_role_from_label(role.unwrap_or("implementer")),
+                )
             })
             .with_run_id(config.run_id.unwrap_or_else(default_run_id));
         if let Some(mcp_config) = config.mcp_config {
@@ -185,6 +183,12 @@ impl ServiceFactory {
         .lift_weights();
 
         let mut prompt_service = PromptAssemblyService::new()
+            .with_model_context_window(model_context_window_tokens)
+            .with_model_context_window_resolver(move |role| {
+                let selected_model =
+                    routed_model_for_role(&prompt_routing_config, &prompt_model_router, role);
+                context_window_tokens_for_model(&prompt_routing_config, &selected_model)
+            })
             .with_knowledge_store(knowledge_store)
             .with_episodes(config.roko_dir.join("episodes.jsonl"))
             .with_playbooks(playbook_store);
@@ -215,6 +219,35 @@ impl ServiceFactory {
             affect_policy,
         })
     }
+}
+
+fn routed_model_for_role(
+    config: &RokoConfig,
+    router: &CascadeRouter,
+    role: AgentRole,
+) -> String {
+    let ctx = RoutingContext {
+        role,
+        ..Default::default()
+    };
+    let mut candidates = config.available_model_slugs_for_cascade();
+    if candidates.is_empty() {
+        candidates = config.model_slugs_for_cascade();
+    }
+    router.explain_routing(&ctx, &candidates).selected_model
+}
+
+fn context_window_tokens_for_model(config: &RokoConfig, model_key: &str) -> usize {
+    let resolved = resolve_model(config, model_key);
+    context_window_tokens_from_resolved(&resolved)
+}
+
+fn context_window_tokens_from_resolved(resolved: &roko_core::agent::ResolvedModel) -> usize {
+    resolved
+        .profile
+        .as_ref()
+        .and_then(|profile| usize::try_from(profile.context_window).ok())
+        .unwrap_or(128_000)
 }
 
 fn tool_instructions_for_config(tools: &ToolsConfig) -> Option<String> {

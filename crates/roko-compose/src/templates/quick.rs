@@ -11,7 +11,10 @@
 //!
 //! Roko-owned quick review/fix prompts for focused retry loops.
 
-use super::common::{self, budget_for, format_prior_review, format_verdict_instructions};
+use super::common::{
+    self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for, format_prior_review,
+    format_verdict_instructions,
+};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -64,7 +67,15 @@ impl RolePromptTemplate for QuickReviewerTemplate {
     type Input = QuickReviewerInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
-        let budget = budget_for(AgentRole::QuickReviewer);
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let budget = adaptive_budget_for(AgentRole::QuickReviewer, context_window_tokens);
         let mut sections = Vec::with_capacity(6);
 
         // 1. agents_instructions — System / Critical / Start

@@ -5,7 +5,7 @@
 //! task checklist. On iteration 2+, it also processes prior review feedback
 //! and generates remediation instructions.
 
-use super::common::{self, budget_for};
+use super::common::{self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -70,7 +70,15 @@ impl RolePromptTemplate for StrategistTemplate {
     type Input = StrategistInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
-        let budget = budget_for(AgentRole::Strategist);
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let budget = adaptive_budget_for(AgentRole::Strategist, context_window_tokens);
         let workspace_map_cap = budget.workspace_map.min(12_000);
         let prd2_cap = budget.prd2.min(8_000);
         let prior_reviews_cap = budget.plan.min(10_000);

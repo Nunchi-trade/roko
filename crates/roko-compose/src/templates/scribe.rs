@@ -3,7 +3,7 @@
 //! Roko-owned scribe, doc revision, and critic prompt templates. The Critic is
 //! treated as a scribe-variant (same section set, different role identity).
 
-use super::common::{self, budget_for};
+use super::common::{self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -109,9 +109,19 @@ impl RolePromptTemplate for ScribeTemplate {
     type Input = ScribeInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
         let budget = match input.variant {
-            ScribeVariant::Critic => budget_for(AgentRole::Critic),
-            ScribeVariant::Initial | ScribeVariant::Revision => budget_for(AgentRole::Scribe),
+            ScribeVariant::Critic => adaptive_budget_for(AgentRole::Critic, context_window_tokens),
+            ScribeVariant::Initial | ScribeVariant::Revision => {
+                adaptive_budget_for(AgentRole::Scribe, context_window_tokens)
+            }
         };
         let mut sections = Vec::with_capacity(8);
 

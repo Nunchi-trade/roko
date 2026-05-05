@@ -37,12 +37,12 @@ use crate::prompt::estimate_tokens;
 use crate::prompt::{
     AttentionBidder, CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority,
 };
-use crate::templates::common::PromptBudget;
+use crate::templates::common::{PromptBudget, adaptive_budget_for};
 use crate::token_counter::TokenCounter;
 use crate::{ContextChunk, GateFeedback, PadState};
 use roko_core::tool::ToolDef;
 use roko_core::traits::Score as ScoreFn;
-use roko_core::{Budget, Compose, Context, Engram, Result};
+use roko_core::{AgentRole, Budget, Compose, Context, Engram, Result};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;
@@ -325,6 +325,17 @@ impl SystemPromptBuilder {
     #[must_use]
     pub const fn with_budget_profile(mut self, budget_profile: PromptBudget) -> Self {
         self.budget_profile = Some(budget_profile);
+        self
+    }
+
+    /// Apply model-context-aware section caps for the given role.
+    #[must_use]
+    pub fn with_adaptive_budget_profile(
+        mut self,
+        role: AgentRole,
+        context_window_tokens: usize,
+    ) -> Self {
+        self.budget_profile = Some(adaptive_budget_for(role, context_window_tokens));
         self
     }
 
