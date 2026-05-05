@@ -382,6 +382,42 @@ pub enum ServerEvent {
         block_number: Option<u64>,
     },
 
+    /// New ISFR composite rate computed by the keeper.
+    IsfrRateComputed {
+        /// Overall composite rate in basis points.
+        composite_bps: u64,
+        /// Lending-class weighted median in basis points.
+        lending_bps: u64,
+        /// Structured-product weighted median in basis points.
+        structured_bps: u64,
+        /// Funding-rate weighted median in basis points.
+        funding_bps: u64,
+        /// Staking-rate weighted median in basis points.
+        staking_bps: u64,
+        /// Confidence score (0–10000, where 10000 = 100% of sources live).
+        confidence_bps: u64,
+        /// Number of source readings that contributed to this composite.
+        source_count: usize,
+        /// Unix millisecond timestamp when this composite was computed.
+        timestamp_ms: i64,
+    },
+
+    /// ISFR source health status changed.
+    IsfrSourceHealthChanged {
+        /// Unique source identifier.
+        source_id: String,
+        /// Health status string: "live", "stale", or "offline".
+        health: String,
+        /// Most recent rate from this source in basis points, if available.
+        last_rate_bps: Option<u64>,
+    },
+
+    /// ISFR keeper started or stopped.
+    IsfrKeeperStateChanged {
+        /// Whether the keeper is now running.
+        running: bool,
+    },
+
     /// The server is shutting down.
     ServerShutdown,
 

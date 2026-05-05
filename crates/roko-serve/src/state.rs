@@ -337,6 +337,45 @@ pub struct BatchProgress {
 }
 
 // ---------------------------------------------------------------------------
+// ISFRState
+// ---------------------------------------------------------------------------
+
+/// Per-source health snapshot, reported by the `/api/isfr/sources` endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ISFRSourceSnapshot {
+    /// Unique source identifier (e.g. "mock-aave-v3").
+    pub id: String,
+    /// Human-readable source name.
+    pub name: String,
+    /// Rate class: "lending", "structured", "funding", "staking".
+    pub class: String,
+    /// Weight used in composite calculation (0.0–1.0).
+    pub weight: f64,
+    /// Most recent rate in basis points, if any.
+    pub last_rate_bps: Option<u64>,
+    /// Health status: "live", "stale", "offline".
+    pub health: String,
+    /// Epoch-ms timestamp of the last successful poll.
+    pub last_poll_ms: Option<i64>,
+}
+
+/// Shared ISFR keeper state exposed via REST (`/api/isfr/...`) and SSE.
+///
+/// Updated by the `PublishFn` callback when the keeper computes a new rate.
+/// All fields use async `RwLock` so handlers can read without blocking.
+#[derive(Debug, Default)]
+pub struct ISFRState {
+    /// Most recent composite rate published by the keeper.
+    pub current_rate: tokio::sync::RwLock<Option<roko_chain::isfr_sources::CompositeRate>>,
+    /// Bounded history ring (last 256 composite rates, newest at the end).
+    pub rate_history: tokio::sync::RwLock<Vec<roko_chain::isfr_sources::CompositeRate>>,
+    /// Per-source health snapshots.
+    pub sources: tokio::sync::RwLock<Vec<ISFRSourceSnapshot>>,
+    /// Whether the keeper background task is currently running.
+    pub keeper_running: std::sync::atomic::AtomicBool,
+}
+
+// ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
 
@@ -452,6 +491,9 @@ pub struct AppState {
     pub mirage_url: Option<String>,
     /// Upstream agent-relay URL for reverse proxy (`ROKO_AGENT_RELAY_URL`).
     pub agent_relay_url: Option<String>,
+
+    /// Shared ISFR keeper state exposed via REST and SSE.
+    pub isfr: Arc<ISFRState>,
 }
 
 /// A tracked bench run with its background task handle.
@@ -732,6 +774,7 @@ impl AppState {
             agent_relay_url: std::env::var("ROKO_AGENT_RELAY_URL")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            isfr: Arc::new(ISFRState::default()),
         })
     }
 
