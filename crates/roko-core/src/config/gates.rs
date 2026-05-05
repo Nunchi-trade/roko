@@ -48,7 +48,7 @@ pub struct GatesConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub domain_gates: HashMap<String, Vec<String>>,
     /// Custom gate rungs. When non-empty, these replace the built-in defaults.
-    #[serde(default)]
+    #[serde(default, rename = "rungs", alias = "custom_rungs")]
     pub custom_rungs: Vec<GateRungConfig>,
 }
 
@@ -69,10 +69,16 @@ impl Default for GatesConfig {
 }
 
 impl GatesConfig {
+    /// Returns true when `[[gates.rungs]]` custom gate configuration is present.
+    #[must_use]
+    pub fn has_custom_rungs(&self) -> bool {
+        !self.custom_rungs.is_empty()
+    }
+
     /// Returns custom rungs if configured, otherwise built-in defaults (compile, lint, test).
     #[must_use]
     pub fn effective_rungs(&self) -> Vec<GateRungConfig> {
-        if !self.custom_rungs.is_empty() {
+        if self.has_custom_rungs() {
             return self.custom_rungs.clone();
         }
         vec![
@@ -344,5 +350,38 @@ impl Default for PipelineConfig {
             integrative: PipelineBandConfig::integrative(),
             architectural: PipelineBandConfig::architectural(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::schema::RokoConfig;
+
+    #[test]
+    fn gates_rungs_deserializes_as_custom_rungs() {
+        let cfg = RokoConfig::from_toml(
+            r#"
+[gates]
+clippy_enabled = true
+
+[[gates.rungs]]
+name = "compile"
+command = "cargo check --workspace"
+timeout_secs = 120
+required = true
+
+[[gates.rungs]]
+name = "test"
+command = "cargo test --workspace"
+timeout_secs = 300
+required = true
+"#,
+        )
+        .expect("config parses");
+
+        assert!(cfg.gates.has_custom_rungs());
+        assert_eq!(cfg.gates.effective_rungs().len(), 2);
+        assert_eq!(cfg.gates.effective_rungs()[0].name, "compile");
+        assert_eq!(cfg.gates.effective_rungs()[1].timeout_secs, 300);
     }
 }

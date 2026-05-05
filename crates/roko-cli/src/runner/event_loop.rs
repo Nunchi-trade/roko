@@ -10,8 +10,10 @@ use std::time::{Duration, Instant};
 use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
 use roko_core::agent::ModelSpec;
+use roko_core::config::GatesConfig;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{AgentRole, PhaseKind, PlanPhase};
+use roko_gate::PlanComplexity;
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
@@ -2157,6 +2159,29 @@ fn record_skipped_gate_rung(
     }
 }
 
+fn gates_config_for_run(config: &RunConfig) -> GatesConfig {
+    let mut gates = config
+        .roko_config
+        .as_ref()
+        .map(|roko_config| roko_config.gates.clone())
+        .unwrap_or_default();
+    if !gates.has_custom_rungs() {
+        gates.clippy_enabled = config.clippy_enabled;
+        gates.skip_tests = config.skip_tests;
+    }
+    gates
+}
+
+fn gate_plan_complexity_for_task(task_def: Option<&TaskDef>) -> PlanComplexity {
+    match task_def.map(|task| task.tier.as_str()).unwrap_or("focused") {
+        "mechanical" | "fast" => PlanComplexity::Trivial,
+        "focused" => PlanComplexity::Simple,
+        "integrative" => PlanComplexity::Standard,
+        "architectural" | "complex" | "premium" => PlanComplexity::Complex,
+        _ => PlanComplexity::Simple,
+    }
+}
+
 async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
     match action {
         ExecutorAction::DispatchPlan { plan_id } => {
@@ -2710,53 +2735,37 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
 
         ExecutorAction::RunGate { plan_id, rung } => {
             let task_id = ctx.state.current_task.clone();
-            // Skip compile/clippy/test gates when no Cargo.toml exists (greenfield workspace).
-            if *rung <= 2 && !ctx.config.workdir.join("Cargo.toml").exists() {
-                info!(plan_id = %plan_id, rung = rung, "skipping cargo gate (no Cargo.toml in workspace)");
+            let gates_config = gates_config_for_run(ctx.config);
+            let pipeline_rung = ctx.config.max_gate_rung;
+            // Default selected rungs are Cargo-oriented; custom rungs own their command semantics.
+            if !gates_config.has_custom_rungs() && !ctx.config.workdir.join("Cargo.toml").exists() {
+                info!(plan_id = %plan_id, rung = pipeline_rung, "skipping default gate pipeline (no Cargo.toml in workspace)");
                 record_skipped_gate_rung(
                     ctx,
                     plan_id,
                     &task_id,
-                    *rung,
-                    "cargo",
+                    pipeline_rung,
+                    "gate-pipeline:default",
                     "skipped: no Cargo.toml in workspace",
                 );
                 return;
             }
-            // Honor gates config: skip clippy rung (1) if disabled, skip test rung (2) if skip_tests.
-            if *rung == 1 && !ctx.config.clippy_enabled {
-                info!(plan_id = %plan_id, rung = rung, "skipping clippy gate (disabled in config)");
-                record_skipped_gate_rung(
-                    ctx,
-                    plan_id,
-                    &task_id,
-                    *rung,
-                    "clippy",
-                    "skipped: clippy disabled in config",
-                );
-                return;
-            }
-            if *rung == 2 && ctx.config.skip_tests {
-                info!(plan_id = %plan_id, rung = rung, "skipping test gate (skip_tests in config)");
-                record_skipped_gate_rung(
-                    ctx,
-                    plan_id,
-                    &task_id,
-                    *rung,
-                    "test",
-                    "skipped: tests disabled in config",
-                );
-                return;
-            }
 
-            info!(plan_id = %plan_id, rung = rung, "dispatching gate");
-            let effect_key = gate_effect_key(plan_id, &task_id, *rung, GateCompletionKind::Gate);
+            info!(
+                plan_id = %plan_id,
+                requested_rung = *rung,
+                rung = pipeline_rung,
+                custom_rungs = gates_config.has_custom_rungs(),
+                "dispatching gate pipeline"
+            );
+            let effect_key =
+                gate_effect_key(plan_id, &task_id, pipeline_rung, GateCompletionKind::Gate);
             if !ctx.state.mark_gate_active(effect_key.clone()) {
                 debug!(
                     plan_id = %plan_id,
                     task_id = %task_id,
-                    rung = rung,
-                    "gate already active — suppressing duplicate dispatch"
+                    rung = pipeline_rung,
+                    "gate pipeline already active - suppressing duplicate dispatch"
                 );
                 return;
             }
@@ -2775,7 +2784,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     &run_id,
                     attempt_ref,
                     GateCompletionKind::Gate,
-                    *rung,
+                    pipeline_rung,
                 ),
             );
             let task_def = ctx
@@ -2797,13 +2806,13 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 info!(
                     plan_id = %plan_id,
                     task_id = %task_id,
-                    rung = rung,
+                    rung = pipeline_rung,
                     "skipping gate for read-only role"
                 );
                 let completion = GateCompletion {
                     plan_id: plan_id.clone(),
                     task_id: task_id.clone(),
-                    rung: *rung,
+                    rung: pipeline_rung,
                     passed: true,
                     output: "skipped: read-only role".to_string(),
                     failure_kind: None,
@@ -2829,11 +2838,14 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 });
             } else {
                 let verify_steps = task_def.map(|task| task.verify.clone()).unwrap_or_default();
+                let complexity = gate_plan_complexity_for_task(task_def);
                 gate_dispatch::spawn_gate(
                     plan_id.clone(),
                     task_id,
-                    *rung,
+                    pipeline_rung,
                     ctx.config.workdir.clone(),
+                    gates_config,
+                    complexity,
                     verify_steps,
                     ctx.config.timeout_secs,
                     ctx.gate_tx.clone(),

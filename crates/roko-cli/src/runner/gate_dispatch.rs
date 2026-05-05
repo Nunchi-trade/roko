@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use roko_core::config::GatesConfig;
 use roko_core::{Body, Engram, EngramBuilder, Kind, Provenance, Verdict, Verify};
 use roko_gate::classify_gate_failure;
-use roko_gate::rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung};
-use roko_gate::{GatePayload, ShellGate};
+use roko_gate::rung_dispatch::{GatePipelineBuilder, RungExecutionConfig, RungExecutionInputs};
+use roko_gate::{GatePayload, PlanComplexity, ShellGate};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::{Duration, timeout};
 use tracing::{error, info};
@@ -28,6 +29,8 @@ pub fn spawn_gate(
     task_id: String,
     rung: u32,
     workdir: PathBuf,
+    gates_config: GatesConfig,
+    complexity: PlanComplexity,
     verify_steps: Vec<VerifyStep>,
     timeout_secs: u64,
     gate_tx: mpsc::Sender<GateCompletion>,
@@ -69,11 +72,19 @@ pub fn spawn_gate(
                 source_roots: Some(vec![workdir_for_run]),
                 ..Default::default()
             };
+            let pipeline = if gates_config.has_custom_rungs() {
+                GatePipelineBuilder::from_config(&gates_config, complexity)
+            } else {
+                GatePipelineBuilder::from_config_with_execution(
+                    &gates_config,
+                    complexity,
+                    inputs,
+                    config,
+                )
+            };
 
-            let mut verdicts = run_rung(&signal, &ctx, rung, &inputs, &config).await;
-            if rung == 0 {
-                verdicts.extend(run_verify_steps(&signal, &ctx, &task_id, verify_steps).await);
-            }
+            let mut verdicts = vec![pipeline.verify(&signal, &ctx).await];
+            verdicts.extend(run_verify_steps(&signal, &ctx, &task_id, verify_steps).await);
             verdicts
         };
 
