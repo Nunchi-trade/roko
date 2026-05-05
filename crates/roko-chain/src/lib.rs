@@ -46,6 +46,7 @@
 pub mod agent_registry;
 #[cfg(feature = "alloy-backend")]
 pub mod alloy_impl;
+pub mod chain_profile;
 pub mod client;
 /// Collusion ring detection via assignment graph clique analysis (P2-11).
 pub mod collusion;
@@ -55,6 +56,12 @@ pub mod heartbeat_ext;
 pub mod identity_economy_identity;
 pub mod identity_economy_markets;
 pub mod isfr;
+/// ISFR contract bootstrap — deployment sequence and verification for dev chains.
+pub mod isfr_bootstrap;
+/// ISFR Keeper orchestrator — polls rate sources, computes composite, publishes.
+pub mod isfr_keeper;
+/// Pluggable rate source trait + MockSource for ISFR keeper.
+pub mod isfr_sources;
 /// KORAI token with lazy demurrage (CHAIN-01).
 pub mod korai_token;
 /// Spore job marketplace with escrow and 3 hiring models (CHAIN-04).
