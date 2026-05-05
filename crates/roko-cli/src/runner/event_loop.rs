@@ -617,6 +617,44 @@ pub async fn run(
         }
     }
 
+    // ── Spawn the learning event subscriber ──────────────────────────
+    // Background task that consumes gate/turn events and feeds them into
+    // CalibrationPolicy, VerdictScorer, ProviderHealth, CascadeRouter,
+    // CostsDb, and the efficiency JSONL log.
+    let learning_event_bus = roko_learn::events::EventBus::new(256);
+    let learning_subscriber_rx = learning_event_bus.subscribe();
+    let subscriber_model_slugs: Vec<String> = config
+        .cascade_router
+        .as_ref()
+        .map(|r| r.model_slugs().to_vec())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| vec![config.model.clone()]);
+    let learning_subscriber_handle = {
+        use std::sync::Mutex;
+        let health = Arc::new(roko_learn::provider_health::ProviderHealthRegistry::new());
+        let latency = Arc::new(roko_learn::latency::LatencyRegistry::new());
+        let router = Arc::new(roko_learn::cascade_router::CascadeRouter::new(
+            subscriber_model_slugs,
+        ));
+        let anomaly_start_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let anomaly = Arc::new(Mutex::new(roko_learn::anomaly::AnomalyDetector::new(
+            anomaly_start_ms,
+        )));
+        let costs = Arc::new(roko_learn::costs_db::CostsDb::new());
+        let efficiency_path = config.layout.learn_dir().join("efficiency.jsonl");
+        tokio::spawn(roko_learn::event_subscriber::run_learning_subscriber(
+            learning_subscriber_rx,
+            health,
+            latency,
+            router,
+            anomaly,
+            costs,
+            efficiency_path,
+        ))
+    };
+
     let mut timed_out = false;
 
     loop {
@@ -921,6 +959,18 @@ pub async fn run(
                     completion.passed,
                 );
                 emit_gate_thresholds_event(&gate_thresholds, &tui);
+
+                // Publish gate result to the learning event bus so the
+                // background subscriber can update VerdictHistory and
+                // CalibrationPolicy.
+                learning_event_bus.publish(
+                    roko_learn::events::AgentEvent::GateResult {
+                        gate_name: format!("rung-{}", completion.rung),
+                        passed: completion.passed,
+                        score: if completion.passed { 1.0 } else { 0.0 },
+                        duration_ms: completion.duration_ms,
+                    },
+                );
 
                 // Append gate verdict to signals.jsonl for audit / replay.
                 {
@@ -1602,6 +1652,10 @@ pub async fn run(
     persist_run_ledger(&run_ledger, &paths.run_ledger_jsonl);
 
     let report = build_report(&executor, &plans, &state);
+
+    // Shut down the learning subscriber background task.
+    learning_subscriber_handle.abort();
+    let _ = learning_subscriber_handle.await;
 
     // Shutdown Phase 0 subsystems and persist learned state.
     shutdown_subsystems(config, &tui).await;
