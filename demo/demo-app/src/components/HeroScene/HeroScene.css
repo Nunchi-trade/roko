@@ -1,0 +1,348 @@
+/* ═══════════════════════════════════════════════════════════
+   HeroScene · NieR-inspired title screen
+   ═══════════════════════════════════════════════════════════ */
+
+.landing-wrapper {
+  height: calc(100vh - 48px);
+  overflow: hidden;
+  position: relative;
+}
+
+.hero-scene-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* ── centered title composition ── */
+
+.landing-center {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: auto;
+  text-align: center;
+  padding: 48px 64px;
+  background: radial-gradient(
+    ellipse 120% 130% at 50% 50%,
+    rgba(10, 6, 12, 0.85) 0%,
+    rgba(10, 6, 12, 0.6) 40%,
+    rgba(10, 6, 12, 0.0) 100%
+  );
+  border-radius: 4px;
+}
+
+/* ── ornamental line (above title) ── */
+
+.nier-rule {
+  position: relative;
+  width: 200px;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    var(--rose-dim) 30%,
+    var(--rose-glow) 50%,
+    var(--rose-dim) 70%,
+    transparent 100%
+  );
+  opacity: 0.4;
+  margin-bottom: 32px;
+}
+
+.nier-rule::before,
+.nier-rule::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--rose-dim);
+  transform: rotate(45deg);
+  background: var(--bg-void);
+}
+
+.nier-rule::before { left: -4px; }
+.nier-rule::after { right: -4px; }
+
+/* ── title ── */
+
+.landing-title {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 300;
+  font-size: clamp(48px, 7vw, 88px);
+  color: var(--text-strong);
+  line-height: 0.9;
+  letter-spacing: -0.035em;
+  margin-bottom: 8px;
+  text-shadow: 0 0 80px color-mix(in srgb, var(--rose-glow) 6%, transparent);
+}
+
+.landing-title .accent {
+  color: var(--rose-glow);
+  text-shadow: 0 0 40px color-mix(in srgb, var(--rose-glow) 25%, transparent);
+}
+
+/* ── subtitle (thin italic) ── */
+
+.landing-sub {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 300;
+  font-size: 19px;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  margin-bottom: 40px;
+}
+
+/* ── ornamental rule (below subtitle) ── */
+
+.nier-rule-lower {
+  width: 120px;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--rose-dim),
+    transparent
+  );
+  opacity: 0.25;
+  margin-bottom: 40px;
+}
+
+/* ── START button — NieR style ── */
+
+.start-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 64px;
+  font-family: var(--mono);
+  font-size: 15px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--rose-glow);
+  text-decoration: none;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color 0.5s var(--ease), text-shadow 0.5s var(--ease);
+}
+
+/* Outer frame — thin ornamental border */
+.start-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--rose-dim);
+  opacity: 0.5;
+  transition: border-color 0.5s var(--ease), opacity 0.5s var(--ease), box-shadow 0.5s var(--ease);
+}
+
+/* Inner line accent */
+.start-btn::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 40px;
+  height: 1px;
+  background: var(--rose-glow);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 50%, transparent);
+  transition: width 0.5s var(--ease), box-shadow 0.5s var(--ease);
+}
+
+.start-btn:hover {
+  color: var(--text-strong);
+  text-shadow: 0 0 20px color-mix(in srgb, var(--rose-glow) 30%, transparent);
+}
+
+.start-btn:hover::before {
+  border-color: var(--rose-glow);
+  opacity: 0.8;
+  box-shadow:
+    0 0 20px color-mix(in srgb, var(--rose) 10%, transparent),
+    inset 0 0 30px color-mix(in srgb, var(--rose) 3%, transparent);
+}
+
+.start-btn:hover::after {
+  width: 80%;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--rose) 70%, transparent);
+}
+
+/* Corner marks on the button frame */
+.start-corner {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-color: var(--rose-dim);
+  border-style: solid;
+  opacity: 0.4;
+  transition: opacity 0.5s var(--ease), border-color 0.5s var(--ease);
+}
+
+.start-corner.tl { top: -1px; left: -1px; border-width: 1px 0 0 1px; }
+.start-corner.tr { top: -1px; right: -1px; border-width: 1px 1px 0 0; }
+.start-corner.bl { bottom: -1px; left: -1px; border-width: 0 0 1px 1px; }
+.start-corner.br { bottom: -1px; right: -1px; border-width: 0 1px 1px 0; }
+
+.start-btn:hover .start-corner {
+  opacity: 0.8;
+  border-color: var(--rose-glow);
+}
+
+/* ── loop phase ticker — below START ── */
+
+.landing-loop-ticker {
+  margin-top: 48px;
+  display: flex;
+  gap: 0;
+  align-items: center;
+}
+
+.landing-loop-ticker .phase {
+  padding: 7px 11px;
+  font-family: var(--mono);
+  font-size: var(--text-xl);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+  transition: color 0.6s ease, text-shadow 0.6s ease;
+  position: relative;
+}
+
+.landing-loop-ticker .phase.active {
+  color: var(--rose-glow);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--rose) 40%, transparent);
+}
+
+.landing-loop-ticker .phase.active::after {
+  content: '';
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 12px;
+  height: 1px;
+  background: var(--rose-glow);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rose) 60%, transparent);
+}
+
+.landing-loop-ticker .sep {
+  width: 4px;
+  height: 1px;
+  background: var(--text-ghost);
+  opacity: 0.4;
+}
+
+/* ── corner ornaments (NieR-style frame marks) ── */
+
+.nier-corner {
+  position: absolute;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  pointer-events: none;
+}
+
+.nier-corner::before,
+.nier-corner::after {
+  content: '';
+  position: absolute;
+  background: var(--rose-dim);
+  opacity: 0.2;
+}
+
+.nier-corner.tl { top: 20px; left: 20px; }
+.nier-corner.tl::before { top: 0; left: 0; width: 1px; height: 100%; }
+.nier-corner.tl::after { top: 0; left: 0; width: 100%; height: 1px; }
+
+.nier-corner.tr { top: 20px; right: 20px; }
+.nier-corner.tr::before { top: 0; right: 0; width: 1px; height: 100%; }
+.nier-corner.tr::after { top: 0; right: 0; width: 100%; height: 1px; }
+
+.nier-corner.bl { bottom: 20px; left: 20px; }
+.nier-corner.bl::before { bottom: 0; left: 0; width: 1px; height: 100%; }
+.nier-corner.bl::after { bottom: 0; left: 0; width: 100%; height: 1px; }
+
+.nier-corner.br { bottom: 20px; right: 20px; }
+.nier-corner.br::before { bottom: 0; right: 0; width: 1px; height: 100%; }
+.nier-corner.br::after { bottom: 0; right: 0; width: 100%; height: 1px; }
+
+/* ── bottom center micro text ── */
+
+.landing-footer-mark {
+  position: absolute;
+  z-index: 2;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: var(--text-xl);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* ── entrance animations ── */
+
+.landing-center.landing-fade-in {
+  opacity: 0;
+  animation: centerFadeIn 2s cubic-bezier(0.16, 0.7, 0.18, 1) 0.2s forwards;
+}
+
+@keyframes centerFadeIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 12px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+}
+
+.nier-corner,
+.landing-footer-mark {
+  opacity: 0;
+  animation: fadeIn 2.5s cubic-bezier(0.16, 0.7, 0.18, 1) 0.8s forwards;
+}
+
+/* ── responsive ── */
+
+@media (max-width: 640px) {
+  .landing-title {
+    font-size: clamp(36px, 10vw, 56px);
+  }
+
+  .landing-loop-ticker {
+    flex-wrap: wrap;
+    justify-content: center;
+    max-width: 280px;
+  }
+
+  .landing-loop-ticker .sep {
+    display: none;
+  }
+
+  .start-btn {
+    padding: 14px 48px;
+    font-size: var(--text-xl);
+  }
+
+  .nier-corner {
+    width: 20px;
+    height: 20px;
+  }
+}

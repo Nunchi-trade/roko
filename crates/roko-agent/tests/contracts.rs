@@ -98,12 +98,18 @@ async fn implementer_exceeds_token_budget_is_rejected() {
     let dispatcher = ToolDispatcher::new(registry, resolver)
         .with_safety(SafetyLayer::with_defaults().with_contract(contract));
 
+    // Token estimation uses content length (chars/4 heuristic), NOT
+    // LLM-supplied "estimated_tokens" (security fix: bypass prevented).
+    // Generate an "input" field that exceeds the budget: (limit + 1) * 4 chars.
+    // Using bash with a large "input" field triggers the token estimate
+    // without hitting path validation.
+    let over_budget_input = "x".repeat(((limit + 1) * 4) as usize);
     let call = ToolCall::new(
         "implementer-over-budget",
         "bash",
         json!({
-            "command": "echo ready",
-            "estimated_tokens": limit + 1,
+            "command": "echo hi",
+            "input": over_budget_input,
         }),
     );
     let result = dispatcher.dispatch(call, &full_capability_ctx()).await;
@@ -170,7 +176,7 @@ async fn researcher_allowed_network() {
 }
 
 #[tokio::test]
-async fn no_contract_means_permissive_default() {
+async fn no_contract_means_restricted_default() {
     assert!(
         AgentContract::load_for_role("does-not-exist").is_err(),
         "missing assets should not load"
@@ -187,16 +193,19 @@ async fn no_contract_means_permissive_default() {
     let dispatcher = ToolDispatcher::new(registry, resolver)
         .with_safety(SafetyLayer::with_defaults().with_role("does-not-exist"));
 
-    let safety = dispatcher
-        .safety()
-        .expect("dispatcher should retain safety");
+    let safety = dispatcher.safety();
     assert_eq!(safety.contract.role, "does-not-exist");
-    assert!(safety.contract.invariants.is_empty());
-    assert!(safety.contract.governance.is_empty());
-    assert!(safety.contract.recovery.is_empty());
+    // X01: fail-closed — restricted contract has an empty allowlist (deny-all)
+    assert!(
+        safety
+            .contract
+            .allowed_tools
+            .as_ref()
+            .is_some_and(|t| t.is_empty())
+    );
 
     let call = ToolCall::new(
-        "permissive-default",
+        "restricted-default",
         "bash",
         json!({
             "command": "echo ready",
@@ -205,7 +214,7 @@ async fn no_contract_means_permissive_default() {
     );
     let result = dispatcher.dispatch(call, &full_capability_ctx()).await;
     assert!(
-        result.is_ok(),
-        "permissive fallback should allow call, got {result:?}"
+        result.is_err(),
+        "restricted fallback should deny call, got {result:?}"
     );
 }

@@ -9,8 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
-/// Default retention window for cached backend responses.
-pub const DEFAULT_RESPONSE_CACHE_TTL_MS: u64 = 30_000;
+pub use roko_core::defaults::DEFAULT_RESPONSE_CACHE_TTL_MS;
 
 /// In-memory cache keyed by the content hash of a full backend request.
 pub struct ResponseCache {

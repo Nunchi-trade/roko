@@ -280,10 +280,11 @@ impl WitnessLogger {
     /// Returns an error if the file exists but cannot be read.
     pub fn read_all(&self) -> std::io::Result<WitnessDag> {
         let mut dag = WitnessDag::new();
-        if !self.path.exists() {
-            return Ok(dag);
-        }
-        let content = fs::read_to_string(&self.path)?;
+        let content = match fs::read_to_string(&self.path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(dag),
+            Err(e) => return Err(e),
+        };
         for line in content.lines().filter(|l| !l.trim().is_empty()) {
             if let Ok(vertex) = serde_json::from_str::<WitnessVertex>(line) {
                 dag.add_vertex(vertex);

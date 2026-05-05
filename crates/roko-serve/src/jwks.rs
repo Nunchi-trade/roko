@@ -56,10 +56,15 @@ struct CacheInner {
     fetched_at: Instant,
 }
 
+/// Default HTTP request timeout for JWKS fetches when none is configured.
+const DEFAULT_JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Thread-safe JWKS cache with automatic refresh.
 pub struct JwksCache {
     http: reqwest::Client,
     cache: RwLock<Option<CacheInner>>,
+    /// Per-request timeout for JWKS fetches (derived from `TimeoutConfig::http_request`).
+    fetch_timeout: Duration,
 }
 
 impl JwksCache {
@@ -68,6 +73,20 @@ impl JwksCache {
         Self {
             http,
             cache: RwLock::new(None),
+            fetch_timeout: DEFAULT_JWKS_FETCH_TIMEOUT,
+        }
+    }
+
+    /// Create a new cache with a configurable fetch timeout.
+    pub fn with_timeout(http: reqwest::Client, fetch_timeout: Duration) -> Self {
+        Self {
+            http,
+            cache: RwLock::new(None),
+            fetch_timeout: if fetch_timeout.is_zero() {
+                DEFAULT_JWKS_FETCH_TIMEOUT
+            } else {
+                fetch_timeout
+            },
         }
     }
 
@@ -184,7 +203,7 @@ impl JwksCache {
         let response = self
             .http
             .get(JWKS_URL)
-            .timeout(Duration::from_secs(10))
+            .timeout(self.fetch_timeout)
             .send()
             .await
             .map_err(|e| format!("JWKS fetch failed: {e}"))?;
@@ -218,4 +237,12 @@ fn ec_decoding_key(jwk: &Jwk) -> Option<DecodingKey> {
 /// Create a new `JwksCache` wrapped in `Arc` for shared ownership.
 pub fn new_jwks_cache(http: reqwest::Client) -> Arc<JwksCache> {
     Arc::new(JwksCache::new(http))
+}
+
+/// Create a new `JwksCache` with a configurable fetch timeout (from `TimeoutConfig::http_request`).
+pub fn new_jwks_cache_with_timeout(
+    http: reqwest::Client,
+    fetch_timeout: Duration,
+) -> Arc<JwksCache> {
+    Arc::new(JwksCache::with_timeout(http, fetch_timeout))
 }

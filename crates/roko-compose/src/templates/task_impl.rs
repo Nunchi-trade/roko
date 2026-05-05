@@ -1,12 +1,12 @@
 //! Per-task implementer prompt template.
 //!
-//! Ports Mori's `task_implementer_prompt` into a typed, I/O-free API.
+//! Roko-owned task implementer prompt template.
 //! Unlike the plan-wide [`ImplementerTemplate`](super::ImplementerTemplate),
 //! this template is scoped to a single task: it includes assignment details,
 //! file context, sibling task awareness for parallel execution, and per-task
 //! learning packs.
 
-use super::common::budget_for;
+use super::common::{self, AdaptiveBudget, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -90,9 +90,17 @@ impl RolePromptTemplate for TaskImplTemplate {
     type Input = TaskImplInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
         let mut sections = Vec::with_capacity(14);
-        push_base_sections(&mut sections, input);
-        push_optional_sections(&mut sections, input);
+        push_base_sections(&mut sections, input, context_window_tokens);
+        push_optional_sections(&mut sections, input, context_window_tokens);
         sections
     }
 
@@ -102,15 +110,19 @@ impl RolePromptTemplate for TaskImplTemplate {
 }
 
 /// Push the 8 always-present base sections.
-fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) {
-    let budget = budget_for(AgentRole::Implementer);
+fn push_base_sections(
+    sections: &mut Vec<PromptSection>,
+    input: &TaskImplInput,
+    context_window_tokens: usize,
+) {
+    let budget = adaptive_budget_for(AgentRole::Implementer, context_window_tokens);
+    let workspace_map_cap = scaled_task_cap(1_500, context_window_tokens);
+    let brief_cap = scaled_task_cap(2_000, context_window_tokens);
+    let prd2_cap = scaled_task_cap(3_000, context_window_tokens);
+    let cross_plan_cap = scaled_task_cap(1_000, context_window_tokens);
+    let ignored_tests_cap = scaled_task_cap(500, context_window_tokens);
     // 1. agents_instructions — System / Critical / Start
-    sections.push(
-        PromptSection::new("agents_instructions", &input.agents_md)
-            .with_priority(SectionPriority::Critical)
-            .with_cache_layer(CacheLayer::Role)
-            .with_placement(Placement::Start),
-    );
+    sections.push(common::agents_instructions_section(&input.agents_md));
     // 2. plan_spec — Session / Critical / Start / hard_cap 50k
     sections.push(
         PromptSection::new("plan_spec", truncate(&input.plan.content, budget.plan))
@@ -121,47 +133,53 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
     );
     // 3. workspace_map — Session / High / Middle / hard_cap 1.5k
     sections.push(
-        PromptSection::new("workspace_map", truncate(&input.workspace_map, 1_500))
-            .with_priority(SectionPriority::High)
-            .with_cache_layer(CacheLayer::Workspace)
-            .with_placement(Placement::Middle)
-            .with_hard_cap(1_500),
+        PromptSection::new(
+            "workspace_map",
+            truncate(&input.workspace_map, workspace_map_cap),
+        )
+        .with_priority(SectionPriority::High)
+        .with_cache_layer(CacheLayer::Workspace)
+        .with_placement(Placement::Middle)
+        .with_hard_cap(workspace_map_cap),
     );
     // 4. brief — Session / High / Middle / hard_cap 2k
     sections.push(
-        PromptSection::new("brief", truncate(&input.brief, 2_000))
+        PromptSection::new("brief", truncate(&input.brief, brief_cap))
             .with_priority(SectionPriority::High)
             .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Middle)
-            .with_hard_cap(2_000),
+            .with_hard_cap(brief_cap),
     );
     // 5. prd2_extract — Session / High / Middle / hard_cap 3k
     sections.push(
-        PromptSection::new("prd2_extract", truncate(&input.prd2_extract, 3_000))
+        PromptSection::new("prd2_extract", truncate(&input.prd2_extract, prd2_cap))
             .with_priority(SectionPriority::High)
             .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Middle)
-            .with_hard_cap(3_000),
+            .with_hard_cap(prd2_cap),
     );
     // 6. cross_plan_context — Session / Normal / Middle / hard_cap 1k
     sections.push(
         PromptSection::new(
             "cross_plan_context",
-            truncate(&input.cross_plan_context, 1_000),
+            truncate(&input.cross_plan_context, cross_plan_cap),
         )
         .with_priority(SectionPriority::Normal)
         .with_cache_layer(CacheLayer::Workspace)
         .with_placement(Placement::Middle)
-        .with_hard_cap(1_000),
+        .with_hard_cap(cross_plan_cap),
     );
     // 7. ignored_tests — Session / Low / Middle / hard_cap 500
     if !input.ignored_tests.is_empty() {
         sections.push(
-            PromptSection::new("ignored_tests", truncate(&input.ignored_tests, 500))
-                .with_priority(SectionPriority::Low)
-                .with_cache_layer(CacheLayer::Workspace)
-                .with_placement(Placement::Middle)
-                .with_hard_cap(500),
+            PromptSection::new(
+                "ignored_tests",
+                truncate(&input.ignored_tests, ignored_tests_cap),
+            )
+            .with_priority(SectionPriority::Low)
+            .with_cache_layer(CacheLayer::Workspace)
+            .with_placement(Placement::Middle)
+            .with_hard_cap(ignored_tests_cap),
         );
     }
     // 8. assignment — Task / Critical / End
@@ -174,23 +192,31 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
 }
 
 /// Push optional sections that are only present when their inputs are non-empty.
-fn push_optional_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) {
+fn push_optional_sections(
+    sections: &mut Vec<PromptSection>,
+    input: &TaskImplInput,
+    context_window_tokens: usize,
+) {
+    let prior_outputs_cap = scaled_task_cap(2_000, context_window_tokens);
+    let verify_chain_cap = scaled_task_cap(2_000, context_window_tokens);
+    let file_context_cap = scaled_task_cap(8_000, context_window_tokens);
+    let learning_pack_cap = scaled_task_cap(3_000, context_window_tokens);
     if let Some(ref prior) = input.prior_task_outputs {
         sections.push(
-            PromptSection::new("prior_task_outputs", truncate(prior, 2_000))
+            PromptSection::new("prior_task_outputs", truncate(prior, prior_outputs_cap))
                 .with_priority(SectionPriority::Normal)
                 .with_cache_layer(CacheLayer::Volatile)
                 .with_placement(Placement::Middle)
-                .with_hard_cap(2_000),
+                .with_hard_cap(prior_outputs_cap),
         );
     }
     if let Some(ref chain) = input.verify_chain {
         sections.push(
-            PromptSection::new("verify_chain", truncate(chain, 2_000))
+            PromptSection::new("verify_chain", truncate(chain, verify_chain_cap))
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::End)
-                .with_hard_cap(2_000),
+                .with_hard_cap(verify_chain_cap),
         );
     }
     if let Some(ref enh) = input.task_enhancements {
@@ -214,21 +240,29 @@ fn push_optional_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInp
     }
     if let Some(ref ctx) = input.file_context {
         sections.push(
-            PromptSection::new("file_context", ctx.as_str())
+            PromptSection::new("file_context", truncate(ctx, file_context_cap))
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Plan)
-                .with_placement(Placement::End),
+                .with_placement(Placement::End)
+                .with_hard_cap(file_context_cap),
         );
     }
     if let Some(ref pack) = input.learning_pack {
         sections.push(
-            PromptSection::new("learning_pack", truncate(pack, 3_000))
+            PromptSection::new("learning_pack", truncate(pack, learning_pack_cap))
                 .with_priority(SectionPriority::Normal)
                 .with_cache_layer(CacheLayer::Volatile)
                 .with_placement(Placement::Middle)
-                .with_hard_cap(3_000),
+                .with_hard_cap(learning_pack_cap),
         );
     }
+}
+
+fn scaled_task_cap(reference_cap: usize, context_window_tokens: usize) -> usize {
+    let reference_chars = REFERENCE_CONTEXT_WINDOW_TOKENS as f64 * 4.0;
+    let fraction = reference_cap as f64 / reference_chars;
+    AdaptiveBudget::new(fraction, reference_cap / 4, reference_cap * 2)
+        .compute(context_window_tokens)
 }
 
 /// Format the core assignment block: task id, title, files, acceptance criteria.

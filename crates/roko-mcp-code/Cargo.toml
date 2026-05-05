@@ -19,3 +19,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 roko-core = { path = "../roko-core" }
 roko-index = { path = "../roko-index" }
 roko-mcp-stdio = { path = "../roko-mcp-stdio" }
+
+[package.metadata.roko]
+layer = 2

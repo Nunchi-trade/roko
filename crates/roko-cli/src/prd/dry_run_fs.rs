@@ -170,13 +170,14 @@ pub(super) fn validate_and_print_preview(path: &Path) -> Result<()> {
     let tasks_file = TasksFile::parse(path).with_context(|| format!("parse {}", path.display()))?;
     let issues = tasks_file.validate();
     if !issues.is_empty() {
-        eprintln!("❌ Dry-run validation failed for {}:", path.display());
         for issue in &issues {
             eprintln!("  - {issue}");
         }
         return Err(anyhow!(
-            "dry-run plan validation failed for {}",
-            path.display()
+            "dry-run plan validation failed for {} ({} issue{})",
+            path.display(),
+            issues.len(),
+            if issues.len() == 1 { "" } else { "s" }
         ));
     }
 

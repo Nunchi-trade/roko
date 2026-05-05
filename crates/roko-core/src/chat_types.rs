@@ -152,6 +152,42 @@ impl Usage {
         self.cost_usd += other.cost_usd;
         self.wall_ms += other.wall_ms;
     }
+
+    /// Whether the cost is known (non-zero or provider-confirmed zero).
+    ///
+    /// Returns `false` when `cost_usd` is the uninitialised default (`0.0`)
+    /// **and** there were tokens consumed — meaning cost was never computed.
+    #[must_use]
+    pub fn has_known_cost(&self) -> bool {
+        self.cost_usd.abs() > f32::EPSILON || self.total_tokens() == 0
+    }
+
+    /// Compute cost from per-million token pricing when the provider did not
+    /// report a dollar amount.
+    ///
+    /// This is a no-op when `cost_usd` is already non-zero.  When
+    /// `input_per_m` **and** `output_per_m` are both `None`, the cost stays
+    /// at zero so the display layer can distinguish "unknown" from "free".
+    pub fn fill_cost_from_pricing(
+        &mut self,
+        input_per_m: Option<f64>,
+        output_per_m: Option<f64>,
+        cache_read_per_m: Option<f64>,
+    ) {
+        if self.cost_usd.abs() > f32::EPSILON {
+            return; // already set (e.g. Claude CLI reports cost natively)
+        }
+        let (Some(inp), Some(out)) = (input_per_m, output_per_m) else {
+            return; // no pricing data — leave at 0.0 so display shows "—"
+        };
+        let cache_r = cache_read_per_m.unwrap_or(inp * 0.1);
+
+        let cost = (self.input_tokens as f64 * inp / 1_000_000.0)
+            + (self.output_tokens as f64 * out / 1_000_000.0)
+            + (self.cache_read_tokens as f64 * cache_r / 1_000_000.0);
+
+        self.cost_usd = cost as f32;
+    }
 }
 
 /// Provider/session continuity state carried across turns.
@@ -236,10 +272,7 @@ impl ChatResponse {
     pub fn to_signal(&self) -> Engram {
         Engram::builder(Kind::AgentOutput)
             .body(Body::text(&self.content))
-            .tag(
-                "model",
-                self.metadata.model_used.as_deref().unwrap_or("unknown"),
-            )
+            .tag("model", self.metadata.model_used.as_deref().unwrap_or(""))
             .tag("finish_reason", format!("{:?}", self.finish_reason))
             .build()
     }
@@ -353,4 +386,130 @@ pub enum ResponseFormat {
     Text,
     /// Structured JSON object.
     JsonObject,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fill_cost_from_pricing_computes_correctly() {
+        let mut usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cache_read_tokens: 500,
+            cache_create_tokens: 0,
+            cost_usd: 0.0,
+            wall_ms: 100,
+        };
+
+        // gpt-5.4-mini pricing: $0.40/M input, $1.60/M output, $0.10/M cache read
+        usage.fill_cost_from_pricing(Some(0.40), Some(1.60), Some(0.10));
+
+        // Expected: (10000 * 0.40 / 1M) + (2000 * 1.60 / 1M) + (500 * 0.10 / 1M)
+        //         = 0.004 + 0.0032 + 0.00005 = 0.00725
+        let expected: f32 = 0.00725;
+        assert!(
+            (usage.cost_usd - expected).abs() < 1e-6,
+            "expected {expected}, got {}",
+            usage.cost_usd,
+        );
+    }
+
+    #[test]
+    fn fill_cost_does_not_overwrite_existing_cost() {
+        let mut usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cache_read_tokens: 0,
+            cache_create_tokens: 0,
+            cost_usd: 0.05, // already set (e.g. Claude CLI)
+            wall_ms: 100,
+        };
+
+        usage.fill_cost_from_pricing(Some(0.40), Some(1.60), None);
+
+        // Should remain at the original value
+        assert!(
+            (usage.cost_usd - 0.05).abs() < 1e-6,
+            "cost should not be overwritten, got {}",
+            usage.cost_usd,
+        );
+    }
+
+    #[test]
+    fn fill_cost_noop_when_no_pricing_data() {
+        let mut usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cache_read_tokens: 0,
+            cache_create_tokens: 0,
+            cost_usd: 0.0,
+            wall_ms: 100,
+        };
+
+        // Both None -> no-op, cost stays 0.0 so display shows "—"
+        usage.fill_cost_from_pricing(None, None, None);
+        assert!(usage.cost_usd.abs() < f32::EPSILON);
+
+        // Only input -> still no-op (need both)
+        usage.fill_cost_from_pricing(Some(0.40), None, None);
+        assert!(usage.cost_usd.abs() < f32::EPSILON);
+
+        // Only output -> still no-op
+        usage.fill_cost_from_pricing(None, Some(1.60), None);
+        assert!(usage.cost_usd.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fill_cost_defaults_cache_read_when_omitted() {
+        let mut usage = Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 1_000_000,
+            cache_create_tokens: 0,
+            cost_usd: 0.0,
+            wall_ms: 0,
+        };
+
+        // cache_read_per_m = None -> defaults to input_per_m * 0.1 = 0.04
+        usage.fill_cost_from_pricing(Some(0.40), Some(1.60), None);
+
+        let expected: f32 = 0.04; // 1M * 0.04 / 1M
+        assert!(
+            (usage.cost_usd - expected).abs() < 1e-6,
+            "expected {expected}, got {}",
+            usage.cost_usd,
+        );
+    }
+
+    #[test]
+    fn has_known_cost_true_when_nonzero() {
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cost_usd: 0.01,
+            ..Usage::default()
+        };
+        assert!(usage.has_known_cost());
+    }
+
+    #[test]
+    fn has_known_cost_true_when_zero_tokens() {
+        // Zero tokens + zero cost = legitimately free (no work done)
+        let usage = Usage::default();
+        assert!(usage.has_known_cost());
+    }
+
+    #[test]
+    fn has_known_cost_false_when_tokens_but_zero_cost() {
+        // Tokens consumed but cost is 0.0 = cost was never computed
+        let usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cost_usd: 0.0,
+            ..Usage::default()
+        };
+        assert!(!usage.has_known_cost());
+    }
 }

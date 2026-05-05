@@ -1,9 +1,22 @@
 //! Context window pressure watcher: fires when token usage exceeds threshold.
 //!
+//! # STATUS: WIRED (via Conductor)
+//!
+//! This watcher IS active at runtime. It is instantiated by `Conductor::new()`
+//! (see `conductor.rs` line ~102) and executed on every conductor check cycle
+//! from `orchestrate.rs::run_conductor_check()`. It fires when token usage
+//! exceeds 80% of the model's context window, producing a
+//! `conductor.intervention` signal that triggers restart/fail decisions.
+//!
+//! The watcher requires `Kind::TokenUsage` signals in the conductor's signal
+//! stream. These are emitted by the orchestrator after each agent dispatch
+//! (via `emit_conductor_signal`). Without those signals, the watcher is inert
+//! but harmless.
+//!
 //! Monitors `TokenUsage` signals derived from agent efficiency events and
 //! fires when usage exceeds [`MAX_CONTEXT_USAGE_RATIO`].
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 
 /// Maximum context window utilization ratio (0.0 to 1.0) before firing.
@@ -49,7 +62,7 @@ impl ContextWindowPressureWatcher {
     }
 }
 
-impl Policy for ContextWindowPressureWatcher {
+impl React for ContextWindowPressureWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Find the most recent TokenUsage signal.
         let latest = stream.iter().rev().find(|s| s.kind == Kind::TokenUsage);
@@ -138,6 +151,7 @@ mod tests {
             model: model.into(),
             plan_id: "plan-1".into(),
             task_id: "task-1".into(),
+            attempt_id: format!("{model}:{prompt_tokens}"),
             input_tokens: prompt_tokens,
             output_tokens: 10,
             reasoning_tokens: 0,
@@ -216,7 +230,7 @@ mod tests {
             Engram::builder(Kind::TokenUsage)
                 .body(Body::text("usage"))
                 .tag(TOKENS_USED_TAG, "0")
-                .tag(MODEL_TAG, "unknown-model")
+                .tag(MODEL_TAG, "mystery-model")
                 .build(),
         ];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());

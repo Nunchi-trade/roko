@@ -1,4 +1,4 @@
-//! [`Gate`](roko_core::traits::Gate) impls that validate on-chain preconditions
+//! [`Verify`](roko_core::traits::Verify) impls that validate on-chain preconditions
 //! before an agent signs a tx.
 //!
 //! These gates close the loop between planning and execution: an agent produces

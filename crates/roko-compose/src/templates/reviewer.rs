@@ -1,11 +1,10 @@
 //! Reviewer prompt template.
 //!
-//! Ports Mori's `architect_prompt` + `auditor_prompt` + `combined_reviewer_prompt`
-//! into a single template with enum dispatch. All three share a common context
-//! prefix (plan, workspace map, prd2, brief) and differ only in role identity
-//! and instructions.
+//! Roko-owned architect, auditor, and combined-reviewer prompts in a single
+//! template with enum dispatch. All three share a common context prefix (plan,
+//! workspace map, prd2, brief) and differ only in role identity and instructions.
 
-use super::common::budget_for;
+use super::common::{self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -113,19 +112,23 @@ impl RolePromptTemplate for ReviewerTemplate {
     type Input = ReviewerInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
-        let budget = budget_for(match self.variant {
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let role = match self.variant {
             Reviewer::Architect => AgentRole::Architect,
             Reviewer::Auditor | Reviewer::Combined => AgentRole::Auditor,
-        });
+        };
+        let budget = adaptive_budget_for(role, context_window_tokens);
         let mut sections = Vec::with_capacity(8);
 
-        // 1. agents_instructions — System / Critical
-        sections.push(
-            PromptSection::new("agents_instructions", &input.agents_md)
-                .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Role)
-                .with_placement(Placement::Start),
-        );
+        // 1. agents_instructions — System / Critical / Start
+        sections.push(common::agents_instructions_section(&input.agents_md));
 
         // 2. plan_spec — Session / Critical / hard_cap 50k
         sections.push(

@@ -1032,7 +1032,7 @@ fn render_plan_gates(
     let block = Block::default()
         .borders(Borders::TOP)
         .title(Span::styled(
-            " Gate Results ",
+            " Verify Results ",
             Style::default().fg(theme.muted),
         ))
         .border_style(Style::default().fg(Color::Rgb(40, 35, 42)));
@@ -1374,11 +1374,4 @@ fn parse_duration_secs(duration: &str) -> Option<f64> {
     matched.then_some(total)
 }
 
-/// Truncate with trailing `...`.
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::truncate;

@@ -1,0 +1,417 @@
+/* ═══════════════════════════════════════════════════════════
+   CommandLog · Rich Animated Log View
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Wrapper with scroll shadow ───────────────────────── */
+
+.command-log-wrapper {
+  position: relative;
+}
+
+.command-log-wrapper::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 24px;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--bg-raised) 80%, transparent), transparent);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity var(--duration-snap) ease;
+}
+
+.command-log-wrapper.has-scroll-shadow::before {
+  opacity: 1;
+}
+
+.command-log {
+  overflow-y: auto;
+  overflow-x: hidden;
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  padding: 10px 16px;
+  min-width: 0;
+  scroll-behavior: smooth;
+}
+
+/* ── Entry base ────────────────────────────────────────── */
+
+.log-entry {
+  display: flex;
+  gap: 10px;
+  padding: 3px 4px;
+  line-height: 1.5;
+  border-radius: 2px;
+  min-width: 0;
+  position: relative;
+  border-left: 2px solid transparent;
+  transition:
+    background var(--duration-snap) ease,
+    padding var(--duration-smooth) var(--ease),
+    border-color var(--duration-snap) ease;
+  overflow: hidden;
+  flex-wrap: wrap;
+}
+
+/* ── Slide-in from left on mount ─────────────────────── */
+
+.log-entry.log-entering {
+  animation: logSlideIn 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes logSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* ── New-entry glow highlight ────────────────────────── */
+
+.log-entry.log-newest::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--rose) 12%, transparent), transparent 70%);
+  border-radius: 2px;
+  pointer-events: none;
+  animation: logGlowFade 1s ease-out forwards;
+}
+
+@keyframes logGlowFade {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ── Cascade-out when clearing ───────────────────────── */
+
+.log-entry.log-exiting {
+  animation: logSlideOut 0.3s cubic-bezier(0.55, 0, 1, 0.45) forwards;
+}
+
+@keyframes logSlideOut {
+  from {
+    opacity: 1;
+    transform: translateX(0) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-12px) translateY(8px);
+  }
+}
+
+/* ── Typewriter reveal on command text ───────────────── */
+
+.log-text-typewriter {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  animation: logTypewriter 0.2s steps(20, end) both;
+  max-width: 100%;
+}
+
+@keyframes logTypewriter {
+  from { max-width: 0; }
+  to { max-width: 100%; }
+}
+
+.log-text-typewriter.log-typewriter-done {
+  animation: none;
+  white-space: normal;
+  overflow: visible;
+  max-width: none;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* ── Text classes ────────────────────────────────────── */
+
+.log-text {
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.log-info .log-text,
+.log-info .log-text-typewriter { color: var(--text-primary); }
+.log-success .log-text,
+.log-success .log-text-typewriter { color: var(--success); }
+.log-error .log-text,
+.log-error .log-text-typewriter { color: var(--rose-bright); }
+.log-dim .log-text,
+.log-dim .log-text-typewriter { color: var(--text-soft); }
+
+/* ── Command syntax highlighting ─────────────────────── */
+
+.log-syn-prefix {
+  color: var(--text-dim);
+}
+
+.log-syn-roko {
+  color: var(--rose-bright);
+  font-weight: var(--weight-medium);
+}
+
+.log-syn-sub {
+  color: var(--bone-bright);
+}
+
+.log-syn-arg {
+  color: var(--text-soft);
+}
+
+.log-syn-flag {
+  color: var(--status-active);
+}
+
+/* ── Entry content layout ────────────────────────────── */
+
+.log-entry-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.log-entry-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Description subtitle ────────────────────────────── */
+
+.log-entry-desc {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  line-height: 1.4;
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.log-entry:hover .log-entry-desc {
+  color: var(--text-soft);
+  white-space: normal;
+}
+
+/* ── Timestamp fade ──────────────────────────────────── */
+
+.log-ts {
+  color: var(--warning);
+  opacity: 0.35;
+  flex-shrink: 0;
+  transition: opacity var(--duration-snap) ease;
+  cursor: default;
+  user-select: none;
+  font-size: var(--text-xs);
+  min-width: 52px;
+}
+
+.log-entry:hover .log-ts {
+  opacity: 0.85;
+}
+
+/* ── Copy button ─────────────────────────────────────── */
+
+.log-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  color: var(--text-ghost);
+  opacity: 0;
+  transition: opacity var(--duration-snap) ease, color var(--duration-snap) ease;
+  flex-shrink: 0;
+}
+
+.log-entry:hover .log-copy-btn {
+  opacity: 1;
+}
+
+.log-copy-btn:hover {
+  color: var(--text-soft);
+}
+
+.log-copy-btn.log-copy-ok {
+  opacity: 1;
+}
+
+/* ── Error left-border pulse ─────────────────────────── */
+
+.log-error {
+  border-left-color: var(--status-error);
+}
+
+.log-entry.log-error.log-entering {
+  animation:
+    logSlideIn 0.35s cubic-bezier(0.22, 1, 0.36, 1) both,
+    logErrorPulse 0.6s ease-out;
+}
+
+@keyframes logErrorPulse {
+  0% { border-left-color: var(--status-error); box-shadow: inset 3px 0 8px color-mix(in srgb, var(--status-error) 30%, transparent); }
+  50% { border-left-color: var(--rose-bright); box-shadow: inset 3px 0 12px color-mix(in srgb, var(--status-error) 50%, transparent); }
+  100% { border-left-color: var(--status-error); box-shadow: inset 3px 0 0 transparent; }
+}
+
+/* ── Hover detail expand ─────────────────────────────── */
+
+.log-entry-detail {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    max-height var(--duration-smooth) var(--ease),
+    opacity var(--duration-snap) ease;
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  padding-left: 2px;
+  width: 100%;
+}
+
+.log-entry:hover .log-entry-detail {
+  max-height: 40px;
+  opacity: 1;
+}
+
+.log-entry:hover {
+  background: color-mix(in srgb, #fff 2%, transparent);
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+/* ── Status icons (SVG path animations) ──────────────── */
+
+.log-status-icon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+}
+
+.log-status-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* Spinner for running */
+.log-icon-spinner {
+  animation: logSpin 0.8s linear infinite;
+}
+
+@keyframes logSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Dot for info */
+.log-icon-dot circle {
+  opacity: 0.6;
+}
+
+/* Check draw-in for success */
+.log-icon-check path {
+  stroke: var(--status-success);
+  stroke-dasharray: 20;
+  stroke-dashoffset: 20;
+  animation: logCheckDraw 0.4s ease-out 0.15s forwards;
+}
+
+@keyframes logCheckDraw {
+  to { stroke-dashoffset: 0; }
+}
+
+/* X draw-in for error */
+.log-icon-x path {
+  stroke: var(--status-error);
+  stroke-dasharray: 16;
+  stroke-dashoffset: 16;
+  animation: logXDraw 0.35s ease-out 0.1s forwards;
+}
+
+@keyframes logXDraw {
+  to { stroke-dashoffset: 0; }
+}
+
+/* ── Group bracket ───────────────────────────────────── */
+
+.log-group {
+  position: relative;
+  margin-left: 4px;
+  padding-left: 10px;
+}
+
+.log-group::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: linear-gradient(to bottom, var(--rose-dim), transparent);
+  border-radius: 1px;
+  opacity: 0.5;
+}
+
+.log-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  user-select: none;
+  transition: color var(--duration-snap) ease;
+}
+
+.log-group-header:hover {
+  color: var(--text-soft);
+}
+
+.log-group-chevron {
+  display: inline-block;
+  font-size: var(--text-xs);
+  transition: transform var(--duration-snap) var(--ease);
+}
+
+.log-group-chevron.collapsed {
+  transform: rotate(-90deg);
+}
+
+.log-group-body {
+  overflow: hidden;
+  transition: max-height var(--duration-smooth) var(--ease);
+}
+
+.log-group-body.collapsed {
+  max-height: 0 !important;
+}
+
+/* ── Reduced motion ──────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .log-entry.log-entering,
+  .log-entry.log-exiting,
+  .log-text-typewriter,
+  .log-entry.log-newest::after,
+  .log-icon-spinner,
+  .log-icon-check path,
+  .log-icon-x path {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

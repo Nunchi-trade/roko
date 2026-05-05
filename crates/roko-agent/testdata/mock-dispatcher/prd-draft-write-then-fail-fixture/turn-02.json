@@ -1,0 +1,12 @@
+{
+  "reply": "{\"entries\":[]}",
+  "name": "prd-draft-write-then-fail-distill-01",
+  "usage": {
+    "input_tokens": 4,
+    "output_tokens": 4,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

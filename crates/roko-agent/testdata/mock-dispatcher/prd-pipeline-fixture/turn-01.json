@@ -1,0 +1,12 @@
+{
+  "reply": "---\nid: prd-workspace-anchored-feature\ntitle: workspace-anchored-feature\nstatus: draft\nversion: 1\ncreated: 2026-05-04\nupdated: 2026-05-04\ndepends_on: []\ncrates: []\nplans_generated: []\ncoverage: 0\ntags: [\"workspace\"]\n---\n\n# Workspace Anchored Feature\n\n## Overview\nKeep PRD pipeline commands anchored to the explicit workspace passed by the caller.\n\n## Requirements\n- REQ-001: Capture ideas, drafts, published PRDs, and plans in the selected workspace.\n- REQ-002: Avoid writing pipeline artifacts into the process current directory.\n\n## Acceptance criteria\n- `roko plan validate .roko/plans` succeeds for the selected workspace.\n",
+  "name": "prd-pipeline-fixture-turn-01",
+  "usage": {
+    "input_tokens": 13,
+    "output_tokens": 24,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

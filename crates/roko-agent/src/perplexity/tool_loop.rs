@@ -13,7 +13,7 @@ use crate::tool_loop::{LlmBackend, LlmError, StopReason, ToolLoop};
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
 use async_trait::async_trait;
 use roko_core::tool::{ToolContext, ToolDef};
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use roko_fs::RokoLayout;
 use serde_json::Value;
 
@@ -194,12 +194,12 @@ impl PerplexityToolLoopAgent {
 
     fn output_signal(
         &self,
-        input: &Engram,
+        input: &Signal,
         text: &str,
         stop_reason: &str,
         iterations: usize,
         metadata: Option<PerplexityMetadata>,
-    ) -> Engram {
+    ) -> Signal {
         let mut builder = derived_output(input, Kind::AgentOutput, Body::text(text))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
@@ -230,7 +230,7 @@ impl PerplexityToolLoopAgent {
 
 #[async_trait]
 impl Agent for PerplexityToolLoopAgent {
-    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         let prompt = input.body.as_text().unwrap_or_default();
         let tool_ctx = ToolContext::testing(&self.worktree_path);
         let tool_loop = match self.checkpoint_path(ctx) {
@@ -317,7 +317,7 @@ mod tests {
         ToolCall, ToolCategory, ToolContext, ToolDef, ToolFormat, ToolHandler, ToolPermission,
         ToolResult, ToolSchema, VecToolRegistry,
     };
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use serde_json::{Value, json};
     use std::sync::{
         Arc, Mutex,
@@ -544,8 +544,8 @@ mod tests {
         ToolLoop::new(translator, dispatcher, backend)
     }
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[tokio::test]

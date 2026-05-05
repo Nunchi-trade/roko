@@ -6,8 +6,8 @@
 //! - **State machine** — phase timeouts and transition records
 //! - **Interventions** — severity classification and escalation policies
 //! - **Circuit breaker** — per-plan failure budget tracking
-//! - **Watchers** — 10 specialized anomaly detectors, each a [`Policy`] impl
-//! - **Conductor** — composite Policy that runs all watchers
+//! - **Watchers** — 10 specialized anomaly detectors, each a [`React`] impl
+//! - **Conductor** — composite React that runs all watchers
 //!
 //! # Architecture
 //!

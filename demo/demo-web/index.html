@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>roko — live demo</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>
+  :root {
+    --bg: #16121a;
+    --fg: #a58e9e;
+    --rose: #b97894;
+    --sage: #7d9e8c;
+    --ember: #c36e55;
+    --bone: #d7c69e;
+    --dream: #7873a5;
+    --ghost: #372a37;
+    --dim: #916e8a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'Geist Mono', 'SF Mono', 'Menlo', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 2rem;
+  }
+  h1 {
+    color: var(--rose);
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+  .subtitle {
+    color: var(--dim);
+    font-size: 0.85rem;
+    margin-bottom: 1.5rem;
+  }
+  #terminal-container {
+    width: 900px;
+    max-width: 95vw;
+    border: 1px solid var(--ghost);
+    border-radius: 8px;
+    overflow: hidden;
+    position: relative;
+  }
+  .title-bar {
+    background: #0e0c10;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--ghost);
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot-red { background: var(--ember); }
+  .dot-yellow { background: #c39b5f; }
+  .dot-green { background: var(--sage); }
+  .title-bar span {
+    color: var(--dim);
+    font-size: 0.75rem;
+    margin-left: 8px;
+  }
+  #terminal { padding: 8px; }
+  .controls {
+    margin-top: 1.5rem;
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+  }
+  button {
+    background: var(--rose);
+    color: var(--bg);
+    border: none;
+    padding: 10px 24px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  button:hover { opacity: 0.85; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .status {
+    color: var(--dim);
+    font-size: 0.8rem;
+  }
+  .metrics {
+    margin-top: 2rem;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    width: 900px;
+    max-width: 95vw;
+  }
+  .metric {
+    background: #0e0c10;
+    border: 1px solid var(--ghost);
+    border-radius: 6px;
+    padding: 1rem;
+    text-align: center;
+  }
+  .metric .value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--sage);
+  }
+  .metric .label {
+    font-size: 0.7rem;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 0.3rem;
+  }
+</style>
+</head>
+<body>
+  <h1>◆ roko</h1>
+  <p class="subtitle">agent runtime — self-hosting demo</p>
+
+  <div id="terminal-container">
+    <div class="title-bar">
+      <div class="dot dot-red"></div>
+      <div class="dot dot-yellow"></div>
+      <div class="dot dot-green"></div>
+      <span>roko — demo</span>
+    </div>
+    <div id="terminal"></div>
+  </div>
+
+  <div class="controls">
+    <button id="btn-run" onclick="runDemo()">Run Demo</button>
+    <button id="btn-reset" onclick="resetDemo()" disabled>Reset</button>
+    <span class="status" id="status">ready</span>
+  </div>
+
+  <div class="metrics">
+    <div class="metric"><div class="value" id="m-cost">—</div><div class="label">total cost</div></div>
+    <div class="metric"><div class="value" id="m-tokens">—</div><div class="label">tokens</div></div>
+    <div class="metric"><div class="value" id="m-savings">—</div><div class="label">savings vs naive</div></div>
+    <div class="metric"><div class="value" id="m-gates">—</div><div class="label">gates passed</div></div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script>
+// ROSEDUST theme for xterm
+const theme = {
+  background: '#16121a',
+  foreground: '#a58e9e',
+  cursor: '#b97894',
+  cursorAccent: '#16121a',
+  selectionBackground: '#372a37',
+  black: '#16121a',
+  red: '#c36e55',
+  green: '#7d9e8c',
+  yellow: '#c39b5f',
+  blue: '#7873a5',
+  magenta: '#b97894',
+  cyan: '#6a9ea0',
+  white: '#d7c69e',
+  brightBlack: '#372a37',
+  brightRed: '#d48a6e',
+  brightGreen: '#99c4ac',
+  brightYellow: '#d9b870',
+  brightBlue: '#9d98c4',
+  brightMagenta: '#dc9cb8',
+  brightCyan: '#8abcbe',
+  brightWhite: '#ede0c8',
+};
+
+const term = new window.Terminal({
+  theme,
+  fontFamily: "'Geist Mono', 'SF Mono', 'Menlo', monospace",
+  fontSize: 13,
+  lineHeight: 1.4,
+  rows: 28,
+  cols: 100,
+  cursorBlink: true,
+  cursorStyle: 'bar',
+});
+term.open(document.getElementById('terminal'));
+
+// Color helpers
+const c = {
+  rose: s => `\x1b[35m${s}\x1b[0m`,
+  sage: s => `\x1b[32m${s}\x1b[0m`,
+  ember: s => `\x1b[31m${s}\x1b[0m`,
+  bone: s => `\x1b[33m${s}\x1b[0m`,
+  dream: s => `\x1b[34m${s}\x1b[0m`,
+  dim: s => `\x1b[90m${s}\x1b[0m`,
+  bold: s => `\x1b[1m${s}\x1b[0m`,
+  pass: '✔',
+  fail: '✖',
+};
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function typeCmd(cmd, delay = 40) {
+  term.write(`\x1b[32m❯\x1b[0m `);
+  for (const ch of cmd) {
+    term.write(ch);
+    await sleep(delay + Math.random() * 20);
+  }
+  await sleep(300);
+  term.writeln('');
+}
+
+async function output(lines, delay = 15) {
+  for (const line of lines) {
+    term.writeln(line);
+    await sleep(delay);
+  }
+}
+
+async function spinner(msg, duration) {
+  const frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧'];
+  const start = Date.now();
+  let i = 0;
+  while (Date.now() - start < duration) {
+    term.write(`\r${c.rose(frames[i % frames.length])} ${msg}...`);
+    i++;
+    await sleep(80);
+  }
+  term.write(`\r\x1b[2K`);
+}
+
+let running = false;
+
+async function runDemo() {
+  if (running) return;
+  running = true;
+  document.getElementById('btn-run').disabled = true;
+  document.getElementById('btn-reset').disabled = true;
+  document.getElementById('status').textContent = 'running...';
+  term.clear();
+
+  // Beat 1: init
+  await typeCmd('roko init');
+  await output([
+    `${c.sage(c.pass)} initialized .roko/ and roko.toml`,
+    '',
+  ]);
+
+  // Beat 2: prd idea
+  await typeCmd('roko prd idea "Wire SystemPromptBuilder into orchestrate.rs"');
+  await spinner('capturing idea', 800);
+  await output([
+    `${c.rose('◆')} ${c.bold('prd idea')}  wire-systempromptbuilder`,
+    `${c.dim('│')} saved to .roko/prd/ideas/wire-systempromptbuilder.md`,
+    `${c.dim('└')} 1 idea captured`,
+    '',
+  ]);
+
+  // Beat 3: draft
+  await typeCmd('roko prd draft new system-prompt-wiring');
+  await spinner('drafting PRD', 1500);
+  await output([
+    `${c.rose('◆')} ${c.bold('prd draft')}  system-prompt-wiring  ${c.dim('·')}  v0.1`,
+    `${c.dim('│')} problem    SystemPromptBuilder exists but is not called from orchestrate.rs`,
+    `${c.dim('│')} solution   Wire RoleSystemPromptSpec into dispatch_agent_with()`,
+    `${c.dim('│')} scope      4 files, ~200 LOC`,
+    `${c.dim('└')} draft saved to .roko/prd/drafts/system-prompt-wiring.md`,
+    '',
+  ]);
+
+  // Beat 4: research
+  await typeCmd('roko research enhance-prd system-prompt-wiring');
+  await spinner('researching', 2000);
+  await output([
+    `${c.rose('◆')} ${c.bold('research')}  system-prompt-wiring`,
+    `${c.dim('│')} sources    4 crate docs, 2 existing PRDs, 1 mori reference`,
+    `${c.dim('│')} findings   9 layers already built in SystemPromptBuilder`,
+    `${c.dim('│')} enriched   added implementation notes to PRD sections 3-5`,
+    `${c.dim('└')} PRD updated with research context`,
+    '',
+  ]);
+
+  updateMetric('m-cost', '$0.12');
+  updateMetric('m-tokens', '8,421');
+
+  // Beat 5: plan
+  await typeCmd('roko prd plan system-prompt-wiring');
+  await spinner('generating plan', 1800);
+  await output([
+    `${c.rose('◆')} ${c.bold('plan')}  system-prompt-wiring  ${c.dim('·')}  5 tasks  ${c.dim('·')}  2 waves`,
+    `${c.dim('├')} wave 1  ${c.sage('━━━━━━━━━━')} 3 tasks (parallel)`,
+    `${c.dim('│')} ${c.dim('├')} T01 add RoleSystemPromptSpec to orchestrate.rs`,
+    `${c.dim('│')} ${c.dim('├')} T02 wire 9-layer builder into dispatch_agent_with`,
+    `${c.dim('│')} ${c.dim('└')} T03 add template selection from agent role`,
+    `${c.dim('├')} wave 2  ${c.dim('░░░░░░░░░░')} 2 tasks (sequential)`,
+    `${c.dim('│')} ${c.dim('├')} T04 integration test with real agent dispatch`,
+    `${c.dim('│')} ${c.dim('└')} T05 update CLI help text and docs`,
+    `${c.dim('└')} saved to plans/system-prompt-wiring/tasks.toml`,
+    '',
+  ]);
+
+  // Beat 6: plan run (the main event)
+  await typeCmd('roko plan run plans/');
+  term.writeln('');
+
+  // Task 1
+  await spinner('T01 dispatching to claude-haiku', 1200);
+  await output([
+    `${c.rose('◆')} ${c.bold('agent')}  implementer@v1  ${c.dim('·')}  eid://roko/implementer.v1`,
+    `${c.dim('│')} predict   $0.043  ${c.dim('·')}  12.4s  ${c.dim('·')}  route: haiku`,
+    `${c.dim('│')} knowledge loaded 3 engrams from /code/orchestrate (2 agents, 0.89 conf)`,
+  ]);
+  await spinner('implementing T01', 1500);
+  await output([
+    `${c.dim('│')} ${c.dim('▸')} ${c.dream('ReadFile')}  src/orchestrate.rs (1247 lines)  ${c.dim('(0.3s)')}`,
+    `${c.dim('│')} ${c.dim('▸')} ${c.dream('Edit')}  src/orchestrate.rs:342 (+18 -3)  ${c.dim('(0.1s)')}`,
+    `${c.dim('│')} gates     compile ${c.sage(c.pass)}   test ${c.sage(c.pass)}   clippy ${c.sage(c.pass)}`,
+    `${c.dim('│')} actual    ${c.sage('$0.031')}  (-28% vs predicted)  ${c.dim('·')}  routed to haiku`,
+    `${c.dim('└')} deposited 1 new engram → /code/orchestrate`,
+    '',
+  ]);
+
+  updateMetric('m-cost', '$0.18');
+  updateMetric('m-tokens', '14,832');
+  updateMetric('m-gates', '3/3');
+
+  // Task 2 + 3 parallel
+  await spinner('T02+T03 dispatching (parallel)', 2000);
+  await output([
+    `${c.rose('◆')} ${c.bold('wave 1')}  3/3 complete  ${c.sage(c.pass)}`,
+    `${c.dim('│')} T01 wire-spec           ${c.sage(c.pass)}  $0.031  4.2s`,
+    `${c.dim('│')} T02 builder-dispatch    ${c.sage(c.pass)}  $0.028  3.8s`,
+    `${c.dim('│')} T03 template-selection  ${c.sage(c.pass)}  $0.019  2.1s`,
+    '',
+  ]);
+
+  updateMetric('m-cost', '$0.26');
+  updateMetric('m-tokens', '21,450');
+  updateMetric('m-gates', '9/9');
+
+  // Task 4 — gate failure + replan
+  await spinner('T04 integration test', 1800);
+  await output([
+    `${c.dim('│')} ${c.ember(c.fail)}  ${c.bold('gate failed')}: test (rung 3/7)`,
+    `${c.dim('│')}    ${c.ember('assertion error in orchestrate.rs:358')}`,
+    `${c.dim('│')} replan    ${c.bone('escalate to sonnet')}  (confidence: 0.67 → 0.91)`,
+  ]);
+  await spinner('T04 retrying with sonnet', 2000);
+  await output([
+    `${c.dim('│')} retry     attempt 2/3  ${c.sage(c.pass)}  (4.2s)`,
+    `${c.dim('│')} gates     compile ${c.sage(c.pass)}   test ${c.sage(c.pass)}   clippy ${c.sage(c.pass)}`,
+    `${c.dim('│')} actual    $0.058 (replan cost: +$0.027)`,
+    '',
+  ]);
+
+  updateMetric('m-cost', '$0.34');
+  updateMetric('m-gates', '15/15');
+  updateMetric('m-savings', '28.4x');
+
+  // Ctrl+C simulation
+  await sleep(500);
+  term.writeln(`${c.dim('│')} ${c.ember('^C')}  interrupted — saving checkpoint...`);
+  await sleep(800);
+  await output([
+    `${c.sage(c.pass)} checkpoint saved to .roko/state/executor.json`,
+    `${c.dim('  tasks: 4/5 complete, T05 pending')}`,
+    '',
+  ]);
+
+  // Beat 7: resume
+  await sleep(1000);
+  await typeCmd('roko resume');
+  await output([
+    `${c.rose('◆')} ${c.bold('resume')}  from checkpoint  ${c.dim('·')}  event 47/52`,
+    `${c.dim('│')} skipping  T01-T04 (already complete)`,
+    `${c.dim('│')} resuming  T05 docs-update`,
+  ]);
+  await spinner('T05 updating docs', 1200);
+  await output([
+    `${c.dim('│')} ${c.dim('▸')} ${c.dream('Edit')}  README.md (+12 -0)  ${c.dim('(0.1s)')}`,
+    `${c.dim('│')} gates     compile ${c.sage(c.pass)}   test ${c.sage(c.pass)}`,
+    `${c.dim('│')} actual    $0.014`,
+    '',
+    `${c.sage(c.pass)} ${c.bold('plan complete')}  5/5 tasks  ${c.dim('·')}  1 replan  ${c.dim('·')}  zero work lost`,
+    '',
+  ]);
+
+  // Beat 8: session summary
+  await output([
+    `${c.rose('◆')} ${c.bold('session')}  summary`,
+    `${c.dim('│')} runs      5`,
+    `${c.dim('│')} total     ${c.sage('$0.35')}  ${c.dim('·')}  baseline: $9.94  ${c.dim('·')}  savings: 28.4x`,
+    `${c.dim('│')} cache     87% hit rate`,
+    `${c.dim('│')} tokens    21,450 in / 5,812 out`,
+    `${c.dim('│')} gates     17/17 passed (1 replan, succeeded)`,
+    `${c.dim('└')} model     haiku (94% of tokens)`,
+    '',
+    `${c.rose('◆')} ${c.bold('cost waterfall')}`,
+    `${c.dim('│')} baseline  $9.94  ${c.dim('·')}  opus, no cache, no routing`,
+    `${c.dim('│')} ${c.dim('├──')} prompt caching              ${c.sage('-$4.97')}  (5.0x)`,
+    `${c.dim('│')} ${c.dim('├──')} cascade routing (haiku)     ${c.sage('-$2.98')}  (3.1x)`,
+    `${c.dim('│')} ${c.dim('├──')} knowledge pre-load          ${c.sage('-$1.19')}  (1.4x)`,
+    `${c.dim('│')} ${c.dim('└──')} gate early-exit             ${c.sage('-$0.50')}  (1.2x)`,
+    `${c.dim('│')} actual    ${c.sage('$0.35')}`,
+    `${c.dim('└')} savings   ${c.sage(c.bold('28.4x'))}  ${c.dim('real tokens, real prices')}`,
+    '',
+  ]);
+
+  updateMetric('m-cost', '$0.35');
+  updateMetric('m-tokens', '27,262');
+  updateMetric('m-savings', '28.4x');
+  updateMetric('m-gates', '17/17');
+
+  // Done
+  document.getElementById('status').textContent = 'complete';
+  document.getElementById('btn-reset').disabled = false;
+  running = false;
+}
+
+function resetDemo() {
+  term.clear();
+  term.write('');
+  document.getElementById('btn-run').disabled = false;
+  document.getElementById('btn-reset').disabled = true;
+  document.getElementById('status').textContent = 'ready';
+  ['m-cost','m-tokens','m-savings','m-gates'].forEach(id => {
+    document.getElementById(id).textContent = '—';
+  });
+}
+
+function updateMetric(id, value) {
+  document.getElementById(id).textContent = value;
+}
+</script>
+</body>
+</html>

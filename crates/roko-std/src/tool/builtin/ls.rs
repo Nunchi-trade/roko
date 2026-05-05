@@ -26,7 +26,16 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Read,
         ToolPermission::read_only(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Relative directory path to list (default: \".\")."
+            }
+        },
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(true)
     .with_timeout_ms(10_000)

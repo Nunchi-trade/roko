@@ -39,6 +39,8 @@ impl CliRuntime for TestRuntime {
         Ok(RunResult {
             success: true,
             output_text: Some("test runtime output".to_string()),
+            usage: None,
+            gate_results: Vec::new(),
         })
     }
 
@@ -71,13 +73,21 @@ fn test_app_state() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
     let dir = tempdir().expect("tempdir");
     let config = RokoConfig::default();
     let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-    let state = Arc::new(AppState::new(
-        dir.path().to_path_buf(),
-        Arc::new(TestRuntime),
-        config,
-        deploy,
-    ));
-    let auth = ServeAuthConfig::default();
+    let state = Arc::new(
+        AppState::new(
+            dir.path().to_path_buf(),
+            Arc::new(TestRuntime),
+            config,
+            deploy,
+        )
+        .expect("AppState::new"),
+    );
+    // T3-22: library default is now `enabled = true`; tests that exercise
+    // unauthenticated routes opt back out explicitly.
+    let auth = ServeAuthConfig {
+        enabled: false,
+        ..ServeAuthConfig::default()
+    };
     let router = build_router(Arc::clone(&state), &[], auth);
     (dir, state, router)
 }

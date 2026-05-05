@@ -4,11 +4,16 @@
 //! older verbose tool results in place so their `tool_call_id`s remain
 //! available to the backend.
 
+use roko_core::defaults::{
+    DEFAULT_RECENT_TOOL_GROUPS_TO_KEEP, DEFAULT_TOOL_RESULT_COMPACTION_THRESHOLD_CHARS,
+    DEFAULT_TOOL_RESULT_PREVIEW_CHARS,
+};
 use serde_json::Value;
 
-const RECENT_TOOL_GROUPS_TO_KEEP: usize = 2;
-const TOOL_RESULT_COMPACTION_THRESHOLD_CHARS: usize = 500;
-const TOOL_RESULT_PREVIEW_CHARS: usize = 200;
+const RECENT_TOOL_GROUPS_TO_KEEP: usize = DEFAULT_RECENT_TOOL_GROUPS_TO_KEEP;
+const TOOL_RESULT_COMPACTION_THRESHOLD_CHARS: usize =
+    DEFAULT_TOOL_RESULT_COMPACTION_THRESHOLD_CHARS;
+const TOOL_RESULT_PREVIEW_CHARS: usize = DEFAULT_TOOL_RESULT_PREVIEW_CHARS;
 
 /// Truncate verbose tool results outside the most recent tool-call groups.
 ///

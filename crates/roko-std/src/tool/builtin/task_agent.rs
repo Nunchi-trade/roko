@@ -96,7 +96,21 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Meta,
         ToolPermission::writes(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "subagent_type": {
+                "type": "string",
+                "description": "Type of sub-agent to spawn (e.g. 'explorer', 'coder', 'researcher')."
+            },
+            "prompt": {
+                "type": "string",
+                "description": "The instruction/task for the sub-agent to execute."
+            }
+        },
+        "required": ["subagent_type", "prompt"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(false)
     .with_timeout_ms(600_000)

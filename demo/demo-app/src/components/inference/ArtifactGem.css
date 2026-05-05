@@ -1,0 +1,352 @@
+/* ArtifactGem -- collectible artifact indicator with sparkle animation */
+
+/* ── Base gem ── */
+
+.artifact-gem {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: default;
+  transition: transform var(--duration-snap) var(--ease),
+              box-shadow var(--duration-smooth) var(--ease),
+              filter var(--duration-smooth) var(--ease);
+}
+
+.artifact-gem--clickable {
+  cursor: pointer;
+}
+
+/* ── Sizes ── */
+
+.artifact-gem--sm { width: 16px; height: 16px; }
+.artifact-gem--md { width: 24px; height: 24px; }
+.artifact-gem--lg { width: 32px; height: 32px; }
+
+/* ── Inner shape ── */
+
+.artifact-gem__shape {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--duration-smooth) var(--ease),
+              box-shadow var(--duration-smooth) var(--ease);
+}
+
+/* Hexagon (episode) */
+.artifact-gem--episode .artifact-gem__shape {
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+}
+
+/* Diamond (insight) */
+.artifact-gem--insight .artifact-gem__shape {
+  transform: rotate(45deg);
+  border-radius: 2px;
+}
+.artifact-gem--insight .artifact-gem__shape .artifact-gem__inner {
+  transform: rotate(-45deg);
+}
+
+/* Circle (hdc) */
+.artifact-gem--hdc .artifact-gem__shape {
+  border-radius: 50%;
+}
+
+/* Rounded square (knowledge) */
+.artifact-gem--knowledge .artifact-gem__shape {
+  border-radius: 25%;
+}
+
+/* ── Inner glyph (optional center pip) ── */
+
+.artifact-gem__inner {
+  width: 40%;
+  height: 40%;
+  border-radius: 50%;
+  opacity: 0.7;
+  transition: opacity var(--duration-smooth) var(--ease);
+}
+
+/* ══════════════════════════════════════════
+   Significance tiers
+   ══════════════════════════════════════════ */
+
+/* Ghost (0.0 - 0.3) */
+.artifact-gem[data-tier="ghost"] .artifact-gem__shape {
+  background: var(--text-ghost);
+  box-shadow: none;
+}
+.artifact-gem[data-tier="ghost"] .artifact-gem__inner {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Dim (0.3 - 0.6) */
+.artifact-gem[data-tier="dim"] .artifact-gem__shape {
+  background: var(--rose-dim);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rose-dim) 30%, transparent);
+}
+.artifact-gem[data-tier="dim"] .artifact-gem__inner {
+  background: color-mix(in srgb, var(--rose-dim) 30%, transparent);
+}
+
+/* Bright (0.6 - 0.8) */
+.artifact-gem[data-tier="bright"] .artifact-gem__shape {
+  background: var(--rose-bright);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--rose-bright) 40%, transparent),
+              0 0 24px color-mix(in srgb, var(--rose-bright) 15%, transparent);
+}
+.artifact-gem[data-tier="bright"] .artifact-gem__inner {
+  background: color-mix(in srgb, var(--rose-glow) 50%, transparent);
+  opacity: 0.9;
+}
+
+/* Crystallized (0.8 - 1.0) */
+.artifact-gem[data-tier="crystallized"] .artifact-gem__shape {
+  background: var(--rose-glow);
+  box-shadow: var(--glow-rose-bright);
+}
+.artifact-gem[data-tier="crystallized"] .artifact-gem__inner {
+  background: rgba(255, 255, 255, 0.6);
+  opacity: 1;
+}
+
+/* ── Breathe animation for bright + crystallized ── */
+
+.artifact-gem[data-tier="bright"] .artifact-gem__shape,
+.artifact-gem[data-tier="crystallized"] .artifact-gem__shape {
+  animation: gem-breathe 2.8s ease-in-out infinite;
+}
+
+@keyframes gem-breathe {
+  0%, 100% { filter: brightness(1); }
+  50%      { filter: brightness(1.15); }
+}
+
+/* Crystallized gets a stronger breathe */
+.artifact-gem[data-tier="crystallized"] .artifact-gem__shape {
+  animation: gem-breathe-intense 2.4s ease-in-out infinite;
+}
+
+@keyframes gem-breathe-intense {
+  0%, 100% {
+    filter: brightness(1);
+    box-shadow: var(--glow-rose-bright);
+  }
+  50% {
+    filter: brightness(1.25);
+    box-shadow: 0 0 40px color-mix(in srgb, var(--rose) 60%, transparent),
+                0 0 80px color-mix(in srgb, var(--rose) 30%, transparent);
+  }
+}
+
+/* ══════════════════════════════════════════
+   Mount sparkle animation
+   ══════════════════════════════════════════ */
+
+.artifact-gem--animate-enter .artifact-gem__shape {
+  animation: gem-pop 300ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes gem-pop {
+  0%   { transform: scale(0); opacity: 0; }
+  60%  { transform: scale(1.2); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* Preserve diamond rotation during pop */
+.artifact-gem--insight.artifact-gem--animate-enter .artifact-gem__shape {
+  animation: gem-pop-diamond 300ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes gem-pop-diamond {
+  0%   { transform: rotate(45deg) scale(0); opacity: 0; }
+  60%  { transform: rotate(45deg) scale(1.2); opacity: 1; }
+  100% { transform: rotate(45deg) scale(1); opacity: 1; }
+}
+
+/* Flash overlay */
+.artifact-gem__flash {
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.artifact-gem--animate-enter .artifact-gem__flash {
+  animation: gem-flash 400ms ease-out forwards;
+}
+
+@keyframes gem-flash {
+  0%   { opacity: 0; background: color-mix(in srgb, var(--rose-glow) 60%, transparent); }
+  30%  { opacity: 1; background: color-mix(in srgb, var(--rose-glow) 40%, transparent); }
+  100% { opacity: 0; background: transparent; }
+}
+
+/* ── Sparkle particles ── */
+
+.artifact-gem__sparkle {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  /* Cross pattern via box-shadow */
+  box-shadow:
+    0 0 0 0.5px currentColor,
+    2px 0 0 0.5px currentColor,
+    -2px 0 0 0.5px currentColor,
+    0 2px 0 0.5px currentColor,
+    0 -2px 0 0.5px currentColor;
+}
+
+.artifact-gem--animate-enter .artifact-gem__sparkle--1 {
+  color: var(--rose-glow);
+  animation: gem-sparkle-1 500ms 80ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.artifact-gem--animate-enter .artifact-gem__sparkle--2 {
+  color: var(--bone-bright);
+  animation: gem-sparkle-2 500ms 120ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.artifact-gem--animate-enter .artifact-gem__sparkle--3 {
+  color: var(--dream-bright);
+  animation: gem-sparkle-3 500ms 60ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.artifact-gem--animate-enter .artifact-gem__sparkle--4 {
+  color: var(--rose-bright);
+  animation: gem-sparkle-4 500ms 160ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.artifact-gem--animate-enter .artifact-gem__sparkle--5 {
+  color: var(--bone);
+  animation: gem-sparkle-5 500ms 100ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes gem-sparkle-1 {
+  0%   { transform: translate(0, 0) scale(0); opacity: 1; }
+  100% { transform: translate(14px, -16px) scale(1); opacity: 0; }
+}
+@keyframes gem-sparkle-2 {
+  0%   { transform: translate(0, 0) scale(0); opacity: 1; }
+  100% { transform: translate(-12px, -14px) scale(0.8); opacity: 0; }
+}
+@keyframes gem-sparkle-3 {
+  0%   { transform: translate(0, 0) scale(0); opacity: 1; }
+  100% { transform: translate(16px, 10px) scale(0.9); opacity: 0; }
+}
+@keyframes gem-sparkle-4 {
+  0%   { transform: translate(0, 0) scale(0); opacity: 1; }
+  100% { transform: translate(-14px, 12px) scale(0.7); opacity: 0; }
+}
+@keyframes gem-sparkle-5 {
+  0%   { transform: translate(0, 0) scale(0); opacity: 1; }
+  100% { transform: translate(6px, -18px) scale(0.85); opacity: 0; }
+}
+
+/* ── Hover ── */
+
+.artifact-gem:hover .artifact-gem__shape {
+  transform: scale(1.1);
+  filter: brightness(1.2);
+}
+
+.artifact-gem--insight:hover .artifact-gem__shape {
+  transform: rotate(45deg) scale(1.1);
+  filter: brightness(1.2);
+}
+
+/* ── Click ripple ── */
+
+.artifact-gem__ripple {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.artifact-gem__ripple--active {
+  animation: gem-ripple 400ms ease-out forwards;
+}
+
+@keyframes gem-ripple {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--rose-bright) 40%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--rose-bright) 0%, transparent);
+  }
+}
+
+/* ── Tooltip ── */
+
+.artifact-gem__tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-soft);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--duration-snap) var(--ease);
+  z-index: var(--z-floating);
+}
+
+.artifact-gem:hover .artifact-gem__tooltip {
+  opacity: 1;
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .artifact-gem,
+  .artifact-gem .artifact-gem__shape {
+    transition: none;
+    animation: none !important;
+  }
+
+  .artifact-gem--animate-enter .artifact-gem__shape {
+    animation: none !important;
+    transform: scale(1) !important;
+    opacity: 1;
+  }
+
+  .artifact-gem--insight.artifact-gem--animate-enter .artifact-gem__shape {
+    animation: none !important;
+    transform: rotate(45deg) scale(1) !important;
+    opacity: 1;
+  }
+
+  .artifact-gem--animate-enter .artifact-gem__flash {
+    animation: none !important;
+    display: none;
+  }
+
+  .artifact-gem--animate-enter .artifact-gem__sparkle--1,
+  .artifact-gem--animate-enter .artifact-gem__sparkle--2,
+  .artifact-gem--animate-enter .artifact-gem__sparkle--3,
+  .artifact-gem--animate-enter .artifact-gem__sparkle--4,
+  .artifact-gem--animate-enter .artifact-gem__sparkle--5 {
+    animation: none !important;
+    display: none;
+  }
+
+  .artifact-gem[data-tier="bright"] .artifact-gem__shape,
+  .artifact-gem[data-tier="crystallized"] .artifact-gem__shape {
+    animation: none !important;
+  }
+
+  .artifact-gem__ripple--active {
+    animation: none !important;
+  }
+}

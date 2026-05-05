@@ -1,0 +1,29 @@
+/* ── KnowledgeGraph page styles ──────────────────────────── */
+
+/* Canvas container fixed height */
+.kg-canvas-wrap {
+  height: 260px;
+}
+
+/* Bar fill defaults for domain breakdown */
+.kg-bar-fill {
+  opacity: 0.7;
+}
+
+/* Table row pointer */
+.kg-entry-row {
+  cursor: pointer;
+}
+
+/* Table cell colors */
+.kg-cell-id {
+  color: var(--text-dim);
+}
+
+.kg-cell-label {
+  color: var(--text-primary);
+}
+
+.kg-cell-citations {
+  color: var(--bone-bright);
+}

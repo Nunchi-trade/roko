@@ -1,7 +1,7 @@
 //! Chain domain tool definitions for DeFi operations.
 //!
 //! These [`ToolDef`] registrations define the 10 core DeFi tools specified in
-//! `docs/18-tools/03-chain-domain-tools.md`. The tools use the [`ChainClient`]
+//! `docs/v1/18-tools/03-chain-domain-tools.md`. The tools use the [`ChainClient`]
 //! and [`ChainWallet`] traits for EVM interaction, allowing the same tool
 //! definitions to work against both mocked and live backends.
 //!
@@ -18,8 +18,8 @@ use roko_core::tool::{
 };
 use std::sync::LazyLock;
 
-/// Number of chain domain tools (10 core + 4 wallet management).
-pub const CHAIN_TOOL_COUNT: usize = 14;
+/// Number of chain domain tools (10 core + 4 wallet management + 3 knowledge).
+pub const CHAIN_TOOL_COUNT: usize = 17;
 
 /// All 14 chain domain tool definitions.
 pub static CHAIN_DOMAIN_TOOLS: LazyLock<[ToolDef; CHAIN_TOOL_COUNT]> = LazyLock::new(|| {
@@ -39,6 +39,10 @@ pub static CHAIN_DOMAIN_TOOLS: LazyLock<[ToolDef; CHAIN_TOOL_COUNT]> = LazyLock:
         wallet_list_tool_def(),
         wallet_info_tool_def(),
         wallet_export_address_tool_def(),
+        // Knowledge graph tools (chain insight RPC bridge)
+        post_insight_tool_def(),
+        search_insights_tool_def(),
+        confirm_insight_tool_def(),
     ]
 });
 
@@ -58,6 +62,9 @@ pub const CHAIN_TOOL_NAMES: [&str; CHAIN_TOOL_COUNT] = [
     "chain.wallet_list",
     "chain.wallet_info",
     "chain.wallet_export_address",
+    "chain.post_insight",
+    "chain.search_insights",
+    "chain.confirm_insight",
 ];
 
 // ──────────────────────────── Layer 1: Chain Primitives ──────────────────────
@@ -603,6 +610,119 @@ fn wallet_export_address_tool_def() -> ToolDef {
     }
 }
 
+// ──────────────────────────── Layer 3: Knowledge Graph ────────────────────────
+
+/// `chain.post_insight` -- post a knowledge insight to the chain knowledge graph.
+fn post_insight_tool_def() -> ToolDef {
+    ToolDef {
+        name: "chain.post_insight".into(),
+        description: "Post a knowledge insight to the on-chain knowledge graph via mirage. \
+            Insights are HDC-indexed and available for search by other agents. \
+            Returns the insight ID and block number."
+            .into(),
+        parameters: ToolSchema::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["heuristic", "causalLink", "warning", "strategyFragment"],
+                    "description": "The type of insight being posted."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The insight content (natural language or structured text)."
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "Confidence score between 0.0 and 1.0.",
+                    "minimum": 0.0,
+                    "maximum": 1.0
+                },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Tags for categorizing the insight (e.g. ['defi', 'yield', 'aave'])."
+                }
+            },
+            "required": ["kind", "content", "confidence"],
+            "additionalProperties": false
+        })),
+        category: ToolCategory::Network,
+        permission: ToolPermission::networked(),
+        timeout_ms: 30_000,
+        concurrency: ToolConcurrency::Serial,
+        idempotent: false,
+        source: ToolSource::Builtin,
+        metadata: None,
+    }
+}
+
+/// `chain.search_insights` -- search the chain knowledge graph for relevant insights.
+fn search_insights_tool_def() -> ToolDef {
+    ToolDef {
+        name: "chain.search_insights".into(),
+        description: "Search the on-chain knowledge graph for insights matching a query. \
+            Uses HDC similarity search. Returns ranked insights with content and metadata."
+            .into(),
+        parameters: ToolSchema::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Tags to filter insights by."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Natural language search query for semantic matching."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return. Default: 5.",
+                    "default": 5
+                }
+            },
+            "required": ["tags"],
+            "additionalProperties": false
+        })),
+        category: ToolCategory::Network,
+        permission: ToolPermission::networked(),
+        timeout_ms: 30_000,
+        concurrency: ToolConcurrency::Parallel,
+        idempotent: true,
+        source: ToolSource::Builtin,
+        metadata: None,
+    }
+}
+
+/// `chain.confirm_insight` -- confirm (upvote) an existing insight on the chain.
+fn confirm_insight_tool_def() -> ToolDef {
+    ToolDef {
+        name: "chain.confirm_insight".into(),
+        description: "Confirm an insight in the on-chain knowledge graph, increasing its \
+            weight and credibility. Returns confirmation status and block number."
+            .into(),
+        parameters: ToolSchema::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The insight ID to confirm (returned by chain.post_insight or chain.search_insights)."
+                }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        })),
+        category: ToolCategory::Network,
+        permission: ToolPermission::networked(),
+        timeout_ms: 30_000,
+        concurrency: ToolConcurrency::Serial,
+        idempotent: false,
+        source: ToolSource::Builtin,
+        metadata: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +763,7 @@ mod tests {
             "chain.simulate_tx",
             "chain.get_pool_info",
             "chain.get_position",
+            "chain.search_insights",
         ];
         for tool in CHAIN_DOMAIN_TOOLS.iter() {
             if read_tools.contains(&tool.name.as_str()) {

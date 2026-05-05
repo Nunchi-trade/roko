@@ -328,7 +328,7 @@ pub struct DashboardData {
     pub active_tasks: Vec<TaskSummary>,
     /// Agents tracked by the process supervisor.
     pub agents: Vec<AgentSummary>,
-    /// Gate verdicts collected from signals.
+    /// Verify verdicts collected from signals.
     pub gate_results: Vec<GateResultSummary>,
     /// Efficiency aggregate from `.roko/learn/efficiency.jsonl`.
     pub efficiency: EfficiencySummary,
@@ -350,7 +350,7 @@ pub struct DashboardData {
     pub experiment_winners: Vec<ExperimentWinnerSummary>,
     /// Last observed experiments file metadata.
     experiments_stamp: FileStamp,
-    /// Gate-results page data derived from signals and adaptive thresholds.
+    /// Verify-results page data derived from signals and adaptive thresholds.
     pub gate_results_page: GateResultsPageData,
     /// Cached adaptive thresholds from `.roko/learn/gate-thresholds.json`.
     adaptive_thresholds: Option<AdaptiveThresholds>,
@@ -890,9 +890,6 @@ fn scan_atelier_prds(
         };
         for entry in plan_entries.filter_map(|e| e.ok()) {
             let tasks_path = entry.path().join("tasks.toml");
-            if !tasks_path.is_file() {
-                continue;
-            }
             let Ok(tasks_file) = TasksFile::parse(&tasks_path) else {
                 continue;
             };
@@ -1042,7 +1039,7 @@ pub struct GateResultSummary {
     pub summary: String,
 }
 
-/// Gate signal summary used to derive the gate-results page.
+/// Verify signal summary used to derive the gate-results page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateSignalSummary {
     pub id: String,
@@ -3324,7 +3321,7 @@ pub struct DashboardSnapshot {
     experiments: Option<ExperimentStore>,
     /// Adaptive gate thresholds from `.roko/learn/gate-thresholds.json`.
     adaptive_thresholds: Option<AdaptiveThresholds>,
-    /// Gate-results page data derived from signals and thresholds.
+    /// Verify-results page data derived from signals and thresholds.
     gate_results_page: GateResultsPageData,
     /// Most recent signals from `.roko/engrams.jsonl`.
     recent_signals: Vec<SignalSummary>,
@@ -4785,16 +4782,7 @@ fn format_compact_count(value: u64) -> String {
     }
 }
 
-/// Truncate a string to `max` chars, adding "..." if truncated.
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else if max > 3 {
-        format!("{}...", &s[..max - 3])
-    } else {
-        s[..max].to_string()
-    }
-}
+use crate::tui::display_utils::truncate as truncate_str;
 
 fn signal_relative_age(created_at_ms: i64) -> String {
     let created_at_ms = u64::try_from(created_at_ms).unwrap_or_default();
@@ -5237,6 +5225,7 @@ mod tests {
             model: model.to_string(),
             plan_id: String::from("plan-a"),
             task_id: task.to_string(),
+            attempt_id: String::new(),
             input_tokens,
             output_tokens,
             cache_read_tokens: 0,
@@ -5651,7 +5640,7 @@ mod tests {
         let rendered = dashboard
             .render_page_text(PageId::GateResults)
             .expect("gate results page should render");
-        assert!(rendered.contains("Gate Results"));
+        assert!(rendered.contains("Verify Results"));
         assert!(rendered.contains("gate summary:"));
         assert!(rendered.contains("adaptive thresholds:"));
         assert!(rendered.contains("recent gate failures:"));

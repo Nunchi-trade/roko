@@ -15,7 +15,8 @@ use crate::process::{
 };
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, OperatingFrequency, Provenance};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
+use roko_core::{Body, Context, Kind, OperatingFrequency, Provenance, Signal};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -115,7 +116,7 @@ impl ClaudeCliAgent {
             current_dir: current_dir.into(),
             model: model.clone(),
             effort: "medium".to_string(),
-            fallback_model: Some("claude-haiku-4-5".to_string()),
+            fallback_model: Some(roko_core::defaults::MODEL_FAST.to_string()),
             bare_mode: true,
             system_prompt: None,
             allowed_tools: None,
@@ -126,7 +127,7 @@ impl ClaudeCliAgent {
             mcp_config: None,
             resume: None,
             dangerously_skip_permissions: true,
-            timeout_ms: 120_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             name: format!("claude-cli:{model}"),
         }
     }
@@ -247,18 +248,33 @@ impl ClaudeCliAgent {
         self
     }
 
-    fn failure(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
+    fn failure(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
+        let stream_usage = StreamUsage::default();
+        self.failure_with_stream_usage(input, reason, started, &stream_usage)
+    }
+
+    fn failure_with_stream_usage(
+        &self,
+        input: &Signal,
+        reason: &str,
+        started: Instant,
+        stream_usage: &StreamUsage,
+    ) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let output = input
+        let mut output = input
             .derive(Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
-            .tag("failed", "true")
-            .build();
-        AgentResult::fail(output).with_usage(Usage {
-            wall_ms,
-            ..Default::default()
-        })
+            .tag("failed", "true");
+        if let Some(model) = stream_usage
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            output = output.tag("model", model);
+        }
+        let output = output.build();
+        AgentResult::fail(output).with_usage(Self::usage_from_stream(stream_usage, wall_ms))
     }
 
     fn discovered_mcp_config(&self) -> Option<PathBuf> {
@@ -276,15 +292,12 @@ impl ClaudeCliAgent {
     }
 
     fn parse_stream_events(stdout: &str) -> Option<Vec<Value>> {
-        let mut events = Vec::new();
-        for raw in stdout
+        let events: Vec<Value> = stdout
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
-        {
-            let value = serde_json::from_str::<Value>(raw).ok()?;
-            events.push(value);
-        }
+            .filter_map(Self::parse_stream_event)
+            .collect();
         if events.is_empty() {
             None
         } else {
@@ -292,7 +305,7 @@ impl ClaudeCliAgent {
         }
     }
 
-    fn prompt_text_from_input(input: &Engram) -> Result<String, String> {
+    fn prompt_text_from_input(input: &Signal) -> Result<String, String> {
         input.body.as_text().map(str::to_string).or_else(|_| {
             serde_json::to_string(&input.body)
                 .map_err(|e| format!("input body not readable as text or json: {e}"))
@@ -331,7 +344,7 @@ impl ClaudeCliAgent {
         if let Some(tools) = &self.allowed_tools
             && !tools.is_empty()
         {
-            cmd.arg("--allowedTools").arg(tools);
+            cmd.arg("--tools").arg(tools);
         }
         if let Some(mcp_config) = self.discovered_mcp_config() {
             cmd.arg("--mcp-config").arg(mcp_config);
@@ -353,17 +366,233 @@ impl ClaudeCliAgent {
         }
         cmd.env("CARGO_INCREMENTAL", "0");
         cmd.env("CARGO_BUILD_JOBS", "2");
+        // Prevent "nested session" detection when spawning from within Claude Code.
+        cmd.env_remove("CLAUDECODE");
         cmd
+    }
+
+    fn debug_enabled() -> bool {
+        std::env::var_os("ROKO_DEBUG")
+            .map(|value| {
+                let value = value.to_string_lossy().trim().to_ascii_lowercase();
+                matches!(value.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    }
+
+    fn parse_stream_event(line: &str) -> Option<Value> {
+        let value = serde_json::from_str::<Value>(line.trim()).ok()?;
+        if value.get("type").and_then(Value::as_str).is_some() {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    fn parse_stream_usage(stdout: &str) -> StreamUsage {
+        let mut usage = StreamUsage::default();
+        for line in stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let Some(event) = Self::parse_stream_event(line) else {
+                continue;
+            };
+            if event.get("type").and_then(Value::as_str) != Some("result") {
+                continue;
+            }
+
+            usage.source = UsageSource::ProviderReported;
+            if let Some(model) = event
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            {
+                usage.model = Some(model.to_string());
+            }
+            if let Some(cost) = event.get("total_cost_usd").and_then(Value::as_f64) {
+                usage.cost_usd = Some(cost);
+            }
+            if let Some(result_usage) = event.get("usage") {
+                Self::update_stream_usage_field(
+                    &mut usage.input_tokens,
+                    Self::stream_usage_u64(result_usage, &["input_tokens"]),
+                );
+                Self::update_stream_usage_field(
+                    &mut usage.output_tokens,
+                    Self::stream_usage_u64(result_usage, &["output_tokens"]),
+                );
+                Self::update_stream_usage_field(
+                    &mut usage.cache_creation_tokens,
+                    Self::stream_usage_u64(
+                        result_usage,
+                        &["cache_creation_input_tokens", "cache_creation_tokens"],
+                    ),
+                );
+                Self::update_stream_usage_field(
+                    &mut usage.cache_read_tokens,
+                    Self::stream_usage_u64(
+                        result_usage,
+                        &["cache_read_input_tokens", "cache_read_tokens"],
+                    ),
+                );
+            }
+        }
+        usage
+    }
+
+    fn usage_from_stream(stream_usage: &StreamUsage, wall_ms: u64) -> Usage {
+        Usage {
+            input_tokens: Self::saturating_u64_to_u32(stream_usage.input_tokens),
+            output_tokens: Self::saturating_u64_to_u32(stream_usage.output_tokens),
+            cache_read_tokens: Self::saturating_u64_to_u32(stream_usage.cache_read_tokens),
+            cache_create_tokens: Self::saturating_u64_to_u32(stream_usage.cache_creation_tokens),
+            cost_usd: stream_usage.cost_usd.unwrap_or(0.0) as f32,
+            wall_ms,
+        }
+    }
+
+    fn stream_usage_u64(usage: &Value, keys: &[&str]) -> Option<u64> {
+        keys.iter()
+            .find_map(|key| usage.get(*key).and_then(Value::as_u64))
+    }
+
+    fn update_stream_usage_field<T>(slot: &mut Option<T>, value: Option<T>) {
+        if let Some(value) = value {
+            *slot = Some(value);
+        }
+    }
+
+    fn saturating_u64_to_u32(value: Option<u64>) -> u32 {
+        value
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0)
+    }
+
+    fn tool_summary(block: &Value) -> String {
+        let name = block
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let mut summary = format!("tool: {name}");
+
+        if let Some(input) = block.get("input") {
+            for key in ["path", "file_path", "filename"] {
+                if let Some(path) = input.get(key).and_then(Value::as_str) {
+                    summary.push_str(&format!(" path={path}"));
+                    return summary;
+                }
+            }
+            if let Some(command) = input.get("command").and_then(Value::as_str) {
+                summary.push_str(&format!(" command={command}"));
+            }
+        }
+
+        summary
+    }
+
+    fn emit_stream_summary(
+        agent_name: &str,
+        event: &Value,
+        text_bytes: &mut usize,
+        tool_count: &mut usize,
+    ) {
+        match event.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                if let Some(content) = event
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(Value::as_array)
+                {
+                    for block in content {
+                        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                            *tool_count += 1;
+                            eprintln!("[{agent_name}] {}", Self::tool_summary(block));
+                        }
+                    }
+                }
+            }
+            Some("content_block_start") => {
+                if let Some(block) = event.get("content_block") {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("tool_use") => {
+                            *tool_count += 1;
+                            eprintln!("[{agent_name}] {}", Self::tool_summary(block));
+                        }
+                        Some("text") => {
+                            eprintln!("[{agent_name}] generating text...");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("content_block_delta") => {
+                if let Some(delta) = event.get("delta")
+                    && let Some(text) = delta.get("text").and_then(Value::as_str)
+                {
+                    *text_bytes += text.len();
+                }
+            }
+            Some("result") => {
+                let summary = if *tool_count > 0 {
+                    format!("{text_bytes} bytes text, {tool_count} tool calls")
+                } else {
+                    format!("{text_bytes} bytes text")
+                };
+                eprintln!("[{agent_name}] result received ({summary})");
+            }
+            _ => {}
+        }
+    }
+
+    fn first_human_stderr_line(stderr: &str) -> Option<&str> {
+        stderr.lines().find(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty()
+                && Self::parse_stream_event(trimmed).is_none()
+                && classify_benign_stderr(line).is_none()
+        })
+    }
+
+    fn stream_requested_tool_use(events: &[Value]) -> bool {
+        events
+            .iter()
+            .any(|event| match event.get("type").and_then(Value::as_str) {
+                Some("assistant") => event
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| {
+                        content.iter().any(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("tool_use")
+                        })
+                    }),
+                Some("content_block_start") => {
+                    event
+                        .get("content_block")
+                        .and_then(|block| block.get("type").and_then(Value::as_str))
+                        == Some("tool_use")
+                }
+                Some("tool") => true,
+                _ => false,
+            })
     }
 
     fn output_text(stdout: &str) -> String {
         Self::parse_stream_events(stdout).map_or_else(
             || stdout.trim().to_string(),
             |events| {
+                let requested_tool_use = Self::stream_requested_tool_use(&events);
                 let response = crate::translate::BackendResponse::StreamJson(events);
                 let extracted = response.extract_text();
                 if extracted.trim().is_empty() {
-                    stdout.trim().to_string()
+                    if requested_tool_use {
+                        "assistant requested tool use".to_string()
+                    } else {
+                        String::new()
+                    }
                 } else {
                     extracted
                 }
@@ -371,13 +600,16 @@ impl ClaudeCliAgent {
         )
     }
 
-    fn stderr_trace(&self, stderr: &str) -> Vec<Engram> {
+    fn stderr_trace(&self, stderr: &str) -> Vec<Signal> {
         stderr
             .lines()
-            .filter(|line| !line.trim().is_empty())
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty() && Self::parse_stream_event(trimmed).is_none()
+            })
             .filter(|line| !self.warn_and_filter_benign(line))
             .map(|line| {
-                Engram::builder(Kind::AgentMessage)
+                Signal::builder(Kind::AgentMessage)
                     .body(Body::text(line))
                     .provenance(Provenance::agent(&self.name))
                     .tag("stream", "stderr")
@@ -399,7 +631,7 @@ impl ClaudeCliAgent {
 
 #[async_trait]
 impl Agent for ClaudeCliAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match Self::prompt_text_from_input(input) {
@@ -445,6 +677,7 @@ impl Agent for ClaudeCliAgent {
 
         // Track activity across stdout and stderr for heartbeat messages.
         let has_activity = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let debug_enabled = Self::debug_enabled();
 
         // Stream stdout in real time, parsing stream-json events for progress.
         // Accumulate the raw output for final processing by output_text().
@@ -457,7 +690,6 @@ impl Agent for ClaudeCliAgent {
             let reader = BufReader::new(pipe);
             let mut lines = reader.lines();
             let mut collected = String::new();
-            let mut last_tool: Option<String> = None;
             let mut text_bytes: usize = 0;
             let mut tool_count: usize = 0;
 
@@ -469,77 +701,29 @@ impl Agent for ClaudeCliAgent {
                     continue;
                 }
                 stdout_activity.store(true, std::sync::atomic::Ordering::Relaxed);
+                if debug_enabled {
+                    eprintln!("{line}");
+                }
 
                 // Parse stream-json events for progress reporting.
                 // Non-JSON output (raw text from other agents) is fine — we
                 // just skip the progress parsing.
-                if let Ok(event) = serde_json::from_str::<Value>(trimmed) {
-                    match event.get("type").and_then(Value::as_str) {
-                        Some("assistant") => {
-                            // New turn — check for tool_use in content
-                            if let Some(content) = event
-                                .get("message")
-                                .and_then(|m| m.get("content"))
-                                .and_then(Value::as_array)
-                            {
-                                for block in content {
-                                    if block.get("type").and_then(Value::as_str) == Some("tool_use")
-                                    {
-                                        let name = block
-                                            .get("name")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or("unknown");
-                                        tool_count += 1;
-                                        last_tool = Some(name.to_string());
-                                        eprintln!("[{stdout_name}] tool: {name}");
-                                    }
-                                }
-                            }
-                        }
-                        Some("content_block_start") => {
-                            if let Some(block) = event.get("content_block") {
-                                match block.get("type").and_then(Value::as_str) {
-                                    Some("tool_use") => {
-                                        let name = block
-                                            .get("name")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or("unknown");
-                                        tool_count += 1;
-                                        last_tool = Some(name.to_string());
-                                        eprintln!("[{stdout_name}] tool: {name}");
-                                    }
-                                    Some("text") => {
-                                        eprintln!("[{stdout_name}] generating text...");
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Some("content_block_delta") => {
-                            if let Some(delta) = event.get("delta") {
-                                if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                                    text_bytes += text.len();
-                                }
-                            }
-                        }
-                        Some("result") => {
-                            let summary = if tool_count > 0 {
-                                format!("{text_bytes} bytes text, {tool_count} tool calls")
-                            } else {
-                                format!("{text_bytes} bytes text")
-                            };
-                            eprintln!("[{stdout_name}] result received ({summary})");
-                        }
-                        _ => {}
-                    }
+                if let Some(event) = Self::parse_stream_event(trimmed) {
+                    Self::emit_stream_summary(
+                        &stdout_name,
+                        &event,
+                        &mut text_bytes,
+                        &mut tool_count,
+                    );
                 }
             }
             collected
         });
 
-        // Stream stderr to the terminal in real time for user feedback,
-        // while accumulating lines for the trace.
+        // Stream stderr in real time. Raw stream JSON stays hidden in normal
+        // mode, but debug mode echoes it verbatim for inspection.
         let agent_name = self.name.clone();
+        let stderr_agent = self.clone();
         let stderr_activity = has_activity.clone();
         let stderr_handle = tokio::spawn(async move {
             let Some(pipe) = stderr_pipe else {
@@ -548,13 +732,32 @@ impl Agent for ClaudeCliAgent {
             let reader = BufReader::new(pipe);
             let mut lines = reader.lines();
             let mut collected = String::new();
+            let mut text_bytes: usize = 0;
+            let mut tool_count: usize = 0;
             while let Ok(Some(line)) = lines.next_line().await {
-                if !line.trim().is_empty() {
-                    stderr_activity.store(true, std::sync::atomic::Ordering::Relaxed);
-                    eprintln!("[{agent_name}] {line}");
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
                 }
+
+                stderr_activity.store(true, std::sync::atomic::Ordering::Relaxed);
                 collected.push_str(&line);
                 collected.push('\n');
+                if let Some(event) = Self::parse_stream_event(trimmed) {
+                    if debug_enabled {
+                        eprintln!("{line}");
+                    }
+                    Self::emit_stream_summary(
+                        &agent_name,
+                        &event,
+                        &mut text_bytes,
+                        &mut tool_count,
+                    );
+                } else if debug_enabled {
+                    eprintln!("{line}");
+                } else if !stderr_agent.warn_and_filter_benign(&line) {
+                    eprintln!("[{agent_name}] {line}");
+                }
             }
             collected
         });
@@ -615,29 +818,42 @@ impl Agent for ClaudeCliAgent {
         let stdout = stdout_handle.await.unwrap_or_default();
         let stderr = stderr_handle.await.unwrap_or_default();
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let stream_usage =
+            Self::parse_stream_usage(&stdout).merge(Self::parse_stream_usage(&stderr));
 
         if !status.success() {
             let code = status
                 .code()
                 .map_or_else(|| "signal".to_string(), |c| c.to_string());
             eprintln!("[{}] failed (exit {code}) after {elapsed_secs}s", self.name);
-            return self.failure(
+            let stderr_reason = Self::first_human_stderr_line(&stderr).unwrap_or("claude failed");
+            return self.failure_with_stream_usage(
                 input,
-                &format!(
-                    "exit {code}: {}",
-                    stderr.lines().next().unwrap_or("claude failed")
-                ),
+                &format!("exit {code}: {stderr_reason}"),
                 started,
+                &stream_usage,
             );
         }
 
-        let text = Self::output_text(&stdout);
+        let text = {
+            let text = Self::output_text(&stdout);
+            if text.trim().is_empty() {
+                Self::output_text(&stderr)
+            } else {
+                text
+            }
+        };
         if text.trim().is_empty() {
             eprintln!(
                 "[{}] finished after {elapsed_secs}s but produced empty output",
                 self.name
             );
-            return self.failure(input, "claude produced an empty response", started);
+            return self.failure_with_stream_usage(
+                input,
+                "claude produced an empty response",
+                started,
+                &stream_usage,
+            );
         }
 
         eprintln!(
@@ -650,15 +866,15 @@ impl Agent for ClaudeCliAgent {
             .derive(Kind::AgentOutput, Body::text(text))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
-            .tag("model", &self.model)
+            .tag(
+                "model",
+                stream_usage.model.as_deref().unwrap_or(&self.model),
+            )
             .build();
 
         AgentResult::ok(output_signal)
             .with_trace(self.stderr_trace(&stderr))
-            .with_usage(Usage {
-                wall_ms,
-                ..Default::default()
-            })
+            .with_usage(Self::usage_from_stream(&stream_usage, wall_ms))
     }
 
     fn name(&self) -> &str {
@@ -671,6 +887,43 @@ impl Agent for ClaudeCliAgent {
 
     fn supports_streaming(&self) -> bool {
         false
+    }
+}
+
+/// Whether usage was reported by the final Claude CLI result event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum UsageSource {
+    ProviderReported,
+    #[default]
+    Unknown,
+}
+
+/// Parsed usage metadata from Claude CLI `result` events.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct StreamUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cost_usd: Option<f64>,
+    model: Option<String>,
+    source: UsageSource,
+}
+
+impl StreamUsage {
+    fn merge(mut self, other: Self) -> Self {
+        if self.source == UsageSource::Unknown {
+            return other;
+        }
+        if other.source == UsageSource::ProviderReported {
+            self.input_tokens = self.input_tokens.or(other.input_tokens);
+            self.output_tokens = self.output_tokens.or(other.output_tokens);
+            self.cache_creation_tokens = self.cache_creation_tokens.or(other.cache_creation_tokens);
+            self.cache_read_tokens = self.cache_read_tokens.or(other.cache_read_tokens);
+            self.cost_usd = self.cost_usd.or(other.cost_usd);
+            self.model = self.model.or(other.model);
+        }
+        self
     }
 }
 
@@ -700,8 +953,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[test]
@@ -720,6 +973,54 @@ mod tests {
         assert!(matcher_strings.contains(&"Bash(git switch *)"));
         assert!(matcher_strings.contains(&"Bash(git branch -m *)"));
         assert!(matcher_strings.contains(&"Bash(git push *)"));
+    }
+
+    #[test]
+    fn parse_stream_usage_extracts_result_event_fields_and_model() {
+        let usage = ClaudeCliAgent::parse_stream_usage(
+            r#"{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":999,"output_tokens":888,"cache_creation_input_tokens":777,"cache_read_input_tokens":666}}}
+{"type":"result","session_id":"sess-1","model":"claude-sonnet-4-6","total_cost_usd":0.25,"usage":{"input_tokens":11,"output_tokens":22,"cache_creation_input_tokens":33,"cache_read_input_tokens":44}}"#,
+        );
+        assert_eq!(usage.source, UsageSource::ProviderReported);
+        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.output_tokens, Some(22));
+        assert_eq!(usage.cache_creation_tokens, Some(33));
+        assert_eq!(usage.cache_read_tokens, Some(44));
+        assert_eq!(usage.cost_usd, Some(0.25));
+        assert_eq!(usage.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn parse_stream_usage_leaves_missing_fields_none_and_keeps_zeroes() {
+        let usage = ClaudeCliAgent::parse_stream_usage(
+            r#"{"type":"result","session_id":"sess-2","model":"claude-sonnet-4-6","total_cost_usd":0,"usage":{"input_tokens":0,"cache_read_input_tokens":5}}"#,
+        );
+        assert_eq!(usage.source, UsageSource::ProviderReported);
+        assert_eq!(usage.input_tokens, Some(0));
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.cache_creation_tokens, None);
+        assert_eq!(usage.cache_read_tokens, Some(5));
+        assert_eq!(usage.cost_usd, Some(0.0));
+        assert_eq!(usage.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn parse_stream_usage_accepts_cache_alias_fields() {
+        let usage = ClaudeCliAgent::parse_stream_usage(
+            r#"{"type":"result","session_id":"sess-3","model":"claude-sonnet-4-6","total_cost_usd":0.5,"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_tokens":3,"cache_read_tokens":4}}"#,
+        );
+        assert_eq!(usage.cache_creation_tokens, Some(3));
+        assert_eq!(usage.cache_read_tokens, Some(4));
+        assert_eq!(usage.cost_usd, Some(0.5));
+    }
+
+    #[test]
+    fn parse_stream_usage_stays_unknown_without_result_event() {
+        let usage = ClaudeCliAgent::parse_stream_usage(
+            r#"{"type":"assistant","subtype":"message","message":{"content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}}
+{"type":"tool","subtype":"result","tool_name":"Bash","tool_use_id":"tu_1","content":"done"}"#,
+        );
+        assert_eq!(usage, StreamUsage::default());
     }
 
     #[tokio::test]
@@ -773,7 +1074,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"hello"}}}}'
         assert!(args_text.contains("system guidance"));
         assert!(args_text.contains("--settings"));
         assert!(args_text.contains("--dangerously-skip-permissions"));
-        assert!(args_text.contains("--allowedTools"));
+        assert!(args_text.contains("--tools"));
         assert!(args_text.contains("Read,Edit"));
         assert!(args_text.contains("--resume"));
         assert!(args_text.contains("session-123"));
@@ -855,6 +1156,65 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"ok"}}}}'
     }
 
     #[tokio::test]
+    async fn result_event_usage_is_threaded_into_agent_result() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("claude-fake.sh");
+        let script_body = r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"content_block_delta","delta":{"text":"hello"}}'
+printf '%s\n' '{"type":"result","session_id":"sess-1","model":"claude-sonnet-4-6","total_cost_usd":0.25,"usage":{"input_tokens":11,"output_tokens":22,"cache_creation_input_tokens":33,"cache_read_input_tokens":44}}'
+"#;
+        fs::write(&script, script_body).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let agent = ClaudeCliAgent::new(&script, tmp.path(), "claude-test-model");
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap().trim(), "hello");
+        assert_eq!(result.output.tag("model"), Some("claude-sonnet-4-6"));
+        assert_eq!(result.usage.input_tokens, 11);
+        assert_eq!(result.usage.output_tokens, 22);
+        assert_eq!(result.usage.cache_read_tokens, 44);
+        assert_eq!(result.usage.cache_create_tokens, 33);
+        assert!((result.usage.cost_usd - 0.25).abs() < 0.0001);
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_still_carries_result_event_usage() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("claude-fake.sh");
+        let script_body = r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"result","session_id":"sess-2","model":"claude-sonnet-4-6","total_cost_usd":0.5,"usage":{"input_tokens":9,"output_tokens":8,"cache_creation_input_tokens":7,"cache_read_input_tokens":6}}'
+exit 1
+"#;
+        fs::write(&script, script_body).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let agent = ClaudeCliAgent::new(&script, tmp.path(), "claude-test-model");
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+        assert!(!result.success);
+        assert_eq!(result.output.tag("model"), Some("claude-sonnet-4-6"));
+        assert_eq!(result.usage.input_tokens, 9);
+        assert_eq!(result.usage.output_tokens, 8);
+        assert_eq!(result.usage.cache_read_tokens, 6);
+        assert_eq!(result.usage.cache_create_tokens, 7);
+        assert!((result.usage.cost_usd - 0.5).abs() < 0.0001);
+    }
+
+    #[tokio::test]
     async fn benign_stderr_is_filtered_from_trace() {
         let tmp = tempdir().unwrap();
         let script = tmp.path().join("claude-fake.sh");
@@ -880,5 +1240,15 @@ printf '%s\n' '{"type":"content_block_delta","delta":{"text":"ok"}}'
             result.output.body.as_text().unwrap_or("unknown")
         );
         assert!(result.trace.is_empty());
+    }
+
+    #[test]
+    fn stderr_trace_skips_stream_json_lines() {
+        let agent = ClaudeCliAgent::new("claude", ".", "claude-test-model");
+        let trace = agent.stderr_trace(
+            "unexpected stderr line\n{\"type\":\"content_block_delta\",\"delta\":{\"text\":\"ok\"}}\n",
+        );
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].body.as_text().unwrap(), "unexpected stderr line");
     }
 }

@@ -10,16 +10,39 @@ use std::fmt;
 ///
 /// Determines which model family to use for default model selection.
 /// Callers must construct this explicitly (no `Default` impl).
+///
+/// Prefer deriving via `LlmBackend::from(AgentBackend)` or
+/// `LlmBackend::from(ProviderKind)` instead of ad-hoc substring matching.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LlmBackend {
     /// Anthropic Claude models.
     Claude,
     /// `OpenAI` Codex models.
     Codex,
-    /// Cursor Composer models.
+    /// Cursor Compose models.
     Cursor,
     /// Local models via Ollama (Gemma, Llama, Qwen, etc.).
     Ollama,
+}
+
+impl From<roko_core::agent::AgentBackend> for LlmBackend {
+    fn from(backend: roko_core::agent::AgentBackend) -> Self {
+        use roko_core::agent::AgentBackend;
+        match backend {
+            AgentBackend::Claude => Self::Claude,
+            AgentBackend::Codex | AgentBackend::OpenAi | AgentBackend::Cerebras => Self::Codex,
+            AgentBackend::Cursor => Self::Cursor,
+            AgentBackend::Ollama => Self::Ollama,
+            AgentBackend::Perplexity => Self::Codex,
+            _ => Self::Codex,
+        }
+    }
+}
+
+impl From<roko_core::agent::ProviderKind> for LlmBackend {
+    fn from(kind: roko_core::agent::ProviderKind) -> Self {
+        Self::from(kind.to_backend())
+    }
 }
 
 /// An individual enrichment step in the pipeline.
@@ -132,7 +155,7 @@ impl EnrichStep {
         match backend {
             LlmBackend::Claude => match self {
                 Self::Decompose | Self::Verify | Self::Reviews | Self::Tests | Self::Scribe => {
-                    "claude-sonnet-4-6"
+                    roko_core::defaults::MODEL_FOCUSED
                 }
                 Self::Prd
                 | Self::Briefs
@@ -141,7 +164,7 @@ impl EnrichStep {
                 | Self::Research
                 | Self::Dependencies
                 | Self::Fixtures
-                | Self::Integration => "claude-haiku-4-5-20251001",
+                | Self::Integration => roko_core::defaults::MODEL_FAST,
             },
             LlmBackend::Codex => match self {
                 Self::Decompose | Self::Verify | Self::Reviews | Self::Tests | Self::Scribe => {
@@ -327,7 +350,7 @@ mod tests {
         for step in heavy {
             assert_eq!(
                 step.default_model(LlmBackend::Claude),
-                "claude-sonnet-4-6",
+                roko_core::defaults::MODEL_FOCUSED,
                 "expected sonnet for {step}"
             );
         }
@@ -348,7 +371,7 @@ mod tests {
         for step in light {
             assert_eq!(
                 step.default_model(LlmBackend::Claude),
-                "claude-haiku-4-5-20251001",
+                roko_core::defaults::MODEL_FAST,
                 "expected haiku for {step}"
             );
         }

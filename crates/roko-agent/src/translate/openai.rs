@@ -21,7 +21,7 @@
 //! same layout as the Ollama translator; only the inbound JSON pointer
 //! and the arguments decoding differ.
 
-use crate::usage::Usage;
+use crate::usage::{Usage, UsageObservation, UsageSource};
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult, ToolSource};
 
 use super::{BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError};
@@ -33,6 +33,13 @@ use super::{BackendResponse, RenderedResults, RenderedTools, Translator, Transla
 /// always JSON-stringified per the `OpenAI` wire contract.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpenAiTranslator;
+
+/// Like [`OpenAiTranslator`] but emits `strict: true` and
+/// `additionalProperties: false` on every tool schema. Providers that
+/// support constrained decoding (e.g. Cerebras) use this to guarantee
+/// well-formed tool-call JSON from small models.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StrictOpenAiTranslator;
 
 /// Build a continuation message for Kimi's partial mode.
 #[must_use]
@@ -76,17 +83,26 @@ impl Translator for OpenAiTranslator {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let name = call
+            let raw_name = call
                 .pointer("/function/name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| TranslatorError::Malformed("missing function.name".into()))?
-                .to_string();
+                .ok_or_else(|| TranslatorError::Malformed("missing function.name".into()))?;
+            let name = unsanitize_tool_name(raw_name);
             let args_str = call
                 .pointer("/function/arguments")
                 .and_then(|v| v.as_str())
                 .unwrap_or("{}");
-            let args: serde_json::Value = serde_json::from_str(args_str)
-                .map_err(|e| TranslatorError::Malformed(format!("bad arguments json: {e}")))?;
+            let args: serde_json::Value = match serde_json::from_str(args_str) {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::warn!(
+                        tool = %name,
+                        len = args_str.len(),
+                        "truncated tool-call arguments — salvaging as raw content"
+                    );
+                    serde_json::json!({ "__truncated": true, "raw": args_str })
+                }
+            };
             out.push(ToolCall::new(id, name, args));
         }
         Ok(out)
@@ -118,18 +134,138 @@ impl Translator for OpenAiTranslator {
     }
 }
 
+impl Translator for StrictOpenAiTranslator {
+    fn format(&self) -> ToolFormat {
+        ToolFormat::OpenAiJson
+    }
+
+    fn render_tools(&self, tools: &[ToolDef]) -> RenderedTools {
+        let arr: Vec<serde_json::Value> = tools.iter().map(render_strict_tool).collect();
+        RenderedTools::JsonArray(serde_json::Value::Array(arr))
+    }
+
+    fn parse_calls(&self, response: &BackendResponse) -> Result<Vec<ToolCall>, TranslatorError> {
+        // Parsing is identical to the non-strict translator.
+        OpenAiTranslator.parse_calls(response)
+    }
+
+    fn render_results(&self, results: &[(ToolCall, ToolResult)]) -> RenderedResults {
+        OpenAiTranslator.render_results(results)
+    }
+
+    fn render_assistant_message(&self, response: &BackendResponse) -> Option<serde_json::Value> {
+        OpenAiTranslator.render_assistant_message(response)
+    }
+}
+
+/// Sanitize a tool name for OpenAI-compatible APIs.
+///
+/// OpenAI requires tool names to match `^[a-zA-Z0-9_-]+$`.  Dots (used by
+/// e.g. `chain.balance`) are replaced with `__DOT__` so the encoding is
+/// fully reversible without ambiguity.
+fn sanitize_tool_name(name: &str) -> String {
+    if name.contains('.') {
+        name.replace('.', "__DOT__")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Reverse [`sanitize_tool_name`]: `chain__DOT__balance` → `chain.balance`.
+fn unsanitize_tool_name(name: &str) -> String {
+    if name.contains("__DOT__") {
+        name.replace("__DOT__", ".")
+    } else {
+        name.to_string()
+    }
+}
+
+fn render_strict_tool(t: &ToolDef) -> serde_json::Value {
+    match &t.source {
+        ToolSource::Builtin | ToolSource::Mcp { .. } | ToolSource::Plugin { .. } => {
+            let mut params = t.parameters.as_value().clone();
+            // Strict mode requires additionalProperties: false on every
+            // object schema — top level and all nested properties.
+            enforce_additional_properties_false(&mut params);
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": sanitize_tool_name(&t.name),
+                    "description": t.description,
+                    "strict": true,
+                    "parameters": params,
+                }
+            })
+        }
+        other => render_tool_with_source(other, t),
+    }
+}
+
+/// Recursively set `additionalProperties: false` on every JSON Schema
+/// object node. Cerebras requires this on all levels for strict mode.
+fn enforce_additional_properties_false(schema: &mut serde_json::Value) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    // If this node is (or looks like) an object schema, force the flag
+    // to false. We use insert (not or_insert) because the source schema
+    // may already have `additionalProperties: true` (e.g. any_object()).
+    let is_object = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| t == "object");
+    if is_object || obj.contains_key("properties") {
+        obj.insert(
+            "additionalProperties".to_string(),
+            serde_json::Value::Bool(false),
+        );
+    }
+
+    // Recurse into properties.
+    if let Some(props) = obj.get_mut("properties") {
+        if let Some(props_obj) = props.as_object_mut() {
+            for (_key, prop_schema) in props_obj.iter_mut() {
+                enforce_additional_properties_false(prop_schema);
+            }
+        }
+    }
+
+    // Recurse into array items.
+    if let Some(items) = obj.get_mut("items") {
+        enforce_additional_properties_false(items);
+    }
+
+    // Recurse into anyOf / oneOf / allOf variants.
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        if let Some(variants) = obj.get_mut(keyword) {
+            if let Some(arr) = variants.as_array_mut() {
+                for variant in arr.iter_mut() {
+                    enforce_additional_properties_false(variant);
+                }
+            }
+        }
+    }
+}
+
 fn render_tool(t: &ToolDef) -> serde_json::Value {
     match &t.source {
         ToolSource::Builtin | ToolSource::Mcp { .. } | ToolSource::Plugin { .. } => {
             serde_json::json!({
                 "type": "function",
                 "function": {
-                    "name": t.name,
+                    "name": sanitize_tool_name(&t.name),
                     "description": t.description,
                     "parameters": t.parameters.as_value(),
                 }
             })
         }
+        other => render_tool_with_source(other, t),
+    }
+}
+
+fn render_tool_with_source(source: &ToolSource, _t: &ToolDef) -> serde_json::Value {
+    match source {
         ToolSource::WebSearch { config, .. } => serde_json::json!({
             "type": "web_search",
             "web_search": config,
@@ -140,39 +276,52 @@ fn render_tool(t: &ToolDef) -> serde_json::Value {
                 "knowledge_id": knowledge_id,
             },
         }),
+        // Builtin/Mcp/Plugin handled by callers; this is unreachable for them.
+        _ => {
+            serde_json::json!({ "type": "function", "function": { "name": sanitize_tool_name(&_t.name) } })
+        }
     }
 }
 
-/// Parse the OpenAI-compatible `usage` block into canonical [`Usage`].
+/// Parse the OpenAI-compatible `usage` block into canonical [`UsageObservation`].
 ///
 /// GLM-5.1 reports cached tokens under `prompt_tokens_details.cached_tokens`,
 /// while Kimi-K2.5 uses a top-level `cached_tokens` field.
 #[must_use]
-pub(crate) fn parse_usage(response: &serde_json::Value) -> Usage {
+pub(crate) fn parse_usage_observation(response: &serde_json::Value) -> UsageObservation {
     let Some(usage) = response.get("usage") else {
-        return Usage::default();
+        return UsageObservation {
+            source: UsageSource::Unknown,
+            ..Default::default()
+        };
     };
 
     let input_tokens = usage
         .get("prompt_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(serde_json::Value::as_u64);
     let output_tokens = usage
         .get("completion_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(serde_json::Value::as_u64);
     let cache_read_tokens = usage
         .pointer("/prompt_tokens_details/cached_tokens")
         .or_else(|| usage.get("cached_tokens"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+        .and_then(serde_json::Value::as_u64);
 
-    Usage {
-        input_tokens: u32::try_from(input_tokens).unwrap_or(u32::MAX),
-        output_tokens: u32::try_from(output_tokens).unwrap_or(u32::MAX),
-        cache_read_tokens: u32::try_from(cache_read_tokens).unwrap_or(u32::MAX),
+    UsageObservation {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        source: UsageSource::ProviderReported,
         ..Default::default()
     }
+}
+
+/// Parse the OpenAI-compatible `usage` block into legacy flat [`Usage`].
+#[must_use]
+pub(crate) fn parse_usage(response: &serde_json::Value) -> Usage {
+    parse_usage_observation(response).into()
 }
 
 #[must_use]
@@ -475,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_malformed_arguments_json_fails() {
+    fn parse_malformed_arguments_json_salvaged() {
         let resp = BackendResponse::Json(serde_json::json!({
             "choices": [{
                 "message": {
@@ -489,11 +638,13 @@ mod tests {
                 }
             }]
         }));
-        let err = OpenAiTranslator
+        let calls = OpenAiTranslator
             .parse_calls(&resp)
-            .expect_err("malformed args should fail");
-        assert!(matches!(err, TranslatorError::Malformed(_)));
-        assert!(err.to_string().contains("bad arguments json"));
+            .expect("truncated args should be salvaged");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["__truncated"], true);
+        assert_eq!(calls[0].arguments["raw"], "{bad");
     }
 
     #[test]
@@ -779,6 +930,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_usage_missing_usage_observation_unknown() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "No usage block here."
+                }
+            }]
+        });
+
+        let usage = parse_usage_observation(&raw);
+
+        assert_eq!(usage.source, UsageSource::Unknown);
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.cache_read_tokens, None);
+        assert_eq!(usage.cache_creation_tokens, None);
+        assert_eq!(usage.cost_usd, None);
+    }
+
+    #[test]
+    fn parse_usage_explicit_zero_usage_observation_provider_reported() {
+        let raw = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "prompt_tokens_details": {
+                    "cached_tokens": 0
+                }
+            }
+        });
+
+        let usage = parse_usage_observation(&raw);
+
+        assert_eq!(usage.source, UsageSource::ProviderReported);
+        assert_eq!(usage.input_tokens, Some(0));
+        assert_eq!(usage.output_tokens, Some(0));
+        assert_eq!(usage.cache_read_tokens, Some(0));
+        assert_eq!(usage.cache_creation_tokens, None);
+        assert_eq!(usage.cost_usd, None);
+    }
+
+    #[test]
     fn kimi_partial_continuation() {
         let continuation = build_partial_continuation("truncated...");
         assert_eq!(continuation["role"], "assistant");
@@ -840,5 +1033,100 @@ mod tests {
                 { "role": "assistant", "level": 0 }
             ]))
         );
+    }
+
+    // ── tool-name sanitization ────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_replaces_dots() {
+        assert_eq!(sanitize_tool_name("chain.balance"), "chain__DOT__balance");
+        assert_eq!(sanitize_tool_name("a.b.c"), "a__DOT__b__DOT__c");
+    }
+
+    #[test]
+    fn sanitize_leaves_clean_names_unchanged() {
+        assert_eq!(sanitize_tool_name("read_file"), "read_file");
+        assert_eq!(sanitize_tool_name("grep"), "grep");
+    }
+
+    #[test]
+    fn unsanitize_reverses_sanitize() {
+        assert_eq!(unsanitize_tool_name("chain__DOT__balance"), "chain.balance");
+        assert_eq!(unsanitize_tool_name("a__DOT__b__DOT__c"), "a.b.c");
+        assert_eq!(unsanitize_tool_name("read_file"), "read_file");
+    }
+
+    #[test]
+    fn render_tool_sanitizes_dotted_name() {
+        let mut t = tool("chain.balance", "Check balance");
+        t.name = "chain.balance".to_string();
+        let rendered = render_tool(&t);
+        assert_eq!(rendered["function"]["name"], "chain__DOT__balance");
+    }
+
+    #[test]
+    fn render_strict_tool_sanitizes_dotted_name() {
+        let mut t = tool("chain.transfer", "Transfer tokens");
+        t.name = "chain.transfer".to_string();
+        let rendered = render_strict_tool(&t);
+        assert_eq!(rendered["function"]["name"], "chain__DOT__transfer");
+    }
+
+    #[test]
+    fn parse_calls_unsanitizes_dotted_name() {
+        let resp = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_chain",
+                        "function": {
+                            "name": "chain__DOT__balance",
+                            "arguments": "{\"address\":\"0xabc\"}"
+                        }
+                    }]
+                }
+            }]
+        }));
+        let calls = OpenAiTranslator
+            .parse_calls(&resp)
+            .expect("parse should succeed");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "chain.balance");
+        assert_eq!(calls[0].arguments["address"], "0xabc");
+    }
+
+    #[test]
+    fn round_trip_dotted_tool_name() {
+        // Render a tool with a dot in the name.
+        let mut t = tool("chain.swap", "Swap tokens");
+        t.name = "chain.swap".to_string();
+        let rendered = render_tool(&t);
+        let wire_name = rendered["function"]["name"].as_str().unwrap();
+        assert_eq!(wire_name, "chain__DOT__swap");
+        // Verify the wire name passes OpenAI validation.
+        assert!(
+            wire_name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        );
+
+        // Simulate the model calling back with the sanitized name.
+        let resp = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": wire_name,
+                            "arguments": "{}"
+                        }
+                    }]
+                }
+            }]
+        }));
+        let calls = OpenAiTranslator
+            .parse_calls(&resp)
+            .expect("parse should succeed");
+        assert_eq!(calls[0].name, "chain.swap");
     }
 }

@@ -8,9 +8,10 @@
 //! Mori reference: `apps/mori/src/orchestrator/gates.rs::test_gate` +
 //! `parse_test_counts`.
 
+use crate::compile_errors::{render_failure_classification, structured_gate_failure};
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, TestCount, Verdict};
+use roko_core::{Context, Signal, TestCount, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -28,6 +29,16 @@ pub struct TestGate {
     name: String,
 }
 
+fn timeout_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+fn default_timeout_ms() -> u64 {
+    timeout_ms(roko_core::config::TimeoutConfig::default().gate_test())
+}
+
 impl TestGate {
     /// Construct a test gate for `build_system` running every test.
     #[must_use]
@@ -36,7 +47,7 @@ impl TestGate {
             build_system,
             selector: TestSelector::All,
             extra_args: Vec::new(),
-            timeout_ms: 15 * 60 * 1000, // 15 minutes, matching Mori
+            timeout_ms: default_timeout_ms(),
             name: format!("test:{}", build_system.program()),
         }
     }
@@ -87,9 +98,21 @@ impl TestGate {
     }
 }
 
+impl roko_core::Cell for TestGate {
+    fn cell_id(&self) -> &str {
+        "test-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "TestGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
-impl Gate for TestGate {
-    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
+impl Verify for TestGate {
+    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {
             Ok(p) => p,
@@ -123,16 +146,21 @@ impl Gate for TestGate {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                return Verdict::fail(&self.name, format!("spawn failed: {e}"))
+                let reason = format!("spawn failed: {e}");
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
                     .with_duration(elapsed);
             }
             Err(_) => {
                 let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                return Verdict::fail(
-                    &self.name,
-                    format!("timed out after {} ms", self.timeout_ms),
-                )
-                .with_duration(elapsed);
+                let reason = format!("timed out after {} ms", self.timeout_ms);
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
+                    .with_duration(elapsed);
             }
         };
 
@@ -148,8 +176,11 @@ impl Gate for TestGate {
                 .with_duration(elapsed)
         } else {
             let reason = summarize_test_failures(&combined, 3);
+            let classification =
+                structured_gate_failure(&self.name, &combined, reason.clone(), elapsed);
             Verdict::fail(&self.name, reason)
                 .with_detail(combined)
+                .with_error_digest(render_failure_classification(&classification))
                 .with_duration(elapsed)
         };
         if let Some(tc) = counts {
@@ -165,15 +196,23 @@ impl Gate for TestGate {
 
 /// Parse `passed/failed/ignored` counts from test-runner output.
 ///
-/// Returns `None` if no summary line is detected. Cargo/nextest format:
-/// `test result: ok. 12 passed; 0 failed; 1 ignored; …`
+/// Returns `None` if no summary line is detected. Dispatches to a
+/// format-specific parser based on the build system:
+/// - Cargo/nextest: `test result: ok. 12 passed; 0 failed; 1 ignored; …`
+/// - Go: `--- PASS: TestX (0.01s)` / `--- FAIL:` / `--- SKIP:`
+/// - Npm (Jest/Vitest/Mocha): `Tests: N passed, N failed, N skipped, N total`
+/// - Python (pytest): `N passed, N failed, N skipped`
+/// - Forge (Foundry): `Test result: ok. N passed; 0 failed;`
 #[must_use]
 pub fn parse_test_counts(output: &str, build: BuildSystem) -> Option<TestCount> {
     match build {
-        // Go's output markers are distinct; everyone else falls through
-        // to the cargo-style `test result:` summary parser, which most
-        // xUnit-style runners approximate.
         BuildSystem::Go => parse_go_test_counts(output),
+        BuildSystem::Npm => {
+            parse_npm_test_counts(output).or_else(|| parse_cargo_test_counts(output))
+        }
+        BuildSystem::Python => {
+            parse_pytest_counts(output).or_else(|| parse_cargo_test_counts(output))
+        }
         _ => parse_cargo_test_counts(output),
     }
 }
@@ -223,6 +262,142 @@ fn parse_go_test_counts(output: &str) -> Option<TestCount> {
     } else {
         None
     }
+}
+
+/// Parse Jest/Vitest/Mocha summary output.
+///
+/// Common patterns:
+/// - Jest/Vitest: `Tests:       3 passed, 1 failed, 4 total`
+/// - Mocha:      `  3 passing (12ms)\n  1 failing`
+/// - TAP:        `# pass  3\n# fail  1\n# skip  0`
+fn parse_npm_test_counts(output: &str) -> Option<TestCount> {
+    let mut total = TestCount::default();
+    let mut saw_summary = false;
+
+    for line in output.lines() {
+        let t = line.trim();
+
+        // Jest/Vitest format: "Tests:  N passed, N failed, N skipped, N total"
+        if t.starts_with("Tests:") || t.starts_with("Test Suites:") {
+            if t.starts_with("Tests:") {
+                saw_summary = true;
+                total.passed += extract_jest_count(t, "passed");
+                total.failed += extract_jest_count(t, "failed");
+                total.ignored += extract_jest_count(t, "skipped")
+                    + extract_jest_count(t, "pending")
+                    + extract_jest_count(t, "todo");
+            }
+        }
+        // TAP format: "# pass  N" / "# fail  N" / "# skip  N"
+        else if t.starts_with("# pass") || t.starts_with("# fail") || t.starts_with("# skip") {
+            if let Some(n) = t
+                .split_whitespace()
+                .last()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                saw_summary = true;
+                if t.starts_with("# pass") {
+                    total.passed += n;
+                } else if t.starts_with("# fail") {
+                    total.failed += n;
+                } else {
+                    total.ignored += n;
+                }
+            }
+        }
+        // Mocha format: "  4 passing (12ms)" / "  1 failing" / "  2 pending"
+        // Pattern: first token is a number, second is passing/failing/pending.
+        else {
+            let words: Vec<&str> = t.split_whitespace().collect();
+            if words.len() >= 2 {
+                if let Ok(n) = words[0].parse::<u32>() {
+                    let keyword = words[1].trim_end_matches(|c: char| !c.is_alphabetic());
+                    match keyword {
+                        "passing" => {
+                            saw_summary = true;
+                            total.passed += n;
+                        }
+                        "failing" => {
+                            saw_summary = true;
+                            total.failed += n;
+                        }
+                        "pending" => {
+                            saw_summary = true;
+                            total.ignored += n;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    if saw_summary { Some(total) } else { None }
+}
+
+/// Extract `N <label>` from Jest/Vitest summary (comma-separated segments).
+fn extract_jest_count(line: &str, label: &str) -> u32 {
+    for segment in line.split(',') {
+        let s = segment.trim();
+        if s.ends_with(label) {
+            if let Some(num_str) = s.split_whitespace().rev().nth(1) {
+                if let Ok(n) = num_str.parse::<u32>() {
+                    return n;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Parse pytest summary output.
+///
+/// Patterns:
+/// - `=== 3 passed, 1 failed, 2 skipped in 0.5s ===`
+/// - `=== 5 passed in 1.2s ===`
+/// - Short: `3 passed, 1 failed`
+fn parse_pytest_counts(output: &str) -> Option<TestCount> {
+    let mut total = TestCount::default();
+    let mut saw_summary = false;
+
+    for line in output.lines() {
+        let t = line.trim();
+
+        // pytest's "=== ... ===" summary line
+        if t.starts_with('=') && t.ends_with('=') && t.contains("passed") {
+            saw_summary = true;
+            total.passed += extract_pytest_label(t, "passed");
+            total.failed += extract_pytest_label(t, "failed");
+            total.ignored +=
+                extract_pytest_label(t, "skipped") + extract_pytest_label(t, "deselected");
+        }
+        // Also look for summary without === decoration (e.g. short mode)
+        else if (t.contains(" passed") || t.contains(" failed")) && t.contains(',') {
+            let has_pytest_keywords = t.contains("passed")
+                || t.contains("failed")
+                || t.contains("skipped")
+                || t.contains("error");
+            if has_pytest_keywords && !t.starts_with("test result:") {
+                saw_summary = true;
+                total.passed += extract_pytest_label(t, "passed");
+                total.failed += extract_pytest_label(t, "failed");
+                total.ignored += extract_pytest_label(t, "skipped");
+            }
+        }
+    }
+    if saw_summary { Some(total) } else { None }
+}
+
+/// Extract `N label` from pytest summary (space-separated tokens).
+fn extract_pytest_label(line: &str, label: &str) -> u32 {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    for (i, &word) in words.iter().enumerate() {
+        if (word == label || word.trim_end_matches(',') == label) && i > 0 {
+            if let Ok(n) = words[i - 1].parse::<u32>() {
+                return n;
+            }
+        }
+    }
+    0
 }
 
 fn extract_count(line: &str, label: &str) -> u32 {
@@ -379,5 +554,83 @@ mod tests {
             args,
             vec!["-run".to_string(), "TestFoo|TestBar".to_string()]
         );
+    }
+
+    // ── npm / Jest / Vitest parser tests ──────────────────────────────────
+
+    #[test]
+    fn parse_jest_summary() {
+        let out = "Test Suites: 2 passed, 2 total\nTests:       5 passed, 1 failed, 2 skipped, 8 total\nTime:        3.2s";
+        let counts = parse_test_counts(out, BuildSystem::Npm).expect("jest summary present");
+        assert_eq!(counts, TestCount::new(5, 1, 2));
+    }
+
+    #[test]
+    fn parse_vitest_summary() {
+        let out = " ✓ tests/math.test.ts (3)\n ✗ tests/api.test.ts (1)\nTests:  3 passed, 1 failed, 4 total";
+        let counts = parse_test_counts(out, BuildSystem::Npm).expect("vitest summary");
+        assert_eq!(counts, TestCount::new(3, 1, 0));
+    }
+
+    #[test]
+    fn parse_mocha_summary() {
+        let out = "  4 passing (12ms)\n  1 failing\n  2 pending";
+        let counts = parse_test_counts(out, BuildSystem::Npm).expect("mocha summary");
+        assert_eq!(counts, TestCount::new(4, 1, 2));
+    }
+
+    #[test]
+    fn parse_tap_summary() {
+        let out = "# tests 10\n# pass  7\n# fail  2\n# skip  1";
+        let counts = parse_test_counts(out, BuildSystem::Npm).expect("TAP summary");
+        assert_eq!(counts, TestCount::new(7, 2, 1));
+    }
+
+    #[test]
+    fn npm_falls_back_to_cargo_format() {
+        // Some npm test runners (e.g. cargo-like) produce "test result:" lines
+        let out = "test result: ok. 3 passed; 0 failed; 0 ignored";
+        let counts = parse_test_counts(out, BuildSystem::Npm).expect("fallback");
+        assert_eq!(counts, TestCount::new(3, 0, 0));
+    }
+
+    // ── pytest parser tests ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_pytest_summary_decorated() {
+        let out = "collected 10 items\n\ntest_math.py ..F..\ntest_api.py .s\n\n======== 7 passed, 1 failed, 2 skipped in 1.23s ========";
+        let counts = parse_test_counts(out, BuildSystem::Python).expect("pytest summary");
+        assert_eq!(counts, TestCount::new(7, 1, 2));
+    }
+
+    #[test]
+    fn parse_pytest_all_passed() {
+        let out = "============================= 12 passed in 0.5s =============================";
+        let counts = parse_test_counts(out, BuildSystem::Python).expect("pytest all passed");
+        assert_eq!(counts, TestCount::new(12, 0, 0));
+    }
+
+    #[test]
+    fn parse_pytest_with_deselected() {
+        let out = "======== 5 passed, 3 deselected in 0.8s ========";
+        let counts = parse_test_counts(out, BuildSystem::Python).expect("pytest deselected");
+        assert_eq!(counts.passed, 5);
+        assert_eq!(counts.ignored, 3);
+    }
+
+    #[test]
+    fn python_falls_back_to_cargo_format() {
+        let out = "test result: ok. 2 passed; 1 failed; 0 ignored";
+        let counts = parse_test_counts(out, BuildSystem::Python).expect("fallback");
+        assert_eq!(counts, TestCount::new(2, 1, 0));
+    }
+
+    // ── Forge still uses Cargo format ────────────────────────────────────
+
+    #[test]
+    fn parse_forge_uses_cargo_format() {
+        let out = "Running 5 tests for src/Counter.sol:CounterTest\n[PASS] testIncrement()\ntest result: ok. 5 passed; 0 failed; 0 ignored";
+        let counts = parse_test_counts(out, BuildSystem::Forge).expect("forge format");
+        assert_eq!(counts, TestCount::new(5, 0, 0));
     }
 }

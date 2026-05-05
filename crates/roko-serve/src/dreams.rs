@@ -230,7 +230,7 @@ async fn apply_dream_affect_feedback(state: &AppState, report: &DreamCycleReport
             Vec::new()
         }
     };
-    let mut engine = state.affect_engine.lock();
+    let mut engine = state.affect_engine.lock().await;
     apply_dream_affect_feedback_to_engine(&mut engine, report, &dream_episodes);
 }
 
@@ -580,6 +580,8 @@ mod tests {
                 agent_review: None,
                 warnings: Vec::new(),
             }],
+            cross_episode_report: None,
+            routing_recommendations: 0,
             knowledge_entries_written: 0,
             playbooks_created: 0,
             regressions_detected: Vec::new(),
@@ -619,6 +621,8 @@ mod tests {
             analysis: roko_neuro::tier_progression::TierProgression::default().analyze(&[]),
             cfactor_regression: None,
             clusters: Vec::new(),
+            cross_episode_report: None,
+            routing_recommendations: 0,
             knowledge_entries_written: 0,
             playbooks_created: 0,
             regressions_detected: Vec::new(),
@@ -666,6 +670,8 @@ mod tests {
                 agent_review: None,
                 warnings: Vec::new(),
             }],
+            cross_episode_report: None,
+            routing_recommendations: 0,
             knowledge_entries_written: 0,
             playbooks_created: 0,
             regressions_detected: Vec::new(),
@@ -735,6 +741,8 @@ mod tests {
                 agent_review: None,
                 warnings: Vec::new(),
             }],
+            cross_episode_report: None,
+            routing_recommendations: 0,
             knowledge_entries_written: 0,
             playbooks_created: 0,
             regressions_detected: Vec::new(),

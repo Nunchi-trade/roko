@@ -1,0 +1,11 @@
+.heartbeat-line {
+  display: block;
+  width: 100%;
+  pointer-events: none;
+}
+
+.heartbeat-line canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}

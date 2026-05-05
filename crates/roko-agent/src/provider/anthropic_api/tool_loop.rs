@@ -5,21 +5,21 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::agent::Agent;
-use crate::claude_agent::{
-    AnthropicTool, DEFAULT_ANTHROPIC_VERSION, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS,
-};
+use crate::claude_agent::{AnthropicTool, DEFAULT_ANTHROPIC_VERSION, DEFAULT_BASE_URL};
 use crate::dispatcher::HandlerResolver;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::openai_compat::tool_registry_for_options;
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderSemaphores, build_tool_dispatcher,
-    tool_loop_max_iterations,
+    map_provider_error, tool_loop_max_iterations_for_profile,
 };
 use crate::tool_loop::{LlmBackend, LlmError, ToolLoop, ToolLoopAgent};
 use crate::translate::{
     BackendResponse, RenderedResults, RenderedTools, SessionState, Translator, TranslatorError,
 };
+use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 pub(super) fn create_tool_loop_agent(
@@ -42,7 +42,7 @@ pub(super) fn create_tool_loop_agent(
     )?;
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-        .with_max_iterations(tool_loop_max_iterations(50))
+        .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -57,6 +57,9 @@ pub(super) fn create_tool_loop_agent(
         .with_name(name);
     if let Some(prompt) = &options.system_prompt {
         agent = agent.with_system_prompt(prompt.clone());
+    }
+    if let Some(ref dir) = options.working_dir {
+        agent = agent.with_worktree_path(dir.clone());
     }
 
     Ok(Box::new(agent))
@@ -98,7 +101,7 @@ fn create_tool_loop_backend_with_api_key(
     let timeout_ms = options
         .timeout_ms
         .or(provider.timeout_ms)
-        .unwrap_or(120_000);
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
 
     let mut backend = AnthropicMessagesBackend::new(api_key, model.slug.clone())
         .with_provider_id(model.provider.clone())
@@ -108,11 +111,14 @@ fn create_tool_loop_backend_with_api_key(
             model
                 .max_output
                 .and_then(|value| u32::try_from(value).ok())
-                .unwrap_or(DEFAULT_MAX_TOKENS),
+                .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
         )
         .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
         .with_poster(poster);
 
+    if let Some(ref env_var) = provider.api_key_env {
+        backend = backend.with_api_key_env(env_var.clone());
+    }
     if let Some(provider_semaphores) = options.provider_semaphores.clone() {
         backend = backend.with_provider_semaphores(provider_semaphores);
     }
@@ -228,6 +234,8 @@ struct AnthropicMessagesBackend {
     extra_headers: Vec<(String, String)>,
     provider_semaphores: Option<Arc<ProviderSemaphores>>,
     poster: Box<dyn HttpPoster>,
+    /// Environment variable name for the API key (used in error messages).
+    api_key_env: Option<String>,
 }
 
 impl AnthropicMessagesBackend {
@@ -238,12 +246,18 @@ impl AnthropicMessagesBackend {
             provider_id: model.clone(),
             model,
             base_url: DEFAULT_BASE_URL.to_string(),
-            timeout_ms: 120_000,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             extra_headers: Vec::new(),
             provider_semaphores: None,
             poster: Box::new(ReqwestPoster::new()),
+            api_key_env: None,
         }
+    }
+
+    fn with_api_key_env(mut self, env_var: impl Into<String>) -> Self {
+        self.api_key_env = Some(env_var.into());
+        self
     }
 
     fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
@@ -289,6 +303,7 @@ impl AnthropicMessagesBackend {
 
     fn headers(&self) -> Vec<(String, String)> {
         let mut headers = vec![
+            ("content-type".to_owned(), "application/json".to_owned()),
             ("x-api-key".to_owned(), self.api_key.clone()),
             (
                 "anthropic-version".to_owned(),
@@ -375,7 +390,7 @@ impl LlmBackend for AnthropicMessagesBackend {
     ) -> Result<BackendResponse, LlmError> {
         let _permit = match (&self.provider_id, &self.provider_semaphores) {
             (provider_id, Some(provider_semaphores)) => {
-                Some(provider_semaphores.acquire(provider_id).await)
+                provider_semaphores.acquire(provider_id).await.ok()
             }
             _ => None,
         };
@@ -390,7 +405,16 @@ impl LlmBackend for AnthropicMessagesBackend {
                 self.timeout_ms,
             )
             .await
-            .map_err(|err| LlmError::Network(err.to_string()))?;
+            .map_err(|err| {
+                let decorated = map_provider_error(
+                    ProviderKind::AnthropicApi,
+                    &self.provider_id,
+                    self.api_key_env.as_deref(),
+                    Some(&self.base_url),
+                    &err,
+                );
+                LlmError::Network(decorated)
+            })?;
 
         let json: Value = serde_json::from_str(&raw)
             .map_err(|err| LlmError::Backend(format!("parse response: {err}")))?;

@@ -6,7 +6,7 @@
 //! - `pub const DESCRIPTION: &str` — LLM-facing help text
 //! - `pub fn tool_def() -> ToolDef` — constructs the full definition
 //!
-//! [`ROKO_BUILTIN_TOOLS`] exposes the 16 std tools plus 14 chain-domain
+//! [`ROKO_BUILTIN_TOOLS`] exposes the 16 std tools plus 17 chain-domain
 //! tools as a single `Vec`, materialized once via [`std::sync::LazyLock`]
 //! on first access.
 //!
@@ -39,10 +39,10 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write_file;
 
-/// Number of std built-in tools shipped in §36.b (excludes chain tools).
-pub const TOOL_COUNT: usize = 30;
+/// Number of total built-in tools (16 std + 17 chain).
+pub const TOOL_COUNT: usize = 33;
 
-/// All built-in tool definitions: 16 std tools + 14 chain-domain tools.
+/// All built-in tool definitions: 16 std tools + 17 chain-domain tools.
 ///
 /// Materialized on first access via [`std::sync::LazyLock`]; every
 /// subsequent read is lock-free.

@@ -74,6 +74,7 @@ async fn chain_balance_reads_deployer_balance() {
         client: client as Arc<dyn ChainClient>,
         wallet: None,
         tool_name: "chain.balance".to_string(),
+        rpc_url: None,
     };
 
     let call = make_call("chain.balance", json!({ "address": DEPLOYER }));
@@ -103,6 +104,7 @@ async fn chain_transfer_sends_wei_on_mirage() {
         client: client as Arc<dyn ChainClient>,
         wallet: Some(wallet.clone() as Arc<dyn ChainWallet>),
         tool_name: "chain.transfer".to_string(),
+        rpc_url: None,
     };
 
     let call = make_call("chain.transfer", json!({ "to": RECIPIENT, "amount": "1" }));
@@ -133,6 +135,7 @@ async fn chain_transfer_without_wallet_returns_error() {
         client: client as Arc<dyn ChainClient>,
         wallet: None,
         tool_name: "chain.transfer".to_string(),
+        rpc_url: None,
     };
 
     let call = make_call("chain.transfer", json!({ "to": RECIPIENT, "amount": "1" }));
@@ -161,6 +164,7 @@ async fn chain_wallet_info_returns_live_details() {
         client: client as Arc<dyn ChainClient>,
         wallet: Some(wallet as Arc<dyn ChainWallet>),
         tool_name: "chain.wallet_info".to_string(),
+        rpc_url: None,
     };
 
     let call = make_call("chain.wallet_info", json!({}));
@@ -292,6 +296,7 @@ async fn full_round_trip_balance_transfer_balance() {
         client: client.clone() as Arc<dyn ChainClient>,
         wallet: None,
         tool_name: "chain.balance".to_string(),
+        rpc_url: None,
     };
     let result = bal_handler
         .execute(
@@ -310,6 +315,7 @@ async fn full_round_trip_balance_transfer_balance() {
         client: client.clone() as Arc<dyn ChainClient>,
         wallet: Some(wallet as Arc<dyn ChainWallet>),
         tool_name: "chain.transfer".to_string(),
+        rpc_url: None,
     };
     let result = tx_handler
         .execute(

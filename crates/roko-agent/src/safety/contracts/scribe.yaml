@@ -1,0 +1,14 @@
+{
+  "role": "scribe",
+  "invariants": [
+    { "MaxTokensPerTurn": 16000 },
+    "NoNetworkAccess"
+  ],
+  "governance": [
+    { "MaxToolCallsPerTurn": 10 },
+    { "ForbiddenTools": ["bash"] }
+  ],
+  "recovery": [
+    { "trigger": "contract_violation", "action": "Alert" }
+  ]
+}

@@ -1,10 +1,9 @@
 //! Scribe prompt template.
 //!
-//! Ports Mori's `scribe_prompt` + `doc_revision_prompt` + `critic_prompt`
-//! into a single template. The Critic is treated as a scribe-variant (same
-//! section set, different role identity).
+//! Roko-owned scribe, doc revision, and critic prompt templates. The Critic is
+//! treated as a scribe-variant (same section set, different role identity).
 
-use super::common::budget_for;
+use super::common::{self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -110,19 +109,24 @@ impl RolePromptTemplate for ScribeTemplate {
     type Input = ScribeInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
         let budget = match input.variant {
-            ScribeVariant::Critic => budget_for(AgentRole::Critic),
-            ScribeVariant::Initial | ScribeVariant::Revision => budget_for(AgentRole::Scribe),
+            ScribeVariant::Critic => adaptive_budget_for(AgentRole::Critic, context_window_tokens),
+            ScribeVariant::Initial | ScribeVariant::Revision => {
+                adaptive_budget_for(AgentRole::Scribe, context_window_tokens)
+            }
         };
         let mut sections = Vec::with_capacity(8);
 
-        // 1. agents_instructions — System / Critical
-        sections.push(
-            PromptSection::new("agents_instructions", &input.agents_md)
-                .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Role)
-                .with_placement(Placement::Start),
-        );
+        // 1. agents_instructions — System / Critical / Start
+        sections.push(common::agents_instructions_section(&input.agents_md));
 
         // 2. plan_spec — Session / Critical / hard_cap 50k
         sections.push(

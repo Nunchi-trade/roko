@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use roko_agent::Usage;
 use roko_agent::cursor_agent::CursorAgent;
 use roko_agent::streaming::StreamChunk;
 use roko_agent::tool_loop::LlmBackend;
 use roko_agent::translate::{OpenAiTranslator, SessionState, Translator};
+use roko_agent::{SafetyLayer, Usage};
 use roko_core::tool::ToolCall;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -403,7 +403,7 @@ fn read_http_request(stream: &mut TcpStream) -> RecordedRequest {
     }
 }
 
-async fn collect_chunks(mut rx: mpsc::UnboundedReceiver<StreamChunk>) -> Vec<StreamChunk> {
+async fn collect_chunks(mut rx: mpsc::Receiver<StreamChunk>) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
     while let Some(chunk) = rx.recv().await {
         chunks.push(chunk);
@@ -435,7 +435,7 @@ fn collect_content(chunks: &[StreamChunk]) -> String {
 async fn cursor_streaming_basic_replays_cleanly() {
     let fixture = Fixture::load("streaming-basic.jsonl");
     let mock_http = MockHttp::spawn(fixture.response_lines.clone());
-    let backend = CursorAgent::new("test-key", "cursor-composer")
+    let backend = CursorAgent::new("test-key", "cursor-composer", SafetyLayer::with_defaults())
         .with_base_url(mock_http.base_url())
         .with_timeout_ms(5_000);
     let translator = OpenAiTranslator;
@@ -450,7 +450,7 @@ async fn cursor_streaming_basic_replays_cleanly() {
         json!({"role": "user", "content": "stream the basic answer"}),
     ];
     let session = SessionState::default();
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
 
     let response = backend
         .send_turn_streaming(&messages, &rendered_tools, &session, event_tx)

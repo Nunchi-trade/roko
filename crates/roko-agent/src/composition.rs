@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use futures::future::join_all;
 use roko_core::{
-    Body, Context, Engram, Kind, Provenance, Task, TaskCategory, TaskComplexityBand,
+    Body, Context, Kind, Provenance, Signal, Task, TaskCategory, TaskComplexityBand,
     TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority,
 };
 use std::collections::HashMap;
@@ -228,10 +228,10 @@ impl CompositeAgent {
 
     fn merge_outputs(
         &self,
-        input: &Engram,
+        input: &Signal,
         results: &[AgentResult],
         strategy: MergeStrategy,
-    ) -> Engram {
+    ) -> Signal {
         let body = match strategy {
             MergeStrategy::Concatenate => {
                 let text = results
@@ -310,7 +310,7 @@ impl CompositeAgent {
     async fn run_pipeline(
         &self,
         agents: &[Box<dyn Agent>],
-        input: &Engram,
+        input: &Signal,
         ctx: &Context,
     ) -> AgentResult {
         if agents.is_empty() {
@@ -339,6 +339,7 @@ impl CompositeAgent {
                     output: result.output,
                     trace,
                     usage,
+                    usage_obs: Some(usage.into()),
                     success: false,
                 };
             }
@@ -348,6 +349,7 @@ impl CompositeAgent {
             output: current,
             trace,
             usage,
+            usage_obs: Some(usage.into()),
             success,
         }
     }
@@ -355,7 +357,7 @@ impl CompositeAgent {
     async fn run_parallel(
         &self,
         agents: &[Box<dyn Agent>],
-        input: &Engram,
+        input: &Signal,
         ctx: &Context,
         strategy: MergeStrategy,
     ) -> AgentResult {
@@ -384,6 +386,7 @@ impl CompositeAgent {
             output,
             trace,
             usage,
+            usage_obs: Some(usage.into()),
             success,
         }
     }
@@ -392,7 +395,7 @@ impl CompositeAgent {
         &self,
         condition: &(dyn Fn(&Task) -> usize + Send + Sync),
         branches: &[Box<dyn Agent>],
-        input: &Engram,
+        input: &Signal,
         ctx: &Context,
     ) -> AgentResult {
         let task = input.body.as_json::<Task>().ok();
@@ -413,7 +416,7 @@ impl CompositeAgent {
         &self,
         agents: &[Box<dyn Agent>],
         aggregator: &Box<dyn Agent>,
-        input: &Engram,
+        input: &Signal,
         ctx: &Context,
     ) -> AgentResult {
         let fanout = self
@@ -442,6 +445,7 @@ impl CompositeAgent {
             output: aggregate.output,
             trace,
             usage,
+            usage_obs: Some(usage.into()),
             success: fanout.success && aggregate.success,
         }
     }
@@ -449,7 +453,7 @@ impl CompositeAgent {
 
 #[async_trait]
 impl Agent for CompositeAgent {
-    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         match &self.composition {
             AgentComposition::Pipeline(agents) => self.run_pipeline(agents, input, ctx).await,
             AgentComposition::Parallel(agents, strategy) => {
@@ -504,10 +508,10 @@ impl std::fmt::Debug for CompositeAgent {
 mod tests {
     use super::*;
     use crate::mock::MockAgent;
-    use roko_core::{Body, Context, Engram, Kind, TaskCategory, TaskComplexityBand};
+    use roko_core::{Body, Context, Kind, Signal, TaskCategory, TaskComplexityBand};
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[tokio::test]
@@ -562,7 +566,7 @@ mod tests {
             complexity_band: Some(TaskComplexityBand::Standard),
             ..Task::new("t1", "docs")
         };
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::from_json(&task).unwrap())
             .build();
         let result = agent.run(&input, &Context::at(0)).await;

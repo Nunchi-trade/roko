@@ -7,12 +7,14 @@
 
 use crate::config::{
     AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
-    ResolvedConfig, ServeAuthLayer, ServeLayer, Source, ToolsLayer, apply_layer_value, detect_clis,
-    global_config_path, load_layered, resolve_paths,
+    ResolvedConfig, RunnerLayer, ServeAuthLayer, ServeLayer, Source, ToolsLayer, apply_layer_value,
+    detect_clis, global_config_path, load_resolved_config, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::agent::ProviderKind;
-use roko_core::config::schema::{CURRENT_SCHEMA_VERSION, ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::config::schema::{
+    CURRENT_CONFIG_VERSION, CURRENT_SCHEMA_VERSION, ModelProfile, ProviderConfig, RokoConfig,
+};
 use roko_core::tool::{ToolFormat, profile_for_model};
 use roko_orchestrator::ExecutorConfig;
 use std::collections::BTreeSet;
@@ -126,17 +128,25 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
         repos: None,
         gates,
         executor: Some(default_executor_layer()),
+        runner: Some(RunnerLayer {
+            plan_timeout_secs: Some(3_600),
+        }),
+        runtime: None,
         providers: None,
         models: None,
         serve: Some(ServeLayer {
             port: None,
+            share_ttl_days: None,
+            terminal_enabled: None,
             auto_orchestrate: None,
             auth: Some(ServeAuthLayer {
                 enabled: Some(false),
                 api_key: Some(String::new()),
             }),
             deploy: None,
+            auto_start: None,
         }),
+        learning: None,
     };
     let rendered = toml::to_string_pretty(&layer).context("serialize config")?;
 
@@ -203,14 +213,14 @@ fn default_executor_layer() -> ExecutorLayer {
 
 /// Print the effective merged config with `[source]` tags on each field.
 pub fn cmd_show(workdir: &Path) -> Result<()> {
-    let resolved = load_layered(workdir)?;
+    let resolved = load_resolved_config(workdir)?;
     print_resolved(&resolved);
     Ok(())
 }
 
 /// Print the resolved config paths (global + project + env override).
 pub fn cmd_path(workdir: &Path) -> Result<()> {
-    let resolved = load_layered(workdir)?;
+    let resolved = load_resolved_config(workdir)?;
     let global_exists = if resolved.paths.global.is_file() {
         "exists"
     } else {
@@ -228,6 +238,55 @@ pub fn cmd_path(workdir: &Path) -> Result<()> {
         println!("env    : {} (via ROKO_CONFIG)", env.display());
     }
     Ok(())
+}
+
+/// Print basic config health without mutating config files.
+pub fn cmd_doctor(workdir: &Path) -> Result<()> {
+    let paths = resolve_paths(workdir);
+    let config_path = doctor_config_path(&paths, workdir);
+    let config = match &config_path {
+        Some(path) => {
+            let text =
+                fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+            RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))?
+        }
+        None => RokoConfig::default(),
+    };
+
+    println!("config doctor");
+    match &config_path {
+        Some(path) => println!("config_path: {}", path.display()),
+        None => println!("config_path: (none; using defaults)"),
+    }
+    println!("config_version: {}", config.config_version);
+    println!("supported_config_version: {CURRENT_CONFIG_VERSION}");
+    println!("schema_version: {}", config.schema_version);
+    println!("supported_schema_version: {CURRENT_SCHEMA_VERSION}");
+    println!("providers: {}", config.effective_providers().len());
+    println!("models: {}", config.effective_models().len());
+    println!(
+        "dangerously_skip_permissions: {}",
+        config.runner.dangerously_skip_permissions
+    );
+
+    Ok(())
+}
+
+fn doctor_config_path(paths: &ConfigPaths, workdir: &Path) -> Option<PathBuf> {
+    if let Some(path) = &paths.project {
+        return Some(path.clone());
+    }
+
+    let direct = workdir.join("roko.toml");
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    if paths.global.is_file() {
+        return Some(paths.global.clone());
+    }
+
+    None
 }
 
 /// Scan the active config file for `${VAR}` references and validate them.
@@ -306,8 +365,17 @@ pub fn cmd_check_secrets(workdir: &Path) -> Result<()> {
 pub async fn cmd_validate(workdir: &Path) -> Result<()> {
     let paths = resolve_paths(workdir);
     let config_path = validate_config_path(&paths, workdir)?;
-    let text = fs::read_to_string(&config_path)
-        .with_context(|| format!("read config {}", config_path.display()))?;
+    let text = match fs::read_to_string(&config_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow!("config file not found: {}", config_path.display()));
+        }
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("read config {}", config_path.display()))
+            );
+        }
+    };
 
     if let Err(err) = toml::from_str::<toml::Value>(&text) {
         print_phase_status("Phase 1: TOML syntax", false);
@@ -318,7 +386,7 @@ pub async fn cmd_validate(workdir: &Path) -> Result<()> {
     }
     print_phase_status("Phase 1: TOML syntax", true);
 
-    let config = match RokoConfig::from_toml(&text) {
+    let config = match toml::from_str::<RokoConfig>(&text) {
         Ok(config) => config,
         Err(err) => {
             print_phase_status("Phase 2: Schema validation", false);
@@ -335,24 +403,25 @@ pub async fn cmd_validate(workdir: &Path) -> Result<()> {
         .timeout(Duration::from_secs(VALIDATION_REACHABILITY_TIMEOUT_SECS))
         .build()
         .context("build validation HTTP client")?;
-    let report = semantic_validate_config(&config, &client).await;
-
-    println!("Phase 3: Semantic validation:");
-    print_semantic_result(
-        "All model providers exist in [providers.*]",
-        &report.provider_reference_errors,
-    );
-    print_semantic_result(
-        "Fallback chain models exist",
-        &report.fallback_reference_errors,
-    );
-    print_semantic_result("Tier model keys exist", &report.tier_model_errors);
-    print_semantic_result("API key env vars are set", &report.api_key_errors);
-    for warning in &report.warnings {
-        println!("  ⚠ {warning}");
+    let mut report = semantic_validate_config(&config, &client).await;
+    if let Some(warning) = legacy_layout_warning(&config) {
+        report.schema_warnings.push(warning);
     }
 
+    println!("Phase 3: Semantic validation:");
+    print_warning_section("Schema warnings", &report.schema_warnings);
+    print_warning_section("Field warnings", &report.field_warnings);
+    print_warning_section("Migration warnings", &report.migration_warnings);
+    print_semantic_result("API key env vars are set", &report.api_key_errors);
+
     println!();
+    println!(
+        "Summary: schema {} warnings, field {} warnings, migration {} warnings, {} errors",
+        report.schema_warning_count(),
+        report.field_warning_count(),
+        report.migration_warning_count(),
+        report.error_count()
+    );
     println!(
         "Result: {} warnings, {} errors",
         report.warning_count(),
@@ -367,11 +436,18 @@ pub async fn cmd_validate(workdir: &Path) -> Result<()> {
 }
 
 /// Migrate a legacy project-local `roko.toml` into explicit provider/model tables.
-pub fn cmd_migrate(workdir: &Path, dry_run: bool) -> Result<()> {
+pub fn cmd_migrate(workdir: &Path, dry_run: bool, yes: bool) -> Result<()> {
     let paths = resolve_paths(workdir);
     let config_path = validate_config_path(&paths, workdir)?;
-    let text = fs::read_to_string(&config_path)
-        .with_context(|| format!("read {}", config_path.display()))?;
+    let text = match fs::read_to_string(&config_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow!("config file not found: {}", config_path.display()));
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("read {}", config_path.display())));
+        }
+    };
     let plan = build_config_migration_plan(&text)?;
 
     match plan {
@@ -394,7 +470,7 @@ pub fn cmd_migrate(workdir: &Path, dry_run: bool) -> Result<()> {
             }
 
             println!();
-            if !prompt_bool("Apply changes?", false)? {
+            if !yes && !prompt_bool("Apply changes?", false)? {
                 return Err(anyhow!("cancelled"));
             }
 
@@ -515,7 +591,7 @@ fn write_atomic_restricted(path: &Path, text: &str) -> Result<()> {
 
 /// Open `$EDITOR` on the global or project config file (creating it if needed).
 pub fn cmd_edit(workdir: &Path, which: EditTarget) -> Result<()> {
-    let resolved = load_layered(workdir)?;
+    let resolved = load_resolved_config(workdir)?;
     let path = match which {
         EditTarget::Global => resolved.paths.global,
         EditTarget::Project => resolved
@@ -547,7 +623,7 @@ pub fn cmd_edit(workdir: &Path, which: EditTarget) -> Result<()> {
 
 /// Set a single dotted-key value and write it to the chosen layer file.
 pub fn cmd_set(workdir: &Path, target: EditTarget, key: &str, value: &str) -> Result<()> {
-    let resolved = load_layered(workdir)?;
+    let resolved = load_resolved_config(workdir)?;
     let path = match target {
         EditTarget::Global | EditTarget::Auto => resolved.paths.global,
         EditTarget::Project => resolved
@@ -684,6 +760,11 @@ fn print_resolved(r: &ResolvedConfig) {
         r.config.gates.len(),
         r.sources.gates.tag()
     );
+    println!(
+        "  runner.plan_timeout_secs = {} {}",
+        r.config.runner.plan_timeout_secs,
+        r.sources.runner_plan_timeout_secs.tag()
+    );
     println!();
     println!("sources:");
     println!("  global : {}", r.paths.global.display());
@@ -703,7 +784,8 @@ fn print_resolved(r: &ResolvedConfig) {
         && r.sources.tools_prefer_mcp == Source::Default
         && r.sources.dreams_auto_dream == Source::Default
         && r.sources.dreams_idle_threshold_mins == Source::Default
-        && r.sources.dreams_min_episodes_for_dream == Source::Default;
+        && r.sources.dreams_min_episodes_for_dream == Source::Default
+        && r.sources.runner_plan_timeout_secs == Source::Default;
     if fully_default {
         println!("\nhint: no config files found — run `roko config init` to set one up.");
     }
@@ -950,23 +1032,31 @@ fn render_prefixed_toml_block(block: String) -> Vec<String> {
 
 #[derive(Debug, Default)]
 struct SemanticValidationReport {
-    provider_reference_errors: Vec<String>,
-    fallback_reference_errors: Vec<String>,
-    tier_model_errors: Vec<String>,
+    schema_warnings: Vec<String>,
+    field_warnings: Vec<String>,
+    migration_warnings: Vec<String>,
     api_key_errors: Vec<String>,
-    warnings: Vec<String>,
 }
 
 impl SemanticValidationReport {
     fn error_count(&self) -> usize {
-        self.provider_reference_errors.len()
-            + self.fallback_reference_errors.len()
-            + self.tier_model_errors.len()
-            + self.api_key_errors.len()
+        self.api_key_errors.len()
+    }
+
+    fn schema_warning_count(&self) -> usize {
+        self.schema_warnings.len()
+    }
+
+    fn field_warning_count(&self) -> usize {
+        self.field_warnings.len()
+    }
+
+    fn migration_warning_count(&self) -> usize {
+        self.migration_warnings.len()
     }
 
     fn warning_count(&self) -> usize {
-        self.warnings.len()
+        self.schema_warnings.len() + self.field_warnings.len() + self.migration_warnings.len()
     }
 }
 
@@ -988,6 +1078,17 @@ fn print_phase_status(label: &str, ok: bool) {
     println!("{label:.<32} {symbol}");
 }
 
+fn print_warning_section(label: &str, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+
+    println!("  {label}:");
+    for warning in warnings {
+        println!("    ⚠ {warning}");
+    }
+}
+
 fn print_semantic_result(label: &str, errors: &[String]) {
     if errors.is_empty() {
         println!("  ✓ {label}");
@@ -997,6 +1098,25 @@ fn print_semantic_result(label: &str, errors: &[String]) {
     for error in errors {
         println!("  ✗ {error}");
     }
+}
+
+fn legacy_layout_warning(config: &RokoConfig) -> Option<String> {
+    // Only warn for genuinely legacy (v0/v1) configs.  A config_version >= 2
+    // config with an empty [providers] table is perfectly valid — the user may
+    // rely on CLI-based agents or env-var providers.
+    if config.config_version <= 1 {
+        if !config.providers.is_empty() {
+            return Some(
+                "roko.toml uses config version 1; run `roko config migrate` to upgrade".to_string(),
+            );
+        }
+        return Some(
+            "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+                .to_string(),
+        );
+    }
+
+    None
 }
 
 async fn semantic_validate_config(
@@ -1012,26 +1132,33 @@ async fn semantic_validate_config(
     for (model_key, profile) in model_entries {
         let provider_name = profile.provider.trim();
         if provider_name.is_empty() {
-            report.provider_reference_errors.push(format!(
+            report.schema_warnings.push(format!(
                 "Model '{model_key}' has an empty provider reference"
             ));
             continue;
         }
         if !providers.contains_key(provider_name) {
-            report.provider_reference_errors.push(format!(
+            report.schema_warnings.push(format!(
                 "Model '{model_key}' references missing provider '{provider_name}'"
             ));
         }
+    }
+
+    let default_model = config.agent.default_model.trim();
+    if !default_model.is_empty() && !models.contains_key(default_model) {
+        report.schema_warnings.push(format!(
+            "agent.default_model references missing model '{default_model}'"
+        ));
     }
 
     if let Some(fallback_model) = config.agent.fallback_model.as_deref() {
         let fallback_model = fallback_model.trim();
         if fallback_model.is_empty() {
             report
-                .fallback_reference_errors
+                .schema_warnings
                 .push("agent.fallback_model must not be empty".to_string());
         } else if !models.contains_key(fallback_model) {
-            report.fallback_reference_errors.push(format!(
+            report.schema_warnings.push(format!(
                 "agent.fallback_model references missing model '{fallback_model}'"
             ));
         }
@@ -1042,13 +1169,18 @@ async fn semantic_validate_config(
     for (tier, model) in tier_models {
         if tier.trim().is_empty() {
             report
-                .tier_model_errors
+                .schema_warnings
                 .push("agent.tier_models contains an empty tier name".to_string());
         }
         if model.trim().is_empty() {
             report
-                .tier_model_errors
+                .schema_warnings
                 .push(format!("agent.tier_models.{tier} must not be empty"));
+        } else if !models.contains_key(model.trim()) {
+            report.schema_warnings.push(format!(
+                "agent.tier_models.{tier} references missing model '{}'",
+                model.trim()
+            ));
         }
     }
 
@@ -1085,7 +1217,7 @@ async fn semantic_validate_config(
             && let Some(warning) = probe_validation_base_url(client, provider_name, base_url).await
         {
             unreachable_providers.insert(provider_name.to_string());
-            report.warnings.push(warning);
+            report.field_warnings.push(warning);
         }
     }
 
@@ -1094,7 +1226,7 @@ async fn semantic_validate_config(
         model_entries.sort_by(|a, b| a.0.cmp(b.0));
         for (model_key, profile) in model_entries {
             if unreachable_providers.contains(profile.provider.trim()) {
-                report.warnings.push(format!(
+                report.field_warnings.push(format!(
                     "Model '{model_key}' references provider '{}' which is unreachable",
                     profile.provider.trim()
                 ));
@@ -1657,6 +1789,7 @@ command = "claude"
     async fn semantic_validate_reports_missing_provider_reference() {
         let client = reqwest::Client::builder().build().unwrap();
         let mut config = RokoConfig::default();
+        config.agent.default_model = "kimi-k2-5".to_string();
         config.models.insert(
             "kimi-k2-5".to_string(),
             ModelProfile {
@@ -1683,10 +1816,12 @@ command = "claude"
         );
 
         let report = semantic_validate_config(&config, &client).await;
-        assert_eq!(report.error_count(), 1);
-        assert_eq!(report.warning_count(), 0);
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(report.warning_count(), 1);
+        assert_eq!(report.schema_warning_count(), 1);
+        assert_eq!(report.field_warning_count(), 0);
         assert_eq!(
-            report.provider_reference_errors,
+            report.schema_warnings,
             vec!["Model 'kimi-k2-5' references missing provider 'moonshot'".to_string()]
         );
     }
@@ -1697,6 +1832,7 @@ command = "claude"
         let env_name = "ROKO_TEST_VALIDATE_API_KEY_THAT_SHOULD_NOT_EXIST";
 
         let mut config = RokoConfig::default();
+        config.agent.default_model.clear();
         config.providers.insert(
             "moonshot".to_string(),
             ProviderConfig {
@@ -1729,22 +1865,26 @@ command = "claude"
     async fn semantic_validate_reports_missing_fallback_model_reference() {
         let client = reqwest::Client::builder().build().unwrap();
         let mut config = RokoConfig::default();
+        config.agent.default_model.clear();
         config.agent.fallback_model = Some("missing-model".to_string());
 
         let report = semantic_validate_config(&config, &client).await;
 
-        assert_eq!(report.error_count(), 1);
-        assert_eq!(report.warning_count(), 0);
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(report.warning_count(), 1);
+        assert_eq!(report.schema_warning_count(), 1);
+        assert_eq!(report.field_warning_count(), 0);
         assert_eq!(
-            report.fallback_reference_errors,
+            report.schema_warnings,
             vec!["agent.fallback_model references missing model 'missing-model'".to_string()]
         );
     }
 
     #[tokio::test]
-    async fn semantic_validate_allows_fallback_model_from_legacy_effective_models() {
+    async fn semantic_validate_warns_for_legacy_default_tier_and_fallback_models() {
         let client = reqwest::Client::builder().build().unwrap();
         let mut config = RokoConfig::default();
+        config.models.clear();
         config.agent.default_model = "claude-sonnet-4-6".to_string();
         config
             .agent
@@ -1754,7 +1894,15 @@ command = "claude"
 
         let report = semantic_validate_config(&config, &client).await;
 
-        assert!(report.fallback_reference_errors.is_empty());
+        assert!(report.schema_warnings.contains(
+            &"agent.default_model references missing model 'claude-sonnet-4-6'".to_string()
+        ));
+        assert!(report.schema_warnings.contains(
+            &"agent.fallback_model references missing model 'claude-haiku-4-5'".to_string()
+        ));
+        assert!(report.schema_warnings.contains(
+            &"agent.tier_models.mechanical references missing model 'claude-haiku-4-5'".to_string()
+        ));
     }
 
     #[tokio::test]
@@ -1764,7 +1912,8 @@ command = "claude"
             .build()
             .unwrap();
         let mut config = RokoConfig::default();
-        config.providers = HashMap::from([(
+        config.agent.default_model = "kimi-k2-5".to_string();
+        config.providers = indexmap::IndexMap::from([(
             "moonshot".to_string(),
             ProviderConfig {
                 kind: ProviderKind::OpenAiCompat,
@@ -1808,15 +1957,34 @@ command = "claude"
 
         assert_eq!(report.error_count(), 0);
         assert_eq!(report.warning_count(), 2);
+        assert_eq!(report.schema_warning_count(), 0);
+        assert_eq!(report.field_warning_count(), 2);
         assert!(
             report
-                .warnings
+                .field_warnings
                 .iter()
                 .any(|warning| warning.contains("Provider 'moonshot' base_url unreachable"))
         );
         assert_eq!(
-            report.warnings[1],
+            report.field_warnings[1],
             "Model 'kimi-k2-5' references provider 'moonshot' which is unreachable"
         );
+    }
+
+    #[test]
+    fn legacy_layout_warning_reports_version_one_only() {
+        let mut legacy = RokoConfig::default();
+        legacy.config_version = 1;
+        assert_eq!(
+            legacy_layout_warning(&legacy).as_deref(),
+            Some(
+                "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+            )
+        );
+
+        // A v2 config with empty providers should NOT warn — empty providers
+        // is a valid configuration (user may rely on CLI agents or env vars).
+        let current = RokoConfig::default();
+        assert_eq!(legacy_layout_warning(&current).as_deref(), None);
     }
 }

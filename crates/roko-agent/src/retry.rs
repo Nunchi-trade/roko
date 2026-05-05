@@ -94,10 +94,13 @@ impl RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
+        use roko_core::defaults::{
+            DEFAULT_RETRY_ATTEMPTS, DEFAULT_RETRY_BASE_DELAY_MS, DEFAULT_RETRY_MAX_BACKOFF_MS,
+        };
         Self {
-            max_attempts: 3,
-            base_delay_ms: 1_000,
-            max_delay_ms: 60_000,
+            max_attempts: DEFAULT_RETRY_ATTEMPTS,
+            base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
+            max_delay_ms: DEFAULT_RETRY_MAX_BACKOFF_MS,
             retryable_errors: vec![
                 ErrorClass::RateLimit,
                 ErrorClass::Timeout,

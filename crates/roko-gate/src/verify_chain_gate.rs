@@ -13,7 +13,7 @@
 //!
 //! # Script resolution
 //!
-//! The path to the script is read from the input [`Engram`]:
+//! The path to the script is read from the input [`Signal`]:
 //!
 //! 1. If `signal.tag("verify_script")` is set, that path is used.
 //! 2. Otherwise the gate treats it as "no script for this signal" and
@@ -38,27 +38,27 @@
 
 use crate::payload::GatePayload;
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Signal, Verdict, Verify};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 
-/// Tag key the gate reads from [`Engram::tag`] to find the verify script.
+/// Tag key the gate reads from [`Signal::tag`] to find the verify script.
 pub const VERIFY_SCRIPT_TAG: &str = "verify_script";
 
 /// Maximum number of bytes of combined stdout/stderr retained in
 /// [`Verdict::detail`] — keeps verdicts small on the event bus.
 const DETAIL_TAIL_BYTES: usize = 16 * 1024;
 
-/// Gate that runs a plan-specific `verify.sh` and parses its output.
+/// Verify that runs a plan-specific `verify.sh` and parses its output.
 ///
 /// See the module-level documentation for the script resolution and line
 /// protocol. Construct with [`VerifyChainGate::strict`] (no fallback) or
 /// [`VerifyChainGate::with_fallback`] (delegate on missing script).
 pub struct VerifyChainGate {
-    fallback: Option<Arc<dyn Gate>>,
+    fallback: Option<Arc<dyn Verify>>,
     timeout_ms: u64,
     retry_once: bool,
     zero_test_guard: bool,
@@ -91,7 +91,7 @@ impl VerifyChainGate {
     /// name — delegating to another `VerifyChainGate` would risk a cycle
     /// when the inner gate also fails to find a script.
     #[must_use]
-    pub fn with_fallback(fallback: Arc<dyn Gate>) -> Self {
+    pub fn with_fallback(fallback: Arc<dyn Verify>) -> Self {
         debug_assert!(
             fallback.name() != "verify_chain",
             "verify_chain fallback must not be another verify_chain gate (cycle risk)",
@@ -139,7 +139,7 @@ impl VerifyChainGate {
     }
 
     /// Resolve the script path from the signal + payload, or return `None`.
-    fn resolve_script(signal: &Engram, payload: Option<&GatePayload>) -> Option<PathBuf> {
+    fn resolve_script(signal: &Signal, payload: Option<&GatePayload>) -> Option<PathBuf> {
         let raw = signal.tag(VERIFY_SCRIPT_TAG)?;
         let p = Path::new(raw);
         if p.is_absolute() {
@@ -173,9 +173,21 @@ impl VerifyChainGate {
     }
 }
 
+impl roko_core::Cell for VerifyChainGate {
+    fn cell_id(&self) -> &str {
+        "verify-chain-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "VerifyChainGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
-impl Gate for VerifyChainGate {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+impl Verify for VerifyChainGate {
+    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
         let started = Instant::now();
         // GatePayload is optional: some callers may rely on absolute
         // script paths and the current process's cwd.
@@ -526,19 +538,19 @@ mod tests {
         }
     }
 
-    fn signal_with_script(dir: &std::path::Path, script: &str) -> Engram {
+    fn signal_with_script(dir: &std::path::Path, script: &str) -> Signal {
         let payload = GatePayload::in_dir(dir);
         let body = Body::from_json(&payload).expect("serialize payload");
-        Engram::builder(Kind::Task)
+        Signal::builder(Kind::Task)
             .body(body)
             .tag(VERIFY_SCRIPT_TAG, script)
             .build()
     }
 
-    fn signal_without_tag(dir: &std::path::Path) -> Engram {
+    fn signal_without_tag(dir: &std::path::Path) -> Signal {
         let payload = GatePayload::in_dir(dir);
         let body = Body::from_json(&payload).expect("serialize payload");
-        Engram::builder(Kind::Task).body(body).build()
+        Signal::builder(Kind::Task).body(body).build()
     }
 
     fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
@@ -867,8 +879,8 @@ mod tests {
         // equality check that triggers it.
         struct FakeCycle;
         #[async_trait]
-        impl Gate for FakeCycle {
-            async fn verify(&self, _: &Engram, _: &Context) -> Verdict {
+        impl Verify for FakeCycle {
+            async fn verify(&self, _: &Signal, _: &Context) -> Verdict {
                 Verdict::pass("verify_chain")
             }
             #[allow(clippy::unnecessary_literal_bound)]

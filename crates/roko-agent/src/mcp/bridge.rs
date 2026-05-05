@@ -13,7 +13,8 @@ use super::{
 };
 use crate::mcp::client::McpError;
 
-const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const MCP_DISCOVERY_TIMEOUT: Duration =
+    Duration::from_secs(roko_core::defaults::DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS);
 
 /// Errors raised while discovering MCP tools for HTTP backends.
 #[derive(Debug, thiserror::Error)]

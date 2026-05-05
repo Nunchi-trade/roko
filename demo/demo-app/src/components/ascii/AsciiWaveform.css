@@ -1,0 +1,30 @@
+/* AsciiWaveform ── block-element oscilloscope display */
+
+.ascii-waveform {
+  display: inline-flex;
+  flex-direction: column;
+  font-family: var(--mono);
+  user-select: none;
+  line-height: 1;
+}
+
+.ascii-waveform__label {
+  font-size: var(--text-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 0.3em;
+}
+
+.ascii-waveform__bars {
+  display: inline-flex;
+  align-items: flex-end;
+  color: var(--rose);
+}
+
+.ascii-waveform__bar {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  white-space: pre;
+}

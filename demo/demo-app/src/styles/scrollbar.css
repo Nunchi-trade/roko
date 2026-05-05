@@ -1,0 +1,111 @@
+/* ═══════════════════════════════════════════════════════════
+   SCROLLBAR · Custom Theming & Scroll-Linked Effects
+   Rosedust design system tokens
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Enhanced WebKit scrollbar ── */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--rose) 15%, transparent);
+  border-radius: 3px;
+  transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--rose) 30%, transparent);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: color-mix(in srgb, var(--rose) 50%, transparent);
+}
+
+/* ── Firefox scrollbar ── */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--rose) 15%, transparent) transparent;
+}
+
+/* ── Utility: hide scrollbar but keep scroll ── */
+
+.scrollbar-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Scroll fade overlays ──
+   Apply to a position:relative container with overflow.
+   Uses mask-image for a clean gradient fade at edges. */
+
+.scroll-fade-top {
+  mask-image: linear-gradient(to bottom, transparent 0%, black 24px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 24px);
+}
+
+.scroll-fade-bottom {
+  mask-image: linear-gradient(to bottom, black calc(100% - 24px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 24px), transparent 100%);
+}
+
+.scroll-fade-both {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    black 24px,
+    black calc(100% - 24px),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    black 24px,
+    black calc(100% - 24px),
+    transparent 100%
+  );
+}
+
+/* ── Smooth scroll (respects reduced-motion via rosedust.css global override) ── */
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* ── Scroll shadow on TopNav ── */
+
+.topnav.scrolled {
+  box-shadow:
+    var(--shadow-md),
+    0 8px 24px color-mix(in srgb, var(--rose) 4%, transparent);
+  border-bottom-color: color-mix(in srgb, #fff 6%, transparent);
+  transition:
+    box-shadow var(--duration-smooth) var(--ease),
+    border-bottom-color var(--duration-smooth) var(--ease);
+}
+
+.topnav:not(.scrolled) {
+  box-shadow: none;
+  transition:
+    box-shadow var(--duration-smooth) var(--ease),
+    border-bottom-color var(--duration-smooth) var(--ease);
+}
+
+/* ── Reduced motion: disable smooth scroll ── */
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}

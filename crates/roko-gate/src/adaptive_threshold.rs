@@ -30,6 +30,7 @@ pub struct RungStats {
     /// Exponential moving average of the pass rate (0.0 to 1.0).
     pub ema_pass_rate: f64,
     /// Total observations for this rung.
+    #[serde(default, alias = "total_count")]
     pub total_observations: u64,
     /// Consecutive passes (reset on any failure).
     pub consecutive_passes: u32,
@@ -519,7 +520,7 @@ impl AdaptiveThresholds {
     }
 
     /// Incorporate neuro-derived knowledge hints into threshold tuning
-    /// (INT-15: Neuro -> Gate Thresholds).
+    /// (INT-15: Neuro -> Verify Thresholds).
     ///
     /// `known_failure_rungs` lists rung indices where neuro's knowledge store
     /// has recorded persistent failure patterns.  For those rungs, the

@@ -38,7 +38,7 @@ impl Default for ValidationRegistryConfig {
 /// Decoded gate result from a work proof.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GateScore {
-    /// Gate kind identifier.
+    /// Verify kind identifier.
     pub gate_kind: String,
     /// Score (0.0 - 1.0).
     pub score: f64,

@@ -27,7 +27,30 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Write,
         ToolPermission::writes(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Relative path within the worktree to edit."
+            },
+            "edits": {
+                "type": "array",
+                "description": "Array of edit operations applied atomically in order.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_string": { "type": "string", "description": "Exact string to find." },
+                        "new_string": { "type": "string", "description": "Replacement string." },
+                        "replace_all": { "type": "boolean", "description": "Replace all occurrences (default: false)." }
+                    },
+                    "required": ["old_string", "new_string"]
+                }
+            }
+        },
+        "required": ["path", "edits"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(false)
     .with_timeout_ms(30_000)

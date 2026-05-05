@@ -1,0 +1,300 @@
+/* ═══════════════════════════════════════════════════════════
+   TERMINAL PANE — rosedust-integrated xterm container
+   Glass morphism + connection animations
+   ═══════════════════════════════════════════════════════════ */
+
+.terminal-pane {
+  background: color-mix(in srgb, var(--bg-deeper) 90%, transparent);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  transition: border-color .3s var(--ease), box-shadow .4s var(--ease);
+}
+
+/* ── 4. Focus glow: breathing rose border (2s cycle) ── */
+
+.terminal-pane:focus-within {
+  border-color: color-mix(in srgb, var(--rose) 22%, transparent);
+  animation: focusBreathe 2s ease-in-out infinite;
+}
+
+@keyframes focusBreathe {
+  0%, 100% {
+    box-shadow: 0 0 12px color-mix(in srgb, var(--rose) 6%, transparent), 0 0 4px color-mix(in srgb, var(--rose) 3%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 20px color-mix(in srgb, var(--rose) 12%, transparent), 0 0 8px color-mix(in srgb, var(--rose) 6%, transparent);
+  }
+}
+
+/* ── 2. Connection pulse wave on border ── */
+
+.terminal-pane.just-connected {
+  animation: connectPulseWave 600ms ease-out;
+}
+
+@keyframes connectPulseWave {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 50%, transparent);
+    border-color: var(--success);
+  }
+  50% {
+    box-shadow: 0 0 12px 4px color-mix(in srgb, var(--success) 25%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    border-color: var(--glass-border);
+  }
+}
+
+/* ── 3. Disconnect shake (200ms) ── */
+
+.terminal-pane.just-disconnected {
+  animation: disconnectShake 200ms ease-in-out;
+}
+
+@keyframes disconnectShake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(2px); }
+  60% { transform: translateX(-1.5px); }
+  80% { transform: translateX(1px); }
+}
+
+/* ── 1. Glass morphism pane header ── */
+
+.pane-header {
+  padding: 1px var(--sp-2);
+  height: 20px;
+  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
+  backdrop-filter: blur(12px) saturate(180%);
+  -webkit-backdrop-filter: blur(12px) saturate(180%);
+  border-bottom: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 3%, transparent), inset 0 -1px 0 color-mix(in srgb, black 8%, transparent);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  letter-spacing: .10em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  transition: border-color var(--duration-smooth), background var(--duration-smooth);
+}
+
+/* ── 5. Header hover effect ── */
+
+.pane-header:hover {
+  background: color-mix(in srgb, var(--bg-mid) 80%, transparent);
+}
+
+.pane-header:hover .pane-label {
+  text-shadow: 0 0 6px color-mix(in srgb, var(--text-primary) 15%, transparent);
+}
+
+.terminal-pane:focus-within .pane-header {
+  border-bottom-color: color-mix(in srgb, var(--rose-bright) 20%, transparent);
+  background: color-mix(in srgb, var(--bg-mid) 80%, transparent);
+}
+
+/* SpectreAvatar inside header */
+.pane-header .spectre-avatar {
+  flex-shrink: 0;
+  border-radius: 2px;
+}
+
+.pane-label {
+  color: var(--text-strong);
+  font-weight: 400;
+  letter-spacing: .12em;
+  transition: color var(--duration-smooth), text-shadow var(--duration-smooth);
+}
+
+.terminal-pane:focus-within .pane-label {
+  color: var(--rose-glow);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 20%, transparent);
+}
+
+.pane-role {
+  font-size: var(--text-xs);
+  letter-spacing: .10em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0.7;
+  margin-left: 2px;
+}
+
+.pane-status {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  letter-spacing: .10em;
+}
+
+.pane-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background var(--duration-smooth), box-shadow var(--duration-smooth);
+}
+
+.pane-dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--success) 60%, transparent);
+}
+
+.pane-dot.disconnected {
+  background: var(--rose-dim);
+  opacity: 0.5;
+}
+
+.pane-dot.connecting {
+  background: var(--warning);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--warning) 50%, transparent);
+  animation: pane-dot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pane-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Pane body ── */
+
+.pane-body {
+  flex: 1;
+  padding: 0;
+  min-height: 0;
+  position: relative;
+}
+
+/* ── 7. Output flash (subtle opacity pulse when receiving data) ── */
+
+.pane-body.output-flash {
+  animation: outputFlash 100ms ease-out;
+}
+
+@keyframes outputFlash {
+  0% { opacity: 1; }
+  50% { opacity: 0.95; }
+  100% { opacity: 1; }
+}
+
+/* Blinking cursor for empty state */
+.pane-body:empty::after {
+  content: "\2588";
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  color: var(--rose-dim);
+  animation: cursorBlink 1.2s step-end infinite;
+  margin: var(--sp-1);
+  display: block;
+}
+
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   XTERM VIEWPORT & CHROME OVERRIDES
+   ═══════════════════════════════════════════════════════════ */
+
+/* Inner padding */
+.pane-body .xterm,
+.demo-term-body .xterm {
+  padding: 2px 0 2px 4px;
+}
+
+/* ── 8. Scrollbar enhancement: glow on hover, invisible track ── */
+
+.pane-body .xterm-viewport,
+.demo-term-body .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--rose) 15%, transparent) transparent;
+}
+
+.pane-body .xterm-viewport::-webkit-scrollbar,
+.demo-term-body .xterm-viewport::-webkit-scrollbar {
+  width: 5px;
+}
+
+.pane-body .xterm-viewport::-webkit-scrollbar-track,
+.demo-term-body .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.pane-body .xterm-viewport::-webkit-scrollbar-thumb,
+.demo-term-body .xterm-viewport::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--rose) 14%, transparent);
+  border-radius: 3px;
+  transition: background var(--duration-snap), box-shadow var(--duration-snap);
+}
+
+.pane-body .xterm-viewport::-webkit-scrollbar-thumb:hover,
+.demo-term-body .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--rose) 40%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rose) 30%, transparent);
+}
+
+/* Hide scrollbar when terminal not hovered */
+.pane-body .xterm-viewport::-webkit-scrollbar-thumb {
+  opacity: 0;
+  transition: opacity var(--duration-smooth);
+}
+
+.pane-body:hover .xterm-viewport::-webkit-scrollbar-thumb,
+.demo-term-body:hover .xterm-viewport::-webkit-scrollbar-thumb {
+  opacity: 1;
+}
+
+/* ── Overview ruler (minimap) ── */
+
+.pane-body .xterm-overview-ruler,
+.demo-term-body .xterm-overview-ruler {
+  opacity: 0.5;
+  transition: opacity var(--duration-smooth);
+}
+
+.pane-body:hover .xterm-overview-ruler,
+.demo-term-body:hover .xterm-overview-ruler {
+  opacity: 0.8;
+}
+
+/* ── Selection ── */
+
+.pane-body .xterm-selection div,
+.demo-term-body .xterm-selection div {
+  border-radius: 2px;
+}
+
+/* ── Link hover ── */
+
+.pane-body .xterm a,
+.demo-term-body .xterm a {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--rose) 40%, transparent);
+  text-underline-offset: 2px;
+}
+
+/* ── 6. Resize handle glow ── */
+
+.terminal-pane:active {
+  border-color: color-mix(in srgb, var(--rose) 25%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rose) 10%, transparent);
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-dot.connecting { animation: none; }
+  .terminal-pane:focus-within { animation: none; }
+  .terminal-pane.just-connected { animation: none; }
+  .terminal-pane.just-disconnected { animation: none; }
+  .pane-body.output-flash { animation: none; }
+}

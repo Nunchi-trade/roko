@@ -189,9 +189,9 @@ pub struct ModelRoutingConfig {
 impl Default for ModelRoutingConfig {
     fn default() -> Self {
         Self {
-            gamma_model: "claude-haiku-4-5".into(),
-            theta_model: "claude-sonnet-4-6".into(),
-            delta_model: "claude-opus-4-6".into(),
+            gamma_model: roko_core::defaults::MODEL_FAST.into(),
+            theta_model: roko_core::defaults::MODEL_FOCUSED.into(),
+            delta_model: roko_core::defaults::MODEL_DEEP.into(),
         }
     }
 }
@@ -201,7 +201,7 @@ impl Default for ModelRoutingConfig {
 pub struct NeuroConfig {
     /// Filesystem path for the knowledge store.
     pub path: String,
-    /// Maximum active Engram count.
+    /// Maximum active Signal count.
     pub max_engrams: u64,
     /// Decay model name.
     pub decay_model: String,
@@ -264,14 +264,14 @@ pub struct MeshConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MeshSharingConfig {
     /// Knowledge types eligible for sharing.
-    pub share_types: Vec<EngramKind>,
+    pub share_types: Vec<SignalKind>,
     /// Minimum confidence before sharing.
     pub min_share_confidence: f64,
-    /// Share gate-passed Engrams automatically.
+    /// Share gate-passed Signals automatically.
     pub share_on_gate_pass: bool,
     /// Confidence multiplier applied to received knowledge.
     pub received_confidence_discount: f64,
-    /// Maximum received Engrams per hour.
+    /// Maximum received Signals per hour.
     pub max_received_per_hour: u32,
     /// Sync interval in seconds.
     pub sync_interval_secs: u64,
@@ -281,9 +281,9 @@ impl Default for MeshSharingConfig {
     fn default() -> Self {
         Self {
             share_types: vec![
-                EngramKind::Insight,
-                EngramKind::Warning,
-                EngramKind::CausalLink,
+                SignalKind::Insight,
+                SignalKind::Warning,
+                SignalKind::CausalLink,
             ],
             min_share_confidence: 0.5,
             share_on_gate_pass: true,
@@ -323,9 +323,9 @@ pub struct InferenceConfig {
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
-            default_model: "claude-haiku-4-5".into(),
-            escalation_model: "claude-sonnet-4-6".into(),
-            critical_model: "claude-opus-4-6".into(),
+            default_model: roko_core::defaults::MODEL_FAST.into(),
+            escalation_model: roko_core::defaults::MODEL_FOCUSED.into(),
+            critical_model: roko_core::defaults::MODEL_DEEP.into(),
             max_tokens_per_turn: 4096,
             temperature: 0.7,
         }
@@ -901,13 +901,13 @@ pub struct LifetimeCosts {
     pub projected_monthly_cost_usd: f64,
 }
 
-/// Engram as stored in a lifecycle backup archive.
+/// Signal as stored in a lifecycle backup archive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BackupEngram {
+pub struct BackupSignal {
     /// Content-addressed hash.
     pub hash: String,
     /// Knowledge type.
-    pub kind: EngramKind,
+    pub kind: SignalKind,
     /// Knowledge content.
     pub body: String,
     /// Author agent ID.
@@ -915,7 +915,7 @@ pub struct BackupEngram {
     /// Tags for categorization and retrieval.
     pub tags: Vec<String>,
     /// Seven-axis score at backup time.
-    pub score: EngramScore,
+    pub score: SignalScore,
     /// Knowledge tier at backup time.
     pub tier: KnowledgeTier,
     /// Decay state at backup time.
@@ -937,7 +937,7 @@ pub struct BackupEngram {
 /// Lifecycle knowledge type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EngramKind {
+pub enum SignalKind {
     /// Observation or interpretation.
     Insight,
     /// Practical rule of thumb.
@@ -952,9 +952,9 @@ pub enum EngramKind {
     AntiKnowledge,
 }
 
-/// Seven-axis Engram score.
+/// Seven-axis Signal score.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct EngramScore {
+pub struct SignalScore {
     /// Confidence in correctness.
     pub confidence: f64,
     /// Novelty relative to prior knowledge.
@@ -971,7 +971,7 @@ pub struct EngramScore {
     pub coherence: f64,
 }
 
-impl EngramScore {
+impl SignalScore {
     /// Create a score from confidence alone.
     pub const fn from_confidence(confidence: f64) -> Self {
         Self {
@@ -1015,7 +1015,7 @@ pub struct DecayState {
     pub tier_multiplier: f64,
 }
 
-/// Decay behavior for a backed-up Engram.
+/// Decay behavior for a backed-up Signal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DecayModel {
@@ -1062,7 +1062,7 @@ pub enum ProvenanceEntry {
     },
     /// Received over Mesh.
     MeshReceived {
-        /// Agent that shared the Engram.
+        /// Agent that shared the Signal.
         from_agent: String,
         /// Collective used for transfer.
         via_collective: Option<String>,
@@ -1093,10 +1093,10 @@ pub struct BackupManifest {
 /// Backup archive statistics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct BackupStats {
-    /// Total Engrams in the archive.
+    /// Total Signals in the archive.
     pub total_engrams: u64,
     /// Count by knowledge type.
-    pub engrams_by_type: HashMap<EngramKind, u64>,
+    pub engrams_by_type: HashMap<SignalKind, u64>,
     /// Count by knowledge tier.
     pub engrams_by_tier: HashMap<KnowledgeTier, u64>,
     /// Average confidence.
@@ -1112,8 +1112,8 @@ pub struct BackupStats {
 pub struct BackupArchive {
     /// Manifest metadata.
     pub manifest: BackupManifest,
-    /// Backed-up Engrams.
-    pub engrams: Vec<BackupEngram>,
+    /// Backed-up Signals.
+    pub engrams: Vec<BackupSignal>,
     /// Optional playbook snapshot.
     pub playbook_md: Option<String>,
     /// Archive checksum.
@@ -1206,7 +1206,7 @@ pub struct RestoreConfig {
     pub type_filter: TypeFilter,
     /// Minimum source confidence accepted.
     pub min_confidence: f64,
-    /// Optional maximum Engram count.
+    /// Optional maximum Signal count.
     pub max_engrams: Option<usize>,
     /// Source-to-target generation distance.
     pub generation: u32,
@@ -1236,12 +1236,12 @@ pub enum TypeFilter {
     /// Accept all knowledge types.
     All,
     /// Accept only listed knowledge types.
-    Only(Vec<EngramKind>),
+    Only(Vec<SignalKind>),
 }
 
 impl TypeFilter {
     /// Return whether a kind is accepted.
-    pub fn accepts(&self, kind: &EngramKind) -> bool {
+    pub fn accepts(&self, kind: &SignalKind) -> bool {
         match self {
             Self::All => true,
             Self::Only(types) => types.contains(kind),
@@ -1249,11 +1249,11 @@ impl TypeFilter {
     }
 }
 
-/// Engram staged in quarantine before restore adoption.
+/// Signal staged in quarantine before restore adoption.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct QuarantinedEngram {
-    /// Backed-up Engram.
-    pub engram: BackupEngram,
+pub struct QuarantinedSignal {
+    /// Backed-up Signal.
+    pub engram: BackupSignal,
     /// Confidence before restore decay.
     pub original_confidence: f64,
     /// Confidence after restore decay.
@@ -1281,39 +1281,39 @@ pub struct ProvenanceTag {
 pub enum ValidationStatus {
     /// Validation has not run.
     Pending,
-    /// Validation accepted the Engram.
+    /// Validation accepted the Signal.
     Accepted,
-    /// Validation rejected the Engram.
+    /// Validation rejected the Signal.
     Rejected,
 }
 
 /// Restore report summarizing quarantine, validation, and adoption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RestoreReport {
-    /// Engrams processed from the archive.
+    /// Signals processed from the archive.
     pub processed: u64,
-    /// Engrams filtered out before quarantine.
+    /// Signals filtered out before quarantine.
     pub filtered: u64,
-    /// Engrams quarantined.
+    /// Signals quarantined.
     pub quarantined: u64,
-    /// Engrams validated.
+    /// Signals validated.
     pub validated: u64,
-    /// Engrams rejected.
+    /// Signals rejected.
     pub rejected: u64,
-    /// Engrams adopted.
+    /// Signals adopted.
     pub adopted: u64,
 }
 
 /// Minimal in-memory Neuro-store stub used by restore helpers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct NeuroStore {
-    /// Stored Engrams.
-    pub engrams: Vec<BackupEngram>,
+    /// Stored Signals.
+    pub engrams: Vec<BackupSignal>,
 }
 
 impl NeuroStore {
-    /// Insert a restored or shared Engram.
-    pub fn insert(&mut self, engram: BackupEngram) {
+    /// Insert a restored or shared Signal.
+    pub fn insert(&mut self, engram: BackupSignal) {
         self.engrams.push(engram);
     }
 }
@@ -1328,8 +1328,8 @@ pub fn restore_confidence(original_confidence: f64, generation: u32, decay_rate:
     (confidence * rate.powi(generation as i32)).max(0.01)
 }
 
-/// Load backup Engrams into quarantine according to restore filters.
-pub fn quarantine_backup(backup: &BackupArchive, config: &RestoreConfig) -> Vec<QuarantinedEngram> {
+/// Load backup Signals into quarantine according to restore filters.
+pub fn quarantine_backup(backup: &BackupArchive, config: &RestoreConfig) -> Vec<QuarantinedSignal> {
     let limit = config.max_engrams.unwrap_or(usize::MAX);
     backup
         .engrams
@@ -1337,7 +1337,7 @@ pub fn quarantine_backup(backup: &BackupArchive, config: &RestoreConfig) -> Vec<
         .filter(|engram| config.type_filter.accepts(&engram.kind))
         .filter(|engram| engram.score.confidence >= config.min_confidence)
         .take(limit)
-        .map(|engram| QuarantinedEngram {
+        .map(|engram| QuarantinedSignal {
             engram: engram.clone(),
             original_confidence: engram.score.confidence,
             decayed_confidence: restore_confidence(
@@ -1355,8 +1355,8 @@ pub fn quarantine_backup(backup: &BackupArchive, config: &RestoreConfig) -> Vec<
         .collect()
 }
 
-/// Adopt quarantined Engrams into an in-memory Neuro store.
-pub fn adopt_engrams(neuro: &mut NeuroStore, quarantined: Vec<QuarantinedEngram>) -> RestoreReport {
+/// Adopt quarantined Signals into an in-memory Neuro store.
+pub fn adopt_engrams(neuro: &mut NeuroStore, quarantined: Vec<QuarantinedSignal>) -> RestoreReport {
     let mut report = RestoreReport {
         processed: u64::try_from(quarantined.len()).unwrap_or(u64::MAX),
         quarantined: u64::try_from(quarantined.len()).unwrap_or(u64::MAX),
@@ -1408,7 +1408,7 @@ pub fn tier_from_confidence(confidence: f64) -> KnowledgeTier {
 /// Retrieval context used by the testing-effect update.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RetrievalContext {
-    /// Whether the turn using this Engram passed gates.
+    /// Whether the turn using this Signal passed gates.
     pub gate_passed: bool,
     /// Diversity score for task/Daimon/context variation.
     pub context_diversity: f64,
@@ -1416,8 +1416,8 @@ pub struct RetrievalContext {
     pub timestamp: u64,
 }
 
-/// Update Engram strength after successful retrieval.
-pub fn apply_testing_effect(engram: &mut BackupEngram, retrieval_context: &RetrievalContext) {
+/// Update Signal strength after successful retrieval.
+pub fn apply_testing_effect(engram: &mut BackupSignal, retrieval_context: &RetrievalContext) {
     let base_increase = 0.05;
     let gate_bonus = if retrieval_context.gate_passed {
         0.03
@@ -1444,8 +1444,8 @@ pub fn ebbinghaus_retention(time_since_access_ms: u64, strength: f64, scale_ms: 
     (-(time_since_access_ms as f64) / denominator).exp()
 }
 
-/// Compute effective confidence for a backed-up Engram.
-pub fn effective_confidence(engram: &BackupEngram) -> f64 {
+/// Compute effective confidence for a backed-up Signal.
+pub fn effective_confidence(engram: &BackupSignal) -> f64 {
     const TICK_DURATION_MS: f64 = 1_000.0;
     match engram.decay.model {
         DecayModel::None => engram.score.confidence,
@@ -1485,14 +1485,14 @@ pub const fn tier_multiplier(tier: KnowledgeTier) -> f64 {
 }
 
 /// Default scale for a knowledge type in milliseconds.
-pub const fn default_scale_for_kind(kind: EngramKind) -> u64 {
+pub const fn default_scale_for_kind(kind: SignalKind) -> u64 {
     const HOUR_MS: u64 = 3_600_000;
     match kind {
-        EngramKind::Insight | EngramKind::StrategyFragment => 168 * HOUR_MS,
-        EngramKind::Heuristic => 336 * HOUR_MS,
-        EngramKind::Warning => 72 * HOUR_MS,
-        EngramKind::CausalLink => 504 * HOUR_MS,
-        EngramKind::AntiKnowledge => 720 * HOUR_MS,
+        SignalKind::Insight | SignalKind::StrategyFragment => 168 * HOUR_MS,
+        SignalKind::Heuristic => 336 * HOUR_MS,
+        SignalKind::Warning => 72 * HOUR_MS,
+        SignalKind::CausalLink => 504 * HOUR_MS,
+        SignalKind::AntiKnowledge => 720 * HOUR_MS,
     }
 }
 
@@ -1540,12 +1540,12 @@ pub struct DemurrageReport {
     pub average_confidence_after: f64,
 }
 
-/// Apply knowledge demurrage to one Engram.
+/// Apply knowledge demurrage to one Signal.
 pub fn apply_demurrage(
-    engram: &BackupEngram,
+    engram: &BackupSignal,
     config: &DemurrageConfig,
     current_iteration: u64,
-) -> BackupEngram {
+) -> BackupSignal {
     if engram.tier == KnowledgeTier::Archived || config.validation_interval == 0 {
         return engram.clone();
     }
@@ -1573,12 +1573,12 @@ pub fn apply_demurrage(
     updated
 }
 
-/// Apply knowledge demurrage to all active Engrams.
+/// Apply knowledge demurrage to all active Signals.
 pub fn apply_demurrage_to_all(
-    engrams: &[BackupEngram],
+    engrams: &[BackupSignal],
     config: &DemurrageConfig,
     current_iteration: u64,
-) -> (Vec<BackupEngram>, DemurrageReport) {
+) -> (Vec<BackupSignal>, DemurrageReport) {
     let mut report = DemurrageReport {
         entries_processed: u32::try_from(engrams.len()).unwrap_or(u32::MAX),
         ..DemurrageReport::default()
@@ -1659,27 +1659,27 @@ impl Default for DemurrageCalibration {
 /// Version vector for Mesh delta sync.
 pub type VersionVector = HashMap<String, u64>;
 
-/// Sync delta containing Engrams a peer has not seen.
+/// Sync delta containing Signals a peer has not seen.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncDelta {
     /// Source agent ID.
     pub source_agent: String,
-    /// Engrams to sync.
-    pub engrams: Vec<SharedEngram>,
+    /// Signals to sync.
+    pub engrams: Vec<SharedSignal>,
     /// Source agent version vector.
     pub version_vector: VersionVector,
     /// Sync timestamp.
     pub timestamp: u64,
 }
 
-/// Engram packaged for sharing across the Mesh.
+/// Signal packaged for sharing across the Mesh.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SharedEngram {
-    /// Engram content and metadata.
-    pub engram: BackupEngram,
+pub struct SharedSignal {
+    /// Signal content and metadata.
+    pub engram: BackupSignal,
     /// Monotonic sequence number per source agent.
     pub seq: u64,
-    /// Agent that shared this Engram.
+    /// Agent that shared this Signal.
     pub shared_by: String,
     /// Share timestamp.
     pub shared_at: u64,
@@ -1708,7 +1708,7 @@ pub fn sharing_threshold(base_threshold: f64, pad: &PADVector) -> f64 {
 /// Mesh receive configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MeshReceiveConfig {
-    /// Maximum Engrams accepted per hour.
+    /// Maximum Signals accepted per hour.
     pub max_received_per_hour: u32,
     /// Minimum sender reputation.
     pub min_sender_reputation: f64,
@@ -1729,27 +1729,27 @@ impl Default for MeshReceiveConfig {
     }
 }
 
-/// Report from processing incoming Mesh Engrams.
+/// Report from processing incoming Mesh Signals.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MeshReceiveReport {
-    /// Engrams received during the current hour.
+    /// Signals received during the current hour.
     pub received_this_hour: u32,
-    /// Engrams dropped by rate limiting.
+    /// Signals dropped by rate limiting.
     pub rate_limited: u32,
-    /// Engrams dropped because attestation failed.
+    /// Signals dropped because attestation failed.
     pub attestation_failed: u32,
-    /// Engrams dropped by reputation filtering.
+    /// Signals dropped by reputation filtering.
     pub reputation_filtered: u32,
-    /// Engrams rejected by validation.
+    /// Signals rejected by validation.
     pub rejected: u32,
-    /// Engrams adopted.
+    /// Signals adopted.
     pub adopted: u32,
 }
 
-/// Process incoming Mesh Engrams through rate-limit, discount, and adoption.
+/// Process incoming Mesh Signals through rate-limit, discount, and adoption.
 pub fn process_mesh_engrams(
     neuro: &mut NeuroStore,
-    incoming: Vec<SharedEngram>,
+    incoming: Vec<SharedSignal>,
     config: &MeshReceiveConfig,
 ) -> MeshReceiveReport {
     let mut report = MeshReceiveReport::default();
@@ -1783,9 +1783,9 @@ pub struct KnowledgeRequest {
     pub target_agent: String,
     /// Knowledge query.
     pub query: KnowledgeQuery,
-    /// Maximum Engrams to receive.
+    /// Maximum Signals to receive.
     pub max_results: u32,
-    /// Optional Engram hashes offered in return.
+    /// Optional Signal hashes offered in return.
     pub offer: Option<Vec<String>>,
 }
 
@@ -1803,7 +1803,7 @@ pub enum KnowledgeQuery {
         threshold: f64,
     },
     /// Query by knowledge type.
-    ByType(EngramKind),
+    ByType(SignalKind),
     /// Query by tag.
     ByTag(String),
 }
@@ -2167,7 +2167,7 @@ pub fn create_successor(
 ///
 /// Wire this into the Theta or Delta heartbeat loop. Each call to [`DemurrageCycle::tick`]
 /// increments the iteration counter; when `validation_interval` iterations elapse,
-/// the cycle applies demurrage to all supplied Engrams and returns a report.
+/// the cycle applies demurrage to all supplied Signals and returns a report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DemurrageCycle {
     /// Demurrage configuration.
@@ -2195,13 +2195,13 @@ impl DemurrageCycle {
     }
 
     /// Advance the iteration counter and, if a validation interval has elapsed,
-    /// apply demurrage to all supplied Engrams.
+    /// apply demurrage to all supplied Signals.
     ///
     /// Returns `Some(report)` when demurrage was applied, `None` otherwise.
     pub fn tick(
         &mut self,
-        engrams: &[BackupEngram],
-    ) -> Option<(Vec<BackupEngram>, DemurrageReport)> {
+        engrams: &[BackupSignal],
+    ) -> Option<(Vec<BackupSignal>, DemurrageReport)> {
         self.iteration += 1;
 
         if self.config.validation_interval == 0 {
@@ -2248,19 +2248,19 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
-    fn sample_engram(confidence: f64) -> BackupEngram {
-        BackupEngram {
+    fn sample_engram(confidence: f64) -> BackupSignal {
+        BackupSignal {
             hash: "hash".into(),
-            kind: EngramKind::Insight,
+            kind: SignalKind::Insight,
             body: "body".into(),
             author: "agent-a".into(),
             tags: vec!["volatility_regime".into()],
-            score: EngramScore::from_confidence(confidence),
+            score: SignalScore::from_confidence(confidence),
             tier: KnowledgeTier::Working,
             decay: DecayState {
                 model: DecayModel::Ebbinghaus {
                     strength: confidence,
-                    scale_ms: default_scale_for_kind(EngramKind::Insight),
+                    scale_ms: default_scale_for_kind(SignalKind::Insight),
                 },
                 effective_confidence: confidence,
                 ticks_since_access: 0,

@@ -89,7 +89,7 @@ pub struct App {
     pub scroll_offset: HashMap<PageId, u16>,
     /// Selected signal row on the Signals page (legacy).
     pub signal_selection: usize,
-    /// Selected gate-failure row on the Gate Results page (legacy).
+    /// Selected gate-failure row on the Verify Results page (legacy).
     pub gate_failure_selection: usize,
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
@@ -109,7 +109,7 @@ pub struct App {
     /// Pending response channel for the active approval modal.
     pending_approval_response: Option<oneshot::Sender<bool>>,
     /// Owning handle for the in-process or connected state hub.
-    _state_hub: Option<roko_core::SharedStateHub>,
+    _state_hub: Option<crate::state_hub::SharedStateHub>,
     /// Live dashboard snapshot receiver from `StateHub` when connected.
     pub snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::DashboardSnapshot>>,
     /// Last error entry surfaced from the live snapshot stream.
@@ -126,6 +126,10 @@ pub struct App {
     last_input: Instant,
     /// Last known terminal size used for hit-testing.
     terminal_size: (u16, u16),
+    /// Flag set by sync methods to request an async refresh on next loop
+    /// iteration (verdicts open/tick are async and cannot be called from sync
+    /// dispatch_action).
+    pending_refresh: bool,
 }
 
 /// Bundle of git data collected by the watcher-driven git refresh path.
@@ -391,6 +395,10 @@ fn tui_log_dispatch(workdir: &Path) -> Result<tracing::Dispatch> {
 
 /// Run the interactive dashboard event loop (async variant).
 pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+    // Populate verdicts aggregator on first async entry.
+    app.reseed_verdicts_aggregator().await;
+    app.refresh_verdicts_from_aggregator().await;
+
     loop {
         terminal.draw(|f| app.draw(f))?;
         if crossterm::event::poll(Duration::from_millis(250))? {
@@ -402,6 +410,11 @@ pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
                 }
                 _ => {}
             }
+        }
+        // Drain pending async refresh requests from sync dispatch_action.
+        if app.pending_refresh {
+            app.pending_refresh = false;
+            app.refresh_snapshot_async().await;
         }
         app.drain_snapshot_channel();
         app.drain_approval_requests();
@@ -416,15 +429,13 @@ impl App {
     /// Build a new app from a workspace root.
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
-        let state_hub = roko_core::SharedStateHub::new_in_process();
+        let state_hub = crate::state_hub::SharedStateHub::new_in_process();
         let _ = state_hub.bootstrap_from_workdir(root.as_ref());
         // Replay events.jsonl to pick up events from roko run / roko serve.
         let events_path = root.as_ref().join(".roko").join("events.jsonl");
-        if events_path.exists() {
-            let count = state_hub.replay_log_into_snapshot(&events_path);
-            if count > 0 {
-                tracing::info!(count, path = %events_path.display(), "replayed events from log");
-            }
+        let count = state_hub.replay_log_into_snapshot(&events_path);
+        if count > 0 {
+            tracing::info!(count, path = %events_path.display(), "replayed events from log");
         }
         Self::new_connected_with_state_hub(root, None, state_hub)
     }
@@ -432,15 +443,13 @@ impl App {
     /// Build a new app from a workspace root with an initial page selection.
     #[must_use]
     pub fn new_with_page(root: impl AsRef<Path>, initial_page: Option<PageId>) -> Self {
-        let state_hub = roko_core::SharedStateHub::new_in_process();
+        let state_hub = crate::state_hub::SharedStateHub::new_in_process();
         let _ = state_hub.bootstrap_from_workdir(root.as_ref());
         // Replay events.jsonl to pick up events from roko run / roko serve.
         let events_path = root.as_ref().join(".roko").join("events.jsonl");
-        if events_path.exists() {
-            let count = state_hub.replay_log_into_snapshot(&events_path);
-            if count > 0 {
-                tracing::info!(count, path = %events_path.display(), "replayed events from log");
-            }
+        let count = state_hub.replay_log_into_snapshot(&events_path);
+        if count > 0 {
+            tracing::info!(count, path = %events_path.display(), "replayed events from log");
         }
         Self::new_connected_with_state_hub(root, initial_page, state_hub)
     }
@@ -448,7 +457,7 @@ impl App {
     fn new_with_page_inner(
         root: impl AsRef<Path>,
         initial_page: Option<PageId>,
-        state_hub: Option<roko_core::SharedStateHub>,
+        state_hub: Option<crate::state_hub::SharedStateHub>,
     ) -> Self {
         let workdir = root.as_ref().to_path_buf();
         let terminal_size = size().unwrap_or((80, 24));
@@ -495,16 +504,20 @@ impl App {
             frame_counter: 0,
             last_input: Instant::now(),
             terminal_size,
+            pending_refresh: false,
         };
         app.fx_config = EffectsConfig::load_from_root(&app.workdir);
-        app.reseed_verdicts_aggregator();
-        app.refresh_verdicts_from_aggregator();
+        // Verdicts aggregator starts as None and is populated on the first
+        // async tick (open/tick are now async — cannot call from sync ctor).
         app
     }
 
     /// Build a new app connected to a shared `StateHub`.
     #[must_use]
-    pub fn new_connected(root: impl AsRef<Path>, state_hub: &roko_core::SharedStateHub) -> Self {
+    pub fn new_connected(
+        root: impl AsRef<Path>,
+        state_hub: &crate::state_hub::SharedStateHub,
+    ) -> Self {
         Self::new_connected_with_page(root, None, state_hub)
     }
 
@@ -513,7 +526,7 @@ impl App {
     pub fn new_connected_with_page(
         root: impl AsRef<Path>,
         initial_page: Option<PageId>,
-        state_hub: &roko_core::SharedStateHub,
+        state_hub: &crate::state_hub::SharedStateHub,
     ) -> Self {
         Self::new_connected_with_state_hub(root, initial_page, state_hub.clone())
     }
@@ -521,11 +534,11 @@ impl App {
     fn new_connected_with_state_hub(
         root: impl AsRef<Path>,
         initial_page: Option<PageId>,
-        state_hub: roko_core::SharedStateHub,
+        state_hub: crate::state_hub::SharedStateHub,
     ) -> Self {
         let mut app = Self::new_with_page_inner(root, initial_page, Some(state_hub.clone()));
         let snapshot_rx = state_hub.snapshot();
-        app.refresh_verdicts_from_aggregator();
+        // Verdicts aggregator starts as None; populated on first async tick.
         if snapshot_has_content(&snapshot_rx.borrow()) {
             let snapshot = snapshot_rx.borrow();
             apply_dashboard_snapshot(
@@ -624,6 +637,12 @@ impl App {
         self.git_watch = Some(git_watch::watch_git_repo_with_fallback(&self.workdir));
 
         // ---------------------------------------------------------------
+        // Populate verdicts aggregator (sync path — no Tokio runtime)
+        // ---------------------------------------------------------------
+        self.reseed_verdicts_aggregator_blocking();
+        self.refresh_verdicts_from_aggregator_blocking();
+
+        // ---------------------------------------------------------------
         // Initial draw
         // ---------------------------------------------------------------
         terminal
@@ -639,6 +658,11 @@ impl App {
                 Event::Key(key) => {
                     self.last_input = Instant::now();
                     self.handle_key(key);
+                    // Handle deferred refresh requests from dispatch_action.
+                    if self.pending_refresh {
+                        self.pending_refresh = false;
+                        self.refresh_snapshot();
+                    }
                     self.drain_snapshot_channel();
                     // Drain background channels before immediate redraw
                     self.drain_background_channels();
@@ -659,6 +683,11 @@ impl App {
                     self.drain_snapshot_channel();
                     self.drain_approval_requests();
                     self.drain_background_channels();
+                    // Handle deferred refresh requests from dispatch_action.
+                    if self.pending_refresh {
+                        self.pending_refresh = false;
+                        self.refresh_snapshot();
+                    }
                     self.expire_notifications();
                 }
             }
@@ -1659,7 +1688,7 @@ impl App {
             }
             TuiAction::MouseScrollUp { .. } => self.scroll_focused(-3),
             TuiAction::MouseScrollDown { .. } => self.scroll_focused(3),
-            TuiAction::Refresh => self.refresh_snapshot(),
+            TuiAction::Refresh => self.pending_refresh = true,
             TuiAction::SwitchSubView(idx) => {
                 // UI-04: switch sub-view within the current tab region.
                 // Map the sub-view index to the appropriate TuiState field
@@ -2323,7 +2352,29 @@ impl App {
         }
     }
 
-    /// Full refresh triggered by Ctrl-R and used as the fallback reload path.
+    /// Full refresh — async version for the connected `run()` path.
+    async fn refresh_snapshot_async(&mut self) {
+        self.data = DashboardData::load_best_effort(&self.workdir);
+        self.scaffold = DashboardScaffold::new_in(&self.workdir);
+        self.last_data_gen = self.data.generation;
+        self.tui_state.update_from_snapshot(&self.data);
+        if let Some(state_hub) = &self._state_hub {
+            let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+            let events_path = self.workdir.join(".roko").join("events.jsonl");
+            state_hub.replay_log_into_snapshot(&events_path);
+        }
+        self.reseed_verdicts_aggregator().await;
+        self.refresh_verdicts_from_aggregator().await;
+        self.fx_config = EffectsConfig::load_from_root(&self.workdir);
+        self.last_refresh = Instant::now();
+        self.clamp_signal_selection();
+        self.clamp_gate_failure_selection();
+        if self.pages().scaffold(self.current_page).is_none() {
+            self.current_page = self.scaffold.active_page();
+        }
+    }
+
+    /// Full refresh — sync version for the standalone `main_loop` path.
     fn refresh_snapshot(&mut self) {
         self.data = DashboardData::load_best_effort(&self.workdir);
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
@@ -2331,9 +2382,11 @@ impl App {
         self.tui_state.update_from_snapshot(&self.data);
         if let Some(state_hub) = &self._state_hub {
             let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+            let events_path = self.workdir.join(".roko").join("events.jsonl");
+            state_hub.replay_log_into_snapshot(&events_path);
         }
-        self.reseed_verdicts_aggregator();
-        self.refresh_verdicts_from_aggregator();
+        self.reseed_verdicts_aggregator_blocking();
+        self.refresh_verdicts_from_aggregator_blocking();
         self.fx_config = EffectsConfig::load_from_root(&self.workdir);
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
@@ -2356,24 +2409,58 @@ impl App {
 
         self.last_data_gen = self.data.generation;
         self.tui_state.update_from_snapshot(&self.data);
-        self.refresh_verdicts_from_aggregator();
+        self.refresh_verdicts_from_aggregator_blocking();
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
         self.clamp_gate_failure_selection();
     }
 
-    fn reseed_verdicts_aggregator(&mut self) {
-        self.verdicts_aggregator = VerdictsAggregator::open(&self.workdir).ok();
+    async fn reseed_verdicts_aggregator(&mut self) {
+        self.verdicts_aggregator = VerdictsAggregator::open(&self.workdir).await.ok();
     }
 
-    fn refresh_verdicts_from_aggregator(&mut self) {
+    async fn refresh_verdicts_from_aggregator(&mut self) {
         let Some(aggregator) = self.verdicts_aggregator.as_mut() else {
             self.tui_state.gate_trends.clear();
             self.tui_state.gate_recent_failures.clear();
             return;
         };
 
-        if let Err(error) = aggregator.tick() {
+        if let Err(error) = aggregator.tick().await {
+            tracing::warn!(
+                error = %error,
+                "verdicts aggregation tick failed"
+            );
+            return;
+        }
+
+        self.tui_state.gate_trends = aggregator.gate_trends();
+        self.tui_state.gate_recent_failures = aggregator.recent_failures();
+
+        if let Some(state_hub) = &self._state_hub {
+            let mut snapshot = state_hub.current_snapshot();
+            snapshot.gate_trends = self.tui_state.gate_trends.clone();
+            snapshot.gate_recent_failures = self.tui_state.gate_recent_failures.clone();
+            state_hub.apply_snapshot(snapshot);
+        }
+    }
+
+    /// Sync variant of [`Self::reseed_verdicts_aggregator`] for the
+    /// standalone `main_loop` path (no Tokio runtime active).
+    fn reseed_verdicts_aggregator_blocking(&mut self) {
+        self.verdicts_aggregator = VerdictsAggregator::open_blocking(&self.workdir).ok();
+    }
+
+    /// Sync variant of [`Self::refresh_verdicts_from_aggregator`] for the
+    /// standalone `main_loop` path (no Tokio runtime active).
+    fn refresh_verdicts_from_aggregator_blocking(&mut self) {
+        let Some(aggregator) = self.verdicts_aggregator.as_mut() else {
+            self.tui_state.gate_trends.clear();
+            self.tui_state.gate_recent_failures.clear();
+            return;
+        };
+
+        if let Err(error) = aggregator.tick_blocking() {
             tracing::warn!(
                 error = %error,
                 "verdicts aggregation tick failed"
@@ -2404,7 +2491,7 @@ impl App {
         {
             Ok(()) => {
                 self.tui_state.config_pending.clear();
-                self.refresh_snapshot();
+                self.pending_refresh = true;
                 self.notifications.push(super::modals::Notification::info(
                     "Config saved and reloaded",
                 ));
@@ -2499,7 +2586,7 @@ impl App {
                     self.tui_state.job_form_description.clear();
                     self.tui_state.job_form_editing = false;
 
-                    self.refresh_snapshot();
+                    self.pending_refresh = true;
                     self.notifications
                         .push(super::modals::Notification::info(format!(
                             "Job '{title}' created"
@@ -2683,10 +2770,20 @@ impl App {
                 }
             }
             if got_refresh {
-                // With a live orchestrator, the push path (drain_snapshot_channel)
-                // handles updates. Only fall back to file-based refresh when
-                // running standalone (`roko dashboard` with no orchestrator).
-                if self.snapshot_rx.is_none() {
+                // Re-bootstrap the in-process StateHub from disk files so
+                // `drain_snapshot_channel()` picks up the changes via the
+                // unified push path.  This replaces the old file-polling
+                // `tick_snapshot()` call and eliminates the dual data
+                // pipeline.
+                if let Some(state_hub) = &self._state_hub {
+                    let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+                    // Replay events.jsonl for any events not covered by
+                    // the bootstrap snapshot (e.g. orchestrator events
+                    // written since last bootstrap).
+                    let events_path = self.workdir.join(".roko").join("events.jsonl");
+                    state_hub.replay_log_into_snapshot(&events_path);
+                } else if self.snapshot_rx.is_none() {
+                    // Legacy fallback: no StateHub and no snapshot_rx.
                     self.tick_snapshot();
                 }
             }
@@ -2840,10 +2937,11 @@ impl App {
             if self.agent_stream_clients.contains_key(&agent_id) {
                 continue;
             }
-            self.agent_stream_clients.insert(
-                agent_id.clone(),
-                AgentStreamClient::connect(agent_id, &server_url, auth_token.clone()),
-            );
+            if let Some(client) =
+                AgentStreamClient::connect(&agent_id, &server_url, auth_token.clone())
+            {
+                self.agent_stream_clients.insert(agent_id, client);
+            }
         }
     }
 
@@ -3136,13 +3234,7 @@ fn tab_to_page(tab: Tab) -> Option<PageId> {
     }
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::truncate as truncate_str;
 
 fn apply_dashboard_snapshot(
     tui_state: &mut TuiState,
@@ -3255,7 +3347,7 @@ mod tests {
     #[test]
     fn app_new_connected_installs_snapshot_receiver() {
         let dir = tempdir().unwrap();
-        let hub = roko_core::shared_state_hub();
+        let hub = crate::state_hub::shared_state_hub();
         let app = App::new_connected(dir.path(), &hub);
         assert!(app.snapshot_rx.is_some());
     }
@@ -3717,8 +3809,7 @@ mod tests {
 
         app.dispatch_action(TuiAction::ConfigSave);
 
-        let mut reloaded = roko_core::config::load_config(dir.path()).unwrap();
-        reloaded.apply_process_env();
+        let reloaded = roko_core::config::loader::load_config_unified(dir.path()).unwrap();
 
         assert!(app.tui_state.config_pending.is_empty());
         assert_eq!(reloaded.agent.default_model, "claude-opus-4-6");

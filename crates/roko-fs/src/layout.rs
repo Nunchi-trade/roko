@@ -1,4 +1,4 @@
-//! `.roko/` directory layout definition and path helpers.
+//! Low-level `.roko/` directory layout definition and path helpers.
 //!
 //! The canonical layout under a project root is:
 //!
@@ -15,9 +15,10 @@
 //!   cache/          # cargo-target, context-pack-cache
 //! ```
 //!
-//! [`RokoLayout`] exposes typed path helpers so call-sites never hard-code
-//! the directory structure. [`LayoutVersion`] tracks on-disk format
-//! migrations.
+//! [`RokoLayout`] exposes typed path helpers for filesystem-internal code.
+//! Runtime and CLI code should prefer `roko_core::Workspace` as the
+//! workspace boundary, with this module retained as a path catalog for
+//! crates that need direct layout versioning or migration helpers.
 
 use std::path::{Path, PathBuf};
 
@@ -160,6 +161,42 @@ impl RokoLayout {
         self.root.join("learn")
     }
 
+    /// `.roko/prd/` — PRD storage.
+    #[must_use]
+    pub fn prd_dir(&self) -> PathBuf {
+        self.root.join("prd")
+    }
+
+    /// `.roko/research/` — research artifacts.
+    #[must_use]
+    pub fn research_dir(&self) -> PathBuf {
+        self.root.join("research")
+    }
+
+    /// `.roko/jobs/` — job execution artifacts.
+    #[must_use]
+    pub fn jobs_dir(&self) -> PathBuf {
+        self.root.join("jobs")
+    }
+
+    /// `.roko/jobs/plan-runs/` — copied plan roots for local job execution.
+    #[must_use]
+    pub fn plan_runs_dir(&self) -> PathBuf {
+        self.jobs_dir().join("plan-runs")
+    }
+
+    /// `.roko/extensions/` — local plugin extension manifests.
+    #[must_use]
+    pub fn extensions_dir(&self) -> PathBuf {
+        self.root.join("extensions")
+    }
+
+    /// `.roko/neuro/` — knowledge ingestion scratch space.
+    #[must_use]
+    pub fn neuro_dir(&self) -> PathBuf {
+        self.root.join("neuro")
+    }
+
     // ── per-entity paths ─────────────────────────────────────────────────
 
     /// `.roko/engrams.jsonl` — the main engram log.
@@ -177,10 +214,62 @@ impl RokoLayout {
         self.root.join("signals.jsonl")
     }
 
+    /// `.roko/signals.jsonl` — legacy signal log.
+    #[must_use]
+    pub fn signals_path(&self) -> PathBuf {
+        self.root.join("signals.jsonl")
+    }
+
+    /// `.roko/episodes.jsonl` — legacy root episode log.
+    ///
+    /// New layout-native episode storage lives at [`Self::episodes_path`].
+    /// This accessor preserves existing runtime behavior for call sites that
+    /// still consume the root log.
+    #[must_use]
+    pub fn root_episodes_path(&self) -> PathBuf {
+        self.root.join("episodes.jsonl")
+    }
+
+    /// `.roko/events.jsonl` — append-only runner event log.
+    #[must_use]
+    pub fn events_jsonl_path(&self) -> PathBuf {
+        self.root.join("events.jsonl")
+    }
+
+    /// `.roko/roko.log` — main log file.
+    #[must_use]
+    pub fn log_path(&self) -> PathBuf {
+        self.root.join("roko.log")
+    }
+
+    /// `.roko/roko.toml` — legacy workspace-local configuration file.
+    #[must_use]
+    pub fn roko_toml_path(&self) -> PathBuf {
+        self.root.join("roko.toml")
+    }
+
+    /// `.roko/mcp.json` — workspace-local MCP configuration file.
+    #[must_use]
+    pub fn mcp_config_path(&self) -> PathBuf {
+        self.root.join("mcp.json")
+    }
+
+    /// `.roko/runner-stderr.log` — approval-TUI stderr redirect.
+    #[must_use]
+    pub fn runner_stderr_log(&self) -> PathBuf {
+        self.root.join("runner-stderr.log")
+    }
+
     /// `.roko/learn/efficiency.jsonl` — per-turn efficiency events.
     #[must_use]
     pub fn efficiency_path(&self) -> PathBuf {
         self.learn_dir().join("efficiency.jsonl")
+    }
+
+    /// `.roko/learn/efficiency.jsonl` — per-turn efficiency events.
+    #[must_use]
+    pub fn efficiency_log_path(&self) -> PathBuf {
+        self.efficiency_path()
     }
 
     /// `.roko/learn/cascade-router.json` — model routing bandit state.
@@ -189,10 +278,22 @@ impl RokoLayout {
         self.learn_dir().join("cascade-router.json")
     }
 
+    /// `.roko/learn/gate-thresholds.json` — adaptive gate thresholds.
+    #[must_use]
+    pub fn gate_thresholds_path(&self) -> PathBuf {
+        self.learn_dir().join("gate-thresholds.json")
+    }
+
     /// `.roko/learn/experiments.json` — prompt experiment store.
     #[must_use]
     pub fn experiments_path(&self) -> PathBuf {
         self.learn_dir().join("experiments.json")
+    }
+
+    /// `.roko/learn/playbooks/` — learned playbook store.
+    #[must_use]
+    pub fn playbooks_dir(&self) -> PathBuf {
+        self.learn_dir().join("playbooks")
     }
 
     /// `.roko/plans/{plan_id}/` — enrichment artifacts for one plan.
@@ -281,6 +382,30 @@ impl RokoLayout {
         self.state_dir().join("executor.json")
     }
 
+    /// `.roko/state/executor.json` — executor snapshot for crash recovery.
+    #[must_use]
+    pub fn executor_snapshot_path(&self) -> PathBuf {
+        self.executor_snapshot()
+    }
+
+    /// `.roko/state/orchestrator.json` — aggregate orchestrator snapshot.
+    #[must_use]
+    pub fn orchestrator_snapshot(&self) -> PathBuf {
+        self.state_dir().join("orchestrator.json")
+    }
+
+    /// `.roko/state/run-state.json` — runner-owned resume state.
+    #[must_use]
+    pub fn run_state_path(&self) -> PathBuf {
+        self.state_dir().join("run-state.json")
+    }
+
+    /// `.roko/state/run-ledger.jsonl` — typed run ledger (task starts, completions, gate outcomes).
+    #[must_use]
+    pub fn run_ledger_path(&self) -> PathBuf {
+        self.state_dir().join("run-ledger.jsonl")
+    }
+
     /// `.roko/state/events.json` — event log snapshot for crash recovery.
     #[must_use]
     pub fn event_log_snapshot(&self) -> PathBuf {
@@ -309,6 +434,18 @@ impl RokoLayout {
     #[must_use]
     pub fn lock_file(&self) -> PathBuf {
         self.runtime_dir().join("roko.lock")
+    }
+
+    /// `.roko/runtime/agent-pids.json` — live agent PID registry.
+    #[must_use]
+    pub fn agent_pids_path(&self) -> PathBuf {
+        self.runtime_dir().join("agent-pids.json")
+    }
+
+    /// `.roko/runtime/gate-attempts/` — per-gate attempt sentinels.
+    #[must_use]
+    pub fn gate_attempts_dir(&self) -> PathBuf {
+        self.runtime_dir().join("gate-attempts")
     }
 
     // ── I/O helpers ──────────────────────────────────────────────────────

@@ -7,7 +7,6 @@ target/
 contracts/out/
 contracts/cache/
 contracts/broadcast/
-contracts/lib/
 
 # roko state
 .roko/
@@ -16,6 +15,10 @@ contracts/lib/
 # Git
 .git/
 .gitmodules
+
+# Claude / AI tooling
+.claude/
+**/.claude/
 
 # IDE / editor
 .vscode/
@@ -43,6 +46,9 @@ node_modules/
 *.tsbuildinfo
 .next/
 dist/
+
+# Cargo local config (sccache paths are macOS-specific)
+.cargo/
 
 # Caches
 .fastembed_cache/

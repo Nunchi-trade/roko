@@ -1,6 +1,6 @@
 # Rust build artifacts --------------------------------------------------------
 # Cargo target dir (also redirected to bardo/.mori/cache/cargo-target/ via
-# bardo/.cargo/config.toml — keep this rule in case someone builds with a
+# bardo/.cargo/config.toml - keep this rule in case someone builds with a
 # different config).
 target/
 **/target/
@@ -9,7 +9,7 @@ target/
 **/rust-toolchain.toml.orig
 
 # Foundry / contracts artifacts ----------------------------------------------
-# Built bytecode + ABI — regenerate with `forge build`.
+# Built bytecode + ABI - regenerate with `forge build`.
 contracts/out/
 contracts/cache/
 # Broadcast logs for non-local runs (keep per-chain deploy history out of git
@@ -58,11 +58,11 @@ demo/.runtime/
 *.log
 *.tmp
 /tmp/
-# mirage/roko test output piped into /tmp/mirage.log during dev — safe to ignore.
 
 # Temporary / work-in-progress (will be refined later) ----------------------
 CLAUDE.md
-scripts/
+scripts/*
+!scripts/layer_check.rs
 
 # Docker volumes (local dev overlays) ----------------------------------------
 docker/.env
@@ -77,7 +77,16 @@ __pycache__/
 node_modules/
 *.tsbuildinfo
 .next/
-dist/
+
+# demo-app build output (embedded by rust-embed at compile time)
+demo/demo-app/dist/
+
+# Playwright per-run artifacts (keep tracked captures under pw-captures if desired)
+demo/demo-app/test-results/**/
+
+# Local-only visual iteration prompts and Playwright audit helpers.
+# Keep these out of GitHub; they are tailored to the current machine/demo pass.
+demo/demo-app/tools/
 .roko-local-target/
 .codex-target/
 .cargo-target/

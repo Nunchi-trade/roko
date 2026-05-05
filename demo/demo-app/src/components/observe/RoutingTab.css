@@ -1,0 +1,45 @@
+/* ── RoutingTab ────────────────────────────────────────── */
+.routing-tab { display: flex; flex-direction: column; gap: 16px; }
+.routing-tab__loading {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  padding: 40px;
+  text-align: center;
+}
+.routing-tab__chart { width: 100%; }
+.routing-tab__chart canvas { display: block; width: 100%; }
+.routing-tab__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-xs, 12px);
+}
+.routing-tab__table th {
+  text-align: left;
+  color: var(--text-dim);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--glass-border);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.routing-tab__table td {
+  padding: 6px 8px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--glass-border);
+  font-family: var(--mono);
+}
+.routing-tab__model-name {
+  font-weight: 500;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.routing-tab__empty {
+  color: var(--text-dim);
+  text-align: center;
+  padding: 16px;
+  font-style: italic;
+}

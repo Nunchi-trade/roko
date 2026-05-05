@@ -452,9 +452,9 @@ pub struct FutureDelivery {
     pub delivery_hash: Blake3Hash,
     /// Engram identifier of the delivered artifact.
     pub engram_id: Blake3Hash,
-    /// Gate-verified quality score.
+    /// Verify-verified quality score.
     pub quality_score: f64,
-    /// Gate verdicts recorded during validation.
+    /// Verify verdicts recorded during validation.
     pub gate_verdicts: Vec<GateVerdict>,
     /// Delivery timestamp.
     pub delivered_at: u64,
@@ -709,8 +709,8 @@ pub enum Kind {
     Insight,
     /// Warning or anomaly artifact.
     Warning,
-    /// Policy or compliance artifact.
-    Policy,
+    /// React or compliance artifact.
+    React,
     /// Any other named kind.
     Custom(String),
 }

@@ -321,7 +321,9 @@ fn save_invitations(workdir: &Path, invitations: &[Invitation]) -> Result<(), Ap
 fn cleanup_invitation(workdir: &Path, email: &str) {
     let mut invitations = load_invitations(workdir);
     invitations.retain(|i| i.email != email);
-    let _ = save_invitations(workdir, &invitations);
+    if let Err(err) = save_invitations(workdir, &invitations) {
+        tracing::warn!(email = %email, error = %err, "failed to clean up accepted invitation");
+    }
 }
 
 /// Extract caller identity from headers.

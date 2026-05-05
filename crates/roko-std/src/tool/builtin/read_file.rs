@@ -4,6 +4,7 @@
 //! Concurrency: [`ToolConcurrency::Parallel`]. Idempotent: yes.
 
 use async_trait::async_trait;
+use roko_core::defaults::DEFAULT_MAX_FILE_READ_BYTES;
 use roko_core::tool::{
     Artifact, ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError,
     ToolHandler, ToolPermission, ToolResult, ToolSchema,
@@ -26,7 +27,25 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Read,
         ToolPermission::read_only(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Relative path within the worktree to read."
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Line offset to start reading from (0-based)."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of lines to return."
+            }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(true)
     .with_timeout_ms(30_000)
@@ -51,6 +70,25 @@ impl ToolHandler for Handler {
             Ok(p) => p,
             Err(e) => return ToolResult::Err(e),
         };
+
+        // §12.7: Check file size before reading to prevent OOM on huge files.
+        match tokio::fs::metadata(&absolute).await {
+            Ok(meta) if meta.len() > DEFAULT_MAX_FILE_READ_BYTES as u64 => {
+                return ToolResult::Err(ToolError::Other(format!(
+                    "read_file: file too large ({} bytes, max {})",
+                    meta.len(),
+                    DEFAULT_MAX_FILE_READ_BYTES,
+                )));
+            }
+            Err(e) => {
+                return ToolResult::Err(ToolError::Other(format!(
+                    "read_file: cannot stat {}: {e}",
+                    absolute.display()
+                )));
+            }
+            _ => {}
+        }
+
         match tokio::fs::read_to_string(&absolute).await {
             Ok(content) => ToolResult::with_artifacts(
                 content,

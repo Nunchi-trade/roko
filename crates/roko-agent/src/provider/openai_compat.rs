@@ -22,20 +22,23 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::Agent;
-use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
+use crate::codex_agent::CodexAgent;
 use crate::dispatcher::HandlerResolver;
 use crate::http::ReqwestPoster;
 use crate::mcp::{DynamicToolRegistry, McpConfig, discover_mcp_tools};
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
-    tool_limit_for_temperament, tool_loop_max_iterations,
+    tool_limit_for_temperament, tool_loop_max_iterations_for_profile,
 };
 use crate::tool_loop::backends::create_openai_compat_backend;
 use crate::tool_loop::{ToolLoop, ToolLoopAgent};
 use crate::translate::capability::cap_tools_for_profile;
 use crate::translate::{OpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::tool::{ToolDef, ToolRegistry, VecToolRegistry};
 use roko_std::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
@@ -91,8 +94,13 @@ fn inject_provider_routing(
         return;
     };
 
-    if let Ok(value) = serde_json::to_value(routing) {
-        body.insert("provider".to_string(), value);
+    match serde_json::to_value(routing) {
+        Ok(value) => {
+            body.insert("provider".to_string(), value);
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize provider routing config for OpenRouter");
+        }
     }
 }
 
@@ -231,7 +239,7 @@ pub(crate) fn max_tokens_for_model(model: &ModelProfile) -> u32 {
     model
         .max_output
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(DEFAULT_MAX_TOKENS)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
 }
 
 fn parse_allowed_tools_csv(csv: Option<&str>) -> Option<HashSet<&str>> {
@@ -244,27 +252,36 @@ fn parse_allowed_tools_csv(csv: Option<&str>) -> Option<HashSet<&str>> {
     (!allowed.is_empty()).then_some(allowed)
 }
 
-fn block_on<F>(future: F) -> F::Output
+fn block_on<F>(future: F) -> Result<F::Output, AgentCreationError>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("create MCP discovery runtime")
-                .block_on(future)
-        })
-        .join()
-        .expect("join MCP discovery thread")
-    } else {
+    let build_rt = || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("create MCP discovery runtime")
-            .block_on(future)
+            .map_err(|e| {
+                AgentCreationError::MissingConfig(format!(
+                    "failed to create MCP discovery runtime: {e}"
+                ))
+            })
+    };
+
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(move || {
+            let rt = build_rt()?;
+            Ok(rt.block_on(future))
+        })
+        .join()
+        .unwrap_or_else(|_| {
+            Err(AgentCreationError::MissingConfig(
+                "MCP discovery thread panicked".to_string(),
+            ))
+        })
+    } else {
+        let rt = build_rt()?;
+        Ok(rt.block_on(future))
     }
 }
 
@@ -293,7 +310,11 @@ pub(crate) fn tool_registry_for_options(
     let base = StaticToolRegistry::new();
     let mut registry = DynamicToolRegistry::new(&base);
 
-    if let Some(mcp_config_path) = &options.mcp_config {
+    // Use pre-discovered MCP tools when available, skipping the expensive
+    // block_on + OS thread MCP discovery entirely.
+    if let Some(pre_discovered) = &options.pre_discovered_mcp_tools {
+        add_mcp_tools_to_registry(&mut registry, pre_discovered.as_ref().clone());
+    } else if let Some(mcp_config_path) = &options.mcp_config {
         let mcp_config = McpConfig::load(mcp_config_path).map_err(|err| {
             AgentCreationError::MissingConfig(format!(
                 "mcp config {}: {err}",
@@ -301,7 +322,7 @@ pub(crate) fn tool_registry_for_options(
             ))
         })?;
         let mcp_tools =
-            block_on(async move { discover_mcp_tools(&mcp_config).await }).map_err(|err| {
+            block_on(async move { discover_mcp_tools(&mcp_config).await })?.map_err(|err| {
                 AgentCreationError::MissingConfig(format!(
                     "mcp tool discovery from {} failed: {err}",
                     mcp_config_path.display()
@@ -351,7 +372,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
         let timeout = options
             .timeout_ms
             .or(provider.timeout_ms)
-            .unwrap_or(120_000);
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
         let max_tokens = max_tokens_for_model(model);
         let extra_headers = provider.extra_headers.clone().unwrap_or_default();
         let extra_body_params = build_extra_body_params(provider, model);
@@ -369,16 +390,20 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             let backend = create_openai_compat_backend(&tool_loop_provider, model, poster)?;
 
             let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-                .with_max_iterations(tool_loop_max_iterations(50))
+                .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
                 .with_context_token_limit(
                     usize::try_from(model.context_window).unwrap_or(usize::MAX),
-                );
+                )
+                .with_model_profile(model.clone());
 
             let mut agent = ToolLoopAgent::new(tool_loop)
                 .with_tools(tools)
                 .with_name(agent_name);
             if let Some(prompt) = &options.system_prompt {
                 agent = agent.with_system_prompt(prompt.clone());
+            }
+            if let Some(ref dir) = options.working_dir {
+                agent = agent.with_worktree_path(dir.clone());
             }
 
             return Ok(Box::new(agent));
@@ -388,6 +413,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .with_base_url(base_url_for_codex(provider))
             .with_timeout_ms(timeout)
             .with_max_tokens(max_tokens)
+            .with_use_max_completion_tokens(model.use_max_completion_tokens)
             .with_extra_headers(extra_headers)
             .with_extra_body_params(extra_body_params)
             .with_name(agent_name);
@@ -436,7 +462,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
 mod tests {
     use super::*;
     use crate::http::{HttpPostError, HttpPoster};
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -444,8 +470,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn spawn_chat_server(
@@ -663,7 +689,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
@@ -767,7 +793,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
@@ -1200,7 +1226,7 @@ done
             command: None,
             args: None,
             timeout_ms: Some(1_500),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,

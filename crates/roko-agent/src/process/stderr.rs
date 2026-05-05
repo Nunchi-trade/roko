@@ -151,11 +151,11 @@ pub fn classify_benign_stderr(line: &str) -> Option<BenignStderr> {
         });
     }
 
-    // --- Codex unknown model metadata ---
+    // --- Codex fallback model metadata ---
     if line.contains("Unknown model ") && line.contains("This will use fallback model metadata") {
         return Some(BenignStderr {
-            key: "codex-unknown-model-metadata",
-            summary: "Codex is using fallback metadata for an unknown model alias; suppressing repeated upstream warnings",
+            key: "codex-fallback-model-metadata",
+            summary: "Codex is using fallback metadata for an unresolved model alias; suppressing repeated upstream warnings",
         });
     }
 
@@ -406,7 +406,7 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(
             result.expect("classified").key,
-            "codex-unknown-model-metadata"
+            "codex-fallback-model-metadata"
         );
     }
 

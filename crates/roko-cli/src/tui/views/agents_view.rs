@@ -252,9 +252,7 @@ fn render_agent_roster(
             .as_ref()
             .and_then(|snap| snap.active_agents.iter().find(|r| r.agent_id == agent.id));
 
-        let model = activity_row
-            .map(|r| shorten_model(&r.model))
-            .unwrap_or_else(|| "-".to_string());
+        let model = display_model(activity_row.map(|r| r.model.as_str()));
         let task = activity_row
             .map(|r| truncate_middle(&r.task, task_w))
             .or_else(|| {
@@ -1147,11 +1145,7 @@ fn render_route_metrics_bar(
                 .filter(|model| !model.is_empty())
         })
         .unwrap_or("");
-    let model_label = if model.is_empty() || model == "-" {
-        "unknown".to_string()
-    } else {
-        shorten_model(model)
-    };
+    let model_label = display_model(Some(model));
     let context_used = metrics
         .map(|metric| metric.context_used)
         .unwrap_or_else(|| agent_row.map_or(0, |row| row.input_tokens + row.output_tokens));
@@ -1254,13 +1248,4 @@ fn agent_status_rank(status: &str) -> u8 {
     }
 }
 
-/// Shorten a model slug for compact display.
-fn shorten_model(slug: &str) -> String {
-    slug.replace("claude-", "")
-        .replace("gpt-", "")
-        .replace("-codex", "c")
-        .replace("-mini", "m")
-        .replace("sonnet-", "s")
-        .replace("opus-", "o")
-        .replace("haiku-", "h")
-}
+use crate::tui::display_utils::{display_model, shorten_model};

@@ -1,0 +1,57 @@
+.flat-icon {
+  --icon-color: var(--rose-glow);
+  --icon-bg: color-mix(in srgb, var(--rose-glow) 12%, transparent);
+  --icon-border: color-mix(in srgb, var(--rose-glow) 22%, transparent);
+  width: calc(var(--icon-size, 18px) + 10px);
+  height: calc(var(--icon-size, 18px) + 10px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  border: 1px solid var(--icon-border);
+  background: var(--icon-bg);
+  color: var(--icon-color);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 4%, transparent);
+}
+
+.flat-icon svg {
+  width: var(--icon-size, 18px);
+  height: var(--icon-size, 18px);
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flat-icon--bone {
+  --icon-color: var(--bone-bright);
+  --icon-bg: color-mix(in srgb, var(--bone) 12%, transparent);
+  --icon-border: color-mix(in srgb, var(--bone) 24%, transparent);
+}
+
+.flat-icon--dream {
+  --icon-color: var(--dream-bright);
+  --icon-bg: color-mix(in srgb, var(--dream) 14%, transparent);
+  --icon-border: color-mix(in srgb, var(--dream) 25%, transparent);
+}
+
+.flat-icon--success {
+  --icon-color: var(--success);
+  --icon-bg: color-mix(in srgb, var(--success) 12%, transparent);
+  --icon-border: color-mix(in srgb, var(--success) 25%, transparent);
+}
+
+.flat-icon--warning {
+  --icon-color: var(--warning);
+  --icon-bg: color-mix(in srgb, var(--warning) 12%, transparent);
+  --icon-border: color-mix(in srgb, var(--warning) 24%, transparent);
+}
+
+.flat-icon--muted {
+  --icon-color: var(--text-soft);
+  --icon-bg: var(--glass-bg);
+  --icon-border: var(--border);
+}

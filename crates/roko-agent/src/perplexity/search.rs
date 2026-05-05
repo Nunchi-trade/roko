@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const DEFAULT_BASE_URL: &str = "https://api.perplexity.ai";
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_TIMEOUT_MS: u64 = roko_core::defaults::DEFAULT_EMBED_TIMEOUT_MS;
 const MAX_BATCH_SIZE: usize = 5;
 
 /// Error type for search API calls.

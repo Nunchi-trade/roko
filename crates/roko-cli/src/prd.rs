@@ -14,24 +14,108 @@
 //! ```
 
 mod dry_run_fs;
+#[path = "plan_validate.rs"]
+mod plan_validate;
 
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::time::Instant;
 
-use crate::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
+use crate::agent_config::command_from_config;
+use crate::agent_exec::{
+    AgentExecEpisode, AgentExecOpts, persist_capture_episode, run_agent_capture_logged,
+    run_agent_capture_silent, run_agent_logged,
+};
 use crate::task_parser::TasksFile;
 use crate::workspace_paths::{
     drafts_dir, ideas_path, plans_dir as workspace_plans_dir, prd_dir, published_dir,
 };
 use anyhow::{Context as _, Result, anyhow};
+use indexmap::IndexMap;
 use roko_core::config::schema::RokoConfig;
-use roko_core::obs::MetricRegistry;
-use roko_core::{Body, Engram, Kind, Provenance, Substrate};
+use roko_core::io::atomic_write_str;
+use roko_core::{Body, Engram, Kind, Provenance, Store};
 use roko_fs::FileSubstrate;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+pub use roko_learn::runtime_feedback::{ArtifactValidationReport, GenerationOutcome};
 use roko_runtime::event_bus::{PublishOrigin, RokoEvent, global_event_bus};
+
+/// Typed artifact result projected from the current PRD/plan generation outcome.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArtifactOutcome {
+    Valid {
+        artifact_type: String,
+        path: PathBuf,
+        report: ArtifactValidationReport,
+    },
+    Invalid {
+        artifact_type: String,
+        path: Option<PathBuf>,
+        report: Option<ArtifactValidationReport>,
+    },
+    NotProduced {
+        artifact_type: String,
+        reason: String,
+    },
+    ValidationUnavailable {
+        artifact_type: String,
+        path: Option<PathBuf>,
+        reason: String,
+    },
+}
+
+impl ArtifactOutcome {
+    /// Adapt the legacy `GenerationOutcome` booleans without changing generation behavior.
+    #[must_use]
+    pub fn from_generation_outcome(
+        artifact_type: impl Into<String>,
+        path: Option<PathBuf>,
+        outcome: &GenerationOutcome,
+    ) -> Self {
+        let artifact_type = artifact_type.into();
+        if !outcome.process_success {
+            return Self::NotProduced {
+                artifact_type,
+                reason: "generation process failed".to_string(),
+            };
+        }
+
+        if !outcome.artifact_valid {
+            return Self::Invalid {
+                artifact_type,
+                path,
+                report: outcome.validation_report.clone(),
+            };
+        }
+
+        let Some(path) = path else {
+            return Self::NotProduced {
+                artifact_type,
+                reason: "generation process succeeded but no artifact path was provided"
+                    .to_string(),
+            };
+        };
+
+        match &outcome.validation_report {
+            Some(report) => Self::Valid {
+                artifact_type,
+                path,
+                report: report.clone(),
+            },
+            None => Self::ValidationUnavailable {
+                artifact_type,
+                path: Some(path),
+                reason: "artifact validation report was not available".to_string(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid { .. })
+    }
+}
 
 fn tier_rank(tier: &str) -> u8 {
     match tier {
@@ -209,9 +293,10 @@ async fn regenerate_old_format_plan(
     let system = crate::plan_generate::build_generation_prompt(workdir, &source_content, "plan");
     let task_prompt = format!(
         "Regenerate the plan at {path} from the source plan document above. \
-         Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
+         Rewrite tasks.toml in place with full modern metadata: tier, \
          max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
-         [task.context], and [[task.verify]]. Preserve the status of any task \
+         [task.context], and [[task.verify]]. Do NOT set model_hint — the runtime \
+         selects models automatically. Preserve the status of any task \
          that is already marked done in the existing file. Do not create new plan \
          directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
         path = tasks_path.display(),
@@ -233,6 +318,7 @@ async fn regenerate_old_format_plan(
             resume_session: None,
             env_vars,
             role: Some("strategist"),
+            allowed_tools: None,
         },
         AgentExecEpisode {
             task_kind: "plan-regenerate",
@@ -266,7 +352,7 @@ async fn regenerate_old_format_plan(
 
     let merged = preserve_completed_task_status(existing_tasks.as_ref(), regenerated, plan_dir);
     let rendered = toml::to_string_pretty(&merged).context("serialize regenerated tasks.toml")?;
-    if let Err(err) = std::fs::write(&tasks_path, rendered) {
+    if let Err(err) = atomic_write_str(&tasks_path, &rendered) {
         std::fs::write(&tasks_path, &existing)
             .with_context(|| format!("restore {}", tasks_path.display()))?;
         return Err(err.into());
@@ -406,41 +492,101 @@ pub struct PrdMeta {
 
 impl PrdMeta {
     /// Parse frontmatter from a PRD markdown file.
+    ///
+    /// Extracts the YAML block between `---` markers and parses it with
+    /// `serde_yaml_ng` so that values containing colons, quoted strings,
+    /// and YAML list syntax are handled correctly.
     pub fn parse(content: &str) -> Option<Self> {
         let content = content.trim();
         if !content.starts_with("---") {
             return None;
         }
         let end = content[3..].find("---")?;
-        let yaml = &content[3..3 + end];
-        let mut meta = Self::default();
-        for line in yaml.lines() {
-            let line = line.trim();
-            if let Some(val) = line.strip_prefix("id:") {
-                meta.id = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("title:") {
-                meta.title = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("status:") {
-                meta.status = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("version:") {
-                meta.version = val.trim().parse().unwrap_or(1);
-            } else if let Some(val) = line.strip_prefix("created:") {
-                meta.created = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("updated:") {
-                meta.updated = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("coverage:") {
-                meta.coverage = val.trim().parse().unwrap_or(0.0);
-            } else if let Some(val) = line
-                .strip_prefix("plan_template:")
-                .or_else(|| line.strip_prefix("plan_template ="))
-            {
-                let value = val.trim().trim_matches('"').trim_matches('\'');
-                if !value.is_empty() {
-                    meta.plan_template = Some(value.to_string());
+        let yaml_str = &content[3..3 + end];
+
+        // Also support legacy `plan_template = "strict"` TOML-ish syntax by
+        // normalizing it to valid YAML before parsing.
+        let normalized: String = yaml_str
+            .lines()
+            .map(|line| {
+                if let Some(rest) = line.strip_prefix("plan_template =") {
+                    format!("plan_template: {rest}")
+                } else if let Some(rest) = line.strip_prefix("plan_template=") {
+                    format!("plan_template: {rest}")
+                } else {
+                    line.to_string()
                 }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mapping: serde_yaml_ng::Mapping =
+            serde_yaml_ng::from_str(&normalized).unwrap_or_default();
+
+        if mapping.is_empty() {
+            // Parsing produced nothing useful — treat as no frontmatter.
+            return None;
+        }
+
+        let mut meta = Self::default();
+        meta.id = yaml_get_string(&mapping, "id").unwrap_or_default();
+        meta.title = yaml_get_string(&mapping, "title").unwrap_or_default();
+        meta.status = yaml_get_string(&mapping, "status").unwrap_or_default();
+        meta.version = yaml_get_string(&mapping, "version")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1);
+        meta.created = yaml_get_string(&mapping, "created").unwrap_or_default();
+        meta.updated = yaml_get_string(&mapping, "updated").unwrap_or_default();
+        meta.coverage = yaml_get_string(&mapping, "coverage")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        meta.depends_on = yaml_get_string_list(&mapping, "depends_on");
+        meta.crates = yaml_get_string_list(&mapping, "crates");
+        meta.plans_generated = yaml_get_string_list(&mapping, "plans_generated");
+        meta.tags = yaml_get_string_list(&mapping, "tags");
+        meta.plan_template = yaml_get_string(&mapping, "plan_template")
+            .map(|v| v.trim_matches('"').trim_matches('\'').to_string())
+            .filter(|v| !v.is_empty());
+        Some(meta)
+    }
+}
+
+/// Extract a scalar value from a YAML mapping as a `String`.
+fn yaml_get_string(mapping: &serde_yaml_ng::Mapping, key: &str) -> Option<String> {
+    let value = mapping.get(serde_yaml_ng::Value::String(key.to_string()))?;
+    match value {
+        serde_yaml_ng::Value::String(s) => Some(s.clone()),
+        serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+        serde_yaml_ng::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Extract a list of strings from a YAML mapping.
+///
+/// Supports both inline `[a, b]` and block list syntax.
+fn yaml_get_string_list(mapping: &serde_yaml_ng::Mapping, key: &str) -> Vec<String> {
+    let Some(value) = mapping.get(serde_yaml_ng::Value::String(key.to_string())) else {
+        return Vec::new();
+    };
+    match value {
+        serde_yaml_ng::Value::Sequence(seq) => seq
+            .iter()
+            .filter_map(|v| match v {
+                serde_yaml_ng::Value::String(s) => Some(s.clone()),
+                serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .collect(),
+        serde_yaml_ng::Value::String(s) => {
+            // Single scalar value — wrap in a vec.
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                vec![s.clone()]
             }
         }
-        Some(meta)
+        _ => Vec::new(),
     }
 }
 
@@ -648,9 +794,23 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
         return Err(anyhow!("draft not found: {}", src.display()));
     }
     let dst = published_dir(workdir).join(format!("{slug}.md"));
+    // §14.2: Refuse to silently overwrite an existing published PRD.
+    if dst.exists() {
+        return Err(anyhow!(
+            "published PRD already exists at {}; remove or rename it first",
+            dst.display()
+        ));
+    }
 
     let mut content = std::fs::read_to_string(&src)?;
-    content = content.replace("status: draft", "status: published");
+    if !has_substantive_markdown_content(&content) {
+        return Err(anyhow!(
+            "draft has no substantive content; cannot promote. \
+             Re-run `roko prd draft edit {slug}` to populate it first."
+        ));
+    }
+    // §14.4: Only replace status within YAML frontmatter, not in body text.
+    content = replace_in_frontmatter(&content, "status: draft", "status: published");
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     // Update the 'updated' field if present
     if content.contains("updated:") {
@@ -660,7 +820,7 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
             .replace(&content, format!("updated: {today}"))
             .to_string();
     }
-    std::fs::write(&dst, &content)?;
+    atomic_write_str(&dst, &content)?;
     std::fs::remove_file(&src)?;
     println!("✅ Promoted: {}", dst.display());
     let published_at = chrono::Utc::now();
@@ -690,7 +850,9 @@ async fn maybe_generate_plan_after_promote(
         slug.to_string(),
         prd_path.to_path_buf(),
         auto_execute,
-        |slug, path, dry_run| async move { generate_plan_from_prd(&slug, &path, dry_run).await },
+        |slug, path, dry_run| async move {
+            generate_plan_from_prd_with_outcome(&slug, &path, dry_run, None, None).await
+        },
     )
     .await
 }
@@ -704,36 +866,71 @@ async fn maybe_generate_plan_after_promote_with<F, Fut>(
 ) -> Result<Option<PathBuf>>
 where
     F: FnOnce(String, PathBuf, bool) -> Fut,
-    Fut: Future<Output = Result<PathBuf>>,
+    Fut: Future<Output = Result<(PathBuf, GenerationOutcome)>>,
 {
     if !auto_plan_enabled(workdir)? {
         return Ok(None);
     }
 
-    match generator(slug, prd_path, false).await {
-        Ok(plans_root) => {
-            println!("Plan generated: {}", plans_root.display());
-            if auto_execute {
-                run_generated_plans(workdir, &plans_root).await?;
+    let prd_path_display = prd_path.display().to_string();
+    match generator(slug, prd_path.clone(), false).await {
+        Ok((plans_root, outcome)) => {
+            if outcome.fully_successful() {
+                println!("Plan generated: {}", plans_root.display());
+                if auto_execute {
+                    run_generated_plans(workdir, &plans_root).await?;
+                }
+            } else if outcome.process_success {
+                eprintln!(
+                    "warning: plan generation completed but artifact validation failed ({})",
+                    outcome.status_label()
+                );
+            } else {
+                eprintln!(
+                    "warning: plan generation reported {} for {}",
+                    outcome.status_label(),
+                    prd_path_display
+                );
+            }
+            if auto_execute && !outcome.fully_successful() {
+                eprintln!(
+                    "warning: skipping auto-execute because generated artifact was not fully successful"
+                );
             }
             Ok(Some(plans_root))
         }
         Err(err) => {
-            eprintln!("warning: auto plan generation failed: {err:#}");
+            // §14.6: Surface actionable feedback — the PRD was promoted
+            // but no plan was generated. Tell the user how to recover.
+            eprintln!("error: auto plan generation failed for '{prd_path_display}': {err:#}");
+            eprintln!(
+                "  → PRD is promoted. Run `roko prd plan <slug>` manually to generate a plan."
+            );
             Ok(None)
         }
     }
 }
 
 async fn run_generated_plans(workdir: &Path, plans_root: &Path) -> Result<()> {
-    let resolved = crate::load_layered(workdir)?;
-    let metrics = Arc::new(MetricRegistry::new());
-    roko_core::obs::register_standard_metrics(&metrics);
-
-    let mut runner =
-        crate::PlanRunner::from_plans_dir(plans_root, workdir, resolved.config, metrics, false)
-            .await?;
-    let _report = runner.run_task_plans(plans_root).await?;
+    let plans = crate::runner::load_plans(plans_root)?;
+    let roko_config = roko_core::config::loader::load_config_unified(workdir)
+        .with_context(|| format!("load roko config from {}", workdir.display()))?;
+    let run_config = crate::runner::RunConfig::from_roko_config(
+        workdir.to_path_buf(),
+        plans_root.to_path_buf(),
+        roko_config,
+    );
+    let state_hub = crate::state_hub::StateHub::default_capacity();
+    let report = crate::runner::run(
+        plans,
+        &run_config,
+        &state_hub,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await?;
+    if !report.all_succeeded() {
+        return Err(anyhow!("generated plan execution failed"));
+    }
     Ok(())
 }
 
@@ -755,12 +952,27 @@ fn auto_plan_enabled(workdir: &Path) -> Result<bool> {
         }
     }
 
-    Ok(crate::load_layered(workdir)?.config.auto_plan)
+    Ok(crate::load_resolved_config(workdir)?.config.auto_plan)
 }
 
 /// Generate implementation plans from a published PRD file.
 pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) -> Result<PathBuf> {
-    generate_plan_from_prd_with_failure_context(slug, prd_path, dry_run, None).await
+    let (plans_root, _) =
+        generate_plan_from_prd_with_outcome(slug, prd_path, dry_run, None, None).await?;
+    Ok(plans_root)
+}
+
+/// Generate implementation plans from a published PRD file using an
+/// explicit resolved model key from the caller.
+pub async fn generate_plan_from_prd_with_model(
+    slug: &str,
+    prd_path: &Path,
+    dry_run: bool,
+    model: Option<&str>,
+) -> Result<PathBuf> {
+    let (plans_root, _) =
+        generate_plan_from_prd_with_outcome(slug, prd_path, dry_run, None, model).await?;
+    Ok(plans_root)
 }
 
 /// Generate implementation plans from a published PRD file with optional
@@ -770,9 +982,25 @@ pub async fn generate_plan_from_prd_with_failure_context(
     prd_path: &Path,
     dry_run: bool,
     failure_context: Option<&str>,
+    model: Option<&str>,
 ) -> Result<PathBuf> {
+    let (plans_root, _) =
+        generate_plan_from_prd_with_outcome(slug, prd_path, dry_run, failure_context, model)
+            .await?;
+    Ok(plans_root)
+}
+
+async fn generate_plan_from_prd_with_outcome(
+    slug: &str,
+    prd_path: &Path,
+    dry_run: bool,
+    failure_context: Option<&str>,
+    model: Option<&str>,
+) -> Result<(PathBuf, GenerationOutcome)> {
     let workdir = prd_workdir(prd_path)?;
     let result = async {
+        let t_total = Instant::now();
+        let t_phase = Instant::now();
         let content = std::fs::read_to_string(prd_path)
             .with_context(|| format!("read {}", prd_path.display()))?;
         let prd_meta = PrdMeta::parse(&content).unwrap_or_default();
@@ -790,74 +1018,393 @@ pub async fn generate_plan_from_prd_with_failure_context(
             .as_ref()
             .map_or(workdir.as_path(), |temp| temp.path());
 
-        let resolved = crate::load_layered(workdir_ref)?;
+        let resolved = crate::load_resolved_config(workdir_ref)?;
         let system = augment_generator_system_prompt(
             crate::plan_generate::build_generator_system_prompt(workdir_ref),
             failure_context,
         );
         let plans_root = workspace_plans_dir(workdir_ref);
         let tasks_before = dry_run_fs::snapshot_tasks_files(&plans_root);
+        let init_ms = t_phase.elapsed().as_millis();
+
+        // Build repo context to ground the planning agent in actual repository
+        // structure. Keywords come from the PRD slug and title.
+        let t_phase = Instant::now();
+        let prd_title = prd_meta.title.as_str();
+        let mut prd_feature_keywords: Vec<String> = slug
+            .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+            .chain(prd_title.split(|c: char| c == '-' || c == '_' || c.is_whitespace()))
+            .filter(|w| w.len() >= 3)
+            .map(|w| w.to_lowercase())
+            .collect();
+        prd_feature_keywords.sort_unstable();
+        prd_feature_keywords.dedup();
+        prd_feature_keywords.truncate(10);
+        let prd_keyword_refs: Vec<&str> = prd_feature_keywords.iter().map(String::as_str).collect();
+        // Skip repo context scanning for workspaces without source code
+        // (e.g. freshly-initialized workspaces from `roko init`).
+        let has_source_code = workdir_ref.join("src").is_dir()
+            || workdir_ref.join("crates").is_dir()
+            || workdir_ref.join("lib").is_dir()
+            || workdir_ref.join("Cargo.toml").is_file()
+            || workdir_ref.join("package.json").is_file();
+        let repo_context_section: Option<String> = if has_source_code {
+            match crate::repo_context::build_repo_context(workdir_ref, &prd_keyword_refs).await {
+                Ok(repo_context) => {
+                    if !repo_context.context_root_verified {
+                        eprintln!(
+                            "warning: repository context not verified for keywords {:?}; \
+                             generated plan may reference nonexistent code.",
+                            prd_feature_keywords
+                        );
+                    }
+                    Some(repo_context.to_prompt_section())
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: repository context unavailable for keywords {:?}: {err}",
+                        prd_feature_keywords
+                    );
+                    None
+                }
+            }
+        } else {
+            None // Empty workspace — skip context scanning
+        };
+        let context_ms = t_phase.elapsed().as_millis();
+        let t_phase = Instant::now();
+        let prd_context_suffix = repo_context_section
+            .as_deref()
+            .map(|ctx| format!("\n\n---\n\n{ctx}"))
+            .unwrap_or_default();
+
+        // Trim PRD content to keep prompt size manageable for smaller models.
+        let max_prd_chars = 8000;
+        let trimmed_content = if content.len() > max_prd_chars {
+            let boundary = content.floor_char_boundary(max_prd_chars);
+            format!(
+                "{}\n\n[PRD content truncated at {max_prd_chars} chars]",
+                &content[..boundary]
+            )
+        } else {
+            content.clone()
+        };
+
         let task_prompt = format!(
-            "Read the PRD at {path} and generate implementation plan directories \
-             under .roko/plans/. Each REQ-XXX requirement becomes one or more tasks. \
-             Each acceptance criterion becomes a task verification command. \
-             Search the codebase first to understand what already exists. \
-             Create plan.md and tasks.toml files directly, including per-task mcp_servers \
-             when a task needs a specific MCP server.\n\n\
+            "Generate an implementation plan from the PRD below.\n\n\
+             Plan slug (use exactly in meta.plan): {slug}\n\n\
+             IMPORTANT: The PRD content is included inline — do NOT read {path} \
+             again. You may read up to 5 codebase files to understand existing \
+             structure, but then you MUST produce your output.\n\n\
+             Each REQ-XXX requirement becomes one or more tasks. \
+             Each acceptance criterion becomes a task verification command.\n\n\
+             Do NOT create files directly. Instead, output the plan content \
+             as follows:\n\n\
+             1. Output a fenced block tagged `toml` containing the tasks.toml content.\n\
+             2. Optionally output a fenced block tagged `plan.md` containing the plan narrative.\n\n\
+             TOML quality checklist (every task MUST pass all of these):\n\
+             - `meta.plan` matches the slug exactly: {slug}\n\
+             - Every task has `id`, `title`, `description`, `status = \"ready\"`, `role`, and `tier`\n\
+             - `files` lists only real paths that exist in the codebase (no placeholders)\n\
+             - `depends_on` only references task ids defined in this same plan\n\
+             - No `model_hint` field (the runtime selects the model automatically)\n\
+             - No `mcp_servers` field unless the task genuinely requires an MCP server\n\
+             - Every `[[task.verify]]` entry has `phase` and `command`\n\n\
              {template_guidance}\n\
-             PRD content:\n{content}",
+             PRD content:\n{trimmed_content}{prd_context_suffix}",
+            slug = slug,
             path = prd_path.display(),
             template_guidance = template_guidance,
-            content = content,
+            trimmed_content = trimmed_content,
+            prd_context_suffix = prd_context_suffix,
         );
 
+        let prompt_ms = t_phase.elapsed().as_millis();
+        let t_phase = Instant::now();
         let task_id = format!("prd:plan:{slug}");
-        let exit_code = run_agent_logged(
-            AgentExecOpts {
-                prompt: &task_prompt,
-                workdir: workdir_ref,
-                model: resolved.config.agent.model.as_deref(),
-                effort: Some(resolved.config.agent.effort.as_str()),
-                system_prompt: Some(&system),
-                resume_session: None,
-                env_vars: &resolved.config.agent.env,
-                role: Some("strategist"),
-            },
-            AgentExecEpisode {
-                task_kind: "prd-plan-generate",
-                task_id: &task_id,
-            },
-        )
+        let effective_model = model.or_else(|| resolved.config.agent.model.as_deref());
+        let plan_agent_command =
+            command_from_config(workdir_ref).unwrap_or_else(|| "claude".to_string());
+        let plan_started = Instant::now();
+        eprintln!("  Generating plan from PRD: {slug}");
+        let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
+            prompt: &task_prompt,
+            workdir: workdir_ref,
+            model: effective_model,
+            effort: Some(resolved.config.agent.effort.as_str()),
+            system_prompt: Some(&system),
+            resume_session: None,
+            env_vars: &resolved.config.agent.env,
+            role: Some("strategist"),
+            allowed_tools: Some("Read,Grep,Glob"),
+        })
         .await?;
+        let agent_ms = t_phase.elapsed().as_millis();
+        let t_phase = Instant::now();
+        if exit_code == 0 {
+            eprintln!("  ✓ Plan generated for: {slug}");
+        } else {
+            eprintln!("  ✗ Plan generation failed");
+        }
+        tracing::info!(
+            exit_code,
+            output_len = output.len(),
+            output_trimmed_len = output.trim().len(),
+            "prd plan: agent returned"
+        );
         if exit_code != 0 {
+            let _ = persist_capture_episode(
+                workdir_ref,
+                &plan_agent_command,
+                effective_model,
+                "prd-plan-generate",
+                &task_id,
+                &task_prompt,
+                &output,
+                false,
+                plan_started.elapsed().as_millis() as u64,
+                None,
+            )
+            .await;
             return Err(anyhow!(
-                "plan generation agent failed with exit code {exit_code}"
+                "plan generation agent failed with exit code {exit_code} \
+                 ({} bytes of output)",
+                output.len()
+            ));
+        }
+        if output.trim().is_empty() {
+            let _ = persist_capture_episode(
+                workdir_ref,
+                &plan_agent_command,
+                effective_model,
+                "prd-plan-generate",
+                &task_id,
+                &task_prompt,
+                &output,
+                false,
+                plan_started.elapsed().as_millis() as u64,
+                None,
+            )
+            .await;
+            return Err(anyhow!(
+                "plan generation agent returned empty output for {slug} — \
+                 the model may not support the required output format"
             ));
         }
 
+        // Write files from agent output (strategist can't write files directly).
+        // Try fenced ```toml block first, then ```tasks.toml, then unfenced TOML.
+        //
+        // If extraction or validation fails, retry up to 2 times with a
+        // stricter prompt requesting only the TOML block.
+        let try_extract_and_validate =
+            |raw: &str| -> std::result::Result<String, String> {
+                let toml_content = extract_fenced_block(raw, "toml")
+                    .or_else(|| extract_fenced_block(raw, "tasks.toml"))
+                    .or_else(|| extract_toml_content_fallback(raw));
+                tracing::info!(
+                    has_toml_block = toml_content.is_some(),
+                    toml_block_len = toml_content.map(|s| s.len()).unwrap_or(0),
+                    "prd plan: fenced block extraction"
+                );
+                let toml_content = toml_content
+                    .ok_or_else(|| "no TOML block found in agent output".to_string())?;
+                validate_and_fix_generated_plan(
+                    toml_content,
+                    slug,
+                    &resolved.config.models,
+                    resolved.config.agent.model.as_deref(),
+                )
+                .map_err(|e| format!("{e:#}"))
+            };
+
+        // First attempt uses the output we already have.
+        let mut validated_toml = try_extract_and_validate(&output);
+
+        // Retry up to 2 times on extraction/validation failure.
+        if validated_toml.is_err() {
+            let max_retries = 2u32;
+            for attempt in 1..=max_retries {
+                let t_retry = Instant::now();
+                tracing::warn!(
+                    attempt,
+                    max_retries,
+                    err = validated_toml.as_ref().unwrap_err().as_str(),
+                    "prd plan: TOML extraction/validation failed, retrying"
+                );
+                eprintln!(
+                    "⚠️  Plan TOML extraction failed (attempt {}/{}), retrying with stricter prompt…",
+                    attempt,
+                    max_retries + 1,
+                );
+                let retry_prompt = format!(
+                    "Your previous output could not be parsed as valid TOML. \
+                     Output ONLY the ```toml fenced block with no other text.\n\n\
+                     The plan must start with a [meta] section followed by [[task]] entries.\n\n\
+                     PRD slug: {slug}"
+                );
+                let retry_result = run_agent_capture_silent(AgentExecOpts {
+                    prompt: &retry_prompt,
+                    workdir: workdir_ref,
+                    model: effective_model,
+                    effort: Some(resolved.config.agent.effort.as_str()),
+                    system_prompt: Some(&system),
+                    resume_session: None,
+                    env_vars: &resolved.config.agent.env,
+                    role: Some("strategist"),
+                    allowed_tools: Some("Read,Grep,Glob"),
+                })
+                .await;
+
+                match retry_result {
+                    Ok((0, retry_output)) if !retry_output.trim().is_empty() => {
+                        validated_toml = try_extract_and_validate(&retry_output);
+                        if validated_toml.is_ok() {
+                            tracing::info!(
+                                attempt,
+                                retry_ms = t_retry.elapsed().as_millis() as u64,
+                                "prd plan: retry succeeded"
+                            );
+                            eprintln!("✅ Retry {attempt} succeeded");
+                            break;
+                        }
+                    }
+                    Ok((code, _)) => {
+                        tracing::warn!(
+                            attempt,
+                            code,
+                            retry_ms = t_retry.elapsed().as_millis() as u64,
+                            "prd plan: retry agent failed"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            attempt,
+                            %err,
+                            retry_ms = t_retry.elapsed().as_millis() as u64,
+                            "prd plan: retry agent error"
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Ok(validated_toml) = validated_toml {
+            let plan_dir = plans_root.join(slug);
+            std::fs::create_dir_all(&plan_dir)
+                .with_context(|| format!("create plan dir {}", plan_dir.display()))?;
+            atomic_write_str(&plan_dir.join("tasks.toml"), &validated_toml)
+                .with_context(|| format!("write tasks.toml to {}", plan_dir.display()))?;
+            println!(
+                "📋 Wrote tasks.toml ({} bytes) to {}",
+                validated_toml.len(),
+                plan_dir.display()
+            );
+            let plan_md_content = extract_fenced_block(&output, "plan.md")
+                .or_else(|| extract_fenced_block(&output, "markdown"))
+                .or_else(|| extract_fenced_block(&output, "md"));
+            if let Some(plan_md) = plan_md_content {
+                atomic_write_str(&plan_dir.join("plan.md"), &plan_md)
+                    .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
+                println!(
+                    "📋 Wrote plan.md ({} bytes) to {}",
+                    plan_md.len(),
+                    plan_dir.display()
+                );
+            } else {
+                // Write minimal plan.md so plan discovery tools can find this directory.
+                let minimal_plan_md = format!(
+                    "---\nplan: {slug}\ntitle: {slug}\n---\n\n# {slug}\n\nGenerated plan.\n"
+                );
+                atomic_write_str(&plan_dir.join("plan.md"), &minimal_plan_md)
+                    .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
+            }
+
+            // Update PRD frontmatter: record the generated plan slug.
+            if let Err(err) = update_prd_plans_generated(prd_path, slug) {
+                eprintln!("warning: failed to update PRD plans_generated: {err}");
+                tracing::warn!(
+                    slug = %slug,
+                    error = %err,
+                    "failed to update PRD plans_generated field"
+                );
+            } else {
+                tracing::info!(slug = %slug, "updated PRD plans_generated field");
+            }
+        } else {
+            // All attempts (initial + retries) failed to produce valid TOML.
+            let final_err = validated_toml.unwrap_err();
+            let preview: String = output.chars().take(500).collect();
+            let has_toml_like = output.contains("[meta]") || output.contains("[[task]]");
+            let toml_hint = if has_toml_like {
+                "\nhint: The model output TOML without proper fencing. \
+                 Try a more capable model or check the plan_generate system prompt."
+            } else {
+                ""
+            };
+            let _ = persist_capture_episode(
+                workdir_ref,
+                &plan_agent_command,
+                effective_model,
+                "prd-plan-generate",
+                &task_id,
+                &task_prompt,
+                &output,
+                false,
+                plan_started.elapsed().as_millis() as u64,
+                None,
+            )
+            .await;
+            return Err(anyhow!(
+                "Plan generation failed after retries: no valid tasks.toml was produced.\n\
+                 Last error: {final_err}\n\
+                 The agent output ({} bytes) did not contain a parseable ```toml block.\n\
+                 Output preview:\n---\n{preview}\n---\n\
+                 hint: Try again, or create plans/{slug}/tasks.toml manually.{toml_hint}",
+                output.len()
+            ));
+        }
+
+        let extraction_ms = t_phase.elapsed().as_millis();
+        tracing::info!(
+            extraction_and_write_ms = extraction_ms,
+            "prd plan: TOML extracted and written"
+        );
+        let t_phase = Instant::now();
         let generated_changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);
 
         if !dry_run {
-            regenerate_old_format_plans(
+            if let Err(e) = regenerate_old_format_plans(
                 workdir_ref,
-                resolved.config.agent.model.as_deref(),
+                model.or_else(|| resolved.config.agent.model.as_deref()),
                 Some(resolved.config.agent.effort.as_str()),
                 &resolved.config.agent.env,
                 &plans_root,
             )
-            .await?;
+            .await
+            {
+                eprintln!("warning: old-format plan regeneration failed (non-fatal): {e}");
+            }
         }
 
         let changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);
+        let mut artifact_valid = true;
+        let mut validation_report: Option<ArtifactValidationReport> = None;
+
         if dry_run {
             if changed.is_empty() {
-                return Err(anyhow!(
-                    "dry-run plan generation did not produce any tasks.toml files"
-                ));
-            }
-
-            for path in &changed {
-                dry_run_fs::validate_and_print_preview(path)?;
+                artifact_valid = false;
+                eprintln!("warning: dry-run plan generation did not produce any tasks.toml files");
+            } else {
+                for path in &changed {
+                    if let Err(err) = dry_run_fs::validate_and_print_preview(path) {
+                        artifact_valid = false;
+                        eprintln!(
+                            "warning: dry-run validation failed for {}: {err:#}",
+                            path.display()
+                        );
+                    }
+                }
             }
         } else {
             dry_run_fs::warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
@@ -871,31 +1418,109 @@ pub async fn generate_plan_from_prd_with_failure_context(
                 template_kind.max_task_count()
             );
         }
+
+        match self::plan_validate::validate_plans_dir_with_workdir(
+            &plans_root,
+            None,
+            Some(workdir_ref),
+        ) {
+            Ok(report) => {
+                if report.totals.errors > 0 {
+                    artifact_valid = false;
+                    eprintln!(
+                        "warning: artifact validation found {} error(s) and {} warning(s) for {}",
+                        report.totals.errors, report.totals.warnings, slug
+                    );
+                }
+                validation_report = serde_json::to_value(&report).ok();
+                if validation_report.is_none() {
+                    artifact_valid = false;
+                }
+            }
+            Err(err) => {
+                artifact_valid = false;
+                eprintln!(
+                    "warning: artifact validation could not be completed for {}: {err:#}",
+                    slug
+                );
+            }
+        }
+
+        let post_ms = t_phase.elapsed().as_millis();
+        let total_ms = t_total.elapsed().as_millis();
+        tracing::info!(
+            init_ms,
+            context_ms,
+            prompt_ms,
+            agent_ms,
+            post_ms,
+            total_ms,
+            "prd plan generate: phase timing"
+        );
+        eprintln!(
+            "  Timing: init={init_ms}ms context={context_ms}ms prompt={prompt_ms}ms agent={agent_ms}ms post={post_ms}ms total={total_ms}ms"
+        );
+
+        let outcome = GenerationOutcome {
+            process_success: true,
+            artifact_valid,
+            validation_report,
+        };
+
+        let _ = persist_capture_episode(
+            workdir_ref,
+            &plan_agent_command,
+            effective_model,
+            "prd-plan-generate",
+            &task_id,
+            &task_prompt,
+            &output,
+            outcome.fully_successful(),
+            plan_started.elapsed().as_millis() as u64,
+            None,
+        )
+        .await;
+
         Ok((
             workspace_plans_dir(&workdir),
             task_count,
             estimated_complexity,
+            outcome,
         ))
     }
     .await;
 
     match result {
-        Ok((plans_root, task_count, estimated_complexity)) => {
-            if !dry_run
-                && let Err(err) = emit_prd_plan_signal(
-                    &workdir,
-                    Kind::Custom("prd:plan:generated".into()),
-                    serde_json::json!({
-                        "plan_path": plans_root.display().to_string(),
-                        "task_count": task_count,
-                        "estimated_complexity": estimated_complexity,
-                    }),
-                )
-                .await
-            {
-                tracing::warn!("[prd] failed to emit generated-plan signal: {err}");
+        Ok((plans_root, task_count, estimated_complexity, outcome)) => {
+            if !dry_run {
+                let signal_kind = if outcome.fully_successful() {
+                    Some(Kind::Custom("prd:plan:generated".into()))
+                } else if outcome.process_success {
+                    Some(Kind::Custom("prd:plan:partial_success".into()))
+                } else {
+                    Some(Kind::Custom("prd:plan:failed".into()))
+                };
+
+                if let Some(kind) = signal_kind
+                    && let Err(err) = emit_prd_plan_signal(
+                        &workdir,
+                        kind,
+                        serde_json::json!({
+                            "plan_path": plans_root.display().to_string(),
+                            "task_count": task_count,
+                            "estimated_complexity": estimated_complexity,
+                            "status": outcome.status_label(),
+                            "process_success": outcome.process_success,
+                            "artifact_valid": outcome.artifact_valid,
+                            "validation_report": outcome.validation_report,
+                        }),
+                    )
+                    .await
+                {
+                    tracing::warn!("[prd] failed to emit plan signal: {err}");
+                }
             }
-            Ok(plans_root)
+            Ok((plans_root, outcome))
         }
         Err(err) => {
             if !dry_run
@@ -936,7 +1561,14 @@ pub(crate) fn augment_generator_system_prompt(
 ///
 /// Combines the PRD quality system prompt (from [`crate::prd_prompt`]) with
 /// context about existing PRDs and the specific task.
+/// Default limit for how many PRDs to include in the agent system prompt.
+const PRD_CONTEXT_LIMIT: usize = 20;
+
 pub fn prd_agent_prompt(workdir: &Path, task: &str) -> String {
+    prd_agent_prompt_with_limit(workdir, task, PRD_CONTEXT_LIMIT)
+}
+
+pub fn prd_agent_prompt_with_limit(workdir: &Path, task: &str, prd_limit: usize) -> String {
     let mut prompt = String::new();
 
     // Include the PRD quality standards as the foundation
@@ -957,19 +1589,38 @@ pub fn prd_agent_prompt(workdir: &Path, task: &str) -> String {
         let _ = writeln!(prompt, "## PRD Index\n{prd_index}\n---\n");
     }
 
-    // Gather existing PRD context
+    // Gather existing PRD context (most recent first, limited to prd_limit)
     let _ = writeln!(
         prompt,
         "## Existing PRDs (for cross-references and consistency)\n"
     );
+    let mut all_prd_files: Vec<PathBuf> = Vec::new();
     for dir in [&published_dir(workdir), &drafts_dir(workdir)] {
-        for path in list_md_files(dir) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                // Include just the frontmatter + first section as context
-                let truncated: String = content.lines().take(30).collect::<Vec<_>>().join("\n");
-                let _ = writeln!(prompt, "### {}\n{truncated}\n---\n", path.display());
-            }
+        all_prd_files.extend(list_md_files(dir));
+    }
+    // Sort by modification time descending so newest PRDs come first
+    all_prd_files.sort_by(|a, b| {
+        let mtime = |p: &Path| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        };
+        mtime(b).cmp(&mtime(a))
+    });
+    let total = all_prd_files.len();
+    for path in all_prd_files.into_iter().take(prd_limit) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            // Include just the frontmatter + first section as context
+            let truncated: String = content.lines().take(30).collect::<Vec<_>>().join("\n");
+            let _ = writeln!(prompt, "### {}\n{truncated}\n---\n", path.display());
         }
+    }
+    if total > prd_limit {
+        let _ = writeln!(
+            prompt,
+            "_({} older PRDs omitted — see .roko/prd/ for full list)_\n",
+            total - prd_limit,
+        );
     }
 
     // Ideas
@@ -1001,6 +1652,23 @@ pub fn new_draft_frontmatter(slug: &str, title: &str) -> String {
          tags: []\n\
          ---\n\n"
     )
+}
+
+/// Replace `from` with `to` only within the YAML frontmatter (between first
+/// pair of `---` delimiters). Body content is left untouched.
+fn replace_in_frontmatter(content: &str, from: &str, to: &str) -> String {
+    // Frontmatter is the region between the first `---\n` and the next `---\n`.
+    if let Some(start) = content.find("---") {
+        let after_first = start + 3;
+        if let Some(end_offset) = content[after_first..].find("---") {
+            let end = after_first + end_offset + 3;
+            let frontmatter = &content[..end];
+            let body = &content[end..];
+            return format!("{}{}", frontmatter.replace(from, to), body);
+        }
+    }
+    // No frontmatter delimiters found — fall back to global replace.
+    content.replace(from, to)
 }
 
 /// Returns true if a PRD markdown string contains substantive body content.
@@ -1073,6 +1741,611 @@ fn strip_markdown_code_fence(output: &str) -> &str {
     &inner[..closing]
 }
 
+/// Extract the contents of a fenced code block tagged with `tag` from agent output.
+///
+/// Looks for `` ```tag `` or `` ```<tag> `` and returns the inner content.
+/// Handles nested fences by matching the closing `` ``` `` that sits alone
+/// on a line (possibly with trailing whitespace).
+fn extract_fenced_block<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let fence_plain = format!("```{tag}");
+    let fence_angle = format!("```<{tag}>");
+    let start = text
+        .find(&fence_plain)
+        .or_else(|| text.find(&fence_angle))?;
+    let after_fence = &text[start..];
+    let newline = after_fence.find('\n')? + 1;
+    let inner = &after_fence[newline..];
+
+    // Find a closing ``` that is alone on a line (not followed by more text
+    // like ```toml or ```python — those are nested openers).
+    let mut search_from = 0;
+    loop {
+        let candidate = inner[search_from..].find("\n```")?;
+        let abs = search_from + candidate;
+        let after_ticks = abs + 4; // position after \n```
+        // Closing fence: either end-of-string, or next char is \n or whitespace-then-\n
+        let rest = &inner[after_ticks..];
+        if rest.is_empty()
+            || rest.starts_with('\n')
+            || rest.trim_start().starts_with('\n')
+            || rest.trim_start().is_empty()
+        {
+            let content = inner[..abs].trim();
+            return if content.is_empty() {
+                None
+            } else {
+                Some(&inner[..abs])
+            };
+        }
+        search_from = after_ticks;
+    }
+}
+
+/// Fallback TOML extraction for agent output that lacks fenced code blocks.
+///
+/// Scans for a `[meta]` section header and returns everything from that point
+/// up to the end of the TOML content, provided it also contains at least one
+/// `[[task]]`.  Trailing explanatory text (markdown headings, horizontal rules,
+/// prose paragraphs after a blank line) is trimmed so that `toml::from_str`
+/// doesn't choke on non-TOML content the LLM appended after the plan.
+fn extract_toml_content_fallback(output: &str) -> Option<&str> {
+    let meta_start = output.find("[meta]")?;
+    // Find the start of the line containing [meta]
+    let line_start = output[..meta_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let candidate = &output[line_start..];
+    if !candidate.contains("[[task]]") {
+        return None;
+    }
+
+    // Walk lines and find the last one that looks like TOML content.
+    // Stop when we hit lines that are clearly markdown/prose trailing text.
+    let mut last_toml_end = 0; // byte offset into `candidate`
+    let mut saw_blank = false;
+    for line in candidate.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            saw_blank = true;
+            // A blank line inside TOML is fine (between sections), so we don't
+            // stop yet — only if the *next* non-blank line looks non-TOML.
+            last_toml_end += line.len() + 1; // +1 for '\n'
+            continue;
+        }
+
+        // Lines that are clearly not TOML — stop here.
+        if trimmed.starts_with("## ")
+            || trimmed.starts_with("---")
+            || trimmed.starts_with("**")
+            || trimmed.starts_with("> ")
+            || trimmed.starts_with("Note:")
+            || trimmed.starts_with("NOTE:")
+        {
+            break;
+        }
+
+        // After a blank line, the next non-blank line must still look like TOML
+        // (contains `=`, starts with `[`, or is a `"""` / `'''` continuation).
+        if saw_blank
+            && !trimmed.contains('=')
+            && !trimmed.starts_with('[')
+            && !trimmed.starts_with('"')
+            && !trimmed.starts_with('\'')
+            && !trimmed.starts_with('#')
+        // TOML comment
+        {
+            break;
+        }
+
+        saw_blank = false;
+        last_toml_end += line.len() + 1;
+    }
+
+    let result = candidate[..last_toml_end].trim();
+    if result.is_empty() || !result.contains("[[task]]") {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Update the PRD frontmatter to record that a plan was generated.
+fn update_prd_plans_generated(prd_path: &std::path::Path, plan_slug: &str) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(prd_path)?;
+
+    let updated = if content.contains("plans_generated: []") {
+        content.replace(
+            "plans_generated: []",
+            &format!("plans_generated: [\"{plan_slug}\"]"),
+        )
+    } else if let Some(pos) = content.find("plans_generated: [") {
+        let after_bracket = pos + "plans_generated: [".len();
+        if let Some(close) = content[after_bracket..].find(']') {
+            let close_pos = after_bracket + close;
+            let existing = content[after_bracket..close_pos].trim();
+            if existing.is_empty() {
+                format!(
+                    "{}\"{plan_slug}\"{}",
+                    &content[..after_bracket],
+                    &content[close_pos..]
+                )
+            } else if existing.contains(plan_slug) {
+                // Already listed
+                return Ok(());
+            } else {
+                format!(
+                    "{}, \"{plan_slug}\"{}",
+                    &content[..close_pos],
+                    &content[close_pos..]
+                )
+            }
+        } else {
+            return Ok(()); // Malformed, skip
+        }
+    } else {
+        // No plans_generated field found -- don't modify
+        return Ok(());
+    };
+
+    atomic_write_str(prd_path, &updated)?;
+    Ok(())
+}
+
+// ---- post-generation plan TOML validation --------------------------------
+
+/// Known field names for the `[meta]` section.
+const KNOWN_META_FIELDS: &[&str] = &[
+    "plan",
+    "iteration",
+    "total",
+    "done",
+    "status",
+    "max_parallel",
+    "estimated_total_minutes",
+    "skip_enrichment",
+];
+
+/// Required field names for the `[meta]` section.
+const REQUIRED_META_FIELDS: &[&str] = &["plan", "total", "status"];
+
+/// Known field names for a `[[task]]` entry.
+const KNOWN_TASK_FIELDS: &[&str] = &[
+    "id",
+    "title",
+    "description",
+    "role",
+    "status",
+    "tier",
+    "frequency",
+    "model_hint",
+    "replan_strategy",
+    "max_loc",
+    "files",
+    "write_files",
+    "allowed_tools",
+    "denied_tools",
+    "mcp_servers",
+    "depends_on",
+    "depends_on_plan",
+    "split_into",
+    "context",
+    "verify",
+    "timeout_secs",
+    "max_retries",
+    "acceptance",
+    "acceptance_contract",
+    "domain",
+    "gate_rung",
+];
+
+/// Required field names for each `[[task]]`.
+const REQUIRED_TASK_FIELDS: &[&str] = &["id", "title", "status", "role", "tier"];
+
+/// Known field names for each `[[task.verify]]` entry.
+const KNOWN_VERIFY_FIELDS: &[&str] = &["phase", "command", "fail_msg", "timeout_ms"];
+
+/// Required field names for each `[[task.verify]]` entry.
+const REQUIRED_VERIFY_FIELDS: &[&str] = &["phase", "command"];
+
+/// Common typos the LLM produces and their corrections.
+const FIELD_TYPO_CORRECTIONS: &[(&str, &str)] = &[
+    ("pha", "phase"),
+    ("phas", "phase"),
+    ("cmd", "command"),
+    ("comand", "command"),
+    ("commnad", "command"),
+    ("commmand", "command"),
+    ("descrption", "description"),
+    ("descripion", "description"),
+    ("desc", "description"),
+    ("stat", "status"),
+    ("staus", "status"),
+    ("tite", "title"),
+    ("titl", "title"),
+    ("modle_hint", "model_hint"),
+    ("model", "model_hint"),
+    ("modelhint", "model_hint"),
+    ("depnds_on", "depends_on"),
+    ("dependson", "depends_on"),
+    ("depend_on", "depends_on"),
+    ("filse", "files"),
+    ("fles", "files"),
+    ("verfy", "verify"),
+    ("verfiy", "verify"),
+    ("tiemout_secs", "timeout_secs"),
+    ("fail_message", "fail_msg"),
+    ("failure_msg", "fail_msg"),
+    ("timeout", "timeout_ms"),
+    // Singular/plural variants
+    ("denied_tool", "denied_tools"),
+    ("deni_tools", "denied_tools"),
+    ("allowed_tool", "allowed_tools"),
+    ("mcp_server", "mcp_servers"),
+    ("file", "files"),
+    ("write_file", "write_files"),
+    // Truncated field names
+    ("stus", "status"),
+    ("rol", "role"),
+    ("tie", "tier"),
+    ("tit", "title"),
+    ("max_lo", "max_loc"),
+    ("model_hin", "model_hint"),
+    ("depends_o", "depends_on"),
+    ("timeout_sec", "timeout_secs"),
+    ("max_retrie", "max_retries"),
+    // Common misspellings
+    ("discription", "description"),
+    ("dependancies", "depends_on"),
+    ("dependecies", "depends_on"),
+];
+
+/// Suggest a correction for a possibly-misspelled field.
+/// Returns an owned `String` to avoid lifetime issues with the caller.
+fn suggest_field_correction(field: &str, known: &[&str]) -> Option<String> {
+    // Check explicit typo table first.
+    for &(typo, correction) in FIELD_TYPO_CORRECTIONS {
+        if field == typo {
+            return Some(correction.to_string());
+        }
+    }
+    // Fallback: find the closest known field by edit distance (threshold <= 2).
+    let mut best: Option<(&str, usize)> = None;
+    for &known_field in known {
+        let dist = strsim_distance(field, known_field);
+        if dist > 0 && dist <= 2 {
+            if best.map_or(true, |(_, best_dist)| dist < best_dist) {
+                best = Some((known_field, dist));
+            }
+        }
+    }
+    best.map(|(s, _)| s.to_string())
+}
+
+/// Minimal Levenshtein distance (no allocations for short strings).
+fn strsim_distance(a: &str, b: &str) -> usize {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let m = a_bytes.len();
+    let n = b_bytes.len();
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
+/// Check whether a model identifier is present in the config model table.
+fn model_in_config(
+    model: &str,
+    models: &IndexMap<String, roko_core::config::schema::ModelProfile>,
+) -> bool {
+    models.contains_key(model) || models.values().any(|p| p.slug == model)
+}
+
+/// Validate and fix a generated plan TOML string.
+///
+/// Checks:
+/// 1. TOML syntax.
+/// 2. Required fields in `[meta]` and `[[task]]`.
+/// 3. Unknown / misspelled fields (with suggested corrections applied).
+/// 4. `model_hint` values validated against the config model table.
+/// 5. `meta.plan` matched against the expected slug.
+///
+/// On fixable issues the TOML is patched and a warning is logged to stderr.
+/// On unfixable issues an error is returned.
+fn validate_and_fix_generated_plan(
+    toml_str: &str,
+    slug: &str,
+    models: &IndexMap<String, roko_core::config::schema::ModelProfile>,
+    default_model: Option<&str>,
+) -> Result<String> {
+    // 0. Deterministic repair before parsing
+    let repaired = crate::task_parser::repair_toml(toml_str);
+    if repaired != toml_str {
+        tracing::info!("prd plan: applied deterministic TOML repair");
+    }
+
+    // 1. Parse syntax.
+    let mut root: toml::Value =
+        toml::from_str(&repaired).map_err(|e| anyhow!("generated plan has invalid TOML: {e}"))?;
+
+    let root_table = root
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("generated plan TOML root is not a table"))?;
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // -- [meta] validation ---------------------------------------------------
+    if let Some(meta_val) = root_table.get_mut("meta") {
+        if let Some(meta) = meta_val.as_table_mut() {
+            // Flag unknown meta fields.
+            let meta_keys: Vec<String> = meta.keys().cloned().collect();
+            for key in &meta_keys {
+                if !KNOWN_META_FIELDS.contains(&key.as_str()) {
+                    if let Some(correction) = suggest_field_correction(key, KNOWN_META_FIELDS) {
+                        if let Some(value) = meta.remove(key.as_str()) {
+                            eprintln!(
+                                "warning: [meta] field '{key}' is unknown; \
+                                 corrected to '{correction}'"
+                            );
+                            meta.insert(correction, value);
+                        }
+                    } else {
+                        eprintln!("warning: [meta] has unknown field '{key}'");
+                    }
+                }
+            }
+            // Check required meta fields.
+            for &required in REQUIRED_META_FIELDS {
+                match meta.get(required) {
+                    None => errors.push(format!("[meta] is missing required field '{required}'")),
+                    Some(v) if v.as_str().is_some_and(|s| s.trim().is_empty()) => {
+                        errors.push(format!("[meta].{required} is empty"));
+                    }
+                    _ => {}
+                }
+            }
+            // Fix meta.plan if truncated or wrong.
+            if let Some(plan_val) = meta.get("plan") {
+                if let Some(plan_str) = plan_val.as_str() {
+                    if plan_str != slug {
+                        if slug.starts_with(plan_str) {
+                            eprintln!(
+                                "warning: meta.plan '{plan_str}' appears truncated; \
+                                 corrected to '{slug}'"
+                            );
+                        } else {
+                            eprintln!(
+                                "warning: meta.plan '{plan_str}' does not match \
+                                 expected slug '{slug}'; corrected"
+                            );
+                        }
+                        meta.insert("plan".to_string(), toml::Value::String(slug.to_string()));
+                    }
+                }
+            }
+        }
+    } else {
+        errors.push("[meta] section is missing".to_string());
+    }
+
+    // -- [[task]] validation --------------------------------------------------
+    if let Some(tasks_val) = root_table.get_mut("task") {
+        if let Some(tasks) = tasks_val.as_array_mut() {
+            if tasks.is_empty() {
+                errors.push("[[task]] array is present but empty".to_string());
+            }
+            for (i, task_val) in tasks.iter_mut().enumerate() {
+                if let Some(task) = task_val.as_table_mut() {
+                    let task_id_label: String = task
+                        .get("id")
+                        .and_then(toml::Value::as_str)
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("task #{}", i + 1));
+
+                    // Flag unknown task fields.
+                    let task_keys: Vec<String> = task.keys().cloned().collect();
+                    for key in &task_keys {
+                        if !KNOWN_TASK_FIELDS.contains(&key.as_str()) {
+                            if let Some(correction) =
+                                suggest_field_correction(key, KNOWN_TASK_FIELDS)
+                            {
+                                if let Some(value) = task.remove(key.as_str()) {
+                                    eprintln!(
+                                        "warning: {task_id_label}: field '{key}' is unknown; \
+                                         corrected to '{correction}'"
+                                    );
+                                    task.insert(correction, value);
+                                }
+                            } else {
+                                eprintln!("warning: {task_id_label}: unknown field '{key}'");
+                            }
+                        }
+                    }
+
+                    // Check required task fields.
+                    for &required in REQUIRED_TASK_FIELDS {
+                        match task.get(required) {
+                            None => errors.push(format!(
+                                "{task_id_label} is missing required field '{required}'"
+                            )),
+                            Some(v) if v.as_str().is_some_and(|s| s.trim().is_empty()) => {
+                                errors
+                                    .push(format!("{task_id_label}: field '{required}' is empty"));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Validate status value.
+                    if let Some(status_val) = task.get("status").cloned() {
+                        if let Some(s) = status_val.as_str() {
+                            const VALID_STATUSES: &[&str] = &[
+                                "ready",
+                                "pending",
+                                "blocked",
+                                "in_progress",
+                                "done",
+                                "skipped",
+                            ];
+                            if !VALID_STATUSES.contains(&s) {
+                                eprintln!(
+                                    "warning: {task_id_label}: status '{s}' is invalid; \
+                                     defaulting to 'ready'"
+                                );
+                                task.insert(
+                                    "status".to_string(),
+                                    toml::Value::String("ready".to_string()),
+                                );
+                            }
+                        }
+                    }
+
+                    // Validate role value.
+                    if let Some(role_val) = task.get("role").cloned() {
+                        if let Some(r) = role_val.as_str() {
+                            const VALID_ROLES: &[&str] = &[
+                                "implementer",
+                                "architect",
+                                "researcher",
+                                "strategist",
+                                "scribe",
+                                "quick-reviewer",
+                            ];
+                            if !VALID_ROLES.contains(&r) {
+                                eprintln!(
+                                    "warning: {task_id_label}: role '{r}' is invalid; \
+                                     defaulting to 'implementer'"
+                                );
+                                task.insert(
+                                    "role".to_string(),
+                                    toml::Value::String("implementer".to_string()),
+                                );
+                            }
+                        }
+                    }
+
+                    // Always strip model_hint from generated plans — the runtime
+                    // picks the best model via cascade routing.
+                    if let Some(hint_val) = task.remove("model_hint") {
+                        let hint = hint_val.as_str().unwrap_or("<unknown>");
+                        eprintln!(
+                            "info: {task_id_label}: removing model_hint '{hint}' \
+                             (runtime will select via cascade routing)"
+                        );
+                    }
+
+                    // Validate [[task.verify]] sub-entries.
+                    if let Some(verify_val) = task.get_mut("verify") {
+                        if let Some(steps) = verify_val.as_array_mut() {
+                            for (si, step_val) in steps.iter_mut().enumerate() {
+                                if let Some(step) = step_val.as_table_mut() {
+                                    let step_keys: Vec<String> = step.keys().cloned().collect();
+                                    for key in &step_keys {
+                                        if !KNOWN_VERIFY_FIELDS.contains(&key.as_str()) {
+                                            if let Some(correction) =
+                                                suggest_field_correction(key, KNOWN_VERIFY_FIELDS)
+                                            {
+                                                if let Some(value) = step.remove(key.as_str()) {
+                                                    eprintln!(
+                                                        "warning: {task_id_label} verify[{si}]: \
+                                                         field '{key}' corrected to '{correction}'"
+                                                    );
+                                                    step.insert(correction, value);
+                                                }
+                                            } else {
+                                                eprintln!(
+                                                    "warning: {task_id_label} verify[{si}]: \
+                                                     unknown field '{key}'"
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    // Check required verify fields.
+                                    for &required in REQUIRED_VERIFY_FIELDS {
+                                        if step
+                                            .get(required)
+                                            .and_then(toml::Value::as_str)
+                                            .is_none_or(|s| s.trim().is_empty())
+                                        {
+                                            errors.push(format!(
+                                                "{task_id_label} verify[{si}]: \
+                                                 missing required field '{required}'"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        errors.push("[[task]] array is missing".to_string());
+    }
+
+    if !errors.is_empty() {
+        let joined = errors.join("\n  - ");
+        return Err(anyhow!(
+            "generated plan TOML has {n} validation error(s):\n  - {joined}",
+            n = errors.len()
+        ));
+    }
+
+    // Serialize the (possibly patched) TOML back to a string.
+    let mut serialized = toml::to_string_pretty(&root)
+        .map_err(|e| anyhow!("failed to re-serialize fixed plan TOML: {e}"))?;
+
+    // -- Angle-bracket placeholder replacement --------------------------------
+    // LLMs sometimes emit literal `<relevant-lib>`, `<crate>`, `<path>` etc.
+    // instead of concrete values. Replace known placeholders with slug-derived
+    // defaults so downstream tooling doesn't choke on them.
+    let path_default = format!("crates/{slug}/src/lib.rs");
+    let replacements: &[(&str, &str)] = &[
+        ("<relevant-lib>", slug),
+        ("<binary-crate>", slug),
+        ("<crate>", slug),
+        ("<module>", "lib"),
+        ("<path>", &path_default),
+        ("<file>", &path_default),
+        ("<test_name>", "test_placeholder"),
+    ];
+    for &(placeholder, replacement) in replacements {
+        if serialized.contains(placeholder) {
+            eprintln!(
+                "plan validation: replaced placeholder '{}' with '{}'",
+                placeholder, replacement
+            );
+            serialized = serialized.replace(placeholder, replacement);
+        }
+    }
+
+    // If we did any replacements, verify the TOML still parses.
+    if replacements.iter().any(|(ph, _)| toml_str.contains(*ph)) {
+        let _: toml::Value = toml::from_str(&serialized)
+            .map_err(|e| anyhow!("TOML became invalid after placeholder replacement: {e}"))?;
+    }
+
+    Ok(serialized)
+}
+
 /// Slugify a title.
 pub fn slugify(title: &str) -> String {
     title
@@ -1104,6 +2377,280 @@ fn prd_workdir(prd_path: &Path) -> Result<PathBuf> {
         })
 }
 
+// ─── PRD artifact validation ───────────────────────────────────────
+
+/// Severity of a PRD validation issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrdValidationSeverity {
+    /// Blocking: `artifact_valid` is set to `false`.
+    Error,
+    /// Non-blocking: printed as a warning, does not affect `artifact_valid`.
+    Warning,
+}
+
+/// A single validation issue found in a generated PRD.
+#[derive(Debug, Clone)]
+pub struct PrdValidationIssue {
+    pub severity: PrdValidationSeverity,
+    pub category: &'static str,
+    pub message: String,
+}
+
+/// Outcome of post-generation PRD artifact validation.
+///
+/// `artifact_valid = false` means the PRD should not be accepted as a
+/// successful generation outcome — learning gates should withhold rewards.
+#[derive(Debug, Clone)]
+pub struct PrdArtifactReport {
+    /// Slug of the PRD being validated.
+    pub slug: String,
+    /// Whether the underlying agent process succeeded (exit 0).
+    pub process_success: bool,
+    /// Whether the artifact itself passes all blocking checks.
+    ///
+    /// Set to `false` when any [`PrdValidationSeverity::Error`] issue is found.
+    pub artifact_valid: bool,
+    /// All issues found during validation (errors + warnings).
+    pub issues: Vec<PrdValidationIssue>,
+}
+
+impl PrdArtifactReport {
+    fn new(slug: &str, process_success: bool) -> Self {
+        Self {
+            slug: slug.to_string(),
+            process_success,
+            artifact_valid: true,
+            issues: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, issue: PrdValidationIssue) {
+        if issue.severity == PrdValidationSeverity::Error {
+            self.artifact_valid = false;
+        }
+        self.issues.push(issue);
+    }
+
+    /// Print all issues to stderr and a summary to stdout.
+    pub fn print_summary(&self) {
+        for issue in &self.issues {
+            let label = match issue.severity {
+                PrdValidationSeverity::Error => "ERROR",
+                PrdValidationSeverity::Warning => "WARNING",
+            };
+            eprintln!("[{}] {}: {}", label, issue.category, issue.message);
+        }
+        let errors = self
+            .issues
+            .iter()
+            .filter(|i| i.severity == PrdValidationSeverity::Error)
+            .count();
+        let warnings = self
+            .issues
+            .iter()
+            .filter(|i| i.severity == PrdValidationSeverity::Warning)
+            .count();
+        if self.artifact_valid {
+            println!("PRD artifact validation: PASSED ({warnings} warnings)");
+        } else {
+            println!("PRD artifact validation: FAILED ({errors} errors, {warnings} warnings)");
+        }
+    }
+}
+
+/// Extract a `## <heading>` markdown section body (case-insensitive).
+///
+/// Returns the lines between the matched heading and the next `##`-level
+/// heading, joined as a single string. Returns `None` when the heading is
+/// not found or the matched section is empty.
+fn extract_prd_section(content: &str, heading: &str) -> Option<String> {
+    let heading_lower = heading.to_lowercase();
+    let mut in_section = false;
+    let mut lines: Vec<&str> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let trimmed_lower = trimmed.to_lowercase();
+        if trimmed_lower.starts_with("## ") {
+            if in_section {
+                // Reached the next ## heading — stop collecting.
+                break;
+            }
+            let heading_text = trimmed_lower.trim_start_matches("## ").trim();
+            if heading_text.starts_with(heading_lower.as_str()) {
+                in_section = true;
+                continue;
+            }
+        } else if in_section {
+            lines.push(line);
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+/// Extract all relative file paths referenced in the grounding section text.
+///
+/// A path is recognised when it starts with `crates/`, `src/`, `tests/`,
+/// `plans/`, `apps/`, or `docs/` — i.e. plausible workspace-relative paths.
+fn extract_referenced_paths(grounding_text: &str) -> Vec<String> {
+    let prefixes = ["crates/", "src/", "tests/", "plans/", "apps/", "docs/"];
+    let mut paths: Vec<String> = Vec::new();
+    for line in grounding_text.lines() {
+        for word in line.split_whitespace() {
+            // Strip leading punctuation like `-`, `*`, `` ` ``, `(`.
+            let word = word
+                .trim_start_matches(['-', '*', '`', '(', '['])
+                .trim_end_matches(['`', ')', ']', ',', '.']);
+            if prefixes.iter().any(|p| word.starts_with(p)) {
+                paths.push(word.to_string());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Check that a generated PRD contains the required `## Repository Grounding`
+/// section.
+///
+/// **R4_B02**: This check is **blocking** — a missing section sets
+/// `artifact_valid = false` on the returned report, which prevents learning
+/// gates from treating the generation as successful.
+///
+/// Returns a [`PrdArtifactReport`] whose `artifact_valid` field reflects
+/// whether the section was found.
+#[must_use]
+pub fn check_grounding_section(
+    prd_content: &str,
+    slug: &str,
+    process_success: bool,
+) -> PrdArtifactReport {
+    let mut report = PrdArtifactReport::new(slug, process_success);
+    let has_section = prd_content.lines().any(|line| {
+        line.trim()
+            .to_lowercase()
+            .starts_with("## repository grounding")
+    });
+    if !has_section {
+        report.push(PrdValidationIssue {
+            severity: PrdValidationSeverity::Error,
+            category: "missing_section",
+            message: format!(
+                "PRD '{}' is missing required '## Repository Grounding' section — PRD rejected",
+                slug
+            ),
+        });
+    }
+    report
+}
+
+/// Validate the `## Repository Grounding` section of a generated PRD.
+///
+/// **R4_B02**: Missing grounding section is an `Error` (blocking).
+/// **R4_B03**: Referenced source files that don't exist on disk are `Error`
+///             (blocking). Duplicate crate proposals are also `Error`.
+///
+/// `workdir` is the workspace root (used to resolve relative source paths).
+/// `workspace_members` is the list of crate directory names under `crates/`.
+#[must_use]
+pub fn validate_prd_grounding(
+    prd_content: &str,
+    slug: &str,
+    workdir: &Path,
+    workspace_members: &[String],
+    process_success: bool,
+) -> PrdArtifactReport {
+    // Start with the blocking grounding-section check (R4_B02).
+    let mut report = check_grounding_section(prd_content, slug, process_success);
+
+    let Some(grounding_text) = extract_prd_section(prd_content, "repository grounding") else {
+        // Section missing — already recorded as Error above; nothing more to validate.
+        return report;
+    };
+
+    let text_lower = grounding_text.to_lowercase();
+
+    // R4_B03a: "no existing crates" claim is suspicious when the workspace has members.
+    if (text_lower.contains("no existing crates") || text_lower.contains("no relevant crates"))
+        && !workspace_members.is_empty()
+    {
+        report.push(PrdValidationIssue {
+            severity: PrdValidationSeverity::Warning,
+            category: "false_negative",
+            message: format!(
+                "PRD claims no existing crates but workspace has {} crate(s): {}",
+                workspace_members.len(),
+                workspace_members
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+
+    // R4_B03b: "new crate X" proposals that duplicate existing workspace members.
+    let new_crate_patterns = ["new crate: ", "new crate `", "create crate ", "add crate "];
+    for line in grounding_text.lines() {
+        let line_lower = line.to_lowercase();
+        for pat in &new_crate_patterns {
+            if let Some(after_offset) = line_lower.find(pat) {
+                let rest = &line[after_offset + pat.len()..];
+                let proposed = rest
+                    .trim()
+                    .trim_start_matches('`')
+                    .trim_start_matches('"')
+                    .split(|c: char| {
+                        c.is_whitespace() || c == '`' || c == '"' || c == ',' || c == ')'
+                    })
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !proposed.is_empty() && proposed.starts_with("roko-") {
+                    if workspace_members
+                        .iter()
+                        .any(|m| m.to_lowercase() == proposed.to_lowercase())
+                    {
+                        report.push(PrdValidationIssue {
+                            severity: PrdValidationSeverity::Error,
+                            category: "duplicate_crate",
+                            message: format!(
+                                "PRD proposes creating crate '{}' which already exists in the workspace",
+                                proposed
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // R4_B03c: Referenced source files must exist in the workspace.
+    let referenced_paths = extract_referenced_paths(&grounding_text);
+    for rel_path in &referenced_paths {
+        let abs_path = workdir.join(rel_path);
+        if !abs_path.exists() {
+            report.push(PrdValidationIssue {
+                severity: PrdValidationSeverity::Error,
+                category: "missing_file_ref",
+                message: format!(
+                    "PRD references '{}' in Repository Grounding but that path does not exist in the workspace",
+                    rel_path
+                ),
+            });
+        }
+    }
+
+    report
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1130,8 +2677,145 @@ mod tests {
     }
 
     #[test]
+    fn parse_frontmatter_colons_in_values() {
+        let content =
+            "---\nid: prd-wire\ntitle: \"Wire: the thing\"\nstatus: draft\n---\n\n# Body\n";
+        let meta = PrdMeta::parse(content).unwrap();
+        assert_eq!(meta.id, "prd-wire");
+        assert_eq!(meta.title, "Wire: the thing");
+        assert_eq!(meta.status, "draft");
+    }
+
+    #[test]
+    fn parse_frontmatter_yaml_lists() {
+        let content = "---\nid: prd-lists\ntitle: List Test\ntags: [\"infra\", \"prd\"]\ndepends_on:\n  - prd-alpha\n  - prd-beta\n---\n\n# Body\n";
+        let meta = PrdMeta::parse(content).unwrap();
+        assert_eq!(meta.tags, vec!["infra", "prd"]);
+        assert_eq!(meta.depends_on, vec!["prd-alpha", "prd-beta"]);
+    }
+
+    #[test]
     fn parse_no_frontmatter() {
         assert!(PrdMeta::parse("# Just a heading").is_none());
+    }
+
+    #[test]
+    fn generation_outcome_labels_distinguish_process_from_artifact() {
+        let success = GenerationOutcome {
+            process_success: true,
+            artifact_valid: true,
+            validation_report: None,
+        };
+        let partial = GenerationOutcome {
+            process_success: true,
+            artifact_valid: false,
+            validation_report: None,
+        };
+        let failure = GenerationOutcome {
+            process_success: false,
+            artifact_valid: true,
+            validation_report: None,
+        };
+
+        assert!(success.fully_successful());
+        assert_eq!(success.status_label(), "success");
+        assert!(!partial.fully_successful());
+        assert_eq!(partial.status_label(), "partial_success");
+        assert!(!failure.fully_successful());
+        assert_eq!(failure.status_label(), "failure");
+    }
+
+    #[test]
+    fn artifact_outcome_valid_requires_process_artifact_path_and_report() {
+        let outcome = GenerationOutcome {
+            process_success: true,
+            artifact_valid: true,
+            validation_report: Some(serde_json::json!({"totals": {"errors": 0}})),
+        };
+        let path = PathBuf::from(".roko/plans/demo");
+
+        let artifact =
+            ArtifactOutcome::from_generation_outcome("prd-plan", Some(path.clone()), &outcome);
+
+        assert_eq!(
+            artifact,
+            ArtifactOutcome::Valid {
+                artifact_type: "prd-plan".to_string(),
+                path,
+                report: serde_json::json!({"totals": {"errors": 0}}),
+            }
+        );
+        assert!(artifact.is_valid());
+    }
+
+    #[test]
+    fn artifact_outcome_invalid_is_not_success() {
+        let outcome = GenerationOutcome {
+            process_success: true,
+            artifact_valid: false,
+            validation_report: Some(serde_json::json!({"totals": {"errors": 2}})),
+        };
+        let path = PathBuf::from(".roko/plans/demo");
+
+        let artifact =
+            ArtifactOutcome::from_generation_outcome("prd-plan", Some(path.clone()), &outcome);
+
+        assert_eq!(
+            artifact,
+            ArtifactOutcome::Invalid {
+                artifact_type: "prd-plan".to_string(),
+                path: Some(path),
+                report: Some(serde_json::json!({"totals": {"errors": 2}})),
+            }
+        );
+        assert!(!artifact.is_valid());
+    }
+
+    #[test]
+    fn artifact_outcome_process_failure_is_not_produced() {
+        let outcome = GenerationOutcome {
+            process_success: false,
+            artifact_valid: true,
+            validation_report: Some(serde_json::json!({"ignored": true})),
+        };
+
+        let artifact = ArtifactOutcome::from_generation_outcome(
+            "prd-plan",
+            Some(PathBuf::from(".roko/plans/demo")),
+            &outcome,
+        );
+
+        assert_eq!(
+            artifact,
+            ArtifactOutcome::NotProduced {
+                artifact_type: "prd-plan".to_string(),
+                reason: "generation process failed".to_string(),
+            }
+        );
+        assert!(!artifact.is_valid());
+    }
+
+    #[test]
+    fn artifact_outcome_validation_unavailable_is_not_success() {
+        let outcome = GenerationOutcome {
+            process_success: true,
+            artifact_valid: true,
+            validation_report: None,
+        };
+        let path = PathBuf::from(".roko/plans/demo");
+
+        let artifact =
+            ArtifactOutcome::from_generation_outcome("prd-plan", Some(path.clone()), &outcome);
+
+        assert_eq!(
+            artifact,
+            ArtifactOutcome::ValidationUnavailable {
+                artifact_type: "prd-plan".to_string(),
+                path: Some(path),
+                reason: "artifact validation report was not available".to_string(),
+            }
+        );
+        assert!(!artifact.is_valid());
     }
 
     #[test]
@@ -1160,7 +2844,7 @@ mod tests {
         let draft = drafts_dir(tmp.path()).join("test.md");
         std::fs::write(
             &draft,
-            "---\nstatus: draft\nupdated: 2020-01-01\n---\n# Test\n",
+            "---\nstatus: draft\nupdated: 2020-01-01\n---\n# Test\n\nThis PRD describes a real feature with substantive content.\n",
         )
         .unwrap();
         cmd_promote(tmp.path(), "test", false).await.unwrap();
@@ -1189,6 +2873,132 @@ mod tests {
         .unwrap();
 
         assert!(outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn promote_rejects_empty_draft() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_dirs(tmp.path()).unwrap();
+        let draft = drafts_dir(tmp.path()).join("empty.md");
+        std::fs::write(&draft, "---\nstatus: draft\n---\n# Empty\n").unwrap();
+        let err = cmd_promote(tmp.path(), "empty", false).await.unwrap_err();
+        assert!(
+            err.to_string().contains("no substantive content"),
+            "got: {err}"
+        );
+        assert!(draft.exists(), "draft should not be deleted on reject");
+    }
+
+    #[test]
+    fn extract_fenced_block_finds_toml() {
+        let text = "Some text\n```toml\n[tasks]\nname = \"test\"\n```\nMore text";
+        let block = extract_fenced_block(text, "toml").unwrap();
+        assert!(block.contains("[tasks]"));
+        assert!(block.contains("name = \"test\""));
+    }
+
+    #[test]
+    fn extract_fenced_block_returns_none_for_missing() {
+        assert!(extract_fenced_block("no blocks here", "toml").is_none());
+    }
+
+    #[test]
+    fn extract_fenced_block_skips_nested_fences() {
+        // Agent output might include code samples with their own fences
+        let text = "Here is the plan:\n```toml\n[[tasks]]\nid = \"T1\"\n\
+                    # Example bash:\n```bash\necho hello\n```\n\
+                    verify = \"cargo test\"\n```\nDone.";
+        let block = extract_fenced_block(text, "toml").unwrap();
+        assert!(block.contains("id = \"T1\""), "should contain task");
+        assert!(block.contains("```bash"), "should include the nested fence");
+    }
+
+    #[test]
+    fn extract_fenced_block_handles_angle_bracket_tag() {
+        let text = "Output:\n```<plan.md>\n# My Plan\n\nSteps here.\n```\n";
+        let block = extract_fenced_block(text, "plan.md").unwrap();
+        assert!(block.contains("# My Plan"));
+    }
+
+    #[test]
+    fn extract_fenced_block_returns_none_for_empty_block() {
+        let text = "```toml\n\n```\n";
+        assert!(extract_fenced_block(text, "toml").is_none());
+    }
+
+    #[test]
+    fn extract_fenced_block_multiple_blocks_gets_first() {
+        let text = "```toml\nfirst = true\n```\n\n```toml\nsecond = true\n```\n";
+        let block = extract_fenced_block(text, "toml").unwrap();
+        assert!(block.contains("first = true"));
+        assert!(!block.contains("second = true"));
+    }
+
+    #[test]
+    fn fallback_extracts_clean_toml() {
+        let text = "[meta]\nplan = \"test\"\ntotal = 2\nstatus = \"ready\"\n\n\
+                    [[task]]\nid = \"T1\"\ntitle = \"First\"\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(block.contains("[meta]"));
+        assert!(block.contains("[[task]]"));
+    }
+
+    #[test]
+    fn fallback_trims_trailing_markdown() {
+        let text = "Here is your plan:\n\n\
+                    [meta]\nplan = \"test\"\ntotal = 1\nstatus = \"ready\"\n\n\
+                    [[task]]\nid = \"T1\"\ntitle = \"Do stuff\"\n\n\
+                    ## Notes\n\nThis plan covers the main requirements.\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(block.contains("[meta]"));
+        assert!(block.contains("[[task]]"));
+        assert!(
+            !block.contains("## Notes"),
+            "should trim trailing markdown heading"
+        );
+        assert!(
+            !block.contains("This plan covers"),
+            "should trim trailing prose"
+        );
+    }
+
+    #[test]
+    fn fallback_trims_trailing_horizontal_rule() {
+        let text = "[meta]\nplan = \"x\"\ntotal = 1\nstatus = \"ready\"\n\n\
+                    [[task]]\nid = \"T1\"\ntitle = \"A\"\n\n\
+                    ---\n\nSome explanation here.\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(!block.contains("---"), "should trim trailing hr");
+        assert!(!block.contains("explanation"));
+    }
+
+    #[test]
+    fn fallback_trims_trailing_prose_after_blank() {
+        let text = "[meta]\nplan = \"x\"\ntotal = 1\nstatus = \"ready\"\n\n\
+                    [[task]]\nid = \"T1\"\ntitle = \"A\"\n\n\
+                    This plan implements the feature as described in the PRD.\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(
+            !block.contains("This plan implements"),
+            "should trim trailing prose paragraph"
+        );
+    }
+
+    #[test]
+    fn fallback_preserves_toml_comments() {
+        let text = "[meta]\nplan = \"x\"\ntotal = 1\nstatus = \"ready\"\n\n\
+                    # Task section\n[[task]]\nid = \"T1\"\ntitle = \"A\"\n";
+        let block = extract_toml_content_fallback(text).unwrap();
+        assert!(
+            block.contains("# Task section"),
+            "TOML comments should be kept"
+        );
+    }
+
+    #[test]
+    fn fallback_returns_none_without_task() {
+        let text = "[meta]\nplan = \"x\"\n";
+        assert!(extract_toml_content_fallback(text).is_none());
     }
 
     #[test]
@@ -1220,6 +3030,17 @@ mod tests {
     }
 
     #[test]
+    fn replace_in_frontmatter_only_affects_frontmatter() {
+        let content = "---\nstatus: draft\ntitle: Demo\n---\n\n# Body\n\nThe status: draft is mentioned here too.\n";
+        let result = replace_in_frontmatter(content, "status: draft", "status: published");
+        assert!(result.contains("status: published"));
+        assert!(
+            result.contains("The status: draft is mentioned here too."),
+            "body should be untouched"
+        );
+    }
+
+    #[test]
     fn has_substantive_markdown_content_ignores_headers_only() {
         let content = "---\nid: demo\n---\n# Title\n\n## Overview\n";
         assert!(!has_substantive_markdown_content(content));
@@ -1246,5 +3067,515 @@ mod tests {
             .expect("rendered");
         assert!(rendered.starts_with("---\nid: demo\n---"));
         assert!(rendered.contains("Body only"));
+    }
+
+    // ─── R4_B02 / R4_B03 validation tests ─────────────────────────
+
+    #[test]
+    fn check_grounding_section_rejects_missing_section() {
+        let content = "---\nid: prd-demo\n---\n# Demo\n\n## Requirements\n\nSome req.\n";
+        let report = check_grounding_section(content, "demo", true);
+        assert!(
+            !report.artifact_valid,
+            "missing section must set artifact_valid=false"
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.severity == PrdValidationSeverity::Error
+                    && i.category == "missing_section"),
+            "expected missing_section error"
+        );
+    }
+
+    #[test]
+    fn check_grounding_section_accepts_present_section() {
+        let content = "---\nid: prd-demo\n---\n# Demo\n\n## Repository Grounding\n\nExisting crates: roko-core.\n";
+        let report = check_grounding_section(content, "demo", true);
+        assert!(report.artifact_valid, "present section must pass");
+        assert!(report.issues.is_empty(), "no issues expected");
+    }
+
+    #[test]
+    fn check_grounding_section_case_insensitive() {
+        let content = "# Demo\n\n## REPOSITORY GROUNDING\n\nContent here.\n";
+        let report = check_grounding_section(content, "demo", true);
+        assert!(report.artifact_valid, "case-insensitive match must pass");
+    }
+
+    #[test]
+    fn validate_prd_grounding_flags_no_existing_crates_claim() {
+        let content = "# Demo\n\n## Repository Grounding\n\nNo existing crates are relevant.\n";
+        let members = vec!["roko-core".to_string(), "roko-agent".to_string()];
+        let report = validate_prd_grounding(content, "demo", Path::new("/tmp"), &members, true);
+        assert!(
+            report.issues.iter().any(|i| i.category == "false_negative"),
+            "expected false_negative warning"
+        );
+        // Warning only — still valid
+        assert!(report.artifact_valid);
+    }
+
+    #[test]
+    fn validate_prd_grounding_blocks_duplicate_crate_proposal() {
+        let content = "# Demo\n\n## Repository Grounding\n\nnew crate: roko-core\n";
+        let members = vec!["roko-core".to_string()];
+        let report = validate_prd_grounding(content, "demo", Path::new("/tmp"), &members, true);
+        assert!(
+            !report.artifact_valid,
+            "duplicate crate must set artifact_valid=false"
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == "duplicate_crate"
+                    && i.severity == PrdValidationSeverity::Error)
+        );
+    }
+
+    #[test]
+    fn validate_prd_grounding_blocks_nonexistent_file_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "# Demo\n\n## Repository Grounding\n\n**Source files**:\n- crates/roko-cli/src/no_such_file.rs — does not exist\n";
+        let report = validate_prd_grounding(content, "demo", tmp.path(), &[], true);
+        assert!(
+            !report.artifact_valid,
+            "nonexistent file ref must set artifact_valid=false"
+        );
+        assert!(report.issues.iter().any(
+            |i| i.category == "missing_file_ref" && i.severity == PrdValidationSeverity::Error
+        ));
+    }
+
+    #[test]
+    fn validate_prd_grounding_allows_existing_file_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create the file so it "exists"
+        let file_path = tmp.path().join("crates").join("roko-cli").join("src");
+        std::fs::create_dir_all(&file_path).unwrap();
+        std::fs::write(file_path.join("prd.rs"), "// prd").unwrap();
+        let content = "# Demo\n\n## Repository Grounding\n\n**Source files**:\n- crates/roko-cli/src/prd.rs — PRD logic\n";
+        let report = validate_prd_grounding(content, "demo", tmp.path(), &[], true);
+        assert!(report.artifact_valid, "existing file ref must pass");
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.category == "missing_file_ref"),
+            "no missing_file_ref issues expected"
+        );
+    }
+
+    #[test]
+    fn extract_prd_section_returns_none_when_missing() {
+        let content = "# Title\n\n## Overview\n\nSome text.\n";
+        assert!(extract_prd_section(content, "repository grounding").is_none());
+    }
+
+    #[test]
+    fn extract_prd_section_extracts_body() {
+        let content =
+            "# Title\n\n## Repository Grounding\n\nCrates: roko-core.\n\n## References\n\nRef 1.\n";
+        let body = extract_prd_section(content, "repository grounding").unwrap();
+        assert!(body.contains("Crates: roko-core."), "body: {body}");
+        assert!(!body.contains("## References"), "must stop at next heading");
+    }
+
+    #[test]
+    fn extract_referenced_paths_finds_crate_paths() {
+        let text = "- crates/roko-cli/src/prd.rs — PRD logic\n- crates/roko-core/src/lib.rs";
+        let paths = extract_referenced_paths(text);
+        assert!(paths.contains(&"crates/roko-cli/src/prd.rs".to_string()));
+        assert!(paths.contains(&"crates/roko-core/src/lib.rs".to_string()));
+    }
+
+    // ---- validate_and_fix_generated_plan tests -------------------------------
+
+    fn empty_models() -> IndexMap<String, roko_core::config::schema::ModelProfile> {
+        IndexMap::new()
+    }
+
+    fn sample_models() -> IndexMap<String, roko_core::config::schema::ModelProfile> {
+        // Build from TOML to avoid enumerating every ModelProfile field.
+        let toml_str = r#"
+[models.claude-sonnet-4-6]
+provider = "anthropic"
+slug = "claude-sonnet-4-6"
+
+[models.claude-haiku-4-5]
+provider = "anthropic"
+slug = "claude-haiku-4-5"
+"#;
+        let cfg: roko_core::config::schema::RokoConfig =
+            roko_core::config::schema::RokoConfig::from_toml(toml_str).unwrap();
+        cfg.models
+    }
+
+    #[test]
+    fn validate_valid_plan_passes() {
+        let toml = r#"
+[meta]
+plan = "my-plan"
+total = 2
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "First task"
+status = "pending"
+role = "implementer"
+tier = "focused"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test"
+
+[[task]]
+id = "T2"
+title = "Second task"
+status = "pending"
+role = "implementer"
+tier = "mechanical"
+depends_on = ["T1"]
+"#;
+        let result = validate_and_fix_generated_plan(toml, "my-plan", &empty_models(), None);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn validate_fixes_truncated_slug() {
+        let toml = r#"
+[meta]
+plan = "my-pl"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+"#;
+        let result =
+            validate_and_fix_generated_plan(toml, "my-plan", &empty_models(), None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["meta"]["plan"].as_str().unwrap(),
+            "my-plan",
+            "slug should be corrected"
+        );
+    }
+
+    #[test]
+    fn validate_fixes_wrong_slug() {
+        let toml = r#"
+[meta]
+plan = "wrong-slug"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+"#;
+        let result =
+            validate_and_fix_generated_plan(toml, "correct-slug", &empty_models(), None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(parsed["meta"]["plan"].as_str().unwrap(), "correct-slug");
+    }
+
+    #[test]
+    fn validate_fixes_verify_field_typo() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+
+[[task.verify]]
+pha = "test"
+command = "cargo test"
+"#;
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        let verify = parsed["task"][0]["verify"][0].as_table().unwrap();
+        assert!(
+            verify.contains_key("phase"),
+            "pha should be corrected to phase"
+        );
+        assert!(!verify.contains_key("pha"), "pha should be removed");
+    }
+
+    #[test]
+    fn validate_removes_unknown_model_hint() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+model_hint = "gpt-nonexistent"
+"#;
+        let models = sample_models();
+        let result =
+            validate_and_fix_generated_plan(toml, "test", &models, Some("claude-sonnet-4-6"))
+                .unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert!(
+            parsed["task"][0].get("model_hint").is_none(),
+            "unknown model_hint should be removed so runtime selects"
+        );
+    }
+
+    #[test]
+    fn validate_normalizes_model_alias() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+model_hint = "haiku"
+"#;
+        let models = sample_models();
+        let result = validate_and_fix_generated_plan(toml, "test", &models, None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["task"][0]["model_hint"].as_str().unwrap(),
+            "claude-haiku-4-5",
+            "alias should be normalized to full name"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_missing_meta() {
+        let toml = r#"
+[[task]]
+id = "T1"
+title = "Do thing"
+status = "pending"
+role = "implementer"
+tier = "focused"
+"#;
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("[meta] section is missing"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_missing_task_array() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 0
+status = "pending"
+"#;
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("[[task]] array is missing"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_missing_required_task_fields() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+"#;
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("missing required field 'title'"), "msg: {msg}");
+        assert!(
+            msg.contains("missing required field 'status'"),
+            "msg: {msg}"
+        );
+        assert!(msg.contains("missing required field 'role'"), "msg: {msg}");
+        assert!(msg.contains("missing required field 'tier'"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_toml_syntax() {
+        let toml = "this is not valid toml {{{}}}";
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid TOML"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_fixes_task_field_typo() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Do thing"
+stat = "pending"
+role = "implementer"
+tier = "focused"
+"#;
+        let result = validate_and_fix_generated_plan(toml, "test", &empty_models(), None).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        let task = parsed["task"][0].as_table().unwrap();
+        assert!(
+            task.contains_key("status"),
+            "stat should be corrected to status"
+        );
+        assert!(!task.contains_key("stat"), "stat should be removed");
+    }
+
+    #[test]
+    fn validate_fixes_placeholder_crate_names() {
+        let toml = r#"
+[meta]
+plan = "btc-funding-alert-cli"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Set up crate structure"
+status = "pending"
+role = "implementer"
+tier = "focused"
+files = ["crates/<relevant-lib>/src/lib.rs"]
+
+[[task.verify]]
+phase = "build"
+command = "cargo check -p <crate>"
+"#;
+        let result =
+            validate_and_fix_generated_plan(toml, "btc-funding-alert-cli", &empty_models(), None)
+                .unwrap();
+        assert!(
+            !result.contains("<relevant-lib>"),
+            "placeholder <relevant-lib> should be replaced"
+        );
+        assert!(
+            !result.contains("<crate>"),
+            "placeholder <crate> should be replaced"
+        );
+        assert!(
+            result.contains("btc-funding-alert-cli"),
+            "slug should appear in output"
+        );
+        // Verify it's still valid TOML.
+        let _parsed: toml::Value = toml::from_str(&result).unwrap();
+    }
+
+    #[test]
+    fn validate_fixes_placeholder_in_verify_command() {
+        let toml = r#"
+[meta]
+plan = "my-cool-tool"
+total = 1
+status = "pending"
+
+[[task]]
+id = "T1"
+title = "Implement module"
+status = "pending"
+role = "implementer"
+tier = "focused"
+files = ["crates/<binary-crate>/src/<module>.rs"]
+
+[[task.verify]]
+phase = "build"
+command = "cargo check -p <binary-crate>"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p <crate> -- <test_name>"
+"#;
+        let result =
+            validate_and_fix_generated_plan(toml, "my-cool-tool", &empty_models(), None).unwrap();
+        // <binary-crate> and <crate> replaced with slug.
+        assert!(
+            !result.contains("<binary-crate>"),
+            "placeholder <binary-crate> should be replaced"
+        );
+        assert!(
+            !result.contains("<crate>"),
+            "placeholder <crate> should be replaced"
+        );
+        assert!(
+            !result.contains("<module>"),
+            "placeholder <module> should be replaced"
+        );
+        assert!(
+            !result.contains("<test_name>"),
+            "placeholder <test_name> should be replaced"
+        );
+        assert!(
+            result.contains("cargo check -p my-cool-tool"),
+            "verify command should contain slug: {result}"
+        );
+        assert!(
+            result.contains("cargo test -p my-cool-tool"),
+            "verify command should contain slug: {result}"
+        );
+        // Verify it's still valid TOML.
+        let _parsed: toml::Value = toml::from_str(&result).unwrap();
+    }
+
+    #[test]
+    fn strsim_distance_basic() {
+        assert_eq!(strsim_distance("phase", "phase"), 0);
+        assert_eq!(strsim_distance("pha", "phase"), 2);
+        assert_eq!(strsim_distance("stat", "status"), 2);
+        assert_eq!(strsim_distance("", "abc"), 3);
+        assert_eq!(strsim_distance("abc", ""), 3);
+    }
+
+    #[test]
+    fn suggest_correction_finds_typos() {
+        assert_eq!(
+            suggest_field_correction("pha", KNOWN_VERIFY_FIELDS),
+            Some("phase".to_string())
+        );
+        assert_eq!(
+            suggest_field_correction("stat", KNOWN_TASK_FIELDS),
+            Some("status".to_string())
+        );
+        // Unknown field with no close match returns None.
+        assert_eq!(
+            suggest_field_correction("zzzzunknown", KNOWN_TASK_FIELDS),
+            None
+        );
     }
 }

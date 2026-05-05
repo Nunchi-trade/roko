@@ -3,8 +3,9 @@
 //! These types define invariants, governance rules, and recovery actions that
 //! higher-level orchestration can evaluate with a low-latency policy check.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -21,6 +22,89 @@ const EDIT_TOOLS: &[&str] = &[
     "notebook_edit",
 ];
 
+#[derive(Debug, Clone, Copy)]
+struct BundledContractAsset {
+    role: &'static str,
+    path: &'static str,
+    source: &'static str,
+}
+
+const BUNDLED_CONTRACTS: &[BundledContractAsset] = &[
+    BundledContractAsset {
+        role: "architect",
+        path: "src/safety/contracts/architect.yaml",
+        source: include_str!("contracts/architect.yaml"),
+    },
+    BundledContractAsset {
+        role: "auditor",
+        path: "src/safety/contracts/auditor.yaml",
+        source: include_str!("contracts/auditor.yaml"),
+    },
+    BundledContractAsset {
+        role: "auto-fixer",
+        path: "src/safety/contracts/auto-fixer.yaml",
+        source: include_str!("contracts/auto-fixer.yaml"),
+    },
+    BundledContractAsset {
+        role: "implementer",
+        path: "src/safety/contracts/implementer.yaml",
+        source: include_str!("contracts/implementer.yaml"),
+    },
+    BundledContractAsset {
+        role: "researcher",
+        path: "src/safety/contracts/researcher.yaml",
+        source: include_str!("contracts/researcher.yaml"),
+    },
+    BundledContractAsset {
+        role: "reviewer",
+        path: "src/safety/contracts/reviewer.yaml",
+        source: include_str!("contracts/reviewer.yaml"),
+    },
+    BundledContractAsset {
+        role: "scribe",
+        path: "src/safety/contracts/scribe.yaml",
+        source: include_str!("contracts/scribe.yaml"),
+    },
+    BundledContractAsset {
+        role: "strategist",
+        path: "src/safety/contracts/strategist.yaml",
+        source: include_str!("contracts/strategist.yaml"),
+    },
+];
+
+/// Process-wide cache of parsed agent contracts, keyed by role name.
+///
+/// Contract assets are embedded into the crate at build time and never change
+/// during a process lifetime. Caching avoids
+/// redundant disk reads and JSON parses on every tool dispatch check.
+///
+/// Uses `RwLock` for thread-safe concurrent reads with exclusive writes on
+/// cache misses. Only successful loads are cached; errors always re-read.
+static CONTRACT_CACHE: LazyLock<RwLock<HashMap<String, AgentContract>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// How to handle a missing or invalid bundled contract asset.
+///
+/// Used by [`AgentContract::load_for_role_with_mode`] to choose between a
+/// hard error and a deny-everything fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ContractLoadMode {
+    /// Treat a missing or malformed asset as a fatal error.
+    ///
+    /// Callers that prefer to fail fast on bootstrap should use this mode
+    /// so the workspace is forced to ship explicit contracts for every role.
+    Strict,
+    /// Substitute a deny-everything restricted contract when the asset is
+    /// missing or malformed.
+    ///
+    /// The fallback contract has zero allowed tools, no governance, and no
+    /// invariants beyond the implicit deny-by-default. This keeps the
+    /// dispatcher safe when an unfamiliar role is requested without
+    /// breaking the orchestrator.
+    #[default]
+    RestrictedFallback,
+}
+
 /// Behavioral contract for a specific agent role.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentContract {
@@ -36,13 +120,22 @@ pub struct AgentContract {
     /// Recovery actions for soft invariant violations or policy triggers.
     #[serde(default)]
     pub recovery: Vec<RecoveryAction>,
+    /// Optional explicit allowlist of tool names this role may invoke.
+    ///
+    /// When `Some(_)`, the dispatcher enforces capability intersection: any
+    /// dispatch request whose tool is not in this list is rejected before
+    /// the handler runs. When `None`, the role is gated only by the
+    /// `ForbiddenTools` denylist in `governance`.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl AgentContract {
     /// Build a permissive contract for `role`.
     ///
-    /// This is used as a safe fallback when contract assets are missing or
-    /// malformed.
+    /// This is retained for tests and adapter shims. New code should prefer
+    /// either [`AgentContract::load_for_role`] or
+    /// [`AgentContract::restricted`] so missing-role fallbacks fail closed.
     #[must_use]
     pub fn permissive(role: impl Into<String>) -> Self {
         Self {
@@ -51,29 +144,50 @@ impl AgentContract {
         }
     }
 
+    /// Build a deny-everything restricted contract for `role`.
+    ///
+    /// The contract sets `allowed_tools = Some(vec![])` and an empty
+    /// `ForbiddenTools` rule (the allowlist intersection is the binding
+    /// constraint). Used as the [`ContractLoadMode::RestrictedFallback`]
+    /// substitute when no bundled YAML exists for a role.
+    #[must_use]
+    pub fn restricted(role: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            invariants: vec![Invariant::NoNetworkAccess],
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: Some(Vec::new()),
+        }
+    }
+
     /// Load the bundled contract asset for `role`.
     ///
-    /// The loader reads `src/safety/contracts/<role>.yaml` relative to the
-    /// `roko-agent` crate root. The files use a YAML-compatible JSON subset,
-    /// so they can be parsed without adding a new dependency.
+    /// The loader reads the compile-time bundled
+    /// `src/safety/contracts/<role>.yaml` asset. The files use a
+    /// YAML-compatible JSON subset, so they can be parsed without adding a
+    /// new dependency.
     pub fn load_for_role(role: impl AsRef<str>) -> Result<Self, ContractLoadError> {
         let role = role.as_ref().trim();
         validate_role(role)?;
 
-        let path = contract_asset_path(role);
-        let source = fs::read_to_string(&path).map_err(|source| match source.kind() {
-            std::io::ErrorKind::NotFound => ContractLoadError::MissingAsset {
+        // Check cache first (read lock — cheap concurrent path).
+        if let Ok(guard) = CONTRACT_CACHE.read() {
+            if let Some(cached) = guard.get(role) {
+                return Ok(cached.clone());
+            }
+        }
+
+        let Some(asset) = bundled_contract_asset(role) else {
+            return Err(ContractLoadError::MissingAsset {
                 role: role.to_owned(),
-                path: path.clone(),
-            },
-            _ => ContractLoadError::ReadAsset {
-                path: path.clone(),
-                source,
-            },
-        })?;
+                path: contract_asset_path(role),
+            });
+        };
+        let path = PathBuf::from(asset.path);
 
         let mut contract: Self =
-            serde_json::from_str(&source).map_err(|source| ContractLoadError::ParseAsset {
+            serde_json::from_str(asset.source).map_err(|source| ContractLoadError::ParseAsset {
                 path: path.clone(),
                 source,
             })?;
@@ -87,7 +201,79 @@ impl AgentContract {
         }
 
         contract.role = role.to_owned();
+
+        // Store in cache on success (write lock — only on first load per role).
+        // Ignore lock poisoning (don't fail the load just because cache is broken).
+        if let Ok(mut guard) = CONTRACT_CACHE.write() {
+            guard.insert(role.to_owned(), contract.clone());
+        }
+
         Ok(contract)
+    }
+
+    /// Load the bundled contract for `role` using `mode` to handle missing
+    /// or malformed assets.
+    ///
+    /// In [`ContractLoadMode::Strict`] mode the underlying load error is
+    /// surfaced directly. In [`ContractLoadMode::RestrictedFallback`] mode a
+    /// deny-everything contract is substituted and a warning is emitted via
+    /// `tracing::warn!`.
+    pub fn load_for_role_with_mode(
+        role: impl AsRef<str>,
+        mode: ContractLoadMode,
+    ) -> Result<Self, ContractLoadError> {
+        let role_ref = role.as_ref();
+        match Self::load_for_role(role_ref) {
+            Ok(contract) => Ok(contract),
+            Err(err) => match mode {
+                ContractLoadMode::Strict => Err(err),
+                ContractLoadMode::RestrictedFallback => {
+                    tracing::warn!(
+                        role = %role_ref,
+                        %err,
+                        "no contract for role; using restricted (deny-all) fallback"
+                    );
+                    Ok(Self::restricted(role_ref))
+                }
+            },
+        }
+    }
+
+    /// Clear the contract cache. Used in tests to ensure each test loads fresh
+    /// contracts without interference from previous test runs.
+    ///
+    /// Only available in test builds.
+    #[cfg(test)]
+    pub fn invalidate_contract_cache() {
+        if let Ok(mut guard) = CONTRACT_CACHE.write() {
+            guard.clear();
+        }
+    }
+
+    /// Returns `true` if the given tool name is permitted by this contract's
+    /// allowlist + denylist intersection.
+    ///
+    /// - When `allowed_tools` is `Some(_)`, the tool must appear in the
+    ///   allowlist *and* must not appear in any `ForbiddenTools` rule.
+    /// - When `allowed_tools` is `None`, the tool only needs to avoid the
+    ///   `ForbiddenTools` denylist.
+    #[must_use]
+    pub fn permits_tool(&self, tool_name: &str) -> bool {
+        if let Some(ref allowed) = self.allowed_tools {
+            if !allowed.iter().any(|allowed_name| allowed_name == tool_name) {
+                return false;
+            }
+        }
+
+        for rule in &self.governance {
+            if let GovernanceRule::ForbiddenTools(forbidden) = rule {
+                if forbidden.iter().any(|name| name == tool_name) {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     /// Validate this contract against an inbound tool invocation.
@@ -96,6 +282,19 @@ impl AgentContract {
         call: &ToolCall,
         ctx: &ToolContext,
     ) -> Result<(), ContractViolation> {
+        // Capability intersection — `allowed_tools` is the binding allowlist
+        // when set; reject before invariants/governance run so a denied tool
+        // never observes any contract side effects.
+        if !self.permits_tool(&call.name) {
+            return Err(ContractViolation::new(
+                &self.role,
+                "AllowedTools",
+                format!(
+                    "tool `{}` is not in the role's allowed_tools list",
+                    call.name
+                ),
+            ));
+        }
         for invariant in &self.invariants {
             invariant.check(&self.role, call, ctx)?;
         }
@@ -315,17 +514,15 @@ impl GovernanceRule {
                 }
             }
             Self::MaxCostPerTurn(max) => {
-                if let Some(estimated_cost_usd) = estimated_cost_usd(call)
-                    && estimated_cost_usd > *max
+                if let Some(observed_cost_usd) = observed_cost_usd(ctx)
+                    && observed_cost_usd > *max
                 {
                     return Err(ContractViolation::new(
                         role,
                         "MaxCostPerTurn",
-                        format!("{estimated_cost_usd:.4} > {max:.4}"),
+                        format!("{observed_cost_usd:.4} > {max:.4}"),
                     ));
                 }
-                // TODO(UX26): enforce cumulative per-turn spend once tool-cost
-                // accounting is threaded into ToolContext.
             }
             Self::MaxConsecutiveFailures(max) => {
                 let consecutive = count_trailing_failures(&ctx.external_actions.read());
@@ -383,9 +580,14 @@ impl RecoveryAction {
 }
 
 fn contract_asset_path(role: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(CONTRACT_DIR)
-        .join(format!("{role}.yaml"))
+    PathBuf::from(CONTRACT_DIR).join(format!("{role}.yaml"))
+}
+
+fn bundled_contract_asset(role: &str) -> Option<BundledContractAsset> {
+    BUNDLED_CONTRACTS
+        .iter()
+        .copied()
+        .find(|asset| asset.role == role)
 }
 
 fn validate_role(role: &str) -> Result<(), ContractLoadError> {
@@ -403,34 +605,43 @@ fn validate_role(role: &str) -> Result<(), ContractLoadError> {
 }
 
 fn estimated_tokens(call: &ToolCall) -> Option<u32> {
-    call.arguments
-        .get("estimated_tokens")
-        .and_then(as_u32)
-        .or_else(|| call.arguments.get("max_tokens").and_then(as_u32))
+    // SECURITY: Do NOT trust LLM-supplied "estimated_tokens" or "max_tokens"
+    // fields. Instead, estimate from actual string content lengths using a
+    // conservative chars/4 heuristic. This prevents an agent from lying
+    // about its token consumption to bypass MaxTokensPerTurn.
+    string_token_estimate(call.arguments.get("content"))
         .or_else(|| string_token_estimate(call.arguments.get("prompt")))
         .or_else(|| string_token_estimate(call.arguments.get("input")))
+        .or_else(|| string_token_estimate(call.arguments.get("source")))
 }
 
-fn estimated_cost_usd(call: &ToolCall) -> Option<f64> {
-    call.arguments
-        .get("estimated_cost_usd")
-        .and_then(|value| value.as_f64())
-        .or_else(|| {
-            call.arguments
-                .get("cost_usd")
-                .and_then(|value| value.as_f64())
-        })
-        .or_else(|| {
-            call.arguments
-                .get("estimated_cost_usd_cents")
-                .and_then(|value| value.as_u64())
-                .and_then(|cents| u32::try_from(cents).ok())
-                .map(|cents| f64::from(cents) / 100.0)
-        })
+fn observed_cost_usd(ctx: &ToolContext) -> Option<f64> {
+    // SECURITY: Do NOT trust LLM-supplied "estimated_cost_usd" fields on the
+    // pending tool call. Cost budget enforcement is based only on prior
+    // orchestrator/tool-recorded external action metadata.
+    let total = ctx
+        .external_actions
+        .read()
+        .iter()
+        .filter_map(action_cost_usd)
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+        .sum::<f64>();
+
+    (total > 0.0).then_some(total)
 }
 
-fn as_u32(value: &serde_json::Value) -> Option<u32> {
-    value.as_u64().and_then(|value| u32::try_from(value).ok())
+fn action_cost_usd(action: &ExternalAction) -> Option<f64> {
+    let metadata = &action.metadata;
+    [
+        metadata.get("actual_cost_usd"),
+        metadata.get("cost_usd"),
+        metadata.get("total_cost_usd"),
+        metadata.pointer("/usage/cost_usd"),
+        metadata.pointer("/usage/total_cost_usd"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(serde_json::Value::as_f64)
 }
 
 fn string_token_estimate(value: Option<&serde_json::Value>) -> Option<u32> {
@@ -471,25 +682,10 @@ fn is_network_like_call(call: &ToolCall) -> bool {
         })
 }
 
-fn has_gate_approval(call: &ToolCall, ctx: &ToolContext) -> bool {
-    if call
-        .arguments
-        .get("gate_passed")
-        .and_then(|value| value.as_bool())
-        == Some(true)
-    {
-        return true;
-    }
-
-    if call
-        .arguments
-        .get("verified")
-        .and_then(|value| value.as_bool())
-        == Some(true)
-    {
-        return true;
-    }
-
+fn has_gate_approval(_call: &ToolCall, ctx: &ToolContext) -> bool {
+    // SECURITY: Only trust orchestrator-recorded external actions, never
+    // LLM-supplied tool-call arguments. An LLM adding `"gate_passed": true`
+    // to its arguments must NOT bypass the gate requirement.
     ctx.external_actions.read().iter().any(|action| {
         action.action_type == "gate_passed"
             || (action.action_type == "run_gate"
@@ -565,9 +761,14 @@ mod tests {
 
     #[test]
     fn bundled_contracts_load_from_assets() {
+        AgentContract::invalidate_contract_cache();
         let implementer = AgentContract::load_for_role("implementer").expect("load implementer");
         let reviewer = AgentContract::load_for_role("reviewer").expect("load reviewer");
         let researcher = AgentContract::load_for_role("researcher").expect("load researcher");
+        let architect = AgentContract::load_for_role("architect").expect("load architect");
+        let auditor = AgentContract::load_for_role("auditor").expect("load auditor");
+        let scribe = AgentContract::load_for_role("scribe").expect("load scribe");
+        let auto_fixer = AgentContract::load_for_role("auto-fixer").expect("load auto-fixer");
 
         assert_eq!(implementer.role, "implementer");
         assert!(matches!(
@@ -589,17 +790,85 @@ mod tests {
             researcher.invariants.as_slice(),
             [Invariant::MaxTokensPerTurn(_)]
         ));
+
+        assert_eq!(architect.role, "architect");
+        assert!(!architect.governance.is_empty());
+        assert_eq!(auditor.role, "auditor");
+        assert!(auditor.invariants.contains(&Invariant::NoNetworkAccess));
+        assert_eq!(scribe.role, "scribe");
+        assert!(scribe.invariants.contains(&Invariant::NoNetworkAccess));
+        assert_eq!(auto_fixer.role, "auto-fixer");
+        assert!(
+            auto_fixer
+                .invariants
+                .contains(&Invariant::RequireGateBeforeCommit)
+        );
+    }
+
+    #[test]
+    fn bundled_contract_registry_covers_expected_roles() {
+        let roles: Vec<_> = BUNDLED_CONTRACTS.iter().map(|asset| asset.role).collect();
+
+        assert_eq!(
+            roles,
+            vec![
+                "architect",
+                "auditor",
+                "auto-fixer",
+                "implementer",
+                "researcher",
+                "reviewer",
+                "scribe",
+                "strategist",
+            ]
+        );
+
+        for asset in BUNDLED_CONTRACTS {
+            assert_eq!(PathBuf::from(asset.path), contract_asset_path(asset.role));
+            assert!(
+                asset.source.trim_start().starts_with('{'),
+                "contract asset {} should be embedded source",
+                asset.path
+            );
+        }
+    }
+
+    #[test]
+    fn missing_contract_error_uses_bundle_relative_path() {
+        AgentContract::invalidate_contract_cache();
+
+        let err = AgentContract::load_for_role("does-not-exist")
+            .expect_err("missing bundled contract should fail");
+
+        match err {
+            ContractLoadError::MissingAsset { role, path } => {
+                assert_eq!(role, "does-not-exist");
+                assert_eq!(
+                    path,
+                    PathBuf::from("src/safety/contracts/does-not-exist.yaml")
+                );
+                assert!(
+                    !path.is_absolute(),
+                    "missing-asset path should not leak a build-machine source path"
+                );
+            }
+            other => panic!("unexpected contract load error: {other}"),
+        }
     }
 
     #[test]
     fn max_tokens_contract_violation_surfaces_permission_error() {
         let contract = AgentContract::load_for_role("implementer").expect("load implementer");
+        // Token estimation is from content length (chars/4 heuristic).
+        // 12000 token limit × 4 chars/token = 48000 chars. Use 50000 chars
+        // to be safely above the threshold.
+        let large_content = "x".repeat(50_000);
         let call = ToolCall::new(
             "call-1",
-            "bash",
+            "write_file",
             serde_json::json!({
-                "command": "echo hi",
-                "estimated_tokens": 12_001_u32,
+                "path": "big.txt",
+                "content": large_content,
             }),
         );
         let ctx = ToolContext::testing("/tmp/contract-tests");
@@ -615,12 +884,168 @@ mod tests {
     }
 
     #[test]
+    fn max_tokens_ignores_llm_supplied_estimate() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: vec![Invariant::MaxTokensPerTurn(10)],
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let call = ToolCall::new(
+            "call-token-bypass",
+            "write_file",
+            serde_json::json!({
+                "path": "large.txt",
+                "content": "x".repeat(44),
+                "estimated_tokens": 1,
+                "max_tokens": 1,
+            }),
+        );
+        let ctx = ToolContext::testing("/tmp/contract-tests");
+
+        let err = contract
+            .check_pre_execution(&call, &ctx)
+            .expect_err("content-derived token estimate should exceed the limit");
+        assert_eq!(err.rule, "MaxTokensPerTurn");
+        assert!(err.detail.contains("11 > 10"));
+    }
+
+    #[test]
+    fn require_gate_before_commit_ignores_llm_supplied_gate_passed_argument() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: vec![Invariant::RequireGateBeforeCommit],
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let call = ToolCall::new(
+            "call-gate-bypass",
+            "bash",
+            serde_json::json!({
+                "command": "git commit -m test",
+                "gate_passed": true,
+            }),
+        );
+        let ctx = ToolContext::testing("/tmp/contract-tests");
+
+        let err = contract
+            .check_pre_execution(&call, &ctx)
+            .expect_err("tool-call arguments must not satisfy gate approval");
+        assert_eq!(err.rule, "RequireGateBeforeCommit");
+    }
+
+    #[test]
+    fn require_gate_before_commit_accepts_recorded_gate_actions() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: vec![Invariant::RequireGateBeforeCommit],
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let call = ToolCall::new(
+            "call-gated-commit",
+            "bash",
+            serde_json::json!({ "command": "git push origin HEAD" }),
+        );
+
+        let ctx = ToolContext::testing("/tmp/contract-tests").with_external_actions(Arc::new(
+            RwLock::new(vec![ExternalAction {
+                service: "gate".into(),
+                action_type: "run_gate".into(),
+                resource_id: "compile".into(),
+                metadata: serde_json::json!({ "passed": true }),
+                performed_at: chrono::Utc::now(),
+            }]),
+        ));
+        assert!(contract.check_pre_execution(&call, &ctx).is_ok());
+
+        let ctx = ToolContext::testing("/tmp/contract-tests").with_external_actions(Arc::new(
+            RwLock::new(vec![ExternalAction {
+                service: "gate".into(),
+                action_type: "gate_passed".into(),
+                resource_id: "test".into(),
+                metadata: serde_json::json!({}),
+                performed_at: chrono::Utc::now(),
+            }]),
+        ));
+        assert!(contract.check_pre_execution(&call, &ctx).is_ok());
+    }
+
+    #[test]
+    fn max_cost_ignores_llm_supplied_estimate() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: Vec::new(),
+            governance: vec![GovernanceRule::MaxCostPerTurn(0.01)],
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let call = ToolCall::new(
+            "call-cost-claim",
+            "bash",
+            serde_json::json!({
+                "command": "echo hi",
+                "estimated_cost_usd": 999.0,
+            }),
+        );
+        let ctx = ToolContext::testing("/tmp/contract-tests");
+
+        assert!(contract.check_pre_execution(&call, &ctx).is_ok());
+    }
+
+    #[test]
+    fn max_cost_uses_recorded_external_action_costs() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: Vec::new(),
+            governance: vec![GovernanceRule::MaxCostPerTurn(0.25)],
+            recovery: Vec::new(),
+            allowed_tools: None,
+        };
+        let actions = Arc::new(RwLock::new(vec![
+            ExternalAction {
+                service: "provider".into(),
+                action_type: "model_call".into(),
+                resource_id: "turn-1".into(),
+                metadata: serde_json::json!({ "usage": { "cost_usd": 0.10 } }),
+                performed_at: chrono::Utc::now(),
+            },
+            ExternalAction {
+                service: "provider".into(),
+                action_type: "model_call".into(),
+                resource_id: "turn-2".into(),
+                metadata: serde_json::json!({ "total_cost_usd": 0.20 }),
+                performed_at: chrono::Utc::now(),
+            },
+        ]));
+        let ctx = ToolContext::testing("/tmp/contract-tests").with_external_actions(actions);
+        let call = ToolCall::new(
+            "call-cost-bypass",
+            "bash",
+            serde_json::json!({
+                "command": "echo hi",
+                "estimated_cost_usd": 0.0,
+            }),
+        );
+
+        let err = contract
+            .check_pre_execution(&call, &ctx)
+            .expect_err("recorded provider cost should exceed the limit");
+        assert_eq!(err.rule, "MaxCostPerTurn");
+        assert!(err.detail.contains("0.3000 > 0.2500"));
+    }
+
+    #[test]
     fn require_tool_before_edit_reads_external_actions() {
         let contract = AgentContract {
             role: "implementer".into(),
             invariants: Vec::new(),
             governance: vec![GovernanceRule::RequireToolBeforeEdit("read_file".into())],
             recovery: Vec::new(),
+            allowed_tools: None,
         };
         let actions = Arc::new(RwLock::new(vec![ExternalAction {
             service: "tool_dispatcher".into(),
@@ -661,6 +1086,7 @@ mod tests {
             invariants: Vec::new(),
             governance: vec![GovernanceRule::MaxConsecutiveFailures(3)],
             recovery: Vec::new(),
+            allowed_tools: None,
         };
 
         // Build 3 consecutive failure actions.
@@ -706,6 +1132,7 @@ mod tests {
             invariants: Vec::new(),
             governance: vec![GovernanceRule::MaxConsecutiveFailures(3)],
             recovery: Vec::new(),
+            allowed_tools: None,
         };
 
         // 2 failures, then 1 success, then 2 more failures = 2 trailing failures.
@@ -794,5 +1221,95 @@ mod tests {
             },
         ];
         assert_eq!(super::count_trailing_failures(&actions), 2);
+    }
+
+    #[test]
+    fn allowed_tools_blocks_disallowed_call_in_check_pre_execution() {
+        let contract = AgentContract {
+            role: "auditor".into(),
+            invariants: Vec::new(),
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: Some(vec!["read_file".into(), "grep".into()]),
+        };
+        let ctx = ToolContext::new(
+            "/tmp/contract-tests",
+            Duration::from_secs(5),
+            ToolPermission {
+                read: true,
+                write: true,
+                exec: true,
+                git: true,
+                network: true,
+            },
+            Arc::new(NoopAuditSink),
+            Arc::new(NoopTraceSink),
+            Arc::new(NoopMetricsSink),
+            Arc::new(roko_core::tool::NeverCancel),
+        );
+
+        // `write_file` is not in the allowlist — must be rejected.
+        let call = ToolCall::new("c1", "write_file", serde_json::json!({}));
+        let err = contract
+            .check_pre_execution(&call, &ctx)
+            .expect_err("write_file must be blocked");
+        assert_eq!(err.rule, "AllowedTools");
+        assert!(err.detail.contains("write_file"));
+
+        // `read_file` is in the allowlist — must pass.
+        let call = ToolCall::new("c2", "read_file", serde_json::json!({"path": "."}));
+        contract.check_pre_execution(&call, &ctx).unwrap();
+    }
+
+    #[test]
+    fn restricted_contract_denies_every_tool() {
+        let contract = AgentContract::restricted("unknown");
+        let ctx = ToolContext::new(
+            "/tmp/contract-tests",
+            Duration::from_secs(5),
+            ToolPermission {
+                read: true,
+                write: true,
+                exec: true,
+                git: true,
+                network: true,
+            },
+            Arc::new(NoopAuditSink),
+            Arc::new(NoopTraceSink),
+            Arc::new(NoopMetricsSink),
+            Arc::new(roko_core::tool::NeverCancel),
+        );
+        for tool in ["read_file", "write_file", "grep", "bash"] {
+            let call = ToolCall::new("x", tool, serde_json::json!({}));
+            assert!(
+                contract.check_pre_execution(&call, &ctx).is_err(),
+                "restricted contract should deny `{tool}`",
+            );
+        }
+    }
+
+    #[test]
+    fn load_for_role_with_mode_strict_errors_on_missing() {
+        AgentContract::invalidate_contract_cache();
+        let err =
+            AgentContract::load_for_role_with_mode("totally-not-a-role", ContractLoadMode::Strict)
+                .expect_err("missing role must error in strict mode");
+        match err {
+            ContractLoadError::MissingAsset { .. } => {}
+            other => panic!("expected MissingAsset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_for_role_with_mode_fallback_returns_restricted() {
+        AgentContract::invalidate_contract_cache();
+        let contract = AgentContract::load_for_role_with_mode(
+            "totally-not-a-role",
+            ContractLoadMode::RestrictedFallback,
+        )
+        .expect("fallback contract must load");
+        assert_eq!(contract.role, "totally-not-a-role");
+        assert_eq!(contract.allowed_tools.as_deref(), Some(&[][..]));
+        assert!(!contract.permits_tool("read_file"));
     }
 }

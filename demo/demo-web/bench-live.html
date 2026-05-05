@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>roko — live bench monitor</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --void: #060608;
+  --raised: #0C0A0E;
+  --mid: #080810;
+  --surface: #100E14;
+  --rose: #AA7088;
+  --rose-bright: #CC90A8;
+  --rose-dim: #7A5060;
+  --rose-deep: #3A2030;
+  --bone: #C8B890;
+  --sage: #70887A;
+  --sage-bright: #99c4ac;
+  --fail: #C36E55;
+  --warn: #AA8855;
+  --glass-2-bg: rgba(255,255,255,0.04);
+  --glass-2-border: rgba(255,255,255,0.08);
+  --text: #B0A0B0;
+  --text-dim: #706070;
+  --text-ghost: #302830;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --bone-bloom: 0 0 12px rgba(200,184,144,0.4), 0 0 32px rgba(200,184,144,0.15);
+  --font-serif: 'Instrument Serif', Georgia, serif;
+  --font-sans: 'General Sans', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', 'SF Mono', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+*::-webkit-scrollbar { width: 5px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--glass-2-border); border-radius: 3px; }
+
+html, body {
+  background: var(--void); color: var(--text); font-family: var(--font-sans);
+  height: 100vh; overflow: hidden; display: flex; flex-direction: column;
+}
+
+body::before {
+  content: ''; position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+  background: repeating-linear-gradient(to bottom, transparent 0px, transparent 1px, rgba(0,0,0,0.05) 1px, rgba(0,0,0,0.05) 2px);
+}
+
+/* ── Header ───────────────────────────────────────── */
+.header {
+  display: flex; align-items: center; padding: 10px 24px; gap: 16px;
+  border-bottom: 1px solid var(--glass-2-border); background: var(--raised);
+  flex-shrink: 0; height: 48px;
+}
+.header .logo {
+  font-family: var(--font-serif); font-size: 1rem; color: var(--rose-bright);
+  display: flex; align-items: center; gap: 8px;
+}
+.header .title {
+  font-family: var(--font-sans); font-size: 0.78rem; color: var(--text);
+  font-weight: 500;
+}
+.header .status {
+  display: flex; align-items: center; gap: 6px; font-size: 0.68rem;
+  margin-left: auto;
+}
+.header .status-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--sage);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.header .elapsed {
+  font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-dim);
+  padding: 3px 10px; background: var(--glass-2-bg); border-radius: 4px;
+}
+
+/* ── Main grid ────────────────────────────────────── */
+.grid {
+  flex: 1; display: grid;
+  grid-template-columns: 1fr 1fr 320px;
+  grid-template-rows: auto 1fr;
+  gap: 1px; background: var(--glass-2-border); overflow: hidden;
+}
+.grid > * { background: var(--void); }
+
+/* ── Top metrics row ──────────────────────────────── */
+.metrics-row {
+  grid-column: 1 / -1; display: flex; padding: 14px 24px; gap: 24px;
+  align-items: center; background: var(--raised);
+}
+.metric-block {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.metric-block .mb-value {
+  font-family: var(--font-mono); font-size: 1.6rem; font-weight: 600;
+}
+.metric-block .mb-value.pass { color: var(--sage-bright); }
+.metric-block .mb-value.cost { color: var(--bone); text-shadow: var(--bone-bloom); }
+.metric-block .mb-value.perf { color: var(--rose-bright); }
+.metric-block .mb-value.time { color: var(--text); }
+.metric-block .mb-label {
+  font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.metric-block .mb-bar {
+  width: 120px; height: 4px; background: var(--glass-2-border); border-radius: 2px;
+  margin-top: 4px; overflow: hidden;
+}
+.metric-block .mb-bar-fill {
+  height: 100%; border-radius: 2px; transition: width 500ms var(--ease);
+}
+.metric-block .mb-bar-fill.pass { background: var(--sage); }
+.metric-block .mb-bar-fill.cost { background: var(--bone); }
+
+.metrics-divider { width: 1px; height: 36px; background: var(--glass-2-border); }
+
+/* ── Task grid (left panel) ───────────────────────── */
+.task-panel {
+  padding: 16px; overflow-y: auto;
+}
+.task-panel-title {
+  font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-dim); margin-bottom: 12px; font-weight: 500;
+}
+.task-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(28px, 1fr));
+  gap: 4px;
+}
+.task-cell {
+  width: 28px; height: 28px; border-radius: 6px; display: flex;
+  align-items: center; justify-content: center; font-size: 0.5rem;
+  font-family: var(--font-mono); font-weight: 600;
+  transition: all 300ms var(--ease); cursor: default;
+  border: 1px solid transparent;
+}
+.task-cell.pending { background: var(--glass-2-bg); color: var(--text-ghost); }
+.task-cell.running { background: var(--rose-deep); border-color: var(--rose-dim); color: var(--rose-bright); animation: taskPulse 1.5s ease-in-out infinite; }
+.task-cell.pass { background: rgba(112,136,122,0.2); border-color: var(--sage); color: var(--sage-bright); }
+.task-cell.fail { background: rgba(195,110,85,0.15); border-color: var(--fail); color: var(--fail); }
+.task-cell.partial { background: rgba(170,136,85,0.15); border-color: var(--warn); color: var(--warn); }
+@keyframes taskPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+.task-cell:hover { transform: scale(1.3); z-index: 2; }
+.task-cell:hover::after {
+  content: attr(data-tooltip); position: absolute; bottom: 100%; left: 50%;
+  transform: translateX(-50%); white-space: nowrap; padding: 4px 8px;
+  background: var(--raised); border: 1px solid var(--glass-2-border);
+  border-radius: 4px; font-size: 0.55rem; color: var(--text); pointer-events: none;
+}
+
+/* ── Visualization panel (center) ─────────────────── */
+.viz-panel {
+  padding: 16px; display: flex; flex-direction: column; gap: 12px;
+}
+.viz-panel-title {
+  font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-dim); font-weight: 500;
+}
+
+.viz-canvas-wrap {
+  flex: 1; position: relative; border-radius: 12px; overflow: hidden;
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  min-height: 200px;
+}
+.viz-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+
+.cost-timeline {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  border-radius: 12px; padding: 14px; flex-shrink: 0;
+}
+.cost-timeline-title {
+  font-size: 0.62rem; color: var(--text-dim); margin-bottom: 8px; font-weight: 500;
+}
+.cost-bars {
+  display: flex; align-items: flex-end; gap: 3px; height: 60px;
+}
+.cost-bar {
+  flex: 1; border-radius: 2px 2px 0 0; min-height: 1px;
+  transition: height 300ms var(--ease);
+  background: linear-gradient(to top, rgba(200,184,144,0.2), var(--bone));
+}
+.cost-bar.current { background: linear-gradient(to top, var(--rose-deep), var(--rose-bright)); }
+
+/* ── Activity feed (right panel) ──────────────────── */
+.feed-panel {
+  display: flex; flex-direction: column; border-left: 1px solid var(--glass-2-border);
+}
+.feed-title {
+  padding: 14px 16px; font-size: 0.65rem; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim); font-weight: 500;
+  border-bottom: 1px solid var(--glass-2-border); flex-shrink: 0;
+}
+.feed-list {
+  flex: 1; overflow-y: auto; padding: 8px;
+}
+.feed-item {
+  padding: 10px 12px; border-radius: 8px; margin-bottom: 4px;
+  background: var(--glass-2-bg); border: 1px solid transparent;
+  animation: feedSlide 200ms var(--ease);
+  transition: border-color 200ms var(--ease);
+}
+.feed-item:hover { border-color: var(--glass-2-border); }
+.feed-item.pass { border-left: 2px solid var(--sage); }
+.feed-item.fail { border-left: 2px solid var(--fail); }
+.feed-item.info { border-left: 2px solid var(--rose-dim); }
+.feed-item.learn { border-left: 2px solid var(--bone); }
+@keyframes feedSlide { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+.feed-item .fi-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;
+}
+.feed-item .fi-title {
+  font-size: 0.68rem; font-weight: 500; color: var(--text);
+}
+.feed-item .fi-time {
+  font-size: 0.55rem; color: var(--text-dim); font-family: var(--font-mono);
+}
+.feed-item .fi-body {
+  font-size: 0.62rem; color: var(--text-dim); line-height: 1.5;
+}
+.feed-item .fi-body code {
+  background: rgba(255,255,255,0.04); padding: 1px 4px; border-radius: 3px;
+  color: var(--rose-bright); font-family: var(--font-mono); font-size: 0.58rem;
+}
+.feed-item .fi-metric {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 4px;
+  font-size: 0.58rem; font-family: var(--font-mono);
+}
+.feed-item .fi-metric.cost { color: var(--bone); }
+.feed-item .fi-metric.tokens { color: var(--text-dim); }
+
+/* ── Bottom bar ───────────────────────────────────── */
+.bottom-bar {
+  display: flex; align-items: center; padding: 6px 24px; gap: 16px;
+  border-top: 1px solid var(--glass-2-border); background: var(--raised);
+  font-size: 0.58rem; color: var(--text-dim); flex-shrink: 0;
+}
+.bottom-bar .bb-item { display: flex; align-items: center; gap: 4px; }
+.bottom-bar .bb-value { font-family: var(--font-mono); color: var(--text); }
+.bottom-bar .bb-value.cost { color: var(--bone); }
+.bottom-bar .bb-spacer { flex: 1; }
+.bottom-bar a { color: var(--text-dim); text-decoration: none; }
+.bottom-bar a:hover { color: var(--rose-bright); }
+
+/* ── Responsive ───────────────────────────────────── */
+@media (max-width: 1000px) {
+  .grid { grid-template-columns: 1fr 1fr; }
+  .feed-panel { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <a href="demo.html" class="logo" style="text-decoration:none">&#9670; roko</a>
+  <span class="title">Live Benchmark Monitor</span>
+  <div class="status">
+    <div class="status-dot"></div>
+    <span>connecting&hellip;</span>
+  </div>
+  <span class="elapsed" id="elapsed">00:00</span>
+</header>
+
+<!-- Top metrics -->
+<div class="metrics-row">
+  <div class="metric-block">
+    <div class="mb-value pass" id="live-pass">0/0</div>
+    <div class="mb-label">Passed</div>
+    <div class="mb-bar"><div class="mb-bar-fill pass" style="width:0%"></div></div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value cost" id="live-cost">$0.00</div>
+    <div class="mb-label">Cost so far</div>
+    <div class="mb-bar"><div class="mb-bar-fill cost" style="width:0%"></div></div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value perf" id="live-cfactor">—</div>
+    <div class="mb-label">C-Factor (live)</div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value time" id="live-avg">—</div>
+    <div class="mb-label">Avg per task</div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value" id="live-model" style="font-size:0.9rem;color:var(--rose-bright)">—</div>
+    <div class="mb-label">Current model</div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value" id="live-progress" style="font-size:0.9rem">0/0</div>
+    <div class="mb-label">Tasks completed</div>
+  </div>
+</div>
+
+<!-- Main grid -->
+<div class="grid">
+  <!-- Task grid -->
+  <div class="task-panel">
+    <div class="task-panel-title">Task Map (each cell = 1 task)</div>
+    <div class="task-grid" id="task-grid"></div>
+  </div>
+
+  <!-- Visualization -->
+  <div class="viz-panel">
+    <div class="viz-panel-title">Cost Accumulation (real-time)</div>
+    <div class="viz-canvas-wrap">
+      <canvas id="viz-canvas" aria-hidden="true"></canvas>
+    </div>
+    <div class="cost-timeline">
+      <div class="cost-timeline-title">Cost per task (last 20)</div>
+      <div class="cost-bars" id="cost-bars"></div>
+    </div>
+  </div>
+
+  <!-- Activity feed -->
+  <div class="feed-panel">
+    <div class="feed-title">Activity Feed</div>
+    <div class="feed-list" id="feed-list"></div>
+  </div>
+</div>
+
+<!-- Bottom bar -->
+<div class="bottom-bar">
+  <div class="bb-item"><span>Suite:</span> <span class="bb-value">swe-lite</span></div>
+  <div class="bb-item"><span>Strategy:</span> <span class="bb-value">cascade</span></div>
+  <div class="bb-item"><span>Batch:</span> <span class="bb-value">50</span></div>
+  <div class="bb-item"><span>Learning:</span> <span class="bb-value" style="color:var(--sage)">enabled</span></div>
+  <span class="bb-spacer"></span>
+  <div class="bb-item"><span>Budget:</span> <span class="bb-value cost">$0.00 / $10.00</span></div>
+  <a href="bench.html">&#8592; Bench Lab</a>
+  <a href="explorer.html">Explorer</a>
+  <a href="demo.html">Demo</a>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────
+let tasks = [];
+let costHistory = [];  // per-task costs (last 20)
+let costPoints = [];   // cumulative cost curve
+let elapsed = 0;
+let totalCost = 0;
+let passed = 0;
+let failed = 0;
+let completed = 0;
+let totalTasks = 0;
+let timerInterval = null;
+let pollInterval = null;
+let useRealData = false;  // flips to true when API responds with data
+let currentModel = '—';
+let budget = 10.00;
+
+// ── API helpers ───────────────────────────────────────────
+const API = '';  // same origin
+
+async function apiFetch(path) {
+  try {
+    const r = await fetch(API + path);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+// ── Load real data from API ───────────────────────────────
+async function loadRealData() {
+  const [eff, episodes, health, router, cfactor] = await Promise.all([
+    apiFetch('/api/learn/efficiency'),
+    apiFetch('/api/episodes'),
+    apiFetch('/api/health'),
+    apiFetch('/api/learn/cascade-router'),
+    apiFetch('/api/c-factor/trend'),
+  ]);
+
+  // If we got efficiency data with tasks, use real data
+  if (eff && eff.tasks && eff.tasks.length > 0) {
+    useRealData = true;
+    tasks = [];
+    costHistory = [];
+    costPoints = [];
+    totalCost = 0;
+    passed = 0;
+    failed = 0;
+    completed = 0;
+
+    // Build task list from efficiency data
+    const effTasks = eff.tasks.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+    totalTasks = effTasks.length;
+
+    let cum = 0;
+    for (const t of effTasks) {
+      const cost = t.cost_usd || 0;
+      cum += cost;
+      tasks.push({ state: 'pass', cost: cost.toFixed(3), name: t.task_id || t.plan_id || '—' });
+      costHistory.push(cost);
+      costPoints.push(cum);
+      totalCost += cost;
+      completed++;
+      passed++;
+    }
+    // Keep last 20 for bar chart
+    if (costHistory.length > 20) costHistory = costHistory.slice(-20);
+
+    // Overlay episode data for pass/fail if available
+    if (episodes && Array.isArray(episodes)) {
+      const failIds = new Set();
+      for (const ep of episodes) {
+        if (ep.gate_verdict === 'fail' || ep.success === false) {
+          failIds.add(ep.task_id || ep.plan_id);
+        }
+      }
+      for (const t of tasks) {
+        if (failIds.has(t.name)) {
+          t.state = 'fail';
+          passed--;
+          failed++;
+        }
+      }
+    }
+
+    // Model from router
+    if (router && router.models) {
+      const models = Object.entries(router.models);
+      if (models.length > 0) {
+        models.sort((a, b) => (b[1].weight || 0) - (a[1].weight || 0));
+        currentModel = models[0][0];
+      }
+    }
+
+    // C-factor
+    if (cfactor && cfactor.buckets && cfactor.buckets.length > 0) {
+      const last = cfactor.buckets[cfactor.buckets.length - 1];
+      document.getElementById('live-cfactor').textContent = (last.value || 0).toFixed(2);
+    }
+
+    // Health for active runs
+    if (health) {
+      const active = health.active_runs || 0;
+      if (active > 0) {
+        document.querySelector('.status span:last-child').textContent = `running · ${active} active`;
+        setStatusDot('running');
+      } else {
+        document.querySelector('.status span:last-child').textContent = 'idle · no active runs';
+        setStatusDot('idle');
+      }
+    }
+
+    // Feed from episodes
+    if (episodes && Array.isArray(episodes)) {
+      const recent = episodes.slice(0, 15);
+      for (const ep of recent.reverse()) {
+        const ok = ep.gate_verdict !== 'fail' && ep.success !== false;
+        const name = ep.task_id || ep.plan_id || 'task';
+        addFeedItem(
+          ok ? 'pass' : 'fail',
+          `${name} ${ok ? 'passed' : 'failed'}`,
+          ep.summary || (ok ? 'Gates passed' : 'Gate failure'),
+          [
+            ...(ep.cost_usd != null ? [{ type: 'cost', label: 'cost', value: `$${ep.cost_usd.toFixed(3)}` }] : []),
+            ...(ep.tokens != null ? [{ type: 'tokens', label: 'tokens', value: String(ep.tokens) }] : []),
+          ]
+        );
+      }
+    }
+
+    updateMetrics();
+    renderTaskGrid();
+    renderCostBars();
+    renderCostChart();
+    return;
+  }
+
+  // No real data — fall back to simulation
+  startSimulation();
+}
+
+// ── Simulation fallback ───────────────────────────────────
+function startSimulation() {
+  useRealData = false;
+  totalTasks = 50;
+  tasks = [];
+  costHistory = [];
+  costPoints = [];
+  totalCost = 0;
+  passed = 0;
+  failed = 0;
+  completed = 0;
+
+  // Initialize all as pending
+  for (let i = 0; i < totalTasks; i++) {
+    tasks.push({ state: 'pending', cost: '0.00', name: `task-${i + 1}` });
+  }
+
+  document.querySelector('.status span:last-child').textContent = 'simulated · no server data';
+  setStatusDot('sim');
+  addFeedItem('info', 'Simulation mode', 'No benchmark data from server. Showing simulated run. Start a real benchmark from <a href="bench.html" style="color:var(--rose-bright)">Bench Lab</a>.', []);
+
+  // Start first task
+  tasks[0].state = 'running';
+  updateMetrics();
+  renderTaskGrid();
+  renderCostBars();
+  renderCostChart();
+
+  // Simulate one task every 2s
+  pollInterval = setInterval(simulateStep, 2000);
+}
+
+const SIM_NAMES = [
+  'django__django-11001', 'astropy__astropy-6938', 'matplotlib__matplotlib-23314',
+  'sympy__sympy-13146', 'scikit-learn__scikit-learn-13497', 'requests__requests-3362',
+  'flask__flask-4045', 'pandas__pandas-21587', 'pytest__pytest-5103',
+  'sphinx__sphinx-8273', 'pylint__pylint-7277', 'black__black-3312',
+];
+
+function simulateStep() {
+  if (completed >= totalTasks) {
+    clearInterval(pollInterval);
+    setStatusDot('done');
+    document.querySelector('.status span:last-child').textContent = 'simulated · complete';
+    addFeedItem('info', 'Simulation complete', `${passed}/${totalTasks} passed. Total cost: $${totalCost.toFixed(2)}`, []);
+    return;
+  }
+
+  const ok = Math.random() > 0.25;
+  const cost = parseFloat((Math.random() * 0.18 + 0.03).toFixed(3));
+  tasks[completed].state = ok ? 'pass' : 'fail';
+  tasks[completed].cost = cost.toFixed(3);
+
+  if (ok) passed++; else failed++;
+  totalCost += cost;
+  costHistory.push(cost);
+  if (costHistory.length > 20) costHistory.shift();
+  costPoints.push(totalCost);
+  completed++;
+
+  if (completed < totalTasks) tasks[completed].state = 'running';
+
+  // Feed
+  const name = SIM_NAMES[completed % SIM_NAMES.length];
+  if (ok) {
+    addFeedItem('pass', `Task ${completed} passed`, `<code>${name}</code> — patch applied, tests passed.`, [
+      { type: 'cost', label: 'cost', value: `$${cost.toFixed(3)}` },
+      { type: 'tokens', label: 'tokens', value: `${Math.floor(Math.random() * 3000 + 800)}` },
+    ]);
+  } else {
+    addFeedItem('fail', `Task ${completed} failed`, `<code>${name}</code> — ${Math.random() > 0.5 ? 'tests failed' : 'patch did not apply'}.`, [
+      { type: 'cost', label: 'cost', value: `$${cost.toFixed(3)}` },
+    ]);
+  }
+  if (completed % 5 === 0) {
+    addFeedItem('learn', 'Knowledge updated', 'Cascade router weights adjusted from last 5 tasks.', []);
+  }
+  if (completed % 8 === 0) {
+    currentModel = Math.random() > 0.5 ? 'haiku-4.5' : 'sonnet-4.6';
+    addFeedItem('info', 'Model switch', `Switched to <code>${currentModel}</code> based on complexity estimate.`, []);
+  }
+
+  updateMetrics();
+  renderTaskGrid();
+  renderCostBars();
+  renderCostChart();
+}
+
+// ── Poll for live updates (real data mode) ────────────────
+async function pollLive() {
+  if (!useRealData) return;
+  const eff = await apiFetch('/api/learn/efficiency');
+  if (!eff || !eff.tasks) return;
+
+  const effTasks = eff.tasks.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+  if (effTasks.length <= completed) return; // no new tasks
+
+  // Process new tasks
+  const newTasks = effTasks.slice(completed);
+  for (const t of newTasks) {
+    const cost = t.cost_usd || 0;
+    totalCost += cost;
+    costHistory.push(cost);
+    costPoints.push(totalCost);
+    tasks.push({ state: 'pass', cost: cost.toFixed(3), name: t.task_id || '—' });
+    completed++;
+    passed++;
+    addFeedItem('pass', `${t.task_id || 'Task'} completed`, `Cost: $${cost.toFixed(3)}`, [
+      { type: 'cost', label: 'cost', value: `$${cost.toFixed(3)}` },
+      ...(t.tokens ? [{ type: 'tokens', label: 'tokens', value: String(t.tokens) }] : []),
+    ]);
+  }
+  if (costHistory.length > 20) costHistory = costHistory.slice(-20);
+  totalTasks = Math.max(totalTasks, completed);
+
+  updateMetrics();
+  renderTaskGrid();
+  renderCostBars();
+  renderCostChart();
+}
+
+// ── Render: task grid ─────────────────────────────────────
+function renderTaskGrid() {
+  const grid = document.getElementById('task-grid');
+  grid.innerHTML = tasks.map((t, i) => {
+    const icon = t.state === 'pass' ? '\u2713' : t.state === 'fail' ? '\u2717' : t.state === 'running' ? '\u25CF' : '';
+    return `<div class="task-cell ${t.state}" data-tooltip="Task ${i+1}: ${t.state} ($${t.cost})">${icon || (i+1)}</div>`;
+  }).join('');
+}
+
+// ── Render: cost bars (last 20) ───────────────────────────
+function renderCostBars() {
+  const container = document.getElementById('cost-bars');
+  if (!container) return;
+  const max = Math.max(...costHistory, 0.01);
+  container.innerHTML = costHistory.map((v, i) => {
+    const h = (v / max * 100).toFixed(0);
+    const cls = i === costHistory.length - 1 ? 'cost-bar current' : 'cost-bar';
+    return `<div class="${cls}" style="height:${h}%"></div>`;
+  }).join('');
+}
+
+// ── Render: Canvas 2D cost accumulation chart ─────────────
+function renderCostChart() {
+  const canvas = document.getElementById('viz-canvas');
+  if (!canvas) return;
+  const parent = canvas.parentElement;
+  const rect = parent.getBoundingClientRect();
+  const w = Math.floor(rect.width);
+  const h = Math.floor(rect.height);
+  if (w < 50 || h < 50) return;
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const pad = { top: 20, right: 20, bottom: 30, left: 50 };
+  const plotW = w - pad.left - pad.right;
+  const plotH = h - pad.top - pad.bottom;
+
+  // Grid lines + labels
+  ctx.strokeStyle = 'rgba(48, 40, 48, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.font = '10px JetBrains Mono, monospace';
+  ctx.fillStyle = '#706070';
+  ctx.textAlign = 'right';
+
+  const maxCost = Math.max(...costPoints, 1);
+  const niceMax = Math.ceil(maxCost * 10) / 10; // round up to 0.1
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + plotH - (i / 4) * plotH;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + plotW, y);
+    ctx.stroke();
+    ctx.fillText(`$${(niceMax * i / 4).toFixed(2)}`, pad.left - 6, y + 3);
+  }
+
+  // X axis
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#706070';
+  const maxT = Math.max(totalTasks, costPoints.length, 10);
+  for (let i = 0; i <= 4; i++) {
+    const x = pad.left + (i / 4) * plotW;
+    const label = Math.round(maxT * i / 4);
+    ctx.fillText(String(label), x, h - 8);
+  }
+
+  // Axis labels
+  ctx.fillStyle = '#504050';
+  ctx.font = '9px General Sans, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Tasks', pad.left + plotW / 2, h - 0);
+  ctx.save();
+  ctx.translate(10, pad.top + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('Cumulative Cost ($)', 0, 0);
+  ctx.restore();
+
+  if (costPoints.length < 1) {
+    // Empty state
+    ctx.fillStyle = '#504050';
+    ctx.font = '13px General Sans, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for data\u2026', w / 2, h / 2);
+    return;
+  }
+
+  // Map data to pixel coords
+  const pts = costPoints.map((c, i) => ({
+    x: pad.left + (i / Math.max(maxT - 1, 1)) * plotW,
+    y: pad.top + plotH - (c / niceMax) * plotH,
+  }));
+
+  // Fill area under curve
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pad.top + plotH);
+  for (const p of pts) ctx.lineTo(p.x, p.y);
+  ctx.lineTo(pts[pts.length - 1].x, pad.top + plotH);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+  grad.addColorStop(0, 'rgba(200, 184, 144, 0.15)');
+  grad.addColorStop(1, 'rgba(200, 184, 144, 0.02)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.strokeStyle = '#C8B890';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Dots every 4th point
+  ctx.fillStyle = 'rgba(200, 184, 144, 0.6)';
+  for (let i = 0; i < pts.length; i += Math.max(1, Math.floor(pts.length / 12))) {
+    ctx.beginPath();
+    ctx.arc(pts[i].x, pts[i].y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Current point (last) — rose dot with glow
+  const last = pts[pts.length - 1];
+  ctx.shadowColor = 'rgba(204, 144, 168, 0.5)';
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = '#CC90A8';
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Ring around current
+  ctx.strokeStyle = 'rgba(204, 144, 168, 0.4)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 8, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Value label at current point
+  ctx.fillStyle = '#C8B890';
+  ctx.font = '11px JetBrains Mono, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`$${costPoints[costPoints.length - 1].toFixed(2)}`, last.x + 12, last.y - 4);
+}
+
+// ── Feed ──────────────────────────────────────────────────
+function addFeedItem(type, title, body, metrics) {
+  const list = document.getElementById('feed-list');
+  if (!list) return;
+  const now = new Date();
+  const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const metricsHtml = metrics && metrics.length ? metrics.map(m =>
+    `<span class="fi-metric ${m.type}">${m.label}: ${m.value}</span>`
+  ).join(' &middot; ') : '';
+
+  const item = document.createElement('div');
+  item.className = `feed-item ${type}`;
+  item.innerHTML = `
+    <div class="fi-header">
+      <span class="fi-title">${title}</span>
+      <span class="fi-time">${time}</span>
+    </div>
+    <div class="fi-body">${body}</div>
+    ${metricsHtml ? `<div style="margin-top:4px">${metricsHtml}</div>` : ''}
+  `;
+  list.prepend(item);
+  while (list.children.length > 50) list.lastChild.remove();
+}
+
+// ── Metrics ───────────────────────────────────────────────
+function updateMetrics() {
+  const total = Math.max(totalTasks, completed, 1);
+  document.getElementById('live-pass').textContent = `${passed}/${total}`;
+  document.getElementById('live-cost').textContent = `$${totalCost.toFixed(2)}`;
+  document.getElementById('live-cfactor').textContent = (passed / Math.max(completed, 1) * 1.1).toFixed(2);
+  document.getElementById('live-avg').textContent = completed > 0 ? `${(elapsed / completed).toFixed(1)}s` : '—';
+  document.getElementById('live-progress').textContent = `${completed}/${total}`;
+  document.getElementById('live-model').textContent = currentModel;
+
+  const passBar = document.querySelector('.mb-bar-fill.pass');
+  if (passBar) passBar.style.width = `${passed / total * 100}%`;
+  const costBar = document.querySelector('.mb-bar-fill.cost');
+  if (costBar) costBar.style.width = `${Math.min(totalCost / budget * 100, 100)}%`;
+
+  // Bottom bar budget
+  const budgetEl = document.querySelector('.bb-value.cost');
+  if (budgetEl) budgetEl.textContent = `$${totalCost.toFixed(2)} / $${budget.toFixed(2)}`;
+}
+
+// ── Status dot color ──────────────────────────────────────
+function setStatusDot(state) {
+  const dot = document.querySelector('.status-dot');
+  if (!dot) return;
+  if (state === 'running') { dot.style.background = 'var(--sage)'; dot.style.animationName = 'pulse'; }
+  else if (state === 'sim') { dot.style.background = 'var(--warn)'; dot.style.animationName = 'pulse'; }
+  else if (state === 'idle') { dot.style.background = 'var(--text-dim)'; dot.style.animationName = 'none'; }
+  else if (state === 'done') { dot.style.background = 'var(--sage-bright)'; dot.style.animationName = 'none'; }
+}
+
+// ── Elapsed timer ─────────────────────────────────────────
+timerInterval = setInterval(() => {
+  elapsed++;
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+  document.getElementById('elapsed').textContent = `${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+}, 1000);
+
+// ── Resize handler ────────────────────────────────────────
+window.addEventListener('resize', () => renderCostChart());
+
+// ── Init ──────────────────────────────────────────────────
+document.getElementById('elapsed').textContent = '00:00';
+loadRealData().then(() => {
+  // If real data, poll for updates every 5s
+  if (useRealData) {
+    pollInterval = setInterval(pollLive, 5000);
+  }
+});
+</script>
+</body>
+</html>

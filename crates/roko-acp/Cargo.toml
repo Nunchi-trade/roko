@@ -1,0 +1,36 @@
+[package]
+name = "roko-acp"
+version = "0.1.0"
+edition = "2024"
+description = "ACP (Agent Client Protocol) server for Roko"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
+roko-core = { path = "../roko-core" }
+roko-runtime = { path = "../roko-runtime" }
+roko-agent = { path = "../roko-agent" }
+roko-gate = { path = "../roko-gate" }
+roko-compose = { path = "../roko-compose" }
+roko-orchestrator = { path = "../roko-orchestrator" }
+roko-learn = { path = "../roko-learn" }
+roko-dreams = { path = "../roko-dreams" }
+roko-neuro = { path = "../roko-neuro" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[package.metadata.roko]
+layer = 4

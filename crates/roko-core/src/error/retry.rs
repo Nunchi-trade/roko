@@ -5,6 +5,17 @@
 //! [`RetryPolicy`] encodes exponential backoff with optional jitter.
 //! [`CircuitBreaker`] tracks consecutive failures and prevents cascading
 //! calls to a failing downstream service.
+//!
+//! # Design note (Task 054)
+//!
+//! This module provides the *config-level* retry policy: `should_retry()` and
+//! `delay_for()` compute whether/when to retry, but **do not execute** the
+//! retry loop themselves. The actual retry loop lives in
+//! `roko_agent::retry::RetryPolicy` which adds provider-aware error
+//! classification (`ErrorClass`), `Retry-After` header support, and full-jitter
+//! randomized backoff via `rand`. If you need to *run* a retryable operation,
+//! use the agent-side `RetryPolicy` or build your own loop around these
+//! primitives.
 
 use std::time::{Duration, Instant};
 

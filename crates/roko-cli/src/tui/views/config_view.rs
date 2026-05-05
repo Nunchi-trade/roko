@@ -371,7 +371,7 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, tui_state: &TuiState) {
 
     // Cascade router
     if !tui_state.cascade_router.model_slugs.is_empty() {
-        items.push(ConfigItem::Header("Runtime: Cascade Router".to_string()));
+        items.push(ConfigItem::Header("Runtime: Cascade Route".to_string()));
 
         let total_trials: u64 = tui_state
             .cascade_router
@@ -424,9 +424,9 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, tui_state: &TuiState) {
         }
     }
 
-    // Gate thresholds
+    // Verify thresholds
     if !tui_state.gate_results_page.threshold_rows.is_empty() {
-        items.push(ConfigItem::Header("Runtime: Gate Thresholds".to_string()));
+        items.push(ConfigItem::Header("Runtime: Verify Thresholds".to_string()));
         for row in &tui_state.gate_results_page.threshold_rows {
             let trend_icon = match row.trend {
                 crate::tui::dashboard::GateTrend::Up => "^",
@@ -453,9 +453,9 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, tui_state: &TuiState) {
         }
     }
 
-    // Gate results summary
+    // Verify results summary
     if !tui_state.gate_results_page.gate_rows.is_empty() {
-        items.push(ConfigItem::Header("Runtime: Gate Results".to_string()));
+        items.push(ConfigItem::Header("Runtime: Verify Results".to_string()));
         for row in &tui_state.gate_results_page.gate_rows {
             items.push(ConfigItem::Field {
                 meta: config_meta::ConfigFieldMeta {

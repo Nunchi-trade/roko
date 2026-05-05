@@ -2,7 +2,7 @@
 //! gate types.
 
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Gate, Kind, Verdict};
+use roko_core::{Body, Context, Kind, Signal, Verdict, Verify};
 use roko_gate::generated_test_gate::{ArtifactStore, GeneratedTestGate, InMemoryArtifactStore};
 use roko_gate::integration_gate::IntegrationGate;
 use roko_gate::llm_judge_gate::{JudgeOracle, JudgePayload, LlmJudgeGate};
@@ -54,10 +54,10 @@ path = "src/lib.rs"
     }
 }
 
-fn json_signal<T: Serialize>(body: &T) -> Engram {
+fn json_signal<T: Serialize>(body: &T) -> Signal {
     let body = Body::from_json(body)
         .unwrap_or_else(|err| panic!("failed to serialize signal body as JSON: {err}"));
-    Engram::builder(Kind::Task).body(body).build()
+    Signal::builder(Kind::Task).body(body).build()
 }
 
 fn cargo_payload(root: &Path) -> GatePayload {
@@ -66,16 +66,16 @@ fn cargo_payload(root: &Path) -> GatePayload {
         .with_label("rungs-fixture")
 }
 
-fn cargo_signal(root: &Path) -> Engram {
+fn cargo_signal(root: &Path) -> Signal {
     json_signal(&cargo_payload(root))
 }
 
-fn text_signal(text: &str) -> Engram {
-    Engram::builder(Kind::Task).body(Body::text(text)).build()
+fn text_signal(text: &str) -> Signal {
+    Signal::builder(Kind::Task).body(Body::text(text)).build()
 }
 
-fn generated_signal(root: &Path, plan: &str) -> Engram {
-    Engram::builder(Kind::Task)
+fn generated_signal(root: &Path, plan: &str) -> Signal {
+    Signal::builder(Kind::Task)
         .tag("plan", plan)
         .body(
             Body::from_json(&cargo_payload(root))
@@ -84,8 +84,8 @@ fn generated_signal(root: &Path, plan: &str) -> Engram {
         .build()
 }
 
-fn generated_verify_signal(root: &Path, plan: &str, script: &Path) -> Engram {
-    Engram::builder(Kind::Task)
+fn generated_verify_signal(root: &Path, plan: &str, script: &Path) -> Signal {
+    Signal::builder(Kind::Task)
         .tag("plan", plan)
         .tag("verify_script", script.to_string_lossy())
         .body(
@@ -95,16 +95,16 @@ fn generated_verify_signal(root: &Path, plan: &str, script: &Path) -> Engram {
         .build()
 }
 
-fn symbol_signal(manifest: &SymbolManifest) -> Engram {
+fn symbol_signal(manifest: &SymbolManifest) -> Signal {
     json_signal(manifest)
 }
 
-fn judge_signal(payload: &JudgePayload) -> Engram {
+fn judge_signal(payload: &JudgePayload) -> Signal {
     json_signal(payload)
 }
 
-fn verify_chain_signal(root: &Path, script: &Path) -> Engram {
-    Engram::builder(Kind::Task)
+fn verify_chain_signal(root: &Path, script: &Path) -> Signal {
+    Signal::builder(Kind::Task)
         .tag("verify_script", script.to_string_lossy())
         .body(
             Body::from_json(&cargo_payload(root))
@@ -113,11 +113,11 @@ fn verify_chain_signal(root: &Path, script: &Path) -> Engram {
         .build()
 }
 
-fn diff_signal(payload: &DiffPayload) -> Engram {
+fn diff_signal(payload: &DiffPayload) -> Signal {
     json_signal(payload)
 }
 
-async fn verify<G: Gate + Sync>(gate: &G, signal: &Engram) -> Verdict {
+async fn verify<G: Verify + Sync>(gate: &G, signal: &Signal) -> Verdict {
     let ctx = Context::now();
     gate.verify(signal, &ctx).await
 }
@@ -234,6 +234,7 @@ fn test_integration_ok() {
         integration_test_pattern: Some("test_integration_ok".into()),
         integration_build_system: None,
         verdict_publisher: None,
+        timeout_ms: None,
     };
 
     let ctx = Context::now();

@@ -33,12 +33,12 @@ pub struct BroadcastBus {
 
 struct BroadcastSubscriber {
     filter: TopicFilter,
-    tx: tokio::sync::mpsc::UnboundedSender<Pulse>,
+    tx: tokio::sync::mpsc::Sender<Pulse>,
 }
 
 /// Receiver for [`BroadcastBus`].
 pub struct BroadcastBusReceiver {
-    rx: tokio::sync::mpsc::UnboundedReceiver<Pulse>,
+    rx: tokio::sync::mpsc::Receiver<Pulse>,
 }
 
 impl BroadcastBusReceiver {
@@ -81,8 +81,8 @@ impl Bus for BroadcastBus {
         let subs = self.subscribers.read();
         for sub in subs.iter() {
             if sub.filter.matches(&pulse.topic) {
-                // Best-effort: if the receiver is dropped, we skip it.
-                let _ = sub.tx.send(pulse.clone());
+                // Best-effort: drop on full buffer or closed receiver.
+                let _ = sub.tx.try_send(pulse.clone());
             }
         }
 
@@ -90,7 +90,7 @@ impl Bus for BroadcastBus {
     }
 
     fn subscribe(&self, filter: TopicFilter) -> Result<BroadcastBusReceiver> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(crate::defaults::DEFAULT_CHANNEL_BUFFER);
         let mut subs = self.subscribers.write();
         // Clean up closed subscribers while we're here.
         subs.retain(|s| !s.tx.is_closed());
@@ -119,7 +119,7 @@ pub struct MemoryBus {
 
 /// Receiver for [`MemoryBus`].
 pub struct MemoryBusReceiver {
-    rx: tokio::sync::mpsc::UnboundedReceiver<Pulse>,
+    rx: tokio::sync::mpsc::Receiver<Pulse>,
 }
 
 impl MemoryBusReceiver {
@@ -180,11 +180,11 @@ impl Bus for MemoryBus {
             ring.push_back((seq, pulse.clone()));
         }
 
-        // Fan out to live subscribers.
+        // Fan out to live subscribers (best-effort, drop on full).
         let subs = self.subscribers.read();
         for sub in subs.iter() {
             if sub.filter.matches(&pulse.topic) {
-                let _ = sub.tx.send(pulse.clone());
+                let _ = sub.tx.try_send(pulse.clone());
             }
         }
 
@@ -192,7 +192,7 @@ impl Bus for MemoryBus {
     }
 
     fn subscribe(&self, filter: TopicFilter) -> Result<MemoryBusReceiver> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(crate::defaults::DEFAULT_CHANNEL_BUFFER);
         let mut subs = self.subscribers.write();
         subs.retain(|s| !s.tx.is_closed());
         subs.push(BroadcastSubscriber { filter, tx });

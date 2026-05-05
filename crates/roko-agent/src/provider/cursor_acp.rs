@@ -1,8 +1,14 @@
 use crate::Agent;
 use crate::cursor_agent::{CursorAgent, DEFAULT_BASE_URL};
-use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
+use crate::provider::{
+    AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, current_safety_layer,
+};
+use crate::safety::SafetyLayer;
 use roko_core::agent::ProviderKind;
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde_json::Value;
 
 /// Adapter for the Cursor ACP HTTP fallback.
@@ -41,11 +47,15 @@ impl ProviderAdapter for CursorAcpAdapter {
         let timeout_ms = options
             .timeout_ms
             .or(provider.timeout_ms)
-            .unwrap_or(120_000);
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
 
-        let mut agent = CursorAgent::new(api_key, model.slug.clone())
-            .with_base_url(Self::base_url(provider))
-            .with_timeout_ms(timeout_ms);
+        let mut agent = CursorAgent::new(
+            api_key,
+            model.slug.clone(),
+            current_safety_layer().unwrap_or_else(SafetyLayer::with_defaults),
+        )
+        .with_base_url(Self::base_url(provider))
+        .with_timeout_ms(timeout_ms);
 
         if let Some(headers) = &provider.extra_headers {
             agent = agent.with_extra_headers(headers.clone());
@@ -77,15 +87,15 @@ impl ProviderAdapter for CursorAcpAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn spawn_prompt_server(
@@ -206,7 +216,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,

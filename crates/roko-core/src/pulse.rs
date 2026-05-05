@@ -4,7 +4,7 @@
 //! flow through the [`Bus`](crate::traits) and may "graduate" to an [`Engram`]
 //! through deliberate promotion. This module also defines [`Topic`] (the
 //! addressing key for Pulses), [`TopicFilter`] (subscription filters), and
-//! [`PolicyOutputs`] (the explicit outputs from a Policy's `decide()` call).
+//! [`PolicyOutputs`] (the explicit outputs from a React's `decide()` call).
 
 use crate::{Body, Engram, Kind};
 use serde::{Deserialize, Serialize};
@@ -201,6 +201,12 @@ pub enum TopicFilter {
     Prefix(String),
     /// Match all topics.
     All,
+    /// Match only if ALL inner filters match (conjunction).
+    And(Vec<TopicFilter>),
+    /// Match if ANY inner filter matches (disjunction).
+    Or(Vec<TopicFilter>),
+    /// Match if the inner filter does NOT match (negation).
+    Not(Box<TopicFilter>),
 }
 
 impl TopicFilter {
@@ -211,13 +217,16 @@ impl TopicFilter {
             Self::Exact(t) => t == topic,
             Self::Prefix(p) => topic.starts_with(p),
             Self::All => true,
+            Self::And(filters) => filters.iter().all(|filter| filter.matches(topic)),
+            Self::Or(filters) => filters.iter().any(|filter| filter.matches(topic)),
+            Self::Not(filter) => !filter.matches(topic),
         }
     }
 }
 
 // ─── PolicyOutputs ──────────────────────────────────────────────────────────
 
-/// Explicit outputs from a [`Policy`](crate::Policy)'s `decide()` call.
+/// Explicit outputs from a [`React`](crate::React)'s `decide()` call.
 ///
 /// Policies can both publish new [`Pulse`]s for immediate downstream reactions
 /// AND persist [`Engram`]s for summaries and decisions. This struct makes both
@@ -239,7 +248,7 @@ impl TopicFilter {
 pub struct PolicyOutputs {
     /// Pulses to publish on the Bus for immediate downstream reactions.
     pub pulses: Vec<Pulse>,
-    /// Engrams to persist via the Substrate.
+    /// Engrams to persist via the Store.
     pub engrams: Vec<Engram>,
 }
 
@@ -428,6 +437,76 @@ mod tests {
             let parsed: TopicFilter = serde_json::from_str(&json).unwrap();
             assert_eq!(f, parsed);
         }
+    }
+
+    #[test]
+    fn filter_and_with_mixed_filters() {
+        // Both must match: prefix "gate." AND exact "gate.verdict"
+        let f = TopicFilter::And(vec![
+            TopicFilter::Prefix("gate.".into()),
+            TopicFilter::Exact(Topic::new("gate.verdict")),
+        ]);
+        assert!(f.matches(&Topic::new("gate.verdict")));
+        // Matches prefix but not exact
+        assert!(!f.matches(&Topic::new("gate.compile")));
+        // Matches neither
+        assert!(!f.matches(&Topic::new("heartbeat.tick")));
+    }
+
+    #[test]
+    fn filter_or_with_disjoint_filters() {
+        // Either matches: exact "gate.verdict" OR prefix "heartbeat."
+        let f = TopicFilter::Or(vec![
+            TopicFilter::Exact(Topic::new("gate.verdict")),
+            TopicFilter::Prefix("heartbeat.".into()),
+        ]);
+        assert!(f.matches(&Topic::new("gate.verdict")));
+        assert!(f.matches(&Topic::new("heartbeat.tick")));
+        assert!(!f.matches(&Topic::new("episode.logged")));
+    }
+
+    #[test]
+    fn filter_not_inverts_exact_match() {
+        let f = TopicFilter::Not(Box::new(TopicFilter::Exact(Topic::new("gate.verdict"))));
+        // The exact topic should NOT match (inverted)
+        assert!(!f.matches(&Topic::new("gate.verdict")));
+        // Everything else matches
+        assert!(f.matches(&Topic::new("gate.compile")));
+        assert!(f.matches(&Topic::new("heartbeat.tick")));
+    }
+
+    #[test]
+    fn filter_nested_combinators() {
+        // Or([And([Prefix("gate."), Prefix("gate.verdict")]), Not(Exact("heartbeat.tick"))])
+        let f = TopicFilter::Or(vec![
+            TopicFilter::And(vec![
+                TopicFilter::Prefix("gate.".into()),
+                TopicFilter::Prefix("gate.verdict".into()),
+            ]),
+            TopicFilter::Not(Box::new(TopicFilter::Exact(Topic::new("heartbeat.tick")))),
+        ]);
+        // Matches first branch (both prefixes)
+        assert!(f.matches(&Topic::new("gate.verdict.emitted")));
+        // Does not match first branch (only one prefix), but matches second (not "heartbeat.tick")
+        assert!(f.matches(&Topic::new("gate.compile")));
+        // "heartbeat.tick" fails second branch (Not inverts to false), check first branch: fails
+        assert!(!f.matches(&Topic::new("heartbeat.tick")));
+    }
+
+    #[test]
+    fn filter_and_empty_is_vacuous_truth() {
+        let f = TopicFilter::And(vec![]);
+        // Empty And: all of zero filters match (vacuous truth)
+        assert!(f.matches(&Topic::new("anything")));
+        assert!(f.matches(&Topic::new("")));
+    }
+
+    #[test]
+    fn filter_or_empty_is_false() {
+        let f = TopicFilter::Or(vec![]);
+        // Empty Or: none of zero filters match
+        assert!(!f.matches(&Topic::new("anything")));
+        assert!(!f.matches(&Topic::new("")));
     }
 
     // ── PolicyOutputs ───────────────────────────────────────────────────

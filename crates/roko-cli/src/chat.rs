@@ -8,13 +8,15 @@
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth;
+use crate::chat_history::{SessionSummary, save_summary_nonblocking};
 
 #[derive(Debug, Deserialize)]
 struct SendMessageResponse {
@@ -66,6 +68,13 @@ fn serve_health_url(base: &str) -> String {
 /// Construct the health-check URL for an agent sidecar (`/health`).
 fn sidecar_health_url(base: &str) -> String {
     format!("{}/health", base.trim_end_matches('/'))
+}
+
+/// Try to find the agent's sidecar bind address from `.roko/runtime/agents.json`.
+///
+/// Public alias for use by `chat_inline`.
+pub fn lookup_sidecar_url(agent_id: &str, workdir: &Path) -> Option<String> {
+    lookup_sidecar(agent_id, workdir)
 }
 
 /// Try to find the agent's sidecar bind address from `.roko/runtime/agents.json`.
@@ -227,6 +236,218 @@ pub async fn run_chat_repl(agent_id: &str, serve_url: &str) -> Result<()> {
 
     println!("\nbye.");
     Ok(())
+}
+
+/// Run a chat REPL that talks directly to a provider adapter.
+///
+/// `provider_name` must be a key in `config.providers` (for example
+/// `"anthropic_api"` or `"openai_compat"`). The model is resolved via
+/// `config.agent.default_model` or the first model whose provider matches
+/// `provider_name`.
+pub async fn run_direct_provider_chat(
+    agent_id: &str,
+    provider_name: &str,
+    config: &roko_core::config::schema::RokoConfig,
+    workdir: &Path,
+) -> Result<()> {
+    use crate::learning_helpers::capture_runtime_model_slugs;
+    use roko_agent::provider::{AgentOptions, create_agent_for_model};
+    use roko_core::agent::resolve_model;
+    use roko_core::{Body, Context, Engram, Kind};
+    use roko_learn::model_call_feedback::{ModelCallFeedback, ModelCallFeedbackRecorder};
+
+    let model_key = find_model_for_provider(config, provider_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no model configured for provider '{provider_name}'; add a [[models]] entry with provider = \"{provider_name}\" in roko.toml"
+        )
+    })?;
+    let model_slug = resolve_model(config, &model_key).slug;
+    let cascade_model_slugs = capture_runtime_model_slugs(config, &model_slug);
+    let feedback_recorder = ModelCallFeedbackRecorder::from_workdir(workdir, cascade_model_slugs);
+
+    let llm_timeout_ms = config.timeouts.llm_call().as_millis() as u64;
+    let options = AgentOptions {
+        name: agent_id.to_string(),
+        timeout_ms: Some(llm_timeout_ms),
+        ..Default::default()
+    };
+
+    let agent = create_agent_for_model(config, &model_key, options)
+        .map_err(|e| anyhow::anyhow!("create agent: {e}"))?;
+    println!("roko chat (direct) — provider: {provider_name}, model: {model_key}");
+    println!("Type a message. Press Ctrl-D to exit.\n");
+
+    let started_at = Utc::now();
+    let mut turn_count: u32 = 0;
+    let mut first_message = String::new();
+    let mut last_message = String::new();
+    let mut total_tokens: u64 = 0;
+
+    let stdin = io::stdin();
+    let mut stdin_lock = stdin.lock();
+    let mut history: Vec<serde_json::Value> = Vec::new();
+
+    loop {
+        print!("\x1b[36myou>\x1b[0m ");
+        std::io::stdout().flush().context("flush prompt")?;
+
+        let mut line = String::new();
+        if stdin_lock.read_line(&mut line).context("read input")? == 0 {
+            break;
+        }
+        let message = line.trim();
+        if message.is_empty() {
+            continue;
+        }
+
+        if first_message.is_empty() {
+            first_message = message.chars().take(120).collect();
+        }
+        last_message = message.chars().take(120).collect();
+        turn_count += 1;
+
+        history.push(json!({
+            "role": "user",
+            "content": message,
+        }));
+
+        let prompt_text = render_history_prompt(&history);
+        let engram = Engram::builder(Kind::Prompt)
+            .body(Body::text(&prompt_text))
+            .build();
+        let ctx = Context::now();
+
+        let indicator = if agent.supports_streaming() {
+            "[streaming...]"
+        } else {
+            "[waiting...]"
+        };
+        print!("{indicator} ");
+        std::io::stdout().flush().context("flush indicator")?;
+
+        let turn_started = Instant::now();
+        let result = agent.run(&engram, &ctx).await;
+        let latency_ms = turn_started.elapsed().as_millis() as u64;
+        total_tokens +=
+            u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
+        if let Err(error) = feedback_recorder
+            .record(ModelCallFeedback {
+                run_id: None,
+                request_id: Some(format!("direct-chat-{agent_id}-{turn_count}")),
+                prompt_section_ids: Vec::new(),
+                knowledge_ids: Vec::new(),
+                model: model_slug.clone(),
+                provider: provider_name.to_string(),
+                role: "chat_direct".to_string(),
+                input_tokens: u64::from(result.usage.input_tokens),
+                output_tokens: u64::from(result.usage.output_tokens),
+                cost_usd: f64::from(result.usage.cost_usd),
+                latency_ms,
+                success: result.success,
+                provider_success: Some(result.success),
+            })
+            .await
+        {
+            tracing::warn!(
+                provider = %provider_name,
+                model = %model_slug,
+                error = %error,
+                "failed to record direct provider chat feedback"
+            );
+        }
+
+        print!("\r\x1b[K");
+
+        print!("\x1b[33m{agent_id}>\x1b[0m ");
+        std::io::stdout().flush().context("flush agent prompt")?;
+
+        let text = result.output.body.as_text().unwrap_or("[no text output]");
+        history.push(json!({
+            "role": "assistant",
+            "content": text,
+            "success": result.success,
+        }));
+
+        if result.success {
+            println!("{text}");
+        } else {
+            eprintln!("[agent error] {text}");
+        }
+        println!();
+    }
+
+    println!("\nbye.");
+
+    let ended_at = Utc::now();
+    let session_id = format!("{}-{}", started_at.format("%Y-%m-%dT%H-%M-%S"), agent_id);
+    let summary = SessionSummary {
+        session_id,
+        agent_id: agent_id.to_string(),
+        provider: provider_name.to_string(),
+        model_key: model_key.clone(),
+        started_at: started_at.to_rfc3339(),
+        ended_at: ended_at.to_rfc3339(),
+        turn_count,
+        first_message,
+        last_message,
+        total_tokens,
+        total_cost_usd: 0.0,
+    };
+    save_summary_nonblocking(workdir.to_path_buf(), summary);
+    tokio::task::yield_now().await;
+    Ok(())
+}
+
+fn render_history_prompt(history: &[serde_json::Value]) -> String {
+    let mut prompt = String::new();
+
+    for message in history {
+        let role = message.get("role").and_then(serde_json::Value::as_str);
+        let content = message
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        let label = match role {
+            Some("assistant") => "Assistant",
+            Some("system") => "System",
+            _ => "User",
+        };
+
+        prompt.push_str(label);
+        prompt.push_str(":\n");
+        prompt.push_str(content);
+        prompt.push_str("\n\n");
+    }
+
+    prompt.trim_end().to_string()
+}
+
+/// Find the first model key in `config` whose provider name matches `provider_name`.
+///
+/// Tries `config.agent.default_model` first; if that model's provider matches,
+/// returns it. Otherwise scans `config.models` for the first match.
+fn find_model_for_provider(
+    config: &roko_core::config::schema::RokoConfig,
+    provider_name: &str,
+) -> Option<String> {
+    if !config.agent.default_model.is_empty() {
+        let default_model = &config.agent.default_model;
+        if let Some(profile) = config.models.get(default_model.as_str()) {
+            if profile.provider == provider_name {
+                return Some(default_model.clone());
+            }
+        }
+    }
+
+    config
+        .models
+        .iter()
+        .find(|(_, profile)| profile.provider == provider_name)
+        .map(|(key, _)| key.clone())
 }
 
 /// Determine which backend to use. Prefers sidecar when available.
@@ -454,6 +675,32 @@ pub fn extract_clean_text(raw: &str) -> String {
                         }
                     }
                 }
+                // Claude CLI tool event: carries output of tool calls (Bash, Read, etc.)
+                Some("tool") => {
+                    let content = obj
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| obj.get("output").and_then(serde_json::Value::as_str));
+                    if let Some(content) = content.filter(|s| !s.is_empty()) {
+                        let tool_name = obj
+                            .get("tool")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("tool");
+                        // Include tool output inline, truncated for sanity
+                        let truncated = if content.len()
+                            > roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT
+                        {
+                            let mut end = roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT;
+                            while !content.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            format!("[{tool_name}] {}...[truncated]", &content[..end])
+                        } else {
+                            format!("[{tool_name}] {content}")
+                        };
+                        parts.push(truncated);
+                    }
+                }
                 // Generic: look for top-level `result` or `content` string fields.
                 _ => {
                     if let Some(text) = obj
@@ -621,5 +868,89 @@ mod tests {
             format!("http://{bind}")
         };
         assert_eq!(url, "http://127.0.0.1:8081");
+    }
+
+    #[test]
+    fn render_history_prompt_formats_turns() {
+        let history = vec![
+            json!({ "role": "user", "content": "hello" }),
+            json!({ "role": "assistant", "content": "world" }),
+            json!({ "role": "assistant", "content": "" }),
+        ];
+
+        let prompt = render_history_prompt(&history);
+
+        assert!(prompt.contains("User:\nhello"));
+        assert!(prompt.contains("Assistant:\nworld"));
+        assert!(!prompt.contains("Assistant:\n\n"));
+    }
+
+    fn model(provider: &str, slug: &str) -> roko_core::config::schema::ModelProfile {
+        roko_core::config::schema::ModelProfile {
+            provider: provider.to_string(),
+            slug: slug.to_string(),
+            context_window: 128_000,
+            max_output: Some(1_024),
+            supports_tools: true,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn find_model_for_provider_prefers_default_model() {
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.agent.default_model = "default-model".to_string();
+        config.models.insert(
+            "default-model".to_string(),
+            model("anthropic_api", "default-model"),
+        );
+        config.models.insert(
+            "fallback-model".to_string(),
+            model("anthropic_api", "fallback-model"),
+        );
+
+        assert_eq!(
+            find_model_for_provider(&config, "anthropic_api"),
+            Some("default-model".to_string())
+        );
+    }
+
+    #[test]
+    fn find_model_for_provider_scans_for_matching_provider() {
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.agent.default_model = "unrelated".to_string();
+        config.models.insert(
+            "anthropic-model".to_string(),
+            model("anthropic_api", "anthropic-model"),
+        );
+        config.models.insert(
+            "openai-model".to_string(),
+            model("openai_compat", "openai-model"),
+        );
+
+        assert_eq!(
+            find_model_for_provider(&config, "openai_compat"),
+            Some("openai-model".to_string())
+        );
+        assert_eq!(find_model_for_provider(&config, "missing"), None);
     }
 }

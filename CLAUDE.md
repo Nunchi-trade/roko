@@ -64,6 +64,11 @@ via `cargo run -p roko-cli -- <subcommand>`, it's probably wrong.
 ### 3. Verify before marking done
 Run the actual code path. "Code exists" != "feature works". Test via CLI, not just unit tests.
 
+### 4. Log gaps when finishing work
+After completing any implementation task, append unfinished items to `.roko/GAPS.md`.
+Include: what's missing, why it wasn't done, and what subsystem it affects.
+This file is the canonical gap tracker — check it before starting new work.
+
 ## Architecture
 
 1 noun (Signal) + 6 verb traits (Substrate, Scorer, Gate, Router, Composer, Policy).
@@ -236,7 +241,7 @@ cargo run -p roko-cli -- status
 | **Safety layer** | `/Users/will/dev/nunchi/roko/roko/crates/roko-agent/src/safety/` |
 | **System prompt builder** | `/Users/will/dev/nunchi/roko/roko/crates/roko-compose/src/system_prompt_builder.rs` |
 | **Role templates** | `/Users/will/dev/nunchi/roko/roko/crates/roko-compose/src/templates/` |
-| **Implementation plans** | `/Users/will/dev/nunchi/roko/roko/tmp/implementation-plans/00-INDEX.md` |
+| **Master task list** | `/Users/will/dev/nunchi/roko/roko/tmp/MASTER-TASKS.md` |
 | **Roko data dir** | `/Users/will/dev/nunchi/roko/roko/.roko/` |
 | **Executor snapshots** | `/Users/will/dev/nunchi/roko/roko/.roko/state/` |
 | **PRD storage** | `/Users/will/dev/nunchi/roko/roko/.roko/prd/` |

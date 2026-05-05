@@ -1,0 +1,563 @@
+/* ═══════════════════════════════════════════════════════════
+   SETTINGS · Config Management
+   Rosedust design system — expressive form controls
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Keyframes ── */
+
+/* fadeSlideUp → shared animations.css (fadeInUp) */
+
+@keyframes shakeX {
+  0%, 100% { transform: translateX(0); }
+  20%      { transform: translateX(-6px); }
+  40%      { transform: translateX(5px); }
+  60%      { transform: translateX(-4px); }
+  80%      { transform: translateX(3px); }
+}
+
+@keyframes successPulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 40%, transparent); }
+  70%  { box-shadow: 0 0 0 8px color-mix(in srgb, var(--success) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 0%, transparent); }
+}
+
+@keyframes toastSlideIn {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes toastSlideOut {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(20px); }
+}
+
+@keyframes checkFadeIn {
+  from { opacity: 0; transform: scale(0.7); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes toggleRipple {
+  0%   { transform: scale(0); opacity: .35; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+
+/* ── Page layout ── */
+
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-4) var(--sp-6);
+  gap: var(--sp-4);
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ── Header ── */
+
+.settings-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  animation: fadeInUp var(--duration-reveal) var(--ease) both;
+}
+
+.settings-title {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: var(--text-xl);
+  color: var(--text-strong);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.settings-subtitle {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.settings-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.settings-status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  animation: ledPulse 3s ease-in-out infinite;
+}
+
+.settings-status .dot.offline {
+  background: var(--danger);
+  box-shadow: 0 0 6px var(--danger);
+}
+
+/* ── Staggered section cards ── */
+
+.settings-section {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--rose-dim);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-4);
+  transition:
+    border-color var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease),
+    transform var(--duration-smooth) var(--ease);
+  animation: fadeInUp var(--duration-reveal) var(--ease) both;
+}
+
+.settings-section:nth-child(2) { animation-delay: 80ms; }
+.settings-section:nth-child(3) { animation-delay: 160ms; }
+.settings-section:nth-child(4) { animation-delay: 240ms; }
+.settings-section:nth-child(5) { animation-delay: 320ms; }
+.settings-section:nth-child(6) { animation-delay: 400ms; }
+
+/* Card hover lift */
+.settings-section:hover {
+  border-left-color: var(--rose);
+  box-shadow: var(--glow-rose-soft), 0 4px 20px color-mix(in srgb, black 20%, transparent);
+  transform: translateY(-1px);
+}
+
+.settings-section h2 {
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  font-weight: 500;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  margin: 0 0 var(--sp-3);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.settings-section h2 .badge {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--rose-deep);
+  color: var(--rose-bright);
+  border: 1px solid var(--rose-dim);
+}
+
+/* ── Table ── */
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-md);
+}
+
+.settings-table th {
+  text-align: left;
+  padding: 0.4rem 0.75rem;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  font-weight: 400;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-table td {
+  padding: 0.5rem 0.75rem;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-soft);
+  transition: background var(--duration-snap);
+}
+
+.settings-table tr:hover td {
+  background: color-mix(in srgb, var(--rose) 3%, transparent);
+}
+
+.settings-table tr:last-child td {
+  border-bottom: none;
+}
+
+.settings-table .mono {
+  font-family: var(--mono);
+  font-size: var(--text-md);
+}
+
+/* ── Form fields ── */
+
+.settings-field {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  position: relative;
+}
+
+.settings-field:last-child {
+  margin-bottom: 0;
+}
+
+.settings-field label {
+  min-width: 130px;
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  letter-spacing: .04em;
+  color: var(--text-dim);
+  transition: color var(--duration-snap);
+}
+
+.settings-field:focus-within label {
+  color: var(--rose-bright);
+}
+
+/* Select & text inputs */
+.settings-field select,
+.settings-field input[type="text"] {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  font-family: var(--mono);
+  transition:
+    border-color var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease);
+}
+
+.settings-field input.input-narrow {
+  max-width: 80px;
+  flex: none;
+}
+
+.settings-field select:focus,
+.settings-field input[type="text"]:focus {
+  outline: none;
+  border-color: var(--rose);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rose) 15%, transparent), 0 0 12px color-mix(in srgb, var(--rose) 10%, transparent);
+}
+
+/* ── Toggle switch (replaces checkbox) ── */
+
+.toggle-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.toggle-wrap input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  cursor: pointer;
+  transition:
+    background var(--duration-smooth) var(--ease),
+    border-color var(--duration-smooth) var(--ease);
+  overflow: hidden;
+}
+
+.toggle-track::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: var(--text-dim);
+  border-radius: 50%;
+  transition:
+    transform var(--duration-smooth) cubic-bezier(0.34, 1.56, 0.64, 1),
+    background var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease);
+}
+
+/* Ripple element */
+.toggle-track::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 11px;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  background: var(--rose-glow);
+  border-radius: 50%;
+  opacity: 0;
+  transform: scale(0);
+  pointer-events: none;
+}
+
+input[type="checkbox"]:checked + .toggle-track {
+  background: var(--rose-deep);
+  border-color: var(--rose-dim);
+}
+
+input[type="checkbox"]:checked + .toggle-track::before {
+  transform: translateX(18px);
+  background: var(--rose-bright);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 50%, transparent);
+}
+
+input[type="checkbox"]:active + .toggle-track::after {
+  animation: toggleRipple .4s ease-out;
+}
+
+input[type="checkbox"]:disabled + .toggle-track {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+input[type="checkbox"]:focus-visible + .toggle-track {
+  outline: 1px solid var(--rose-dim);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rose) 15%, transparent);
+}
+
+/* ── Actions bar ── */
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+  animation: fadeInUp var(--duration-reveal) var(--ease) both;
+  animation-delay: 480ms;
+}
+
+.settings-actions button {
+  padding: 0.6rem 1.4rem;
+  border-radius: var(--radius-md);
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  transition:
+    background var(--duration-snap) var(--ease),
+    border-color var(--duration-snap) var(--ease),
+    transform var(--duration-snap) var(--ease),
+    box-shadow var(--duration-snap) var(--ease);
+}
+
+.settings-actions button:hover:not(:disabled) {
+  background: var(--surface);
+  border-color: var(--rose-dim);
+  transform: translateY(-1px);
+}
+
+.settings-actions button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.settings-actions button.primary {
+  background: var(--rose-dim);
+  border-color: var(--rose);
+  color: var(--text-strong);
+}
+
+.settings-actions button.primary:hover:not(:disabled) {
+  background: var(--rose);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--rose) 30%, transparent);
+}
+
+.settings-actions button.primary:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.settings-actions button.primary.saving {
+  pointer-events: none;
+  opacity: .7;
+}
+
+.settings-actions button.primary.success-flash {
+  animation: successPulse 0.6s ease-out;
+}
+
+.settings-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Save toast ── */
+
+.settings-toast {
+  position: fixed;
+  bottom: var(--sp-6);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  background: color-mix(in srgb, var(--bg-void) 92%, transparent);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(8px);
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  letter-spacing: .06em;
+  color: var(--success);
+  z-index: var(--z-floating);
+  animation: toastSlideIn var(--duration-smooth) var(--ease) both;
+}
+
+.settings-toast.exiting {
+  animation: toastSlideOut var(--duration-smooth) var(--ease) both;
+}
+
+.settings-toast .toast-check {
+  font-size: var(--text-md);
+  animation: checkFadeIn var(--duration-snap) var(--ease) both;
+}
+
+/* ── Validation states ── */
+
+.settings-field.invalid input,
+.settings-field.invalid select {
+  border-color: var(--status-error);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--rose-bright) 15%, transparent);
+  animation: shakeX 0.4s ease-in-out;
+}
+
+.settings-field .valid-check {
+  color: var(--success);
+  font-size: var(--text-md);
+  animation: checkFadeIn var(--duration-snap) var(--ease) both;
+  margin-left: var(--sp-1);
+}
+
+/* ── Empty state ── */
+
+.settings-empty {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  font-style: italic;
+  padding: var(--sp-2) 0;
+}
+
+/* ── Offline state ── */
+
+.settings-offline .settings-section,
+.settings-offline .settings-actions {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.settings-offline-banner {
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-raised);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-lg);
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  animation: fadeInUp var(--duration-reveal) var(--ease) both;
+  animation-delay: 60ms;
+}
+
+.settings-offline-banner code {
+  font-family: var(--mono);
+  color: var(--rose-bright);
+}
+
+/* ── Reset button ── */
+
+.settings-actions button.reset-btn {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+.settings-actions button.reset-btn:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+}
+
+.settings-actions button.reset-btn.shaking {
+  animation: shakeX 0.4s ease-in-out;
+}
+
+/* ── Collapsible section ── */
+
+.settings-section-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+  margin: 0 0 var(--sp-3);
+}
+
+.settings-section-toggle h2 {
+  margin: 0;
+}
+
+.settings-section-chevron {
+  font-size: var(--text-md);
+  color: var(--text-dim);
+  transition: transform var(--duration-smooth) var(--ease);
+}
+
+.settings-section-chevron.collapsed {
+  transform: rotate(-90deg);
+}
+
+.settings-section-body {
+  overflow: hidden;
+  transition:
+    max-height var(--duration-smooth) var(--ease),
+    opacity var(--duration-smooth) var(--ease);
+  max-height: 600px;
+  opacity: 1;
+}
+
+.settings-section-body.collapsed {
+  max-height: 0;
+  opacity: 0;
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-section,
+  .settings-header,
+  .settings-actions,
+  .settings-offline-banner {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .settings-toast {
+    animation: none;
+  }
+}

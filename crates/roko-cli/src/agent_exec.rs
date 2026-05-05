@@ -5,11 +5,16 @@
 //! safety scoping, resume threading, and learning-episode persistence.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::agent_config::{command_from_config, model_from_config};
 use crate::agent_episode::build_capture_episode;
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
+use crate::learning_helpers::{
+    capture_runtime_model_slugs, distillation_model_caller, provider_id_for_model,
+    record_persisted_provider_health, resolve_capture_model_slug,
+};
 use anyhow::{Context as _, Result};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
@@ -37,6 +42,8 @@ pub struct AgentExecOpts<'a> {
     /// When set, the safety layer applies role-specific policies and the
     /// CascadeRouter can make role-aware model selection decisions.
     pub role: Option<&'a str>,
+    /// Tool restriction. `Some("none")` disables all tools. `None` uses provider defaults.
+    pub allowed_tools: Option<&'a str>,
 }
 
 /// Episode metadata for agent execution paths that should persist learning data.
@@ -90,9 +97,8 @@ async fn run_agent_capture_impl(
     episode: Option<AgentExecEpisode<'_>>,
 ) -> Result<(i32, String)> {
     let started = Instant::now();
-    let mut routing_config = roko_core::config::load_config(opts.workdir)
+    let routing_config = roko_core::config::loader::load_config_unified(opts.workdir)
         .with_context(|| format!("load routing config from {}", opts.workdir.display()))?;
-    routing_config.apply_process_env();
     let routing_enabled = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
     // Fail fast if the agent command is still the test-only default.
@@ -132,10 +138,10 @@ async fn run_agent_capture_impl(
         SpawnAgentSpec {
             model: model.clone(),
             command: routing_config.agent.command.clone(),
-            timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
+            timeout_ms: Some(300_000), // 5 min for CLI flows (plan generation / research tasks)
             system_prompt: opts.system_prompt.map(str::to_string),
             cached_content: None,
-            tools: None,
+            tools: opts.allowed_tools.map(str::to_string),
             mcp_config: None,
             working_dir: Some(opts.workdir.to_path_buf()),
             env: opts.env_vars.to_vec(),
@@ -152,9 +158,77 @@ async fn run_agent_capture_impl(
     let prompt = Engram::builder(Kind::Prompt)
         .body(Body::text(opts.prompt))
         .build();
+    tracing::info!(
+        model = %model,
+        role = ?opts.role,
+        provider = %resolved.provider_kind.label(),
+        prompt_len = opts.prompt.len(),
+        "agent_exec: dispatching prompt"
+    );
+
+    // Run agent with a concurrent progress ticker so the user sees activity
+    // during long-running LLM calls (especially non-Claude backends that
+    // don't emit streaming stderr).
+    let tick_model = model.clone();
+    let tick_provider = resolved.provider_kind.label().to_string();
+    let tick_start = Instant::now();
+    let ticker = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        interval.tick().await; // skip immediate first tick
+        loop {
+            interval.tick().await;
+            let elapsed = tick_start.elapsed().as_secs();
+            let mins = elapsed / 60;
+            let secs = elapsed % 60;
+            if mins > 0 {
+                eprintln!(
+                    "  ⏳ Agent working... ({mins}m {secs}s) [{tick_model} via {tick_provider}]"
+                );
+            } else {
+                eprintln!("  ⏳ Agent working... ({secs}s) [{tick_model} via {tick_provider}]");
+            }
+        }
+    });
     let result = agent.run(&prompt, &Context::now()).await;
+    ticker.abort();
 
     let rendered = result.output.body.as_text().unwrap_or("").to_string();
+    let elapsed_ms = started.elapsed().as_millis();
+    tracing::info!(
+        model = %model,
+        success = result.success,
+        output_len = rendered.len(),
+        output_empty = rendered.trim().is_empty(),
+        elapsed_ms = elapsed_ms,
+        "agent_exec: agent returned"
+    );
+    // Print completion summary to stderr
+    {
+        let secs = elapsed_ms / 1000;
+        let mins = secs / 60;
+        let s = secs % 60;
+        let len = rendered.len();
+        if result.success {
+            if mins > 0 {
+                eprintln!("  ✓ Agent completed ({mins}m {s}s, {len} bytes) [{model}]");
+            } else {
+                eprintln!("  ✓ Agent completed ({s}s, {len} bytes) [{model}]");
+            }
+        } else {
+            if mins > 0 {
+                eprintln!("  ✗ Agent failed ({mins}m {s}s, {len} bytes) [{model}]");
+            } else {
+                eprintln!("  ✗ Agent failed ({s}s, {len} bytes) [{model}]");
+            }
+        }
+    }
+    if rendered.trim().is_empty() {
+        tracing::warn!(
+            model = %model,
+            role = ?opts.role,
+            "agent_exec: agent returned empty output text"
+        );
+    }
     if echo_output && !rendered.is_empty() {
         print!("{rendered}");
     }
@@ -164,7 +238,7 @@ async fn run_agent_capture_impl(
         persist_capture_episode(
             opts.workdir,
             resolved.provider_kind.label(),
-            Some(&model),
+            Some(&resolved.slug),
             episode.task_kind,
             episode.task_id,
             opts.prompt,
@@ -192,9 +266,17 @@ pub async fn persist_capture_episode(
     wall_time_ms: u64,
     resume_session: Option<&str>,
 ) -> Result<()> {
-    let (episode, provider) = build_capture_episode(
+    let config = roko_core::config::loader::load_config_unified(workdir).unwrap_or_default();
+    let capture_model = resolve_capture_model_slug(&config, model);
+    let provider_from_config = capture_model
+        .as_deref()
+        .and_then(|model_slug| provider_id_for_model(&config, model_slug))
+        .or_else(|| model.and_then(|model_key| provider_id_for_model(&config, model_key)));
+
+    let episode_model = capture_model.as_deref().or(model);
+    let (mut episode, fallback_provider) = build_capture_episode(
         agent_command,
-        model,
+        episode_model,
         task_kind,
         task_id,
         prompt,
@@ -203,21 +285,38 @@ pub async fn persist_capture_episode(
         wall_time_ms,
         resume_session,
     );
+    let provider = provider_from_config.unwrap_or(fallback_provider);
+    if !provider.trim().is_empty() {
+        episode
+            .extra
+            .insert("provider".to_string(), serde_json::json!(provider.clone()));
+    }
 
-    let mut runtime = LearningRuntime::open_under(workdir.join(".roko").join("memory"))
-        .await
-        .map_err(|e| anyhow::anyhow!("open learning runtime: {e}"))?;
+    let learn_root = workdir.join(".roko").join("learn");
+    let model_slugs = capture_runtime_model_slugs(&config, episode.model.as_str());
+    let mut runtime = if model_slugs.is_empty() {
+        LearningRuntime::open_under(&learn_root).await
+    } else {
+        LearningRuntime::open_under_with_models(&learn_root, model_slugs).await
+    }
+    .map_err(|e| anyhow::anyhow!("open learning runtime: {e}"))?;
     let distillation_workdir = workdir.to_path_buf();
+    let distillation_caller = distillation_model_caller(workdir);
     runtime.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+        roko_neuro::spawn_episode_distillation(
+            distillation_workdir.clone(),
+            episode,
+            Some(Arc::clone(&distillation_caller)),
+        );
     });
 
     let mut completed = CompletedRunInput::from_episode(episode);
-    completed.provider = Some(provider);
+    completed.provider = (!provider.trim().is_empty()).then_some(provider.clone());
     runtime
         .record_completed_run(completed)
         .await
         .map_err(|e| anyhow::anyhow!("record learning feedback: {e}"))?;
+    record_persisted_provider_health(workdir, &provider, success)?;
     Ok(())
 }
 
@@ -228,7 +327,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn persist_capture_episode_records_memory_episode() {
+    async fn persist_capture_episode_records_learning_episode() {
         let tmp = TempDir::new().expect("tempdir");
 
         persist_capture_episode(
@@ -249,7 +348,7 @@ mod tests {
         let episodes_path = tmp
             .path()
             .join(".roko")
-            .join("memory")
+            .join("learn")
             .join("episodes.jsonl");
         let episodes = EpisodeLogger::read_all_lossy(&episodes_path).await.unwrap();
         assert_eq!(episodes.len(), 1);
@@ -270,6 +369,117 @@ mod tests {
         assert_eq!(
             episode.extra.get("plan_id"),
             Some(&serde_json::json!("demo"))
+        );
+        assert!(
+            !tmp.path()
+                .join(".roko")
+                .join("memory")
+                .join("episodes.jsonl")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_capture_episode_resolves_model_key_to_slug_and_provider() {
+        let tmp = TempDir::new().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("roko.toml"),
+            r#"
+[agent]
+default_model = "glm-mini"
+command = "claude"
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = ""
+
+[models.glm-mini]
+provider = "zai"
+slug = "glm-5.1"
+context_window = 131072
+tool_format = "openai_json"
+"#,
+        )
+        .expect("write roko.toml");
+
+        persist_capture_episode(
+            tmp.path(),
+            "claude",
+            Some("glm-mini"),
+            "prd-plan-generate",
+            "prd:plan:glm",
+            "prompt body",
+            "output body",
+            true,
+            42,
+            None,
+        )
+        .await
+        .expect("persist capture episode");
+
+        let episodes_path = tmp
+            .path()
+            .join(".roko")
+            .join("learn")
+            .join("episodes.jsonl");
+        let episodes = EpisodeLogger::read_all_lossy(&episodes_path).await.unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].model, "glm-5.1");
+        assert_eq!(
+            episodes[0].extra.get("provider"),
+            Some(&serde_json::json!("zai"))
+        );
+
+        let cascade_path = tmp
+            .path()
+            .join(".roko")
+            .join("learn")
+            .join("cascade-router.json");
+        let cascade: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(cascade_path).unwrap()).unwrap();
+        assert_eq!(
+            cascade
+                .pointer("/confidence_stats/glm-5.1/trials")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+
+        let health_path = tmp
+            .path()
+            .join(".roko")
+            .join("learn")
+            .join("provider-health.json");
+        let health: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(health_path).unwrap()).unwrap();
+        assert_eq!(
+            health
+                .pointer("/providers/zai/total_requests")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn dispatch_surfaces_provide_episodes() {
+        let commands_prd =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands/prd.rs"))
+                .unwrap();
+        assert!(
+            !commands_prd.contains("crate::commands::util::persist_capture_episode"),
+            "PRD commands must use roko_cli::agent_exec::persist_capture_episode"
+        );
+        assert!(
+            commands_prd.matches("persist_capture_episode").count()
+                >= commands_prd.matches("run_agent_capture_silent").count(),
+            "every silent PRD dispatch needs canonical episode persistence"
+        );
+
+        let prd_rs =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/prd.rs")).unwrap();
+        assert!(
+            prd_rs.contains("prd-plan-generate") && prd_rs.contains("persist_capture_episode"),
+            "generate_plan_from_prd_with_model must persist a prd-plan-generate episode"
         );
     }
 }

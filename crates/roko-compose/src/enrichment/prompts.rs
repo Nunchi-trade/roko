@@ -1,7 +1,7 @@
 //! Prompt dispatch for all 13 enrichment steps.
 //!
-//! Ported from `apps/mori/src/support_enrich/mod.rs` lines 756-837 and the
-//! `apps/mori/src/support_enrich/prompts.rs` module.
+//! Roko-owned enrichment prompt dispatch, adapted from the legacy support
+//! enrichment pipeline.
 //!
 //! Every function here takes and returns `String` — no filesystem access.
 //! This is anti-pattern #8: I/O at boundary only.
@@ -15,7 +15,7 @@ use super::step::EnrichStep;
 /// The pipeline reads files from disk and populates this struct before calling
 /// [`build_prompt`]. Prompt builders receive only strings.
 ///
-/// Ported from Mori `StepInputs` (lines 200-212).
+/// Roko-owned enrichment step input bundle.
 pub struct StepInputs {
     /// Full content of `plan.md`.
     pub plan_content: String,
@@ -39,14 +39,9 @@ pub struct StepInputs {
 
 /// Build the (system, user) prompt pair for a given step.
 ///
-/// Dispatches to step-specific prompt builders using the Mori prompt templates
-/// that already live in `crate::templates::*` (the enrichment prompts module).
-///
-/// Ported from Mori `build_prompt` (lines 756-837).
+/// Dispatches to step-specific prompt builders that live in
+/// `crate::templates::prompts`.
 pub fn build_prompt(step: EnrichStep, inputs: &StepInputs) -> (String, String) {
-    // We re-use the prompt templates from the Mori prompts module, which was
-    // already ported into this crate at `crate::templates::prompts`. The
-    // templates are constants and pure functions taking string slices.
     use crate::templates::prompts as p;
 
     match step {
@@ -134,7 +129,7 @@ pub fn build_prompt(step: EnrichStep, inputs: &StepInputs) -> (String, String) {
 
 /// Build the repair prompt for invalid TOML output.
 ///
-/// Ported from Mori `repair_toml_output` (lines 872-890).
+/// Repair invalid TOML output from a model.
 pub fn build_repair_prompt(
     step: EnrichStep,
     raw_output: &str,
@@ -161,7 +156,7 @@ pub fn build_repair_prompt(
 /// existing artifacts. In the current implementation, all non-LLM steps return
 /// a placeholder extraction; a richer extraction is a future enhancement.
 ///
-/// Ported from Mori `generate_without_llm` (lines 893-903).
+/// Generate deterministic enrichment output without calling a model.
 pub fn generate_without_llm(step: EnrichStep, inputs: &StepInputs) -> Result<String, String> {
     match step {
         EnrichStep::Prd => Ok(extract_prd(&inputs.plan_content)),

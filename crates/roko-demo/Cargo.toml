@@ -36,3 +36,6 @@ crossterm = "0.28"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[package.metadata.roko]
+layer = 2

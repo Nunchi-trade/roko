@@ -37,7 +37,7 @@ pub struct PromptSectionMeta {
     pub name: String,
     /// Number of tokens this section consumed in the final prompt.
     pub tokens: u64,
-    /// Composer-assigned priority (0 = highest, 255 = lowest).
+    /// Compose-assigned priority (0 = highest, 255 = lowest).
     pub priority: u8,
     /// Whether this section was truncated due to budget pressure.
     pub was_truncated: bool,
@@ -91,6 +91,12 @@ pub struct AgentEfficiencyEvent {
     pub plan_id: String,
     /// Task within the plan.
     pub task_id: String,
+    /// Unique identifier for this dispatch attempt.
+    ///
+    /// Shared between the dispatch cost event and any gate-failure event for
+    /// the same attempt, enabling cross-event joins.
+    #[serde(default)]
+    pub attempt_id: String,
 
     // ── Token accounting ────────────────────────────────────────────
     /// Input tokens from provider response.
@@ -146,11 +152,11 @@ pub struct AgentEfficiencyEvent {
     /// Outcome label for the observation.
     #[serde(default)]
     pub outcome: String,
-    /// Gate error summaries recorded for failed tasks.
+    /// Verify error summaries recorded for failed tasks.
     #[serde(default)]
     pub gate_errors: Vec<String>,
-    /// Model used for the task attempt.
-    #[serde(default)]
+    /// Resolved model used for the task attempt.
+    #[serde(rename = "resolved_model", alias = "model_used", default)]
     pub model_used: String,
     /// Operating frequency for the turn.
     #[serde(default = "default_operating_frequency")]
@@ -210,6 +216,7 @@ impl Default for AgentEfficiencyEvent {
             model: String::new(),
             plan_id: String::new(),
             task_id: String::new(),
+            attempt_id: String::new(),
             input_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: 0,
@@ -783,6 +790,7 @@ fn make_test_event(
         model: "claude-sonnet-4-5".into(),
         plan_id: "plan-1".into(),
         task_id: "t1".into(),
+        attempt_id: "test-attempt".into(),
         input_tokens,
         output_tokens,
         reasoning_tokens: 0,
@@ -933,6 +941,22 @@ mod tests {
         let json = serde_json::to_string(&e).expect("serialize");
         let e2: AgentEfficiencyEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(e, e2);
+    }
+
+    #[test]
+    fn efficiency_event_serializes_resolved_model() {
+        let event = AgentEfficiencyEvent {
+            model_used: "claude-sonnet-4-6".to_string(),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&event).expect("serialize event");
+        assert_eq!(json["resolved_model"], "claude-sonnet-4-6");
+        assert!(json.get("model_used").is_none());
+
+        let roundtrip: AgentEfficiencyEvent =
+            serde_json::from_value(json).expect("deserialize event");
+        assert_eq!(roundtrip.model_used, "claude-sonnet-4-6");
     }
 
     #[test]

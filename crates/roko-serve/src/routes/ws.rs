@@ -25,9 +25,27 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/roko-ws", get(ws_upgrade))
 }
 
+/// Per-frame and per-message ceilings applied to every WebSocket upgrade.
+///
+/// `max_message_size` bounds the total reassembled payload a single message
+/// can carry (1 MiB) and `max_frame_size` bounds an individual fragmented
+/// frame (256 KiB). Together they prevent a hostile client from forcing the
+/// server to buffer arbitrary amounts of memory before the application code
+/// even runs.
+pub(crate) const WS_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+pub(crate) const WS_MAX_FRAME_SIZE: usize = 256 * 1024;
+
+/// Apply the standard `(max_message_size, max_frame_size)` caps to a
+/// [`WebSocketUpgrade`] before any handler-specific configuration. Every
+/// upgrade handler in this crate goes through this helper.
+pub(crate) fn apply_ws_size_limits(ws: WebSocketUpgrade) -> WebSocketUpgrade {
+    ws.max_message_size(WS_MAX_MESSAGE_SIZE)
+        .max_frame_size(WS_MAX_FRAME_SIZE)
+}
+
 /// `GET /ws` — upgrade to a WebSocket connection.
 async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(state, socket))
+    apply_ws_size_limits(ws).on_upgrade(move |socket| handle_ws(state, socket))
 }
 
 /// Back-pressure mode for a WebSocket subscription channel.
@@ -69,7 +87,7 @@ async fn handle_ws(state: Arc<AppState>, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let mut filter: Vec<String> = Vec::new();
     let mut replay_cursor: u64 = 0;
-    let mut _back_pressure = BackPressureMode::AtMostOnce;
+    let mut back_pressure = BackPressureMode::AtMostOnce;
 
     // Wait for the first client message to get the cursor, or replay from 0.
     // We do an initial replay from 0; if the client sends a cursor later we
@@ -101,7 +119,20 @@ async fn handle_ws(state: Arc<AppState>, socket: WebSocket) {
                         if let Ok(cmd) = serde_json::from_str::<ClientMsg>(&text) {
                             filter = cmd.subscribe;
                             if let Some(bp) = cmd.back_pressure {
-                                _back_pressure = bp;
+                                match bp {
+                                    BackPressureMode::AtMostOnce => {
+                                        back_pressure = bp;
+                                    }
+                                    _ => {
+                                        // Coalesce and ResumeRequired are not yet implemented.
+                                        // Log and continue with at_most_once rather than silently
+                                        // ignoring the request.
+                                        tracing::warn!(
+                                            mode = ?bp,
+                                            "unsupported back_pressure mode requested; using at_most_once"
+                                        );
+                                    }
+                                }
                             }
                             // If client provides a cursor, replay missed events.
                             if let Some(cursor) = cmd.cursor {
@@ -168,6 +199,7 @@ async fn handle_ws(state: Arc<AppState>, socket: WebSocket) {
         }
     }
 
+    let _ = back_pressure; // forward-compat: will be consulted once Coalesce/Resume are wired
     let _ = sink.close().await;
 }
 

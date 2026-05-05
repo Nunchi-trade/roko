@@ -2,7 +2,7 @@
 //!
 //! This crate provides:
 //!
-//! - [`MemorySubstrate`] — an in-memory `Substrate` for tests and ephemeral state
+//! - [`MemorySubstrate`] — an in-memory `Store` for tests and ephemeral state
 //! - **`NoOp` impls** of all six traits (useful as defaults and testing scaffolds)
 //! - **Composite scorers** — `SumScorer`, `MulScorer`, `ConstScorer`
 //! - **Simple routers** — `FirstRouter`, `HighestScoreRouter`, `RoundRobinRouter`
@@ -11,7 +11,11 @@
 //! needs. Concrete domain impls (gates, agents, prompt composers) live in
 //! their own crates.
 
-#![allow(clippy::doc_markdown, clippy::module_name_repetitions)]
+#![allow(
+    clippy::doc_markdown,
+    clippy::module_name_repetitions,
+    clippy::unnecessary_literal_bound
+)]
 
 pub mod memory;
 pub mod noop;

@@ -1,0 +1,33 @@
+/* ── KnowledgeTransfer (edge particle effect) ── */
+
+.kt-particles {
+  pointer-events: none;
+}
+
+.kt-particle {
+  r: 2;
+  opacity: 0;
+  animation: kt-travel var(--kt-duration, 2s) linear infinite;
+  animation-delay: var(--kt-delay, 0s);
+}
+
+@keyframes kt-travel {
+  0%   { offset-distance: 0%;   opacity: 0; }
+  10%  { opacity: 0.8; }
+  90%  { opacity: 0.8; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+
+/* Fallback for browsers without offset-path: animate cx along line via SVG animateMotion */
+.kt-particle-glow {
+  r: 4;
+  opacity: 0.3;
+  filter: blur(2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kt-particle {
+    animation: none;
+    opacity: 0;
+  }
+}

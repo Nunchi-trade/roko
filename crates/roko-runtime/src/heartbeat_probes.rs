@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Zero-LLM heartbeat probe registry and default probe set.
 //!
 //! Probes are deterministic, side-effect-light checks that feed prediction

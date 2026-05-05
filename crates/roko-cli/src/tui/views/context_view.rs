@@ -461,7 +461,7 @@ fn render_cost_by_model(
                 theme.text()
             };
             Row::new(vec![
-                Cell::from(truncate(model, 20)),
+                Cell::from(truncate(&display_model(Some(model.as_str())), 20)),
                 Cell::from(Span::styled(format!("${:.4}", agg.cost_usd), cost_style)),
                 Cell::from(format_count(agg.input_tokens)),
                 Cell::from(format_count(agg.output_tokens)),
@@ -507,14 +507,14 @@ fn render_cascade_router(
         theme.accent()
     };
     let block = Block::bordered()
-        .title(Span::styled(" Cascade Router ", title_style))
+        .title(Span::styled(" Cascade Route ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).split(inner);
 
-    // Router model stats
+    // Route model stats
     if tui_state.cascade_router.model_slugs.is_empty() && ctx_data.token_burns.is_empty() {
         let empty = Paragraph::new("no routing decisions -- run agents to populate")
             .style(theme.muted())
@@ -544,7 +544,7 @@ fn render_cascade_router(
                     theme.muted()
                 };
                 Row::new(vec![
-                    Cell::from(truncate(slug, 20)),
+                    Cell::from(truncate(&display_model(Some(slug.as_str())), 20)),
                     Cell::from(trials.to_string()),
                     Cell::from(successes.to_string()),
                     Cell::from(Span::styled(format!("{rate:.0}%"), rate_style)),
@@ -677,7 +677,7 @@ fn render_alerts_and_health(
         frame.render_widget(List::new(items), sections[0]);
     }
 
-    // Gate threshold summary
+    // Verify threshold summary
     if tui_state.gate_results_page.threshold_rows.is_empty()
         && tui_state.gate_results_page.gate_rows.is_empty()
     {
@@ -1055,13 +1055,7 @@ fn format_count(n: u64) -> String {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::{display_model, shorten_model, truncate};
 
 #[cfg(test)]
 mod tests {

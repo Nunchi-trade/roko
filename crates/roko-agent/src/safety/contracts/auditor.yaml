@@ -1,0 +1,14 @@
+{
+  "role": "auditor",
+  "invariants": [
+    "NoNetworkAccess",
+    { "MaxTokensPerTurn": 12000 }
+  ],
+  "governance": [
+    { "MaxToolCallsPerTurn": 8 },
+    { "ForbiddenTools": ["edit_file", "write_file", "multi_edit", "apply_patch", "notebook_edit"] }
+  ],
+  "recovery": [
+    { "trigger": "attempted_edit", "action": "Abort" }
+  ]
+}

@@ -29,7 +29,7 @@ pub enum EvalStrategy {
 pub struct EvalTemplate {
     /// Human-readable template name (e.g. "compile-gate-basic").
     pub name: String,
-    /// Gate type this template targets (e.g. "compile", "test", "clippy").
+    /// Verify type this template targets (e.g. "compile", "test", "clippy").
     pub gate_type: String,
     /// Strategy used for test generation.
     pub strategy: EvalStrategy,
@@ -45,7 +45,7 @@ pub struct EvalTemplate {
 pub struct Evaluation {
     /// Evaluation name derived from template + task.
     pub name: String,
-    /// Gate type being evaluated.
+    /// Verify type being evaluated.
     pub gate_type: String,
     /// Strategy used.
     pub strategy: EvalStrategy,

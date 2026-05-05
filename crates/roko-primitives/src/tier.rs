@@ -62,7 +62,7 @@ impl TierRouter {
     ///
     /// - `T0` → `None` (suppress inference)
     /// - `T1` → `"claude-haiku-4-5"` (regardless of vitality)
-    /// - `T2` → `"claude-opus-4-6"` if vitality ≥ 0.3, `"claude-sonnet-4"` if below
+    /// - `T2` → `"claude-opus-4-6"` if vitality ≥ 0.3, `"claude-sonnet-4-6"` if below
     #[must_use]
     pub fn select_model(tier: InferenceTier, vitality: f32) -> Option<&'static str> {
         match tier {
@@ -72,7 +72,7 @@ impl TierRouter {
                 if vitality >= T2_VITALITY_THRESHOLD {
                     Some("claude-opus-4-6")
                 } else {
-                    Some("claude-sonnet-4")
+                    Some("claude-sonnet-4-6")
                 }
             }
         }
@@ -115,7 +115,7 @@ mod tests {
     fn t2_sonnet_below_threshold() {
         assert_eq!(
             TierRouter::select_model(InferenceTier::T2, 0.1),
-            Some("claude-sonnet-4")
+            Some("claude-sonnet-4-6")
         );
     }
 
@@ -127,7 +127,7 @@ mod tests {
         );
         assert_eq!(
             TierRouter::select_model(InferenceTier::T2, 0.299_99),
-            Some("claude-sonnet-4")
+            Some("claude-sonnet-4-6")
         );
     }
 

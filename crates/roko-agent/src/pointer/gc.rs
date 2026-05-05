@@ -54,9 +54,9 @@ pub struct PointerGcPolicy {
 
 impl PointerGcPolicy {
     /// Default policy: evict after 10 turns, cap at 10 `MiB`.
-    pub const DEFAULT_MAX_AGE_TURNS: u32 = 10;
+    pub const DEFAULT_MAX_AGE_TURNS: u32 = roko_core::defaults::DEFAULT_POINTER_MAX_AGE_TURNS;
     /// Default total bytes budget: 10 `MiB`.
-    pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 10 * 1024 * 1024;
+    pub const DEFAULT_MAX_TOTAL_BYTES: u64 = roko_core::defaults::DEFAULT_POINTER_MAX_TOTAL_BYTES;
 
     /// Construct a policy with the given parameters.
     #[must_use]

@@ -5,26 +5,29 @@
 //! layout, configuration, runtime services, and tracking maps for active
 //! runs, plans, and operations.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use base64::Engine;
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::{Mutex, OnceCell, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use roko_agent::ModelCallService;
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::LogScrubber;
-use roko_core::{Engram, Substrate};
+use roko_core::{Engram, Store};
 use roko_daimon::{DaimonState, StrategySpaceDefinition};
+use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::provider_health::ProviderHealthTracker;
+use roko_orchestrator::{ServiceConfig, ServiceFactory};
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::process::{ProcessId, ProcessSupervisor};
 
@@ -274,6 +277,66 @@ pub struct TemplateRunRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Gateway token & cost counters (B1)
+// ---------------------------------------------------------------------------
+
+/// Atomic per-model token and cost counters accumulated across inference
+/// requests and surfaced by the `GET /api/gateway/stats` endpoint.
+pub struct GatewayModelCounters {
+    /// Estimated input tokens dispatched to this model.
+    pub tokens_in: AtomicU64,
+    /// Estimated output tokens received from this model.
+    pub tokens_out: AtomicU64,
+    /// Cost in USD * 1e9 (nano-dollars) for atomic accumulation.
+    pub cost_nano_usd: AtomicU64,
+}
+
+impl GatewayModelCounters {
+    /// Create a fresh zeroed counter set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            tokens_in: AtomicU64::new(0),
+            tokens_out: AtomicU64::new(0),
+            cost_nano_usd: AtomicU64::new(0),
+        }
+    }
+
+    /// Record one completion's token + cost figures.
+    pub fn record(&self, input_tokens: u64, output_tokens: u64, cost_usd: f64) {
+        self.tokens_in.fetch_add(input_tokens, Ordering::Relaxed);
+        self.tokens_out.fetch_add(output_tokens, Ordering::Relaxed);
+        let nano = (cost_usd * 1_000_000_000.0) as u64;
+        self.cost_nano_usd.fetch_add(nano, Ordering::Relaxed);
+    }
+
+    /// Read the current accumulated cost as USD.
+    #[must_use]
+    pub fn cost_usd(&self) -> f64 {
+        self.cost_nano_usd.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+    }
+}
+
+impl Default for GatewayModelCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch progress tracker (B3)
+// ---------------------------------------------------------------------------
+
+/// Shared progress state for a running inference batch, allowing the status
+/// endpoint to report incremental completion counts.
+pub struct BatchProgress {
+    /// Number of items that have finished processing (success or failure).
+    pub completed: Arc<std::sync::atomic::AtomicUsize>,
+    /// Total number of items in the batch.
+    pub total: usize,
+}
+
+// ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
 
@@ -299,16 +362,35 @@ pub struct AppState {
     pub event_bus: EventBus<ServerEvent>,
     /// Unified state hub for dashboard snapshot + event streaming.
     pub state_hub: roko_core::SharedStateHub,
+    /// RuntimeEvent SSE adapter for workflow event streaming.
+    pub sse_adapter: Arc<crate::adapters::SseAdapter>,
+    /// Durable RuntimeEvent logger for externally ingested events.
+    pub runtime_event_logger: Arc<roko_runtime::JsonlLogger>,
     /// Event subscriptions loaded at startup.
     pub subscriptions: SubscriptionRegistry,
     /// Runtime bridge to CLI operations (run_once, status, dashboard).
     pub runtime: Arc<dyn CliRuntime>,
+    /// Shared model-call gateway service used by HTTP inference adapters.
+    pub model_call_service: Arc<ModelCallService>,
     /// Full `roko.toml` schema configuration with lock-free reads.
     pub roko_config: ArcSwap<RokoConfig>,
     /// In-memory provider health tracker exposed via serve APIs.
     pub provider_health: ProviderHealthTracker,
     /// In-memory provider latency stats exposed via serve APIs.
     pub latency_registry: LatencyRegistry,
+    // -- Lock acquisition order (acquire outer before inner) ---------------
+    //
+    //  1. active_runs          7. discovered_agents     13. cascade_router
+    //  2. active_plans         8. aggregator_cache      14. gateway_model_counters
+    //  3. operations           9. heartbeats            15. batch_progress
+    //  4. templates           10. connectors            16. active_bench_runs
+    //  5. deployments         11. feeds                 17. active_matrix_runs
+    //  6. template_runs       12. ephemeral_workspaces
+    //
+    // Handlers that need multiple locks MUST acquire them in this order.
+    // Read-heavy maps (discovered_agents, aggregator_cache, heartbeats)
+    // are candidates for DashMap conversion in a future wave.
+    // ------------------------------------------------------------------
     /// Active one-shot runs.
     pub active_runs: RwLock<HashMap<String, RunHandle>>,
     /// Active plan executions.
@@ -347,16 +429,151 @@ pub struct AppState {
     pub connectors: RwLock<roko_core::ConnectorRegistry>,
     /// In-memory feed registry.
     pub feeds: RwLock<roko_core::FeedRegistry>,
+
+    // -- Gateway audit fixes (D1, B1, B3) --
+    /// Cached [`CascadeRouter`] so model routing avoids per-request disk I/O.
+    pub cascade_router: RwLock<Option<CascadeRouter>>,
+    /// Per-model token + cost counters accumulated across inference requests.
+    pub gateway_model_counters: RwLock<HashMap<String, Arc<GatewayModelCounters>>>,
+    /// Per-batch progress counters keyed by batch id.
+    pub batch_progress: RwLock<HashMap<String, Arc<BatchProgress>>>,
+
+    /// PTY-backed terminal sessions for the web UI.
+    pub terminal_sessions: crate::terminal::SessionManager,
+
+    /// Active bench runs (keyed by run_id).
+    pub active_bench_runs: RwLock<HashMap<String, BenchRunHandle>>,
+    /// Active matrix (multi-lane) bench runs (keyed by matrix_id).
+    pub active_matrix_runs: RwLock<HashMap<String, MatrixRunHandle>>,
+    /// Ephemeral workspaces created via the API (keyed by workspace id).
+    pub ephemeral_workspaces: RwLock<HashMap<String, WorkspaceInfo>>,
+
+    /// Upstream mirage JSON-RPC URL for reverse proxy (`ROKO_MIRAGE_URL`).
+    pub mirage_url: Option<String>,
+    /// Upstream agent-relay URL for reverse proxy (`ROKO_AGENT_RELAY_URL`).
+    pub agent_relay_url: Option<String>,
+}
+
+/// A tracked bench run with its background task handle.
+pub struct BenchRunHandle {
+    /// Run identifier.
+    pub id: String,
+    /// Background task driving the bench execution.
+    pub handle: JoinHandle<()>,
+}
+
+/// A tracked matrix (multi-lane) bench run.
+pub struct MatrixRunHandle {
+    /// Matrix run identifier.
+    pub id: String,
+    /// Per-lane task handles.
+    pub lane_handles: Vec<JoinHandle<()>>,
+}
+
+/// Status of an ephemeral workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceStatus {
+    /// Workspace directory exists on disk.
+    Active,
+    /// Workspace directory is missing or inaccessible.
+    Stale,
+}
+
+/// Metadata for an ephemeral workspace created via the API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    /// Unique workspace identifier (prefix + timestamp).
+    pub id: String,
+    /// Absolute path to the workspace directory.
+    pub path: PathBuf,
+    /// Unix timestamp (seconds) when the workspace was created.
+    pub created_at: u64,
+    /// Unix timestamp (seconds) when the workspace was last accessed.
+    #[serde(default)]
+    pub last_accessed_at: u64,
+    /// Current status of the workspace on disk.
+    #[serde(default = "default_workspace_status")]
+    pub status: WorkspaceStatus,
+}
+
+fn default_workspace_status() -> WorkspaceStatus {
+    WorkspaceStatus::Active
+}
+
+/// Persisted workspace registry (serialized to `.roko/workspaces.json`).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkspaceRegistry {
+    pub workspaces: BTreeMap<String, WorkspaceInfo>,
+}
+
+/// Return the path to the workspace registry file for a given workdir.
+pub fn workspace_registry_path_for(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("workspaces.json")
+}
+
+/// Load the workspace registry from disk. Returns an empty map if the file
+/// does not exist or is corrupt (in which case a warning is logged).
+pub fn load_workspace_registry(workdir: &Path) -> HashMap<String, WorkspaceInfo> {
+    let path = workspace_registry_path_for(workdir);
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to read workspace registry, starting with empty map"
+            );
+            return HashMap::new();
+        }
+    };
+
+    let registry: WorkspaceRegistry = match serde_json::from_str(&data) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "workspace registry is corrupt, starting with empty map"
+            );
+            return HashMap::new();
+        }
+    };
+
+    // Validate each entry: mark Active if path exists, Stale if not.
+    let mut map = HashMap::with_capacity(registry.workspaces.len());
+    for (id, mut entry) in registry.workspaces {
+        if entry.path.exists() {
+            entry.status = WorkspaceStatus::Active;
+        } else {
+            entry.status = WorkspaceStatus::Stale;
+        }
+        map.insert(id, entry);
+    }
+    map
 }
 
 impl AppState {
+    /// Build the shared hub used by AppState and in-process CLI runtimes.
+    #[must_use]
+    pub fn state_hub_for_workdir(workdir: &Path) -> roko_core::SharedStateHub {
+        let layout = RokoLayout::for_project(workdir);
+        let event_log_path = layout.root().join("events.jsonl");
+        roko_core::SharedStateHub::new(roko_core::StateHub::with_event_log(1024, &event_log_path))
+    }
+
     /// Construct a new `AppState` from the working directory and loaded configs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the shared service bundle cannot be constructed (e.g.
+    /// because the model configuration is missing or invalid).
     pub fn new(
         workdir: PathBuf,
         runtime: Arc<dyn CliRuntime>,
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         Self::new_with_daimon_strategy(
             workdir,
             runtime,
@@ -366,17 +583,70 @@ impl AppState {
         )
     }
 
+    /// Construct a new `AppState` with a prebuilt shared hub.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the shared service bundle cannot be constructed (e.g.
+    /// because the model configuration is missing or invalid).
+    pub fn new_with_state_hub(
+        workdir: PathBuf,
+        runtime: Arc<dyn CliRuntime>,
+        roko_config: RokoConfig,
+        deploy_backend: Arc<dyn DeployBackend>,
+        state_hub: roko_core::SharedStateHub,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_daimon_strategy_and_state_hub(
+            workdir,
+            runtime,
+            roko_config,
+            deploy_backend,
+            StrategySpaceDefinition::default(),
+            Some(state_hub),
+        )
+    }
+
     /// Construct a new `AppState` with an explicit Daimon strategy-space definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the shared service bundle cannot be constructed (e.g.
+    /// because the model configuration is missing or invalid).
     pub fn new_with_daimon_strategy(
         workdir: PathBuf,
         runtime: Arc<dyn CliRuntime>,
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
         strategy_space: StrategySpaceDefinition,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        Self::new_with_daimon_strategy_and_state_hub(
+            workdir,
+            runtime,
+            roko_config,
+            deploy_backend,
+            strategy_space,
+            None,
+        )
+    }
+
+    /// Construct a new `AppState` with an explicit Daimon strategy and optional shared hub.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the shared service bundle cannot be constructed (e.g.
+    /// because the model configuration is missing or invalid).
+    pub fn new_with_daimon_strategy_and_state_hub(
+        workdir: PathBuf,
+        runtime: Arc<dyn CliRuntime>,
+        roko_config: RokoConfig,
+        deploy_backend: Arc<dyn DeployBackend>,
+        strategy_space: StrategySpaceDefinition,
+        state_hub: Option<roko_core::SharedStateHub>,
+    ) -> anyhow::Result<Self> {
         let layout = RokoLayout::for_project(&workdir);
-        let signal_root = layout.root().to_path_buf();
-        let affect_path = affect_state_path(layout.root());
+        let layout_root = layout.root().to_path_buf();
+        let signal_root = layout_root.clone();
+        let affect_path = affect_state_path(&layout_root);
         let cancel = CancelToken::new();
         let supervisor = Arc::new(ProcessSupervisor::new(cancel.child()));
         let subscriptions = SubscriptionRegistry::load_from_project(&workdir, &roko_config);
@@ -386,19 +656,27 @@ impl AppState {
         let mut template_registry = TemplateRegistry::new(workdir.clone());
         template_registry.scan();
 
-        // Create StateHub with on-disk event log so all published events
-        // persist to `.roko/events.jsonl` for replay by standalone consumers.
-        let event_log_path = layout.root().join("events.jsonl");
-        let state_hub = roko_core::SharedStateHub::new(roko_core::StateHub::with_event_log(
-            1024,
-            &event_log_path,
-        ));
+        let state_hub = state_hub.unwrap_or_else(|| Self::state_hub_for_workdir(&workdir));
 
         // Initialize chain client + wallet from [chain] config section.
         let (chain_client, chain_wallet) = Self::init_chain(&roko_config);
         let http_client = reqwest::Client::new();
+        let service_bundle = ServiceFactory::build(ServiceConfig::production(
+            workdir.clone(),
+            roko_config.clone(),
+        ))
+        .map_err(|e| anyhow::anyhow!("build shared service bundle: {e}"))?;
+        let model_call_service = service_bundle.model_call_service;
+        let terminal_workdir = workdir.clone();
+        let terminal_sessions = crate::terminal::SessionManager::new(terminal_workdir);
+        terminal_sessions.configure_server_env_from_config(&roko_config);
 
-        Self {
+        let runtime_event_logger =
+            Arc::new(roko_runtime::JsonlLogger::from_roko_dir(layout.root()));
+
+        let ephemeral_workspaces = RwLock::new(load_workspace_registry(&workdir));
+
+        Ok(Self {
             workdir,
             layout,
             signal_store: SignalStore::new(signal_root),
@@ -409,9 +687,12 @@ impl AppState {
             affect_engine: Mutex::new(affect_engine),
             event_bus: EventBus::new(16_384),
             state_hub,
+            sse_adapter: Arc::new(crate::adapters::SseAdapter::new(256)),
+            runtime_event_logger,
             subscriptions,
             runtime,
-            roko_config: ArcSwap::from_pointee(roko_config),
+            model_call_service,
+            roko_config: ArcSwap::from_pointee(roko_config.clone()),
             provider_health: ProviderHealthTracker::new(),
             latency_registry: LatencyRegistry::new(),
             active_runs: RwLock::new(HashMap::new()),
@@ -422,7 +703,10 @@ impl AppState {
             deployments: RwLock::new(HashMap::new()),
             template_runs: RwLock::new(HashMap::new()),
             scrubber: Arc::new(LogScrubber::new()),
-            jwks_cache: crate::jwks::new_jwks_cache(http_client.clone()),
+            jwks_cache: crate::jwks::new_jwks_cache_with_timeout(
+                http_client.clone(),
+                roko_config.timeouts.http_request(),
+            ),
             http_client,
             discovered_agents: RwLock::new(HashMap::new()),
             aggregator_cache: RwLock::new(HashMap::new()),
@@ -435,7 +719,20 @@ impl AppState {
             )),
             connectors: RwLock::new(roko_core::ConnectorRegistry::new()),
             feeds: RwLock::new(roko_core::FeedRegistry::new()),
-        }
+            cascade_router: RwLock::new(None),
+            gateway_model_counters: RwLock::new(HashMap::new()),
+            batch_progress: RwLock::new(HashMap::new()),
+            terminal_sessions,
+            active_bench_runs: RwLock::new(HashMap::new()),
+            active_matrix_runs: RwLock::new(HashMap::new()),
+            ephemeral_workspaces,
+            mirage_url: std::env::var("ROKO_MIRAGE_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            agent_relay_url: std::env::var("ROKO_AGENT_RELAY_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
+        })
     }
 
     /// Build chain client + wallet from the `[chain]` config section.
@@ -492,6 +789,22 @@ impl AppState {
         self.roko_config.store(Arc::new(roko_config));
     }
 
+    /// Return a reference-counted handle to the per-model gateway counters,
+    /// creating a fresh entry when the model is seen for the first time.
+    pub async fn gateway_counters_for(&self, model_slug: &str) -> Arc<GatewayModelCounters> {
+        {
+            let map = self.gateway_model_counters.read().await;
+            if let Some(c) = map.get(model_slug) {
+                return Arc::clone(c);
+            }
+        }
+        let mut map = self.gateway_model_counters.write().await;
+        Arc::clone(
+            map.entry(model_slug.to_owned())
+                .or_insert_with(|| Arc::new(GatewayModelCounters::new())),
+        )
+    }
+
     /// Publish the current job list to the StateHub so dashboard consumers
     /// (TUI, REST, SSE) see an up-to-date marketplace view after any mutation.
     pub fn refresh_jobs_in_state_hub(&self) {
@@ -503,6 +816,14 @@ impl AppState {
     /// Initiate graceful shutdown: cancel all work and stop supervised processes.
     pub async fn shutdown(&self) {
         tracing::info!("server shutdown initiated");
+        let router_path = self.layout.cascade_router_path();
+        if let Some(ref router) = *self.cascade_router.read().await {
+            if let Err(err) = router.save(&router_path) {
+                tracing::warn!(error = %err, "failed to save CascadeRouter on shutdown");
+            } else {
+                tracing::info!(path = %router_path.display(), "CascadeRouter saved on shutdown");
+            }
+        }
         if let Err(err) = self.save_snapshot().await {
             tracing::warn!(error = %err, "failed to save server state on shutdown");
         }
@@ -542,11 +863,14 @@ impl AppState {
     /// Restore discovered agents and template run records from disk.
     pub async fn restore_snapshot(&self) -> anyhow::Result<()> {
         let path = self.snapshot_path();
-        if !path.exists() {
-            tracing::debug!("no server state snapshot found; starting fresh");
-            return Ok(());
-        }
-        let data = tokio::fs::read_to_string(&path).await?;
+        let data = match tokio::fs::read_to_string(&path).await {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!("no server state snapshot found; starting fresh");
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
         let snapshot: ServerStateSnapshot = serde_json::from_str(&data)?;
         {
             let mut agents = self.discovered_agents.write().await;
@@ -562,6 +886,98 @@ impl AppState {
         }
         tracing::info!(path = %path.display(), "restored server state from snapshot");
         Ok(())
+    }
+
+    /// Persist the current workspace registry to `.roko/workspaces.json`.
+    ///
+    /// Takes a brief read-lock snapshot of the map, then writes outside the lock.
+    pub async fn persist_workspace_registry(&self) -> anyhow::Result<()> {
+        let snapshot: BTreeMap<String, WorkspaceInfo> = {
+            let map = self.ephemeral_workspaces.read().await;
+            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        let registry = WorkspaceRegistry {
+            workspaces: snapshot,
+        };
+        let json = serde_json::to_string_pretty(&registry)
+            .map_err(|e| anyhow::anyhow!("serialize workspace registry: {e}"))?;
+        let path = workspace_registry_path_for(&self.workdir);
+        roko_core::io::atomic_write_async(&path, json.as_bytes())
+            .await
+            .map_err(|e| anyhow::anyhow!("write workspace registry: {e}"))?;
+        Ok(())
+    }
+
+    /// Insert a workspace into the in-memory map and persist to disk.
+    ///
+    /// On persistence failure the entry is removed from the map and an error
+    /// is returned so the caller can clean up the directory.
+    pub async fn insert_workspace(&self, info: WorkspaceInfo) -> anyhow::Result<()> {
+        let id = info.id.clone();
+        {
+            let mut map = self.ephemeral_workspaces.write().await;
+            map.insert(id.clone(), info);
+        }
+        if let Err(e) = self.persist_workspace_registry().await {
+            // Rollback: remove the entry we just inserted.
+            let mut map = self.ephemeral_workspaces.write().await;
+            map.remove(&id);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Remove a workspace from the in-memory map and persist to disk.
+    ///
+    /// Returns the removed entry on success. On persistence failure the entry
+    /// is reinserted and an error is returned.
+    pub async fn remove_workspace(&self, id: &str) -> anyhow::Result<Option<WorkspaceInfo>> {
+        let removed = {
+            let mut map = self.ephemeral_workspaces.write().await;
+            map.remove(id)
+        };
+        if removed.is_some() {
+            if let Err(e) = self.persist_workspace_registry().await {
+                // Rollback: reinsert the removed entry.
+                if let Some(ref info) = removed {
+                    let mut map = self.ephemeral_workspaces.write().await;
+                    map.insert(id.to_owned(), info.clone());
+                }
+                return Err(e);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Look up a workspace by ID.
+    pub async fn get_workspace_info(&self, id: &str) -> Option<WorkspaceInfo> {
+        let map = self.ephemeral_workspaces.read().await;
+        map.get(id).cloned()
+    }
+
+    /// Update `last_accessed_at` for a workspace and persist.
+    ///
+    /// Returns `None` if the workspace does not exist.
+    pub async fn touch_workspace(&self, id: &str) -> anyhow::Result<Option<WorkspaceInfo>> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let updated = {
+            let mut map = self.ephemeral_workspaces.write().await;
+            match map.get_mut(id) {
+                Some(ws) => {
+                    ws.last_accessed_at = now;
+                    Some(ws.clone())
+                }
+                None => None,
+            }
+        };
+        if updated.is_some() {
+            // Best-effort persist; don't fail the request over a touch.
+            let _ = self.persist_workspace_registry().await;
+        }
+        Ok(updated)
     }
 
     /// Insert or update a discovery entry and return the stored snapshot.
@@ -654,6 +1070,7 @@ impl AppState {
                     .label
                     .clone()
                     .unwrap_or_else(|| stored.agent_id.clone()),
+                model: stored.model.clone().unwrap_or_default(),
             });
         stored
     }
@@ -777,6 +1194,25 @@ impl AppState {
             .await
             .retain(|key, _| !key.starts_with("aggregator:"));
     }
+
+    /// Remove completed/failed handles from active collections (§15.6).
+    ///
+    /// Should be called periodically (e.g. from a background interval task)
+    /// to prevent unbounded memory growth from accumulated handles.
+    pub async fn gc_completed_handles(&self) {
+        self.active_runs
+            .write()
+            .await
+            .retain(|_, handle| !handle.handle.is_finished());
+        self.active_plans
+            .write()
+            .await
+            .retain(|_, handle| !handle.handle.is_finished());
+        self.operations
+            .write()
+            .await
+            .retain(|_, handle| !handle.handle.is_finished());
+    }
 }
 
 /// Serializable snapshot of server state that survives restarts.
@@ -845,12 +1281,15 @@ mod tests {
         let mut initial = RokoConfig::default();
         initial.server.port = 4000;
 
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            initial,
-            Arc::new(ManualBackend::default()),
-        ));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                initial,
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         let mut readers = JoinSet::new();
         for _ in 0..8 {

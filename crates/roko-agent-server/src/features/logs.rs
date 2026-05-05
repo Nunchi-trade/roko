@@ -18,8 +18,8 @@ use serde_json::json;
 
 use crate::state::AgentState;
 
-const DEFAULT_TAIL: usize = 200;
-const MAX_TAIL: usize = 2000;
+const DEFAULT_TAIL: usize = roko_core::defaults::DEFAULT_LOG_TAIL;
+const MAX_TAIL: usize = roko_core::defaults::DEFAULT_LOG_MAX_TAIL;
 
 /// Logs routes.
 pub fn router() -> Router<Arc<AgentState>> {

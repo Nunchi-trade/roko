@@ -39,6 +39,8 @@ impl CliRuntime for TestRuntime {
         Ok(RunResult {
             success: true,
             output_text: Some("test runtime output".to_string()),
+            usage: None,
+            gate_results: Vec::new(),
         })
     }
 
@@ -71,13 +73,21 @@ fn test_app_state() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
     let dir = tempdir().expect("tempdir");
     let config = RokoConfig::default();
     let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-    let state = Arc::new(AppState::new(
-        dir.path().to_path_buf(),
-        Arc::new(TestRuntime),
-        config,
-        deploy,
-    ));
-    let auth = ServeAuthConfig::default();
+    let state = Arc::new(
+        AppState::new(
+            dir.path().to_path_buf(),
+            Arc::new(TestRuntime),
+            config,
+            deploy,
+        )
+        .expect("AppState::new"),
+    );
+    // Library default flips to `enabled = true` (T3-22). These tests exercise
+    // routes without auth, so we explicitly disable it for the fixture.
+    let auth = ServeAuthConfig {
+        enabled: false,
+        ..ServeAuthConfig::default()
+    };
     let router = build_router(Arc::clone(&state), &[], auth);
     (dir, state, router)
 }
@@ -94,12 +104,15 @@ fn test_app_with_auth(api_key: &str) -> (tempfile::TempDir, axum::Router) {
     };
     config.serve.auth = auth.clone();
     let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-    let state = Arc::new(AppState::new(
-        dir.path().to_path_buf(),
-        Arc::new(TestRuntime),
-        config,
-        deploy,
-    ));
+    let state = Arc::new(
+        AppState::new(
+            dir.path().to_path_buf(),
+            Arc::new(TestRuntime),
+            config,
+            deploy,
+        )
+        .expect("AppState::new"),
+    );
     let router = build_router(Arc::clone(&state), &[], auth);
     (dir, router)
 }
@@ -561,6 +574,90 @@ async fn dashboard_returns_ok() {
     assert_eq!(status, StatusCode::OK);
 }
 
+#[tokio::test]
+async fn projection_catalog_exposes_stable_dashboard_state_contracts() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/projections/catalog").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let projections = body["projections"].as_array().expect("projection catalog");
+    for name in [
+        "agent_state",
+        "plan_state",
+        "gate_state",
+        "learning_policy_state",
+    ] {
+        let entry = projections
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap_or_else(|| panic!("missing projection contract {name}"));
+        assert_eq!(entry["version"], 1);
+        assert!(entry["policy"]["max_age_secs"].as_u64().unwrap_or(0) > 0);
+        assert!(
+            !entry["policy"]["invalidation_triggers"]
+                .as_array()
+                .expect("triggers")
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn stable_projection_frames_include_version_and_explicit_missing_state() {
+    let (_dir, state, app) = test_app_state();
+    state
+        .state_hub
+        .publish(roko_core::DashboardEvent::PlanStarted {
+            plan_id: "plan-1".into(),
+        });
+    state
+        .state_hub
+        .publish(roko_core::DashboardEvent::TaskStarted {
+            plan_id: "plan-1".into(),
+            task_id: "work-a".into(),
+            title: String::new(),
+            phase: "dispatch".into(),
+        });
+    state
+        .state_hub
+        .publish(roko_core::DashboardEvent::GateResult {
+            plan_id: "plan-1".into(),
+            task_id: "work-a".into(),
+            gate: "compile".into(),
+            passed: false,
+        });
+
+    let (status, plan) = get_json(&app, "/api/projections/plan_state?filter=plan:plan-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(plan["name"], "plan_state");
+    assert_eq!(plan["version"], 1);
+    assert!(plan["computed_at"].as_str().is_some());
+    assert_eq!(plan["recovered"], false);
+    assert_eq!(plan["state"]["plans"][0]["plan_id"], "plan-1");
+    assert_eq!(plan["state"]["tasks"][0]["task_id"], "work-a");
+    assert_eq!(plan["state"]["availability"]["state"], "available");
+
+    let (status, gates) = get_json(&app, "/api/projections/gate_state?filter=plan:plan-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(gates["name"], "gate_state");
+    assert_eq!(gates["state"]["gates"][0]["gate"], "compile");
+    assert_eq!(gates["state"]["stats"]["failed"], 1);
+    assert_eq!(gates["state"]["thresholds"]["state"], "missing");
+
+    let (status, learning) = get_json(&app, "/api/projections/learning_policy_state").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(learning["name"], "learning_policy_state");
+    assert_eq!(learning["state"]["cascade_router"]["state"], "missing");
+    assert_eq!(
+        learning["state"]["policy_updates"]["state"],
+        "unavailable_in_statehub"
+    );
+    assert_eq!(
+        learning["state"]["policy_updates"]["endpoint"],
+        "/api/learning/policy-updates"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // OpenAPI spec
 // ---------------------------------------------------------------------------
@@ -662,6 +759,7 @@ async fn bridge_converts_multiple_event_types() {
     sender.publish(roko_core::DashboardEvent::TaskStarted {
         plan_id: "plan-bridge".to_string(),
         task_id: "task-1".to_string(),
+        title: String::new(),
         phase: "implementing".to_string(),
     });
     let ev: serde_json::Value =

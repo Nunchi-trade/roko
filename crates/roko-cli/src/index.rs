@@ -151,6 +151,25 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
     }
     plan_dirs.sort();
 
+    // Load run-state for real completion data. tasks.toml is never
+    // updated by plan run -- completion state lives in run-state.json only.
+    // NOTE: This is run-state.json (RunStateSnapshot), NOT executor.json
+    // (ExecutorSnapshot). Only RunStateSnapshot has completed_tasks.
+    let run_state_path = workdir.join(".roko/state/run-state.json");
+    let run_state_completed: std::collections::HashMap<String, Vec<String>> =
+        if run_state_path.exists() {
+            std::fs::read_to_string(&run_state_path)
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|val| {
+                    val.get("completed_tasks")
+                        .and_then(|ct| serde_json::from_value(ct.clone()).ok())
+                })
+                .unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+
     let mut total_tasks = 0u32;
     let mut total_done = 0u32;
 
@@ -159,9 +178,14 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
         let tasks_path = dir.join("tasks.toml");
         let content = std::fs::read_to_string(&tasks_path).unwrap_or_default();
 
-        let tasks: u32 = content.matches("[[task]]").count() as u32;
-        let done: u32 = content.matches("status = \"done\"").count() as u32;
-        let ready: u32 = content.matches("status = \"ready\"").count() as u32;
+        let (tasks, mut done, ready) = count_top_level_tasks(&content);
+
+        // Overlay real completion data from run-state.json if available.
+        if let Some(completed_ids) = run_state_completed.get(name.as_ref()) {
+            if !completed_ids.is_empty() {
+                done = completed_ids.len() as u32;
+            }
+        }
         let max_parallel = extract_toml_value(&content, "max_parallel").unwrap_or_default();
 
         let status = if done == tasks && tasks > 0 {
@@ -195,6 +219,36 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
 
     std::fs::write(plans_index_path(workdir), &out)?;
     Ok(())
+}
+
+fn count_top_level_tasks(content: &str) -> (u32, u32, u32) {
+    let Ok(parsed) = toml::from_str::<toml::Value>(content) else {
+        return (
+            content.matches("[[task]]").count() as u32,
+            content.matches("status = \"done\"").count() as u32,
+            content.matches("status = \"ready\"").count() as u32,
+        );
+    };
+
+    let Some(tasks) = parsed.get("task").and_then(toml::Value::as_array) else {
+        return (0, 0, 0);
+    };
+
+    let mut done = 0u32;
+    let mut ready = 0u32;
+    for task in tasks {
+        match task
+            .as_table()
+            .and_then(|table| table.get("status"))
+            .and_then(toml::Value::as_str)
+        {
+            Some("done") => done += 1,
+            Some("ready") | None => ready += 1,
+            _ => {}
+        }
+    }
+
+    (tasks.len() as u32, done, ready)
 }
 
 // ─── Research index ────────────────────────────────────────────────
@@ -297,7 +351,7 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "→ [Full index](.roko/research/INDEX.md)\n");
 
     // Episodes summary
-    let episodes_path = workdir.join(".roko/memory/episodes.jsonl");
+    let episodes_path = workdir.join(".roko/episodes.jsonl");
     let episode_count = if episodes_path.exists() {
         std::fs::read_to_string(&episodes_path)
             .unwrap_or_default()
@@ -307,7 +361,7 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
         0
     };
     let _ = writeln!(out, "## Episodes ({episode_count} recorded)");
-    let _ = writeln!(out, "→ `.roko/memory/episodes.jsonl`\n");
+    let _ = writeln!(out, "→ `.roko/episodes.jsonl`\n");
 
     // Config
     let config_exists = workdir.join("roko.toml").exists();
@@ -461,6 +515,29 @@ mod tests {
         assert!(content.contains("test-plan"));
         assert!(content.contains("2")); // 2 tasks
         assert!(content.contains("1")); // 1 done
+    }
+
+    #[test]
+    fn plans_index_ignores_nested_acceptance_contract_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = plans_dir(tmp.path()).join("contract-plan");
+        std::fs::create_dir_all(&plan).unwrap();
+        std::fs::write(
+            plan.join("tasks.toml"),
+            "[meta]\nplan = \"contract\"\nmax_parallel = 1\n\n\
+             [[task]]\nid = \"T1\"\ntitle = \"Task\"\nstatus = \"ready\"\n\n\
+             [task.acceptance_contract]\nversion = 1\n\n\
+             [[task.acceptance_contract.gates]]\nid = \"compile\"\nkind = \"compile\"\ncommand = \"cargo check\"\n",
+        )
+        .unwrap();
+
+        rebuild_plans_index(tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(plans_index_path(tmp.path())).unwrap();
+        assert!(
+            content.contains("| `contract-plan` | 1 | 0 | 1 |"),
+            "nested gate id/status changed plan counts: {content}"
+        );
     }
 
     #[test]

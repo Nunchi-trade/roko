@@ -49,6 +49,8 @@ pub mod life_review;
 /// (Camel/Lion/Child), and EmotionalDeathTestament (P0-24, P1-26, P1-28).
 pub mod mortality;
 mod phase2_stubs;
+/// AffectPolicy adapter for WorkflowEngine integration.
+pub mod policy;
 /// Somatic TA integration: somatic marker bias for oracle predictions,
 /// IIT Phi metric, and PID synergy detection (TA-11).
 pub mod somatic_ta;
@@ -1697,7 +1699,7 @@ pub enum AffectEvent {
         task_id: String,
         /// Whether the gate passed.
         passed: bool,
-        /// Gate rung for the task.
+        /// Verify rung for the task.
         rung: u32,
     },
     /// Final task outcome.
@@ -1785,7 +1787,7 @@ pub struct AppraisalResult {
 /// Per spec: 10 categories, each mapping to different appraisal weights.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppraisalTrigger {
-    /// Gate or test result (performance feedback).
+    /// Verify or test result (performance feedback).
     Performance,
     /// Task completion or failure.
     TaskOutcome,

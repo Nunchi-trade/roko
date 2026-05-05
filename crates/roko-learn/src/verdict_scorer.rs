@@ -1,6 +1,8 @@
+//! STATUS: NOT WIRED -- called internally by floating code but no runtime entrypoint.
+//!
 //! VerdictAwareScorer — weights gate verdict signals by recency and severity (GATE-05).
 //!
-//! This scorer implements the `Scorer` trait from `roko-core` and specifically
+//! This scorer implements the `ScoreFn` trait from `roko-core` and specifically
 //! targets engrams of `Kind::GateVerdict`. It assigns higher scores to:
 //!
 //! 1. **Recent** verdicts (exponential time decay)
@@ -10,7 +12,8 @@
 //! Non-verdict engrams receive a neutral score so the scorer composes cleanly
 //! with other scorers in a `SumScorer` or `MulScorer` chain.
 
-use roko_core::{Context, Engram, Kind, Score, Scorer};
+use roko_core::traits::Score as ScoreFn;
+use roko_core::{Context, Kind, Score, Signal};
 
 /// Weights for verdict scoring dimensions.
 #[derive(Debug, Clone)]
@@ -36,7 +39,7 @@ impl Default for VerdictScorerConfig {
     }
 }
 
-/// Scorer that weights `Kind::GateVerdict` engrams by recency, severity, and relevance.
+/// ScoreFn that weights `Kind::GateVerdict` engrams by recency, severity, and relevance.
 ///
 /// Designed to be composed with other scorers. Non-verdict engrams receive
 /// `Score::ZERO` so they don't interfere in aggregate pipelines.
@@ -73,7 +76,7 @@ impl VerdictAwareScorer {
     ///
     /// Severity ordering: compile error (1.0) > test failure (0.8) >
     /// lint warning (0.5) > pass (0.1).
-    fn severity_factor(&self, signal: &Engram) -> f32 {
+    fn severity_factor(&self, signal: &Signal) -> f32 {
         let gate_name = signal.tag("gate").unwrap_or("");
 
         let passed = signal
@@ -99,7 +102,7 @@ impl VerdictAwareScorer {
     ///
     /// Checks for matching `task_type`, `crate`, and `task_category` tags
     /// between the verdict engram and the current context.
-    fn relevance_factor(&self, signal: &Engram, ctx: &Context) -> f32 {
+    fn relevance_factor(&self, signal: &Signal, ctx: &Context) -> f32 {
         let mut relevance: f32 = 0.0;
         let mut checks: f32 = 0.0;
 
@@ -140,8 +143,8 @@ impl Default for VerdictAwareScorer {
     }
 }
 
-impl Scorer for VerdictAwareScorer {
-    fn score(&self, signal: &Engram, ctx: &Context) -> Score {
+impl ScoreFn for VerdictAwareScorer {
+    fn score(&self, signal: &Signal, ctx: &Context) -> Score {
         // Only score GateVerdict engrams.
         if signal.kind != Kind::GateVerdict {
             return Score::ZERO;
@@ -325,11 +328,11 @@ impl VerdictHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Engram, Kind, Score};
+    use roko_core::{Body, Context, Kind, Score, Signal};
 
-    fn verdict_engram(gate: &str, passed: bool, age_ms: i64) -> Engram {
+    fn verdict_engram(gate: &str, passed: bool, age_ms: i64) -> Signal {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut e = Engram::builder(Kind::GateVerdict)
+        let mut e = Signal::builder(Kind::GateVerdict)
             .body(Body::empty())
             .build();
         e.created_at_ms = now - age_ms;
@@ -339,8 +342,8 @@ mod tests {
         e
     }
 
-    fn non_verdict_engram() -> Engram {
-        Engram::builder(Kind::Task).body(Body::empty()).build()
+    fn non_verdict_engram() -> Signal {
+        Signal::builder(Kind::Task).body(Body::empty()).build()
     }
 
     fn ctx_at_now() -> Context {

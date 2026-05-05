@@ -1,0 +1,14 @@
+/* AsciiBraille ── animated braille pattern fill */
+
+.ascii-braille {
+  font-family: var(--mono);
+  color: var(--text-ghost);
+  user-select: none;
+  line-height: 1.2;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.ascii-braille--spinner {
+  display: inline-block;
+}

@@ -1,0 +1,3 @@
+/* ── TimelineCanvas ────────────────────────────────────── */
+.timeline-canvas { width: 100%; position: relative; }
+.timeline-canvas canvas { display: block; width: 100%; }

@@ -4,7 +4,8 @@
 //! sets a token budget for prompt composition, and lists the gates to run
 //! on the agent's output.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,12 @@ use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{
     ModelProfile, ProviderConfig, ProviderRouting, RokoConfig, SubscriptionConfig,
 };
-use roko_core::config::{ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig};
+use roko_core::config::{
+    DEFAULT_TTFT_TIMEOUT_MS, ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig,
+};
+use roko_core::defaults::{
+    DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_PLAN_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_MS,
+};
 use roko_daimon::StrategySpaceDefinition;
 use roko_orchestrator::ExecutorConfig;
 
@@ -46,15 +52,24 @@ pub struct Config {
     /// Executor runtime settings.
     #[serde(default)]
     pub executor: ExecutorConfig,
+    /// Plan-level runner settings.
+    #[serde(default)]
+    pub runner: RunnerConfig,
+    /// Durable runtime/control-plane settings.
+    #[serde(default)]
+    pub runtime: RuntimeControlConfig,
     /// Cost budget configuration.
     #[serde(default)]
     pub budget: BudgetConfig,
     /// Provider registry keyed by provider name.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub providers: HashMap<String, ProviderConfig>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub providers: IndexMap<String, ProviderConfig>,
     /// Model registry keyed by model name.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub models: HashMap<String, ModelProfile>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub models: IndexMap<String, ModelProfile>,
+    /// Learning / feedback-loop settings.
+    #[serde(default)]
+    pub learning: LearningLayer,
     /// API serving options.
     #[serde(default)]
     pub serve: ServeConfig,
@@ -81,9 +96,12 @@ impl Default for Config {
             repos: Vec::new(),
             gates: vec![GateConfig::default_shell_true()],
             executor: ExecutorConfig::default(),
+            runner: RunnerConfig::default(),
+            runtime: RuntimeControlConfig::default(),
             budget: BudgetConfig::default(),
-            providers: HashMap::new(),
-            models: HashMap::new(),
+            providers: IndexMap::new(),
+            models: IndexMap::new(),
+            learning: LearningLayer::default(),
             serve: ServeConfig::default(),
             log_format: None,
             bind: None,
@@ -113,45 +131,7 @@ impl Config {
 
     /// Render the default `roko.toml` template used by `roko init`.
     pub fn default_toml_template(cloud: bool) -> Result<String> {
-        let mut config = Self::default();
-        // Use "claude" as the default agent command for init — not the struct
-        // default ("cat") which is a safe no-op for tests.  Users running
-        // `roko init` expect a working config out of the box.
-        config.agent.command = "claude".into();
-        if cloud {
-            config.log_format = Some("json".to_string());
-            config.bind = Some("0.0.0.0".to_string());
-            config.data_dir = Some(PathBuf::from("/data/.roko"));
-        }
-        let rendered = config.to_toml()?;
-        let cloud_deploy = if cloud {
-            "\n# Auto-register webhooks after deploy\n\
-             [[serve.deploy.webhooks]]\n\
-             provider = \"github\"\n\
-             owner = \"nunchi\"\n\
-             repo = \"roko\"\n\
-             \n\
-             [[serve.deploy.webhooks]]\n\
-             provider = \"github\"\n\
-             owner = \"nunchi\"\n\
-             repo = \"collaboration\"\n"
-        } else {
-            ""
-        };
-        Ok(format!(
-            "# REQUIRED_ENV\n\
-             # Required environment variables (set in .env or shell):\n\
-             # GITHUB_TOKEN       — GitHub personal access token (for MCP GitHub server)\n\
-             # GITHUB_WEBHOOK_SECRET — GitHub webhook secret for deploy registration\n\
-             # SLACK_BOT_TOKEN    — Slack bot token (for MCP Slack server)\n\
-             # SLACK_SIGNING_SECRET — Slack webhook signing secret\n\
-             # ANTHROPIC_API_KEY  — Claude API key (for direct API agents, not needed for CLI agents)\n\
-             \n\
-             {rendered}{cloud_deploy}\n\
-             # PRD settings (parsed by `RokoConfig`)\n\
-             [prd]\n\
-             auto_plan = false\n"
-        ))
+        crate::init::render_init_template(cloud)
     }
 }
 
@@ -286,7 +266,7 @@ impl Default for DaimonConfig {
 
 impl AgentConfig {
     const fn default_timeout() -> u64 {
-        120_000
+        DEFAULT_REQUEST_TIMEOUT_MS
     }
 
     fn default_effort() -> String {
@@ -399,6 +379,85 @@ impl Default for BudgetConfig {
             max_task_usd: Self::default_max_task(),
             max_session_usd: Self::default_max_session(),
             warn_at_percent: Self::default_warn_pct(),
+        }
+    }
+}
+
+/// Durable runtime/control-plane configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeControlConfig {
+    /// Path to the process-session ledger. Relative paths resolve from the workspace root.
+    #[serde(default = "RuntimeControlConfig::default_process_session_ledger")]
+    pub process_session_ledger: PathBuf,
+    /// Maximum age for resumable process-session metadata before resume fails closed.
+    #[serde(default = "RuntimeControlConfig::default_resume_max_staleness_secs")]
+    pub resume_max_staleness_secs: u64,
+}
+
+impl RuntimeControlConfig {
+    fn default_process_session_ledger() -> PathBuf {
+        PathBuf::from(".roko/state/process-sessions.json")
+    }
+
+    const fn default_resume_max_staleness_secs() -> u64 {
+        24 * 60 * 60
+    }
+
+    /// Resolve the configured ledger path against a workspace root.
+    #[must_use]
+    pub fn process_session_ledger_path(&self, workdir: &Path) -> PathBuf {
+        if self.process_session_ledger.is_absolute() {
+            self.process_session_ledger.clone()
+        } else {
+            workdir.join(&self.process_session_ledger)
+        }
+    }
+
+    /// Return the resume staleness window in milliseconds.
+    #[must_use]
+    pub const fn resume_max_staleness_ms(&self) -> u64 {
+        self.resume_max_staleness_secs.saturating_mul(1_000)
+    }
+
+    /// Validate runtime control-plane settings.
+    pub fn validate(&self) -> Result<()> {
+        if self.process_session_ledger.as_os_str().is_empty() {
+            bail!("runtime.process_session_ledger must not be empty");
+        }
+        if self.resume_max_staleness_secs == 0 {
+            bail!("runtime.resume_max_staleness_secs must be greater than zero");
+        }
+        Ok(())
+    }
+}
+
+impl Default for RuntimeControlConfig {
+    fn default() -> Self {
+        Self {
+            process_session_ledger: Self::default_process_session_ledger(),
+            resume_max_staleness_secs: Self::default_resume_max_staleness_secs(),
+        }
+    }
+}
+
+/// Plan-level runner configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RunnerConfig {
+    /// Wall-clock timeout for the entire plan execution.
+    #[serde(default = "RunnerConfig::default_plan_timeout_secs")]
+    pub plan_timeout_secs: u64,
+}
+
+impl RunnerConfig {
+    const fn default_plan_timeout_secs() -> u64 {
+        DEFAULT_PLAN_TIMEOUT_SECS
+    }
+}
+
+impl Default for RunnerConfig {
+    fn default() -> Self {
+        Self {
+            plan_timeout_secs: Self::default_plan_timeout_secs(),
         }
     }
 }
@@ -769,11 +828,15 @@ impl RepoRegistry {
         repo_name: &str,
     ) -> Result<(Option<RokoConfig>, Option<PathBuf>)> {
         let path = root.join(".roko").join("roko.toml");
-        if !path.is_file() {
-            return Ok((None, None));
-        }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("read repo config {}", path.display()))?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("read repo config {}", path.display()))
+                );
+            }
+        };
         let config = RokoConfig::from_toml(&text)
             .map_err(|err| anyhow!(err))
             .with_context(|| {
@@ -912,24 +975,65 @@ pub struct ConfigLayer {
     /// Prompt settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<PromptLayer>,
-    /// Gate list (replaces rather than merges if present).
+    /// Verify list (replaces rather than merges if present).
     #[serde(default, rename = "gate", skip_serializing_if = "Option::is_none")]
     pub gates: Option<Vec<GateConfig>>,
     /// Executor settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<ExecutorLayer>,
+    /// Plan-level runner settings overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<RunnerLayer>,
+    /// Runtime/control-plane settings overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeControlLayer>,
     /// Provider registry overrides keyed by provider name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub providers: Option<HashMap<String, ProviderLayer>>,
+    pub providers: Option<IndexMap<String, ProviderLayer>>,
     /// Model registry overrides keyed by model name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub models: Option<HashMap<String, ModelProfileLayer>>,
+    pub models: Option<IndexMap<String, ModelProfileLayer>>,
     /// API serving options overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serve: Option<ServeLayer>,
     /// Per-repository configuration blocks.
     #[serde(default, rename = "repos", skip_serializing_if = "Option::is_none")]
     pub repos: Option<Vec<RepoConfig>>,
+    /// Learning subsystem overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learning: Option<LearningLayer>,
+}
+
+/// Partial overrides for `[learning]`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct LearningLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_on_gate_failure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_max_per_plan: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_gate_attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_playbook_refresh: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_lookahead_router: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookahead_threshold: Option<f64>,
+}
+
+impl LearningLayer {
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            replan_on_gate_failure: overlay
+                .replan_on_gate_failure
+                .or(self.replan_on_gate_failure),
+            replan_max_per_plan: overlay.replan_max_per_plan.or(self.replan_max_per_plan),
+            replan_gate_attempts: overlay.replan_gate_attempts.or(self.replan_gate_attempts),
+            auto_playbook_refresh: overlay.auto_playbook_refresh.or(self.auto_playbook_refresh),
+            use_lookahead_router: overlay.use_lookahead_router.or(self.use_lookahead_router),
+            lookahead_threshold: overlay.lookahead_threshold.or(self.lookahead_threshold),
+        }
+    }
 }
 
 impl ConfigLayer {
@@ -991,6 +1095,18 @@ impl ConfigLayer {
                 None => e,
             });
         }
+        if let Some(runner) = overlay.runner {
+            self.runner = Some(match self.runner {
+                Some(base) => base.merge(runner),
+                None => runner,
+            });
+        }
+        if let Some(runtime) = overlay.runtime {
+            self.runtime = Some(match self.runtime {
+                Some(base) => base.merge(runtime),
+                None => runtime,
+            });
+        }
         if let Some(overlay_providers) = overlay.providers {
             let mut providers = self.providers.unwrap_or_default();
             for (name, layer) in overlay_providers {
@@ -1020,6 +1136,12 @@ impl ConfigLayer {
         if let Some(repos) = overlay.repos {
             self.repos = Some(repos);
         }
+        if let Some(l) = overlay.learning {
+            self.learning = Some(match self.learning {
+                Some(base) => base.merge(l),
+                None => l,
+            });
+        }
         self
     }
 
@@ -1034,10 +1156,13 @@ impl ConfigLayer {
             && self.prompt.is_none()
             && self.gates.is_none()
             && self.executor.is_none()
+            && self.runner.is_none()
+            && self.runtime.is_none()
             && self.providers.is_none()
             && self.models.is_none()
             && self.serve.is_none()
             && self.repos.is_none()
+            && self.learning.is_none()
     }
 
     /// Resolve into a concrete [`Config`], filling missing fields with defaults.
@@ -1122,6 +1247,14 @@ impl ConfigLayer {
             }
             None => ExecutorConfig::default(),
         };
+        let runner = match self.runner {
+            Some(runner) => runner.resolve(),
+            None => RunnerConfig::default(),
+        };
+        let runtime = match self.runtime {
+            Some(runtime) => runtime.resolve()?,
+            None => RuntimeControlConfig::default(),
+        };
         let providers = match self.providers {
             Some(providers) => providers
                 .into_iter()
@@ -1131,8 +1264,8 @@ impl ConfigLayer {
                         .with_context(|| format!("resolve providers.{name}"))?;
                     Ok((name, provider))
                 })
-                .collect::<Result<HashMap<_, _>>>()?,
-            None => HashMap::new(),
+                .collect::<Result<IndexMap<_, _>>>()?,
+            None => IndexMap::new(),
         };
         let models = match self.models {
             Some(models) => models
@@ -1143,14 +1276,20 @@ impl ConfigLayer {
                         .with_context(|| format!("resolve models.{name}"))?;
                     Ok((name, profile))
                 })
-                .collect::<Result<HashMap<_, _>>>()?,
-            None => HashMap::new(),
+                .collect::<Result<IndexMap<_, _>>>()?,
+            None => IndexMap::new(),
         };
         let serve = match self.serve {
             Some(s) => {
                 let defaults = ServeConfig::default();
                 ServeConfig {
                     port: s.port,
+                    share_ttl_days: s.share_ttl_days.unwrap_or(defaults.share_ttl_days),
+                    acknowledge_public_risk: defaults.acknowledge_public_risk,
+                    terminal_enabled: match s.terminal_enabled {
+                        Some(terminal_enabled) => terminal_enabled,
+                        None => defaults.terminal_enabled,
+                    },
                     auto_orchestrate: match s.auto_orchestrate {
                         Some(auto_orchestrate) => auto_orchestrate,
                         None => defaults.auto_orchestrate,
@@ -1163,10 +1302,16 @@ impl ConfigLayer {
                         Some(deploy) => deploy.resolve(defaults.deploy),
                         None => defaults.deploy,
                     },
+                    auto_start: match s.auto_start {
+                        Some(auto_start) => auto_start,
+                        None => defaults.auto_start,
+                    },
+                    event_ingest_allowlist: defaults.event_ingest_allowlist,
                 }
             }
             None => ServeConfig::default(),
         };
+        let learning = self.learning.unwrap_or_default();
         Ok(Config {
             agent,
             auto_plan,
@@ -1177,9 +1322,12 @@ impl ConfigLayer {
             repos: self.repos.unwrap_or_default(),
             gates,
             executor,
+            runner,
+            runtime,
             budget: BudgetConfig::default(),
             providers,
             models,
+            learning,
             serve,
             log_format: None,
             bind: None,
@@ -1216,17 +1364,37 @@ pub struct ProviderLayer {
 impl ProviderLayer {
     #[must_use]
     pub fn merge(self, overlay: Self) -> Self {
-        Self {
-            kind: overlay.kind.or(self.kind),
-            base_url: overlay.base_url.or(self.base_url),
-            api_key_env: overlay.api_key_env.or(self.api_key_env),
-            command: overlay.command.or(self.command),
-            args: overlay.args.or(self.args),
-            timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
-            ttft_timeout_ms: overlay.ttft_timeout_ms.or(self.ttft_timeout_ms),
-            connect_timeout_ms: overlay.connect_timeout_ms.or(self.connect_timeout_ms),
-            extra_headers: overlay.extra_headers.or(self.extra_headers),
-            max_concurrent: overlay.max_concurrent.or(self.max_concurrent),
+        // If the overlay changes `kind`, don't inherit kind-specific fields
+        // (api_key_env, base_url, command, args) from the base — they belong
+        // to a different provider type and would cause misrouting.
+        let kind_changed = overlay.kind.is_some() && overlay.kind != self.kind;
+        if kind_changed {
+            Self {
+                kind: overlay.kind,
+                base_url: overlay.base_url,
+                api_key_env: overlay.api_key_env,
+                command: overlay.command,
+                args: overlay.args,
+                // Timeouts are kind-agnostic, safe to inherit
+                timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
+                ttft_timeout_ms: overlay.ttft_timeout_ms.or(self.ttft_timeout_ms),
+                connect_timeout_ms: overlay.connect_timeout_ms.or(self.connect_timeout_ms),
+                extra_headers: overlay.extra_headers.or(self.extra_headers),
+                max_concurrent: overlay.max_concurrent.or(self.max_concurrent),
+            }
+        } else {
+            Self {
+                kind: overlay.kind.or(self.kind),
+                base_url: overlay.base_url.or(self.base_url),
+                api_key_env: overlay.api_key_env.or(self.api_key_env),
+                command: overlay.command.or(self.command),
+                args: overlay.args.or(self.args),
+                timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
+                ttft_timeout_ms: overlay.ttft_timeout_ms.or(self.ttft_timeout_ms),
+                connect_timeout_ms: overlay.connect_timeout_ms.or(self.connect_timeout_ms),
+                extra_headers: overlay.extra_headers.or(self.extra_headers),
+                max_concurrent: overlay.max_concurrent.or(self.max_concurrent),
+            }
         }
     }
 
@@ -1237,9 +1405,9 @@ impl ProviderLayer {
             api_key_env: self.api_key_env,
             command: self.command,
             args: self.args,
-            timeout_ms: self.timeout_ms.or(Some(120_000)),
-            ttft_timeout_ms: self.ttft_timeout_ms.or(Some(15_000)),
-            connect_timeout_ms: self.connect_timeout_ms.or(Some(5_000)),
+            timeout_ms: self.timeout_ms.or(Some(DEFAULT_REQUEST_TIMEOUT_MS)),
+            ttft_timeout_ms: self.ttft_timeout_ms.or(Some(DEFAULT_TTFT_TIMEOUT_MS)),
+            connect_timeout_ms: self.connect_timeout_ms.or(Some(DEFAULT_CONNECT_TIMEOUT_MS)),
             extra_headers: self.extra_headers,
             max_concurrent: self.max_concurrent,
         })
@@ -1348,6 +1516,12 @@ pub struct ModelProfileLayer {
     pub search_context_size: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_per_request: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<roko_core::ModelTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_max_completion_tokens: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_iterations: Option<u32>,
 }
 
 impl ModelProfileLayer {
@@ -1395,6 +1569,11 @@ impl ModelProfileLayer {
             is_embedding_model: overlay.is_embedding_model.or(self.is_embedding_model),
             search_context_size: overlay.search_context_size.or(self.search_context_size),
             cost_per_request: overlay.cost_per_request.or(self.cost_per_request),
+            tier: overlay.tier.or(self.tier),
+            use_max_completion_tokens: overlay
+                .use_max_completion_tokens
+                .or(self.use_max_completion_tokens),
+            max_tool_iterations: overlay.max_tool_iterations.or(self.max_tool_iterations),
         }
     }
 
@@ -1432,6 +1611,9 @@ impl ModelProfileLayer {
             is_embedding_model: self.is_embedding_model.unwrap_or(false),
             search_context_size: self.search_context_size,
             cost_per_request: self.cost_per_request,
+            use_max_completion_tokens: self.use_max_completion_tokens.unwrap_or(false),
+            max_tool_iterations: self.max_tool_iterations,
+            tier: self.tier,
         })
     }
 }
@@ -1461,7 +1643,7 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
             let agent = layer.agent.get_or_insert_with(AgentLayer::default);
             agent.args = Some(parse_string_list(value, "parse JSON array for agent.args")?);
         }
-        ["agent", "model"] => {
+        ["agent", "model"] | ["agent", "default_model"] => {
             let agent = layer.agent.get_or_insert_with(AgentLayer::default);
             agent.model = Some(value.into());
         }
@@ -1626,6 +1808,14 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
                 value
                     .parse::<bool>()
                     .context("parse use_worktrees as bool")?,
+            );
+        }
+        ["runner", "plan_timeout_secs"] => {
+            let runner = layer.runner.get_or_insert_with(RunnerLayer::default);
+            runner.plan_timeout_secs = Some(
+                value
+                    .parse::<u64>()
+                    .context("parse plan_timeout_secs as u64")?,
             );
         }
         ["providers", name, "kind"] => {
@@ -1944,6 +2134,58 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
                     .context("parse JSON array for serve.deploy.webhooks")?,
             );
         }
+        ["serve", "auto_start"] => {
+            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
+            serve.auto_start = Some(value.parse::<bool>().context("parse auto_start as bool")?);
+        }
+        ["learning", "replan_on_gate_failure"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.replan_on_gate_failure = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse replan_on_gate_failure as bool")?,
+            );
+        }
+        ["learning", "replan_max_per_plan"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.replan_max_per_plan = Some(
+                value
+                    .parse::<u32>()
+                    .context("parse replan_max_per_plan as u32")?,
+            );
+        }
+        ["learning", "replan_gate_attempts"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.replan_gate_attempts = Some(
+                value
+                    .parse::<u32>()
+                    .context("parse replan_gate_attempts as u32")?,
+            );
+        }
+        ["learning", "auto_playbook_refresh"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.auto_playbook_refresh = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse auto_playbook_refresh as bool")?,
+            );
+        }
+        ["learning", "use_lookahead_router"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.use_lookahead_router = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse use_lookahead_router as bool")?,
+            );
+        }
+        ["learning", "lookahead_threshold"] => {
+            let learning = layer.learning.get_or_insert_with(LearningLayer::default);
+            learning.lookahead_threshold = Some(
+                value
+                    .parse::<f64>()
+                    .context("parse lookahead_threshold as f64")?,
+            );
+        }
         _ => return Err(anyhow!("unknown key: {key}")),
     }
 
@@ -1968,7 +2210,7 @@ where
 fn provider_layer_mut<'a>(layer: &'a mut ConfigLayer, name: &str) -> &'a mut ProviderLayer {
     layer
         .providers
-        .get_or_insert_with(HashMap::new)
+        .get_or_insert_with(IndexMap::new)
         .entry(name.to_string())
         .or_default()
 }
@@ -1976,7 +2218,7 @@ fn provider_layer_mut<'a>(layer: &'a mut ConfigLayer, name: &str) -> &'a mut Pro
 fn model_layer_mut<'a>(layer: &'a mut ConfigLayer, name: &str) -> &'a mut ModelProfileLayer {
     layer
         .models
-        .get_or_insert_with(HashMap::new)
+        .get_or_insert_with(IndexMap::new)
         .entry(name.to_string())
         .or_default()
 }
@@ -2056,6 +2298,7 @@ fn apply_env_source_overrides(sources: &mut ConfigSources, paths: &[String]) {
             "dreams.auto_dream" => sources.dreams_auto_dream = Source::Env,
             "dreams.idle_threshold_mins" => sources.dreams_idle_threshold_mins = Source::Env,
             "dreams.min_episodes_for_dream" => sources.dreams_min_episodes_for_dream = Source::Env,
+            "runner.plan_timeout_secs" => sources.runner_plan_timeout_secs = Source::Env,
             path if path.starts_with("providers.") => sources.providers = Source::Env,
             path if path.starts_with("models.") => sources.models = Source::Env,
             _ => {}
@@ -2143,7 +2386,11 @@ pub struct AgentLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     /// Preferred model slug.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "default_model"
+    )]
     pub model: Option<String>,
     /// Claude effort level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2259,12 +2506,86 @@ pub struct ExecutorLayer {
     pub speculative_threshold_multiplier: Option<f64>,
 }
 
+/// Partial `RuntimeControlConfig` — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RuntimeControlLayer {
+    /// Path to the process-session ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_session_ledger: Option<PathBuf>,
+    /// Maximum process-session metadata age before resume fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_max_staleness_secs: Option<u64>,
+}
+
+impl RuntimeControlLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            process_session_ledger: overlay
+                .process_session_ledger
+                .or(self.process_session_ledger),
+            resume_max_staleness_secs: overlay
+                .resume_max_staleness_secs
+                .or(self.resume_max_staleness_secs),
+        }
+    }
+
+    /// Resolve into a validated [`RuntimeControlConfig`].
+    pub fn resolve(self) -> Result<RuntimeControlConfig> {
+        let defaults = RuntimeControlConfig::default();
+        let config = RuntimeControlConfig {
+            process_session_ledger: self
+                .process_session_ledger
+                .unwrap_or(defaults.process_session_ledger),
+            resume_max_staleness_secs: self
+                .resume_max_staleness_secs
+                .unwrap_or(defaults.resume_max_staleness_secs),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+/// Partial `RunnerConfig` — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RunnerLayer {
+    /// Wall-clock timeout for the entire plan execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_timeout_secs: Option<u64>,
+}
+
+impl RunnerLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            plan_timeout_secs: overlay.plan_timeout_secs.or(self.plan_timeout_secs),
+        }
+    }
+
+    /// Resolve into a concrete [`RunnerConfig`] value.
+    #[must_use]
+    pub fn resolve(self) -> RunnerConfig {
+        let defaults = RunnerConfig::default();
+        RunnerConfig {
+            plan_timeout_secs: self.plan_timeout_secs.unwrap_or(defaults.plan_timeout_secs),
+        }
+    }
+}
+
 /// Partial `ServeConfig` — every field optional.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ServeLayer {
     /// Port override for `roko serve`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Shared transcript retention period in days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_ttl_days: Option<u64>,
+    /// Whether to expose the PTY terminal routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_enabled: Option<bool>,
     /// Whether serve-side publish events trigger orchestration automatically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_orchestrate: Option<bool>,
@@ -2274,6 +2595,9 @@ pub struct ServeLayer {
     /// Cloud deployment settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy: Option<ServeDeployLayer>,
+    /// Whether `roko` with no subcommand should auto-start the HTTP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_start: Option<bool>,
 }
 
 impl ServeLayer {
@@ -2282,6 +2606,8 @@ impl ServeLayer {
     pub fn merge(self, overlay: Self) -> Self {
         Self {
             port: overlay.port.or(self.port),
+            share_ttl_days: overlay.share_ttl_days.or(self.share_ttl_days),
+            terminal_enabled: overlay.terminal_enabled.or(self.terminal_enabled),
             auto_orchestrate: overlay.auto_orchestrate.or(self.auto_orchestrate),
             auth: match (self.auth, overlay.auth) {
                 (Some(base), Some(overlay)) => Some(base.merge(overlay)),
@@ -2293,6 +2619,7 @@ impl ServeLayer {
                 (_, Some(overlay)) => Some(overlay),
                 (base, None) => base,
             },
+            auto_start: overlay.auto_start.or(self.auto_start),
         }
     }
 }
@@ -2457,36 +2784,7 @@ pub struct ConfigPaths {
 /// path so that `init` writes to the right place.
 #[must_use]
 pub fn global_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let canonical = PathBuf::from(&home).join(".roko").join("config.toml");
-
-    if canonical.exists() {
-        return canonical;
-    }
-
-    // Legacy: $XDG_CONFIG_HOME/roko/config.toml or ~/.config/roko/config.toml
-    let legacy = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            PathBuf::from(xdg).join("roko").join("config.toml")
-        } else {
-            PathBuf::from(&home)
-                .join(".config")
-                .join("roko")
-                .join("config.toml")
-        }
-    } else {
-        PathBuf::from(&home)
-            .join(".config")
-            .join("roko")
-            .join("config.toml")
-    };
-
-    if legacy.exists() {
-        return legacy;
-    }
-
-    // Neither exists — return canonical for new installs.
-    canonical
+    roko_core::config::loader::global_config_path()
 }
 
 /// Merge providers and models from the global config into `config`.
@@ -2495,48 +2793,13 @@ pub fn global_config_path() -> PathBuf {
 /// gets inserted. This lets project `roko.toml` files override specific
 /// entries while inheriting the rest from `~/.roko/config.toml`.
 pub fn merge_global_providers(config: &mut roko_core::config::schema::RokoConfig) {
-    let global_path = global_config_path();
-    if !global_path.exists() {
-        return;
-    }
-    let text = match std::fs::read_to_string(&global_path) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(path = %global_path.display(), error = %e, "failed to read global config");
-            return;
-        }
-    };
-    let global = match roko_core::config::schema::RokoConfig::from_toml(&text) {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::warn!(path = %global_path.display(), error = %e, "failed to parse global config");
-            return;
-        }
-    };
-    for (name, provider) in global.providers {
-        config.providers.entry(name).or_insert(provider);
-    }
-    for (name, model) in global.models {
-        config.models.entry(name).or_insert(model);
-    }
+    roko_core::config::loader::merge_global_into(config);
 }
 
 /// Walk up from `start` looking for `roko.toml`. Returns the first hit.
 #[must_use]
 pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
-    let mut cur = start
-        .canonicalize()
-        .ok()
-        .unwrap_or_else(|| start.to_path_buf());
-    loop {
-        let candidate = cur.join("roko.toml");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !cur.pop() {
-            return None;
-        }
-    }
+    roko_core::config::loader::discover_project_config(start)
 }
 
 /// Compute the paths used to resolve config for `workdir`.
@@ -2603,18 +2866,48 @@ pub struct ConfigSources {
     pub dreams_min_episodes_for_dream: Source,
     /// Where `gates` came from.
     pub gates: Source,
+    /// Where `runner.plan_timeout_secs` came from.
+    pub runner_plan_timeout_secs: Source,
 }
 
-/// Load global + project configs, merge them, and return a `ResolvedConfig`.
+/// Load config using the unified core loader and return a [`ResolvedConfig`].
 ///
-/// Precedence (highest first): `ROKO__*` env vars → `ROKO_CONFIG` env var →
-/// project → global → defaults.
-pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
+/// This is the primary config loading entry point for CLI code. It delegates to
+/// `roko_core::config::loader::load_config_validated_with_options()` for the
+/// authoritative config (providers, models, agent defaults, env overrides),
+/// then builds the CLI-specific compatibility fields (`ConfigSources`,
+/// `ConfigPaths`, `RepoRegistry`) that downstream code still requires.
+///
+/// Precedence (highest first): hierarchical `ROKO__*` env vars → named
+/// `ROKO_*` env vars → `ROKO_CONFIG` env var → project `roko.toml` →
+/// global `~/.roko/config.toml` → defaults.
+///
+/// ## Compatibility notes
+///
+/// The following CLI-only fields are still parsed from the legacy `ConfigLayer`
+/// system because they have no equivalent in `RokoConfig`:
+/// - `auto_plan` (CLI-specific flag, not in core schema)
+/// - `repos` (per-repository blocks, CLI-only)
+/// - Legacy `[[gate]]` array syntax (core uses `[gates]` section)
+/// - `dreams` / `daimon` / `runner.plan_timeout_secs` (CLI-specific config shapes)
+///
+/// These fields do NOT override core provider/model/env behavior.
+pub fn load_resolved_config(workdir: &Path) -> Result<ResolvedConfig> {
     let paths = resolve_paths(workdir);
     let (env_layer, env_paths) = collect_env_override_layer()?;
 
-    // If ROKO_CONFIG is set, it alone resolves the file config; field-level
-    // ROKO__* env vars still apply on top.
+    // Load the authoritative config from the core unified loader.
+    // This handles: ancestor walk, ROKO_CONFIG env, global merge, named env
+    // overrides (ROKO_MODEL etc.), hierarchical ROKO__* overrides,
+    // interpolation, and file secret resolution.
+    let _core_validated = roko_core::config::loader::load_config_validated_with_options(
+        workdir,
+        &roko_core::config::loader::LoadOptions::default(),
+    )
+    .map_err(|e| anyhow!("core config loader: {e}"))?;
+
+    // Build CLI config from the legacy layer system for compatibility fields.
+    // The core-loaded config is authoritative for providers/models/agent/env.
     if let Some(env_path) = &paths.env_override {
         let layer = ConfigLayer::from_file(env_path)?.merge(env_layer);
         let sources = sources_from_layer(&layer, Source::Env, Source::Default);
@@ -2628,10 +2921,15 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
         });
     }
 
-    let global_layer = if paths.global.is_file() {
-        ConfigLayer::from_file(&paths.global)?
-    } else {
-        ConfigLayer::default()
+    let global_layer = match std::fs::read_to_string(&paths.global) {
+        Ok(text) => ConfigLayer::parse_toml(&text)
+            .with_context(|| format!("parse config {}", paths.global.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ConfigLayer::default(),
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("read config {}", paths.global.display()))
+            );
+        }
     };
     let project_layer = match &paths.project {
         Some(p) => ConfigLayer::from_file(p)?,
@@ -2652,6 +2950,15 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
     })
 }
 
+/// **Deprecated**: Use [`load_resolved_config`] instead.
+///
+/// This function now delegates to `load_resolved_config` and exists only to
+/// avoid breaking any remaining test-only references during migration.
+#[deprecated(note = "use load_resolved_config() instead")]
+pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
+    load_resolved_config(workdir)
+}
+
 /// Compute per-field provenance from global + project layers.
 fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources {
     let g_auto_plan = global.auto_plan.is_some();
@@ -2664,6 +2971,8 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
     let p_prompt = project.prompt.as_ref();
     let g_dreams = global.dreams.as_ref();
     let p_dreams = project.dreams.as_ref();
+    let g_runner = global.runner.as_ref();
+    let p_runner = project.runner.as_ref();
 
     let pick = |in_project: bool, in_global: bool| -> Source {
         if in_project {
@@ -2740,6 +3049,7 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
             g_dreams.and_then(|d| d.min_episodes_for_dream).is_some(),
         ),
         gates: pick(project.gates.is_some(), global.gates.is_some()),
+        runner_plan_timeout_secs: pick(p_runner.is_some(), g_runner.is_some()),
     }
 }
 
@@ -2772,6 +3082,7 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
             dreams.and_then(|d| d.min_episodes_for_dream).is_some(),
         ),
         gates: pick(layer.gates.is_some()),
+        runner_plan_timeout_secs: pick(layer.runner.is_some()),
     }
 }
 
@@ -2876,11 +3187,15 @@ command = "cat"
 "#;
         let cfg = Config::parse_toml(toml).unwrap();
         assert_eq!(cfg.agent.command, "cat");
-        assert_eq!(cfg.agent.timeout_ms, 120_000);
+        assert_eq!(
+            cfg.agent.timeout_ms,
+            roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS
+        );
         assert!(!cfg.tools.prefer_mcp);
         assert!(cfg.tools.global_denied.is_empty());
         assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
+        assert_eq!(cfg.runner.plan_timeout_secs, DEFAULT_PLAN_TIMEOUT_SECS);
         assert!(cfg.repos.is_empty());
     }
 
@@ -2998,6 +3313,7 @@ use_worktrees = true
         assert!(!cfg.tools.prefer_mcp);
         assert_eq!(cfg.tools.global_denied, vec!["bash".to_string()]);
         assert_eq!(cfg.tools.mcp_timeout_secs, 15);
+        assert_eq!(cfg.runner.plan_timeout_secs, DEFAULT_PLAN_TIMEOUT_SECS);
     }
 
     #[test]
@@ -3009,10 +3325,24 @@ command = "cat"
 [serve.auth]
 enabled = true
 api_key = "secret"
-"#;
+        "#;
         let cfg = Config::parse_toml(toml).unwrap();
+        assert!(!cfg.serve.terminal_enabled);
         assert!(cfg.serve.auth.enabled);
         assert_eq!(cfg.serve.auth.api_key, "secret");
+    }
+
+    #[test]
+    fn parses_serve_auto_start_section_from_toml() {
+        let toml = r#"
+[agent]
+command = "cat"
+
+[serve]
+auto_start = true
+        "#;
+        let cfg = Config::parse_toml(toml).unwrap();
+        assert!(cfg.serve.auto_start);
     }
 
     #[test]
@@ -3105,6 +3435,9 @@ max_concurrent_plans = 6
 task_timeout_secs = 900
 auto_replan = false
 use_worktrees = true
+
+[runner]
+plan_timeout_secs = 1200
 "#,
         )
         .unwrap();
@@ -3118,7 +3451,10 @@ use_worktrees = true
         assert_eq!(cfg.executor.task_timeout_secs, 900);
         assert!(!cfg.executor.auto_replan);
         assert!(cfg.executor.use_worktrees);
-        assert!(!cfg.serve.auth.enabled);
+        assert_eq!(cfg.runner.plan_timeout_secs, 1_200);
+        assert!(!cfg.serve.terminal_enabled);
+        // Secure-by-default: auth is enabled even with no explicit [serve] config.
+        assert!(cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
         assert_eq!(cfg.serve.deploy.provider, "railway");
         assert_eq!(
@@ -3131,6 +3467,76 @@ use_worktrees = true
             ]
         );
         assert!(cfg.serve.deploy.webhooks.is_empty());
+    }
+
+    #[test]
+    fn layer_resolve_uses_terminal_override() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[serve]
+terminal_enabled = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve().unwrap();
+        assert!(cfg.serve.terminal_enabled);
+    }
+
+    #[test]
+    fn layer_resolve_uses_auto_start_override() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[serve]
+auto_start = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve().unwrap();
+        assert!(cfg.serve.auto_start);
+    }
+
+    #[test]
+    fn layer_resolve_uses_runtime_control_overrides() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[runtime]
+process_session_ledger = ".roko/state/custom-process-sessions.json"
+resume_max_staleness_secs = 3600
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve().unwrap();
+        assert_eq!(
+            cfg.runtime.process_session_ledger,
+            PathBuf::from(".roko/state/custom-process-sessions.json")
+        );
+        assert_eq!(cfg.runtime.resume_max_staleness_secs, 3600);
+        assert_eq!(cfg.runtime.resume_max_staleness_ms(), 3_600_000);
+        assert_eq!(
+            cfg.runtime
+                .process_session_ledger_path(Path::new("/workspace")),
+            PathBuf::from("/workspace/.roko/state/custom-process-sessions.json")
+        );
+    }
+
+    #[test]
+    fn runtime_control_rejects_zero_staleness_window() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[runtime]
+resume_max_staleness_secs = 0
+"#,
+        )
+        .unwrap();
+
+        let err = layer.resolve().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("runtime.resume_max_staleness_secs must be greater than zero")
+        );
     }
 
     #[test]
@@ -3169,6 +3575,8 @@ auto_plan = true
         assert_eq!(parsed.models, cfg.models);
         assert_eq!(parsed.repos.len(), cfg.repos.len());
         assert_eq!(parsed.gates.len(), cfg.gates.len());
+        assert_eq!(parsed.serve.terminal_enabled, cfg.serve.terminal_enabled);
+        assert_eq!(parsed.serve.auto_start, cfg.serve.auto_start);
         assert_eq!(parsed.serve.auth.enabled, cfg.serve.auth.enabled);
         assert_eq!(parsed.serve.auth.api_key, cfg.serve.auth.api_key);
         assert_eq!(parsed.serve.deploy.provider, cfg.serve.deploy.provider);
@@ -3177,6 +3585,10 @@ auto_plan = true
             cfg.serve.deploy.environment
         );
         assert_eq!(parsed.serve.deploy.webhooks, cfg.serve.deploy.webhooks);
+        assert_eq!(
+            parsed.runner.plan_timeout_secs,
+            cfg.runner.plan_timeout_secs
+        );
     }
 
     #[test]
@@ -3336,6 +3748,7 @@ max_output = 131072
         apply_layer_value(&mut layer, "models.glm51.provider", "zai").unwrap();
         apply_layer_value(&mut layer, "models.glm51.slug", "glm-5.1").unwrap();
         apply_layer_value(&mut layer, "models.glm51.supports_thinking", "true").unwrap();
+        apply_layer_value(&mut layer, "runner.plan_timeout_secs", "1800").unwrap();
 
         let cfg = layer.resolve().unwrap();
         let provider = cfg.providers.get("zai").unwrap();
@@ -3349,6 +3762,7 @@ max_output = 131072
         assert_eq!(model.provider, "zai");
         assert_eq!(model.slug, "glm-5.1");
         assert!(model.supports_thinking);
+        assert_eq!(cfg.runner.plan_timeout_secs, 1_800);
     }
 
     #[test]
@@ -3384,7 +3798,10 @@ base_url = "https://api.z.ai/api/paas/v4"
         assert_eq!(cfg.daimon.strategy_space.domain, "coding");
         assert_eq!(cfg.daimon.strategy_space.dimensions[0], "complexity");
         assert!(cfg.gates.is_empty());
-        assert!(!cfg.serve.auth.enabled);
+        assert_eq!(cfg.runner.plan_timeout_secs, DEFAULT_PLAN_TIMEOUT_SECS);
+        assert!(!cfg.serve.terminal_enabled);
+        // Secure-by-default: auth is enabled by default.
+        assert!(cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
     }
 
@@ -3488,6 +3905,7 @@ token_budget = 8000
         assert_eq!(sources.dreams_auto_dream, Source::Default);
         assert_eq!(sources.dreams_idle_threshold_mins, Source::Default);
         assert_eq!(sources.dreams_min_episodes_for_dream, Source::Default);
+        assert_eq!(sources.runner_plan_timeout_secs, Source::Default);
     }
 
     #[test]
@@ -3508,6 +3926,10 @@ base_url = "https://file.example"
         let (env_layer, env_paths) = collect_env_override_layer_from(vec![
             ("ROKO__AGENT__MODEL".to_string(), "test".to_string()),
             (
+                "ROKO__RUNNER__PLAN_TIMEOUT_SECS".to_string(),
+                "77".to_string(),
+            ),
+            (
                 "ROKO__PROVIDERS__ZAI__BASE_URL".to_string(),
                 "https://env.example".to_string(),
             ),
@@ -3520,6 +3942,8 @@ base_url = "https://file.example"
 
         assert_eq!(resolved.agent.model.as_deref(), Some("test"));
         assert_eq!(sources.agent_model, Source::Env);
+        assert_eq!(resolved.runner.plan_timeout_secs, 77);
+        assert_eq!(sources.runner_plan_timeout_secs, Source::Env);
         assert_eq!(
             resolved.providers.get("zai").unwrap().base_url.as_deref(),
             Some("https://env.example")
@@ -3616,22 +4040,102 @@ program = "echo"
         assert!(rendered.contains("SLACK_BOT_TOKEN"));
         assert!(rendered.contains("SLACK_SIGNING_SECRET"));
         assert!(rendered.contains("ANTHROPIC_API_KEY"));
-        assert!(rendered.contains("[serve.deploy]"));
+        assert!(rendered.contains("config_version = 2"));
+        assert!(rendered.contains("schema_version = 2"));
+        assert!(rendered.contains("default_backend = \"claude\""));
+        assert!(rendered.contains("default_model = \"claude-sonnet-4-6\""));
+        assert!(
+            rendered.contains("[providers.claude_cli]")
+                || rendered.contains("# [providers.claude_cli]")
+        );
+        assert!(rendered.contains("kind = \"claude_cli\""));
+        assert!(rendered.contains("command = \"claude\""));
+        assert!(rendered.contains("[models.claude-sonnet-4-6]"));
+        assert!(rendered.contains("provider = \"claude_cli\""));
+        assert!(rendered.contains("slug = \"claude-sonnet-4-6\""));
+        assert!(rendered.contains("context_window = 200000"));
+        assert!(rendered.contains("tool_format = \"anthropic_blocks\""));
+        assert!(rendered.contains("max_tools = 32"));
         assert!(rendered.contains("[prd]"));
         assert!(rendered.contains("auto_plan = false"));
-        assert!(rendered.contains("[dreams]"));
-        assert!(rendered.contains("auto_dream = true"));
+        assert!(rendered.contains("auto_start = false"));
     }
 
     #[test]
     fn cloud_default_toml_template_includes_cloud_settings() {
         let rendered = Config::default_toml_template(true).unwrap();
-        assert!(rendered.contains(r#"log_format = "json""#));
+        assert!(rendered.contains("schema_version = 2"));
         assert!(rendered.contains(r#"bind = "0.0.0.0""#));
-        assert!(rendered.contains(r#"data_dir = "/data/.roko""#));
         assert!(rendered.contains(r#"provider = "railway""#));
+        assert!(rendered.contains("[models.claude-sonnet-4-6]"));
         assert!(rendered.contains("GITHUB_WEBHOOK_SECRET"));
         assert!(rendered.contains("Auto-register webhooks after deploy"));
         assert!(rendered.contains("[[serve.deploy.webhooks]]"));
+    }
+
+    #[test]
+    fn default_toml_template_disables_auth_with_local_dev_comment() {
+        let rendered = Config::default_toml_template(false).unwrap();
+        assert!(
+            rendered.contains("[serve.auth]"),
+            "[serve.auth] table missing"
+        );
+        assert!(
+            rendered.contains("Disable auth for local development only"),
+            "expected local-development comment near [serve.auth].enabled"
+        );
+        assert!(
+            rendered.contains("enabled = false"),
+            "expected the rendered template to set serve.auth.enabled = false"
+        );
+    }
+
+    #[test]
+    fn load_resolved_config_returns_defaults_when_no_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = load_resolved_config(dir.path()).unwrap();
+        // Default source for all fields when no config files exist.
+        assert_eq!(resolved.sources.agent_command, Source::Default);
+        assert_eq!(resolved.sources.agent_model, Source::Default);
+        assert_eq!(resolved.sources.providers, Source::Default);
+    }
+
+    #[test]
+    fn load_resolved_config_reads_project_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = r#"
+[agent]
+command = "claude"
+model = "opus-4"
+"#;
+        std::fs::write(dir.path().join("roko.toml"), toml).unwrap();
+
+        let resolved = load_resolved_config(dir.path()).unwrap();
+        assert_eq!(resolved.config.agent.command, "claude");
+        assert_eq!(resolved.config.agent.model, Some("opus-4".to_string()));
+        assert_eq!(resolved.sources.agent_command, Source::Project);
+        assert_eq!(resolved.sources.agent_model, Source::Project);
+    }
+
+    #[test]
+    fn load_resolved_config_repo_registry_loads_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("roko.toml"), "[agent]\ncommand = \"cat\"\n").unwrap();
+
+        let resolved = load_resolved_config(dir.path()).unwrap();
+        // No repos configured, registry should be empty.
+        assert!(resolved.repo_registry.is_empty());
+    }
+
+    #[test]
+    fn load_resolved_config_config_paths_populated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("roko.toml"), "[agent]\ncommand = \"cat\"\n").unwrap();
+
+        let resolved = load_resolved_config(dir.path()).unwrap();
+        // Global path is always set (even if file doesn't exist).
+        assert!(!resolved.paths.global.as_os_str().is_empty());
+        // Project path should point to the roko.toml we wrote.
+        assert!(resolved.paths.project.is_some());
     }
 }

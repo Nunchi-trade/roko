@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Policy configuration for self-healing behavior.
+/// React configuration for self-healing behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelfHealingPolicy {
     /// Maximum oscillation count before a watcher is reset.

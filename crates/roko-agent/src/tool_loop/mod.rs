@@ -45,10 +45,29 @@ pub struct TurnProgress {
     pub tool_results: Vec<String>,
     /// Any text the LLM produced alongside tool calls (often empty).
     pub text_output: String,
+    /// Optional reasoning/thinking content the backend exposed for this turn.
+    pub reasoning: Option<String>,
+    /// Token usage reported for this backend turn.
+    pub usage: Usage,
 }
 
 /// Type-erased callback invoked after each tool-dispatch iteration.
 pub type OnTurnCallback = Arc<dyn Fn(&TurnProgress) + Send + Sync>;
+
+/// Metadata captured for one backend turn of the tool loop.
+#[derive(Debug, Clone)]
+pub struct ToolLoopTurnTrace {
+    /// One-based turn number within this tool loop run.
+    pub turn: u32,
+    /// Tool calls dispatched during this turn.
+    pub tool_calls: Vec<ToolCall>,
+    /// Brief text summaries of tool results, index-aligned with `tool_calls`.
+    pub tool_results: Vec<String>,
+    /// Optional reasoning/thinking content the backend exposed for this turn.
+    pub reasoning: Option<String>,
+    /// Token usage reported for this backend turn.
+    pub usage: Usage,
+}
 
 pub mod agent_wrapper;
 pub mod backends;
@@ -107,7 +126,7 @@ pub trait LlmBackend: Send + Sync {
         messages: &[serde_json::Value],
         tools: &RenderedTools,
         session: &SessionState,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
         let _ = event_tx;
         self.send_turn(messages, tools, session).await
@@ -163,6 +182,14 @@ pub struct ToolLoopOutput {
     pub stop_reason: StopReason,
     /// Resumable snapshot — populated when `stop_reason != Stop`.
     pub checkpoint: Option<Checkpoint>,
+    /// Per-turn trace metadata captured during the loop.
+    pub turn_traces: Vec<ToolLoopTurnTrace>,
+    /// MCP errors accumulated during the session (non-blocking, informational).
+    ///
+    /// Populated when an [`McpErrorAccumulator`](crate::mcp::McpErrorAccumulator)
+    /// is attached to the MCP handler resolver. Empty if no MCP errors occurred
+    /// or no accumulator was configured.
+    pub mcp_errors: Vec<crate::mcp::McpErrorRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +197,34 @@ enum OverflowAction {
     Ok,
     CompactRecommended,
     CompactRequired,
+}
+
+fn trace_turn(iterations: usize) -> u32 {
+    let capped = iterations.saturating_add(1).min(u32::MAX as usize);
+    capped as u32
+}
+
+fn tool_result_previews(results: &[(ToolCall, roko_core::tool::ToolResult)]) -> Vec<String> {
+    results
+        .iter()
+        .map(|(_call, result)| match result {
+            roko_core::tool::ToolResult::Ok { content, .. } => truncate_preview(content, 120),
+            roko_core::tool::ToolResult::Err(err) => {
+                truncate_preview(&format!("error: {err}"), 120)
+            }
+        })
+        .collect()
+}
+
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(3);
+    let mut preview = text.chars().take(keep).collect::<String>();
+    preview.push_str("...");
+    preview
 }
 
 // ─── ToolLoop ────────────────────────────────────────────────────────
@@ -181,7 +236,7 @@ enum OverflowAction {
 /// reached, the cancel token fires, or the backend errors.
 /// Shared budget guard that can be attached to a [`ToolLoop`] to enforce
 /// budget constraints before each LLM invocation.
-pub type SharedBudgetTracker = Arc<std::sync::Mutex<BudgetTracker>>;
+pub type SharedBudgetTracker = Arc<parking_lot::Mutex<BudgetTracker>>;
 
 #[derive(Clone)]
 pub struct ToolLoop {
@@ -198,6 +253,12 @@ pub struct ToolLoop {
     budget: Option<SharedBudgetTracker>,
     /// Optional callback fired after each tool-dispatch iteration.
     on_turn: Option<OnTurnCallback>,
+    /// Few-shot example messages inserted between system and user prompt.
+    /// Dramatically improves tool-call reliability for small models.
+    few_shot_messages: Vec<Value>,
+    /// Optional MCP error accumulator for IDE/ACP sessions.
+    /// When attached, MCP tool failures are recorded here non-blockingly.
+    mcp_error_accumulator: Option<crate::mcp::McpErrorAccumulator>,
 }
 
 impl ToolLoop {
@@ -220,6 +281,8 @@ impl ToolLoop {
             monitor: None,
             budget: None,
             on_turn: None,
+            few_shot_messages: Vec::new(),
+            mcp_error_accumulator: None,
         }
     }
 
@@ -293,6 +356,36 @@ impl ToolLoop {
         self
     }
 
+    /// Inject few-shot example messages between system and user prompts.
+    ///
+    /// These messages demonstrate correct tool-call behavior and
+    /// dramatically improve reliability for small models (8B and below).
+    #[must_use]
+    pub fn with_few_shot_messages(mut self, messages: Vec<Value>) -> Self {
+        self.few_shot_messages = messages;
+        self
+    }
+
+    /// Attach an MCP error accumulator for IDE/ACP sessions.
+    ///
+    /// When set, MCP tool call failures during the session are recorded
+    /// non-blockingly. Accumulated errors are surfaced in the
+    /// [`ToolLoopOutput::mcp_errors`] field when the loop completes.
+    #[must_use]
+    pub fn with_mcp_error_accumulator(
+        mut self,
+        accumulator: crate::mcp::McpErrorAccumulator,
+    ) -> Self {
+        self.mcp_error_accumulator = Some(accumulator);
+        self
+    }
+
+    /// Borrow the attached MCP error accumulator, if any.
+    #[must_use]
+    pub fn mcp_error_accumulator(&self) -> Option<&crate::mcp::McpErrorAccumulator> {
+        self.mcp_error_accumulator.as_ref()
+    }
+
     /// Run a fresh tool loop from an initial system + user prompt.
     pub async fn run(
         &self,
@@ -301,27 +394,40 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
-        if let Some(path) = self.checkpoint_path.as_deref().filter(|path| path.exists()) {
+        if let Some(path) = self.checkpoint_path.as_deref() {
             match Checkpoint::load(path) {
                 Ok(cp) => return self.resume(cp, tools, ctx).await,
                 Err(err) => {
-                    return ToolLoopOutput {
-                        final_text: String::new(),
-                        iterations: 0,
-                        tool_calls: Vec::new(),
-                        total_usage: Usage::default(),
-                        stop_reason: StopReason::BackendError(format!(
-                            "checkpoint load {}: {err}",
-                            path.display()
-                        )),
-                        checkpoint: None,
-                    };
+                    let is_not_found = matches!(
+                        &err,
+                        roko_core::RokoError::Io(e) if e.kind() == std::io::ErrorKind::NotFound
+                    );
+                    if !is_not_found {
+                        return ToolLoopOutput {
+                            final_text: String::new(),
+                            iterations: 0,
+                            tool_calls: Vec::new(),
+                            total_usage: Usage::default(),
+                            stop_reason: StopReason::BackendError(format!(
+                                "checkpoint load {}: {err}",
+                                path.display()
+                            )),
+                            checkpoint: None,
+                            turn_traces: Vec::new(),
+                            mcp_errors: Vec::new(),
+                        };
+                    }
+                    // NotFound: no checkpoint yet, continue with fresh run
                 }
             }
         }
 
-        let messages = result_msg::initial_messages(system, user);
-        self.run_inner(
+        let messages = if self.few_shot_messages.is_empty() {
+            result_msg::initial_messages(system, user)
+        } else {
+            result_msg::initial_messages_with_few_shot(system, user, &self.few_shot_messages)
+        };
+        self.run_inner_with_mcp_errors(
             messages,
             0,
             Vec::new(),
@@ -341,10 +447,40 @@ impl ToolLoop {
         user: &str,
         tools: &[ToolDef],
         ctx: &ToolContext,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> ToolLoopOutput {
-        let messages = result_msg::initial_messages(system, user);
-        self.run_inner(
+        let messages = if self.few_shot_messages.is_empty() {
+            result_msg::initial_messages(system, user)
+        } else {
+            result_msg::initial_messages_with_few_shot(system, user, &self.few_shot_messages)
+        };
+        self.run_inner_with_mcp_errors(
+            messages,
+            0,
+            Vec::new(),
+            Usage::default(),
+            tools,
+            ctx,
+            Some(event_tx),
+            SessionState::default(),
+        )
+        .await
+    }
+
+    /// Run a fresh streaming tool loop from an already-built message history.
+    ///
+    /// ACP and other chat surfaces may already have a normalized
+    /// system/history/user message array. This keeps those callers on the
+    /// shared tool-loop runtime without flattening history back into a single
+    /// user prompt.
+    pub async fn run_messages_streaming(
+        &self,
+        messages: Vec<Value>,
+        tools: &[ToolDef],
+        ctx: &ToolContext,
+        event_tx: mpsc::Sender<StreamChunk>,
+    ) -> ToolLoopOutput {
+        self.run_inner_with_mcp_errors(
             messages,
             0,
             Vec::new(),
@@ -364,7 +500,7 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
-        self.run_inner(
+        self.run_inner_with_mcp_errors(
             cp.messages,
             cp.iterations,
             cp.tool_calls,
@@ -377,6 +513,41 @@ impl ToolLoop {
         .await
     }
 
+    /// Wrapper around `run_inner` that drains the MCP error accumulator
+    /// into the output's `mcp_errors` field after the loop completes.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_inner_with_mcp_errors(
+        &self,
+        messages: Vec<serde_json::Value>,
+        iterations: usize,
+        all_calls: Vec<ToolCall>,
+        total_usage: Usage,
+        tools: &[ToolDef],
+        ctx: &ToolContext,
+        event_tx: Option<mpsc::Sender<StreamChunk>>,
+        session: SessionState,
+    ) -> ToolLoopOutput {
+        let mut output = self
+            .run_inner(
+                messages,
+                iterations,
+                all_calls,
+                total_usage,
+                tools,
+                ctx,
+                event_tx,
+                session,
+            )
+            .await;
+
+        // Drain accumulated MCP errors into the output for the caller to inspect.
+        if let Some(ref accumulator) = self.mcp_error_accumulator {
+            output.mcp_errors = accumulator.drain();
+        }
+
+        output
+    }
+
     /// Core loop shared by [`run`](Self::run) and [`resume`](Self::resume).
     async fn run_inner(
         &self,
@@ -386,12 +557,13 @@ impl ToolLoop {
         mut total_usage: Usage,
         tools: &[ToolDef],
         ctx: &ToolContext,
-        event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
+        event_tx: Option<mpsc::Sender<StreamChunk>>,
         initial_session: SessionState,
     ) -> ToolLoopOutput {
         let rendered_tools = self.translator.render_tools(tools);
         let mut session = initial_session;
         let mut turn_history: Vec<Turn> = Vec::new();
+        let mut turn_traces: Vec<ToolLoopTurnTrace> = Vec::new();
 
         loop {
             self.prune_context_if_needed(&mut messages);
@@ -407,6 +579,8 @@ impl ToolLoop {
                     total_usage,
                     stop_reason: StopReason::MaxIterations,
                     checkpoint: Some(cp),
+                    turn_traces,
+                    mcp_errors: Vec::new(),
                 };
             }
 
@@ -421,24 +595,27 @@ impl ToolLoop {
                     total_usage,
                     stop_reason: StopReason::Cancelled,
                     checkpoint: Some(cp),
+                    turn_traces,
+                    mcp_errors: Vec::new(),
                 };
             }
 
             // LIFE-03: Budget check before each LLM invocation.
             if let Some(ref budget) = self.budget {
-                if let Ok(guard) = budget.lock() {
-                    if guard.check() == BudgetStatus::Exhausted {
-                        let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
-                            .with_session(session.clone());
-                        return ToolLoopOutput {
-                            final_text: String::new(),
-                            iterations,
-                            tool_calls: all_calls,
-                            total_usage,
-                            stop_reason: StopReason::BudgetExhausted,
-                            checkpoint: Some(cp),
-                        };
-                    }
+                let guard = budget.lock();
+                if guard.check() == BudgetStatus::Exhausted {
+                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                        .with_session(session.clone());
+                    return ToolLoopOutput {
+                        final_text: String::new(),
+                        iterations,
+                        tool_calls: all_calls,
+                        total_usage,
+                        stop_reason: StopReason::BudgetExhausted,
+                        checkpoint: Some(cp),
+                        turn_traces,
+                        mcp_errors: Vec::new(),
+                    };
                 }
             }
 
@@ -465,37 +642,50 @@ impl ToolLoop {
                         total_usage,
                         stop_reason: StopReason::BackendError(e.to_string()),
                         checkpoint: Some(cp),
+                        turn_traces,
+                        mcp_errors: Vec::new(),
                     };
                 }
             };
             merge_session_state(&mut session, self.backend.extract_session(&response));
-            let turn_usage = response.extract_usage();
+            let turn_reasoning = response.extract_reasoning();
+            let mut turn_usage = response.extract_usage();
+
+            // Compute cost from model profile pricing when the provider did not
+            // report a dollar amount (all OpenAI-compat backends).
+            if let Some(profile) = self.model_profile.as_ref() {
+                turn_usage.fill_cost_from_pricing(
+                    profile.cost_input_per_m,
+                    profile.cost_output_per_m,
+                    profile.cost_cache_read_per_m,
+                );
+            }
+
             total_usage.add(&turn_usage);
 
             // LIFE-03: Record turn cost in budget tracker after LLM call.
             if let Some(ref budget) = self.budget {
-                if let Ok(mut guard) = budget.lock() {
-                    let model_name = self
-                        .model_profile
-                        .as_ref()
-                        .map(|p| p.slug.clone())
-                        .unwrap_or_default();
-                    let cost_record = TurnCostRecord {
-                        turn_id: format!("turn-{iterations}"),
-                        model: model_name,
-                        input_tokens: u64::from(turn_usage.input_tokens),
-                        output_tokens: u64::from(turn_usage.output_tokens),
-                        cache_read_tokens: u64::from(turn_usage.cache_read_tokens),
-                        estimated_cost_usd: f64::from(turn_usage.cost_usd),
-                        cognitive_tier: CognitiveTier::Gamma,
-                        t0_suppressed: false,
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0),
-                    };
-                    guard.record_turn(&cost_record);
-                }
+                let mut guard = budget.lock();
+                let model_name = self
+                    .model_profile
+                    .as_ref()
+                    .map(|p| p.slug.clone())
+                    .unwrap_or_default();
+                let cost_record = TurnCostRecord {
+                    turn_id: format!("turn-{iterations}"),
+                    model: model_name,
+                    input_tokens: u64::from(turn_usage.input_tokens),
+                    output_tokens: u64::from(turn_usage.output_tokens),
+                    cache_read_tokens: u64::from(turn_usage.cache_read_tokens),
+                    estimated_cost_usd: f64::from(turn_usage.cost_usd),
+                    cognitive_tier: CognitiveTier::Gamma,
+                    t0_suppressed: false,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                };
+                guard.record_turn(&cost_record);
             }
 
             // Parse tool calls from the response.
@@ -511,6 +701,8 @@ impl ToolLoop {
                         total_usage,
                         stop_reason: StopReason::BackendError(format!("parse: {e}")),
                         checkpoint: Some(cp),
+                        turn_traces,
+                        mcp_errors: Vec::new(),
                     };
                 }
             };
@@ -519,13 +711,57 @@ impl ToolLoop {
             if calls.is_empty() {
                 self.clear_checkpoint_file();
                 let final_text = response.extract_text();
+                turn_traces.push(ToolLoopTurnTrace {
+                    turn: trace_turn(iterations),
+                    tool_calls: Vec::new(),
+                    tool_results: Vec::new(),
+                    reasoning: turn_reasoning,
+                    usage: turn_usage,
+                });
+                let finish_reason_raw = response.extract_finish_reason_raw();
+                let hit_length_limit = finish_reason_raw
+                    .as_deref()
+                    .is_some_and(|r| r == "length" || r == "max_tokens");
+                tracing::info!(
+                    iterations,
+                    final_text_len = final_text.len(),
+                    final_text_empty = final_text.trim().is_empty(),
+                    finish_reason = ?finish_reason_raw,
+                    input_tokens = turn_usage.input_tokens,
+                    output_tokens = turn_usage.output_tokens,
+                    "tool_loop: stop — no tool calls, returning final text"
+                );
+                if final_text.trim().is_empty() && hit_length_limit {
+                    tracing::error!(
+                        iterations,
+                        output_tokens = turn_usage.output_tokens,
+                        "tool_loop: model hit output token limit (finish_reason=length) \
+                         and produced no final text — increase max_output for this model"
+                    );
+                } else if final_text.trim().is_empty() {
+                    tracing::warn!(
+                        iterations,
+                        "tool_loop: final text is empty — model may have returned \
+                         content in an unexpected format"
+                    );
+                }
+
+                let stop_reason = if hit_length_limit {
+                    StopReason::BackendError(
+                        "model hit output token limit (finish_reason=length)".to_string(),
+                    )
+                } else {
+                    StopReason::Stop
+                };
                 return ToolLoopOutput {
                     final_text,
                     iterations,
                     tool_calls: all_calls,
                     total_usage,
-                    stop_reason: StopReason::Stop,
+                    stop_reason,
                     checkpoint: None,
+                    turn_traces,
+                    mcp_errors: Vec::new(),
                 };
             }
 
@@ -535,36 +771,40 @@ impl ToolLoop {
             }
 
             // Dispatch tool calls (§36.41 parallel/serial batching).
+            let call_names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+            tracing::info!(
+                iteration = iterations,
+                num_calls = calls.len(),
+                tools = ?call_names,
+                "tool_loop: dispatching tool calls"
+            );
             let current_calls = calls.clone();
             let results = self.dispatcher.dispatch_batch(calls, ctx).await;
             all_calls.extend(current_calls.clone());
+            let tool_results = tool_result_previews(&results);
 
             // §36.56 — shape results into messages for the next turn.
             let rendered_results = self.translator.render_results(&results);
             result_msg::append_results(&mut messages, rendered_results);
 
+            turn_traces.push(ToolLoopTurnTrace {
+                turn: trace_turn(iterations),
+                tool_calls: current_calls.clone(),
+                tool_results: tool_results.clone(),
+                reasoning: turn_reasoning.clone(),
+                usage: turn_usage,
+            });
+
             // Fire on_turn callback with a snapshot of this iteration.
             if let Some(ref cb) = self.on_turn {
                 let text_output = response.extract_text();
-                let tool_results: Vec<String> = results
-                    .iter()
-                    .map(|(_call, result)| {
-                        let s = match result {
-                            roko_core::tool::ToolResult::Ok { content, .. } => content.clone(),
-                            roko_core::tool::ToolResult::Err(e) => format!("error: {e}"),
-                        };
-                        if s.len() > 120 {
-                            format!("{}…", &s[..119])
-                        } else {
-                            s
-                        }
-                    })
-                    .collect();
                 cb(&TurnProgress {
                     iteration: iterations,
                     tool_calls: current_calls.clone(),
                     tool_results,
                     text_output,
+                    reasoning: turn_reasoning,
+                    usage: turn_usage,
                 });
             }
 
@@ -595,6 +835,8 @@ impl ToolLoop {
                                     "metacognitive intervention: {intervention:?}"
                                 )),
                                 checkpoint: Some(cp),
+                                turn_traces,
+                                mcp_errors: Vec::new(),
                             };
                         }
                     }
@@ -1402,6 +1644,33 @@ mod tests {
         assert_eq!(out.tool_calls[0].name, "echo");
         assert_eq!(out.final_text, "final answer");
         assert!(out.checkpoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_messages_streaming_preserves_prebuilt_history() {
+        let backend = Arc::new(CapturingBackend::new());
+        let tl = make_tool_loop(backend.clone(), 25);
+        let ctx = ToolContext::testing("/tmp");
+        let messages = vec![
+            serde_json::json!({"role": "system", "content": "system"}),
+            serde_json::json!({"role": "assistant", "content": "earlier answer"}),
+            serde_json::json!({"role": "user", "content": "new prompt"}),
+        ];
+        let (stream_tx, _stream_rx) = mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
+
+        let out = tl
+            .run_messages_streaming(messages.clone(), &test_tools(), &ctx, stream_tx)
+            .await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.iterations, 1);
+        let captured = backend.captured.lock();
+        assert_eq!(captured[0], messages);
+        assert!(
+            captured[1]
+                .iter()
+                .any(|message| message["role"] == "tool" && message["tool_call_id"] == "call-42")
+        );
     }
 
     #[tokio::test]

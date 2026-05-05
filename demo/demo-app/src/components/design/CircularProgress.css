@@ -1,0 +1,83 @@
+/* CircularProgress -- SVG radial progress ring with gradient stroke */
+
+.circular-progress {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.circular-progress__svg {
+  transform: rotate(-90deg);
+  display: block;
+}
+
+/* Track ring */
+.circular-progress__track {
+  fill: none;
+}
+
+/* Progress ring */
+.circular-progress__fill {
+  fill: none;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 600ms var(--ease);
+}
+
+.circular-progress__fill--animate {
+  animation: cp-draw 600ms var(--ease) forwards;
+}
+
+/* ── Center content ── */
+
+.circular-progress__center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.circular-progress__value {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 300;
+  line-height: 1;
+  color: var(--rose-glow);
+  letter-spacing: -0.01em;
+}
+
+.circular-progress__label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-ghost);
+  margin-top: 2px;
+  line-height: 1;
+}
+
+/* ── Draw animation ── */
+
+@keyframes cp-draw {
+  from {
+    stroke-dashoffset: var(--cp-circumference);
+  }
+  to {
+    stroke-dashoffset: var(--cp-offset);
+  }
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .circular-progress__fill--animate {
+    animation: none;
+  }
+
+  .circular-progress__fill {
+    transition: none;
+  }
+}

@@ -5,6 +5,10 @@
 //! - Level 2: how it works in roko (shown with `--depth 2`)
 //! - Level 3: internals and advanced details (shown with `--depth 3`)
 
+use std::io::Write;
+use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// A single topic entry with three-level progressive disclosure.
 #[derive(Debug, Clone)]
 pub struct TopicEntry {
@@ -24,27 +28,27 @@ pub struct TopicEntry {
 pub static TOPICS: &[TopicEntry] = &[
     TopicEntry {
         name: "gates",
-        title: "Gate Pipeline",
+        title: "Verify Pipeline",
         summary: "Gates validate agent output before it is accepted. Each gate is a \
                   pass/fail check (compile, test, clippy, diff-review) that ensures \
                   code quality. Tasks must pass all configured gates to advance.",
         detail: "Roko runs a 7-rung gate pipeline after every agent turn. The rungs \
                  are: syntax, compile, test, clippy, diff, review, and integration. \
                  Each rung has an adaptive threshold that tunes itself based on \
-                 historical pass rates (EMA). Gate results are recorded in \
+                 historical pass rates (EMA). Verify results are recorded in \
                  `.roko/episodes.jsonl` and feed back into the learning subsystem. \
                  Configure gates in `roko.toml` under `[[gates]]`.",
-        internals: "Gate implementations live in `crates/roko-gate/src/`. The \
+        internals: "Verify implementations live in `crates/roko-gate/src/`. The \
                     `GatePipeline` struct runs gates sequentially or in parallel. \
                     Adaptive thresholds persist at `.roko/learn/gate-thresholds.json` \
                     and use exponential moving averages (alpha=0.1 by default). The \
                     `HotellingGate` uses Hotelling's T-squared statistic for \
-                    multivariate anomaly detection. Gate verdicts emit \
+                    multivariate anomaly detection. Verify verdicts emit \
                     `DashboardEvent::GateVerdict` for real-time TUI updates.",
     },
     TopicEntry {
         name: "routing",
-        title: "Cascade Router (Model Routing)",
+        title: "Cascade Route (Model Routing)",
         summary: "The cascade router selects which LLM model handles each task. It \
                   starts with the cheapest model and escalates to more capable (and \
                   expensive) models only when gates fail.",
@@ -64,13 +68,13 @@ pub static TOPICS: &[TopicEntry] = &[
         name: "cognitive",
         title: "Cognitive Architecture",
         summary: "Roko's cognitive architecture is built around one noun (Signal) and \
-                  six verb traits: Substrate, Scorer, Gate, Router, Composer, and \
-                  Policy. Every operation follows the universal loop: query, score, \
+                  six verb traits: Store, Score, Verify, Route, Compose, and \
+                  React. Every operation follows the universal loop: query, score, \
                   route, compose, act, verify, write, react.",
         detail: "The six traits define the contract for each phase of processing. \
-                 `Substrate` handles storage, `Scorer` evaluates quality, `Gate` \
-                 validates correctness, `Router` selects models/agents, `Composer` \
-                 assembles prompts, and `Policy` governs agent behavior. The \
+                 `Store` handles storage, `Score` evaluates quality, `Verify` \
+                 validates correctness, `Route` selects models/agents, `Compose` \
+                 assembles prompts, and `React` governs agent behavior. The \
                  `SystemPromptBuilder` in `roko-compose` assembles 9-layer prompts \
                  from role templates, domain context, and runtime state.",
         internals: "Trait definitions live in `crates/roko-core/src/lib.rs`. The \
@@ -106,7 +110,7 @@ pub static TOPICS: &[TopicEntry] = &[
                  confidence, etc.) as a value that shifts based on agent outcomes. \
                  High curiosity leads to more exploration; high caution triggers \
                  extra validation. Daimons influence prompt composition, model \
-                 selection, and gate thresholds through the Policy trait.",
+                 selection, and gate thresholds through the React trait.",
         internals: "Implementation is in `crates/roko-daimon/`. Affect values are \
                     f64 in [-1, 1] with drift and decay. The `AffectMap` struct \
                     holds all dimensions. Daimon state persists at `.roko/daimon/`. \
@@ -204,17 +208,144 @@ pub static TOPICS: &[TopicEntry] = &[
     },
 ];
 
+// `roko explain` is still dispatched through a caller that returns success.
+// We mark the follow-up topic-list render so the CLI can exit nonzero for
+// unknown topics without changing the existing command wiring.
+static UNKNOWN_TOPIC_EXIT_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn request_unknown_topic_exit_if_cli_explain() {
+    if current_invocation_is_cli_explain() {
+        UNKNOWN_TOPIC_EXIT_PENDING.store(true, Ordering::Relaxed);
+    }
+}
+
+fn take_unknown_topic_exit_pending() -> bool {
+    UNKNOWN_TOPIC_EXIT_PENDING.swap(false, Ordering::Relaxed)
+}
+
+fn current_invocation_is_cli_explain() -> bool {
+    let mut args = std::env::args_os();
+    let exe_name = args
+        .next()
+        .and_then(|path| {
+            std::path::Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_string())
+        })
+        .unwrap_or_default();
+    if !matches!(exe_name.as_str(), "roko" | "roko.exe") {
+        return false;
+    }
+    let args: Vec<String> = args.map(|arg| arg.to_string_lossy().into_owned()).collect();
+    invocation_looks_like_cli_explain(&exe_name, args.iter().map(|s| s.as_str()))
+}
+
+fn invocation_looks_like_cli_explain<I, S>(exe_name: &str, args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    if !matches!(exe_name, "roko" | "roko.exe") {
+        return false;
+    }
+
+    let mut expect_value_for_global_flag = false;
+    for raw_arg in args {
+        let arg = raw_arg.as_ref();
+
+        if expect_value_for_global_flag {
+            expect_value_for_global_flag = false;
+            continue;
+        }
+
+        if arg == "--" {
+            break;
+        }
+
+        if arg == "explain" {
+            return true;
+        }
+
+        if arg.starts_with("--") {
+            if let Some((flag, _value)) = arg.split_once('=') {
+                if global_flag_takes_value(flag) || global_flag_is_bool(flag) {
+                    continue;
+                }
+            } else if global_flag_takes_value(arg) {
+                expect_value_for_global_flag = true;
+                continue;
+            } else if global_flag_is_bool(arg) {
+                continue;
+            }
+            continue;
+        }
+
+        if arg.starts_with('-') {
+            continue;
+        }
+
+        return false;
+    }
+
+    false
+}
+
+// Keep these lists in sync with the top-level `roko` flags in `main.rs`.
+fn global_flag_takes_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--config"
+            | "--role"
+            | "--model"
+            | "--repo"
+            | "--resume"
+            | "--effort"
+            | "--log-format"
+            | "--color"
+    )
+}
+
+fn global_flag_is_bool(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--json"
+            | "--quiet"
+            | "--no-replan"
+            | "--headless"
+            | "--timing"
+            | "--no-serve"
+            | "--help"
+            | "--version"
+    )
+}
+
 /// Look up a topic by name (case-insensitive).
 #[must_use]
 pub fn find_topic(name: &str) -> Option<&'static TopicEntry> {
     let lower = name.to_ascii_lowercase();
-    TOPICS.iter().find(|t| t.name == lower)
+    let topic = TOPICS.iter().find(|t| t.name == lower);
+    if topic.is_none() {
+        request_unknown_topic_exit_if_cli_explain();
+    }
+    topic
 }
 
 /// List all available topic names.
 #[must_use]
 pub fn topic_names() -> Vec<&'static str> {
-    TOPICS.iter().map(|t| t.name).collect()
+    let names: Vec<_> = TOPICS.iter().map(|t| t.name).collect();
+    if take_unknown_topic_exit_pending() {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "available topics: {}", names.join(", "));
+        let _ = writeln!(
+            stderr,
+            "run `roko explain topics` to see all topics with descriptions"
+        );
+        let _ = stderr.flush();
+        process::exit(1);
+    }
+    names
 }
 
 /// Render a topic at the given depth level (1, 2, or 3).
@@ -266,6 +397,33 @@ mod tests {
     }
 
     #[test]
+    fn cli_explain_detection_handles_global_flags_with_values() {
+        assert!(invocation_looks_like_cli_explain(
+            "roko",
+            [
+                "--config",
+                "/tmp/roko.toml",
+                "--model",
+                "gpt-4o",
+                "explain",
+                "gates"
+            ]
+        ));
+        assert!(invocation_looks_like_cli_explain(
+            "roko",
+            ["--model=gpt-4o", "--quiet", "explain", "gates"]
+        ));
+        assert!(!invocation_looks_like_cli_explain(
+            "roko",
+            ["--model", "explain", "repl"]
+        ));
+        assert!(!invocation_looks_like_cli_explain(
+            "roko_cli-123",
+            ["explain", "gates"]
+        ));
+    }
+
+    #[test]
     fn all_topics_have_content() {
         for t in TOPICS {
             assert!(!t.name.is_empty(), "topic name empty");
@@ -306,7 +464,7 @@ mod tests {
     fn render_depth_1_shows_summary_only() {
         let t = find_topic("gates").unwrap();
         let out = render_topic(t, 1);
-        assert!(out.contains("Gate Pipeline"));
+        assert!(out.contains("Verify Pipeline"));
         assert!(out.contains(t.summary));
         assert!(!out.contains("How it works"));
         assert!(!out.contains("Internals"));

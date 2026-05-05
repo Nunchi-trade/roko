@@ -1,0 +1,49 @@
+/* CellBoard — kanban-style horizontal board */
+
+.cell-board {
+  display: flex;
+  gap: var(--cell-gap);
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+/* Scrollbar styling */
+.cell-board::-webkit-scrollbar {
+  height: 4px;
+}
+
+.cell-board::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cell-board::-webkit-scrollbar-thumb {
+  background: var(--border-soft);
+  border-radius: 2px;
+}
+
+/* ── Column ── */
+
+.cell-board__column {
+  flex: 0 0 280px;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cell-gap);
+}
+
+.cell-board__column-header {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.cell-board__column-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cell-gap);
+  flex: 1;
+}

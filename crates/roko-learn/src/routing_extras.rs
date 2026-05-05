@@ -252,7 +252,7 @@ fn tier_rank_for_slug(slug: &str) -> u8 {
     }
 }
 
-/// Router calibration state for model confidence.
+/// Route calibration state for model confidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterCalibration {
     /// Per-model calibration data.

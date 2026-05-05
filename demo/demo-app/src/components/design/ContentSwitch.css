@@ -1,0 +1,40 @@
+/* ContentSwitch — crossfade / fade-through content transition */
+
+.content-switch {
+  position: relative;
+  overflow: hidden;
+  transition: height 200ms var(--ease);
+}
+
+.content-switch-layer {
+  transition: opacity var(--duration-smooth);
+}
+
+.content-switch-layer.exiting {
+  opacity: 0;
+}
+
+.content-switch-layer.entering {
+  opacity: 0;
+}
+
+.content-switch-layer.visible {
+  opacity: 1;
+}
+
+/* Absolute positioning for crossfade overlap */
+.content-switch-layer.stacked {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .content-switch {
+    transition: none;
+  }
+  .content-switch-layer {
+    transition: none;
+  }
+}

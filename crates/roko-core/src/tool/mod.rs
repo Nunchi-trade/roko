@@ -93,5 +93,5 @@ pub use relevance::{KeywordOverlapScorer, ToolRelevanceScorer};
 pub use role_allowlist::role_allowlist;
 pub use trace::{
     CancelSource, FailureKind, FailureTrace, NoopTraceSink, ToolOutcome, ToolTrace, ToolTraceEvent,
-    TraceBuilder, TraceId, TraceSink, TraceStep,
+    TraceBuilder, TraceId, TraceSink, TraceStep, classify_tool_error,
 };

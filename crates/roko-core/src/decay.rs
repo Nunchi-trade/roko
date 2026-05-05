@@ -134,7 +134,7 @@ impl Decay {
     pub const WISDOM: Self = Self::HalfLife {
         half_life_ms: 86_400_000,
     };
-    /// Gate verdict half-life (24 hours).
+    /// Verify verdict half-life (24 hours).
     ///
     /// Verdict signals should stay queryable across the current workday and the
     /// next orchestration cycle, but still fade without explicit reinforcement.

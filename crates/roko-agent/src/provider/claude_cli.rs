@@ -1,8 +1,18 @@
+pub mod stream;
+
+pub use stream::{
+    ClaudeAssistantEvent, ClaudeContentBlock, ClaudeMessage, ClaudeResultEvent, ClaudeStreamEvent,
+    ClaudeSystemEvent, ClaudeToolEvent, ClaudeUsage, parse_stream_line,
+};
+
 use crate::Agent;
 use crate::claude_cli_agent::{ClaudeCliAgent, build_settings_json};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use roko_core::agent::ProviderKind;
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -38,7 +48,7 @@ impl ProviderAdapter for ClaudeCliAdapter {
         let timeout_ms = options
             .timeout_ms
             .or(provider.timeout_ms)
-            .unwrap_or(120_000);
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
 
         let mut agent = ClaudeCliAgent::new(command, current_dir, model.slug.clone())
             .with_timeout_ms(timeout_ms)
@@ -126,12 +136,12 @@ impl ProviderAdapter for ClaudeCliAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use std::fs;
     use tempfile::tempdir;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn write_script(path: &std::path::Path, body: &str) {
@@ -213,14 +223,14 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
                 "provider-value".to_string(),
             ]),
             timeout_ms: Some(2_500),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };
         let options = AgentOptions {
             command: None,
-            timeout_ms: Some(1_500),
+            timeout_ms: Some(5_000),
             system_prompt: Some("system guidance".to_string()),
             cached_content: None,
             tools: Some("Read,Edit".to_string()),
@@ -233,6 +243,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
             bare_mode: false,
             dangerously_skip_permissions: false,
             name: "claude-cli-adapter".to_string(),
+            pre_discovered_mcp_tools: None,
         };
         let model = claude_model();
 
@@ -264,7 +275,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
         assert!(args_text.contains("--settings"));
         assert!(args_text.contains("--append-system-prompt"));
         assert!(args_text.contains("system guidance"));
-        assert!(args_text.contains("--allowedTools"));
+        assert!(args_text.contains("--tools"));
         assert!(args_text.contains("Read,Edit"));
         assert!(args_text.contains("--mcp-config"));
         assert!(args_text.contains(mcp_config.to_str().expect("mcp path")));
@@ -312,7 +323,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"worktree-ok"}}}}
             command: Some(script.display().to_string()),
             args: None,
             timeout_ms: Some(1_000),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
@@ -366,7 +377,7 @@ printf '%s\n' '{"type":"content_block_delta","delta":{"text":"late"}}'
             command: Some(script.display().to_string()),
             args: None,
             timeout_ms: Some(1_000),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,

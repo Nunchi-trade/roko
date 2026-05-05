@@ -37,9 +37,13 @@ fn persist_pids() {
     };
     let pids: Vec<u32> = set.iter().copied().collect();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(path = %parent.display(), error = %e, "failed to create PID registry directory");
+        }
     }
-    let _ = std::fs::write(&path, serde_json::to_string(&pids).unwrap_or_default());
+    if let Err(e) = std::fs::write(&path, serde_json::to_string(&pids).unwrap_or_default()) {
+        tracing::warn!(path = %path.display(), error = %e, "failed to persist PID registry to disk");
+    }
 }
 
 /// Register a child PID in the global registry and persist to disk.

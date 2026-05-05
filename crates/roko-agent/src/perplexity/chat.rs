@@ -12,10 +12,10 @@ use crate::perplexity::types::SearchOptions;
 use crate::perplexity::wire::{
     apply_search_options, base_chat_body, chat_endpoint, headers, parse_pplx_meta,
 };
-use crate::translate::openai::parse_usage;
-use crate::usage::Usage;
+use crate::translate::openai::parse_usage_observation;
+use crate::usage::UsageObservation;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -96,7 +96,7 @@ impl PerplexityChatAgent {
         body
     }
 
-    fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
+    fn failure(&self, input: &Signal, reason: String, started: &Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -104,7 +104,7 @@ impl PerplexityChatAgent {
             .tag("agent", &self.name)
             .tag("failed", "true")
             .build();
-        AgentResult::fail(output).with_usage(Usage {
+        AgentResult::fail(output).with_usage_obs(UsageObservation {
             wall_ms,
             ..Default::default()
         })
@@ -113,7 +113,7 @@ impl PerplexityChatAgent {
 
 #[async_trait]
 impl Agent for PerplexityChatAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -188,8 +188,9 @@ impl Agent for PerplexityChatAgent {
         let pplx_meta = parse_pplx_meta(&parsed);
         let meta_json = serde_json::to_string(&pplx_meta).unwrap_or_default();
 
-        let usage = parse_usage(&parsed);
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut usage_obs = parse_usage_observation(&parsed);
+        usage_obs.wall_ms = wall_ms;
 
         let out_signal = input
             .derive(Kind::AgentOutput, Body::text(&content))
@@ -199,13 +200,7 @@ impl Agent for PerplexityChatAgent {
             .tag("pplx_meta", &meta_json)
             .build();
 
-        AgentResult::ok(out_signal).with_usage(Usage {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_read_tokens: usage.cache_read_tokens,
-            wall_ms,
-            ..Default::default()
-        })
+        AgentResult::ok(out_signal).with_usage_obs(usage_obs)
     }
 
     fn name(&self) -> &str {
@@ -291,8 +286,8 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(poster: Box<dyn HttpPoster>) -> PerplexityChatAgent {
@@ -450,12 +445,71 @@ mod tests {
 
     #[tokio::test]
     async fn perplexity_chat_agent_usage_is_parsed() {
+        use crate::usage::UsageSource;
+
         let (mock, _) = MockPoster::ok(canned_ok("ok"));
         let agent = agent_with(Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(result.success);
         assert_eq!(result.usage.input_tokens, 10);
         assert_eq!(result.usage.output_tokens, 5);
+
+        let obs = result.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs.source, UsageSource::ProviderReported);
+        assert_eq!(obs.input_tokens, Some(10));
+        assert_eq!(obs.output_tokens, Some(5));
+    }
+
+    #[tokio::test]
+    async fn perplexity_chat_agent_missing_usage_block_keeps_observation_unknown() {
+        use crate::usage::UsageSource;
+
+        let body = json!({
+            "id": "resp-no-usage",
+            "model": "sonar",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string();
+        let (mock, _) = MockPoster::ok(body);
+        let agent = agent_with(Box::new(mock));
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+        assert!(result.success);
+
+        let obs = result.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs.source, UsageSource::Unknown);
+        assert_eq!(obs.input_tokens, None);
+        assert_eq!(obs.output_tokens, None);
+        assert_eq!(obs.cache_read_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn perplexity_chat_agent_explicit_zero_usage_kept_distinct_from_unknown() {
+        use crate::usage::UsageSource;
+
+        let body = json!({
+            "id": "resp-zero-usage",
+            "model": "sonar",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 }
+        })
+        .to_string();
+        let (mock, _) = MockPoster::ok(body);
+        let agent = agent_with(Box::new(mock));
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+        assert!(result.success);
+
+        let obs = result.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs.source, UsageSource::ProviderReported);
+        assert_eq!(obs.input_tokens, Some(0));
+        assert_eq!(obs.output_tokens, Some(0));
     }
 
     // ── Search option injection ────────────────────────────────────────────────

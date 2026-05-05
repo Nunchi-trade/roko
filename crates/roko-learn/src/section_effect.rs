@@ -143,17 +143,7 @@ impl SectionEffectivenessRegistry {
     /// snapshot cannot be written to disk.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let snapshot = self.snapshot();
-        let json = serde_json::to_string_pretty(&snapshot)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        roko_fs::atomic_write_json(path, &snapshot)
     }
 
     /// Record one included/excluded outcome for `section_name` scoped to `role`.

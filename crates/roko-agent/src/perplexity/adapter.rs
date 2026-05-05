@@ -15,14 +15,17 @@ use crate::perplexity::types::SearchOptions;
 use crate::provider::openai_compat::tool_registry_for_options;
 use crate::provider::{
     AgentCreationError, AgentOptions, PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX, ProviderAdapter,
-    ProviderError, build_tool_dispatcher, tool_loop_max_iterations,
+    ProviderError, build_tool_dispatcher, tool_loop_max_iterations_for_profile,
 };
 use crate::tool_loop::ToolLoop;
 use crate::translate::{OpenAiTranslator, Translator};
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -33,7 +36,7 @@ const DEFAULT_BASE_URL: &str = "https://api.perplexity.ai";
 
 /// `Agent` wrapper around the real Perplexity `/v1/embeddings` client.
 ///
-/// Extracts text from the input `Engram`, calls `embed::PerplexityEmbedAgent`
+/// Extracts text from the input `Signal`, calls `embed::PerplexityEmbedAgent`
 /// for real embeddings, and returns the float vectors as a JSON body.
 pub struct PerplexityEmbedAgentAdapter {
     inner: embed::PerplexityEmbedAgent,
@@ -58,7 +61,7 @@ impl PerplexityEmbedAgentAdapter {
 
 #[async_trait]
 impl Agent for PerplexityEmbedAgentAdapter {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let text = input.body.as_text().unwrap_or_default();
         match self.inner.embed(&[text]).await {
             Ok(vectors) => {
@@ -171,7 +174,7 @@ fn perplexity_tool_loop_agent(
         Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
     let dispatcher = build_tool_dispatcher(registry, resolver);
     let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
-    let timeout_ms = options.timeout_ms.unwrap_or(120_000);
+    let timeout_ms = options.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
     let backend = Arc::new(PerplexityToolLoopBackend::new(
         api_key,
         base_url,
@@ -181,7 +184,7 @@ fn perplexity_tool_loop_agent(
     ));
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend.clone())
-        .with_max_iterations(tool_loop_max_iterations(50))
+        .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -250,7 +253,7 @@ impl ProviderAdapter for PerplexityAdapter {
         }
 
         let name = agent_name(options, &format!("perplexity:{}", model.slug));
-        let timeout = options.timeout_ms.unwrap_or(120_000);
+        let timeout = options.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
 
         Ok(Box::new(
             PerplexityChatAgent::new(api_key, base_url, model.slug.clone(), name, timeout)
@@ -305,6 +308,7 @@ mod tests {
             cost_cache_write_per_m: None,
             thinking_level: None,
             max_tools: None,
+            max_tool_iterations: None,
             tokenizer_ratio: None,
             supports_search: true,
             supports_citations: true,
@@ -312,6 +316,8 @@ mod tests {
             is_embedding_model: false,
             search_context_size: Some("medium".to_string()),
             cost_per_request: None,
+            use_max_completion_tokens: false,
+            tier: None,
         }
     }
 
@@ -323,7 +329,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: None,
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,

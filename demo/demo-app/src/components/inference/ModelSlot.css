@@ -1,0 +1,250 @@
+/* ModelSlot -- slot-machine character animation with status + meta badges */
+
+.model-slot {
+  --tier-t0: var(--success);
+  --tier-t1: var(--bone);
+  --tier-t2: var(--rose-bright);
+
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  padding: 2px 4px;
+  transition:
+    border-color var(--duration-smooth) var(--ease),
+    box-shadow var(--duration-smooth) var(--ease),
+    padding var(--duration-smooth) var(--ease),
+    max-width var(--duration-smooth) var(--ease);
+  border: 1px solid transparent;
+  cursor: default;
+  position: relative;
+  max-width: 200px;
+  overflow: hidden;
+}
+
+/* -- Sizes -- */
+
+.model-slot--sm { font-size: var(--text-xs); }
+.model-slot--md { font-size: var(--text-sm); }
+.model-slot--lg { font-size: var(--text-lg); }
+
+/* -- Tier tints -- */
+
+.model-slot--t0 {
+  color: var(--tier-t0);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+.model-slot--t1 {
+  color: var(--tier-t1);
+  background: color-mix(in srgb, var(--bone) 10%, transparent);
+}
+
+.model-slot--t2 {
+  color: var(--tier-t2);
+  background: color-mix(in srgb, var(--rose-bright) 10%, transparent);
+}
+
+/* -- Active inference glow -- */
+
+.model-slot--active {
+  border-color: currentColor;
+  animation: ms-active-glow 2s ease-in-out infinite;
+}
+
+.model-slot--active.model-slot--t0 {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 30%, transparent), inset 0 0 6px color-mix(in srgb, var(--success) 8%, transparent);
+}
+
+.model-slot--active.model-slot--t1 {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--bone) 30%, transparent), inset 0 0 6px color-mix(in srgb, var(--bone) 8%, transparent);
+}
+
+.model-slot--active.model-slot--t2 {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose-bright) 30%, transparent), inset 0 0 6px color-mix(in srgb, var(--rose-bright) 8%, transparent);
+}
+
+/* -- Expanded (hover) -- */
+
+.model-slot--expanded {
+  max-width: 400px;
+  padding: 3px 6px;
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* -- Status indicator -- */
+
+.model-slot__status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.model-slot__spinner {
+  animation: ms-spin 1s linear infinite;
+  opacity: 0.9;
+}
+
+.model-slot__check {
+  animation: ms-check-appear 300ms var(--ease) both;
+}
+
+.model-slot__status--done .model-slot__check {
+  color: var(--status-success);
+}
+
+/* -- Character reels container -- */
+
+.model-slot__reels {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* -- Character reel -- */
+
+.slot-reel {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: top;
+}
+
+.slot-reel--sm { height: var(--text-xs); }
+.slot-reel--md { height: var(--text-sm); }
+.slot-reel--lg { height: var(--text-lg); }
+
+.slot-reel__inner {
+  display: block;
+  will-change: transform;
+}
+
+.slot-reel__inner--spinning {
+  animation: slot-spin var(--duration-smooth) var(--ease) forwards;
+}
+
+/* -- Meta badges (tokens, cost, latency) -- */
+
+.model-slot__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 2px;
+  overflow: hidden;
+  max-width: 0;
+  opacity: 0;
+  transition:
+    max-width var(--duration-smooth) var(--ease),
+    opacity var(--duration-smooth) var(--ease),
+    margin-left var(--duration-smooth) var(--ease);
+}
+
+.model-slot--expanded .model-slot__meta {
+  max-width: 200px;
+  opacity: 1;
+  margin-left: 6px;
+}
+
+.model-slot__badge {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 2px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.model-slot__badge--tokens {
+  color: var(--dream-bright);
+  background: color-mix(in srgb, var(--status-blocked) 12%, transparent);
+}
+
+.model-slot__badge--cost {
+  color: var(--bone);
+  background: color-mix(in srgb, var(--bone) 12%, transparent);
+  animation: ms-rolling-digits 0.4s ease-out;
+}
+
+.model-slot__badge--latency {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ======================================================
+   Keyframes
+   ====================================================== */
+
+@keyframes slot-spin {
+  0%   { transform: translateY(0); }
+  50%  { transform: translateY(-200%); }
+  100% { transform: translateY(-100%); }
+}
+
+@keyframes ms-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes ms-check-appear {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ms-active-glow {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.85; }
+}
+
+@keyframes ms-rolling-digits {
+  0%   { transform: translateY(2px); opacity: 0.5; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+/* ======================================================
+   Reduced motion
+   ====================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  .slot-reel__inner--spinning {
+    animation: none;
+    transform: translateY(-100%);
+  }
+
+  .model-slot__spinner {
+    animation: none;
+  }
+
+  .model-slot__check {
+    animation: none;
+  }
+
+  .model-slot--active {
+    animation: none;
+  }
+
+  .model-slot__badge--cost {
+    animation: none;
+  }
+
+  .model-slot__meta {
+    transition: none;
+  }
+
+  .model-slot {
+    transition: none;
+  }
+}

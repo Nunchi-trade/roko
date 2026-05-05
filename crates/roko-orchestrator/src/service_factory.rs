@@ -1,0 +1,377 @@
+//! Shared workflow service construction for CLI, server, and ACP.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use roko_agent::{GatewayEventWriter, InferenceObserver, ModelCallService};
+use roko_compose::prompt_assembly_service::PromptAssemblyService;
+use roko_core::agent::resolve_model;
+use roko_core::config::schema::{RokoConfig, ToolsConfig};
+use roko_core::foundation::{
+    AffectPolicy, FeedbackEvent, FeedbackSink, GateRunner, ModelCaller, PromptAssembler,
+};
+use roko_core::{AgentRole, Result, RokoError};
+use roko_daimon::policy::DaimonPolicy;
+use roko_gate::gate_service::GateService;
+use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::feedback_service::FeedbackService;
+use roko_learn::model_router::RoutingContext;
+use roko_learn::playbook::PlaybookStore;
+use roko_learn::section_effect::SectionEffectivenessRegistry;
+use roko_neuro::knowledge_store::KnowledgeStore;
+use roko_runtime::{JsonlLogger, effect_driver::EffectServices};
+
+/// Input settings for constructing shared workflow services.
+#[derive(Clone)]
+pub struct ServiceConfig {
+    /// Workspace root used by service implementations.
+    pub workdir: PathBuf,
+    /// `.roko` directory used for persistent service state.
+    pub roko_dir: PathBuf,
+    /// Runtime workspace configuration for model/provider dispatch.
+    pub workspace_config: RokoConfig,
+    /// Optional model key or slug overriding `workspace_config.agent.default_model`.
+    pub model_key: Option<String>,
+    /// Optional MCP config passed into model provider construction.
+    pub mcp_config: Option<PathBuf>,
+    /// Whether feedback should persist through `FeedbackService`.
+    pub feedback_enabled: bool,
+    /// Whether affect modulation should be backed by Daimon state.
+    pub affect_enabled: bool,
+    /// Whether cascade routing and cascade learning should be active.
+    pub cascade_enabled: bool,
+    /// Stable run id used by service-level event and feedback records.
+    pub run_id: Option<String>,
+    /// Optional inference observer for RuntimeEvent emission around model calls.
+    pub inference_observer: Option<Arc<dyn InferenceObserver>>,
+}
+
+impl ServiceConfig {
+    /// Build a production service config from a workspace root and Roko config.
+    #[must_use]
+    pub fn production(workdir: impl Into<PathBuf>, workspace_config: RokoConfig) -> Self {
+        let workdir = workdir.into();
+        Self {
+            roko_dir: workdir.join(".roko"),
+            workdir,
+            workspace_config,
+            model_key: None,
+            mcp_config: None,
+            feedback_enabled: true,
+            affect_enabled: true,
+            cascade_enabled: true,
+            run_id: None,
+            inference_observer: None,
+        }
+    }
+}
+
+/// Concrete service bundle shared by all runtime entry points.
+pub struct ServiceBundle {
+    /// Resolved default model slug.
+    pub model: String,
+    /// Concrete model-call gateway used by HTTP inference and workflow effects.
+    pub model_call_service: Arc<ModelCallService>,
+    /// Prompt assembly service exposed as the foundation trait.
+    pub prompt_assembler: Arc<dyn PromptAssembler>,
+    /// Feedback service exposed as the foundation trait.
+    pub feedback_sink: Arc<dyn FeedbackSink>,
+    /// Gate execution service exposed as the foundation trait.
+    pub gate_runner: Arc<dyn GateRunner>,
+    /// Optional affect policy shared with the effect driver.
+    pub affect_policy: Option<Arc<tokio::sync::Mutex<dyn AffectPolicy>>>,
+}
+
+impl ServiceBundle {
+    /// Build the `EffectServices` value consumed by `WorkflowEngine`.
+    #[must_use]
+    pub fn effect_services(&self) -> EffectServices {
+        let model_caller: Arc<dyn ModelCaller> = self.model_call_service.clone();
+        EffectServices {
+            default_model: self.model.clone(),
+            model_caller,
+            prompt_assembler: Arc::clone(&self.prompt_assembler),
+            feedback_sink: Arc::clone(&self.feedback_sink),
+            gate_runner: Arc::clone(&self.gate_runner),
+            affect_policy: self.affect_policy.clone(),
+        }
+    }
+}
+
+/// Factory for constructing the shared service bundle.
+pub struct ServiceFactory;
+
+impl ServiceFactory {
+    /// Construct all workflow services through the canonical path.
+    pub fn build(config: ServiceConfig) -> Result<ServiceBundle> {
+        let mut workspace_config = config.workspace_config;
+        let model_key = config
+            .model_key
+            .clone()
+            .unwrap_or_else(|| workspace_config.agent.default_model.clone());
+        if model_key.trim().is_empty() {
+            return Err(RokoError::invalid(
+                "model is not configured for service factory",
+            ));
+        }
+        let resolved_model = resolve_model(&workspace_config, &model_key);
+        let model_context_window_tokens = context_window_tokens_from_resolved(&resolved_model);
+        let model = resolved_model.slug;
+        if model.trim().is_empty() {
+            return Err(RokoError::invalid(format!(
+                "model key {model_key:?} resolved to an empty model slug"
+            )));
+        }
+        workspace_config.agent.default_model = model.clone();
+        let prompt_token_budget = workspace_config.budget.prompt_token_budget;
+        let tool_instructions = tool_instructions_for_config(&workspace_config.tools);
+        let cascade_router = if config.cascade_enabled {
+            let cascade_model_slugs = model_slugs_for_config(&workspace_config, &model);
+            Some(Arc::new(CascadeRouter::load_or_new(
+                &config.roko_dir.join("learn").join("cascade-router.json"),
+                cascade_model_slugs,
+            )))
+        } else {
+            None
+        };
+        let knowledge_store = Arc::new(KnowledgeStore::for_roko_dir(&config.roko_dir));
+
+        let feedback_sink: Arc<dyn FeedbackSink> = if config.feedback_enabled {
+            let feedback_service = FeedbackService::from_roko_dir_with_episodes(&config.roko_dir);
+            match &cascade_router {
+                Some(router) => Arc::new(feedback_service.with_cascade_router(Arc::clone(router))),
+                None => Arc::new(feedback_service),
+            }
+        } else {
+            Arc::new(MemoryFeedbackSink::default())
+        };
+
+        let gateway_knowledge_store = Arc::clone(&knowledge_store);
+        let gateway_knowledge_query = Arc::new(move |topic: &str, limit: usize| {
+            let entries = gateway_knowledge_store
+                .query(topic, limit)
+                .map_err(|err| RokoError::invalid(format!("query knowledge store: {err}")))?;
+            entries
+                .into_iter()
+                .map(|entry| {
+                    serde_json::to_value(entry)
+                        .map_err(|err| RokoError::invalid(format!("serialize knowledge: {err}")))
+                })
+                .collect()
+        });
+        let cost_table = roko_agent::CostTable::from_config_with_defaults(&workspace_config.models);
+        let routing_config = workspace_config.clone();
+        let prompt_model_router = cascade_router.clone();
+        let prompt_routing_config = workspace_config.clone();
+        let mut model_call_service = ModelCallService::new(model.clone())
+            .with_config(workspace_config)
+            .with_cost_table(cost_table)
+            .with_feedback_sink(Arc::clone(&feedback_sink))
+            .with_gateway_event_writer(Arc::new(GatewayEventWriter::for_workdir(&config.workdir)))
+            .with_event_consumer(Arc::new(JsonlLogger::from_roko_dir(&config.roko_dir)))
+            .with_knowledge_store(gateway_knowledge_query)
+            .with_run_id(config.run_id.unwrap_or_else(default_run_id));
+        if let Some(cascade_router) = cascade_router {
+            let model_router = Some(Arc::clone(&cascade_router));
+            model_call_service = model_call_service
+                .with_cascade_router(cascade_router)
+                .with_model_router(move |role| {
+                    routed_model_for_role(
+                        &routing_config,
+                        model_router.as_ref(),
+                        agent_role_from_label(role.unwrap_or("implementer")),
+                    )
+                });
+        }
+        if let Some(observer) = config.inference_observer {
+            model_call_service = model_call_service.with_inference_observer(observer);
+        }
+        if let Some(mcp_config) = config.mcp_config {
+            model_call_service = model_call_service.with_mcp_config(mcp_config);
+        }
+        let model_call_service = Arc::new(model_call_service);
+
+        let playbook_store = Arc::new(PlaybookStore::new(
+            config.roko_dir.join("learn").join("playbooks"),
+        ));
+        let section_effectiveness = SectionEffectivenessRegistry::load_or_new(
+            &config.roko_dir.join("learn").join("section-effects.json"),
+        )
+        .lift_weights();
+
+        let mut prompt_service = PromptAssemblyService::new()
+            .with_model_context_window(model_context_window_tokens)
+            .with_model_context_window_resolver(move |role| {
+                let selected_model = routed_model_for_role(
+                    &prompt_routing_config,
+                    prompt_model_router.as_ref(),
+                    role,
+                );
+                context_window_tokens_for_model(&prompt_routing_config, &selected_model)
+            })
+            .with_knowledge_store(knowledge_store)
+            .with_episodes(config.roko_dir.join("episodes.jsonl"))
+            .with_playbooks(playbook_store);
+        if prompt_token_budget > 0 {
+            prompt_service = prompt_service.with_token_budget(prompt_token_budget);
+        }
+        if let Some(tools) = tool_instructions {
+            prompt_service = prompt_service.with_tool_instructions(tools);
+        }
+        if !section_effectiveness.is_empty() {
+            prompt_service = prompt_service.with_section_effectiveness(section_effectiveness);
+        }
+
+        let prompt_assembler: Arc<dyn PromptAssembler> = Arc::new(prompt_service);
+        let gate_runner: Arc<dyn GateRunner> = Arc::new(GateService::new());
+        let affect_policy = config.affect_enabled.then(|| {
+            let state_path = config.roko_dir.join("state").join("daimon.json");
+            Arc::new(tokio::sync::Mutex::new(DaimonPolicy::new(state_path)))
+                as Arc<tokio::sync::Mutex<dyn AffectPolicy>>
+        });
+
+        Ok(ServiceBundle {
+            model,
+            model_call_service,
+            prompt_assembler,
+            feedback_sink,
+            gate_runner,
+            affect_policy,
+        })
+    }
+}
+
+fn routed_model_for_role(
+    config: &RokoConfig,
+    router: Option<&Arc<CascadeRouter>>,
+    role: AgentRole,
+) -> String {
+    let Some(router) = router else {
+        return resolve_model(config, &config.agent.default_model).slug;
+    };
+    let ctx = RoutingContext {
+        role,
+        ..Default::default()
+    };
+    let mut candidates = config.available_model_slugs_for_cascade();
+    if candidates.is_empty() {
+        candidates = config.model_slugs_for_cascade();
+    }
+    router.explain_routing(&ctx, &candidates).selected_model
+}
+
+fn context_window_tokens_for_model(config: &RokoConfig, model_key: &str) -> usize {
+    let resolved = resolve_model(config, model_key);
+    context_window_tokens_from_resolved(&resolved)
+}
+
+fn context_window_tokens_from_resolved(resolved: &roko_core::agent::ResolvedModel) -> usize {
+    resolved
+        .profile
+        .as_ref()
+        .and_then(|profile| usize::try_from(profile.context_window).ok())
+        .unwrap_or(128_000)
+}
+
+fn tool_instructions_for_config(tools: &ToolsConfig) -> Option<String> {
+    if tools.allow.is_empty() && tools.deny.is_empty() && tools.profiles.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    if !tools.allow.is_empty() {
+        lines.push(format!("Allowed tools: {}", tools.allow.join(", ")));
+    }
+    if !tools.deny.is_empty() {
+        lines.push(format!("Denied tools: {}", tools.deny.join(", ")));
+    }
+    let mut profiles = tools.profiles.iter().collect::<Vec<_>>();
+    profiles.sort_by_key(|(left, _)| *left);
+    for (name, profile) in profiles {
+        let mut parts = Vec::new();
+        if !profile.extra_tools.is_empty() {
+            parts.push(format!("extra: {}", profile.extra_tools.join(", ")));
+        }
+        if !profile.excluded_tools.is_empty() {
+            parts.push(format!("excluded: {}", profile.excluded_tools.join(", ")));
+        }
+        if !parts.is_empty() {
+            lines.push(format!("{name} profile tools: {}", parts.join("; ")));
+        }
+    }
+
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn model_slugs_for_config(config: &RokoConfig, default_model: &str) -> Vec<String> {
+    let mut slugs = Vec::new();
+    push_model_slug(config, &mut slugs, default_model);
+
+    if let Some(fallback) = config.agent.fallback_model.as_deref() {
+        push_model_slug(config, &mut slugs, fallback);
+    }
+
+    let mut tier_models = config.agent.tier_models.values().collect::<Vec<_>>();
+    tier_models.sort();
+    for tier_model in tier_models {
+        push_model_slug(config, &mut slugs, tier_model);
+    }
+
+    let mut configured_models = config
+        .effective_models()
+        .into_values()
+        .map(|profile| profile.slug)
+        .collect::<Vec<_>>();
+    configured_models.sort();
+    for slug in configured_models {
+        push_model_slug(config, &mut slugs, &slug);
+    }
+
+    slugs
+}
+
+fn push_model_slug(config: &RokoConfig, slugs: &mut Vec<String>, model_key: &str) {
+    let slug = resolve_model(config, model_key).slug;
+    if !slug.trim().is_empty() && !slugs.contains(&slug) {
+        slugs.push(slug);
+    }
+}
+
+fn agent_role_from_label(label: &str) -> AgentRole {
+    let normalized = label.trim().to_ascii_lowercase();
+    if normalized == AgentRole::Conductor.label() {
+        return AgentRole::Conductor;
+    }
+    AgentRole::ALL_AGENTS
+        .iter()
+        .copied()
+        .find(|role| role.label() == normalized)
+        .unwrap_or(AgentRole::Implementer)
+}
+
+#[derive(Default)]
+struct MemoryFeedbackSink {
+    events: tokio::sync::Mutex<Vec<FeedbackEvent>>,
+}
+
+#[async_trait]
+impl FeedbackSink for MemoryFeedbackSink {
+    async fn record(&self, event: FeedbackEvent) -> Result<()> {
+        self.events.lock().await.push(event);
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.events.lock().await.clear();
+        Ok(())
+    }
+}
+
+fn default_run_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    format!("service_factory_{millis}")
+}

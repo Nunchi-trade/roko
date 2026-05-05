@@ -8,9 +8,10 @@
 //! This is the "Rung 1" gate from Mori's 6-rung verification ladder: the
 //! cheapest check that proves the code at least compiles.
 
+use crate::compile_errors::{render_failure_classification, structured_gate_failure};
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Signal, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -23,6 +24,16 @@ pub struct CompileGate {
     name: String,
 }
 
+fn timeout_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+fn default_timeout_ms() -> u64 {
+    timeout_ms(roko_core::config::TimeoutConfig::default().gate_compile())
+}
+
 impl CompileGate {
     /// A compile gate for the given build system with default args.
     #[must_use]
@@ -30,7 +41,7 @@ impl CompileGate {
         Self {
             build_system,
             extra_args: Vec::new(),
-            timeout_ms: 600_000, // 10 minutes
+            timeout_ms: default_timeout_ms(),
             name: format!("compile:{}", build_system.program()),
         }
     }
@@ -56,10 +67,22 @@ impl CompileGate {
     }
 }
 
+impl roko_core::Cell for CompileGate {
+    fn cell_id(&self) -> &str {
+        "compile-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "CompileGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
 #[allow(clippy::cast_possible_truncation)]
-impl Gate for CompileGate {
-    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
+impl Verify for CompileGate {
+    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {
             Ok(p) => p,
@@ -76,6 +99,14 @@ impl Gate for CompileGate {
         for arg in &self.extra_args {
             cmd.arg(arg);
         }
+        if self.build_system == BuildSystem::Cargo
+            && !self
+                .extra_args
+                .iter()
+                .any(|arg| arg.starts_with("--message-format"))
+        {
+            cmd.arg("--message-format=json");
+        }
         cmd.current_dir(&payload.working_dir);
         cmd.kill_on_drop(true);
 
@@ -89,15 +120,22 @@ impl Gate for CompileGate {
         let output = match timeout(Duration::from_millis(self.timeout_ms), cmd.output()).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
-                return Verdict::fail(&self.name, format!("spawn failed: {e}"))
-                    .with_duration(started.elapsed().as_millis() as u64);
+                let elapsed = started.elapsed().as_millis() as u64;
+                let reason = format!("spawn failed: {e}");
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
+                    .with_duration(elapsed);
             }
             Err(_) => {
-                return Verdict::fail(
-                    &self.name,
-                    format!("timed out after {} ms", self.timeout_ms),
-                )
-                .with_duration(started.elapsed().as_millis() as u64);
+                let elapsed = started.elapsed().as_millis() as u64;
+                let reason = format!("timed out after {} ms", self.timeout_ms);
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
+                    .with_duration(elapsed);
             }
         };
 
@@ -115,9 +153,12 @@ impl Gate for CompileGate {
                 .with_detail(detail)
                 .with_duration(elapsed)
         } else {
-            let reason = summarize_errors(&stderr, 3);
+            let reason = summarize_errors(&detail, 3);
+            let classification =
+                structured_gate_failure(&self.name, &detail, reason.clone(), elapsed);
             Verdict::fail(&self.name, reason)
                 .with_detail(detail)
+                .with_error_digest(render_failure_classification(&classification))
                 .with_duration(elapsed)
         }
     }

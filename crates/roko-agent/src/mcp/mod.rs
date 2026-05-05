@@ -10,6 +10,7 @@ pub mod client;
 pub mod config;
 pub mod dedup;
 pub mod dynamic_registry;
+pub mod error_accumulator;
 pub mod handler;
 pub mod to_tool_def;
 
@@ -21,5 +22,6 @@ pub use client::{
 pub use config::{McpConfig, McpServerConfig, McpTransportConfig, find_mcp_config};
 pub use dedup::dedup_tools;
 pub use dynamic_registry::{DynamicToolRegistry, MergedToolRegistry};
+pub use error_accumulator::{McpErrorAccumulator, McpErrorRecord};
 pub use handler::{McpHandlerResolver, McpToolHandler};
 pub use to_tool_def::mcp_to_tool_def;

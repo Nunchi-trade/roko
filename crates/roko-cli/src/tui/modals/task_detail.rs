@@ -77,7 +77,7 @@ pub fn render_task_detail_modal(
 
     let mut lines = vec![
         Line::from(Span::styled(
-            "Gate Results",
+            "Verify Results",
             theme.accent().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),

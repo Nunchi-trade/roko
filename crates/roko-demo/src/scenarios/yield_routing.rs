@@ -30,7 +30,7 @@ pub const DEFAULT_SCENARIO_NAME: &str = "yield-routing";
 pub const DEFAULT_ROUNDS: u32 = 2;
 
 const AGENT_MODELS: [&str; 5] = [
-    "claude-sonnet-4",
+    "claude-sonnet-4-6",
     "gemma-27b",
     "gemma-7b",
     "claude-haiku",

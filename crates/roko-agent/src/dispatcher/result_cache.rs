@@ -7,6 +7,7 @@
 //! This reduces token cost by avoiding redundant tool calls within an agent
 //! session and speeds up multi-turn agent loops.
 
+use roko_core::defaults::{DEFAULT_MAX_CACHE_ENTRIES, DEFAULT_RESULT_CACHE_TTL_SECS};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
@@ -14,10 +15,10 @@ use std::time::{Duration, Instant};
 use roko_core::tool::{ToolCall, ToolResult};
 
 /// Default TTL for cached tool results (5 minutes).
-pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(DEFAULT_RESULT_CACHE_TTL_SECS);
 
 /// Maximum number of entries before LRU eviction triggers.
-const MAX_CACHE_ENTRIES: usize = 256;
+const MAX_CACHE_ENTRIES: usize = DEFAULT_MAX_CACHE_ENTRIES;
 
 /// Tools whose results are deterministic for the same arguments (within a
 /// session where no writes have occurred to the relevant paths).

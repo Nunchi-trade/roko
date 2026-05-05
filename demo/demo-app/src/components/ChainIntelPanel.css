@@ -1,0 +1,169 @@
+/* ═══════════════════════════════════════════════════════════
+   ChainIntelPanel — composite panel for Chain Intelligence demo
+   ═══════════════════════════════════════════════════════════ */
+
+.chain-intel-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Connected state: staggered entrance */
+.chain-intel-connected .chain-intel-section {
+  animation: fadeInUp 0.5s var(--ease) both;
+}
+
+.chain-intel-connected .chain-intel-section:nth-child(1) { animation-delay: 0ms; }
+.chain-intel-connected .chain-intel-section:nth-child(3) { animation-delay: 150ms; }
+.chain-intel-connected .chain-intel-section:nth-child(5) { animation-delay: 300ms; }
+
+/* ciSectionIn → shared animations.css (fadeInUp) */
+
+/* ── Sections ── */
+
+.chain-intel-section {
+  flex-shrink: 0;
+}
+
+.chain-intel-knowledge {
+  min-height: 200px;
+}
+
+.chain-intel-middle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  min-height: 160px;
+}
+
+.chain-intel-col {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chain-intel-efficiency {
+  flex-shrink: 0;
+}
+
+/* ── Section connectors: energy pulse lines ── */
+.chain-intel-connector {
+  position: relative;
+  height: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chain-intel-connector-line {
+  width: 1px;
+  height: 100%;
+  background: var(--border);
+}
+
+.chain-intel-connector-energy {
+  position: absolute;
+  width: 1px;
+  height: 100%;
+  overflow: hidden;
+}
+
+.chain-intel-connector-energy::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  width: 1px;
+  height: 6px;
+  background: var(--rose-glow);
+  box-shadow: 0 0 4px var(--rose-glow);
+  border-radius: 1px;
+  animation: ciEnergyFlow 2s ease-in-out infinite;
+}
+
+@keyframes ciEnergyFlow {
+  0% { top: -6px; opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+
+/* ── Offline state ── */
+
+.chain-intel-offline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px 24px;
+  text-align: center;
+  min-height: 200px;
+}
+
+.chain-intel-offline-icon {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  margin-bottom: 4px;
+}
+
+.chain-intel-offline-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid var(--text-ghost);
+  animation: ciOfflineRing 3s ease-in-out infinite;
+}
+
+.chain-intel-offline-ring-2 {
+  inset: -6px;
+  animation-delay: 0.5s;
+  border-color: var(--rose-dim);
+  opacity: 0.5;
+}
+
+@keyframes ciOfflineRing {
+  0%, 100% { transform: scale(1); opacity: 0.3; }
+  50% { transform: scale(1.15); opacity: 0.6; }
+}
+
+.chain-intel-offline-title {
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  color: var(--text-primary);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.chain-intel-offline-hint {
+  font-family: var(--mono);
+  font-size: 1rem;
+  color: var(--text-dim);
+  max-width: 320px;
+  line-height: 1.5;
+}
+
+.chain-intel-offline-cmd {
+  font-family: var(--mono);
+  font-size: 0.96rem;
+  color: var(--bone);
+  background: rgba(10, 10, 13, 0.6);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  padding: 12px 16px;
+  text-align: left;
+  white-space: pre-wrap;
+  max-width: 380px;
+  width: 100%;
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  .chain-intel-connected .chain-intel-section,
+  .chain-intel-connector-energy::after,
+  .chain-intel-offline-ring {
+    animation: none !important;
+  }
+}

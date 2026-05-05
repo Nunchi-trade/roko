@@ -27,7 +27,21 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Read,
         ToolPermission::read_only(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Glob pattern to match (supports *, ?, **, [...]). Example: \"src/**/*.rs\""
+            },
+            "path": {
+                "type": "string",
+                "description": "Optional subdirectory to search within (default: worktree root)."
+            }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(true)
     .with_timeout_ms(30_000)

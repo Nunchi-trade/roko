@@ -1,0 +1,243 @@
+/* ── Timeline container ───────────────────────────────────── */
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 10px 16px;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.timeline--compact {
+  padding: 6px 12px;
+}
+
+/* ── Animated vertical track ──────────────────────────────── */
+
+.timeline-track {
+  position: absolute;
+  left: 21px;            /* centers on the 11px marker at padding-left 16px */
+  width: 2px;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.timeline--compact .timeline-track {
+  left: 17px;
+}
+
+.timeline-track-bg {
+  position: absolute;
+  inset: 0;
+  background: var(--glass-border);
+  border-radius: 1px;
+}
+
+.timeline-track-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(to bottom, var(--success), color-mix(in srgb, var(--success) 40%, transparent));
+  border-radius: 1px;
+  transition: height 0.6s var(--ease);
+}
+
+/* ── Step row ─────────────────────────────────────────────── */
+
+.timeline-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 7px 0;
+  position: relative;
+  z-index: 1;
+  /* default: no entrance animation */
+  animation: none;
+}
+
+.timeline--compact .timeline-step {
+  padding: 3px 0;
+  gap: 8px;
+}
+
+/* Entrance animation for newly added steps */
+.timeline-step[data-new] {
+  animation: tl-step-enter 0.35s var(--ease) both;
+}
+
+@keyframes tl-step-enter {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* ── Marker (dot / icon container) ────────────────────────── */
+
+.timeline-marker {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--text-dim);
+  flex-shrink: 0;
+  margin-top: 2px;
+  transition: background 0.3s var(--ease), border-color 0.3s var(--ease), box-shadow 0.3s var(--ease);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+/* Done: green filled with check */
+.timeline-done .timeline-marker {
+  background: var(--success);
+  border-color: var(--success);
+}
+
+/* Active: rose filled with pulse + spinner */
+.timeline-active .timeline-marker {
+  background: var(--rose-bright);
+  border-color: var(--rose-bright);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rose-bright) 60%, transparent), 0 0 22px color-mix(in srgb, var(--rose-bright) 25%, transparent);
+  animation: active-dot-breathe 2s ease-in-out infinite;
+}
+
+/* Active step glow background */
+.timeline-active {
+  background: radial-gradient(ellipse at 0% 50%, color-mix(in srgb, var(--rose-bright) 8%, transparent) 0%, transparent 70%);
+  border-radius: 6px;
+  margin-left: -6px;
+  padding-left: 6px;
+}
+
+/* Pending: hollow dim circle */
+.timeline-pending .timeline-marker {
+  background: transparent;
+  border-color: var(--text-dim);
+}
+
+/* Failed: rose filled with cross */
+.timeline-failed .timeline-marker {
+  background: var(--rose-bright);
+  border-color: var(--rose-bright);
+}
+
+@keyframes active-dot-breathe {
+  0%, 100% {
+    box-shadow: 0 0 10px color-mix(in srgb, var(--rose-bright) 60%, transparent), 0 0 22px color-mix(in srgb, var(--rose-bright) 25%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 16px color-mix(in srgb, var(--rose-bright) 85%, transparent), 0 0 32px color-mix(in srgb, var(--rose-bright) 40%, transparent);
+  }
+}
+
+/* ── SVG Icons inside markers ─────────────────────────────── */
+
+.tl-icon {
+  color: var(--text-strong);
+  position: absolute;
+}
+
+.tl-icon-check {
+  animation: tl-check-draw 0.4s var(--ease) both;
+}
+
+@keyframes tl-check-draw {
+  from {
+    stroke-dasharray: 20;
+    stroke-dashoffset: 20;
+    opacity: 0;
+  }
+  to {
+    stroke-dasharray: 20;
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+.tl-icon-spinner {
+  animation: tl-spin 0.8s linear infinite;
+}
+
+@keyframes tl-spin {
+  to { transform: rotate(360deg); }
+}
+
+.tl-icon-cross {
+  animation: tl-cross-pop 0.3s var(--ease) both;
+}
+
+@keyframes tl-cross-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ── Labels ───────────────────────────────────────────────── */
+
+.timeline-content {
+  min-width: 0;
+}
+
+.timeline-label {
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  font-family: var(--sans);
+  line-height: 1.4;
+}
+.timeline-done .timeline-label { color: var(--text-soft); }
+.timeline-active .timeline-label { color: var(--rose-glow); font-weight: 500; }
+.timeline-pending .timeline-label { color: var(--text-dim); }
+.timeline-failed .timeline-label { color: var(--rose-bright); }
+
+.timeline--compact .timeline-label {
+  font-size: 0.85rem;
+}
+
+/* ── Detail / sublabel ────────────────────────────────────── */
+
+.timeline-detail {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
+}
+
+.timeline-duration {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+.timeline--compact .timeline-detail {
+  font-size: 0.76rem;
+}
+
+/* ── Progress fraction ────────────────────────────────────── */
+
+.timeline-progress {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  text-align: right;
+  padding-top: 6px;
+  letter-spacing: 0.05em;
+  opacity: 0.7;
+}
+
+.timeline--compact .timeline-progress {
+  padding-top: 4px;
+  font-size: 0.7rem;
+}

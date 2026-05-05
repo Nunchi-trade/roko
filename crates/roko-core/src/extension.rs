@@ -21,6 +21,147 @@
 
 use serde::{Deserialize, Serialize};
 
+// ── Typed hook parameter structs (C2) ─────────────────────────────────
+
+/// Pre-inference hook context. Passed mutably so extensions can modify
+/// the request before it reaches the LLM.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InferenceRequest {
+    /// Plan this inference belongs to.
+    pub plan_id: String,
+    /// Task being executed.
+    pub task: String,
+    /// Agent role (e.g. "engineer", "reviewer").
+    pub role: String,
+    /// Model being called (e.g. "claude-sonnet-4-20250514").
+    pub model: String,
+    /// Estimated prompt token count.
+    pub prompt_tokens: usize,
+    /// Escape hatch for truly dynamic / extension-specific data.
+    pub extra: serde_json::Value,
+}
+
+/// Post-inference hook context. Passed mutably so extensions can annotate
+/// or transform the response.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InferenceResponse {
+    /// Plan this inference belongs to.
+    pub plan_id: String,
+    /// Task that was executed.
+    pub task: String,
+    /// Agent role.
+    pub role: String,
+    /// Model that was called.
+    pub model: String,
+    /// Whether the inference succeeded.
+    pub success: bool,
+    /// Estimated cost in USD.
+    pub cost_usd: f64,
+    /// Wall-clock duration in milliseconds.
+    pub wall_ms: u64,
+    /// Escape hatch for truly dynamic / extension-specific data.
+    pub extra: serde_json::Value,
+}
+
+/// Verify evaluation result passed to `on_gate`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GateEvent {
+    /// Plan the gate belongs to.
+    pub plan_id: String,
+    /// Verify that ran (e.g. "compile", "test", "clippy").
+    pub gate_name: String,
+    /// Whether the gate passed.
+    pub passed: bool,
+    /// Verify rung (e.g. "rung-1", "rung-3").
+    pub rung: String,
+    /// How long the gate took in milliseconds.
+    pub duration_ms: u64,
+    /// Verify-specific details (diagnostics, counts, etc.).
+    pub details: serde_json::Value,
+}
+
+/// Error context for recovery hooks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ErrorEvent {
+    /// Human-readable error message.
+    pub error_message: String,
+    /// Where the error originated (e.g. "agent_dispatch", "gate_pipeline").
+    pub source: String,
+    /// Escape hatch for extension-specific context.
+    pub extra: serde_json::Value,
+}
+
+/// Generic observation for the perception layer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Observation {
+    /// Where this observation came from.
+    pub source: String,
+    /// The observation payload.
+    pub data: serde_json::Value,
+}
+
+/// Tool call event for action-layer hooks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolCallEvent {
+    /// Name of the tool being invoked.
+    pub tool_name: String,
+    /// Arguments passed to the tool.
+    pub arguments: serde_json::Value,
+    /// Result of the tool call, if available (post-action only).
+    pub result: Option<serde_json::Value>,
+}
+
+/// Cost update event for the meta layer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CostUpdate {
+    /// Model that incurred the cost.
+    pub model: String,
+    /// Input tokens consumed.
+    pub tokens_in: u64,
+    /// Output tokens produced.
+    pub tokens_out: u64,
+    /// Cost in USD.
+    pub cost_usd: f64,
+}
+
+/// Inter-agent message for social-layer hooks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentMessage {
+    /// Sender agent name.
+    pub from: String,
+    /// Recipient agent name.
+    pub to: String,
+    /// Message payload.
+    pub payload: serde_json::Value,
+}
+
+/// Memory retrieval context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetrievalResult {
+    /// The query that was issued.
+    pub query: String,
+    /// Retrieved entries (mutable so extensions can augment).
+    pub entries: Vec<serde_json::Value>,
+}
+
+/// Memory store context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoreEntry {
+    /// Key or topic being stored.
+    pub key: String,
+    /// The entry payload.
+    pub data: serde_json::Value,
+}
+
+/// Reflection state for the meta layer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReflectionState {
+    /// Current agent state snapshot.
+    pub state: serde_json::Value,
+}
+
+// ── Existing enums & structs ──────────────────────────────────────────
+
 /// Layer in the agent tick pipeline where an extension runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +248,8 @@ pub struct ExtensionMeta {
     pub version: String,
 }
 
+// ── Extension trait (async + typed parameters) ────────────────────────
+
 /// Extension trait for composable agent behavior.
 ///
 /// All hooks have default no-op implementations. Extensions only override
@@ -114,11 +257,15 @@ pub struct ExtensionMeta {
 /// Recovery last), and within a layer in the order extensions are listed
 /// in the configuration.
 ///
+/// All hooks are async (E1) and use typed parameter structs (C2) instead
+/// of raw `serde_json::Value`.
+///
 /// # Error handling
 ///
 /// If an extension hook returns `Err`, the error is:
 /// - Logged and ignored if `optional = true`
 /// - Propagated to the caller if `optional = false` (default)
+#[async_trait::async_trait]
 pub trait Extension: Send + Sync {
     /// Unique name identifying this extension.
     fn name(&self) -> &str;
@@ -140,29 +287,29 @@ pub trait Extension: Send + Sync {
     // ── Foundation (Layer 0) ────────────────────────────────────────
 
     /// Called once when the agent starts. Use for setup, connections, etc.
-    fn on_init(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn on_init(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
     /// Called once when the agent shuts down. Use for cleanup.
-    fn on_shutdown(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn on_shutdown(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
     // ── Perception (Layer 1) ────────────────────────────────────────
 
     /// Called when new observations arrive. Can enrich or annotate them.
-    fn on_observe(
+    async fn on_observe(
         &self,
-        _observations: &mut serde_json::Value,
+        _observation: &mut Observation,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
     /// Called to filter observations before they reach cognition.
-    fn on_filter(
+    async fn on_filter(
         &self,
-        _observations: &mut Vec<serde_json::Value>,
+        _observations: &mut Vec<Observation>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
@@ -170,18 +317,17 @@ pub trait Extension: Send + Sync {
     // ── Memory (Layer 2) ────────────────────────────────────────────
 
     /// Called when retrieving from knowledge store. Can augment results.
-    fn on_retrieve(
+    async fn on_retrieve(
         &self,
-        _query: &str,
-        _results: &mut Vec<serde_json::Value>,
+        _results: &mut RetrievalResult,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
     /// Called when storing to knowledge. Can transform or filter.
-    fn on_store(
+    async fn on_store(
         &self,
-        _entry: &mut serde_json::Value,
+        _entry: &mut StoreEntry,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
@@ -189,27 +335,25 @@ pub trait Extension: Send + Sync {
     // ── Cognition (Layer 3) ─────────────────────────────────────────
 
     /// Called before sending a request to the LLM. Can modify the request.
-    fn pre_inference(
+    async fn pre_inference(
         &self,
-        _request: &mut serde_json::Value,
+        _request: &mut InferenceRequest,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
     /// Called after receiving a response from the LLM. Can modify or log.
-    fn post_inference(
+    async fn post_inference(
         &self,
-        _response: &mut serde_json::Value,
+        _response: &mut InferenceResponse,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
     /// Called during gating decisions. Can influence pass/fail.
-    fn on_gate(
+    async fn on_gate(
         &self,
-        _gate_name: &str,
-        _passed: bool,
-        _details: &mut serde_json::Value,
+        _event: &mut GateEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
@@ -217,27 +361,25 @@ pub trait Extension: Send + Sync {
     // ── Action (Layer 4) ────────────────────────────────────────────
 
     /// Called before an action executes. Can block, allow, or rewrite.
-    fn pre_action(
+    async fn pre_action(
         &self,
-        _action: &serde_json::Value,
+        _event: &ToolCallEvent,
     ) -> Result<ActionDecision, Box<dyn std::error::Error + Send + Sync>> {
         Ok(ActionDecision::Proceed)
     }
 
     /// Called after an action completes.
-    fn post_action(
+    async fn post_action(
         &self,
-        _action: &serde_json::Value,
-        _result: &serde_json::Value,
+        _event: &ToolCallEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
     /// Called when a tool is invoked. Can allow, deny, or rewrite.
-    fn on_tool_call(
+    async fn on_tool_call(
         &self,
-        _tool_name: &str,
-        _args: &serde_json::Value,
+        _event: &ToolCallEvent,
     ) -> Result<ToolDecision, Box<dyn std::error::Error + Send + Sync>> {
         Ok(ToolDecision::Allow)
     }
@@ -245,17 +387,17 @@ pub trait Extension: Send + Sync {
     // ── Social (Layer 5) ────────────────────────────────────────────
 
     /// Called before sending a message to another agent.
-    fn on_message_send(
+    async fn on_message_send(
         &self,
-        _message: &mut serde_json::Value,
+        _message: &mut AgentMessage,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
     /// Called when receiving a message from another agent.
-    fn on_message_receive(
+    async fn on_message_receive(
         &self,
-        _message: &mut serde_json::Value,
+        _message: &mut AgentMessage,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
@@ -263,17 +405,17 @@ pub trait Extension: Send + Sync {
     // ── Meta (Layer 6) ──────────────────────────────────────────────
 
     /// Called during the reflection phase. Returns suggested adjustments.
-    fn on_reflect(
+    async fn on_reflect(
         &self,
-        _state: &serde_json::Value,
+        _state: &ReflectionState,
     ) -> Result<Vec<Adjustment>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Vec::new())
     }
 
     /// Called when cost data is updated (tokens, USD).
-    fn on_cost_update(
+    async fn on_cost_update(
         &self,
-        _cost: &serde_json::Value,
+        _cost: &CostUpdate,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
@@ -281,13 +423,15 @@ pub trait Extension: Send + Sync {
     // ── Recovery (Layer 7) ──────────────────────────────────────────
 
     /// Called when an error occurs. Determines recovery strategy.
-    fn on_error(
+    async fn on_error(
         &self,
-        _error: &dyn std::error::Error,
+        _event: &ErrorEvent,
     ) -> Result<RecoveryAction, Box<dyn std::error::Error + Send + Sync>> {
         Ok(RecoveryAction::Propagate)
     }
 }
+
+// ── ExtensionChain ────────────────────────────────────────────────────
 
 /// An ordered chain of extensions, executed in layer order.
 pub struct ExtensionChain {
@@ -323,10 +467,10 @@ impl ExtensionChain {
     }
 
     /// Initialize all extensions in order.
-    pub fn init_all(&mut self) -> Vec<(String, Box<dyn std::error::Error + Send + Sync>)> {
+    pub async fn init_all(&mut self) -> Vec<(String, Box<dyn std::error::Error + Send + Sync>)> {
         let mut errors = Vec::new();
         for ext in &mut self.extensions {
-            if let Err(e) = ext.on_init() {
+            if let Err(e) = ext.on_init().await {
                 errors.push((ext.name().to_string(), e));
             }
         }
@@ -334,10 +478,12 @@ impl ExtensionChain {
     }
 
     /// Shut down all extensions in reverse order.
-    pub fn shutdown_all(&mut self) -> Vec<(String, Box<dyn std::error::Error + Send + Sync>)> {
+    pub async fn shutdown_all(
+        &mut self,
+    ) -> Vec<(String, Box<dyn std::error::Error + Send + Sync>)> {
         let mut errors = Vec::new();
         for ext in self.extensions.iter_mut().rev() {
-            if let Err(e) = ext.on_shutdown() {
+            if let Err(e) = ext.on_shutdown().await {
                 errors.push((ext.name().to_string(), e));
             }
         }
@@ -345,46 +491,61 @@ impl ExtensionChain {
     }
 
     /// Run pre_inference hooks (Cognition layer only).
-    pub fn run_pre_inference(
+    pub async fn run_pre_inference(
         &self,
-        request: &mut serde_json::Value,
+        request: &mut InferenceRequest,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for ext in self
             .extensions
             .iter()
             .filter(|e| e.layer() == ExtensionLayer::Cognition)
         {
-            ext.pre_inference(request)?;
+            ext.pre_inference(request).await?;
         }
         Ok(())
     }
 
     /// Run post_inference hooks (Cognition layer only).
-    pub fn run_post_inference(
+    pub async fn run_post_inference(
         &self,
-        response: &mut serde_json::Value,
+        response: &mut InferenceResponse,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for ext in self
             .extensions
             .iter()
             .filter(|e| e.layer() == ExtensionLayer::Cognition)
         {
-            ext.post_inference(response)?;
+            ext.post_inference(response).await?;
+        }
+        Ok(())
+    }
+
+    /// Run on_gate hooks (Cognition layer only).
+    pub async fn run_on_gate(
+        &self,
+        event: &mut GateEvent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for ext in self
+            .extensions
+            .iter()
+            .filter(|e| e.layer() == ExtensionLayer::Cognition)
+        {
+            ext.on_gate(event).await?;
         }
         Ok(())
     }
 
     /// Run pre_action hooks (Action layer only). Returns first Block/Rewrite.
-    pub fn run_pre_action(
+    pub async fn run_pre_action(
         &self,
-        action: &serde_json::Value,
+        event: &ToolCallEvent,
     ) -> Result<ActionDecision, Box<dyn std::error::Error + Send + Sync>> {
         for ext in self
             .extensions
             .iter()
             .filter(|e| e.layer() == ExtensionLayer::Action)
         {
-            match ext.pre_action(action)? {
+            match ext.pre_action(event).await? {
                 ActionDecision::Proceed => continue,
                 decision => return Ok(decision),
             }
@@ -393,17 +554,16 @@ impl ExtensionChain {
     }
 
     /// Run on_tool_call hooks (Action layer only). Returns first Deny/Rewrite.
-    pub fn run_on_tool_call(
+    pub async fn run_on_tool_call(
         &self,
-        tool_name: &str,
-        args: &serde_json::Value,
+        event: &ToolCallEvent,
     ) -> Result<ToolDecision, Box<dyn std::error::Error + Send + Sync>> {
         for ext in self
             .extensions
             .iter()
             .filter(|e| e.layer() == ExtensionLayer::Action)
         {
-            match ext.on_tool_call(tool_name, args)? {
+            match ext.on_tool_call(event).await? {
                 ToolDecision::Allow => continue,
                 decision => return Ok(decision),
             }
@@ -412,16 +572,16 @@ impl ExtensionChain {
     }
 
     /// Run on_error hooks (Recovery layer only). Returns first non-Propagate.
-    pub fn run_on_error(
+    pub async fn run_on_error(
         &self,
-        error: &dyn std::error::Error,
+        event: &ErrorEvent,
     ) -> Result<RecoveryAction, Box<dyn std::error::Error + Send + Sync>> {
         for ext in self
             .extensions
             .iter()
             .filter(|e| e.layer() == ExtensionLayer::Recovery)
         {
-            match ext.on_error(error)? {
+            match ext.on_error(event).await? {
                 RecoveryAction::Propagate => continue,
                 action => return Ok(action),
             }
@@ -450,6 +610,7 @@ mod tests {
         layer: ExtensionLayer,
     }
 
+    #[async_trait::async_trait]
     impl Extension for TestExtension {
         fn name(&self) -> &str {
             &self.name
@@ -480,8 +641,8 @@ mod tests {
         assert_eq!(names, &["foundation-ext", "cognition-ext", "recovery-ext"]);
     }
 
-    #[test]
-    fn chain_init_shutdown_order() {
+    #[tokio::test]
+    async fn chain_init_shutdown_order() {
         let mut chain = ExtensionChain::new();
         chain.add(Box::new(TestExtension {
             name: "ext-a".into(),
@@ -492,10 +653,10 @@ mod tests {
             layer: ExtensionLayer::Cognition,
         }));
 
-        let init_errors = chain.init_all();
+        let init_errors = chain.init_all().await;
         assert!(init_errors.is_empty());
 
-        let shutdown_errors = chain.shutdown_all();
+        let shutdown_errors = chain.shutdown_all().await;
         assert!(shutdown_errors.is_empty());
     }
 
@@ -513,27 +674,87 @@ mod tests {
         assert_eq!(meta[0].layer, ExtensionLayer::Social);
     }
 
-    #[test]
-    fn tool_call_allow_by_default() {
+    #[tokio::test]
+    async fn tool_call_allow_by_default() {
         let chain = ExtensionChain::new();
-        let decision = chain
-            .run_on_tool_call("bash", &serde_json::json!({}))
-            .unwrap();
+        let event = ToolCallEvent {
+            tool_name: "bash".into(),
+            arguments: serde_json::json!({}),
+            result: None,
+        };
+        let decision = chain.run_on_tool_call(&event).await.unwrap();
         assert_eq!(decision, ToolDecision::Allow);
     }
 
-    #[test]
-    fn action_proceed_by_default() {
+    #[tokio::test]
+    async fn action_proceed_by_default() {
         let chain = ExtensionChain::new();
-        let decision = chain.run_pre_action(&serde_json::json!({})).unwrap();
+        let event = ToolCallEvent {
+            tool_name: "bash".into(),
+            arguments: serde_json::json!({}),
+            result: None,
+        };
+        let decision = chain.run_pre_action(&event).await.unwrap();
         assert_eq!(decision, ActionDecision::Proceed);
     }
 
-    #[test]
-    fn error_propagate_by_default() {
+    #[tokio::test]
+    async fn error_propagate_by_default() {
         let chain = ExtensionChain::new();
-        let err = std::io::Error::new(std::io::ErrorKind::Other, "test");
-        let action = chain.run_on_error(&err).unwrap();
+        let event = ErrorEvent {
+            error_message: "test error".into(),
+            source: "test".into(),
+            extra: serde_json::Value::Null,
+        };
+        let action = chain.run_on_error(&event).await.unwrap();
         assert_eq!(action, RecoveryAction::Propagate);
+    }
+
+    #[tokio::test]
+    async fn pre_inference_typed_struct() {
+        let chain = ExtensionChain::new();
+        let mut req = InferenceRequest {
+            plan_id: "plan-1".into(),
+            task: "task-1".into(),
+            role: "engineer".into(),
+            model: "claude-sonnet-4-20250514".into(),
+            prompt_tokens: 1000,
+            extra: serde_json::Value::Null,
+        };
+        // No extensions, should pass through cleanly.
+        chain.run_pre_inference(&mut req).await.unwrap();
+        assert_eq!(req.plan_id, "plan-1");
+    }
+
+    #[tokio::test]
+    async fn post_inference_typed_struct() {
+        let chain = ExtensionChain::new();
+        let mut resp = InferenceResponse {
+            plan_id: "plan-1".into(),
+            task: "task-1".into(),
+            role: "engineer".into(),
+            model: "claude-sonnet-4-20250514".into(),
+            success: true,
+            cost_usd: 0.01,
+            wall_ms: 500,
+            extra: serde_json::Value::Null,
+        };
+        chain.run_post_inference(&mut resp).await.unwrap();
+        assert!(resp.success);
+    }
+
+    #[tokio::test]
+    async fn on_gate_typed_struct() {
+        let chain = ExtensionChain::new();
+        let mut event = GateEvent {
+            plan_id: "plan-1".into(),
+            gate_name: "compile".into(),
+            passed: true,
+            rung: "rung-1".into(),
+            duration_ms: 200,
+            details: serde_json::Value::Null,
+        };
+        chain.run_on_gate(&mut event).await.unwrap();
+        assert!(event.passed);
     }
 }

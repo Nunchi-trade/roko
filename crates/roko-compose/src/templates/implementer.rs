@@ -1,9 +1,8 @@
 //! Implementer prompt template.
 //!
-//! Ports Mori's `implementer_sections` + `implementer_prompt` into a typed,
-//! I/O-free API. The most context-heavy template in the set.
+//! Roko-owned implementer prompt template with typed, I/O-free inputs.
 
-use super::common::budget_for;
+use super::common::{self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -44,7 +43,18 @@ static IMPLEMENTER_ROLE_IDENTITY: &str = "\
 You are the Implementer. Your job is to write production-quality code that \
 satisfies the plan specification exactly.\n\
 \n\
-Rules:\n\
+## Workspace\n\
+\n\
+You are working in a Rust workspace managed by Cargo. Key conventions:\n\
+- Run `cargo check -p <crate-name>` to verify compilation\n\
+- Run `cargo test -p <crate-name>` to run tests for a specific crate\n\
+- Run `cargo clippy -p <crate-name> --no-deps` for lint checks\n\
+- Always work from the workspace root directory\n\
+- Only modify files listed in the task's `files` field\n\
+- Read context files listed in `read_files` before making changes\n\
+\n\
+## Rules\n\
+\n\
 1. Read the plan carefully. Implement each unit of work in sequence.\n\
 2. For each unit: implement the code, write tests, create/update documentation.\n\
 3. Verify exports, doc comments, and unwrap() usage.\n\
@@ -57,22 +67,36 @@ document the deviation.\n\
 9. No upward dependencies — leaf crates must have zero workspace-internal deps.\n\
 10. All tests from the plan's Verification section must pass.\n\
 11. Self-validate before signaling done: cargo check, cargo test on affected crates.\n\
-12. Operate autonomously. Do not ask questions. Complete all work and end your turn.";
+12. Operate autonomously. Do not ask questions. Complete all work and end your turn.\n\
+\n\
+## When Things Go Wrong\n\
+\n\
+- **cargo check fails**: Read the full error. Fix the root cause in the file that owns the type/trait. \
+Do not add spurious `#[allow(...)]` or `as _` casts to silence errors.\n\
+- **Tests fail**: Run the failing test in isolation with `cargo test -p <crate> <test_name>`. \
+Read the assertion message. Fix the logic, not the test expectation, unless the test was wrong.\n\
+- **You need to touch a file not in your task's `files` list**: STOP. You may only read it for context. \
+If the fix genuinely requires changing that file, note it in your output as a blocker for a follow-up task.\n\
+- **Ambiguous requirement**: Pick the simplest interpretation that satisfies all verify commands. \
+Document your assumption in a code comment.";
 
 impl RolePromptTemplate for ImplementerTemplate {
     type Input = ImplementerInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
-        let budget = budget_for(AgentRole::Implementer);
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let budget = adaptive_budget_for(AgentRole::Implementer, context_window_tokens);
         let mut sections = Vec::with_capacity(10);
 
-        // 1. agents_instructions — System / Critical
-        sections.push(
-            PromptSection::new("agents_instructions", &input.agents_md)
-                .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Role)
-                .with_placement(Placement::Start),
-        );
+        // 1. agents_instructions — System / Critical / Start
+        sections.push(common::agents_instructions_section(&input.agents_md));
 
         // 2. plan_spec — Session / Critical / hard_cap 50k
         sections.push(
@@ -251,11 +275,29 @@ mod tests {
         assert_eq!(sections[3].cache_layer, CacheLayer::Plan); // tasks
         assert_eq!(sections[6].cache_layer, CacheLayer::Volatile); // registry
 
-        // Hard caps match Mori
+        // Hard caps match the built-in Roko cold-start budget.
         assert_eq!(sections[1].hard_cap, Some(50_000)); // plan_spec
         assert_eq!(sections[4].hard_cap, Some(20_000)); // workspace_map
         assert_eq!(sections[5].hard_cap, Some(5_000)); // preflight
         assert_eq!(sections[6].hard_cap, Some(8_000)); // registry
+    }
+
+    #[test]
+    fn context_window_scales_hard_caps() {
+        let template = ImplementerTemplate;
+        let input = full_input();
+        let small = template.sections_with_context_window(&input, 50_000);
+        let large = template.sections_with_context_window(&input, REFERENCE_CONTEXT_WINDOW_TOKENS);
+        let cap = |sections: &[PromptSection], name: &str| {
+            sections
+                .iter()
+                .find(|section| section.name == name)
+                .and_then(|section| section.hard_cap)
+                .unwrap()
+        };
+
+        assert!(cap(&small, "plan_spec") < cap(&large, "plan_spec"));
+        assert!(cap(&small, "workspace_map") < cap(&large, "workspace_map"));
     }
 
     #[test]
@@ -343,7 +385,7 @@ mod tests {
         let template = ImplementerTemplate;
         let id = template.role_identity();
         assert!(id.len() >= 500);
-        assert!(id.len() <= 1500);
+        assert!(id.len() <= 3000);
         assert!(id.contains("Implementer"));
     }
 }

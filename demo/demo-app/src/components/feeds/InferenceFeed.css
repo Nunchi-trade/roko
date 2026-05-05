@@ -1,0 +1,255 @@
+/* ═══════════════════════════════════════════════════════════
+   INFERENCE FEED — LLM inference event stream
+   ═══════════════════════════════════════════════════════════ */
+
+.inference-feed {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+
+.inference-feed__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+
+.inference-feed__title {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.inference-feed__total-cost {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--bone);
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  line-height: 1;
+}
+
+/* ── Scrollable body ── */
+
+.inference-feed__body {
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.06) transparent;
+}
+
+.inference-feed__body::-webkit-scrollbar {
+  width: 4px;
+}
+.inference-feed__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.inference-feed__body::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.06);
+  border-radius: 2px;
+}
+
+/* ── Gradient fades ── */
+
+.inference-feed__body::before,
+.inference-feed__body::after {
+  content: '';
+  position: sticky;
+  display: block;
+  left: 0;
+  right: 0;
+  height: 22px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.inference-feed__body::before {
+  top: 0;
+  background: linear-gradient(to bottom, var(--bg-raised), transparent);
+  margin-bottom: -22px;
+}
+
+.inference-feed__body::after {
+  bottom: 0;
+  background: linear-gradient(to top, var(--bg-raised), transparent);
+  margin-top: -22px;
+}
+
+/* ── Card list ── */
+
+.inference-feed__list {
+  padding: var(--sp-2) var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ── Inference card ── */
+
+.inference-feed__card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px 8px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  animation: fadeInUp 0.2s var(--ease) both;
+  overflow: hidden;
+}
+
+/* ── Card top row: model + provider + status ── */
+
+.inference-feed__top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inference-feed__model {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.inference-feed__provider {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.inference-feed__status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.inference-feed__status-dot--success {
+  background: var(--status-success);
+}
+
+.inference-feed__status-dot--error {
+  background: var(--status-error);
+}
+
+.inference-feed__status-dot--streaming {
+  background: var(--status-warning);
+  animation: pulse-dot 2.4s ease-in-out infinite;
+}
+
+/* ── Card bottom row: tokens + latency + cost ── */
+
+.inference-feed__bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+
+.inference-feed__tokens {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.inference-feed__tokens-in {
+  color: var(--dream-bright);
+}
+
+.inference-feed__tokens-out {
+  color: var(--bone-dim);
+}
+
+.inference-feed__latency {
+  color: var(--text-ghost);
+  white-space: nowrap;
+}
+
+.inference-feed__cost {
+  color: var(--bone);
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+/* ── Streaming shimmer ── */
+
+.inference-feed__card--streaming {
+  border-color: color-mix(in srgb, var(--status-warning) 20%, transparent);
+}
+
+.inference-feed__card--streaming::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 3px;
+  height: 100%;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--status-warning),
+    transparent
+  );
+  animation: if-shimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes if-shimmer {
+  0% {
+    opacity: 0.2;
+    transform: translateY(-100%);
+  }
+  50% {
+    opacity: 0.8;
+  }
+  100% {
+    opacity: 0.2;
+    transform: translateY(100%);
+  }
+}
+
+/* ── Error styling ── */
+
+.inference-feed__card--error {
+  border-color: color-mix(in srgb, var(--danger) 20%, transparent);
+}
+
+/* ── Empty state ── */
+
+.inference-feed__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-8) var(--sp-4);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-ghost);
+}

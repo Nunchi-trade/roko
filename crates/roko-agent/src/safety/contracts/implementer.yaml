@@ -6,7 +6,7 @@
   ],
   "governance": [
     { "MaxToolCallsPerTurn": 8 },
-    { "ForbiddenTools": ["network", "fetch"] },
+    { "ForbiddenTools": ["web_fetch", "web_search"] },
     { "RequireToolBeforeEdit": "read_file" }
   ],
   "recovery": [

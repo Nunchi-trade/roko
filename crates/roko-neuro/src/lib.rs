@@ -727,7 +727,7 @@ impl ReinforcementSignal {
 pub enum SourceChannel {
     /// Direct user input -- fully trusted.
     UserInput,
-    /// Gate verdicts from the validation pipeline.
+    /// Verify verdicts from the validation pipeline.
     GateVerdict,
     /// Output produced by an LLM agent.
     AgentOutput,
@@ -1320,8 +1320,59 @@ pub trait NeuroStore: Sized {
     /// Returns an error if the backend cannot load or persist the filtered
     /// entries.
     fn gc(&mut self, min_confidence: f64) -> Result<usize>;
+
+    /// Adjust the confidence score of a knowledge entry by `delta`.
+    ///
+    /// Backends that do not support mutable confidence updates may leave this
+    /// as a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot load or persist the updated
+    /// entry.
+    fn update_confidence(&mut self, knowledge_id: &str, delta: f64) -> Result<bool> {
+        let _ = (knowledge_id, delta);
+        Ok(false)
+    }
+
+    /// Record a usage outcome for a knowledge entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot load or persist the updated
+    /// entry.
+    fn record_usage(&mut self, knowledge_id: &str, succeeded: bool) -> Result<()> {
+        let delta = if succeeded { 0.02 } else { -0.05 };
+        self.update_confidence(knowledge_id, delta)?;
+        tracing::debug!(
+            knowledge_id,
+            succeeded,
+            delta,
+            "recorded knowledge usage outcome"
+        );
+        Ok(())
+    }
+
+    /// Record usage outcomes for multiple knowledge entries at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot load or persist the updated
+    /// entries.
+    fn batch_record_usage(&mut self, outcomes: &[(String, bool)]) -> Result<usize> {
+        let mut updated = 0usize;
+        for (knowledge_id, succeeded) in outcomes {
+            let delta = if *succeeded { 0.02 } else { -0.05 };
+            if self.update_confidence(knowledge_id, delta)? {
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
 }
 
+/// Evidence-based admission control for durable knowledge.
+pub mod admission;
 pub mod context;
 /// Episode distillation into durable knowledge candidates.
 pub mod distiller;
@@ -1330,11 +1381,21 @@ pub mod episode_completion;
 #[cfg(feature = "hdc")]
 mod hdc;
 pub mod knowledge_store;
+/// Runtime knowledge lifecycle ingestion and promotion facade.
+pub mod lifecycle;
 /// Temporal knowledge topology -- Allen interval algebra over knowledge states.
 pub mod temporal;
 /// Tier progression from raw episodes to playbooks.
 pub mod tier_progression;
 
+pub use admission::{
+    AdmissionGateOutcome, DEFAULT_KNOWLEDGE_ADMISSION_DECISIONS_FILE,
+    DEFAULT_KNOWLEDGE_CANDIDATES_FILE, DEFAULT_MIN_ADMISSION_CONFIDENCE,
+    DEFAULT_MIN_ANTI_KNOWLEDGE_CONFIDENCE, EvidencePolarity, KnowledgeAdmissionDecision,
+    KnowledgeAdmissionOutcome, KnowledgeAdmissionPolicy, KnowledgeAdmissionReason,
+    KnowledgeAdmissionStore, KnowledgeCandidateRecord, KnowledgeEvidence, KnowledgeEvidenceSource,
+    KnowledgeScope, LightAdmissionGate,
+};
 pub use context::{
     ContextAssembler, ContextChunk, ContextSource, EpisodeStore, PadState, ReadFileSpec, TaskInput,
     VerifySpec,
@@ -1348,8 +1409,17 @@ pub use knowledge_store::{
 };
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};
+pub use lifecycle::{
+    DEFAULT_KNOWLEDGE_LIFECYCLE_FILE, KnowledgeLifecycleConfig, KnowledgeLifecycleRecord,
+    RuntimeAdmissionPath, RuntimeEpisodeObservation, RuntimeKnowledgeLifecycle,
+};
 pub use temporal::{
     AllenRelation, KnowledgeEpoch, TemporalIndex, TemporalInterval, TemporalRelation,
+};
+pub use tier_progression::{
+    DEFAULT_HEURISTIC_DEMOTIONS_FILE, DEFAULT_HEURISTIC_OBSERVATIONS_FILE, DEFAULT_HEURISTICS_FILE,
+    Heuristic, HeuristicDemotionRecord, HeuristicObservation, HeuristicStore,
+    evaluate_tier_progression_v2, promotion_threshold,
 };
 
 #[cfg(test)]

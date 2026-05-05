@@ -34,3 +34,6 @@ roko-primitives = { path = "../roko-primitives", optional = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
+
+[package.metadata.roko]
+layer = 2

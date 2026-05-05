@@ -29,7 +29,25 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Meta,
         ToolPermission::default(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "todos": {
+                "type": "array",
+                "description": "List of todo items representing the agent's current plan.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "content": { "type": "string", "description": "Description of the todo item." },
+                        "status": { "type": "string", "enum": ["pending", "in_progress", "done"], "description": "Item status." }
+                    },
+                    "required": ["content"]
+                }
+            }
+        },
+        "required": ["todos"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(true)
     .with_timeout_ms(5_000)

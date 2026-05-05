@@ -1,11 +1,11 @@
 //! Strategist prompt template.
 //!
-//! Ports Mori's `strategist_prompt` into a typed, I/O-free API.
+//! Roko-owned strategist prompt template.
 //! The strategist analyzes a plan and produces a brief + structured TOML
 //! task checklist. On iteration 2+, it also processes prior review feedback
 //! and generates remediation instructions.
 
-use super::common::budget_for;
+use super::common::{self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -70,19 +70,22 @@ impl RolePromptTemplate for StrategistTemplate {
     type Input = StrategistInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
-        let budget = budget_for(AgentRole::Strategist);
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let budget = adaptive_budget_for(AgentRole::Strategist, context_window_tokens);
         let workspace_map_cap = budget.workspace_map.min(12_000);
         let prd2_cap = budget.prd2.min(8_000);
         let prior_reviews_cap = budget.plan.min(10_000);
         let mut sections = Vec::with_capacity(10);
 
         // 1. agents_instructions — System / Critical / Start
-        sections.push(
-            PromptSection::new("agents_instructions", &input.agents_md)
-                .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Role)
-                .with_placement(Placement::Start),
-        );
+        sections.push(common::agents_instructions_section(&input.agents_md));
 
         // 2. plan_spec — Session / Critical / Start / hard_cap 50k
         sections.push(
@@ -270,8 +273,8 @@ mod tests {
             decomposition: Some("Step 1: Define types.\nStep 2: Implement formulas.".into()),
             preflight: Some("all green, 142 tests passing".into()),
             ignored_tests: Some("test_old_feature: reason".into()),
-            brief_write_path: ".mori/plans/golem-mortality/brief.md".into(),
-            tasks_write_path: ".mori/plans/golem-mortality/042-tasks.toml".into(),
+            brief_write_path: ".roko/plans/golem-mortality/brief.md".into(),
+            tasks_write_path: ".roko/plans/golem-mortality/042-tasks.toml".into(),
         }
     }
 

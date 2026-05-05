@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 
 /// Minimum increase in test failures required to fire.
 pub const MIN_FAILURE_INCREASE: u32 = 1;
@@ -53,7 +53,7 @@ impl TestFailureBudgetWatcher {
     }
 }
 
-impl Policy for TestFailureBudgetWatcher {
+impl React for TestFailureBudgetWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         let mut baselines: HashMap<String, u32> = HashMap::new();
         let mut latest: HashMap<String, u32> = HashMap::new();

@@ -22,9 +22,9 @@ use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
-use crate::usage::Usage;
+use crate::usage::{UsageObservation, UsageSource};
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
@@ -41,7 +41,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 180_000;
 ///
 /// ```ignore
 /// let agent = OllamaAgent::new("llama3.1:8b");
-/// let prompt = Engram::builder(Kind::Prompt).body(Body::text("Hi")).build();
+/// let prompt = Signal::builder(Kind::Prompt).body(Body::text("Hi")).build();
 /// let result = agent.run(&prompt, &Context::now()).await;
 /// ```
 pub struct OllamaAgent {
@@ -100,7 +100,7 @@ impl OllamaAgent {
 
     /// Execute one chat turn against the given poster. Shared by the real
     /// `Agent::run` and the unit tests.
-    async fn run_with_poster(&self, poster: &dyn HttpPoster, input: &Engram) -> AgentResult {
+    async fn run_with_poster(&self, poster: &dyn HttpPoster, input: &Signal) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -138,8 +138,10 @@ impl OllamaAgent {
         };
 
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
+        let json_headers: [(String, String); 1] =
+            [("content-type".to_owned(), "application/json".to_owned())];
         let raw = match poster
-            .post_json(&url, &[], body.as_bytes(), self.timeout_ms)
+            .post_json(&url, &json_headers, body.as_bytes(), self.timeout_ms)
             .await
         {
             Ok(raw) => raw,
@@ -174,17 +176,21 @@ impl OllamaAgent {
             .tag("model", &self.model)
             .build();
 
-        let usage = Usage {
-            input_tokens: resp.prompt_eval_count.unwrap_or(0),
-            output_tokens: resp.eval_count.unwrap_or(0),
+        let observation = UsageObservation {
+            input_tokens: resp.prompt_eval_count.map(u64::from),
+            output_tokens: resp.eval_count.map(u64::from),
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            cost_usd: None,
+            source: UsageSource::ProviderReported,
+            model: Some(self.model.clone()),
             wall_ms,
-            ..Default::default()
         };
 
-        AgentResult::ok(output).with_usage(usage)
+        AgentResult::ok(output).with_usage_obs(observation)
     }
 
-    fn failure_signal(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
+    fn failure_signal(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -193,16 +199,22 @@ impl OllamaAgent {
             .tag("model", &self.model)
             .tag("failed", "true")
             .build();
-        AgentResult::fail(output).with_usage(Usage {
+        AgentResult::fail(output).with_usage_obs(UsageObservation {
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            cost_usd: None,
+            source: UsageSource::Unknown,
+            model: Some(self.model.clone()),
             wall_ms,
-            ..Default::default()
         })
     }
 }
 
 #[async_trait]
 impl Agent for OllamaAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let poster = ReqwestPoster::new();
         self.run_with_poster(&poster, input).await
     }
@@ -317,8 +329,8 @@ mod agent_tests {
         }
     }
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn canned_ok_response() -> String {
@@ -397,18 +409,37 @@ mod agent_tests {
         assert!(result.success);
         assert_eq!(result.usage.input_tokens, 12);
         assert_eq!(result.usage.output_tokens, 34);
+        let obs = result.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs.input_tokens, Some(12));
+        assert_eq!(obs.output_tokens, Some(34));
+        assert_eq!(obs.source, UsageSource::ProviderReported);
+        assert_eq!(obs.model.as_deref(), Some("llama3.1:8b"));
     }
 
     #[tokio::test]
-    async fn missing_counts_default_to_zero() {
+    async fn ollama_usage_distinguishes_absent_from_zero() {
         let agent = OllamaAgent::new("llama3.1:8b");
-        // No prompt_eval_count / eval_count fields.
-        let poster =
+
+        // Absent: no eval counts in the response — observation must be None.
+        let absent_poster =
             MockPoster::ok(r#"{"message":{"role":"assistant","content":"ok"},"done":true}"#);
-        let result = agent.run_with_poster(&poster, &prompt("hi")).await;
-        assert!(result.success);
-        assert_eq!(result.usage.input_tokens, 0);
-        assert_eq!(result.usage.output_tokens, 0);
+        let absent_result = agent.run_with_poster(&absent_poster, &prompt("hi")).await;
+        assert!(absent_result.success);
+        let absent_obs = absent_result.usage_obs.expect("usage_obs populated");
+        assert_eq!(absent_obs.input_tokens, None);
+        assert_eq!(absent_obs.output_tokens, None);
+        // Legacy view collapses absent to 0 for back-compat.
+        assert_eq!(absent_result.usage.input_tokens, 0);
+
+        // Zero: explicit zero counts — observation must be Some(0).
+        let zero_poster = MockPoster::ok(
+            r#"{"message":{"role":"assistant","content":"ok"},"done":true,"prompt_eval_count":0,"eval_count":0}"#,
+        );
+        let zero_result = agent.run_with_poster(&zero_poster, &prompt("hi")).await;
+        assert!(zero_result.success);
+        let zero_obs = zero_result.usage_obs.expect("usage_obs populated");
+        assert_eq!(zero_obs.input_tokens, Some(0));
+        assert_eq!(zero_obs.output_tokens, Some(0));
     }
 
     #[tokio::test]
@@ -568,9 +599,11 @@ impl OllamaLlmBackend {
         url: &str,
         body_bytes: &[u8],
     ) -> Result<BackendResponse, LlmError> {
+        let json_headers: [(String, String); 1] =
+            [("content-type".to_owned(), "application/json".to_owned())];
         let raw = self
             .poster
-            .post_json(url, &[], body_bytes, self.timeout_ms)
+            .post_json(url, &json_headers, body_bytes, self.timeout_ms)
             .await
             .map_err(|e| LlmError::Network(e.to_string()))?;
 

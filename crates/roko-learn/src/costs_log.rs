@@ -60,6 +60,11 @@ impl CostsLog {
 
     /// Append one [`CostRecord`] as one JSON line.
     ///
+    /// Each call opens, writes, optionally fsyncs, and closes the file.
+    /// For high-throughput paths (many concurrent agents), prefer collecting
+    /// records into a `Vec` and calling [`append_all`] in a periodic flush
+    /// to amortize the syscall overhead.
+    ///
     /// # Errors
     ///
     /// Returns an error for serialization or file I/O failures.
@@ -107,6 +112,15 @@ impl CostsLog {
         Ok(())
     }
 
+    /// Return whether the log has fsync enabled.
+    ///
+    /// Callers that do high-frequency appends can check this and batch
+    /// records themselves before calling [`append_all`].
+    #[must_use]
+    pub const fn fsync_enabled(&self) -> bool {
+        self.fsync
+    }
+
     /// Read all valid records; malformed lines are skipped.
     ///
     /// # Errors
@@ -139,12 +153,13 @@ impl CostsLog {
     ///
     /// Returns an error if the underlying log cannot be read.
     pub async fn total_cost(&self) -> io::Result<f64> {
-        Ok(self
+        let total: f64 = self
             .read_all()
             .await?
             .into_iter()
             .map(|record| record.cost_usd)
-            .sum())
+            .sum();
+        Ok(total.max(0.0))
     }
 
     /// Aggregate recorded cost by model slug.
@@ -194,7 +209,7 @@ impl CostsLog {
             let day = today - chrono::Duration::days(offset as i64);
             out.push((
                 day.format("%Y-%m-%d").to_string(),
-                totals.get(&day).copied().unwrap_or(0.0),
+                totals.get(&day).copied().unwrap_or(0.0).max(0.0),
             ));
         }
         Ok(out)

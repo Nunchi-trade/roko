@@ -3,8 +3,7 @@
 //! Prevents the tool loop from running indefinitely when the backend
 //! keeps emitting tool calls without converging on a final answer.
 
-/// Default ceiling on tool-call iterations before the loop force-stops.
-pub const DEFAULT_MAX_ITERATIONS: usize = 25;
+pub use roko_core::defaults::DEFAULT_MAX_TOOL_ITERATIONS as DEFAULT_MAX_ITERATIONS;
 
 /// Returns `true` when the loop has exhausted its iteration budget.
 #[inline]

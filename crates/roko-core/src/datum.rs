@@ -1,8 +1,8 @@
 //! Polymorphic input surface — work over either medium without a new trait family.
 //!
 //! [`Datum`] unifies [`Engram`](crate::Engram) (persisted) and
-//! [`Pulse`](crate::Pulse) (ephemeral) so operators like [`Scorer`](crate::Scorer)
-//! and [`Composer`](crate::Composer) can accept both without requiring callers
+//! [`Pulse`](crate::Pulse) (ephemeral) so operators like [`Score`](crate::traits::Score)
+//! and [`Compose`](crate::Compose) can accept both without requiring callers
 //! to persist first.
 
 use crate::{Body, Engram, Kind, Pulse};

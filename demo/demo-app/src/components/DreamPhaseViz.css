@@ -1,0 +1,166 @@
+/* ── DreamPhaseViz · Inline style extraction ──────────────── */
+
+/* Sparkline canvas */
+.dream-sparkline {
+  width: 100%;
+  display: block;
+}
+
+/* PhaseStat row */
+.dream-phase-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.dream-phase-stat__label {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.dream-phase-stat__value {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* PhaseArrow connector */
+.dream-phase-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  opacity: 0.55;
+  font-family: var(--mono);
+  font-size: var(--text-lg);
+  letter-spacing: 0.08em;
+}
+
+/* Viz wrapper */
+.dream-viz {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  width: 100%;
+}
+
+/* Header row */
+.dream-viz-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: 0 var(--sp-1);
+}
+.dream-viz-header__left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dream-viz-header__right {
+  text-align: right;
+}
+.dream-viz-micro-label {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.dream-viz-micro-label--block {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.dream-viz-title {
+  font-family: var(--display);
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+.dream-viz-last-cycle {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--text-ghost);
+}
+
+/* Phase pipeline strip */
+.dream-viz-pipeline {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.dream-viz-phase-slot {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+
+/* Phase card */
+.dream-viz-phase-card {
+  width: 220px;
+  min-width: 220px;
+  border-radius: var(--sp-3);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, white 2%, transparent),
+              0 12px 28px color-mix(in srgb, black 12%, transparent);
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.dream-viz-phase-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.dream-viz-phase-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.dream-viz-phase-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.dream-viz-phase-name {
+  font-family: var(--display);
+  font-size: var(--text-md);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.dream-viz-phase-status {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.dream-viz-phase-stats {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  border-top: 1px solid color-mix(in srgb, white 4%, transparent);
+  padding-top: var(--sp-2);
+}
+
+/* Footer row */
+.dream-viz-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: 0 var(--sp-1);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}

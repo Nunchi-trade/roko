@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>roko — builder</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>
+  :root {
+    --bg: #16121a; --fg: #a58e9e; --rose: #b97894; --sage: #7d9e8c;
+    --ember: #c36e55; --bone: #d7c69e; --dream: #7873a5; --ghost: #372a37; --dim: #916e8a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); font-family: 'Geist Mono','SF Mono','Menlo',monospace;
+    display: flex; flex-direction: column; height: 100vh; }
+
+  .header { padding: 8px 16px; display: flex; align-items: center; gap: 12px;
+    border-bottom: 1px solid var(--ghost); }
+  .header h1 { color: var(--rose); font-size: 1rem; }
+  .header .task-cards { display: flex; gap: 6px; margin-left: auto; }
+  .task-card { background: var(--ghost); color: var(--dim); border: none; padding: 4px 10px;
+    border-radius: 4px; font-family: inherit; font-size: 0.7rem; cursor: pointer; }
+  .task-card:hover { background: #4a3a4a; color: var(--bone); }
+
+  .main { display: grid; grid-template-columns: 200px 1fr; flex: 1; overflow: hidden; }
+
+  .sidebar { border-right: 1px solid var(--ghost); overflow-y: auto; padding: 8px; }
+  .sidebar h3 { color: var(--dim); font-size: 0.65rem; text-transform: uppercase;
+    letter-spacing: 0.1em; margin-bottom: 8px; }
+  .file { padding: 2px 4px; font-size: 0.75rem; color: var(--dim); cursor: default;
+    border-radius: 2px; }
+  .file:hover { background: var(--ghost); }
+  .file.new { color: var(--sage); }
+  .file .icon { margin-right: 4px; }
+
+  .terminal-area { display: flex; flex-direction: column; overflow: hidden; }
+  .terminal-wrap { flex: 1; padding: 4px; overflow: hidden; }
+
+  .gates-bar { padding: 6px 16px; border-top: 1px solid var(--ghost);
+    display: flex; gap: 16px; font-size: 0.75rem; }
+  .gate { display: flex; align-items: center; gap: 4px; }
+  .gate.pass { color: var(--sage); }
+  .gate.fail { color: var(--ember); }
+  .gate.pending { color: var(--dim); }
+
+  .input-bar { padding: 8px 16px; border-top: 1px solid var(--ghost);
+    display: flex; align-items: center; gap: 8px; }
+  .input-bar .prompt { color: var(--rose); font-weight: 600; }
+  .input-bar input { flex: 1; background: transparent; border: 1px solid var(--ghost);
+    border-radius: 4px; padding: 8px 12px; color: var(--bone); font-family: inherit;
+    font-size: 0.85rem; outline: none; }
+  .input-bar input:focus { border-color: var(--rose); }
+  .input-bar input::placeholder { color: var(--ghost); }
+  .input-bar button { background: var(--rose); color: var(--bg); border: none; padding: 8px 16px;
+    border-radius: 4px; font-family: inherit; font-weight: 600; cursor: pointer; }
+  .input-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .status-bar { padding: 4px 16px; border-top: 1px solid var(--ghost);
+    display: flex; gap: 16px; font-size: 0.65rem; color: var(--dim); }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1><a href="demo.html" style="color:inherit;text-decoration:none">◆ roko</a> builder</h1>
+    <span style="color:var(--dim);font-size:0.75rem">type a request — roko builds it live</span>
+    <span style="font-size:0.65rem;display:flex;gap:8px;margin-left:auto"><a href="demo.html" style="color:var(--dim);text-decoration:none">Demo</a><a href="bench.html" style="color:var(--dim);text-decoration:none">Bench</a><a href="bench-live.html" style="color:var(--dim);text-decoration:none">Live</a><a href="explorer.html" style="color:var(--dim);text-decoration:none">Explorer</a></span>
+    <div class="task-cards">
+      <button class="task-card" onclick="submitTask('Build a CLI calculator in Rust')">calculator</button>
+      <button class="task-card" onclick="submitTask('Create a REST API with health check')">REST API</button>
+      <button class="task-card" onclick="submitTask('Write a markdown to HTML converter')">md→html</button>
+      <button class="task-card" onclick="submitTask('Build a file deduplication tool')">dedup</button>
+      <button class="task-card" onclick="submitTask('Create a git commit message generator')">commitgen</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="sidebar">
+      <h3>files</h3>
+      <div id="file-tree">
+        <div class="file" style="color:var(--ghost)">no project yet</div>
+      </div>
+    </div>
+    <div class="terminal-area">
+      <div class="terminal-wrap" id="terminal"></div>
+    </div>
+  </div>
+
+  <div class="gates-bar" id="gates-bar">
+    <div class="gate pending" id="gate-compile">⏳ compile</div>
+    <div class="gate pending" id="gate-test">⏳ test</div>
+    <div class="gate pending" id="gate-clippy">⏳ clippy</div>
+  </div>
+
+  <div class="input-bar">
+    <span class="prompt">❯</span>
+    <input type="text" id="prompt-input" placeholder="What do you want to build?"
+      onkeydown="if(event.key==='Enter')submitFromInput()">
+    <button id="btn-build" onclick="submitFromInput()">Build</button>
+  </div>
+
+  <div class="status-bar">
+    <span id="sb-status">ready</span>
+    <span id="sb-cost">cost: —</span>
+    <span id="sb-server">connecting...</span>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script>
+const SERVE_URL = location.protocol === 'file:'
+  ? 'http://localhost:6677'
+  : (location.port === '6677' || location.pathname.startsWith('/demo'))
+    ? location.origin : 'http://localhost:6677';
+const WS_BASE = SERVE_URL.replace(/^http/, 'ws');
+// Resolve roko binary: prefer PATH, fall back to local builds.
+// The PTY shell may not have roko on PATH, so we probe at connect time.
+let ROKO = 'roko';
+let rokoResolved = false;
+
+const theme = {
+  background: '#0e0c10', foreground: '#a58e9e', cursor: '#b97894', cursorAccent: '#0e0c10',
+  selectionBackground: '#372a37',
+  black: '#16121a', red: '#c36e55', green: '#7d9e8c', yellow: '#c39b5f',
+  blue: '#7873a5', magenta: '#b97894', cyan: '#6a9ea0', white: '#d7c69e',
+  brightBlack: '#372a37', brightRed: '#d48a6e', brightGreen: '#99c4ac', brightYellow: '#d9b870',
+  brightBlue: '#9d98c4', brightMagenta: '#dc9cb8', brightCyan: '#8abcbe', brightWhite: '#ede0c8',
+};
+
+// Terminal setup
+const term = new Terminal({
+  theme, fontFamily: "'Geist Mono','SF Mono','Menlo',monospace",
+  fontSize: 13, lineHeight: 1.3, cursorBlink: true, cursorStyle: 'bar',
+});
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+term.open(document.getElementById('terminal'));
+fitAddon.fit();
+
+new ResizeObserver(() => fitAddon.fit()).observe(document.getElementById('terminal'));
+
+// WebSocket to PTY
+let ws = null;
+let sessionId = 'builder-1';
+let building = false;
+let tmpDir = null;
+
+function connectTerminal() {
+  ws = new WebSocket(`${WS_BASE}/ws/terminal/${sessionId}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    document.getElementById('sb-server').textContent = `server: ${SERVE_URL}`;
+    // Send initial resize
+    const dims = fitAddon.proposeDimensions();
+    if (dims) ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+  };
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) {
+      const text = new TextDecoder().decode(e.data);
+      term.write(new Uint8Array(e.data));
+      appendOutput(text);
+      detectGates(text);
+      detectFiles(text);
+    } else {
+      term.write(e.data);
+      appendOutput(typeof e.data === 'string' ? e.data : '');
+    }
+  };
+  ws.onclose = () => {
+    document.getElementById('sb-server').textContent = 'disconnected';
+  };
+
+  // Forward keystrokes (allow interactive use)
+  term.onData(data => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+  });
+  term.onResize(({ cols, rows }) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    }
+  });
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Buffer of recent terminal output for prompt detection.
+let outputBuffer = '';
+const PROMPT_RE = /[❯\$>]\s*$/;  // Matches common shell prompts
+
+// Track output for prompt detection.
+function appendOutput(text) {
+  outputBuffer += text;
+  // Keep buffer bounded (last 2KB)
+  if (outputBuffer.length > 2048) outputBuffer = outputBuffer.slice(-1024);
+}
+
+// Wait until the shell shows a prompt (command finished).
+// Returns false if timed out.
+async function waitForPrompt(timeoutMs = 60000) {
+  const start = Date.now();
+  // Clear buffer so we only see new output
+  outputBuffer = '';
+  while (Date.now() - start < timeoutMs) {
+    await sleep(300);
+    if (PROMPT_RE.test(outputBuffer)) return true;
+  }
+  return false;
+}
+
+async function typeCmd(cmd, delay = 20) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  for (const ch of cmd) {
+    ws.send(ch);
+    await sleep(delay + Math.random() * 8);
+  }
+  await sleep(100);
+  ws.send('\r');
+}
+
+// Type a command and wait for the shell prompt to return.
+// Returns true if prompt returned (success), false if timed out.
+async function runCmd(cmd, timeoutMs = 60000) {
+  await typeCmd(cmd);
+  return await waitForPrompt(timeoutMs);
+}
+
+// Resolve the roko binary path inside the PTY shell.
+async function resolveRoko() {
+  if (rokoResolved) return;
+  // Try `which roko` — if it's on PATH, use it directly.
+  outputBuffer = '';
+  await typeCmd('which roko 2>/dev/null && echo __ROKO_OK__ || echo __ROKO_MISS__');
+  await waitForPrompt(5000);
+  if (outputBuffer.includes('__ROKO_OK__')) {
+    ROKO = 'roko';
+    rokoResolved = true;
+    return;
+  }
+  // Fall back to local builds.
+  for (const p of ['./target/release/roko', './target/debug/roko']) {
+    outputBuffer = '';
+    await typeCmd(`test -x ${p} && echo __ROKO_OK__ || echo __ROKO_MISS__`);
+    await waitForPrompt(3000);
+    if (outputBuffer.includes('__ROKO_OK__')) {
+      ROKO = p;
+      rokoResolved = true;
+      return;
+    }
+  }
+  // Last resort
+  ROKO = 'roko';
+  rokoResolved = true;
+}
+
+function submitFromInput() {
+  const input = document.getElementById('prompt-input');
+  const prompt = input.value.trim();
+  if (!prompt || building) return;
+  input.value = '';
+  submitTask(prompt);
+}
+
+async function submitTask(prompt) {
+  if (building) return;
+  building = true;
+  document.getElementById('btn-build').disabled = true;
+  document.getElementById('sb-status').textContent = 'initializing...';
+
+  // Reset gates
+  ['compile', 'test', 'clippy'].forEach(g => {
+    const el = document.getElementById(`gate-${g}`);
+    el.className = 'gate pending';
+    el.textContent = `⏳ ${g}`;
+  });
+
+  // Reset file tree
+  document.getElementById('file-tree').innerHTML =
+    '<div class="file" style="color:var(--ghost)">creating project...</div>';
+
+  // Ensure terminal is connected
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    connectTerminal();
+    await sleep(2000);
+  }
+
+  // Wait for initial shell prompt
+  await waitForPrompt(5000);
+
+  // Resolve roko binary path
+  await resolveRoko();
+
+  // Create clean demo workspace
+  tmpDir = `/tmp/roko-demo-${Date.now()}`;
+  document.getElementById('sb-status').textContent = 'creating workspace...';
+  if (!await runCmd(`mkdir -p ${tmpDir} && cd ${tmpDir}`, 5000)) {
+    document.getElementById('sb-status').textContent = 'error: cd failed';
+    building = false;
+    document.getElementById('btn-build').disabled = false;
+    return;
+  }
+
+  // Initialize roko workspace
+  document.getElementById('sb-status').textContent = 'initializing workspace...';
+  if (!await runCmd(`${ROKO} init`, 10000)) {
+    document.getElementById('sb-status').textContent = 'error: init timed out';
+    building = false;
+    document.getElementById('btn-build').disabled = false;
+    return;
+  }
+
+  // Run the build task
+  document.getElementById('sb-status').textContent = 'agent working...';
+  const escaped = prompt.replace(/"/g, '\\"');
+  if (!await runCmd(`${ROKO} run "${escaped}" --share`, 120000)) {
+    document.getElementById('sb-status').textContent = 'timed out (2 min)';
+  }
+
+  // List created files
+  document.getElementById('sb-status').textContent = 'listing files...';
+  await runCmd(`find . -type f -not -path './.roko/*' -not -path './target/*' | head -20`, 5000);
+
+  building = false;
+  document.getElementById('btn-build').disabled = false;
+  document.getElementById('sb-status').textContent = 'done';
+}
+
+// Detect gate results from terminal output
+function detectGates(text) {
+  if (text.includes('compile') && text.includes('✔')) setGate('compile', true);
+  if (text.includes('compile') && text.includes('✖')) setGate('compile', false);
+  if (text.includes('test') && text.includes('✔')) setGate('test', true);
+  if (text.includes('test') && text.includes('✖')) setGate('test', false);
+  if (text.includes('clippy') && text.includes('✔')) setGate('clippy', true);
+  if (text.includes('clippy') && text.includes('✖')) setGate('clippy', false);
+}
+
+function setGate(name, passed) {
+  const el = document.getElementById(`gate-${name}`);
+  el.className = `gate ${passed ? 'pass' : 'fail'}`;
+  el.textContent = `${passed ? '✔' : '✖'} ${name}`;
+}
+
+// Detect files from terminal output (simple heuristic)
+function detectFiles(text) {
+  const lines = text.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Look for Write/Edit tool calls or find output
+    if (trimmed.startsWith('./') && !trimmed.includes(' ')) {
+      addFile(trimmed);
+    }
+    if (trimmed.includes('Write') && trimmed.includes('.rs')) {
+      const match = trimmed.match(/(\S+\.rs)/);
+      if (match) addFile(match[1]);
+    }
+    if (trimmed.includes('Cargo.toml')) addFile('Cargo.toml');
+  }
+}
+
+const knownFiles = new Set();
+function addFile(path) {
+  if (knownFiles.has(path)) return;
+  knownFiles.add(path);
+
+  const tree = document.getElementById('file-tree');
+  // Clear placeholder
+  if (tree.querySelector('[style*="ghost"]')) tree.innerHTML = '';
+
+  const ext = path.split('.').pop();
+  const icon = ext === 'rs' ? '🦀' : ext === 'toml' ? '📦' : '📄';
+
+  const div = document.createElement('div');
+  div.className = 'file new';
+  div.innerHTML = `<span class="icon">${icon}</span>${path}`;
+  tree.appendChild(div);
+
+  // Flash animation
+  div.style.background = 'rgba(125,158,140,0.2)';
+  setTimeout(() => { div.style.background = 'transparent'; div.style.transition = 'background 1s'; }, 100);
+}
+
+// Connect on load
+connectTerminal();
+
+// Health check
+fetch(`${SERVE_URL}/health`)
+  .then(r => r.json())
+  .then(() => { document.getElementById('sb-server').textContent = `server: ${SERVE_URL}`; })
+  .catch(() => { document.getElementById('sb-server').textContent = 'server not reachable — run: roko serve'; });
+</script>
+</body>
+</html>

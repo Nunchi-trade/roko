@@ -46,6 +46,8 @@ pub enum ProviderKind {
     PerplexityApi,
     /// Google Gemini API.
     GeminiApi,
+    /// Cerebras Inference API (OpenAI-compatible, ultra-fast inference).
+    CerebrasApi,
 }
 
 impl ProviderKind {
@@ -59,6 +61,24 @@ impl ProviderKind {
             Self::CursorAcp => "cursor_acp",
             Self::PerplexityApi => "perplexity_api",
             Self::GeminiApi => "gemini_api",
+            Self::CerebrasApi => "cerebras_api",
+        }
+    }
+
+    /// Derive the legacy [`AgentBackend`] from this provider kind.
+    ///
+    /// This is the **config-authoritative** path: when a model has a
+    /// configured provider, use this instead of slug-guessing via
+    /// `AgentBackend::from_model()`.
+    #[must_use]
+    pub const fn to_backend(self) -> AgentBackend {
+        match self {
+            Self::AnthropicApi | Self::ClaudeCli => AgentBackend::Claude,
+            Self::OpenAiCompat => AgentBackend::OpenAi,
+            Self::CursorAcp => AgentBackend::Cursor,
+            Self::PerplexityApi => AgentBackend::Perplexity,
+            Self::GeminiApi => AgentBackend::OpenAi,
+            Self::CerebrasApi => AgentBackend::Cerebras,
         }
     }
 }
@@ -73,8 +93,9 @@ impl fmt::Display for ProviderKind {
 
 /// Which backing CLI tool an agent role spawns.
 ///
-/// Backend is inferred either from a model slug (see [`AgentBackend::from_model`])
-/// or taken from the role's default (see [`AgentRole::backend`]).
+/// Backend is derived from the provider's [`ProviderKind`] via
+/// [`ProviderKind::to_backend()`] (preferred), or as a legacy fallback
+/// from model slug heuristics via [`AgentBackend::from_model()`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -91,6 +112,8 @@ pub enum AgentBackend {
     OpenAi,
     /// Perplexity Sonar HTTP API.
     Perplexity,
+    /// Cerebras Inference API (ultra-fast LLM inference).
+    Cerebras,
 }
 
 impl AgentBackend {
@@ -104,27 +127,49 @@ impl AgentBackend {
             Self::Ollama => "ol",
             Self::OpenAi => "oa",
             Self::Perplexity => "px",
+            Self::Cerebras => "cb",
         }
     }
 
-    /// Infer backend from a model slug.
+    /// Infer backend from a model slug using **substring heuristics**.
+    ///
+    /// **Prefer `ProviderKind::to_backend()`** when the model has a configured
+    /// provider — that path is authoritative. This function is a legacy
+    /// fallback for ad-hoc slugs that don't appear in `[models.*]` config.
     ///
     /// Rules (derived from `apps/mori/src/agent/roles.rs::from_model`):
     /// - `claude-*` → Claude
     /// - `composer-*`, `cursor-*`, `sonnet-*`, `opus-*`, `haiku-*`,
-    ///   `gemini-*`, `auto`, `*-high`, `*-xhigh-fast` → Cursor
+    ///   `auto`, `*-high`, `*-xhigh-fast` → Cursor
     /// - `ollama/*` or `llama*` → Ollama
     /// - `sonar*` or `perplexity/*` → Perplexity
     /// - everything else → Codex (default GPT routing)
+    ///
+    /// # Deprecation
+    ///
+    /// This heuristic is a legacy fallback. Production code should resolve
+    /// models via [`resolve_model()`] which reads provider from config.
+    /// `from_model()` is only hit when a slug isn't in config at all.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Resolve model via config and use ProviderKind::to_backend() instead. \
+                This heuristic fires only for slugs not present in [models.*] config, \
+                which is an error in production. Use resolve_model() and check that \
+                resolved.profile is Some before dispatching."
+    )]
     #[must_use]
     pub fn from_model(slug: &str) -> Self {
         let slug = slug.trim();
-        if slug.starts_with("claude-") {
+        if slug.starts_with("claude-") || matches!(slug, "sonnet" | "opus" | "haiku") {
             Self::Claude
+        } else if slug.starts_with("gemini-") || slug.starts_with("gemini/") {
+            Self::Codex // OpenAI-compat; Gemini models route through the unified backend
         } else if slug.starts_with("ollama/") || slug.starts_with("llama") {
             Self::Ollama
         } else if slug.starts_with("sonar") || slug.starts_with("perplexity/") {
             Self::Perplexity
+        } else if slug.starts_with("cerebras/") {
+            Self::Cerebras
         } else if is_cursor_slug(slug) {
             Self::Cursor
         } else {
@@ -141,6 +186,7 @@ impl From<AgentBackend> for ProviderKind {
             AgentBackend::Cursor => ProviderKind::CursorAcp,
             AgentBackend::Ollama => ProviderKind::OpenAiCompat,
             AgentBackend::Perplexity => ProviderKind::PerplexityApi,
+            AgentBackend::Cerebras => ProviderKind::CerebrasApi,
         }
     }
 }
@@ -152,7 +198,6 @@ fn is_cursor_slug(slug: &str) -> bool {
         || slug.starts_with("sonnet-")
         || slug.starts_with("opus-")
         || slug.starts_with("haiku-")
-        || slug.starts_with("gemini-")
         || slug == "gpt-5.2"
         || slug.ends_with("-high")
         || slug.ends_with("-xhigh-fast")
@@ -204,6 +249,9 @@ impl ModelSpec {
     #[must_use]
     pub fn from_slug(slug: impl Into<String>) -> Self {
         let slug = slug.into();
+        // Legacy fallback: slug not in config. Call sites that know the slug is configured
+        // should call resolve_model() and use the provider-authoritative backend instead.
+        #[allow(deprecated)]
         let backend = AgentBackend::from_model(&slug);
         Self {
             slug,
@@ -263,6 +311,24 @@ pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
         }
     }
 
+    // 3. Prefix match on slug (e.g. "claude-opus-4" matches slug "claude-opus-4-6").
+    //    Only accept the match if the slug starts with the key and the next char
+    //    (if any) is a separator, avoiding false positives like "o3" matching "o3-mini".
+    for (key, profile) in &config.models {
+        if profile.slug.len() > model_key.len()
+            && profile.slug.starts_with(model_key)
+            && matches!(
+                profile.slug.as_bytes().get(model_key.len()),
+                Some(b'-' | b'.' | b'_')
+            )
+        {
+            return resolved_from_profile(config, key, profile);
+        }
+    }
+
+    // Unconfigured slug — heuristic fallback. This path fires when a model
+    // key is not in config and must not be silently accepted in dispatch paths.
+    #[allow(deprecated)]
     let backend = AgentBackend::from_model(model_key);
     ResolvedModel {
         model_key: model_key.to_owned(),
@@ -280,11 +346,20 @@ fn resolved_from_profile(
     profile: &crate::config::schema::ModelProfile,
 ) -> ResolvedModel {
     let provider_config = config.providers.get(&profile.provider).cloned();
-    let backend = AgentBackend::from_model(&profile.slug);
-    let provider_kind = provider_config
-        .as_ref()
-        .map(|provider| provider.kind)
-        .unwrap_or_else(|| provider_kind_from_backend(backend));
+
+    // Derive provider_kind and backend from config (authoritative) rather
+    // than from slug heuristics. Only fall back to from_model() when the
+    // provider entry is missing from config entirely.
+    let (provider_kind, backend) = match &provider_config {
+        Some(provider) => (provider.kind, provider.kind.to_backend()),
+        None => {
+            // Legacy fallback: provider entry missing from config. The slug
+            // heuristic is the last resort for determining the backend.
+            #[allow(deprecated)]
+            let backend = AgentBackend::from_model(&profile.slug);
+            (provider_kind_from_backend(backend), backend)
+        }
+    };
 
     ResolvedModel {
         model_key: model_key.to_owned(),
@@ -640,7 +715,7 @@ pub enum AgentRole {
     CoverageTracker,
     /// Manages plan lifecycle state transitions.
     PlanLifecycleManager,
-    /// Tests cross-system flows (mori↔bardo↔golem).
+    /// Tests cross-system flows across Roko runtime boundaries.
     CrossSystemTester,
     /// Diagnoses errors into actionable root causes.
     ErrorDiagnoser,
@@ -969,8 +1044,12 @@ impl std::fmt::Display for AgentRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_TTFT_TIMEOUT_MS;
     use crate::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 
+    // These tests intentionally exercise the deprecated `AgentBackend::from_model()`
+    // heuristic to ensure backwards-compatibility for the legacy slug-routing path.
+    #[allow(deprecated)]
     #[test]
     fn backend_from_claude_slug() {
         assert_eq!(
@@ -979,6 +1058,7 @@ mod tests {
         );
     }
 
+    #[allow(deprecated)]
     #[test]
     fn backend_from_cursor_slug() {
         assert_eq!(AgentBackend::from_model("composer-1"), AgentBackend::Cursor);
@@ -987,6 +1067,7 @@ mod tests {
         assert_eq!(AgentBackend::from_model("gpt-5-high"), AgentBackend::Cursor);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn backend_from_ollama_slug() {
         assert_eq!(
@@ -996,12 +1077,32 @@ mod tests {
         assert_eq!(AgentBackend::from_model("llama3-8b"), AgentBackend::Ollama);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn backend_from_codex_slug() {
         assert_eq!(AgentBackend::from_model("gpt-5"), AgentBackend::Codex);
         assert_eq!(AgentBackend::from_model("o3-mini"), AgentBackend::Codex);
     }
 
+    #[allow(deprecated)]
+    #[test]
+    fn backend_from_perplexity_slug() {
+        assert_eq!(AgentBackend::from_model("sonar"), AgentBackend::Perplexity);
+        assert_eq!(
+            AgentBackend::from_model("sonar-pro"),
+            AgentBackend::Perplexity
+        );
+        assert_eq!(
+            AgentBackend::from_model("perplexity/sonar"),
+            AgentBackend::Perplexity
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Perplexity),
+            ProviderKind::PerplexityApi
+        );
+    }
+
+    #[allow(deprecated)]
     #[test]
     fn kimi_not_cursor() {
         assert!(!is_cursor_slug("kimi-k2.5"));
@@ -1192,7 +1293,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: Some(8),
@@ -1233,7 +1334,8 @@ mod tests {
         assert_eq!(resolved.model_key, "glm-5-1");
         assert_eq!(resolved.slug, "glm-5.1");
         assert_eq!(resolved.provider_kind, ProviderKind::OpenAiCompat);
-        assert_eq!(resolved.backend, AgentBackend::Codex);
+        // Config-authoritative: provider kind OpenAiCompat → AgentBackend::OpenAi
+        assert_eq!(resolved.backend, AgentBackend::OpenAi);
         assert!(resolved.provider_config.is_some());
         assert!(resolved.profile.is_some());
     }
@@ -1284,6 +1386,7 @@ mod tests {
             is_embedding_model: false,
             search_context_size: None,
             cost_per_request: None,
+            ..Default::default()
         };
 
         let requirements = TaskRequirements {
@@ -1329,6 +1432,7 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
+                ..Default::default()
             },
         );
         config.models.insert(
@@ -1364,6 +1468,7 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
+                ..Default::default()
             },
         );
         let requirements = TaskRequirements {
@@ -1377,6 +1482,51 @@ mod tests {
 
         let selected = select_model_for_task(&config, &requirements).expect("selected model");
         assert_eq!(selected, "capable");
+    }
+
+    #[test]
+    fn resolve_model_prefix_matches_slug() {
+        let mut config = RokoConfig::default();
+        config.models.insert(
+            "opus".to_owned(),
+            ModelProfile {
+                provider: "anthropic".to_owned(),
+                slug: "claude-opus-4-6".to_owned(),
+                ..Default::default()
+            },
+        );
+
+        // "claude-opus-4" is a prefix of slug "claude-opus-4-6" separated by '-'
+        let resolved = resolve_model(&config, "claude-opus-4");
+        assert_eq!(resolved.model_key, "opus");
+        assert_eq!(resolved.slug, "claude-opus-4-6");
+        assert!(resolved.profile.is_some());
+    }
+
+    #[test]
+    fn resolve_model_prefix_requires_separator() {
+        let mut config = RokoConfig::default();
+        config.models.insert(
+            "o3".to_owned(),
+            ModelProfile {
+                provider: "openai".to_owned(),
+                slug: "o3".to_owned(),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "o3-mini".to_owned(),
+            ModelProfile {
+                provider: "openai".to_owned(),
+                slug: "o3-mini".to_owned(),
+                ..Default::default()
+            },
+        );
+
+        // "o3" should match exactly, not prefix-match "o3-mini"
+        let resolved = resolve_model(&config, "o3");
+        assert_eq!(resolved.model_key, "o3");
+        assert_eq!(resolved.slug, "o3");
     }
 
     #[test]

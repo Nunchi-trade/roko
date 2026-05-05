@@ -6,14 +6,20 @@
 //! suitable for both single-shot and orchestrated execution paths.
 
 use crate::ContextChunk;
+use crate::GateFeedback;
 use crate::PadState;
-use crate::budget::{Complexity, adjusted_budget_for};
+use crate::budget::{Complexity, adjusted_adaptive_budget_for};
 use crate::prompt::estimate_tokens;
-use crate::prompt::{PromptComposer, PromptSection};
+use crate::prompt::{
+    COMPOSITION_MANIFEST_TAG, CompositionManifest, ContextStrategy, PromptBuild, PromptComposer,
+    PromptSection,
+};
 use crate::scorer::{GoalDirectedHeuristicScorer, SectionScorer};
 use crate::system_prompt_builder::SystemPromptBuilder;
 use crate::templates::RolePromptTemplate;
-use crate::templates::common::{CONTEXT_LAYOUT_STANZA, MCP_TOOLS_STANZA};
+use crate::templates::common::{
+    CONTEXT_LAYOUT_STANZA, MCP_TOOLS_STANZA, REFERENCE_CONTEXT_WINDOW_TOKENS,
+};
 use crate::templates::conductor::ConductorTemplate;
 use crate::templates::implementer::ImplementerTemplate;
 use crate::templates::integration::IntegrationTemplate;
@@ -24,7 +30,9 @@ use crate::templates::reviewer::{Reviewer, ReviewerTemplate};
 use crate::templates::scribe::{ScribeTemplate, ScribeVariant};
 use crate::templates::strategist::StrategistTemplate;
 use roko_core::error::{Result, RokoError};
-use roko_core::{AgentRole, Budget, Composer, Context, Scorer};
+use roko_core::traits::Score as ScoreFn;
+use roko_core::{AgentRole, Budget, Compose, Context, ManifestError};
+use roko_core::{PolicyProvenance, PromptPolicy, PromptSectionSource, RolePolicyManifest};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
 use roko_learn::skill_library::Skill;
@@ -40,6 +48,70 @@ const DEFAULT_ANTI_PATTERNS: [&str; 3] = [
     "Do not use git checkout, git switch, or git branch -m.",
     "Do not push branches directly.",
 ];
+
+/// Runtime source metadata for a built-in role prompt.
+///
+/// This is deliberately small and static: callers can record where role text
+/// came from without inspecting prompt bytes or relying on historical comments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RolePromptSource {
+    /// Stable source identifier for logs and workspace audit records.
+    pub source_id: &'static str,
+    /// Module or manifest path that owns the runtime prompt content.
+    pub location: &'static str,
+    /// Whether this source is owned by Roko runtime policy rather than a legacy import.
+    pub roko_owned: bool,
+}
+
+/// Core built-in roles whose `RoleProfile` and `PromptPolicy` are loaded from
+/// the bundled manifest before falling back to generated compatibility policy.
+pub const MANIFEST_BACKED_CORE_ROLES: [AgentRole; 6] = [
+    AgentRole::Strategist,
+    AgentRole::Implementer,
+    AgentRole::Architect,
+    AgentRole::Auditor,
+    AgentRole::QuickReviewer,
+    AgentRole::Scribe,
+];
+
+/// Loaded manifest policy for one built-in role.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuiltinRolePolicy {
+    /// Versioned role profile.
+    pub role_profile: roko_core::RoleProfile,
+    /// Prompt policy referenced by `role_profile.default_prompt_policy`.
+    pub prompt_policy: PromptPolicy,
+}
+
+/// Return the manifest-backed built-in roles migrated so far.
+#[must_use]
+pub const fn manifest_backed_core_roles() -> &'static [AgentRole] {
+    &MANIFEST_BACKED_CORE_ROLES
+}
+
+/// Load a role from the bundled manifest, returning `None` only for roles that
+/// have not been migrated yet.
+///
+/// Broken manifests return an error so callers can fail closed rather than
+/// silently using legacy generated policy.
+pub fn builtin_role_policy_from_manifest(
+    role: AgentRole,
+) -> std::result::Result<Option<BuiltinRolePolicy>, ManifestError> {
+    let manifest = RolePolicyManifest::builtin_manifest()?;
+    if manifest.role_profile(role.label()).is_none() {
+        return Ok(None);
+    }
+
+    let (role_profile, prompt_policy) = match manifest.role_with_default_prompt_policy(role.label())
+    {
+        Ok(pair) => pair,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(BuiltinRolePolicy {
+        role_profile: role_profile.clone(),
+        prompt_policy: prompt_policy.clone(),
+    }))
+}
 
 /// Typed task/domain context for role prompts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -160,7 +232,7 @@ pub struct RoleSystemPromptSpec {
     pub role: AgentRole,
     /// Task/domain context.
     pub task_context: TaskContext,
-    /// Comma-separated hosted-backend tool allowlist.
+    /// Comma-separated runtime tool allowlist.
     pub tool_allowlist_csv: String,
     /// Optional model slug hint for future model-specific prompt formatting.
     pub model_hint: Option<String>,
@@ -176,8 +248,12 @@ pub struct RoleSystemPromptSpec {
     pub pheromones: Vec<ContextChunk>,
     /// Optional affect state used to tune tone and focus.
     pub affect_state: Option<PadState>,
+    /// Optional structured retry feedback from previous gate failures.
+    pub gate_feedback: Vec<GateFeedback>,
     /// Complexity band used for static per-layer budget shaping.
     pub complexity: Complexity,
+    /// Context window for the selected model, in tokens.
+    pub context_window_tokens: usize,
     /// Whether to include cache markers between stability tiers.
     pub cache_markers: bool,
 }
@@ -197,7 +273,9 @@ impl RoleSystemPromptSpec {
             relevant_playbooks: Vec::new(),
             pheromones: Vec::new(),
             affect_state: None,
+            gate_feedback: Vec::new(),
             complexity: Complexity::Standard,
+            context_window_tokens: REFERENCE_CONTEXT_WINDOW_TOKENS,
             cache_markers: false,
         }
     }
@@ -251,10 +329,40 @@ impl RoleSystemPromptSpec {
         self
     }
 
+    /// Attach structured gate-failure feedback for a retry prompt.
+    #[must_use]
+    pub fn with_gate_feedback(mut self, feedback: GateFeedback) -> Self {
+        self.gate_feedback.push(feedback);
+        self
+    }
+
+    /// Parse and attach raw gate output for a retry prompt.
+    #[must_use]
+    pub fn with_raw_gate_feedback(mut self, raw_output: &str, rung: u32) -> Self {
+        if let Some(feedback) = GateFeedback::from_raw(raw_output, rung) {
+            self.gate_feedback.push(feedback);
+        }
+        self
+    }
+
+    /// Attach multiple structured gate-failure feedback entries.
+    #[must_use]
+    pub fn with_gate_feedback_entries(mut self, feedback: &[GateFeedback]) -> Self {
+        self.gate_feedback.extend_from_slice(feedback);
+        self
+    }
+
     /// Apply one complexity band to the shared role-budget profile.
     #[must_use]
     pub const fn with_complexity(mut self, complexity: Complexity) -> Self {
         self.complexity = complexity;
+        self
+    }
+
+    /// Apply the selected model's context window to prompt section caps.
+    #[must_use]
+    pub const fn with_context_window(mut self, context_window_tokens: usize) -> Self {
+        self.context_window_tokens = context_window_tokens;
         self
     }
 
@@ -300,10 +408,10 @@ impl RoleSystemPromptSpec {
             .with_anti_patterns(self.anti_patterns())
             .with_affect_state(self.affect_state);
 
-        if self.complexity != Complexity::Standard {
-            builder =
-                builder.with_budget_profile(adjusted_budget_for(self.role, self.complexity).budget);
-        }
+        builder = builder.with_budget_profile(
+            adjusted_adaptive_budget_for(self.role, self.complexity, self.context_window_tokens)
+                .budget,
+        );
 
         if let Some(registry) = section_effectiveness {
             builder = builder.with_section_effectiveness(format!("{:?}", self.role), registry);
@@ -316,6 +424,9 @@ impl RoleSystemPromptSpec {
         }
         if !self.pheromones.is_empty() {
             builder = builder.with_pheromones(&self.pheromones);
+        }
+        if !self.gate_feedback.is_empty() {
+            builder = builder.with_gate_feedback_entries(&self.gate_feedback);
         }
 
         let domain = self.task_context.domain_layer();
@@ -382,7 +493,7 @@ impl RoleSystemPromptSpec {
     pub fn compose_with_budget_and_scorer(
         &self,
         token_budget: usize,
-        scorer: &dyn Scorer,
+        scorer: &dyn ScoreFn,
         ctx: &Context,
     ) -> Result<String> {
         let sections = self.build_sections();
@@ -393,6 +504,52 @@ impl RoleSystemPromptSpec {
         let composed =
             PromptComposer::new().compose(&signals, &Budget::tokens(token_budget), scorer, ctx)?;
         composed.body.as_text().map(str::to_string)
+    }
+
+    /// Compose under a token budget and return prompt text plus selection metadata.
+    pub fn compose_build_with_budget(&self, token_budget: usize) -> Result<PromptBuild> {
+        self.compose_build_with_budget_and_composer(token_budget, PromptComposer::new())
+    }
+
+    /// Compose under a token budget with a caller-supplied composer.
+    ///
+    /// Use this when the runner has loaded learning bidders or wants an
+    /// explicit [`crate::CompositionStrategy`].
+    pub fn compose_build_with_budget_and_composer(
+        &self,
+        token_budget: usize,
+        composer: PromptComposer,
+    ) -> Result<PromptBuild> {
+        let sections = self.build_sections();
+        let scorer = self.composition_scorer();
+        let ctx = self.composition_context();
+        self.compose_sections_to_build(sections, token_budget, composer, scorer.as_ref(), &ctx)
+    }
+
+    /// Compose with learned section-effectiveness and return selection metadata.
+    pub fn compose_build_with_budget_and_section_effectiveness(
+        &self,
+        token_budget: usize,
+        section_effectiveness: &SectionEffectivenessRegistry,
+    ) -> Result<PromptBuild> {
+        self.compose_build_with_budget_section_effectiveness_and_composer(
+            token_budget,
+            section_effectiveness,
+            PromptComposer::new(),
+        )
+    }
+
+    /// Compose with learned section-effectiveness and a caller-supplied composer.
+    pub fn compose_build_with_budget_section_effectiveness_and_composer(
+        &self,
+        token_budget: usize,
+        section_effectiveness: &SectionEffectivenessRegistry,
+        composer: PromptComposer,
+    ) -> Result<PromptBuild> {
+        let sections = self.build_sections_with_section_effectiveness(section_effectiveness);
+        let scorer = self.composition_scorer();
+        let ctx = self.composition_context();
+        self.compose_sections_to_build(sections, token_budget, composer, scorer.as_ref(), &ctx)
     }
 
     /// Build the prompt and validate it against a model context window.
@@ -411,7 +568,8 @@ impl RoleSystemPromptSpec {
         context_window_tokens: usize,
         section_effectiveness: Option<&SectionEffectivenessRegistry>,
     ) -> Result<String> {
-        let prompt = self
+        let spec = self.clone().with_context_window(context_window_tokens);
+        let prompt = spec
             .builder_with_section_effectiveness(section_effectiveness)
             .build();
         let prompt_tokens = estimate_tokens(&prompt);
@@ -438,13 +596,13 @@ impl RoleSystemPromptSpec {
             );
 
             let sections = if let Some(registry) = section_effectiveness {
-                self.build_sections_with_section_effectiveness(registry)
+                spec.build_sections_with_section_effectiveness(registry)
             } else {
-                self.build_sections()
+                spec.build_sections()
             };
-            let scorer = self.composition_scorer();
-            let ctx = self.composition_context();
-            let prompt = self.compose_sections_with_budget_and_scorer(
+            let scorer = spec.composition_scorer();
+            let ctx = spec.composition_context();
+            let prompt = spec.compose_sections_with_budget_and_scorer(
                 sections,
                 soft_limit,
                 scorer.as_ref(),
@@ -470,7 +628,7 @@ impl RoleSystemPromptSpec {
         &self,
         sections: Vec<PromptSection>,
         token_budget: usize,
-        scorer: &dyn Scorer,
+        scorer: &dyn ScoreFn,
         ctx: &Context,
     ) -> Result<String> {
         let signals = sections
@@ -482,6 +640,46 @@ impl RoleSystemPromptSpec {
         composed.body.as_text().map(str::to_string)
     }
 
+    fn compose_sections_to_build(
+        &self,
+        sections: Vec<PromptSection>,
+        token_budget: usize,
+        composer: PromptComposer,
+        scorer: &dyn ScoreFn,
+        ctx: &Context,
+    ) -> Result<PromptBuild> {
+        let signals = sections
+            .into_iter()
+            .map(PromptSection::into_signal)
+            .collect::<Result<Vec<_>>>()?;
+        let composed = composer.compose(&signals, &Budget::tokens(token_budget), scorer, ctx)?;
+        let prompt = composed.body.as_text().map(str::to_string)?;
+        let sections_kept = composed
+            .tag("sections")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let sections_dropped = composed
+            .tag("sections_dropped")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let manifest = composed
+            .tag(COMPOSITION_MANIFEST_TAG)
+            .and_then(CompositionManifest::from_tag_value);
+
+        let mut build = PromptBuild::new(prompt)
+            .with_strategy(if self.gate_feedback.is_empty() {
+                ContextStrategy::Full
+            } else {
+                ContextStrategy::Retry
+            })
+            .with_playbook_hits(self.relevant_playbooks.len())
+            .with_section_counts(sections_kept, sections_dropped);
+        if let Some(manifest) = manifest {
+            build = build.with_composition_manifest(manifest);
+        }
+        Ok(build)
+    }
+
     fn composition_context(&self) -> Context {
         let mut ctx = Context::now();
         if let Some(goal) = self.task_context.goal_text() {
@@ -490,7 +688,7 @@ impl RoleSystemPromptSpec {
         ctx
     }
 
-    fn composition_scorer(&self) -> Box<dyn Scorer> {
+    fn composition_scorer(&self) -> Box<dyn ScoreFn> {
         if let Some(goal) = self.task_context.goal_text() {
             Box::new(GoalDirectedHeuristicScorer::new(goal))
         } else {
@@ -505,11 +703,11 @@ pub fn tool_allowlist_instructions(tools_csv: &str) -> String {
     let csv = tools_csv.trim();
     if csv.is_empty() {
         format!(
-            "{MCP_TOOLS_STANZA}\nNo hosted-backend tool allowlist was supplied. Use only the minimum tools required for the role."
+            "{MCP_TOOLS_STANZA}\nNo runtime tool allowlist was supplied. Use only the minimum tools required for the role."
         )
     } else {
         format!(
-            "{MCP_TOOLS_STANZA}\nClaude tool allowlist: {csv}\n\nUse only the tools granted to your role."
+            "{MCP_TOOLS_STANZA}\nRuntime tool allowlist: {csv}\n\nUse only the tools granted to your role."
         )
     }
 }
@@ -545,6 +743,136 @@ pub fn role_identity_for(role: AgentRole) -> String {
     }
 }
 
+/// Resolve prompt source metadata for a built-in role.
+#[must_use]
+pub fn role_prompt_source_for(role: AgentRole) -> RolePromptSource {
+    match role {
+        AgentRole::Strategist => RolePromptSource {
+            source_id: "roko.builtin.role.strategist",
+            location: "crates/roko-compose/src/templates/strategist.rs",
+            roko_owned: true,
+        },
+        AgentRole::Implementer => RolePromptSource {
+            source_id: "roko.builtin.role.implementer",
+            location: "crates/roko-compose/src/templates/implementer.rs",
+            roko_owned: true,
+        },
+        AgentRole::Architect => RolePromptSource {
+            source_id: "roko.builtin.role.architect",
+            location: "crates/roko-compose/src/templates/reviewer.rs",
+            roko_owned: true,
+        },
+        AgentRole::Auditor => RolePromptSource {
+            source_id: "roko.builtin.role.auditor",
+            location: "crates/roko-compose/src/templates/reviewer.rs",
+            roko_owned: true,
+        },
+        AgentRole::QuickReviewer => RolePromptSource {
+            source_id: "roko.builtin.role.quick-reviewer",
+            location: "crates/roko-compose/src/templates/quick.rs",
+            roko_owned: true,
+        },
+        AgentRole::Scribe => RolePromptSource {
+            source_id: "roko.builtin.role.scribe",
+            location: "crates/roko-compose/src/templates/scribe.rs",
+            roko_owned: true,
+        },
+        AgentRole::Critic => RolePromptSource {
+            source_id: "roko.builtin.role.critic",
+            location: "crates/roko-compose/src/templates/scribe.rs",
+            roko_owned: true,
+        },
+        AgentRole::AutoFixer => RolePromptSource {
+            source_id: "roko.builtin.role.auto-fixer",
+            location: "crates/roko-compose/src/templates/quick.rs",
+            roko_owned: true,
+        },
+        AgentRole::IntegrationTester => RolePromptSource {
+            source_id: "roko.builtin.role.integration-tester",
+            location: "crates/roko-compose/src/templates/integration.rs",
+            roko_owned: true,
+        },
+        AgentRole::Refactorer => RolePromptSource {
+            source_id: "roko.builtin.role.refactorer",
+            location: "crates/roko-compose/src/templates/refactorer.rs",
+            roko_owned: true,
+        },
+        AgentRole::Researcher => RolePromptSource {
+            source_id: "roko.builtin.role.researcher",
+            location: "crates/roko-compose/src/templates/researcher.rs",
+            roko_owned: true,
+        },
+        AgentRole::Conductor => RolePromptSource {
+            source_id: "roko.builtin.role.conductor",
+            location: "crates/roko-compose/src/templates/conductor.rs",
+            roko_owned: true,
+        },
+        other => RolePromptSource {
+            source_id: "roko.builtin.role.generic",
+            location: other.label(),
+            roko_owned: true,
+        },
+    }
+}
+
+/// Build the manifest prompt-policy contract for an existing built-in role.
+///
+/// RT11 keeps current prompt rendering in code, but records the source and
+/// section ids in the same typed contract future manifest-backed roles will use.
+#[must_use]
+pub fn builtin_prompt_policy_for(role: AgentRole) -> PromptPolicy {
+    if let Ok(Some(loaded)) = builtin_role_policy_from_manifest(role) {
+        return loaded.prompt_policy;
+    }
+
+    let source = role_prompt_source_for(role);
+    let mut policy = PromptPolicy::builtin(role);
+    policy.provenance = PolicyProvenance {
+        source_id: source.source_id.to_string(),
+        path: Some(source.location.to_string()),
+        owner: Some("roko-compose".to_string()),
+        generated_by: Some("RoleSystemPromptSpec".to_string()),
+    };
+    if let Some(section) = policy
+        .sections
+        .iter_mut()
+        .find(|section| section.section_id == "role_identity")
+    {
+        section.source = PromptSectionSource::builtin(source.source_id);
+        section.provenance = policy.provenance.clone();
+    }
+    policy
+}
+
+/// Build the manifest role-profile contract for an existing built-in role.
+#[must_use]
+pub fn builtin_role_profile_for(role: AgentRole) -> roko_core::RoleProfile {
+    if let Ok(Some(loaded)) = builtin_role_policy_from_manifest(role) {
+        return loaded.role_profile;
+    }
+
+    roko_core::RoleProfile::builtin(role)
+}
+
+/// Build a manifest compatibility view for existing built-in roles.
+#[must_use]
+pub fn builtin_role_policy_manifest_for(
+    roles: impl IntoIterator<Item = AgentRole>,
+) -> RolePolicyManifest {
+    let mut manifest = RolePolicyManifest {
+        schema_version: roko_core::CURRENT_POLICY_MANIFEST_SCHEMA_VERSION,
+        roles: Vec::new(),
+        prompt_policies: Vec::new(),
+    };
+    for role in roles {
+        manifest.roles.push(builtin_role_profile_for(role));
+        manifest
+            .prompt_policies
+            .push(builtin_prompt_policy_for(role));
+    }
+    manifest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,6 +903,123 @@ mod tests {
     }
 
     #[test]
+    fn built_in_role_prompt_sources_are_roko_owned() {
+        let roles = std::iter::once(AgentRole::Conductor).chain(AgentRole::ALL_AGENTS);
+        for role in roles {
+            let source = role_prompt_source_for(role);
+            assert!(
+                source.roko_owned,
+                "{} source is not Roko-owned",
+                role.label()
+            );
+            assert!(
+                source.source_id.starts_with("roko.builtin.role."),
+                "{} source id should be Roko-owned: {}",
+                role.label(),
+                source.source_id
+            );
+            assert!(
+                !source.location.contains("mori") && !source.location.contains("bardo"),
+                "{} source location leaks legacy project name: {}",
+                role.label(),
+                source.location
+            );
+        }
+    }
+
+    #[test]
+    fn built_in_manifest_contracts_validate() {
+        let manifest = builtin_role_policy_manifest_for([
+            AgentRole::Implementer,
+            AgentRole::Architect,
+            AgentRole::QuickReviewer,
+        ]);
+
+        manifest.validate().expect("built-in manifest contracts");
+        assert_eq!(manifest.roles[0].role_id, "implementer");
+        assert_eq!(
+            manifest.prompt_policies[0].provenance.source_id,
+            "roko.builtin.role-manifest.core"
+        );
+        assert_eq!(
+            manifest.prompt_policies[0].sections[0].source.id,
+            "roko.builtin.role.implementer.identity"
+        );
+        assert_eq!(
+            manifest.prompt_policies[0].sections[0].source.kind,
+            "manifest"
+        );
+    }
+
+    #[test]
+    fn manifest_backed_core_roles_expose_profile_version_and_prompt_policy() {
+        for role in manifest_backed_core_roles() {
+            let loaded = builtin_role_policy_from_manifest(*role)
+                .expect("built-in manifest validates")
+                .expect("core role is manifest backed");
+
+            assert_eq!(loaded.role_profile.role_id, role.label());
+            assert_eq!(loaded.role_profile.version, "1.0.0");
+            assert_eq!(
+                loaded.role_profile.default_prompt_policy,
+                loaded.prompt_policy.policy_id
+            );
+            assert!(
+                loaded
+                    .prompt_policy
+                    .sections
+                    .iter()
+                    .any(|section| section.section_id == "role_identity"
+                        && section.source.kind == "manifest"),
+                "{} should have manifest role identity source",
+                role.label()
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_backed_role_output_and_gate_expectations_are_structured() {
+        let reviewer_roles = [
+            AgentRole::Architect,
+            AgentRole::Auditor,
+            AgentRole::QuickReviewer,
+        ];
+
+        for role in reviewer_roles {
+            let profile = builtin_role_profile_for(role);
+            let schema = profile.output_schema.expect("review output schema");
+            assert_eq!(schema.schema_id, "roko.review.verdict-v1");
+            assert_eq!(schema.format, roko_core::OutputFormat::Toml);
+            assert!(schema.required);
+            assert!(profile.gate_expectations.iter().any(|gate| {
+                gate.gate_id == "structured-review-verdict"
+                    && gate.required
+                    && gate.outcome == "passed"
+            }));
+        }
+    }
+
+    #[test]
+    fn built_in_runtime_role_prompts_do_not_emit_legacy_project_tokens() {
+        let roles = std::iter::once(AgentRole::Conductor).chain(AgentRole::ALL_AGENTS);
+        for role in roles {
+            let spec = RoleSystemPromptSpec::new(
+                role,
+                TaskContext::new("Check prompt provenance.").with_plan_id("RT10"),
+                "Read,Edit,Bash",
+            );
+            let prompt = spec.build().to_lowercase();
+            for forbidden in [".mori", "bardo", "mori"] {
+                assert!(
+                    !prompt.contains(forbidden),
+                    "{} prompt leaked forbidden token {forbidden:?}",
+                    role.label()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn built_prompt_includes_context_and_tool_guidance() {
         let ctx = TaskContext::new("Implement task wiring")
             .with_plan_id("042-golem-mortality")
@@ -592,7 +1037,7 @@ mod tests {
         assert!(prompt.contains("Task: Implement task wiring"));
         assert!(prompt.contains("Workspace: roko-cli orchestration"));
         assert!(prompt.contains("## Relevant Context"));
-        assert!(prompt.contains("Claude tool allowlist: Read,Edit,Bash"));
+        assert!(prompt.contains("Runtime tool allowlist: Read,Edit,Bash"));
         assert!(prompt.contains("Prefer additive changes."));
     }
 
@@ -604,6 +1049,23 @@ mod tests {
 
         let prompt = spec.build();
         assert!(prompt.contains("You are under time pressure, focus on the most critical path."));
+    }
+
+    #[test]
+    fn built_prompt_includes_bounded_gate_feedback_layer() {
+        let ctx = TaskContext::new("Fix the retry failure");
+        let spec = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit")
+            .with_raw_gate_feedback(
+                "noise\nerror[E0308]: mismatched types\n --> src/lib.rs:4:1",
+                2,
+            );
+
+        let prompt = spec.build();
+
+        assert!(prompt.contains("## Previous Verify Failure"));
+        assert!(prompt.contains("Gate rung: 2"));
+        assert!(prompt.contains("error[E0308]"));
+        assert!(!prompt.contains("noise"));
     }
 
     #[test]
@@ -676,6 +1138,25 @@ mod tests {
         assert!(!prompt.contains("--- domain_context ---"));
         assert!(!prompt.contains("--- tool_instructions ---"));
         assert!(!prompt.contains("--- anti_patterns ---"));
+    }
+
+    #[test]
+    fn compose_build_with_budget_returns_auction_manifest() {
+        let ctx = TaskContext::new("Implement prompt metadata");
+        let build = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit")
+            .compose_build_with_budget(512)
+            .expect("composition build");
+
+        let manifest = build
+            .composition_manifest
+            .expect("composition manifest sidecar");
+        assert_eq!(build.sections_kept, manifest.included.len());
+        assert!(
+            manifest
+                .included
+                .iter()
+                .any(|section| section.name == "role_identity")
+        );
     }
 
     #[test]

@@ -360,20 +360,6 @@ pub fn all_fields() -> Vec<ConfigFieldMeta> {
             group: "Conductor",
         },
         ConfigFieldMeta {
-            key: "conductor.auto_advance_batch",
-            label: "Auto Advance Batch",
-            description: "Auto-advance to the next plan on batch completion",
-            kind: ConfigFieldKind::Bool,
-            group: "Conductor",
-        },
-        ConfigFieldMeta {
-            key: "conductor.auto_merge_on_complete",
-            label: "Auto Merge on Complete",
-            description: "Auto-merge plans to batch on review completion",
-            kind: ConfigFieldKind::Bool,
-            group: "Conductor",
-        },
-        ConfigFieldMeta {
             key: "conductor.max_auto_fix_attempts",
             label: "Max Auto-Fix Attempts",
             description: "Max auto-fix attempts before failing (express mode)",
@@ -382,34 +368,6 @@ pub fn all_fields() -> Vec<ConfigFieldMeta> {
                 max: Some(10),
                 presets: vec![0, 1, 3, 5],
             },
-            group: "Conductor",
-        },
-        ConfigFieldMeta {
-            key: "conductor.enabled_roles.architect",
-            label: "Role: Architect",
-            description: "Enable the architect agent role",
-            kind: ConfigFieldKind::Bool,
-            group: "Conductor",
-        },
-        ConfigFieldMeta {
-            key: "conductor.enabled_roles.auditor",
-            label: "Role: Auditor",
-            description: "Enable the auditor agent role",
-            kind: ConfigFieldKind::Bool,
-            group: "Conductor",
-        },
-        ConfigFieldMeta {
-            key: "conductor.enabled_roles.scribe",
-            label: "Role: Scribe",
-            description: "Enable the scribe agent role",
-            kind: ConfigFieldKind::Bool,
-            group: "Conductor",
-        },
-        ConfigFieldMeta {
-            key: "conductor.enabled_roles.critic",
-            label: "Role: Critic",
-            description: "Enable the critic agent role",
-            kind: ConfigFieldKind::Bool,
             group: "Conductor",
         },
         // ── Pipeline ──
@@ -841,20 +799,7 @@ fn set_toml_path(root: &mut toml::Value, key: &str, val: toml::Value) -> Result<
     Err("empty key path".to_string())
 }
 
-/// Truncate a string to `max` chars, appending `...` if needed.
-pub fn truncate(s: &str, max: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max {
-        return s.to_string();
-    }
-    if max <= 3 {
-        return ".".repeat(max);
-    }
-
-    let keep = max - 3;
-    let truncated = s.chars().take(keep).collect::<String>();
-    format!("{truncated}...")
-}
+pub use crate::tui::display_utils::truncate;
 
 /// Format a token count with K/M suffix.
 #[allow(clippy::cast_precision_loss)]

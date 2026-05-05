@@ -1,0 +1,10 @@
+/* TokenFlowChart */
+.token-flow-chart {
+  position: relative;
+}
+
+.token-flow-chart--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

@@ -14,6 +14,8 @@ pub struct PromptBuildOptions {
     pub affect_state: Option<PadState>,
     /// Optional prompt-budget complexity band.
     pub complexity: Option<Complexity>,
+    /// Context window for the selected model, in tokens.
+    pub context_window_tokens: Option<usize>,
     /// Optional additional conventions appended to defaults.
     pub extra_conventions: Option<String>,
     /// Optional extra anti-patterns appended to defaults.
@@ -45,6 +47,9 @@ fn build_spec(
         .with_cache_markers();
     if let Some(complexity) = options.complexity {
         spec = spec.with_complexity(complexity);
+    }
+    if let Some(context_window_tokens) = options.context_window_tokens {
+        spec = spec.with_context_window(context_window_tokens);
     }
     if let Some(conventions) = options.extra_conventions {
         spec = spec.with_extra_conventions(conventions);
@@ -81,6 +86,8 @@ pub fn build_role_system_prompt_validated(
     context_window_tokens: usize,
     section_effectiveness: Option<&SectionEffectivenessRegistry>,
 ) -> Result<String> {
+    let mut options = options;
+    options.context_window_tokens = Some(context_window_tokens);
     Ok(build_spec(role, task_context, tools_csv, options)
         .build_with_context_window_and_section_effectiveness(
             context_window_tokens,

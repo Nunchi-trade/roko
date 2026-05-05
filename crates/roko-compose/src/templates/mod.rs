@@ -21,7 +21,7 @@ pub mod strategist;
 pub mod task_impl;
 
 pub use assembly::PromptAssembler;
-pub use common::{PromptBudget, budget_for};
+pub use common::{PromptBudget, REFERENCE_CONTEXT_WINDOW_TOKENS, budget_for};
 pub use conductor::ConductorTemplate;
 pub use implementer::{ImplementerInput, ImplementerTemplate};
 pub use integration::{IntegrationInput, IntegrationTemplate};
@@ -89,6 +89,20 @@ pub trait RolePromptTemplate {
     /// along with a budget.
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection>;
 
+    /// Produce prompt sections using the selected model's context window.
+    ///
+    /// Templates that apply per-section caps should override this method and
+    /// call `adaptive_budget_for(role, context_window_tokens)`. The default
+    /// keeps simple templates that have no budgeted context unchanged.
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let _ = context_window_tokens;
+        self.sections(input)
+    }
+
     /// The role identity opening text (layer 1 of the system prompt).
     fn role_identity(&self) -> &'static str;
 }
@@ -96,7 +110,7 @@ pub trait RolePromptTemplate {
 /// Truncate `s` to at most `max_chars`, cutting at the last newline boundary
 /// before the limit. Appends a truncation marker.
 ///
-/// Port of Mori's `truncate()` helper (prompts.rs:744).
+/// Truncate from the head while preserving newline boundaries.
 pub fn truncate(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         return s.to_string();
@@ -116,7 +130,7 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
 
 /// Truncate from the *tail* — keeps the last `max_chars` of `s`.
 ///
-/// Port of Mori's `truncate_tail()` helper (prompts.rs:760).
+/// Truncate from the tail while preserving newline boundaries.
 pub fn truncate_tail(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         return s.to_string();

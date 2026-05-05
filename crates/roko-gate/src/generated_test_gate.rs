@@ -34,7 +34,7 @@
 
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, TestCount, Verdict};
+use roko_core::{Context, Signal, TestCount, Verdict, Verify};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,7 +52,15 @@ pub const PLAN_TAG_KEY_ALT: &str = "plan_id";
 /// Default file-name prefix the `TestGenerator` role uses.
 pub const DEFAULT_TEST_PREFIX: &str = "gen_";
 /// Default timeout (matches [`crate::test_gate::TestGate`]).
-const DEFAULT_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+fn default_timeout_ms() -> u64 {
+    u64::try_from(
+        roko_core::config::TimeoutConfig::default()
+            .gate_test()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+    .max(1)
+}
 /// Staging subdirectory name, nested under `<worktree>/tests/`.
 ///
 /// The leading/trailing underscores make accidental name collisions with
@@ -200,7 +208,7 @@ impl GeneratedTestGate {
             artifacts,
             test_prefix: DEFAULT_TEST_PREFIX.into(),
             artifact_prefix: "generated-tests/".into(),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            timeout_ms: default_timeout_ms(),
             name: format!("generated_test:{}", build_system.program()),
         }
     }
@@ -235,9 +243,21 @@ impl GeneratedTestGate {
     }
 }
 
+impl roko_core::Cell for GeneratedTestGate {
+    fn cell_id(&self) -> &str {
+        "generated-test-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "GeneratedTestGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
-impl Gate for GeneratedTestGate {
-    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
+impl Verify for GeneratedTestGate {
+    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
         let started = Instant::now();
 
         // 1. Resolve plan id.
@@ -364,7 +384,7 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn resolve_plan_id(signal: &Engram) -> Option<String> {
+fn resolve_plan_id(signal: &Signal) -> Option<String> {
     if let Some(v) = signal.tag(PLAN_TAG_KEY) {
         return Some(v.to_string());
     }
@@ -497,8 +517,8 @@ mod tests {
     use super::*;
     use roko_core::{Body, Kind};
 
-    fn signal_with_plan(plan: &str, payload: &GatePayload) -> Engram {
-        Engram::builder(Kind::Task)
+    fn signal_with_plan(plan: &str, payload: &GatePayload) -> Signal {
+        Signal::builder(Kind::Task)
             .tag("plan", plan)
             .body(Body::from_json(payload).unwrap())
             .build()
@@ -537,7 +557,7 @@ mod tests {
     #[test]
     fn resolve_plan_id_prefers_tag() {
         let payload = GatePayload::in_dir("/nowhere");
-        let sig = Engram::builder(Kind::Task)
+        let sig = Signal::builder(Kind::Task)
             .tag("plan", "plan-42")
             .body(Body::from_json(&payload).unwrap())
             .build();
@@ -546,7 +566,7 @@ mod tests {
 
     #[test]
     fn resolve_plan_id_falls_back_to_body() {
-        let sig = Engram::builder(Kind::Task)
+        let sig = Signal::builder(Kind::Task)
             .body(Body::from_json(&serde_json::json!({ "plan": "from-body" })).unwrap())
             .build();
         assert_eq!(resolve_plan_id(&sig).as_deref(), Some("from-body"));
@@ -554,7 +574,7 @@ mod tests {
 
     #[test]
     fn resolve_plan_id_none_when_missing() {
-        let sig = Engram::builder(Kind::Task).body(Body::empty()).build();
+        let sig = Signal::builder(Kind::Task).body(Body::empty()).build();
         assert!(resolve_plan_id(&sig).is_none());
     }
 
@@ -736,7 +756,7 @@ mod tests {
     async fn missing_plan_id_fails_cleanly() {
         let tmp = tempfile::tempdir().unwrap();
         let payload = GatePayload::in_dir(tmp.path());
-        let sig = Engram::builder(Kind::Task)
+        let sig = Signal::builder(Kind::Task)
             .body(Body::from_json(&payload).unwrap())
             .build();
         let gate = GeneratedTestGate::new(store());
@@ -747,7 +767,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_body_fails_cleanly() {
-        let sig = Engram::builder(Kind::Task)
+        let sig = Signal::builder(Kind::Task)
             .tag("plan", "p")
             .body(Body::text("not json"))
             .build();
@@ -801,7 +821,7 @@ mod tests {
         let g = GeneratedTestGate::new(store());
         assert_eq!(g.test_prefix, DEFAULT_TEST_PREFIX);
         assert_eq!(g.artifact_prefix, "generated-tests/");
-        assert_eq!(g.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(g.timeout_ms, default_timeout_ms());
         assert_eq!(g.name(), "generated_test:cargo");
     }
 

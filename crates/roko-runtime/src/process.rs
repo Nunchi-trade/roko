@@ -16,13 +16,13 @@
 use std::{
     collections::HashMap,
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitStatus,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -43,6 +43,15 @@ use crate::cancel::CancelToken;
 
 const DEFAULT_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
+/// Default location for durable process-session state under a workspace.
+#[must_use]
+pub fn default_process_session_ledger_path(workdir: &Path) -> PathBuf {
+    workdir
+        .join(".roko")
+        .join("state")
+        .join("process-sessions.json")
+}
+
 /// Monotonically increasing process identifier, unique within a single runtime.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -56,6 +65,14 @@ impl fmt::Display for ProcessId {
 }
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
+        })
+}
 
 impl ProcessId {
     /// Allocate the next unique process ID.
@@ -79,6 +96,8 @@ pub struct SpawnConfig {
     pub grace_period: Duration,
     /// Optional external cancellation trigger for this specific child process.
     pub cancellation: Option<CancelToken>,
+    /// Optional durable session metadata for resume and interruption diagnosis.
+    pub session: Option<ProcessSessionConfig>,
     /// Human-readable label for logging.
     pub label: String,
 }
@@ -151,9 +170,338 @@ impl Default for SpawnConfig {
             env: HashMap::new(),
             grace_period: DEFAULT_GRACE_PERIOD,
             cancellation: None,
+            session: None,
             label: String::from("unnamed"),
         }
     }
+}
+
+/// Durable metadata attached to a supervised child process.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessSessionConfig {
+    /// Stable session id shared by resume attempts.
+    pub session_id: String,
+    /// Unique invocation id for this child process.
+    pub invocation_id: String,
+    /// Backend/provider identifier.
+    pub backend_id: String,
+    /// Optional task id this process is serving.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// Reuse policy id active for this invocation.
+    #[serde(default)]
+    pub reuse_policy_id: Option<String>,
+    /// Whether this interrupted invocation may be resumed.
+    #[serde(default)]
+    pub resumable: bool,
+    /// Optional request timeout in milliseconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// JSON file where session records should be persisted.
+    pub ledger_path: PathBuf,
+}
+
+/// Durable state for a process-backed invocation.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessSessionState {
+    /// Process was spawned and has not recorded a terminal state.
+    Started,
+    /// Process exited with status 0.
+    Succeeded,
+    /// Process exited with a non-zero status.
+    Failed,
+    /// Supervisor wait timed out and the process remained tracked.
+    TimedOut,
+    /// Process was cancelled or force-killed by the supervisor.
+    Cancelled,
+}
+
+impl ProcessSessionState {
+    /// Whether this state is terminal for normal execution.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+
+    /// Whether a session in this state can be offered for resume.
+    #[must_use]
+    pub const fn is_resumable(self) -> bool {
+        matches!(self, Self::Started | Self::TimedOut | Self::Cancelled)
+    }
+}
+
+/// One durable process-session ledger row.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessSessionRecord {
+    /// Stable session id shared by resume attempts.
+    pub session_id: String,
+    /// Unique invocation id for this child process.
+    pub invocation_id: String,
+    /// Backend/provider identifier.
+    pub backend_id: String,
+    /// Optional task id this process is serving.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// Reuse policy id active for this invocation.
+    #[serde(default)]
+    pub reuse_policy_id: Option<String>,
+    /// Whether interrupted states may be resumed.
+    #[serde(default)]
+    pub resumable: bool,
+    /// Supervisor process id.
+    pub process_id: ProcessId,
+    /// OS process id, if known.
+    #[serde(default)]
+    pub os_pid: Option<u32>,
+    /// Human-readable process label.
+    pub label: String,
+    /// Program path.
+    pub program: String,
+    /// Command arguments.
+    pub args: Vec<String>,
+    /// Unix milliseconds when the process was spawned.
+    pub started_at_ms: u64,
+    /// Unix milliseconds when the latest state was recorded.
+    pub updated_at_ms: u64,
+    /// Unix milliseconds when the process ended, if known.
+    #[serde(default)]
+    pub ended_at_ms: Option<u64>,
+    /// Timeout configured for the invocation.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Current durable state.
+    pub state: ProcessSessionState,
+    /// Optional structured reason string.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Operator-facing aggregate over the durable process-session ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessSessionStateSummary {
+    /// Total durable records in the ledger.
+    pub total: usize,
+    /// Records currently in `started`.
+    pub started: usize,
+    /// Records that reached `succeeded`.
+    pub succeeded: usize,
+    /// Records that reached `failed`.
+    pub failed: usize,
+    /// Records that reached `timed_out`.
+    pub timed_out: usize,
+    /// Records that reached `cancelled`.
+    pub cancelled: usize,
+    /// Latest records that are eligible for resume under their own metadata.
+    pub resumable: usize,
+    /// Resumable records older than the operator's configured staleness window.
+    pub stale: usize,
+    /// Latest update timestamp observed in the ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_updated_at_ms: Option<u64>,
+}
+
+/// Resume compatibility policy applied to a durable process-session record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessResumePolicy {
+    /// Expected backend/provider id. Mismatches fail closed.
+    pub expected_backend_id: Option<String>,
+    /// Expected task id. Mismatches fail closed.
+    pub expected_task_id: Option<String>,
+    /// Maximum allowed age since the latest ledger update.
+    pub max_staleness_ms: Option<u64>,
+    /// Current wall-clock time in Unix milliseconds.
+    pub now_ms: Option<u64>,
+}
+
+/// Process-session ledger persisted as JSON.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessSessionLedger {
+    /// Ledger rows.
+    #[serde(default)]
+    pub records: Vec<ProcessSessionRecord>,
+}
+
+impl ProcessSessionLedger {
+    /// Load a ledger from disk. Missing files load as empty ledgers.
+    ///
+    /// # Errors
+    ///
+    /// Returns JSON or filesystem errors other than missing-file.
+    pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Save the ledger to disk via tmp + rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns filesystem or JSON serialization errors.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
+    }
+
+    /// Insert or replace a record by invocation id.
+    pub fn upsert(&mut self, record: ProcessSessionRecord) {
+        if let Some(existing) = self
+            .records
+            .iter_mut()
+            .find(|existing| existing.invocation_id == record.invocation_id)
+        {
+            *existing = record;
+        } else {
+            self.records.push(record);
+        }
+    }
+
+    /// Find the newest record for a session id.
+    #[must_use]
+    pub fn latest_for_session(&self, session_id: &str) -> Option<&ProcessSessionRecord> {
+        self.records
+            .iter()
+            .filter(|record| record.session_id == session_id)
+            .max_by_key(|record| record.updated_at_ms)
+    }
+
+    /// Validate that a session has a resumable latest record.
+    pub fn validate_resume(
+        &self,
+        session_id: &str,
+    ) -> Result<&ProcessSessionRecord, ProcessResumeError> {
+        self.validate_resume_with_policy(session_id, &ProcessResumePolicy::default())
+    }
+
+    /// Validate that a session has a resumable latest record matching a policy.
+    pub fn validate_resume_with_policy(
+        &self,
+        session_id: &str,
+        policy: &ProcessResumePolicy,
+    ) -> Result<&ProcessSessionRecord, ProcessResumeError> {
+        let record = self
+            .latest_for_session(session_id)
+            .ok_or(ProcessResumeError::NotFound)?;
+        if !record.resumable {
+            return Err(ProcessResumeError::NotResumable);
+        }
+        if !record.state.is_resumable() {
+            return Err(ProcessResumeError::TerminalState(record.state));
+        }
+        if let Some(expected) = &policy.expected_backend_id
+            && &record.backend_id != expected
+        {
+            return Err(ProcessResumeError::BackendMismatch {
+                expected: expected.clone(),
+                actual: record.backend_id.clone(),
+            });
+        }
+        if let Some(expected) = &policy.expected_task_id
+            && record.task_id.as_ref() != Some(expected)
+        {
+            return Err(ProcessResumeError::TaskMismatch {
+                expected: expected.clone(),
+                actual: record.task_id.clone(),
+            });
+        }
+        if let Some(max_staleness_ms) = policy.max_staleness_ms {
+            let now_ms = policy.now_ms.unwrap_or_else(unix_ms);
+            let age_ms = now_ms.saturating_sub(record.updated_at_ms);
+            if age_ms > max_staleness_ms {
+                return Err(ProcessResumeError::Stale {
+                    max_staleness_ms,
+                    age_ms,
+                });
+            }
+        }
+        Ok(record)
+    }
+
+    /// Build an operator-facing state summary.
+    #[must_use]
+    pub fn state_summary(
+        &self,
+        stale_after_ms: Option<u64>,
+        now_ms: u64,
+    ) -> ProcessSessionStateSummary {
+        let mut summary = ProcessSessionStateSummary::default();
+        for record in &self.records {
+            summary.total += 1;
+            summary.latest_updated_at_ms = Some(
+                summary
+                    .latest_updated_at_ms
+                    .map_or(record.updated_at_ms, |latest| {
+                        latest.max(record.updated_at_ms)
+                    }),
+            );
+            match record.state {
+                ProcessSessionState::Started => summary.started += 1,
+                ProcessSessionState::Succeeded => summary.succeeded += 1,
+                ProcessSessionState::Failed => summary.failed += 1,
+                ProcessSessionState::TimedOut => summary.timed_out += 1,
+                ProcessSessionState::Cancelled => summary.cancelled += 1,
+            }
+            if record.resumable && record.state.is_resumable() {
+                summary.resumable += 1;
+                if stale_after_ms
+                    .is_some_and(|max_age| now_ms.saturating_sub(record.updated_at_ms) > max_age)
+                {
+                    summary.stale += 1;
+                }
+            }
+        }
+        summary
+    }
+}
+
+/// Resume validation error for process session ledgers.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProcessResumeError {
+    /// No record exists for the requested session.
+    #[error("process session not found")]
+    NotFound,
+    /// Record is not marked resumable.
+    #[error("process session is not marked resumable")]
+    NotResumable,
+    /// Latest record is terminal.
+    #[error("process session reached terminal state {0:?}")]
+    TerminalState(ProcessSessionState),
+    /// Latest record belongs to a different backend/provider.
+    #[error("process session backend mismatch: expected {expected}, found {actual}")]
+    BackendMismatch {
+        /// Expected backend id.
+        expected: String,
+        /// Actual backend id in the ledger.
+        actual: String,
+    },
+    /// Latest record belongs to a different task.
+    #[error("process session task mismatch: expected {expected}, found {actual:?}")]
+    TaskMismatch {
+        /// Expected task id.
+        expected: String,
+        /// Actual task id in the ledger.
+        actual: Option<String>,
+    },
+    /// Latest record is older than the configured resume staleness window.
+    #[error("process session is stale: age {age_ms} ms exceeds {max_staleness_ms} ms")]
+    Stale {
+        /// Configured maximum staleness.
+        max_staleness_ms: u64,
+        /// Observed age.
+        age_ms: u64,
+    },
 }
 
 /// Outcome of a completed process.
@@ -169,6 +517,40 @@ pub struct ProcessOutcome {
     pub was_killed: bool,
 }
 
+/// Live snapshot of a supervised child process.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessSnapshot {
+    /// The internal process identifier.
+    pub id: ProcessId,
+    /// Human-readable label.
+    pub label: String,
+    /// OS process id, if available.
+    #[serde(default)]
+    pub os_pid: Option<u32>,
+    /// Process uptime in milliseconds.
+    pub uptime_ms: u64,
+    /// Durable session id attached to this process, if any.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Durable invocation id attached to this process, if any.
+    #[serde(default)]
+    pub invocation_id: Option<String>,
+    /// Backend/provider id attached to this process, if any.
+    #[serde(default)]
+    pub backend_id: Option<String>,
+    /// Task id attached to this process, if any.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// Reuse policy id attached to this process, if any.
+    #[serde(default)]
+    pub reuse_policy_id: Option<String>,
+    /// Whether this process-session can be offered for resume.
+    pub resumable: bool,
+    /// Configured timeout in milliseconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
 /// A handle to a managed child process.
 pub struct ProcessHandle {
     /// Internal unique identifier.
@@ -180,10 +562,61 @@ pub struct ProcessHandle {
     grace_period: Duration,
     cancel: CancelToken,
     spawn_config: SpawnConfig,
+    session: Option<ProcessSessionConfig>,
     started_at: Instant,
 }
 
 impl ProcessHandle {
+    fn record_session_state(&self, state: ProcessSessionState, reason: Option<String>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let mut ledger = match ProcessSessionLedger::load(&session.ledger_path) {
+            Ok(ledger) => ledger,
+            Err(err) => {
+                warn!(
+                    path = %session.ledger_path.display(),
+                    error = %err,
+                    "failed to load process session ledger"
+                );
+                ProcessSessionLedger::default()
+            }
+        };
+        let now = unix_ms();
+        let existing_started_at = ledger
+            .records
+            .iter()
+            .find(|record| record.invocation_id == session.invocation_id)
+            .map(|record| record.started_at_ms)
+            .unwrap_or(now);
+        ledger.upsert(ProcessSessionRecord {
+            session_id: session.session_id.clone(),
+            invocation_id: session.invocation_id.clone(),
+            backend_id: session.backend_id.clone(),
+            task_id: session.task_id.clone(),
+            reuse_policy_id: session.reuse_policy_id.clone(),
+            resumable: session.resumable,
+            process_id: self.id,
+            os_pid: self.os_pid,
+            label: self.label.clone(),
+            program: self.spawn_config.program.clone(),
+            args: self.spawn_config.args.clone(),
+            started_at_ms: existing_started_at,
+            updated_at_ms: now,
+            ended_at_ms: state.is_terminal().then_some(now),
+            timeout_ms: session.timeout_ms,
+            state,
+            reason,
+        });
+        if let Err(err) = ledger.save(&session.ledger_path) {
+            warn!(
+                path = %session.ledger_path.display(),
+                error = %err,
+                "failed to save process session ledger"
+            );
+        }
+    }
+
     fn outcome(&self, exit_status: Option<ExitStatus>, was_killed: bool) -> ProcessOutcome {
         ProcessOutcome {
             id: self.id,
@@ -255,6 +688,18 @@ impl ProcessHandle {
 
     async fn force_kill(&mut self) -> ProcessOutcome {
         if let Some(outcome) = self.try_wait_outcome(false) {
+            self.record_session_state(
+                if outcome
+                    .exit_status
+                    .as_ref()
+                    .is_some_and(std::process::ExitStatus::success)
+                {
+                    ProcessSessionState::Succeeded
+                } else {
+                    ProcessSessionState::Failed
+                },
+                Some("process exited before force kill".to_string()),
+            );
             return outcome;
         }
 
@@ -267,6 +712,10 @@ impl ProcessHandle {
         let _ = self.child.start_kill();
         let status = self.child.wait().await.ok();
         warn!(id = %self.id, label = %self.label, "process force-killed");
+        self.record_session_state(
+            ProcessSessionState::Cancelled,
+            Some("force killed".to_string()),
+        );
         self.outcome(status, true)
     }
 
@@ -332,6 +781,18 @@ impl ProcessHandle {
         drop(self.child.stdin.take());
 
         if let Some(outcome) = self.try_wait_outcome(false) {
+            self.record_session_state(
+                if outcome
+                    .exit_status
+                    .as_ref()
+                    .is_some_and(std::process::ExitStatus::success)
+                {
+                    ProcessSessionState::Succeeded
+                } else {
+                    ProcessSessionState::Failed
+                },
+                Some("process exited before shutdown".to_string()),
+            );
             return outcome;
         }
 
@@ -339,6 +800,10 @@ impl ProcessHandle {
         self.send_signal(Signal::SIGTERM);
 
         if let Some(outcome) = self.wait_for_graceful_exit().await {
+            self.record_session_state(
+                ProcessSessionState::Cancelled,
+                Some("shutdown requested".to_string()),
+            );
             return outcome;
         }
         self.force_kill().await
@@ -413,6 +878,7 @@ impl ProcessSupervisor {
         let child_cancel = self.cancel.child();
         let external_cancellation = config.cancellation.clone();
         let spawn_config = config.clone();
+        let session = config.session.clone();
         let label = config.label.clone();
 
         let mut cmd = Command::new(&config.program);
@@ -448,9 +914,11 @@ impl ProcessSupervisor {
             grace_period: config.grace_period,
             cancel: child_cancel,
             spawn_config,
+            session,
             started_at: Instant::now(),
         };
 
+        handle.record_session_state(ProcessSessionState::Started, None);
         self.handles.lock().insert(id, handle);
 
         if let Some(token) = external_cancellation {
@@ -510,13 +978,29 @@ impl ProcessSupervisor {
             waiters.spawn(async move {
                 let id = handle.id;
                 match timeout(wait_timeout, handle.wait()).await {
-                    Ok(Ok(status)) => WaitResult::Completed(handle.outcome(Some(status), false)),
+                    Ok(Ok(status)) => {
+                        let state = if status.success() {
+                            ProcessSessionState::Succeeded
+                        } else {
+                            ProcessSessionState::Failed
+                        };
+                        handle.record_session_state(state, Some("process exited".to_string()));
+                        WaitResult::Completed(handle.outcome(Some(status), false))
+                    }
                     Ok(Err(err)) => {
                         warn!(id = %id, label = %handle.label, error = %err, "error waiting for process during shutdown");
+                        handle.record_session_state(
+                            ProcessSessionState::TimedOut,
+                            Some(format!("wait error: {err}")),
+                        );
                         WaitResult::TimedOut(Box::new(handle))
                     }
                     Err(_) => {
                         debug!(id = %id, label = %handle.label, "process wait timed out during shutdown");
+                        handle.record_session_state(
+                            ProcessSessionState::TimedOut,
+                            Some(format!("wait timed out after {} ms", wait_timeout.as_millis())),
+                        );
                         WaitResult::TimedOut(Box::new(handle))
                     }
                 }
@@ -582,6 +1066,14 @@ impl ProcessSupervisor {
         for (id, status) in exited_ids {
             if let Some(handle) = map.remove(&id) {
                 debug!(id = %id, label = %handle.label, code = ?status.code(), "reaped exited process");
+                handle.record_session_state(
+                    if status.success() {
+                        ProcessSessionState::Succeeded
+                    } else {
+                        ProcessSessionState::Failed
+                    },
+                    Some("reaped exited process".to_string()),
+                );
                 outcomes.push(ProcessOutcome {
                     id: handle.id,
                     label: handle.label,
@@ -606,6 +1098,54 @@ impl ProcessSupervisor {
             .lock()
             .iter()
             .map(|(id, h)| (*id, h.label.clone()))
+            .collect()
+    }
+
+    /// List detailed live process snapshots for operator status surfaces.
+    #[allow(clippy::unused_async)] // Preserve the existing async API style for supervisor reads.
+    pub async fn snapshots(&self) -> Vec<ProcessSnapshot> {
+        self.handles
+            .lock()
+            .values()
+            .map(|handle| {
+                let uptime_ms =
+                    u64::try_from(handle.uptime().as_millis().min(u128::from(u64::MAX)))
+                        .unwrap_or(u64::MAX);
+                ProcessSnapshot {
+                    id: handle.id,
+                    label: handle.label.clone(),
+                    os_pid: handle.os_pid,
+                    uptime_ms,
+                    session_id: handle
+                        .session
+                        .as_ref()
+                        .map(|session| session.session_id.clone()),
+                    invocation_id: handle
+                        .session
+                        .as_ref()
+                        .map(|session| session.invocation_id.clone()),
+                    backend_id: handle
+                        .session
+                        .as_ref()
+                        .map(|session| session.backend_id.clone()),
+                    task_id: handle
+                        .session
+                        .as_ref()
+                        .and_then(|session| session.task_id.clone()),
+                    reuse_policy_id: handle
+                        .session
+                        .as_ref()
+                        .and_then(|session| session.reuse_policy_id.clone()),
+                    resumable: handle
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.resumable),
+                    timeout_ms: handle
+                        .session
+                        .as_ref()
+                        .and_then(|session| session.timeout_ms),
+                }
+            })
             .collect()
     }
 

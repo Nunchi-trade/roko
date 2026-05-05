@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use roko_core::{AgentRole, Body, Context, Engram, Provenance};
+use roko_core::{AgentRole, Body, Context, Provenance, Signal};
 
 use crate::agent::{Agent, AgentResult, derived_output};
 use crate::introspection::AgentIdentity;
@@ -140,7 +140,7 @@ impl MorphableAgent {
             .is_some_and(|roles| roles.contains(&new_role))
     }
 
-    fn augment_input(&self, input: &Engram) -> Engram {
+    fn augment_input(&self, input: &Signal) -> Signal {
         if self.system_prompt.is_empty() {
             return input.clone();
         }
@@ -160,7 +160,7 @@ impl MorphableAgent {
 
 #[async_trait]
 impl Agent for MorphableAgent {
-    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         let wrapped_input = self.augment_input(input);
         let mut result = self.inner.run(&wrapped_input, ctx).await;
         let output_kind = result.output.kind.clone();
@@ -210,10 +210,10 @@ fn default_transition_matrix() -> HashMap<AgentRole, Vec<AgentRole>> {
 mod tests {
     use super::*;
     use crate::mock::MockAgent;
-    use roko_core::{Body, Context, Engram, Kind, Temperament};
+    use roko_core::{Body, Context, Kind, Signal, Temperament};
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[tokio::test]

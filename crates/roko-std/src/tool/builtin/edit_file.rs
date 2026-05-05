@@ -26,7 +26,29 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Write,
         ToolPermission::writes(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Relative path within the worktree to edit."
+            },
+            "old_string": {
+                "type": "string",
+                "description": "Exact string to find and replace. Must be unique in the file unless replace_all is true."
+            },
+            "new_string": {
+                "type": "string",
+                "description": "Replacement string."
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "If true, replace all occurrences. If false (default), fail on ambiguous matches."
+            }
+        },
+        "required": ["path", "old_string", "new_string"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(false)
     .with_timeout_ms(30_000)

@@ -1,7 +1,7 @@
 //! F10 Learning view -- cascade router & model routing insights.
 //!
 //! Layout:
-//!   Sub-view 1 (Router): cascade stage + per-model stats table
+//!   Sub-view 1 (Route): cascade stage + per-model stats table
 //!   Sub-view 2 (History): stage transition timeline
 //!   Sub-view 3 (Efficiency): per-model cost/pass sparklines
 //!
@@ -48,7 +48,7 @@ pub(crate) fn render(
 }
 
 // ---------------------------------------------------------------------------
-// Sub-view 1: Router overview
+// Sub-view 1: Route overview
 // ---------------------------------------------------------------------------
 
 fn render_router(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
@@ -57,7 +57,7 @@ fn render_router(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme:
     if router.model_slugs.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Cascade Router ")
+            .title(" Cascade Route ")
             .border_style(Style::default().fg(theme.muted));
         let msg = Paragraph::new("No cascade router data. Run tasks to populate.")
             .alignment(Alignment::Center)
@@ -198,7 +198,7 @@ fn model_sparkline(
 
     let model_events: Vec<bool> = events
         .iter()
-        .filter(|e| event_model(e) == model_slug)
+        .filter(|e| event_model_slug(e) == model_slug)
         .map(|e| e.gate_passed)
         .collect();
 
@@ -232,15 +232,7 @@ fn model_sparkline(
         .collect()
 }
 
-/// Extract the effective model key from an efficiency event.
-fn event_model(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> &str {
-    let used = event.model_used.as_str();
-    if !used.is_empty() {
-        used
-    } else {
-        event.model.as_str()
-    }
-}
+use crate::tui::display_utils::{display_model, event_model_slug, shorten_model};
 
 fn render_selection_bars(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
     let router = &tui_state.cascade_router;
@@ -263,10 +255,15 @@ fn render_selection_bars(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState
                 .get(slug)
                 .map(|s| s.trials)
                 .unwrap_or(0);
-            let label = if slug.len() > 12 { &slug[..12] } else { slug };
+            let label = display_model(Some(slug.as_str()));
+            let label = if label.len() > 12 {
+                label[..12].to_string()
+            } else {
+                label
+            };
             Bar::default()
                 .value(trials)
-                .label(Line::from(label.to_string()))
+                .label(Line::from(label))
                 .style(Style::default().fg(colors[i % colors.len()]))
         })
         .collect();
@@ -433,7 +430,7 @@ fn render_efficiency(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
 
     let mut model_stats: HashMap<String, ModelEffStats> = HashMap::new();
     for event in events {
-        let model = event_model(event).to_string();
+        let model = event_model_slug(event).to_string();
         let entry = model_stats.entry(model).or_default();
         entry.count += 1;
         if event.gate_passed {
@@ -493,7 +490,7 @@ fn render_efficiency(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
             };
 
             Row::new(vec![
-                Cell::from(model.as_str()),
+                Cell::from(display_model(Some(model.as_str()))),
                 Cell::from(stats.count.to_string()),
                 Cell::from(stats.passed.to_string()),
                 Cell::from(pass_pct).style(Style::default().fg(rate_color)),
@@ -540,14 +537,15 @@ fn render_efficiency(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
         .map(|(i, (model, stats))| {
             let avg = stats.total_cost / stats.count as f64;
             let value = (avg * 10000.0).round() as u64;
-            let label = if model.len() > 12 {
-                &model[..12]
+            let label = display_model(Some(model.as_str()));
+            let label = if label.len() > 12 {
+                label[..12].to_string()
             } else {
-                model
+                label
             };
             Bar::default()
                 .value(value)
-                .label(Line::from(label.to_string()))
+                .label(Line::from(label))
                 .style(Style::default().fg(colors[i % colors.len()]))
         })
         .collect();

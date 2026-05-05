@@ -2,7 +2,7 @@
 //!
 //! Left panel (38%): plan tree + phase compact + task progress.
 //! Right panel (62%): sub-tabbed detail view (Agents, Output, Diff,
-//! Gate, Git, Context/MCP, Learning, Processes).
+//! Verify, Git, Context/MCP, Learning, Processes).
 //! Bottom ribbon: wave progress + token sparkline + sys metrics.
 //!
 //! Delegates to compiled widgets for all panels.
@@ -36,7 +36,7 @@ const SUB_TAB_LABELS: &[(&str, &str)] = &[
     ("a", "Agents"),
     ("o", "Output"),
     ("d", "Diff"),
-    ("e", "Gate"),
+    ("e", "Verify"),
     ("g", "Git"),
     ("m", "MCP"),
     ("L", "Learning"),
@@ -413,11 +413,7 @@ fn render_agent_routes_table(
                 } else {
                     Style::default()
                 };
-                let model = if metric.model.is_empty() {
-                    "-".to_string()
-                } else {
-                    truncate(&shorten_model(&metric.model), 18)
-                };
+                let model = truncate(&display_model(Some(metric.model.as_str())), 18);
                 Row::new(vec![
                     Cell::from(truncate(&agent.id, 14)),
                     Cell::from(Span::styled(
@@ -481,7 +477,7 @@ fn render_sub_diff(
 }
 
 // ---------------------------------------------------------------------------
-// Sub-tab: Gate -- verdict summary + recent failures
+// Sub-tab: Verify -- verdict summary + recent failures
 // ---------------------------------------------------------------------------
 
 fn render_sub_gate(
@@ -827,7 +823,13 @@ fn render_sub_mcp(
         ]));
         for (model, usage) in model_usage {
             lines.push(Line::from(vec![
-                Span::styled(format!("{:>12}: ", truncate(&model, 12)), theme.muted()),
+                Span::styled(
+                    format!(
+                        "{:>12}: ",
+                        truncate(&display_model(Some(model.as_str())), 12)
+                    ),
+                    theme.muted(),
+                ),
                 Span::styled(format!("{} turns", usage.turns), theme.text()),
                 Span::styled("  in ", theme.muted()),
                 Span::styled(fmt_count(usage.input_tokens), theme.info()),
@@ -841,7 +843,7 @@ fn render_sub_mcp(
 
     lines.extend([
         Line::from(Span::raw("")),
-        section_header("Cascade Router", theme),
+        section_header("Cascade Route", theme),
     ]);
     if tui_state.cascade_router.model_slugs.is_empty() && total_trials == 0 {
         lines.push(Line::from(vec![
@@ -1419,7 +1421,7 @@ fn render_gate_verdict_summary(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" Gate Summary ", title_style))
+        .title(Span::styled(" Verify Summary ", title_style))
         .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1584,7 +1586,7 @@ fn render_gate_trend_grid(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" Gate Timeline ", title_style))
+        .title(Span::styled(" Verify Timeline ", title_style))
         .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -2015,38 +2017,7 @@ fn aggregate_model_usage(
     usage
 }
 
-fn event_model_slug(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> String {
-    let model = if event.model.is_empty() {
-        event.model_used.as_str()
-    } else {
-        event.model.as_str()
-    };
-    if model.is_empty() {
-        "unknown".to_string()
-    } else {
-        model.to_string()
-    }
-}
-
-fn shorten_model(slug: &str) -> String {
-    slug.replace("claude-", "")
-        .replace("gpt-", "")
-        .replace("-codex", "c")
-        .replace("-mini", "m")
-        .replace("sonnet-", "s")
-        .replace("opus-", "o")
-        .replace("haiku-", "h")
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else if max <= 3 {
-        s[..max].to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::{display_model, event_model_slug, shorten_model, truncate};
 
 fn fmt_count(n: u64) -> String {
     if n >= 1_000_000 {
@@ -2315,7 +2286,7 @@ mod tests {
         let rendered = render_gate_dashboard(&data);
 
         assert!(rendered.contains("Verdicts"));
-        assert!(rendered.contains("Gate Summary"));
+        assert!(rendered.contains("Verify Summary"));
         assert!(rendered.contains("Recent Failures"));
         assert!(rendered.contains("compile"));
         assert!(rendered.contains("assertion failed"));

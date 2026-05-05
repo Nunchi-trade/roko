@@ -69,12 +69,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        Arc::new(AppState::new(
-            dir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            deploy_backend,
-        ))
+        Arc::new(
+            AppState::new(
+                dir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        )
     }
 
     #[tokio::test]

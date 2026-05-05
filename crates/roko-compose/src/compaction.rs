@@ -10,7 +10,7 @@
 //! `tool_outcomes`.
 
 use roko_agent::Agent;
-use roko_core::{Body, Context, Engram, Kind};
+use roko_core::{Body, Context, Kind, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -47,7 +47,7 @@ impl ChatMessage {
     }
 }
 
-/// Policy controlling when and how conversation history is compacted.
+/// React controlling when and how conversation history is compacted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompactionPolicy {
     /// Compact when the compactable region occupies at least this fraction of
@@ -254,7 +254,7 @@ async fn summarize_region(
     }
 
     let prompt = build_summary_prompt(compactable, summary_budget_tokens);
-    let input = Engram::builder(Kind::Prompt)
+    let input = Signal::builder(Kind::Prompt)
         .body(Body::text(prompt))
         .build();
     let result = summarizer.run(&input, &Context::at(0)).await;
@@ -288,7 +288,7 @@ Do not restate raw gate results or tool outputs; those are preserved separately.
     )
 }
 
-fn extract_summary_text(signal: &Engram) -> Option<String> {
+fn extract_summary_text(signal: &Signal) -> Option<String> {
     match &signal.body {
         Body::Text(text) => Some(text.clone()),
         Body::Json(value) => value
@@ -327,7 +327,8 @@ fn fallback_summary(compactable: &[ChatMessage]) -> String {
 }
 
 fn truncate_to_budget(text: &str, budget_tokens: usize) -> String {
-    let max_chars = budget_tokens.saturating_mul(4);
+    // Conservative: 3.5 chars/token → multiply by 7/2 (≈3.5) to stay under budget.
+    let max_chars = budget_tokens.saturating_mul(7) / 2;
     if text.len() <= max_chars {
         return text.to_string();
     }

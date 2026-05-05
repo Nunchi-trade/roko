@@ -118,13 +118,7 @@ pub(crate) fn render_parallel_pool(
     frame.render_widget(table, inner);
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::truncate;
 
 fn render_status_label(status: AgentStatus, theme: &Theme) -> Line<'static> {
     let (label, color) = match status {

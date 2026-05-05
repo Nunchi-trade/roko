@@ -22,6 +22,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/plans", get(list_plans).post(create_plan))
         .route("/plans/{id}", get(get_plan))
+        .route("/plans/{id}/tasks", get(plan_tasks))
         .route("/plans/{id}/execute", post(execute_plan))
         .route("/plans/{id}/status", get(plan_status))
         .route("/plans/{id}/pause", post(pause_plan))
@@ -78,6 +79,33 @@ async fn get_plan(
 ) -> Result<Json<Value>, ApiError> {
     let plan = find_plan(&state.workdir, &id).await?;
     Ok(Json(plan_to_json(&plan)))
+}
+
+/// `GET /api/plans/:id/tasks` — return the task list for a specific plan.
+async fn plan_tasks(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let plan = find_plan(&state.workdir, &id).await?;
+    let tasks: Vec<Value> = plan
+        .tasks
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "description": t.description,
+                "depends_on": t.depends_on,
+                "files": t.files,
+                "completed": t.completed,
+                "status": task_status(t),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "plan_id": plan.id,
+        "task_count": tasks.len(),
+        "tasks": tasks,
+    })))
 }
 
 #[derive(Deserialize, Validate)]
@@ -272,7 +300,9 @@ async fn pause_plan(
     // Write a lightweight snapshot so the dashboard knows the plan is
     // paused and `POST /resume` can restart it.
     let snapshot_dir = state.workdir.join(".roko").join("state");
-    let _ = tokio::fs::create_dir_all(&snapshot_dir).await;
+    if let Err(err) = tokio::fs::create_dir_all(&snapshot_dir).await {
+        tracing::warn!(path = %snapshot_dir.display(), error = %err, "failed to create state dir for pause snapshot");
+    }
     let snapshot_path = snapshot_dir.join(format!("{id}.paused.json"));
     let snapshot = json!({
         "plan_id": id,
@@ -281,11 +311,14 @@ async fn pause_plan(
         "plan_dir": handle.plan_dir,
         "run_id": handle.id,
     });
-    let _ = tokio::fs::write(
+    if let Err(err) = tokio::fs::write(
         &snapshot_path,
         serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
     )
-    .await;
+    .await
+    {
+        tracing::warn!(path = %snapshot_path.display(), error = %err, "failed to write pause snapshot");
+    }
 
     // Remove from active set.
     active.remove(&id);
@@ -324,6 +357,7 @@ async fn resume_plan(
         .join(".roko")
         .join("state")
         .join(format!("{id}.paused.json"));
+    // Intentionally ignoring: file may not exist if plan was never paused
     let _ = tokio::fs::remove_file(&paused_path).await;
 
     // Re-execute (same logic as execute, but marks it as a resume).
@@ -383,7 +417,7 @@ async fn resume_plan(
     ))
 }
 
-// ── Gate results query ──────────────────────────────────────────────
+// ── Verify results query ──────────────────────────────────────────────
 
 /// `GET /api/plans/:id/gates` — query gate results for a specific plan.
 ///
@@ -480,6 +514,7 @@ async fn plan_chat(
             Ok(RunResult {
                 success,
                 output_text,
+                ..
             }) => {
                 // Try to parse mutations from the LLM output and apply them.
                 if let Some(ref text) = output_text {
@@ -489,11 +524,18 @@ async fn plan_chat(
                             .join(".roko")
                             .join("state")
                             .join(format!("{plan_id}.chat-response.json"));
-                        let _ = tokio::fs::write(
+                        if let Err(err) = tokio::fs::write(
                             &mutations_path,
                             serde_json::to_string_pretty(&mutations).unwrap_or_default(),
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::warn!(
+                                path = %mutations_path.display(),
+                                error = %err,
+                                "failed to write plan chat mutations response"
+                            );
+                        }
                     }
                 }
                 state_for_task.provider_health.record_success("default");
@@ -1071,7 +1113,10 @@ async fn record_review(
     comment: &str,
 ) {
     let reviews_path = workdir.join(".roko").join("state").join("reviews.jsonl");
-    let _ = tokio::fs::create_dir_all(reviews_path.parent().unwrap_or(workdir)).await;
+    if let Err(err) = tokio::fs::create_dir_all(reviews_path.parent().unwrap_or(workdir)).await {
+        tracing::warn!(path = %reviews_path.display(), error = %err, "failed to create reviews state directory");
+        return;
+    }
 
     let entry = serde_json::json!({
         "plan_id": plan_id,
@@ -1085,14 +1130,21 @@ async fn record_review(
     line.push('\n');
 
     // Append atomically.
-    if let Ok(mut f) = tokio::fs::OpenOptions::new()
+    match tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&reviews_path)
         .await
     {
-        use tokio::io::AsyncWriteExt;
-        let _ = f.write_all(line.as_bytes()).await;
+        Ok(mut f) => {
+            use tokio::io::AsyncWriteExt;
+            if let Err(err) = f.write_all(line.as_bytes()).await {
+                tracing::warn!(path = %reviews_path.display(), error = %err, "failed to write review entry");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(path = %reviews_path.display(), error = %err, "failed to open reviews file for append");
+        }
     }
 }
 
@@ -1367,6 +1419,8 @@ mod tests {
             Ok(RunResult {
                 success: self.success,
                 output_text: None,
+                usage: None,
+                gate_results: Vec::new(),
             })
         }
 
@@ -1393,12 +1447,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            roko_core::config::schema::RokoConfig::default(),
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(
+                workdir,
+                Arc::new(NoOpRuntime),
+                roko_core::config::schema::RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
         (dir, state)
     }
 
@@ -1407,12 +1464,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        let state = Arc::new(AppState::new(
-            workdir,
-            runtime,
-            roko_core::config::schema::RokoConfig::default(),
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(
+                workdir,
+                runtime,
+                roko_core::config::schema::RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
         (dir, state)
     }
 
@@ -1469,7 +1529,14 @@ mod tests {
     #[tokio::test]
     async fn create_plan_route_returns_top_level_validation_error() {
         let (_dir, state) = test_state();
-        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let app = build_router(
+            Arc::clone(&state),
+            &[],
+            ServeAuthConfig {
+                enabled: false,
+                ..ServeAuthConfig::default()
+            },
+        );
 
         let response = app
             .oneshot(

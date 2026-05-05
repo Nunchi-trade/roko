@@ -7,6 +7,7 @@ use super::schema::{
     AgentConfig, BudgetConfig, ConductorConfig, GatesConfig, LearningConfig, RokoConfig,
     RoutingConfig,
 };
+use crate::defaults::{MODEL_DEEP, MODEL_FAST, MODEL_FOCUSED};
 
 /// Available preset names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +60,7 @@ impl Preset {
 fn minimal() -> RokoConfig {
     RokoConfig {
         agent: AgentConfig {
-            default_model: "claude-haiku-4-5".into(),
+            default_model: MODEL_FAST.into(),
             default_backend: "claude".into(),
             default_effort: "low".into(),
             context_limit_k: 100,
@@ -74,9 +75,9 @@ fn minimal() -> RokoConfig {
             ..GatesConfig::default()
         },
         routing: RoutingConfig {
-            fast_task_model: "claude-haiku-4-5".into(),
-            standard_task_model: "claude-haiku-4-5".into(),
-            complex_task_model: "claude-sonnet-4-6".into(),
+            fast_task_model: MODEL_FAST.into(),
+            standard_task_model: MODEL_FAST.into(),
+            complex_task_model: MODEL_FOCUSED.into(),
             ..RoutingConfig::default()
         },
         budget: BudgetConfig {
@@ -90,7 +91,7 @@ fn minimal() -> RokoConfig {
             parallel_enabled: false,
             express_mode: true,
             max_auto_fix_attempts: 1,
-            auto_fix_model: "claude-haiku-4-5".into(),
+            auto_fix_model: MODEL_FAST.into(),
             ..ConductorConfig::default()
         },
         learning: LearningConfig {
@@ -105,6 +106,7 @@ fn minimal() -> RokoConfig {
             replan_on_gate_failure: false,
             replan_max_per_plan: 1,
             replan_gate_attempts: 3,
+            dream_on_completion: true,
             use_lookahead_router: false,
             lookahead_threshold: 0.7,
         },
@@ -122,12 +124,12 @@ fn balanced() -> RokoConfig {
 fn thorough() -> RokoConfig {
     RokoConfig {
         agent: AgentConfig {
-            default_model: "claude-opus-4-6".into(),
+            default_model: MODEL_DEEP.into(),
             default_backend: "claude".into(),
             default_effort: "high".into(),
             context_limit_k: 300,
             bare_mode: true,
-            fallback_model: Some("claude-sonnet-4-6".into()),
+            fallback_model: Some(MODEL_FOCUSED.into()),
             ..AgentConfig::default()
         },
         gates: GatesConfig {
@@ -137,9 +139,9 @@ fn thorough() -> RokoConfig {
             ..GatesConfig::default()
         },
         routing: RoutingConfig {
-            fast_task_model: "claude-sonnet-4-6".into(),
-            standard_task_model: "claude-opus-4-6".into(),
-            complex_task_model: "claude-opus-4-6".into(),
+            fast_task_model: MODEL_FOCUSED.into(),
+            standard_task_model: MODEL_DEEP.into(),
+            complex_task_model: MODEL_DEEP.into(),
             ..RoutingConfig::default()
         },
         budget: BudgetConfig {
@@ -153,8 +155,7 @@ fn thorough() -> RokoConfig {
             parallel_enabled: true,
             express_mode: false,
             max_auto_fix_attempts: 5,
-            auto_fix_model: "claude-sonnet-4-6".into(),
-            warm_implementers_per_plan: 2,
+            auto_fix_model: MODEL_FOCUSED.into(),
             ..ConductorConfig::default()
         },
         learning: LearningConfig {
@@ -169,6 +170,7 @@ fn thorough() -> RokoConfig {
             replan_on_gate_failure: true,
             replan_max_per_plan: 2,
             replan_gate_attempts: 3,
+            dream_on_completion: true,
             use_lookahead_router: true,
             lookahead_threshold: 0.7,
         },

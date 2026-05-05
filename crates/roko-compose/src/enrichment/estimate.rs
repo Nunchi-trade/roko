@@ -472,7 +472,7 @@ mod tests {
             &default_plan_info(),
             TaskComplexityBand::Standard,
             ALL_ORDERED,
-            "some-unknown-model-v3",
+            "some-mystery-model-v3",
             false,
         );
 

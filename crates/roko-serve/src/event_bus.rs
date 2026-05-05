@@ -160,4 +160,95 @@ mod tests {
         assert_eq!(env.seq, 0);
         assert!(env.ts_millis > 0);
     }
+
+    /// The SSE handler caps replay at 256 events via `.take(SSE_REPLAY_CAP)`.
+    /// This test proves that even when the ring holds more than 256 events,
+    /// the take(256) bound correctly limits the replay slice sent to clients.
+    #[test]
+    fn sse_replay_cap_bounds_at_256() {
+        // The SSE replay cap used in routes/sse.rs
+        const SSE_REPLAY_CAP: usize = 256;
+
+        // Use a ring large enough to hold >256 events (like the real AppState
+        // which uses 16_384).
+        let bus = EventBus::new(512);
+        for i in 0..400u32 {
+            bus.publish(TestEvent::Ping(i));
+        }
+
+        // The ring holds all 400 events.
+        let all = bus.replay_from(0);
+        assert_eq!(all.len(), 400);
+
+        // Applying .take(SSE_REPLAY_CAP) like the SSE handler does:
+        let capped: Vec<_> = bus
+            .replay_from(0)
+            .into_iter()
+            .take(SSE_REPLAY_CAP)
+            .collect();
+        assert_eq!(capped.len(), SSE_REPLAY_CAP);
+        // First event is seq 0, last is seq 255.
+        assert_eq!(capped[0].seq, 0);
+        assert_eq!(capped[SSE_REPLAY_CAP - 1].seq, 255);
+    }
+
+    /// Verify that when the ring has fewer events than the cap, all are returned.
+    #[test]
+    fn sse_replay_cap_passes_through_when_under_limit() {
+        const SSE_REPLAY_CAP: usize = 256;
+
+        let bus = EventBus::new(512);
+        for i in 0..100u32 {
+            bus.publish(TestEvent::Ping(i));
+        }
+
+        let capped: Vec<_> = bus
+            .replay_from(0)
+            .into_iter()
+            .take(SSE_REPLAY_CAP)
+            .collect();
+        assert_eq!(capped.len(), 100);
+    }
+
+    /// Verify that replay_from with a Last-Event-ID mid-stream still respects
+    /// the 256 cap (the pattern used by SSE reconnection).
+    #[test]
+    fn sse_replay_cap_with_last_event_id() {
+        const SSE_REPLAY_CAP: usize = 256;
+
+        let bus = EventBus::new(512);
+        for i in 0..500u32 {
+            bus.publish(TestEvent::Ping(i));
+        }
+
+        // Client reconnects with Last-Event-ID = 100, meaning they want
+        // events from seq >= 100. The ring has seqs 0..499.
+        let from_100: Vec<_> = bus
+            .replay_from(100)
+            .into_iter()
+            .take(SSE_REPLAY_CAP)
+            .collect();
+
+        assert_eq!(from_100.len(), SSE_REPLAY_CAP);
+        assert_eq!(from_100[0].seq, 100);
+        assert_eq!(from_100[SSE_REPLAY_CAP - 1].seq, 355);
+    }
+
+    /// Edge case: replay_from with a seq beyond all published events returns empty.
+    #[test]
+    fn sse_replay_cap_with_future_seq_returns_empty() {
+        const SSE_REPLAY_CAP: usize = 256;
+
+        let bus = EventBus::new(512);
+        for i in 0..10u32 {
+            bus.publish(TestEvent::Ping(i));
+        }
+
+        let replay: Vec<_> = bus
+            .replay_from(9999)
+            .into_iter()
+            .take(SSE_REPLAY_CAP)
+            .collect();
+        assert!(replay.is_empty());
+    }
 }

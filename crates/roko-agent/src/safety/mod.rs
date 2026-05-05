@@ -259,6 +259,52 @@ impl SafetyLayer {
         }
     }
 
+    /// A [`SafetyLayer`] that passes all checks. For test use only.
+    ///
+    /// Do NOT use in production code. Every production dispatcher should be
+    /// constructed with [`SafetyLayer::with_defaults()`] or an explicit policy.
+    #[cfg(test)]
+    #[must_use]
+    pub fn permissive() -> Self {
+        Self {
+            bash_policy: BashPolicy {
+                deny_patterns: Vec::new(),
+                allow_prefixes: Vec::new(),
+                max_command_len: usize::MAX,
+                allowed_path_prefixes: Vec::new(),
+            },
+            git_policy: GitPolicy {
+                protected_branches: Vec::new(),
+                allow_force_push_on: Vec::new(),
+                block_force_push: false,
+                block_hard_reset_on_protected: false,
+                block_branch_delete_protected: false,
+            },
+            network_policy: NetworkPolicy {
+                allow_schemes: Vec::new(),
+                allow_hosts: Vec::new(),
+                deny_hosts: Vec::new(),
+                block_private_networks: false,
+            },
+            path_policy: PathPolicy {
+                deny_symlinks: false,
+                prevent_escapes: false,
+            },
+            scrub_policy: ScrubPolicy {
+                extra_patterns: Vec::new(),
+                disable_defaults: true,
+            },
+            rate_limiter: None,
+            safety_budget: None,
+            role: "test".to_string(),
+            contract: AgentContract::permissive("test"),
+            warrant: None,
+            role_tools: HashMap::new(),
+            role_overrides: HashMap::new(),
+            temporal_monitor: None,
+        }
+    }
+
     /// Construct with default policies and role-local tool whitelists from config.
     #[must_use]
     pub fn from_config(config: &RokoConfig) -> Self {
@@ -862,14 +908,45 @@ impl SafetyLayer {
     }
 
     fn contract_for_role(&self, role: &str) -> AgentContract {
-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
-            tracing::warn!(
+        // Load the bundled contract asset, falling back to a deny-all
+        // restricted contract when the YAML is missing or malformed.
+        // This is fail-closed by design: an unknown role gets zero
+        // capabilities until an explicit contract is shipped.
+        //
+        // Exception: when the role has TOML-configured tools in
+        // `self.role_tools`, the restricted fallback clears its
+        // `allowed_tools` so the TOML role-tools whitelist (checked
+        // earlier in `check_pre_execution`) is the binding constraint.
+        // This prevents the contract deny-all from overriding explicit
+        // operator configuration.
+        let mut contract = AgentContract::load_for_role_with_mode(
+            role,
+            contract::ContractLoadMode::RestrictedFallback,
+        )
+        .unwrap_or_else(|err| {
+            // RestrictedFallback only returns Err for InvalidRole.
+            tracing::error!(
                 %role,
                 %err,
-                "no contract for role; using permissive default"
+                "contract load returned unexpected error; using restricted fallback"
             );
-            AgentContract::permissive(role.to_string())
+            AgentContract::restricted(role)
         });
+
+        // When the restricted fallback produced a deny-all allowlist but
+        // the operator explicitly configured this role in TOML (either via
+        // a tools whitelist or any role override), defer tool-access
+        // control to the TOML role-tools whitelist instead of the
+        // contract's empty allowlist.  An operator-defined role without
+        // a tools list is intentionally permissive.
+        if contract
+            .allowed_tools
+            .as_ref()
+            .is_some_and(|t| t.is_empty())
+            && (self.role_tools.contains_key(role) || self.role_overrides.contains_key(role))
+        {
+            contract.allowed_tools = None;
+        }
 
         if let Some(role_override) = self.role_overrides.get(role)
             && let Some(budget) = role_override.effective_budget()
@@ -1064,6 +1141,11 @@ mod tests {
         ToolCall::new("test-id", "bash", serde_json::json!({ "command": cmd }))
     }
 
+    /// Safety layer with a permissive contract for tests that check allow behavior.
+    fn permissive_layer() -> SafetyLayer {
+        SafetyLayer::with_defaults().with_contract(AgentContract::permissive("test"))
+    }
+
     #[test]
     fn safety_layer_blocks_dangerous_bash() {
         let layer = SafetyLayer::with_defaults();
@@ -1074,7 +1156,7 @@ mod tests {
 
     #[test]
     fn safety_layer_allows_safe_bash() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = bash_call("cargo test");
         assert!(layer.check_pre_execution(&call, &ctx).is_ok());
@@ -1114,7 +1196,7 @@ mod tests {
     #[test]
     fn safety_layer_no_safety_means_passthrough() {
         // Verify that non-filesystem tools pass through without errors.
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = ToolCall::new("test-id", "exit_plan_mode", serde_json::json!({}));
         // exit_plan_mode is not in any policy group; should pass all checks.
@@ -1135,7 +1217,7 @@ mod tests {
 
     #[test]
     fn rate_limiter_eventually_blocks() {
-        let mut layer = SafetyLayer::with_defaults();
+        let mut layer = permissive_layer();
         // Custom tight limit: 2 calls per window.
         layer.rate_limiter = Some(Arc::new(RateLimiter::new(rate_limit::RateLimitPolicy {
             max_calls_per_window: 2,
@@ -1221,7 +1303,7 @@ mod tests {
 
     #[test]
     fn taint_escalates_network_to_allow_with_confirm() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = ToolContext::testing("/tmp/worktree");
         let call = ToolCall::new(
             "test-id",
@@ -1243,7 +1325,7 @@ mod tests {
         let worktree = tmp.path().to_path_buf();
         let file_path = worktree.join("x.txt");
         let ctx = ToolContext::testing(&worktree);
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let call = ToolCall::new(
             "test-id",
             "write_file",
@@ -1259,7 +1341,7 @@ mod tests {
 
     #[test]
     fn taint_escalates_bash_to_allow_with_confirm() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = bash_call("echo hi");
         let taint = Taint::UserInput;
@@ -1272,7 +1354,7 @@ mod tests {
 
     #[test]
     fn no_taint_means_normal_allow() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = bash_call("echo hi");
         let decision = layer.authorize_call_with_taint(&call, &ctx, None);
@@ -1284,7 +1366,7 @@ mod tests {
 
     #[test]
     fn inactive_taint_means_normal_allow() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = bash_call("echo hi");
         let taint = Taint::None;
@@ -1297,12 +1379,11 @@ mod tests {
 
     #[test]
     fn safety_budget_blocks_after_limit_is_spent() {
-        let layer = SafetyLayer::with_defaults().with_safety_budget(SafetyBudgetTracker::new(
-            risk::SafetyBudget {
+        let layer =
+            permissive_layer().with_safety_budget(SafetyBudgetTracker::new(risk::SafetyBudget {
                 footprint_limit: 1,
                 ..risk::SafetyBudget::default()
-            },
-        ));
+            }));
         let ctx = test_ctx();
         let call = bash_call("echo hi");
         assert!(layer.check_pre_execution(&call, &ctx).is_ok());
@@ -1326,7 +1407,7 @@ mod tests {
             pattern: "force-push main".into(),
             description: "never force-push main".into(),
         }]);
-        let layer = SafetyLayer::with_defaults().with_temporal_monitor(monitor);
+        let layer = permissive_layer().with_temporal_monitor(monitor);
         let ctx = test_ctx();
 
         // Safe command passes.

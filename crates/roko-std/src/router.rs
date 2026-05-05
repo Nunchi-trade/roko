@@ -4,7 +4,8 @@
 //! Thompson sampling) live in `roko-learn`.
 
 use parking_lot::Mutex;
-use roko_core::{Context, Engram, Outcome, Router, Scorer, Selection};
+use roko_core::traits::Score as ScoreFn;
+use roko_core::{Context, Engram, Outcome, Route, Selection};
 use std::sync::Arc;
 
 /// Picks the first candidate (deterministic, no-state).
@@ -12,7 +13,7 @@ use std::sync::Arc;
 pub struct FirstRouter;
 
 #[allow(clippy::unnecessary_literal_bound)]
-impl Router for FirstRouter {
+impl Route for FirstRouter {
     fn select(&self, candidates: &[Engram], _ctx: &Context) -> Option<Selection> {
         candidates
             .first()
@@ -24,21 +25,21 @@ impl Router for FirstRouter {
     }
 }
 
-/// Picks the candidate with the highest effective score (via a [`Scorer`]).
+/// Picks the candidate with the highest effective score (via a [`ScoreFn`]).
 pub struct HighestScoreRouter {
-    scorer: Arc<dyn Scorer>,
+    scorer: Arc<dyn ScoreFn>,
 }
 
 impl HighestScoreRouter {
     /// Construct a router that picks by effective score via the given scorer.
     #[must_use]
-    pub fn new(scorer: Arc<dyn Scorer>) -> Self {
+    pub fn new(scorer: Arc<dyn ScoreFn>) -> Self {
         Self { scorer }
     }
 }
 
 #[allow(clippy::unnecessary_literal_bound)]
-impl Router for HighestScoreRouter {
+impl Route for HighestScoreRouter {
     fn select(&self, candidates: &[Engram], ctx: &Context) -> Option<Selection> {
         candidates
             .iter()
@@ -71,7 +72,7 @@ impl RoundRobinRouter {
 }
 
 #[allow(clippy::unnecessary_literal_bound)]
-impl Router for RoundRobinRouter {
+impl Route for RoundRobinRouter {
     fn select(&self, candidates: &[Engram], _ctx: &Context) -> Option<Selection> {
         if candidates.is_empty() {
             return None;
@@ -130,7 +131,7 @@ mod tests {
         // Use the signal's own score via a scorer that returns what we set.
         // Here we just use a const scorer — the router will score both equally,
         // but we'll test with a scorer that varies by tag.
-        let scorer: Arc<dyn Scorer> = Arc::new(ConstScorer::new(Score::new(0.5, 0.0, 0.0, 1.0)));
+        let scorer: Arc<dyn ScoreFn> = Arc::new(ConstScorer::new(Score::new(0.5, 0.0, 0.0, 1.0)));
         let r = HighestScoreRouter::new(scorer);
         // With a const scorer, both have equal score — returns one of them.
         let sel = r.select(&[a.clone(), b.clone()], &Context::at(0)).unwrap();

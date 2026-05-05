@@ -32,7 +32,10 @@ use std::sync::Arc;
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
+
+const PLAYBOOK_MERGE_THRESHOLD: f64 = 0.80;
 
 /// A single step within a [`Playbook`].
 ///
@@ -49,6 +52,117 @@ pub struct PlaybookStep {
     pub action_kind: String,
     /// Signals expected to appear when the step succeeds.
     pub expected_signals: Vec<String>,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod extraction_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn extract_from_tool_calls_produces_valid_playbook() {
+        let tool_calls = vec![
+            ("shell".to_string(), "cargo init".to_string()),
+            (
+                "write_file".to_string(),
+                "Write src/lib.rs with function stub".to_string(),
+            ),
+            ("shell".to_string(), "cargo test".to_string()),
+        ];
+
+        let playbook =
+            extract_playbook_from_episode("task-1", "Implement add function", &tool_calls)
+                .expect("playbook should be extracted");
+
+        assert_eq!(playbook.steps.len(), 3);
+        assert_eq!(playbook.steps[0].index, 0);
+        assert_eq!(playbook.steps[0].action_kind, "shell");
+        assert_eq!(playbook.steps[1].index, 1);
+        assert_eq!(playbook.steps[1].action_kind, "write_file");
+        assert_eq!(playbook.steps[2].index, 2);
+        assert_eq!(playbook.steps[2].action_kind, "shell");
+        assert_eq!(playbook.success_count, 1);
+        assert_eq!(playbook.failure_count, 0);
+        assert!(playbook.id.starts_with("ep-task-1-"));
+        assert_eq!(playbook.goal, "Implement add function");
+        assert_eq!(playbook.name, "Learned: Implement add function");
+    }
+
+    #[test]
+    fn extract_empty_tool_calls_returns_none() {
+        assert!(extract_playbook_from_episode("task-2", "Empty task", &[]).is_none());
+    }
+
+    #[test]
+    fn extract_truncates_long_prompt_in_goal() {
+        let long_prompt = "x".repeat(500);
+        let tool_calls = vec![("shell".to_string(), "echo hello".to_string())];
+
+        let playbook = extract_playbook_from_episode("task-3", &long_prompt, &tool_calls)
+            .expect("playbook should be extracted");
+
+        assert_eq!(playbook.goal, format!("{}...", "x".repeat(200)));
+        assert!(playbook.goal.len() <= 203);
+    }
+
+    #[tokio::test]
+    async fn save_or_merge_creates_new_entry_for_extracted_playbook() {
+        let dir = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(dir.path());
+        let tool_calls = vec![("shell".to_string(), "cargo test".to_string())];
+
+        let playbook = extract_playbook_from_episode("t1", "Run tests", &tool_calls)
+            .expect("playbook should be extracted");
+        store.save_or_merge(&playbook).await.expect("save_or_merge");
+
+        let loaded = store
+            .load(&playbook.id)
+            .await
+            .expect("load")
+            .expect("playbook");
+        assert_eq!(loaded.success_count, 1);
+        assert_eq!(loaded.failure_count, 0);
+        assert_eq!(loaded.steps.len(), 1);
+        assert_eq!(loaded.steps[0].action_kind, "shell");
+
+        let listed = store.list().await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, playbook.id);
+    }
+
+    #[tokio::test]
+    async fn save_or_merge_merges_similar_extracted_playbooks() {
+        let dir = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(dir.path());
+        let tool_calls = vec![
+            ("shell".to_string(), "cargo test".to_string()),
+            ("shell".to_string(), "cargo fmt --check".to_string()),
+        ];
+
+        let first =
+            extract_playbook_from_episode("t1", "Run tests", &tool_calls).expect("first playbook");
+        store.save_or_merge(&first).await.expect("save first");
+
+        let mut second =
+            extract_playbook_from_episode("t1", "Run tests", &tool_calls).expect("second playbook");
+        second.id = format!("{}-retry", second.id);
+        store.save_or_merge(&second).await.expect("merge second");
+
+        let merged = store
+            .load(&first.id)
+            .await
+            .expect("load merged")
+            .expect("merged playbook");
+        assert_eq!(merged.success_count, 2);
+        assert_eq!(merged.failure_count, 0);
+        assert_eq!(merged.steps.len(), 2);
+        assert!(store.load(&second.id).await.expect("load second").is_none());
+
+        let listed = store.list().await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, first.id);
+    }
 }
 
 impl PlaybookStep {
@@ -189,6 +303,342 @@ impl QueryContext {
     }
 }
 
+/// Extract a playbook from a successful episode's tool-call sequence.
+///
+/// Returns `None` when `tool_calls` is empty after trimming blank entries.
+/// The generated playbook uses the prompt as the goal, a truncated learned
+/// title as the display name, and one [`PlaybookStep`] per tool invocation.
+#[must_use]
+pub fn extract_playbook_from_episode(
+    task_id: &str,
+    task_prompt: &str,
+    tool_calls: &[(String, String)],
+) -> Option<Playbook> {
+    let steps: Vec<PlaybookStep> = tool_calls
+        .iter()
+        .filter_map(|(tool_name, description)| {
+            let tool_name = tool_name.trim();
+            if tool_name.is_empty() {
+                return None;
+            }
+
+            Some((tool_name.to_string(), description.trim().to_string()))
+        })
+        .enumerate()
+        .map(|(index, (tool_name, description))| {
+            PlaybookStep::new(index as u32, description, tool_name, Vec::new())
+        })
+        .collect();
+
+    if steps.is_empty() {
+        return None;
+    }
+
+    let prompt = task_prompt.trim();
+    let prompt_source = {
+        let source = if prompt.is_empty() {
+            task_id.trim()
+        } else {
+            prompt
+        };
+        if source.is_empty() {
+            "untitled task"
+        } else {
+            source
+        }
+    };
+    let now_ms = Utc::now().timestamp_millis();
+    let id_component = sanitize_playbook_id_component(task_id);
+    let mut playbook = Playbook::new(
+        format!("ep-{id_component}-{now_ms}"),
+        truncate_chars(prompt_source, 200),
+    );
+    playbook.name = format!("Learned: {}", truncate_chars(prompt_source, 60));
+    playbook.steps = steps;
+    playbook.success_count = 1;
+    playbook.failure_count = 0;
+    playbook.created_at_ms = now_ms;
+    playbook.last_used_ms = None;
+    Some(playbook)
+}
+
+/// Extract a tool-call sequence from an episode payload.
+///
+/// The helper prefers explicit `extra["tool_calls"]`-style arrays when they
+/// are present, then falls back to the episode's `external_actions` bag.
+/// Each returned tuple is `(tool_name, description_or_args_summary)`.
+#[must_use]
+pub fn extract_tool_calls_from_episode(
+    episode: &crate::episode_logger::Episode,
+) -> Vec<(String, String)> {
+    for key in ["tool_calls", "tool_sequence", "tools_used", "tools"] {
+        if let Some(value) = episode.extra.get(key) {
+            let calls = extract_tool_calls_from_value(value);
+            if !calls.is_empty() {
+                return calls;
+            }
+        }
+    }
+
+    extract_tool_calls_from_values(&episode.external_actions)
+}
+
+fn validate_playbook_id(id: &str) -> io::Result<()> {
+    if id.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "playbook id must not be empty",
+        ));
+    }
+
+    if !is_valid_playbook_id(id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "playbook id must not contain path separators",
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_valid_playbook_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains(std::path::MAIN_SEPARATOR)
+        && !id.contains('/')
+        && !id.contains('\\')
+        && id != ".."
+        && id != "."
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let mut iter = text.trim().chars();
+    let mut out = String::with_capacity(max_chars.saturating_add(3));
+    for _ in 0..max_chars {
+        let Some(ch) = iter.next() else {
+            return out;
+        };
+        out.push(ch);
+    }
+
+    if iter.next().is_some() {
+        out.push_str("...");
+    }
+
+    out
+}
+
+fn sanitize_playbook_id_component(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.trim().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        "task".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn playbook_merge_query(playbook: &Playbook) -> String {
+    let mut parts = Vec::new();
+    if !playbook.goal.trim().is_empty() {
+        parts.push(playbook.goal.trim());
+    }
+    if !playbook.name.trim().is_empty() {
+        parts.push(playbook.name.trim());
+    }
+    for step in &playbook.steps {
+        if !step.description.trim().is_empty() {
+            parts.push(step.description.trim());
+        }
+        if !step.action_kind.trim().is_empty() {
+            parts.push(step.action_kind.trim());
+        }
+        for signal in &step.expected_signals {
+            let signal = signal.trim();
+            if !signal.is_empty() {
+                parts.push(signal);
+            }
+        }
+    }
+    parts.join(" ")
+}
+
+fn merge_playbooks(mut existing: Playbook, incoming: &Playbook) -> Playbook {
+    if existing.name.trim().is_empty() || existing.name == existing.id {
+        if !incoming.name.trim().is_empty() {
+            existing.name = incoming.name.clone();
+        }
+    }
+    if existing.goal.trim().is_empty() && !incoming.goal.trim().is_empty() {
+        existing.goal = incoming.goal.clone();
+    }
+    if incoming.steps.len() > existing.steps.len() {
+        existing.steps = incoming.steps.clone();
+    }
+    existing.success_count = existing
+        .success_count
+        .saturating_add(incoming.success_count.max(1));
+    existing.failure_count = existing
+        .failure_count
+        .saturating_add(incoming.failure_count);
+    existing.created_at_ms = existing.created_at_ms.min(incoming.created_at_ms);
+    existing.last_used_ms = Some(Utc::now().timestamp_millis());
+    existing
+}
+
+fn extract_tool_calls_from_values(values: &[Value]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for value in values {
+        out.extend(extract_tool_calls_from_value(value));
+    }
+    out
+}
+
+fn extract_tool_calls_from_value(value: &Value) -> Vec<(String, String)> {
+    match value {
+        Value::Array(items) => extract_tool_calls_from_values(items),
+        Value::Object(object) => {
+            for key in ["tool_calls", "tool_sequence", "tools_used", "tools"] {
+                if let Some(items) = object.get(key).and_then(Value::as_array) {
+                    let calls = extract_tool_calls_from_values(items);
+                    if !calls.is_empty() {
+                        return calls;
+                    }
+                }
+            }
+
+            extract_tool_call_from_object(object).into_iter().collect()
+        }
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![(text.to_string(), text.to_string())]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn extract_tool_call_from_object(
+    object: &serde_json::Map<String, Value>,
+) -> Option<(String, String)> {
+    let name = extract_named_string(
+        object,
+        &["tool_name", "tool", "name", "action_type", "kind"],
+    )
+    .or_else(|| {
+        object
+            .get("function")
+            .and_then(Value::as_object)
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })?;
+
+    let description = object
+        .get("description")
+        .or_else(|| object.get("summary"))
+        .or_else(|| object.get("args_summary"))
+        .and_then(|value| summarize_value(value, 160))
+        .or_else(|| {
+            let mut parts = Vec::new();
+
+            if let Some(value) = object.get("arguments").or_else(|| object.get("args")) {
+                if let Some(summary) = summarize_value(value, 160) {
+                    parts.push(summary);
+                }
+            }
+
+            if let Some(value) = object.get("resource_id").and_then(Value::as_str) {
+                let value = value.trim();
+                if !value.is_empty() {
+                    parts.push(value.to_string());
+                }
+            }
+
+            if let Some(value) = object.get("metadata") {
+                if let Some(summary) = summarize_value(value, 160) {
+                    parts.push(summary);
+                }
+            }
+
+            if let Some(function_args) = object
+                .get("function")
+                .and_then(Value::as_object)
+                .and_then(|function| function.get("arguments"))
+            {
+                if let Some(summary) = summarize_value(function_args, 160) {
+                    parts.push(summary);
+                }
+            }
+
+            if parts.is_empty() {
+                summarize_inline_call_object(object)
+            } else {
+                Some(parts.join(" "))
+            }
+        })
+        .unwrap_or_else(|| name.clone());
+
+    Some((name, description))
+}
+
+fn extract_named_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = object.get(*key).and_then(Value::as_str) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn summarize_value(value: &Value, max_chars: usize) -> Option<String> {
+    let text = match value {
+        Value::String(text) => text.trim().to_string(),
+        Value::Null => return None,
+        _ => serde_json::to_string(value).ok()?,
+    };
+
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(truncate_chars(text, max_chars))
+    }
+}
+
+fn summarize_inline_call_object(object: &serde_json::Map<String, Value>) -> Option<String> {
+    let mut parts = Vec::new();
+    for key in ["command", "path", "target", "query", "text", "body", "url"] {
+        if let Some(value) = object.get(key).and_then(|value| summarize_value(value, 80)) {
+            parts.push(format!("{key}={value}"));
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 /// JSON-file backed store for playbooks.
 ///
 /// Each playbook is persisted to `<root>/<id>.json`. The store uses a
@@ -198,10 +648,23 @@ impl QueryContext {
 /// [`tokio::sync::Mutex`] to serialize load+save cycles in
 /// [`PlaybookStore::record_outcome`] so concurrent outcomes don't lose
 /// updates.
+///
+/// ## Lock domains
+///
+/// - **`merge_lock`** — serializes all [`PlaybookStore::save_or_merge`] calls.
+///   Held across disk I/O (intentional; merges must be atomic).
+/// - **`id_locks`** — per-id async mutexes used by [`PlaybookStore::record_outcome`]
+///   to serialize load+save for a single playbook id.
+///
+/// These two domains are disjoint: `merge_lock` is never acquired while an
+/// `id_locks` entry is held, and vice-versa. No deadlock is possible.
 #[derive(Debug, Clone)]
 pub struct PlaybookStore {
     root: PathBuf,
     tmp_counter: Arc<Mutex<u64>>,
+    /// Serializes all save_or_merge calls. Held across disk I/O — intentional.
+    /// Per-id record_outcome locks remain in id_locks; this lock covers only merge.
+    merge_lock: Arc<AsyncMutex<()>>,
     id_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
 }
 
@@ -212,6 +675,7 @@ impl PlaybookStore {
         Self {
             root: path.into(),
             tmp_counter: Arc::new(Mutex::new(0)),
+            merge_lock: Arc::new(AsyncMutex::new(())),
             id_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -249,23 +713,7 @@ impl PlaybookStore {
     /// created, the playbook cannot be serialized, or the file cannot be
     /// written.
     pub async fn save(&self, playbook: &Playbook) -> io::Result<()> {
-        if playbook.id.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "playbook id must not be empty",
-            ));
-        }
-        if playbook.id.contains(std::path::MAIN_SEPARATOR)
-            || playbook.id.contains('/')
-            || playbook.id.contains('\\')
-            || playbook.id == ".."
-            || playbook.id == "."
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "playbook id must not contain path separators",
-            ));
-        }
+        validate_playbook_id(&playbook.id)?;
         let bytes = serde_json::to_vec_pretty(playbook)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         tokio::fs::create_dir_all(&self.root).await?;
@@ -278,6 +726,43 @@ impl PlaybookStore {
         tokio::fs::write(&tmp, &bytes).await?;
         tokio::fs::rename(&tmp, &path).await?;
         Ok(())
+    }
+
+    /// Save `playbook`, or merge it into the most similar existing playbook.
+    ///
+    /// The merge path increments the chosen playbook's success count instead
+    /// of creating a duplicate entry for the same task pattern.
+    ///
+    /// Lock ordering: `merge_lock` is always acquired BEFORE any `id_locks` entry.
+    /// `record_outcome` acquires only an `id_locks` entry, never `merge_lock`.
+    /// These two lock domains are disjoint — no deadlock is possible.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for any I/O or serialization failure.
+    pub async fn save_or_merge(&self, playbook: &Playbook) -> io::Result<()> {
+        validate_playbook_id(&playbook.id)?;
+
+        // Named field — no map lookup, no parking_lot lock during merge.
+        let _merge_guard = self.merge_lock.lock().await;
+
+        // Check for exact match (no per-ID lock)
+        if let Some(existing) = self.load(&playbook.id).await? {
+            let merged = merge_playbooks(existing, playbook);
+            self.save(&merged).await?;
+            return Ok(());
+        }
+
+        // Check for similar match (no candidate lock)
+        if let Some(candidate) = self.best_similar_playbook(playbook).await? {
+            if let Some(existing) = self.load(&candidate.id).await? {
+                let merged = merge_playbooks(existing, playbook);
+                self.save(&merged).await?;
+                return Ok(());
+            }
+        }
+
+        self.save(playbook).await
     }
 
     /// Load the playbook stored under `id`, or `None` if the file does not
@@ -501,6 +986,34 @@ impl PlaybookStore {
             Err(e) => Err(e),
         }
     }
+
+    async fn best_similar_playbook(&self, playbook: &Playbook) -> io::Result<Option<Playbook>> {
+        let query = playbook_merge_query(playbook);
+        if query.is_empty() {
+            return Ok(None);
+        }
+
+        let query = normalize_query(&query);
+        if query.is_empty() {
+            return Ok(None);
+        }
+        let query_terms = tokenize(&query);
+        let mut best: Option<(f64, Playbook)> = None;
+
+        for candidate in self.list().await? {
+            let score = relevance_score(&candidate, &query, &query_terms);
+            if best
+                .as_ref()
+                .map_or(true, |(best_score, _)| score > *best_score)
+            {
+                best = Some((score, candidate));
+            }
+        }
+
+        Ok(best.and_then(|(score, candidate)| {
+            (score >= PLAYBOOK_MERGE_THRESHOLD).then_some(candidate)
+        }))
+    }
 }
 
 fn normalize_query(text: &str) -> String {
@@ -614,6 +1127,115 @@ mod tests {
         pb.name = format!("playbook-{id}");
         pb.steps = sample_steps();
         pb
+    }
+
+    fn learned_playbook(id: &str, goal: &str, steps: Vec<(&str, &str)>) -> Playbook {
+        let mut pb = Playbook::new(id, goal);
+        pb.name = format!("Learned: {goal}");
+        pb.steps = steps
+            .into_iter()
+            .enumerate()
+            .map(|(index, (action_kind, description))| {
+                PlaybookStep::new(index as u32, description, action_kind, Vec::new())
+            })
+            .collect();
+        pb.success_count = 1;
+        pb
+    }
+
+    #[test]
+    fn extract_playbook_from_episode_builds_steps_and_metadata() {
+        let tool_calls = vec![
+            (
+                "read_file".to_string(),
+                r#"{"path":"src/lib.rs"}"#.to_string(),
+            ),
+            ("bash".to_string(), "cargo test".to_string()),
+        ];
+
+        let playbook =
+            extract_playbook_from_episode("task-1", "Fix the failing tests", &tool_calls)
+                .expect("playbook");
+
+        assert!(playbook.id.starts_with("ep-task-1-"));
+        assert_eq!(playbook.name, "Learned: Fix the failing tests");
+        assert_eq!(playbook.goal, "Fix the failing tests");
+        assert_eq!(playbook.steps.len(), 2);
+        assert_eq!(playbook.steps[0].index, 0);
+        assert_eq!(playbook.steps[0].action_kind, "read_file");
+        assert_eq!(playbook.steps[0].description, r#"{"path":"src/lib.rs"}"#);
+        assert_eq!(playbook.steps[1].index, 1);
+        assert_eq!(playbook.steps[1].action_kind, "bash");
+        assert_eq!(playbook.steps[1].description, "cargo test");
+        assert_eq!(playbook.success_count, 1);
+        assert_eq!(playbook.failure_count, 0);
+        assert!(playbook.last_used_ms.is_none());
+    }
+
+    #[test]
+    fn extract_playbook_from_episode_returns_none_for_empty_tool_calls() {
+        assert!(extract_playbook_from_episode("task-1", "prompt", &[]).is_none());
+        assert!(
+            extract_playbook_from_episode(
+                "task-1",
+                "prompt",
+                &[("   ".to_string(), "   ".to_string())],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn extract_tool_calls_from_episode_prefers_extra_tool_calls() {
+        let mut episode = crate::episode_logger::Episode::new("agent-1", "task-1");
+        episode.extra.insert(
+            "tool_calls".to_string(),
+            serde_json::json!([
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": {"path": "src/lib.rs"}
+                    }
+                },
+                {
+                    "id": "call-2",
+                    "name": "bash",
+                    "arguments": "cargo test"
+                }
+            ]),
+        );
+        episode.external_actions = vec![serde_json::json!({
+            "service": "github",
+            "action_type": "review_pr",
+            "resource_id": "pr-12",
+            "metadata": {"state": "approved"}
+        })];
+
+        let calls = extract_tool_calls_from_episode(&episode);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "read_file");
+        assert!(calls[0].1.contains("src/lib.rs"));
+        assert_eq!(calls[1].0, "bash");
+        assert_eq!(calls[1].1, "cargo test");
+    }
+
+    #[test]
+    fn extract_tool_calls_from_episode_falls_back_to_external_actions() {
+        let mut episode = crate::episode_logger::Episode::new("agent-1", "task-1");
+        episode.external_actions = vec![serde_json::json!({
+            "service": "github",
+            "action_type": "review_pr",
+            "resource_id": "pr-12",
+            "metadata": {"state": "approved"}
+        })];
+
+        let calls = extract_tool_calls_from_episode(&episode);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "review_pr");
+        assert!(calls[0].1.contains("pr-12"));
+        assert!(calls[0].1.contains("approved"));
     }
 
     #[tokio::test]
@@ -870,6 +1492,104 @@ mod tests {
         // Only one file should exist for this id.
         let listed = store.list().await.expect("list");
         assert_eq!(listed.iter().filter(|p| p.id == "same-id").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn save_or_merge_merges_similar_playbooks() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(tmp.path());
+
+        let first = learned_playbook(
+            "ep-task-1-111",
+            "Audit dependencies",
+            vec![("read_file", "Read Cargo.toml")],
+        );
+        store.save(&first).await.expect("save first");
+
+        let second = learned_playbook(
+            "ep-task-1-222",
+            "Audit dependencies",
+            vec![
+                ("read_file", "Read Cargo.toml"),
+                ("run_command", "Run cargo tree"),
+            ],
+        );
+        store.save_or_merge(&second).await.expect("merge second");
+
+        let loaded = store
+            .load(&first.id)
+            .await
+            .expect("load first")
+            .expect("some");
+        assert_eq!(loaded.success_count, 2);
+        assert_eq!(loaded.steps.len(), 2);
+        assert!(store.load(&second.id).await.expect("load second").is_none());
+    }
+
+    #[tokio::test]
+    async fn save_or_merge_keeps_dissimilar_playbooks_separate() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(tmp.path());
+
+        let first = learned_playbook(
+            "ep-task-1-111",
+            "Audit dependencies",
+            vec![("read_file", "Read Cargo.toml")],
+        );
+        store.save(&first).await.expect("save first");
+
+        let other = learned_playbook(
+            "ep-task-2-222",
+            "Rewrite the dashboard theme",
+            vec![("edit_file", "Update CSS variables")],
+        );
+        store.save_or_merge(&other).await.expect("save other");
+
+        let mut listed = store.list().await.expect("list");
+        listed.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, first.id);
+        assert_eq!(listed[1].id, other.id);
+    }
+
+    #[tokio::test]
+    async fn concurrent_save_or_merge_does_not_lose_updates() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(tmp.path());
+
+        // Seed with initial playbook.
+        let seed = learned_playbook(
+            "merge-race",
+            "Concurrent merge target",
+            vec![("read_file", "Read config")],
+        );
+        store.save(&seed).await.expect("save seed");
+
+        // Spawn 16 concurrent save_or_merge calls with similar playbooks.
+        // Each call should merge (incrementing success_count) rather than
+        // creating a duplicate, and no update should be lost.
+        let mut handles = Vec::new();
+        for i in 0..16u32 {
+            let store = store.clone();
+            let pb = learned_playbook(
+                &format!("merge-race-{i}"),
+                "Concurrent merge target",
+                vec![("read_file", "Read config")],
+            );
+            handles.push(tokio::spawn(async move { store.save_or_merge(&pb).await }));
+        }
+        for h in handles {
+            h.await.expect("join").expect("save_or_merge");
+        }
+
+        // The seed playbook should have accumulated all merges.
+        let loaded = store.load("merge-race").await.expect("load").expect("some");
+        // seed started at success_count=1, each merge adds 1 → total 17
+        assert_eq!(
+            loaded.success_count, 17,
+            "expected 17 successes (1 seed + 16 merges), got {}",
+            loaded.success_count
+        );
     }
 
     #[tokio::test]

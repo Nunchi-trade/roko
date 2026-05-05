@@ -9,9 +9,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use roko_core::config::LoadConfigError;
 use roko_core::config::hot_reload;
+use roko_core::config::loader::load_config_unified;
 use roko_core::config::schema::RokoConfig;
-use roko_core::config::{LoadConfigError, load_config};
 
 use crate::error::ApiError;
 use crate::events::ServerEvent;
@@ -21,6 +22,7 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/config", get(get_config).put(update_config))
+        .route("/config/toml", get(get_config_toml))
         .route("/config/reload", post(reload_config))
 }
 
@@ -39,6 +41,28 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Result<Json<Value>, A
     expose_dashboard_config_fields(&mut value, cfg.as_ref());
     mask_secret_fields(&mut value);
     Ok(Json(value))
+}
+
+/// `GET /api/config/toml` — return the raw `roko.toml` content as `text/toml`.
+///
+/// Used by Builder workspaces to copy the live config into ephemeral directories.
+async fn get_config_toml(
+    State(state): State<Arc<AppState>>,
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], String), ApiError> {
+    let cfg = state.load_roko_config();
+    let mut value = serde_json::to_value(cfg.as_ref())
+        .map_err(|e| ApiError::internal(format!("serialize config: {e}")))?;
+    mask_secret_fields(&mut value);
+    strip_mask_hint_fields(&mut value);
+    strip_json_nulls(&mut value);
+    let toml_value: toml::Value = serde_json::from_value(value)
+        .map_err(|e| ApiError::internal(format!("convert to toml: {e}")))?;
+    let toml_str = toml::to_string_pretty(&toml_value)
+        .map_err(|e| ApiError::internal(format!("serialize toml: {e}")))?;
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/toml")],
+        toml_str,
+    ))
 }
 
 /// `PUT /api/config` — merge partial config JSON into the current config,
@@ -63,9 +87,24 @@ async fn update_config(
     let toml_str = toml::to_string_pretty(&updated)
         .map_err(|e| ApiError::internal(format!("serialize toml: {e}")))?;
     let config_path = state.workdir.join("roko.toml");
-    tokio::fs::write(&config_path, toml_str)
+    tokio::fs::write(&config_path, &toml_str)
         .await
         .map_err(|e| ApiError::internal(format!("write roko.toml: {e}")))?;
+
+    // Propagate to ephemeral workspaces so running scenarios see the change.
+    {
+        let workspaces = state.ephemeral_workspaces.read().await;
+        for ws in workspaces.values() {
+            if let Err(err) = tokio::fs::write(ws.path.join("roko.toml"), &toml_str).await {
+                tracing::warn!(
+                    workspace_id = %ws.id,
+                    path = %ws.path.display(),
+                    error = %err,
+                    "failed to propagate config update to ephemeral workspace"
+                );
+            }
+        }
+    }
 
     expose_dashboard_config_fields(&mut current, &updated);
     state.store_roko_config(updated);
@@ -105,7 +144,9 @@ pub async fn reload_config(
 fn map_load_config_error(err: LoadConfigError) -> ApiError {
     match err {
         LoadConfigError::Read { .. } => ApiError::internal(err.to_string()),
-        LoadConfigError::Parse { .. } => ApiError::bad_request(err.to_string()),
+        LoadConfigError::Parse { .. }
+        | LoadConfigError::Validation { .. }
+        | LoadConfigError::ProviderReference { .. } => ApiError::bad_request(err.to_string()),
     }
 }
 
@@ -124,7 +165,7 @@ fn map_load_config_error(err: LoadConfigError) -> ApiError {
 /// Returns [`LoadConfigError::Read`] when `roko.toml` cannot be read and
 /// [`LoadConfigError::Parse`] when the file contents are not valid config.
 pub fn reload_config_from_disk(state: &AppState) -> Result<Vec<String>, LoadConfigError> {
-    let new_config = load_config(&state.workdir)?;
+    let new_config = load_config_unified(&state.workdir)?;
     let mut warnings = validate_references(&new_config);
 
     // Compute diff and apply only hot-reloadable sections.
@@ -226,6 +267,42 @@ fn merge_json(base: &mut Value, patch: &Value) {
     }
 }
 
+/// Remove `*_note` keys added by [`mask_secret_fields`] so the JSON can become TOML.
+fn strip_mask_hint_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|k, _| !k.ends_with("_note"));
+            for v in map.values_mut() {
+                strip_mask_hint_fields(v);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                strip_mask_hint_fields(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// TOML has no `null`. Drop null values before converting [`serde_json::Value`] to [`toml::Value`].
+fn strip_json_nulls(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_json_nulls(v);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                strip_json_nulls(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn mask_secret_fields(value: &mut Value) {
     mask_secret_field(
         value,
@@ -240,6 +317,22 @@ fn mask_secret_fields(value: &mut Value) {
         "railway_api_token",
         "ROKO_DEPLOY_RAILWAY_API_TOKEN",
     );
+    mask_secret_field(value, &["chain"], "wallet_key", "ROKO_CHAIN_WALLET_KEY");
+    mask_secret_field(
+        value,
+        &["webhooks", "github"],
+        "secret",
+        "ROKO_WEBHOOKS_GITHUB_SECRET",
+    );
+    if let Some(providers) = value.get_mut("providers").and_then(|v| v.as_object_mut()) {
+        for (_name, provider) in providers.iter_mut() {
+            if let Some(obj) = provider.as_object_mut() {
+                if obj.contains_key("api_key") {
+                    obj.insert("api_key".to_string(), Value::String("****".to_string()));
+                }
+            }
+        }
+    }
 }
 
 fn mask_secret_field(value: &mut Value, path: &[&str], field: &str, env_var: &str) {
@@ -316,6 +409,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mask_secret_fields_redacts_extended_secrets() {
+        let mut value = serde_json::json!({
+            "chain": { "wallet_key": "0xdeadbeef" },
+            "webhooks": { "github": { "secret": "ghsecret" } },
+            "providers": {
+                "anthropic": { "api_key": "sk-ant-xxx" }
+            }
+        });
+
+        mask_secret_fields(&mut value);
+
+        assert_eq!(value["chain"]["wallet_key"], "***");
+        assert_eq!(
+            value["chain"]["wallet_key_note"],
+            "Set `ROKO_CHAIN_WALLET_KEY` in the environment."
+        );
+        assert_eq!(value["webhooks"]["github"]["secret"], "***");
+        assert_eq!(
+            value["webhooks"]["github"]["secret_note"],
+            "Set `ROKO_WEBHOOKS_GITHUB_SECRET` in the environment."
+        );
+        assert_eq!(value["providers"]["anthropic"]["api_key"], "****");
+    }
+
+    #[tokio::test]
+    async fn get_config_toml_masks_secrets() {
+        use std::sync::Arc;
+
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        use crate::deploy::create_backend;
+        use crate::runtime::NoOpRuntime;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let mut cfg = RokoConfig::default();
+        cfg.serve.auth.api_key = "test-secret-key".into();
+        let state = Arc::new(
+            AppState::new(workdir, Arc::new(NoOpRuntime), cfg, deploy_backend)
+                .expect("AppState::new"),
+        );
+
+        let response = routes()
+            .with_state(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/config/toml")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(
+            !text.contains("test-secret-key"),
+            "TOML response leaked api key: {text}"
+        );
+    }
+
     #[tokio::test]
     async fn reload_config_reloads_state_from_disk() {
         use std::sync::Arc;
@@ -331,12 +494,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        let state = Arc::new(AppState::new(
-            workdir.clone(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(
+                workdir.clone(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
 
         tokio::fs::write(
             workdir.join("roko.toml"),

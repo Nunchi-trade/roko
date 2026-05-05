@@ -16,7 +16,7 @@ adaptive routing with budget enforcement.
 - `skill_library` -- structured skills agents can invoke
 - `cascade_router` -- cost/quality model cascade with tier routing
 - `model_router` / `routing_extras` -- lookahead and calibration around cascade decisions
-- `bandits` / `bandit_research` -- Thompson sampling for model/prompt selection
+- `bandits` -- Thompson sampling for model/prompt selection
 - `prompt_experiment` / `model_experiment` -- A/B experiment infrastructure
 - `pattern_discovery` -- mining episodes for recurring shapes
 - `provider_health` -- per-provider circuit breaker for LLM routing
@@ -26,13 +26,7 @@ adaptive routing with budget enforcement.
 - `budget` -- budget tracking and enforcement guardrails
 - `context_pack_cache` -- cached prompts keyed by task fingerprint
 - `efficiency` / `aggregate` -- per-turn efficiency JSONL telemetry
-- `forensic_replay` -- debugging failed tasks (GATE-07)
-- `causal` -- Granger causality and PC algorithm for causal DAG discovery (TA-08)
-- `shapley` -- Shapley-value attribution for fair agent credit (P1-08)
-- `resonant_patterns` -- evolutionary pattern organisms with Lotka-Volterra dynamics (TA-09)
-- `kalman` -- online signal smoothing for oracle predictions (P2-10)
 - `bayesian_confidence` -- Beta-Binomial confidence updating (AS-07)
-- `adas` -- autocatalytic optimization (LEARN-08)
 - `conductor` -- learned intervention policy for conductor retries/aborts
 
 ## Usage

@@ -61,7 +61,7 @@ pub enum EntityKind {
     Episode,
     /// Persisted signal / engram.
     Signal,
-    /// Gate check result.
+    /// Verify check result.
     GateResult,
     /// Cascade router state (model routing weights).
     CascadeRouter,

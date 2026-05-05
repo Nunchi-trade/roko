@@ -16,7 +16,7 @@ use super::hooks::{HookDecision, SafetyHook};
 use super::scrub::{ScrubPolicy, scrub_secrets};
 
 /// Default maximum response size before truncation (100 KB).
-const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024;
+const DEFAULT_MAX_RESPONSE_BYTES: usize = roko_core::defaults::DEFAULT_MAX_RESPONSE_BYTES;
 
 /// Tools whose output comes from external sources (network, user input).
 const EXTERNAL_OUTPUT_TOOLS: &[&str] = &["web_fetch", "web_search", "bash", "run_tests"];

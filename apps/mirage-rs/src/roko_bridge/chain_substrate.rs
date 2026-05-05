@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use roko_core::{Body, ContentHash, Context, Engram, Query, error::Result, traits::Substrate};
+use roko_core::{Body, ContentHash, Context, Engram, Query, error::Result, traits::Store};
 
 use crate::{
     chain::{
@@ -138,7 +138,7 @@ impl ChainSubstrate {
 }
 
 #[async_trait]
-impl Substrate for ChainSubstrate {
+impl Store for ChainSubstrate {
     async fn put(&self, signal: Engram) -> Result<ContentHash> {
         let hash = signal.content_hash();
         let text = Self::signal_text(&signal);

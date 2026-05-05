@@ -1,0 +1,279 @@
+/* ── AnimatedIcons.css ─────────────────────────────────────── */
+/* Co-located animations for the animated SVG icon library     */
+
+/* ── Shared ─────────────────────────────────────────────────── */
+.aicon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.aicon svg {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ── CheckmarkIcon ─────────────────────────────────────────── */
+.aicon-checkmark .aicon-circle {
+  stroke-dasharray: 76;
+  stroke-dashoffset: 76;
+  animation: aicon-draw-circle 0.5s ease-out forwards;
+}
+
+.aicon-checkmark .aicon-check {
+  stroke-dasharray: 20;
+  stroke-dashoffset: 20;
+  animation: aicon-draw-check 0.35s ease-out 0.4s forwards;
+}
+
+@keyframes aicon-draw-circle {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes aicon-draw-check {
+  to { stroke-dashoffset: 0; }
+}
+
+/* ── CrossIcon ─────────────────────────────────────────────── */
+.aicon-cross .aicon-circle {
+  stroke-dasharray: 76;
+  stroke-dashoffset: 76;
+  animation: aicon-draw-circle 0.5s ease-out forwards;
+}
+
+.aicon-cross .aicon-x1,
+.aicon-cross .aicon-x2 {
+  stroke-dasharray: 12;
+  stroke-dashoffset: 12;
+  animation: aicon-draw-x 0.25s ease-out 0.45s forwards;
+}
+
+.aicon-cross .aicon-x2 {
+  animation-delay: 0.55s;
+}
+
+.aicon-cross svg {
+  animation: aicon-shake 0.4s ease-out 0.65s;
+}
+
+@keyframes aicon-draw-x {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes aicon-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(2px); }
+  60% { transform: translateX(-1px); }
+  80% { transform: translateX(1px); }
+}
+
+/* ── SpinnerIcon ───────────────────────────────────────────── */
+.aicon-spinner .aicon-arc1 {
+  stroke-dasharray: 20 60;
+  animation: aicon-spin 1s linear infinite;
+  transform-origin: center;
+}
+
+.aicon-spinner .aicon-arc2 {
+  stroke-dasharray: 10 70;
+  animation: aicon-spin 1.6s linear infinite reverse;
+  transform-origin: center;
+  opacity: 0.5;
+}
+
+.aicon-spinner .aicon-arc3 {
+  stroke-dasharray: 6 74;
+  animation: aicon-spin 2.2s linear infinite;
+  transform-origin: center;
+  opacity: 0.3;
+}
+
+@keyframes aicon-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── ArrowIcon ─────────────────────────────────────────────── */
+.aicon-arrow svg {
+  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ── PulseIcon ─────────────────────────────────────────────── */
+.aicon-pulse .aicon-dot {
+  fill: currentColor;
+}
+
+.aicon-pulse .aicon-ring {
+  fill: none;
+  stroke: currentColor;
+  animation: aicon-pulse-ring 1.8s ease-out infinite;
+}
+
+@keyframes aicon-pulse-ring {
+  0% {
+    r: 4;
+    opacity: 0.7;
+  }
+  100% {
+    r: 11;
+    opacity: 0;
+  }
+}
+
+/* ── ChevronIcon ───────────────────────────────────────────── */
+.aicon-chevron svg {
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.aicon-chevron.aicon-expanded svg {
+  transform: rotate(180deg);
+}
+
+/* ── WarningIcon ───────────────────────────────────────────── */
+.aicon-warning .aicon-tri {
+  stroke-dasharray: 64;
+  stroke-dashoffset: 64;
+  animation: aicon-draw-tri 0.6s ease-out forwards;
+}
+
+.aicon-warning .aicon-bang {
+  opacity: 0;
+  animation: aicon-bounce-in 0.35s ease-out 0.5s forwards;
+}
+
+@keyframes aicon-draw-tri {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes aicon-bounce-in {
+  0% { opacity: 0; transform: translateY(-3px); }
+  50% { opacity: 1; transform: translateY(1px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* ── InfoIcon ──────────────────────────────────────────────── */
+.aicon-info .aicon-circle {
+  stroke-dasharray: 76;
+  stroke-dashoffset: 76;
+  animation: aicon-draw-circle 0.5s ease-out forwards;
+}
+
+.aicon-info .aicon-i {
+  opacity: 0;
+  animation: aicon-fade-in 0.3s ease-out 0.4s forwards;
+}
+
+@keyframes aicon-fade-in {
+  to { opacity: 1; }
+}
+
+/* ── StarIcon ──────────────────────────────────────────────── */
+.aicon-star .aicon-star-path {
+  fill: none;
+  stroke: currentColor;
+  stroke-dasharray: 60;
+  stroke-dashoffset: 60;
+  animation: aicon-draw-star 0.6s ease-out forwards;
+}
+
+.aicon-star.aicon-filled .aicon-star-path {
+  fill: currentColor;
+  animation: aicon-draw-star 0.6s ease-out forwards, aicon-fill-star 0.3s ease-out 0.5s forwards;
+}
+
+@keyframes aicon-draw-star {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes aicon-fill-star {
+  from { fill-opacity: 0; }
+  to { fill-opacity: 1; }
+}
+
+/* ── GearIcon ──────────────────────────────────────────────── */
+.aicon-gear svg {
+  transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.aicon-gear:hover svg {
+  transform: rotate(90deg);
+}
+
+/* ── BoltIcon ──────────────────────────────────────────────── */
+.aicon-bolt .aicon-bolt-path {
+  stroke-dasharray: 32;
+  stroke-dashoffset: 32;
+  animation: aicon-draw-bolt 0.4s ease-out forwards;
+}
+
+.aicon-bolt .aicon-flash {
+  fill: currentColor;
+  opacity: 0;
+  animation: aicon-flash 0.3s ease-out 0.35s forwards;
+}
+
+@keyframes aicon-draw-bolt {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes aicon-flash {
+  0% { opacity: 0.8; transform: scale(1.5); }
+  100% { opacity: 0; transform: scale(0.5); }
+}
+
+/* ── WaveformIcon ──────────────────────────────────────────── */
+.aicon-waveform .aicon-bar {
+  transform-origin: center bottom;
+}
+
+.aicon-waveform .aicon-bar:nth-child(1) { animation: aicon-wave 0.8s ease-in-out 0s infinite alternate; }
+.aicon-waveform .aicon-bar:nth-child(2) { animation: aicon-wave 0.8s ease-in-out 0.15s infinite alternate; }
+.aicon-waveform .aicon-bar:nth-child(3) { animation: aicon-wave 0.8s ease-in-out 0.3s infinite alternate; }
+.aicon-waveform .aicon-bar:nth-child(4) { animation: aicon-wave 0.8s ease-in-out 0.45s infinite alternate; }
+.aicon-waveform .aicon-bar:nth-child(5) { animation: aicon-wave 0.8s ease-in-out 0.1s infinite alternate; }
+
+@keyframes aicon-wave {
+  0% { transform: scaleY(0.3); }
+  100% { transform: scaleY(1); }
+}
+
+/* ── Reduced motion ────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .aicon-checkmark .aicon-circle,
+  .aicon-checkmark .aicon-check,
+  .aicon-cross .aicon-circle,
+  .aicon-cross .aicon-x1,
+  .aicon-cross .aicon-x2,
+  .aicon-cross svg,
+  .aicon-spinner .aicon-arc1,
+  .aicon-spinner .aicon-arc2,
+  .aicon-spinner .aicon-arc3,
+  .aicon-pulse .aicon-ring,
+  .aicon-warning .aicon-tri,
+  .aicon-warning .aicon-bang,
+  .aicon-info .aicon-circle,
+  .aicon-info .aicon-i,
+  .aicon-star .aicon-star-path,
+  .aicon-star.aicon-filled .aicon-star-path,
+  .aicon-bolt .aicon-bolt-path,
+  .aicon-bolt .aicon-flash,
+  .aicon-waveform .aicon-bar {
+    animation: none !important;
+    stroke-dashoffset: 0 !important;
+    opacity: 1 !important;
+    fill-opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .aicon-arrow svg,
+  .aicon-chevron svg,
+  .aicon-gear svg {
+    transition: none !important;
+  }
+}

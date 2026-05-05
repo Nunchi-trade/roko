@@ -10,16 +10,17 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::provider::map_provider_error;
 use crate::rate_limit::ProviderRateLimiter;
 use crate::streaming::{StreamAccumulator, StreamChunk, parse_sse_line};
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::FinishReason;
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
 use crate::usage::Usage;
+use roko_core::agent::ProviderKind;
+use roko_core::defaults::{DEFAULT_PROVIDER_RPM, DEFAULT_REQUEST_TIMEOUT_MS};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-const DEFAULT_PROVIDER_RPM: u32 = 60;
 
 #[derive(Debug, Clone, Default)]
 struct StreamResponseMetadata {
@@ -36,6 +37,16 @@ fn shared_rate_limiter() -> Arc<ProviderRateLimiter> {
     )
 }
 
+fn compute_headers(api_key: &str, extra_headers: &[(String, String)]) -> Vec<(String, String)> {
+    let mut headers = Vec::with_capacity(2 + extra_headers.len());
+    headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    if !api_key.is_empty() {
+        headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
+    }
+    headers.extend(extra_headers.iter().cloned());
+    headers
+}
+
 /// HTTP adapter for OpenAI-compatible `/chat/completions` endpoints.
 pub struct OpenAiCompatLlmBackend {
     api_key: String,
@@ -48,6 +59,31 @@ pub struct OpenAiCompatLlmBackend {
     extra_body_params: Map<String, Value>,
     rate_limiter: Arc<ProviderRateLimiter>,
     poster: Box<dyn HttpPoster>,
+    /// Pre-computed HTTP headers (Content-Type + Auth + extras).
+    computed_headers: Vec<(String, String)>,
+    /// When true, omit `session_id`, `thread_id`, and `conversation_id` from
+    /// request bodies. Strict OpenAI-compatible providers (e.g. Cerebras)
+    /// reject unknown top-level fields.
+    skip_session_fields: bool,
+    /// When true, include `"parallel_tool_calls": false` in request bodies.
+    /// Small models (e.g. Llama 3.1 8B via Cerebras) cannot reliably handle
+    /// multiple tool calls in a single turn.
+    disable_parallel_tool_calls: bool,
+    /// When true, normalize `content: ""` to `content: null` on assistant
+    /// messages that carry `tool_calls`. Strict providers (e.g. Cerebras)
+    /// reject empty-string content alongside tool calls.
+    normalize_tool_call_content: bool,
+    /// Time-to-first-token timeout in milliseconds for streaming requests.
+    /// When set, the first `response.chunk()` call is wrapped with
+    /// `tokio::time::timeout` so slow providers fail fast.
+    ttft_timeout_ms: Option<u64>,
+    /// When true, emit `max_completion_tokens` instead of `max_tokens` in
+    /// request bodies. Required for newer OpenAI models (o1, o3, gpt-5.x).
+    use_max_completion_tokens: bool,
+    /// Provider kind used for error mapping to user-friendly messages.
+    provider_kind: ProviderKind,
+    /// Environment variable name holding the API key (for error messages).
+    api_key_env: Option<String>,
 }
 
 impl OpenAiCompatLlmBackend {
@@ -55,17 +91,27 @@ impl OpenAiCompatLlmBackend {
     #[must_use]
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         let model = model.into();
+        let api_key = api_key.into();
+        let computed_headers = compute_headers(&api_key, &[]);
         Self {
-            api_key: api_key.into(),
+            api_key,
             provider_id: model.clone(),
             model,
             base_url: DEFAULT_BASE_URL.to_string(),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             max_tokens: None,
             extra_headers: Vec::new(),
             extra_body_params: Map::new(),
             rate_limiter: shared_rate_limiter(),
             poster: Box::new(ReqwestPoster::new()),
+            computed_headers,
+            skip_session_fields: false,
+            disable_parallel_tool_calls: false,
+            normalize_tool_call_content: false,
+            ttft_timeout_ms: None,
+            use_max_completion_tokens: false,
+            provider_kind: ProviderKind::OpenAiCompat,
+            api_key_env: None,
         }
     }
 
@@ -103,6 +149,7 @@ impl OpenAiCompatLlmBackend {
         let mut extra_headers: Vec<(String, String)> = extra_headers.into_iter().collect();
         extra_headers.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         self.extra_headers = extra_headers;
+        self.computed_headers = compute_headers(&self.api_key, &self.extra_headers);
         self
     }
 
@@ -127,20 +174,90 @@ impl OpenAiCompatLlmBackend {
         self
     }
 
+    /// Skip `session_id`, `thread_id`, and `conversation_id` in request bodies.
+    ///
+    /// Strict OpenAI-compatible providers (e.g. Cerebras) reject unknown
+    /// top-level fields. Enable this for providers that only accept the
+    /// standard OpenAI Chat Completions schema.
+    #[must_use]
+    pub const fn with_skip_session_fields(mut self, skip: bool) -> Self {
+        self.skip_session_fields = skip;
+        self
+    }
+
+    /// Include `"parallel_tool_calls": false` in request bodies.
+    ///
+    /// Small models that cannot reliably handle multiple tool calls in a
+    /// single turn should have this enabled to constrain the backend to
+    /// emitting at most one tool call per response.
+    #[must_use]
+    pub const fn with_disable_parallel_tool_calls(mut self, disable: bool) -> Self {
+        self.disable_parallel_tool_calls = disable;
+        self
+    }
+
+    /// Normalize `content: ""` to `content: null` on assistant messages
+    /// that carry `tool_calls`. Strict providers (e.g. Cerebras) reject
+    /// empty-string content alongside tool calls.
+    #[must_use]
+    pub const fn with_normalize_tool_call_content(mut self, normalize: bool) -> Self {
+        self.normalize_tool_call_content = normalize;
+        self
+    }
+
+    /// Set the time-to-first-token timeout for streaming requests.
+    ///
+    /// When set, `send_turn_streaming` wraps the first `response.chunk()`
+    /// call with `tokio::time::timeout` so slow providers fail fast instead
+    /// of hanging until the full request timeout expires.
+    #[must_use]
+    pub const fn with_ttft_timeout_ms(mut self, ms: Option<u64>) -> Self {
+        self.ttft_timeout_ms = ms;
+        self
+    }
+
+    /// Emit `max_completion_tokens` instead of `max_tokens` in request bodies.
+    ///
+    /// Newer OpenAI models (o1, o3, gpt-4o, gpt-5.x) reject `max_tokens`
+    /// and require `max_completion_tokens`.
+    #[must_use]
+    pub const fn with_use_max_completion_tokens(mut self, use_it: bool) -> Self {
+        self.use_max_completion_tokens = use_it;
+        self
+    }
+
+    /// Set the provider kind for user-facing error messages.
+    #[must_use]
+    pub const fn with_provider_kind(mut self, kind: ProviderKind) -> Self {
+        self.provider_kind = kind;
+        self
+    }
+
+    /// Set the env var name for the API key (used in error messages).
+    #[must_use]
+    pub fn with_api_key_env(mut self, env_var: impl Into<String>) -> Self {
+        self.api_key_env = Some(env_var.into());
+        self
+    }
+
+    /// Map a raw error into a user-friendly message using provider context.
+    fn decorate_error(&self, raw_err: &dyn std::fmt::Display) -> String {
+        map_provider_error(
+            self.provider_kind,
+            &self.provider_id,
+            self.api_key_env.as_deref(),
+            Some(&self.base_url),
+            raw_err,
+        )
+    }
+
     fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
+    /// Return a clone of the cached request headers.
     fn headers(&self) -> Vec<(String, String)> {
-        let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
-        if !self.api_key.is_empty() {
-            headers.push((
-                "Authorization".to_string(),
-                format!("Bearer {}", self.api_key),
-            ));
-        }
-        headers.extend(self.extra_headers.iter().cloned());
-        headers
+        self.computed_headers.clone()
     }
 
     fn build_body(
@@ -153,28 +270,58 @@ impl OpenAiCompatLlmBackend {
         let RenderedTools::JsonArray(tools) = tools else {
             return Err(LlmError::Backend("expected json tool array".into()));
         };
+        // Optionally normalize assistant messages for strict providers.
+        let messages = if self.normalize_tool_call_content {
+            let mut msgs = messages.to_vec();
+            for msg in &mut msgs {
+                if msg.get("role").and_then(Value::as_str) == Some("assistant")
+                    && msg.get("tool_calls").is_some_and(Value::is_array)
+                {
+                    if let Some(content) = msg.get("content") {
+                        if content.as_str().is_some_and(str::is_empty) || content.is_null() {
+                            if let Some(obj) = msg.as_object_mut() {
+                                obj.insert("content".to_string(), Value::Null);
+                            }
+                        }
+                    }
+                }
+            }
+            std::borrow::Cow::Owned(msgs)
+        } else {
+            std::borrow::Cow::Borrowed(messages)
+        };
 
         let mut body = serde_json::json!({
             "model": self.model,
-            "messages": messages,
+            "messages": *messages,
             "tools": tools,
         });
 
         if let Some(body_obj) = body.as_object_mut() {
             if let Some(max_tokens) = self.max_tokens {
-                body_obj.insert("max_tokens".to_string(), Value::from(max_tokens));
+                let key = if self.use_max_completion_tokens {
+                    "max_completion_tokens"
+                } else {
+                    "max_tokens"
+                };
+                body_obj.insert(key.to_string(), Value::from(max_tokens));
             }
-            if let Some(session_id) = &session.session_id {
-                body_obj.insert("session_id".to_string(), Value::String(session_id.clone()));
+            if !self.skip_session_fields {
+                if let Some(session_id) = &session.session_id {
+                    body_obj.insert("session_id".to_string(), Value::String(session_id.clone()));
+                }
+                if let Some(thread_id) = &session.thread_id {
+                    body_obj.insert("thread_id".to_string(), Value::String(thread_id.clone()));
+                }
+                if let Some(conversation_id) = &session.conversation_id {
+                    body_obj.insert(
+                        "conversation_id".to_string(),
+                        Value::String(conversation_id.clone()),
+                    );
+                }
             }
-            if let Some(thread_id) = &session.thread_id {
-                body_obj.insert("thread_id".to_string(), Value::String(thread_id.clone()));
-            }
-            if let Some(conversation_id) = &session.conversation_id {
-                body_obj.insert(
-                    "conversation_id".to_string(),
-                    Value::String(conversation_id.clone()),
-                );
+            if self.disable_parallel_tool_calls {
+                body_obj.insert("parallel_tool_calls".to_string(), Value::Bool(false));
             }
             if stream {
                 body_obj.insert("stream".to_string(), Value::Bool(true));
@@ -187,16 +334,16 @@ impl OpenAiCompatLlmBackend {
         serde_json::to_vec(&body).map_err(|e| LlmError::Backend(format!("serialize: {e}")))
     }
 
-    fn push_stream_line(
+    async fn push_stream_line(
         line: &[u8],
         accumulator: &mut StreamAccumulator,
-        event_tx: &mpsc::UnboundedSender<StreamChunk>,
+        event_tx: &mpsc::Sender<StreamChunk>,
     ) {
         let line = String::from_utf8_lossy(line);
         let line = line.trim_end_matches(['\r', '\n']);
         if let Some(chunk) = parse_sse_line(line) {
             accumulator.push(chunk.clone());
-            let _ = event_tx.send(chunk);
+            let _ = event_tx.send(chunk).await;
         }
     }
 
@@ -292,12 +439,12 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             .poster
             .post_json(
                 &self.endpoint(),
-                &self.headers(),
+                &self.computed_headers,
                 &body_bytes,
                 self.timeout_ms,
             )
             .await
-            .map_err(|e| LlmError::Network(e.to_string()))?;
+            .map_err(|e| LlmError::Network(self.decorate_error(&e)))?;
 
         let json: Value = serde_json::from_str(&raw)
             .map_err(|e| LlmError::Backend(format!("parse response: {e}")))?;
@@ -310,33 +457,40 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         messages: &[serde_json::Value],
         tools: &RenderedTools,
         session: &SessionState,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
         let body_bytes = self.build_body(messages, tools, session, true)?;
         self.rate_limiter.acquire(&self.provider_id).await;
 
-        let mut req = reqwest::Client::new()
+        let mut req = crate::provider::shared_http_client()
             .post(self.endpoint())
             .timeout(Duration::from_millis(self.timeout_ms));
-        for (key, value) in self.headers() {
-            req = req.header(key, value);
+        for (key, value) in &self.computed_headers {
+            req = req.header(key.as_str(), value.as_str());
         }
 
-        let response = req.body(body_bytes).send().await.map_err(|e| {
-            let message = format!("request failed: {e}");
-            let _ = event_tx.send(StreamChunk::Error(message.clone()));
-            LlmError::Network(message)
-        })?;
+        let response = match req.body(body_bytes).send().await {
+            Ok(response) => response,
+            Err(e) => {
+                let message = self.decorate_error(&e);
+                let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                return Err(LlmError::Network(message));
+            }
+        };
 
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.map_err(|e| {
-                let message = format!("read body failed: {e}");
-                let _ = event_tx.send(StreamChunk::Error(message.clone()));
-                LlmError::Network(message)
-            })?;
-            let message = crate::http::HttpPostError::http(status.as_u16(), text).to_string();
-            let _ = event_tx.send(StreamChunk::Error(message.clone()));
+            let text = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    let message = self.decorate_error(&e);
+                    let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                    return Err(LlmError::Network(message));
+                }
+            };
+            let raw_err = crate::http::HttpPostError::http(status.as_u16(), text);
+            let message = self.decorate_error(&raw_err);
+            let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
             return Err(LlmError::Network(message));
         }
 
@@ -344,13 +498,44 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         let mut pending = Vec::new();
         let mut accumulator = StreamAccumulator::new();
         let mut metadata = StreamResponseMetadata::default();
+        let mut first_chunk = true;
 
         loop {
-            let chunk = response.chunk().await.map_err(|e| {
-                let message = format!("read chunk failed: {e}");
-                let _ = event_tx.send(StreamChunk::Error(message.clone()));
-                LlmError::Network(message)
-            })?;
+            let chunk_fut = response.chunk();
+            let chunk = if first_chunk {
+                // Apply TTFT timeout only to the first body chunk. This
+                // measures the real time-to-first-token: from HTTP headers
+                // received until the provider starts streaming content.
+                first_chunk = false;
+                if let Some(ttft_ms) = self.ttft_timeout_ms {
+                    match tokio::time::timeout(Duration::from_millis(ttft_ms), chunk_fut).await {
+                        Ok(inner) => inner,
+                        Err(_) => {
+                            let message =
+                                format!("TTFT timeout: no streaming data within {ttft_ms}ms");
+                            tracing::warn!(
+                                endpoint = %self.endpoint(),
+                                ttft_timeout_ms = ttft_ms,
+                                "TTFT timeout — no first chunk within deadline"
+                            );
+                            let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                            return Err(LlmError::Network(message));
+                        }
+                    }
+                } else {
+                    chunk_fut.await
+                }
+            } else {
+                chunk_fut.await
+            };
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    let message = format!("read chunk failed: {e}");
+                    let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                    return Err(LlmError::Network(message));
+                }
+            };
             let Some(chunk) = chunk else {
                 break;
             };
@@ -359,13 +544,13 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             while let Some(newline_idx) = pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = pending.drain(..=newline_idx).collect();
                 Self::capture_stream_metadata(&line, &mut metadata);
-                Self::push_stream_line(&line, &mut accumulator, &event_tx);
+                Self::push_stream_line(&line, &mut accumulator, &event_tx).await;
             }
         }
 
         if !pending.is_empty() {
             Self::capture_stream_metadata(&pending, &mut metadata);
-            Self::push_stream_line(&pending, &mut accumulator, &event_tx);
+            Self::push_stream_line(&pending, &mut accumulator, &event_tx).await;
         }
 
         let json = Self::stream_response_to_json(accumulator.finalize(), metadata)?;
@@ -654,6 +839,143 @@ mod tests {
         assert_eq!(requests[0].body["model"], "glm-5.1");
         assert_eq!(requests[0].body["thinking"]["type"], "enabled");
         assert_eq!(requests[0].body["tools"][0]["function"]["name"], "echo");
+    }
+
+    #[test]
+    fn build_body_can_use_max_completion_tokens() {
+        let backend = OpenAiCompatLlmBackend::new("test-key", "gpt-5.4")
+            .with_max_tokens(256)
+            .with_use_max_completion_tokens(true);
+        let body = backend
+            .build_body(
+                &[serde_json::json!({"role": "user", "content": "hello"})],
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+                false,
+            )
+            .expect("build body");
+        let parsed: Value = serde_json::from_slice(&body).expect("request body json");
+
+        assert_eq!(parsed["model"], "gpt-5.4");
+        assert_eq!(parsed["max_completion_tokens"], 256);
+        assert!(parsed.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn headers_are_cached_and_recomputed_for_extra_headers() {
+        let backend = OpenAiCompatLlmBackend::new("test-key", "glm-5.1");
+
+        let first = backend.headers();
+        let second = backend.headers();
+
+        assert_eq!(
+            first,
+            vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Authorization".to_string(), "Bearer test-key".to_string()),
+            ]
+        );
+        assert_eq!(first, second);
+
+        let updated = backend
+            .with_extra_headers(HashMap::from([
+                ("X-B".to_string(), "2".to_string()),
+                ("X-A".to_string(), "1".to_string()),
+            ]))
+            .headers();
+
+        assert_eq!(
+            updated,
+            vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Authorization".to_string(), "Bearer test-key".to_string()),
+                ("X-A".to_string(), "1".to_string()),
+                ("X-B".to_string(), "2".to_string()),
+            ]
+        );
+    }
+
+    struct HeaderPointerPoster {
+        responses: Mutex<VecDeque<Result<String, HttpPostError>>>,
+        auth_ptrs: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl HeaderPointerPoster {
+        fn new(responses: Vec<Result<String, HttpPostError>>) -> (Self, Arc<Mutex<Vec<usize>>>) {
+            let auth_ptrs = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    responses: Mutex::new(responses.into_iter().collect()),
+                    auth_ptrs: auth_ptrs.clone(),
+                },
+                auth_ptrs,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl HttpPoster for HeaderPointerPoster {
+        async fn post_json(
+            &self,
+            _url: &str,
+            headers: &[(String, String)],
+            _body: &[u8],
+            _timeout_ms: u64,
+        ) -> Result<String, HttpPostError> {
+            let auth_ptr = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.as_ptr() as usize)
+                .expect("authorization header");
+            self.auth_ptrs.lock().expect("auth ptr lock").push(auth_ptr);
+            self.responses
+                .lock()
+                .expect("responses lock")
+                .pop_front()
+                .expect("mock response queued")
+        }
+    }
+
+    #[tokio::test]
+    async fn request_path_reuses_cached_authorization_header() {
+        let (poster, auth_ptrs) = HeaderPointerPoster::new(vec![
+            Ok(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "done"
+                    }
+                }]
+            })
+            .to_string()),
+            Ok(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "done"
+                    }
+                }]
+            })
+            .to_string()),
+        ]);
+        let backend =
+            OpenAiCompatLlmBackend::new("test-key", "glm-5.1").with_poster(Box::new(poster));
+        let messages = [serde_json::json!({ "role": "user", "content": "hi" })];
+        let tools = RenderedTools::JsonArray(serde_json::json!([]));
+        let session = SessionState::default();
+
+        backend
+            .send_turn(&messages, &tools, &session)
+            .await
+            .expect("first send turn");
+        backend
+            .send_turn(&messages, &tools, &session)
+            .await
+            .expect("second send turn");
+
+        let auth_ptrs = auth_ptrs.lock().expect("auth ptr lock");
+        assert_eq!(auth_ptrs.len(), 2);
+        assert_eq!(auth_ptrs[0], auth_ptrs[1]);
     }
 
     #[tokio::test]
@@ -950,7 +1272,7 @@ mod tests {
             .with_timeout_ms(5_000);
         let tool_loop = make_tool_loop(backend);
         let tools = test_tools();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
         let run = tokio::spawn(async move {
             let ctx = ToolContext::testing("/tmp");
             tool_loop
@@ -1044,5 +1366,107 @@ mod tests {
         let s = format!("{backend:?}");
         assert!(s.contains("OpenAiCompatLlmBackend"));
         assert!(s.contains("glm-5.1"));
+    }
+
+    /// Live integration test — sends a real request to OpenAI to verify the
+    /// request body is well-formed and the model parameter is accepted.
+    ///
+    /// Requires `OPENAI_API_KEY` in the environment. Skipped otherwise.
+    #[tokio::test]
+    async fn live_openai_gpt4o_accepts_request() {
+        let Ok(api_key) = std::env::var("OPENAI_API_KEY") else {
+            eprintln!("skipping: OPENAI_API_KEY not set");
+            return;
+        };
+
+        let backend = OpenAiCompatLlmBackend::new(api_key, "gpt-4o").with_max_tokens(10);
+        let result = backend
+            .send_turn(
+                &[serde_json::json!({ "role": "user", "content": "say hi" })],
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+            )
+            .await;
+
+        match &result {
+            Ok(BackendResponse::Json(json)) => {
+                assert!(
+                    json.pointer("/choices/0/message/content").is_some(),
+                    "expected choices[0].message.content in response: {json}"
+                );
+            }
+            Ok(other) => panic!("unexpected response variant: {other:?}"),
+            Err(e) => panic!("request failed: {e:?}"),
+        }
+    }
+
+    /// Verify TTFT timeout fires when the server sends HTTP headers but delays
+    /// the first body chunk beyond the deadline.
+    #[tokio::test]
+    async fn streaming_ttft_timeout_fires_on_slow_first_chunk() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("listener addr");
+
+        // Server: send response headers immediately, then sleep longer than
+        // the TTFT timeout before sending any body data.
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let _ = read_http_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write response headers");
+            stream.flush().expect("flush response headers");
+            // Delay first chunk beyond the 100ms TTFT timeout.
+            thread::sleep(StdDuration::from_millis(2000));
+            let _ =
+                stream.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n");
+        });
+
+        let backend = OpenAiCompatLlmBackend::new("test-key", "test-model")
+            .with_base_url(&format!("http://{addr}/v1/"))
+            .with_ttft_timeout_ms(Some(100)); // 100ms TTFT — server delays 2s
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
+        let started = Instant::now();
+
+        let result = backend
+            .send_turn_streaming(
+                &[serde_json::json!({ "role": "user", "content": "hello" })],
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+                tx,
+            )
+            .await;
+
+        let elapsed = started.elapsed();
+
+        // Should fail with TTFT timeout, not wait the full 2 seconds.
+        assert!(
+            result.is_err(),
+            "expected TTFT timeout error, got {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            format!("{err:?}").contains("TTFT timeout"),
+            "error should mention TTFT: {err:?}"
+        );
+        assert!(
+            elapsed < StdDuration::from_millis(1500),
+            "should timeout quickly (~100ms), not wait for delayed body (took {}ms)",
+            elapsed.as_millis()
+        );
+
+        // The error channel should have the TTFT error event.
+        let mut got_error = false;
+        while let Ok(chunk) = rx.try_recv() {
+            if matches!(chunk, StreamChunk::Error(_)) {
+                got_error = true;
+            }
+        }
+        assert!(got_error, "expected StreamChunk::Error for TTFT timeout");
+
+        server.join().expect("server thread");
     }
 }

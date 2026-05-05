@@ -115,8 +115,8 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn builtin_count_is_thirty() {
-        assert_eq!(TOOL_COUNT, 30);
+    fn builtin_count_matches() {
+        assert_eq!(TOOL_COUNT, 33);
         assert_eq!(ROKO_BUILTIN_TOOLS.len(), TOOL_COUNT);
         assert_eq!(BUILTIN_TOOL_NAMES.len(), TOOL_COUNT);
     }

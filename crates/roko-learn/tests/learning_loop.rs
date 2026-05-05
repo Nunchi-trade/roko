@@ -38,9 +38,9 @@ fn default_ctx() -> RoutingContext {
 
 fn test_slugs() -> Vec<String> {
     vec![
-        "claude-haiku-3-5".to_string(),
+        "claude-haiku-4-5".to_string(),
         "claude-sonnet-4-5".to_string(),
-        "claude-opus-4".to_string(),
+        "claude-opus-4-6".to_string(),
     ]
 }
 
@@ -91,8 +91,8 @@ fn bandit_persistence_roundtrip() {
     let router = LinUCBRouter::new(test_slugs()).with_persist_path(&path);
     let ctx = default_ctx();
     router.update(&ctx, "claude-sonnet-4-5", 0.9);
-    router.update(&ctx, "claude-haiku-3-5", 0.3);
-    router.update(&ctx, "claude-opus-4", 0.7);
+    router.update(&ctx, "claude-haiku-4-5", 0.3);
+    router.update(&ctx, "claude-opus-4-6", 0.7);
     router.save().unwrap();
 
     // Drop the router — state is only on disk now.
@@ -108,9 +108,9 @@ fn bandit_persistence_roundtrip() {
         .find(|a| a.slug == "claude-sonnet-4-5")
         .unwrap();
     assert_eq!(sonnet.observations, 1);
-    let haiku = stats.iter().find(|a| a.slug == "claude-haiku-3-5").unwrap();
+    let haiku = stats.iter().find(|a| a.slug == "claude-haiku-4-5").unwrap();
     assert_eq!(haiku.observations, 1);
-    let opus = stats.iter().find(|a| a.slug == "claude-opus-4").unwrap();
+    let opus = stats.iter().find(|a| a.slug == "claude-opus-4-6").unwrap();
     assert_eq!(opus.observations, 1);
 }
 
@@ -121,7 +121,7 @@ fn auto_persist_on_update() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("auto.json");
 
-    // Router with persist_path — update() should auto-save.
+    // Route with persist_path — update() should auto-save.
     let router = LinUCBRouter::new(test_slugs()).with_persist_path(&path);
     let ctx = default_ctx();
     router.update(&ctx, "claude-sonnet-4-5", 0.8);

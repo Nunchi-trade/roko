@@ -993,7 +993,7 @@ mod tests {
 
         let path = root.join(".roko/learn/cascade-router.json");
         let router = CascadeRouter::new(vec![
-            "claude-haiku-3-5".to_string(),
+            "claude-haiku-4-5".to_string(),
             "claude-sonnet-4-5".to_string(),
         ]);
         router.save(&path).expect("seed router state");
@@ -1010,7 +1010,7 @@ mod tests {
         let reloaded = CascadeRouter::load_or_new(
             &path,
             vec![
-                "claude-haiku-3-5".to_string(),
+                "claude-haiku-4-5".to_string(),
                 "claude-sonnet-4-5".to_string(),
             ],
         );

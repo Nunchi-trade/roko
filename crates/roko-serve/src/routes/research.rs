@@ -594,6 +594,8 @@ mod tests {
             Ok(RunResult {
                 success: true,
                 output_text: None,
+                usage: None,
+                gate_results: Vec::new(),
             })
         }
 
@@ -637,12 +639,15 @@ mod tests {
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let runtime_trait: Arc<dyn CliRuntime> = runtime.clone();
-        let state = Arc::new(AppState::new(
-            workdir,
-            runtime_trait,
-            roko_core::config::schema::RokoConfig::default(),
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(
+                workdir,
+                runtime_trait,
+                roko_core::config::schema::RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
         (dir, state, runtime)
     }
 

@@ -42,3 +42,6 @@ uuid = { workspace = true }
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true, features = ["limit", "load-shed", "util"] }
+
+[package.metadata.roko]
+layer = 4

@@ -24,9 +24,9 @@
 //! Each detected pattern is returned as a [`MevAlert`] with severity, profit
 //! estimate, and the offending transaction hashes.
 //!
-//! # Gate integration
+//! # Verify integration
 //!
-//! `MevGate` implements [`Gate`](roko_core::Gate). It reads the signal body as
+//! `MevGate` implements [`Verify`](roko_core::Verify). It reads the signal body as
 //! a JSON object containing:
 //!
 //! - `victim_tx`: the agent's planned transaction (same format as `TxRequest`)
@@ -35,7 +35,7 @@
 //! If any high-severity MEV pattern is detected, the gate fails the signal.
 
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, traits::Gate, verdict::Verdict};
+use roko_core::{Body, Context, Engram, traits::Verify, verdict::Verdict};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -546,9 +546,9 @@ impl Default for MevDetector {
     }
 }
 
-// ─── Gate ────────────────────────────────────────────────────────────────
+// ─── Verify ────────────────────────────────────────────────────────────────
 
-/// A [`Gate`] that runs MEV detection on a planned transaction before signing.
+/// A [`Verify`] that runs MEV detection on a planned transaction before signing.
 ///
 /// The gate reads the signal body as a JSON-encoded [`MevAnalysisInput`]
 /// containing the victim transaction and mempool context. If any critical
@@ -619,7 +619,7 @@ impl Default for MevGate {
 }
 
 #[async_trait]
-impl Gate for MevGate {
+impl Verify for MevGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
 

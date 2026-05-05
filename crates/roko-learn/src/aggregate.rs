@@ -594,6 +594,7 @@ mod tests {
             model: "claude-opus-4-6".to_string(),
             plan_id: "plan-1".to_string(),
             task_id: format!("task-{idx:03}"),
+            attempt_id: format!("sample-{idx}"),
             input_tokens: 100,
             output_tokens: 40,
             reasoning_tokens: 0,

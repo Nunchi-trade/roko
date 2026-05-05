@@ -1,0 +1,191 @@
+/* ═══════════════════════════════════════════════════════════
+   BLOCK FEED — compact blockchain block stream
+   ═══════════════════════════════════════════════════════════ */
+
+.block-feed {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Scrollable body ── */
+
+.block-feed__body {
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.06) transparent;
+}
+
+.block-feed__body::-webkit-scrollbar {
+  width: 4px;
+}
+.block-feed__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.block-feed__body::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.06);
+  border-radius: 2px;
+}
+
+/* ── Gradient fades ── */
+
+.block-feed__body::before,
+.block-feed__body::after {
+  content: '';
+  position: sticky;
+  display: block;
+  left: 0;
+  right: 0;
+  height: 20px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.block-feed__body::before {
+  top: 0;
+  background: linear-gradient(to bottom, var(--bg-raised), transparent);
+  margin-bottom: -20px;
+}
+
+.block-feed__body::after {
+  bottom: 0;
+  background: linear-gradient(to top, var(--bg-raised), transparent);
+  margin-top: -20px;
+}
+
+/* ── Block list with connecting line ── */
+
+.block-feed__list {
+  position: relative;
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-5);
+}
+
+/* Vertical connecting line */
+.block-feed__list::before {
+  content: '';
+  position: absolute;
+  top: var(--sp-2);
+  bottom: var(--sp-2);
+  left: 19px;
+  width: 2px;
+  background: var(--border-soft);
+}
+
+/* ── Block row ── */
+
+.block-feed__row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  animation: slideIn 0.25s var(--ease) both;
+}
+
+/* Brief highlight on new block */
+.block-feed__row--new {
+  animation: slideIn 0.25s var(--ease) both,
+             bf-flash 0.6s var(--ease) both;
+}
+
+@keyframes bf-flash {
+  0% { background: color-mix(in srgb, var(--rose-bright) 15%, transparent); }
+  100% { background: transparent; }
+}
+
+/* ── Node dot on the line ── */
+
+.block-feed__node {
+  position: absolute;
+  left: -21px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rose-dim);
+  border: 2px solid var(--bg-raised);
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+.block-feed__row:first-child .block-feed__node {
+  background: var(--rose-bright);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rose-bright) 50%, transparent);
+}
+
+/* ── Block number ── */
+
+.block-feed__num {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  color: var(--rose-bright);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 64px;
+}
+
+/* ── Hash ── */
+
+.block-feed__hash {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Tx count badge ── */
+
+.block-feed__tx {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Timestamp ── */
+
+.block-feed__ago {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  white-space: nowrap;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* ── Gas ── */
+
+.block-feed__gas {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Empty state ── */
+
+.block-feed__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-8) var(--sp-4);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-ghost);
+}

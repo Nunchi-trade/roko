@@ -1,0 +1,93 @@
+/* ═══════════════════════════════════════════════════════════
+   EmptyState · Standalone empty placeholder
+   ═══════════════════════════════════════════════════════════ */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  padding: var(--sp-10) var(--sp-6);
+  text-align: center;
+  animation: empty-state-in var(--duration-normal) var(--ease) both;
+}
+
+/* CSS-only ghost icon — large version */
+.empty-state__icon {
+  width: 64px;
+  height: 64px;
+  position: relative;
+  opacity: 0.4;
+}
+
+.empty-state__icon::before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 32px;
+  border-radius: 18px 18px 0 0;
+  border: 2px solid var(--text-ghost);
+  border-bottom: none;
+}
+
+.empty-state__icon::after {
+  content: '';
+  position: absolute;
+  top: 36px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 18px;
+  border: 2px solid var(--text-ghost);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  mask-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 36 18' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M0,0 L0,12 Q4.5,18 9,12 Q13.5,6 18,12 Q22.5,18 27,12 Q31.5,6 36,12 L36,0 Z' fill='white'/%3E%3C/svg%3E");
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 36 18' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M0,0 L0,12 Q4.5,18 9,12 Q13.5,6 18,12 Q22.5,18 27,12 Q31.5,6 36,12 L36,0 Z' fill='white'/%3E%3C/svg%3E");
+}
+
+.empty-state__title {
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.empty-state__action {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--rose-glow);
+  background: color-mix(in srgb, var(--rose) 6%, transparent);
+  border: 1px solid var(--rose-dim);
+  border-radius: var(--radius-md);
+  padding: 10px 24px;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    border-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease),
+    transform var(--duration-fast) var(--ease);
+}
+
+.empty-state__action:hover {
+  background: color-mix(in srgb, var(--rose) 12%, transparent);
+  border-color: var(--rose-glow);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--rose) 18%, transparent);
+  transform: translateY(-1px);
+}
+
+@keyframes empty-state-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .empty-state {
+    animation: none;
+  }
+}

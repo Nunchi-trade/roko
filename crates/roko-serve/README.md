@@ -116,6 +116,25 @@ server.serve().await?;
 | `GET` | `/api/learn/experiments` | A/B variants + win rates |
 | `GET` | `/api/learn/adaptive-thresholds`, `/gate-thresholds` | EMA gate thresholds |
 
+### Dashboard projections
+
+Dashboard and product surfaces should prefer StateHub projections over private
+runtime internals. Each projection response includes `name`, `version`,
+`cursor`, `computed_at`, `recovered`, `freshness`, and a stable `state` object.
+Use `GET /api/projections/catalog` for versions and invalidation triggers.
+
+| Method | Path | What |
+|--------|------|------|
+| `GET` | `/api/projections/agent_state` | agent roster, active state, output/cost counters |
+| `GET` | `/api/projections/plan_state` | plan and task execution state |
+| `GET` | `/api/projections/gate_state` | gate verdicts, trends, failures, threshold availability |
+| `GET` | `/api/projections/learning_policy_state` | learning and policy summaries available through StateHub |
+| `GET` | `/api/projections/{name}/stream` | SSE initial state plus projection deltas |
+
+Missing projection data is represented as `{"state":"missing", ...}` or
+`{"state":"empty", ...}` with a reason and, when applicable, the stable
+endpoint that owns the data.
+
 ### Subscriptions / templates / deployments / config / providers
 
 | Area | Paths |

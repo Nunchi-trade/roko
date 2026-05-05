@@ -9,10 +9,12 @@
 //! - [`QuickFixTemplate`] — minimal fix-only prompt. Does not re-read the plan
 //!   or workspace map; only includes the compressed feedback and fix directives.
 //!
-//! Ports Mori's `quick_reviewer_prompt` and `quick_fix_prompt` from
-//! `prompts.rs:3468` and `prompts.rs:3622`.
+//! Roko-owned quick review/fix prompts for focused retry loops.
 
-use super::common::{budget_for, format_prior_review, format_verdict_instructions};
+use super::common::{
+    self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for, format_prior_review,
+    format_verdict_instructions,
+};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -65,16 +67,19 @@ impl RolePromptTemplate for QuickReviewerTemplate {
     type Input = QuickReviewerInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
-        let budget = budget_for(AgentRole::QuickReviewer);
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let budget = adaptive_budget_for(AgentRole::QuickReviewer, context_window_tokens);
         let mut sections = Vec::with_capacity(6);
 
         // 1. agents_instructions — System / Critical / Start
-        sections.push(
-            PromptSection::new("agents_instructions", &input.agents_md)
-                .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Role)
-                .with_placement(Placement::Start),
-        );
+        sections.push(common::agents_instructions_section(&input.agents_md));
 
         // 2. plan_spec — Session / Critical / Start / hard_cap 50k
         sections.push(
@@ -189,7 +194,7 @@ impl RolePromptTemplate for QuickFixTemplate {
         // 2. selfcheck_instructions — System / High / End
         let selfcheck = format!(
             "## Output\n\n\
-             Write results to `.mori/plans/completion/{plan_num}-selfcheck.toml` \
+             Write results to `.roko/plans/completion/{plan_num}-selfcheck.toml` \
              (fallback: `plans/context/completion/{plan_num}-selfcheck.toml`).\n",
             plan_num = input.plan_num,
         );

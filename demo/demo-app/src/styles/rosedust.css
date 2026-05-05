@@ -1,0 +1,8 @@
+/* ═══════════════════════════════════════════════════════════
+   ROSEDUST Design System · Entry Point
+   All code lives in tokens.css (custom properties) and
+   global.css (resets, base styles, components, utilities).
+   ═══════════════════════════════════════════════════════════ */
+
+@import './tokens.css';
+@import './global.css';

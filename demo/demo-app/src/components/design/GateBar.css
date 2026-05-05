@@ -1,0 +1,86 @@
+/* GateBar — horizontal gate status strip */
+
+.gate-bar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.gate-bar__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+
+/* ── Icon ── */
+
+.gate-bar__icon {
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+  line-height: 1;
+}
+
+/* ── Status variants ── */
+
+.gate-bar__item--pass {
+  color: var(--status-success);
+}
+
+.gate-bar__item--pass .gate-bar__icon {
+  animation: gate-scale-up 150ms ease-out both;
+}
+
+.gate-bar__item--fail {
+  color: var(--status-error);
+}
+
+.gate-bar__item--fail .gate-bar__icon {
+  animation: gate-error-flash 200ms ease-out;
+}
+
+.gate-bar__item--running {
+  color: var(--bone);
+}
+
+.gate-bar__item--running .gate-bar__icon {
+  animation: pulse-dot 2.4s ease-in-out infinite;
+}
+
+.gate-bar__item--pending {
+  color: var(--text-ghost);
+}
+
+.gate-bar__item--skipped {
+  color: var(--text-ghost);
+}
+
+/* ── Gate-specific animations ── */
+
+@keyframes gate-scale-up {
+  from {
+    transform: scale(0.8);
+    opacity: 0.5;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes gate-error-flash {
+  0% {
+    opacity: 1;
+  }
+  30% {
+    opacity: 0.3;
+  }
+  100% {
+    opacity: 1;
+  }
+}

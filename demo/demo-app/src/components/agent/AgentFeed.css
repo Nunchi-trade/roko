@@ -1,0 +1,138 @@
+/* AgentFeed — scrollable per-agent event feed */
+
+.agent-feed {
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Scroll container ── */
+
+.agent-feed__scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rose-dim) transparent;
+}
+
+/* ── Bottom fade ── */
+
+.agent-feed__fade {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  background: linear-gradient(to bottom, transparent, var(--bg-void));
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ── Event row ── */
+
+.agent-feed__event {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  animation: fadeInUp var(--duration-reveal) var(--ease) both;
+}
+
+.agent-feed__event:last-child {
+  border-bottom: none;
+}
+
+/* ── Timestamp ── */
+
+.agent-feed__ts {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  color: var(--text-ghost);
+  line-height: 1.6;
+  min-width: 52px;
+}
+
+/* ── Type badge ── */
+
+.agent-feed__type {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid;
+  min-width: 56px;
+  justify-content: center;
+}
+
+.agent-feed__type--inference {
+  color: var(--dream-bright);
+  border-color: color-mix(in srgb, var(--status-blocked) 30%, transparent);
+}
+
+.agent-feed__type--tool_call {
+  color: var(--bone);
+  border-color: color-mix(in srgb, var(--bone) 30%, transparent);
+}
+
+.agent-feed__type--gate {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+}
+
+.agent-feed__type--error {
+  color: var(--status-error);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
+.agent-feed__type--status {
+  color: var(--text-dim);
+  border-color: var(--border-soft);
+}
+
+/* ── Summary text ── */
+
+.agent-feed__summary {
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+  color: var(--text-soft);
+  line-height: 1.5;
+  min-width: 0;
+}
+
+/* ── Detail ── */
+
+.agent-feed__detail {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-ghost);
+  line-height: 1.4;
+  margin-top: 2px;
+  padding-left: 64px;
+}
+
+/* ── Empty state ── */
+
+.agent-feed__empty {
+  padding: 16px 10px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-ghost);
+  text-align: center;
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-feed__event {
+    animation: none;
+  }
+}

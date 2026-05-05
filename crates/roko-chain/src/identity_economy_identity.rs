@@ -1584,7 +1584,13 @@ pub enum GateType {
     Quality,
     /// Safety or policy check.
     Safety,
-    /// Arbitrary named gate.
+    /// Arbitrary named gate for user-defined verification checks.
+    ///
+    /// This is the default variant. Use it for gates that don't fit the four
+    /// built-in categories (Compile, Semantic, Quality, Safety). When
+    /// constructing a [`GateVerdict`] for a custom gate, set `gate` to
+    /// `GateType::Custom` and rely on the verdict's `details` field to carry
+    /// the gate-specific context.
     #[default]
     Custom,
 }
@@ -1592,7 +1598,7 @@ pub enum GateType {
 /// Deferred gate verdict referenced by futures delivery records.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GateVerdict {
-    /// Gate that produced the verdict.
+    /// Verify that produced the verdict.
     pub gate: GateType,
     /// Whether the gate passed.
     pub passed: bool,

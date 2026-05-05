@@ -1,0 +1,118 @@
+/* Modal — accessible dialog with backdrop blur and focus trap */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-floating);
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px) saturate(180%);
+  -webkit-backdrop-filter: blur(8px) saturate(180%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 200ms var(--ease);
+}
+
+.modal-backdrop--open {
+  opacity: 1;
+}
+
+.modal-backdrop--closing {
+  opacity: 0;
+  transition-duration: 150ms;
+}
+
+/* ── Panel ── */
+
+.modal-panel {
+  background: var(--bg-raised);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  transform: scale(0.96);
+  opacity: 0;
+  transition:
+    transform 200ms var(--ease),
+    opacity 200ms var(--ease);
+}
+
+.modal-backdrop--open .modal-panel {
+  transform: scale(1);
+  opacity: 1;
+}
+
+.modal-backdrop--closing .modal-panel {
+  transform: scale(0.96);
+  opacity: 0;
+  transition-duration: 150ms;
+}
+
+/* ── Sizes ── */
+
+.modal-panel--sm { max-width: 400px; }
+.modal-panel--md { max-width: 560px; }
+.modal-panel--lg { max-width: 720px; }
+
+/* ── Header ── */
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
+}
+
+.modal-title {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-soft);
+  margin: 0;
+}
+
+.modal-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-xl);
+  cursor: pointer;
+  transition: color var(--duration-snap) ease, background var(--duration-snap) ease;
+}
+
+.modal-close:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Body ── */
+
+.modal-body {
+  padding: var(--sp-5);
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+/* ── Footer ── */
+
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  border-top: 1px solid var(--glass-border);
+  flex-shrink: 0;
+}

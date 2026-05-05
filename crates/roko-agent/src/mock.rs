@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::agent::{Agent, AgentResult};
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -216,7 +216,7 @@ impl MockAgent {
 
 #[async_trait]
 impl Agent for MockAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let (reply, fail, usage, name) = match &self.mode {
             MockMode::Fixed { reply, fail } => (
                 reply.clone(),
@@ -386,8 +386,8 @@ fn ensure_non_empty(turns: Vec<MockFixtureTurn>) -> Vec<MockFixtureTurn> {
 mod tests {
     use super::*;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[tokio::test]
@@ -462,7 +462,7 @@ mod tests {
         );
         assert_eq!(
             fourth.output.body.as_text().unwrap(),
-            "Implemented the single smoke-test task."
+            "{\"outcome\":\"passed\",\"task_id\":\"T1\",\"summary\":\"Implemented the single smoke-test task and left the sample Rust project ready for cargo check.\",\"evidence_refs\":[\"Cargo.toml\",\"src/main.rs\"]}"
         );
         assert!(
             fifth
@@ -470,7 +470,7 @@ mod tests {
                 .body
                 .as_text()
                 .unwrap()
-                .contains("verdict = \"approve\"")
+                .contains("\"status\":\"passed\"")
         );
         assert_eq!(agent.name(), "self-host-fixture");
     }

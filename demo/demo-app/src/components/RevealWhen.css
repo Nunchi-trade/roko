@@ -1,0 +1,65 @@
+/* ── RevealWhen animation modes ── */
+
+.reveal-when {
+  animation-fill-mode: both;
+  animation-timing-function: var(--ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+
+/* ── mode: fade (default) ── */
+
+.reveal-when--fade {
+  animation-name: fadeIn;
+}
+
+/* ── mode: slide-up ── */
+
+.reveal-when--slide-up {
+  animation-name: fadeInUp;
+}
+
+/* ── mode: scale ── */
+
+.reveal-when--scale {
+  animation-name: scaleIn;
+}
+
+/* ── mode: blur ── */
+
+.reveal-when--blur {
+  animation-name: reveal-blur;
+}
+
+@keyframes reveal-blur {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+/* ── mode: clip ── */
+
+.reveal-when--clip {
+  animation-name: reveal-clip;
+}
+
+@keyframes reveal-clip {
+  from {
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* ── Reduced motion: instant reveal for all modes ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal-when {
+    animation-duration: 0ms !important;
+    animation-delay: 0ms !important;
+  }
+}

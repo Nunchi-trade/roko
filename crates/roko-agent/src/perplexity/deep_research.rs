@@ -12,16 +12,21 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::perplexity::types::{AgentResponse, PerplexityMetadata};
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
+use roko_core::defaults::{
+    DEFAULT_DEEP_RESEARCH_MAX_POLL_ATTEMPTS, DEFAULT_DEEP_RESEARCH_POLL_INTERVAL_MS,
+    DEFAULT_EMBED_TIMEOUT_MS,
+};
+
 /// Default polling interval between status checks.
-const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_POLL_INTERVAL_MS: u64 = DEFAULT_DEEP_RESEARCH_POLL_INTERVAL_MS;
 /// Default maximum number of polling attempts (120 × 5 s = 10 minutes).
-const DEFAULT_MAX_POLL_ATTEMPTS: u32 = 120;
+const DEFAULT_MAX_POLL_ATTEMPTS: u32 = DEFAULT_DEEP_RESEARCH_MAX_POLL_ATTEMPTS;
 /// Default HTTP request timeout for submit/poll calls.
-const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = DEFAULT_EMBED_TIMEOUT_MS;
 
 /// Async polling agent for Perplexity's `sonar-deep-research` model.
 ///
@@ -210,7 +215,7 @@ impl PerplexityDeepResearchAgent {
         ))
     }
 
-    fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
+    fn failure(&self, input: &Signal, reason: String, started: &Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -227,7 +232,7 @@ impl PerplexityDeepResearchAgent {
 
 #[async_trait]
 impl Agent for PerplexityDeepResearchAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -398,8 +403,8 @@ mod tests {
         .to_string()
     }
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(mock: SequentialMock) -> PerplexityDeepResearchAgent {

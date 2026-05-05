@@ -1,0 +1,58 @@
+/* DataSurface — loading / error / empty / data states */
+
+.data-surface {
+  position: relative;
+}
+
+.ds-loading,
+.ds-error,
+.ds-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-6);
+  min-height: 80px;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.ds-loading-label {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ds-error {
+  color: var(--status-error);
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.ds-error-msg {
+  max-width: 400px;
+  text-align: center;
+}
+
+.ds-retry {
+  padding: var(--sp-1) var(--sp-3);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--rose-glow);
+  background: transparent;
+  border: 1px solid var(--rose-dim);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--duration-snap);
+}
+
+.ds-retry:hover {
+  border-color: var(--rose-glow);
+}
+
+.ds-empty {
+  font-style: italic;
+  color: var(--text-ghost);
+}

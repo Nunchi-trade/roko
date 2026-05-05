@@ -114,16 +114,34 @@ impl DispatchLike for BackendMessageDispatcher {
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| DispatchError::DispatchFailed(error.to_string()))?;
+
+        // Bridge: create a bounded channel for the LlmBackend, forward chunks
+        // to the public unbounded sender so the DispatchLike trait signature
+        // remains unchanged.
+        let (bounded_tx, mut bounded_rx) =
+            mpsc::channel::<StreamChunk>(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
+        let forwarder = tokio::spawn(async move {
+            while let Some(chunk) = bounded_rx.recv().await {
+                if event_tx.send(chunk).is_err() {
+                    break;
+                }
+            }
+        });
+
         let response = self
             .backend
             .send_turn_streaming(
                 &messages,
                 &RenderedTools::JsonArray(serde_json::json!([])),
                 &SessionState::default(),
-                event_tx,
+                bounded_tx,
             )
             .await
             .map_err(|error| DispatchError::DispatchFailed(error.to_string()))?;
+
+        // Ensure all remaining chunks are forwarded before returning.
+        let _ = forwarder.await;
+
         Ok(chat_response_from_backend(&*self.backend, &response))
     }
 }

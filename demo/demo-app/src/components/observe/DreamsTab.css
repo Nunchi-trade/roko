@@ -1,0 +1,57 @@
+/* ── DreamsTab ─────────────────────────────────────────── */
+.dreams-tab { display: flex; flex-direction: column; gap: 16px; }
+.dreams-tab__loading {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  padding: 40px;
+  text-align: center;
+}
+.dreams-tab__empty {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  padding: 40px;
+  text-align: center;
+  font-style: italic;
+}
+.dreams-tab__cycle { margin-bottom: 8px; }
+.dreams-tab__entries {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+}
+.dreams-tab__entry {
+  display: flex;
+  gap: 8px;
+  font-size: var(--text-xs, 12px);
+  padding: 4px 0;
+  align-items: baseline;
+}
+.dreams-tab__entry-ts {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  min-width: 50px;
+  flex-shrink: 0;
+}
+.dreams-tab__entry-type {
+  color: var(--dream);
+  font-family: var(--mono);
+  min-width: 80px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: var(--text-sm);
+}
+.dreams-tab__entry-summary {
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+}
+.dreams-tab__no-entries {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: var(--text-xs, 12px);
+  padding: 8px 0;
+  font-style: italic;
+}

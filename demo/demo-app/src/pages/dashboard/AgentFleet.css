@@ -1,0 +1,44 @@
+/* ── AgentFleet page styles ──────────────────────────────────── */
+
+/* Keyframes for status dot pulse */
+@keyframes fleet-pulse-green {
+  0%, 100% { box-shadow: 0 0 4px 1px color-mix(in srgb, var(--success) 60%, transparent), 0 0 8px 2px color-mix(in srgb, var(--success) 25%, transparent); }
+  50%       { box-shadow: 0 0 8px 3px color-mix(in srgb, var(--success) 90%, transparent), 0 0 16px 5px color-mix(in srgb, var(--success) 40%, transparent); }
+}
+
+@keyframes fleet-pulse-amber {
+  0%, 100% { box-shadow: 0 0 4px 1px color-mix(in srgb, var(--warning) 60%, transparent), 0 0 8px 2px color-mix(in srgb, var(--warning) 25%, transparent); }
+  50%       { box-shadow: 0 0 8px 3px color-mix(in srgb, var(--warning) 90%, transparent), 0 0 16px 5px color-mix(in srgb, var(--warning) 40%, transparent); }
+}
+
+/* Agent card hover lift */
+.af-agent-card {
+  transition: transform .25s var(--ease), box-shadow .25s var(--ease), border-color .25s ease;
+}
+
+.af-agent-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 32px color-mix(in srgb, var(--rose) 12%, transparent), 0 0 0 1px color-mix(in srgb, var(--rose) 25%, transparent);
+}
+
+/* Status dot state variants */
+.af-dot--active {
+  background: var(--success);
+  color: color-mix(in srgb, var(--success) 60%, transparent);
+  animation: fleet-pulse-green 2.4s ease-in-out infinite;
+  box-shadow: var(--glow-success);
+}
+
+.af-dot--idle {
+  background: var(--warning);
+  color: color-mix(in srgb, var(--warning) 60%, transparent);
+  animation: fleet-pulse-amber 3s ease-in-out infinite;
+  box-shadow: var(--glow-warning);
+}
+
+.af-dot--inactive {
+  background: var(--bone);
+  color: color-mix(in srgb, var(--bone) 30%, transparent);
+  animation: none;
+  box-shadow: 0 0 4px color-mix(in srgb, var(--bone) 30%, transparent);
+}

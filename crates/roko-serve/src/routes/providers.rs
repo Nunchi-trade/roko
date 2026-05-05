@@ -7,15 +7,22 @@ use std::time::Instant;
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_agent::ModelCallService;
 use roko_core::agent::{AgentRole, ModelTier, resolve_model};
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, RokoConfig};
+#[cfg(test)]
+use roko_core::defaults::{DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS};
+use roko_core::foundation::{
+    CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, caller,
+};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::{Body as SignalBody, Context, Engram, Kind};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::model_router::RoutingContext;
 use roko_learn::provider_health::{HealthState, ProviderStatus};
@@ -130,11 +137,17 @@ async fn explain_routing(
 
     let effective_models = config.effective_models();
     let model_catalog = build_model_catalog(&effective_models);
-    let mut model_slugs: Vec<String> = model_catalog.keys().cloned().collect();
-    if model_slugs.is_empty() {
-        model_slugs.push(resolved.slug.clone());
+    let mut all_model_slugs = config.model_slugs_for_cascade();
+    if all_model_slugs.is_empty() {
+        all_model_slugs.push(resolved.slug.clone());
     }
-    model_slugs.sort();
+    all_model_slugs.sort();
+
+    let mut dispatch_candidates = config.available_model_slugs_for_cascade();
+    if dispatch_candidates.is_empty() {
+        dispatch_candidates = all_model_slugs.clone();
+    }
+    dispatch_candidates.sort();
 
     let routing_ctx = RoutingContext {
         task_category: TaskCategory::Implementation,
@@ -156,8 +169,8 @@ async fn explain_routing(
     };
 
     let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
-    let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
-    let all_explanation = router.explain_routing(&routing_ctx, &model_slugs);
+    let router = CascadeRouter::load_or_new(&cascade_path, all_model_slugs.clone());
+    let all_explanation = router.explain_routing(&routing_ctx, &all_model_slugs);
 
     let mut health_by_provider: HashMap<String, ProviderStatus> = HashMap::new();
     for provider in model_catalog.values().map(|entry| entry.provider.as_str()) {
@@ -166,7 +179,7 @@ async fn explain_routing(
             .or_insert_with(|| state.provider_health.get(provider));
     }
 
-    let available_candidates: Vec<String> = model_slugs
+    let available_candidates: Vec<String> = dispatch_candidates
         .iter()
         .filter(|slug| {
             model_catalog
@@ -183,7 +196,7 @@ async fn explain_routing(
         || all_explanation.selected_model.clone(),
         |explanation| explanation.selected_model.clone(),
     );
-    let selected_model = model_slugs
+    let selected_model = all_model_slugs
         .iter()
         .find(|slug| routing_slugs_match(slug, &selected))
         .cloned()
@@ -200,7 +213,7 @@ async fn explain_routing(
         |explanation| explanation.fallback_model.clone(),
     );
 
-    let mut candidates: Vec<_> = model_slugs
+    let mut candidates: Vec<_> = all_model_slugs
         .iter()
         .map(|slug| {
             let detail = score_by_model.get(slug).cloned();
@@ -286,7 +299,7 @@ async fn test_provider(
 ) -> Result<Json<ProviderTestResponse>, ApiError> {
     let config = state.load_roko_config().as_ref().clone();
     let providers = config.effective_providers();
-    let Some(provider) = providers.get(&provider_id) else {
+    let Some(_provider) = providers.get(&provider_id) else {
         return Err(ApiError::not_found(format!(
             "provider {provider_id} is not configured"
         )));
@@ -298,63 +311,59 @@ async fn test_provider(
         )));
     };
 
-    let agent = create_agent_for_model(
-        &config,
-        &model_key,
-        AgentOptions {
-            timeout_ms: provider.timeout_ms,
-            name: format!("provider-test-{provider_id}"),
-            ..Default::default()
-        },
-    )
-    .map_err(|err| {
-        ApiError::bad_request(format!(
-            "failed to create test agent for provider {provider_id}: {err}"
-        ))
-    })?;
-
     let started = Instant::now();
-    let result = agent.run(&provider_test_prompt(), &Context::now()).await;
+    let request = provider_test_request(&model_key, &provider_id);
+    let result = ModelCallService::new(model_key.clone())
+        .with_config(config)
+        .call(request)
+        .await;
     let fallback_latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let latency_ms = result.usage.wall_ms.max(fallback_latency_ms);
-    let output = result
-        .output
-        .body
-        .as_text()
-        .ok()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned);
+    let latency_ms = fallback_latency_ms.max(1);
 
-    if result.success {
-        state.provider_health.record_success(&provider_id);
-    } else {
-        state.provider_health.record_failure(&provider_id);
-    }
+    let (success, model_slug, usage, response_text, error_text) = match result {
+        Ok(response) => {
+            state.provider_health.record_success(&provider_id);
+            let response_text =
+                (!response.content.trim().is_empty()).then(|| response.content.trim().to_string());
+            (
+                true,
+                model.slug.clone(),
+                response.usage,
+                response_text,
+                None::<String>,
+            )
+        }
+        Err(error) => {
+            state.provider_health.record_failure(&provider_id);
+            (
+                false,
+                model.slug.clone(),
+                Default::default(),
+                None,
+                Some(error.to_string()),
+            )
+        }
+    };
 
     // The probe is a single-shot request, so use the same end-to-end latency
     // for both TTFT and total latency until streaming timings are available.
     state.latency_registry.record(
-        &model.slug,
+        &model_slug,
         &provider_id,
         latency_ms as f64,
         latency_ms as f64,
-        u64::from(result.usage.output_tokens),
+        usage.output_tokens,
     );
-
-    let response_text = result.success.then(|| output.clone()).flatten();
-    let error_text =
-        (!result.success).then(|| output.unwrap_or_else(|| "provider test failed".to_string()));
 
     Ok(Json(ProviderTestResponse {
         provider_id,
         model_key,
-        model_slug: model.slug,
-        success: result.success,
+        model_slug,
+        success,
         latency_ms,
-        input_tokens: result.usage.input_tokens,
-        output_tokens: result.usage.output_tokens,
-        total_tokens: result.usage.total_tokens(),
+        input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
+        output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
+        total_tokens: u32::try_from(usage.total_tokens).unwrap_or(u32::MAX),
         response: response_text,
         error: error_text,
     }))
@@ -560,7 +569,7 @@ fn default_complexity_for_role(role: AgentRole) -> TaskComplexityBand {
 }
 
 fn build_model_catalog(
-    models: &HashMap<String, ModelProfile>,
+    models: &IndexMap<String, ModelProfile>,
 ) -> HashMap<String, ModelCatalogEntry> {
     let mut catalog = HashMap::new();
     for (model_key, profile) in models {
@@ -603,10 +612,26 @@ fn select_test_model(config: &RokoConfig, provider_id: &str) -> Option<(String, 
     models.into_iter().next()
 }
 
-fn provider_test_prompt() -> Engram {
-    Engram::builder(Kind::Prompt)
-        .body(SignalBody::text(PROVIDER_TEST_PROMPT))
-        .build()
+fn provider_test_request(model_key: &str, provider_id: &str) -> ModelCallRequest {
+    ModelCallRequest {
+        model: model_key.to_string(),
+        system: None,
+        messages: vec![ChatMessage {
+            role: MessageRole::User,
+            content: PROVIDER_TEST_PROMPT.to_string(),
+        }],
+        max_tokens: Some(32),
+        temperature: None,
+        role: Some(format!("provider-test-{provider_id}")),
+        caller: Some(caller::SERVE.to_string()),
+        run_id: None,
+        prompt_section_ids: Vec::new(),
+        knowledge_ids: Vec::new(),
+        budget: None,
+        budget_remaining: None,
+        routing_hints: Vec::new(),
+        cache_policy: CachePolicy::Bypass,
+    }
 }
 
 #[cfg(test)]
@@ -711,9 +736,9 @@ mod tests {
                 api_key_env: Some("ZAI_API_KEY".into()),
                 command: None,
                 args: None,
-                timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
-                connect_timeout_ms: Some(5_000),
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -743,7 +768,9 @@ mod tests {
                 cost_cache_read_per_m: None,
                 cost_cache_write_per_m: None,
                 thinking_level: None,
+                use_max_completion_tokens: false,
                 max_tools: None,
+                max_tool_iterations: None,
                 tokenizer_ratio: None,
                 supports_search: false,
                 supports_citations: false,
@@ -751,15 +778,14 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
+                tier: None,
             },
         );
 
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            config,
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(workdir, Arc::new(NoOpRuntime), config, deploy_backend)
+                .expect("AppState::new"),
+        );
         state.provider_health.record_failure("zai");
 
         let app = routes().with_state(Arc::clone(&state));
@@ -828,7 +854,9 @@ mod tests {
                 cost_cache_read_per_m: None,
                 cost_cache_write_per_m: None,
                 thinking_level: None,
+                use_max_completion_tokens: false,
                 max_tools: None,
+                max_tool_iterations: None,
                 tokenizer_ratio: None,
                 supports_search: false,
                 supports_citations: false,
@@ -836,15 +864,14 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
+                tier: None,
             },
         );
 
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            config,
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(workdir, Arc::new(NoOpRuntime), config, deploy_backend)
+                .expect("AppState::new"),
+        );
 
         let app = routes().with_state(Arc::clone(&state));
         let response = app
@@ -910,9 +937,9 @@ mod tests {
                 api_key_env: Some("ZAI_API_KEY".into()),
                 command: None,
                 args: None,
-                timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
-                connect_timeout_ms: Some(5_000),
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -925,9 +952,9 @@ mod tests {
                 api_key_env: Some("ANTHROPIC_API_KEY".into()),
                 command: None,
                 args: None,
-                timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
-                connect_timeout_ms: Some(5_000),
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -957,7 +984,9 @@ mod tests {
                 cost_cache_read_per_m: None,
                 cost_cache_write_per_m: None,
                 thinking_level: None,
+                use_max_completion_tokens: false,
                 max_tools: None,
+                max_tool_iterations: None,
                 tokenizer_ratio: None,
                 supports_search: false,
                 supports_citations: false,
@@ -965,6 +994,7 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
+                tier: None,
             },
         );
         config.models.insert(
@@ -992,7 +1022,9 @@ mod tests {
                 cost_cache_read_per_m: None,
                 cost_cache_write_per_m: None,
                 thinking_level: None,
+                use_max_completion_tokens: false,
                 max_tools: None,
+                max_tool_iterations: None,
                 tokenizer_ratio: None,
                 supports_search: false,
                 supports_citations: false,
@@ -1000,15 +1032,14 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
+                tier: None,
             },
         );
 
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            config,
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(workdir, Arc::new(NoOpRuntime), config, deploy_backend)
+                .expect("AppState::new"),
+        );
         state.provider_health.record_failure("zai");
         state.provider_health.record_failure("zai");
         state.provider_health.record_failure("zai");
@@ -1077,20 +1108,18 @@ mod tests {
                 api_key_env: Some("ZAI_API_KEY".into()),
                 command: None,
                 args: None,
-                timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
-                connect_timeout_ms: Some(5_000),
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
                 extra_headers: None,
                 max_concurrent: None,
             },
         );
 
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            config,
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(workdir, Arc::new(NoOpRuntime), config, deploy_backend)
+                .expect("AppState::new"),
+        );
         state.provider_health.record_success("zai");
         state.provider_health.record_failure("zai");
         state.provider_health.record_failure("zai");
@@ -1168,9 +1197,9 @@ mod tests {
                 api_key_env: Some("PATH".into()),
                 command: None,
                 args: None,
-                timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
-                connect_timeout_ms: Some(5_000),
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -1200,7 +1229,9 @@ mod tests {
                 cost_cache_read_per_m: None,
                 cost_cache_write_per_m: None,
                 thinking_level: None,
+                use_max_completion_tokens: false,
                 max_tools: None,
+                max_tool_iterations: None,
                 tokenizer_ratio: None,
                 supports_search: false,
                 supports_citations: false,
@@ -1208,15 +1239,14 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: None,
                 cost_per_request: None,
+                tier: None,
             },
         );
 
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            config,
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(workdir, Arc::new(NoOpRuntime), config, deploy_backend)
+                .expect("AppState::new"),
+        );
 
         let app = routes().with_state(Arc::clone(&state));
         let response = app
@@ -1293,20 +1323,18 @@ mod tests {
                 api_key_env: Some("ZAI_API_KEY".into()),
                 command: None,
                 args: None,
-                timeout_ms: Some(120_000),
-                ttft_timeout_ms: Some(15_000),
-                connect_timeout_ms: Some(5_000),
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
                 extra_headers: None,
                 max_concurrent: None,
             },
         );
 
-        let state = Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            config,
-            deploy_backend,
-        ));
+        let state = Arc::new(
+            AppState::new(workdir, Arc::new(NoOpRuntime), config, deploy_backend)
+                .expect("AppState::new"),
+        );
 
         let app = routes().with_state(Arc::clone(&state));
         let response = app

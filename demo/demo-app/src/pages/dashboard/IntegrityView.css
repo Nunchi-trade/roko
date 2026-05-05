@@ -1,0 +1,12 @@
+/* ── IntegrityView · Inline style extraction ──────────────── */
+
+/* Pass rate inline-flex value */
+.integrity-pass-value {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.integrity-pass-bar {
+  width: 48px;
+  display: inline-block;
+}

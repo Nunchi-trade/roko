@@ -169,12 +169,15 @@ mod tests {
     fn test_state(workdir: std::path::PathBuf) -> Arc<AppState> {
         let deploy_backend =
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
-        Arc::new(AppState::new(
-            workdir,
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            deploy_backend,
-        ))
+        Arc::new(
+            AppState::new(
+                workdir,
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        )
     }
 
     #[tokio::test]

@@ -352,7 +352,7 @@ pub fn model_context_limit(model: &str) -> u64 {
 
     if model.contains("gemini") && model.contains("pro") {
         1_000_000
-    } else if model.contains("gpt-4o") {
+    } else if model.contains("gpt-5") || model.contains("gpt-4") {
         128_000
     } else if model.contains("claude") {
         200_000
@@ -395,14 +395,7 @@ fn route_tier_label_for_model(model: &str) -> &'static str {
     }
 }
 
-#[must_use]
-fn event_model_slug(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> String {
-    if event.model.trim().is_empty() {
-        event.model_used.trim().to_string()
-    } else {
-        event.model.trim().to_string()
-    }
-}
+use crate::tui::display_utils::event_model_slug;
 
 #[must_use]
 fn prompt_focus_score(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> f64 {
@@ -817,13 +810,7 @@ fn truncate_log_kind(kind: &str) -> String {
     }
 }
 
-fn truncate_log(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
+use crate::tui::display_utils::truncate as truncate_log;
 
 fn format_log_count(n: u64) -> String {
     if n >= 1_000_000 {
@@ -901,13 +888,13 @@ pub struct TaskRow {
 /// A single gate result for the command_output widget.
 #[derive(Debug, Clone, Default)]
 pub struct GateResultEntry {
-    /// Gate name (e.g. "compile", "clippy", "test").
+    /// Verify name (e.g. "compile", "clippy", "test").
     pub gate: String,
     /// Plan ID this gate ran against.
     pub plan_id: String,
     /// Whether the gate passed.
     pub passed: bool,
-    /// Gate output text (stdout + stderr).
+    /// Verify output text (stdout + stderr).
     pub output: String,
 }
 
@@ -1022,7 +1009,7 @@ pub struct TuiState {
     pub current_task_checklist: Vec<TaskRow>,
 
     // -- gate results --
-    /// Gate pipeline results for the command_output widget.
+    /// Verify pipeline results for the command_output widget.
     pub gate_results: Vec<GateResultEntry>,
     /// Recent conductor diagnoses from the live dashboard snapshot.
     pub diagnoses: Vec<roko_core::dashboard_snapshot::DiagnosisSummary>,
@@ -1223,7 +1210,7 @@ pub struct TuiState {
     pub conductor_alerts: Vec<AlertSummary>,
     /// C-factor snapshot for the inspect tab.
     pub cfactor: Option<roko_learn::cfactor::CFactor>,
-    /// Gate results page data (gate_rows, failure_rows, threshold_rows).
+    /// Verify results page data (gate_rows, failure_rows, threshold_rows).
     pub gate_results_page: GateResultsPageData,
     /// Experiment summaries for the config tab.
     pub experiments: Vec<ExperimentSummary>,
@@ -1237,7 +1224,7 @@ pub struct TuiState {
     pub agent_summaries: Vec<AgentSummary>,
     /// Active task summaries (legacy format from DashboardData).
     pub active_task_summaries: Vec<TaskSummary>,
-    /// Gate result summaries (legacy format from DashboardData).
+    /// Verify result summaries (legacy format from DashboardData).
     pub gate_result_summaries: Vec<GateResultSummary>,
     /// Cached episodes for the logs tab.
     pub episodes_cache: Vec<roko_learn::episode_logger::Episode>,
@@ -2045,13 +2032,21 @@ impl TuiState {
                     .or_default()
                     .push(TaskEntry {
                         id: task.task_id.clone(),
-                        name: task.task_id.clone(),
+                        name: if task.title.is_empty() {
+                            task.task_id.clone()
+                        } else {
+                            task.title.clone()
+                        },
                         status,
                         agent_id: None,
                     });
                 TaskRow {
                     id: task.task_id.clone(),
-                    title: task.task_id.clone(),
+                    title: if task.title.is_empty() {
+                        task.task_id.clone()
+                    } else {
+                        task.title.clone()
+                    },
                     status,
                     elapsed_secs: prev_task_elapsed.get(&task.task_id).copied().unwrap_or(0.0),
                 }
@@ -4712,6 +4707,7 @@ tier = "focused"
             "plan-a/task-1".into(),
             roko_core::dashboard_snapshot::TaskState {
                 task_id: "task-1".into(),
+                title: String::new(),
                 plan_id: "plan-a".into(),
                 phase: "implementer".into(),
                 outcome: None,
@@ -4721,6 +4717,7 @@ tier = "focused"
             "plan-a/task-2".into(),
             roko_core::dashboard_snapshot::TaskState {
                 task_id: "task-2".into(),
+                title: String::new(),
                 plan_id: "plan-a".into(),
                 phase: "completed".into(),
                 outcome: Some("success".into()),
@@ -4894,6 +4891,7 @@ tier = "focused"
             "plan-b/task-2".into(),
             roko_core::dashboard_snapshot::TaskState {
                 task_id: "task-2".into(),
+                title: String::new(),
                 plan_id: "plan-b".into(),
                 phase: "implementer".into(),
                 outcome: None,

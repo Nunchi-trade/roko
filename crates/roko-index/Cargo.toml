@@ -32,3 +32,6 @@ rkyv = ["dep:rkyv", "roko-core/rkyv"]
 [dev-dependencies]
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
+
+[package.metadata.roko]
+layer = 2

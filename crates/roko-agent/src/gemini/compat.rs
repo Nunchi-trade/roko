@@ -1,17 +1,24 @@
 //! Gemini OpenAI-compatible chat agent.
 
 use crate::agent::{Agent, AgentResult};
-use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
+use crate::codex_agent::CodexAgent;
 use crate::provider::AgentOptions;
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
-use roko_core::{Context, Engram};
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
+use roko_core::{Context, Signal};
 use serde_json::{Map, Value};
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_REQUEST_TIMEOUT_MS;
 
 fn compat_base_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
+    // Strip the path suffix if it was already included in base_url (e.g. via roko.toml)
+    // so this function is idempotent regardless of how base_url is configured.
+    let trimmed = base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1beta/openai/v1")
+        .trim_end_matches("/v1beta/openai")
+        .trim_end_matches('/');
     format!("{trimmed}/v1beta/openai")
 }
 
@@ -23,7 +30,7 @@ fn resolved_max_tokens(model: &ModelProfile) -> u32 {
     model
         .max_output
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(DEFAULT_MAX_TOKENS)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
 }
 
 fn resolved_name(options: &AgentOptions, default_name: String) -> String {
@@ -70,7 +77,7 @@ impl GeminiCompatAgent {
 
 #[async_trait]
 impl Agent for GeminiCompatAgent {
-    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         self.inner.run(input, ctx).await
     }
 
@@ -122,6 +129,7 @@ mod tests {
             cost_cache_write_per_m: None,
             thinking_level: None,
             max_tools: None,
+            max_tool_iterations: None,
             tokenizer_ratio: None,
             supports_search: false,
             supports_citations: false,
@@ -129,6 +137,8 @@ mod tests {
             is_embedding_model: false,
             search_context_size: None,
             cost_per_request: None,
+            use_max_completion_tokens: false,
+            tier: None,
         }
     }
 
@@ -220,7 +230,7 @@ mod tests {
             base_model(),
             &AgentOptions::default(),
         );
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text("Say hi"))
             .build();
 
@@ -263,7 +273,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text("Say hi"))
             .build();
 
@@ -278,5 +288,30 @@ mod tests {
             .clone()
             .expect("captured request");
         assert!(request.contains("\"cached_content\":\"cachedContents/cache-123\""));
+    }
+
+    #[test]
+    fn compat_base_url_idempotent_with_suffix() {
+        let with_suffix = "https://generativelanguage.googleapis.com/v1beta/openai";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(compat_base_url(with_suffix), compat_base_url(bare));
+        assert_eq!(
+            compat_base_url(with_suffix),
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+    }
+
+    #[test]
+    fn compat_base_url_idempotent_with_trailing_slash() {
+        let with_slash = "https://generativelanguage.googleapis.com/v1beta/openai/";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(compat_base_url(with_slash), compat_base_url(bare));
+    }
+
+    #[test]
+    fn compat_base_url_idempotent_with_v1_suffix() {
+        let with_v1 = "https://generativelanguage.googleapis.com/v1beta/openai/v1";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(compat_base_url(with_v1), compat_base_url(bare));
     }
 }

@@ -1,0 +1,132 @@
+/* FeatureChip — pill tag for scenario features */
+
+.feature-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  background: color-mix(in srgb, #fff 4%, transparent);
+  backdrop-filter: blur(6px) saturate(180%);
+  animation: scaleIn 200ms var(--ease) both;
+}
+
+.feature-chip:hover {
+  transform: translateY(-1px);
+}
+
+/* ── sizes ── */
+
+.feature-chip--sm {
+  height: 18px;
+  padding: 0 8px;
+  font-size: var(--text-xs);
+  line-height: 18px;
+}
+
+.feature-chip--md {
+  height: 24px;
+  padding: 0 10px;
+  font-size: var(--text-xs);
+  line-height: 24px;
+}
+
+/* ── variants ── */
+
+.feature-chip--default {
+  border: 1px solid color-mix(in srgb, var(--rose-dim) 40%, transparent);
+  color: var(--text-ghost);
+}
+
+.feature-chip--default:hover {
+  border-color: color-mix(in srgb, var(--rose-dim) 70%, transparent);
+}
+
+.feature-chip--accent {
+  border: 1px solid color-mix(in srgb, var(--rose-bright) 50%, transparent);
+  color: var(--rose-glow);
+}
+
+.feature-chip--accent:hover {
+  border-color: color-mix(in srgb, var(--rose-bright) 80%, transparent);
+}
+
+.feature-chip--dim {
+  border: 1px solid color-mix(in srgb, #fff 6%, transparent);
+  color: var(--text-ghost);
+  opacity: 0.6;
+}
+
+.feature-chip--dim:hover {
+  border-color: color-mix(in srgb, #fff 12%, transparent);
+  opacity: 0.8;
+}
+
+.feature-chip--success {
+  border: 1px solid color-mix(in srgb, var(--success) 50%, transparent);
+  color: var(--success);
+}
+
+.feature-chip--success:hover {
+  border-color: color-mix(in srgb, var(--success) 80%, transparent);
+}
+
+.feature-chip--warning {
+  border: 1px solid color-mix(in srgb, var(--warning) 50%, transparent);
+  color: var(--warning);
+}
+
+.feature-chip--warning:hover {
+  border-color: color-mix(in srgb, var(--warning) 80%, transparent);
+}
+
+/* ── icon ── */
+
+.feature-chip__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+}
+
+.feature-chip__icon > * {
+  width: 100%;
+  height: 100%;
+}
+
+/* chip-enter → shared animations.css (scaleIn) */
+
+/* ── group (stagger container) ── */
+
+.feature-chip-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.feature-chip-group > .feature-chip:nth-child(1) { animation-delay: 0ms; }
+.feature-chip-group > .feature-chip:nth-child(2) { animation-delay: 50ms; }
+.feature-chip-group > .feature-chip:nth-child(3) { animation-delay: 100ms; }
+.feature-chip-group > .feature-chip:nth-child(4) { animation-delay: 150ms; }
+.feature-chip-group > .feature-chip:nth-child(5) { animation-delay: 200ms; }
+.feature-chip-group > .feature-chip:nth-child(6) { animation-delay: 250ms; }
+.feature-chip-group > .feature-chip:nth-child(7) { animation-delay: 300ms; }
+.feature-chip-group > .feature-chip:nth-child(8) { animation-delay: 350ms; }
+
+/* ── reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .feature-chip {
+    animation: none;
+  }
+  .feature-chip:hover {
+    transform: none;
+  }
+}

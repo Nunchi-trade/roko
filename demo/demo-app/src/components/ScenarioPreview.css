@@ -1,0 +1,607 @@
+/* ═══════════════════════════════════════════════════════════
+   ScenarioPreview — rich pre-play idle state
+   ═══════════════════════════════════════════════════════════ */
+
+.sp-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 40px;
+  padding: 32px 40px;
+  background: color-mix(in srgb, var(--bg-void) 88%, transparent);
+  background-image: radial-gradient(
+    ellipse 60% 40% at 50% 45%,
+    color-mix(in srgb, var(--rose) 10%, transparent) 0%,
+    transparent 70%
+  );
+  backdrop-filter: blur(12px) saturate(180%);
+  animation: fadeIn 400ms var(--ease) both;
+}
+
+/* Dismiss matches the existing cinematic intro dismiss */
+.sp-overlay.dismissing {
+  animation: introDismiss 600ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* ── Left: terminal layout preview ── */
+
+.sp-terminals {
+  flex: 0 0 55%;
+  max-width: 55%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: sp-stagger-1 500ms var(--ease) both;
+  animation-delay: 100ms;
+}
+
+.sp-term-grid {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+}
+
+.sp-term-grid.sp-grid-1 {
+  grid-template-columns: 1fr;
+}
+
+.sp-term-grid.sp-grid-2 {
+  grid-template-columns: 1fr 1fr;
+}
+
+.sp-term-grid.sp-grid-4 {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+/* ── Mini terminal pane ── */
+
+.sp-mini-pane {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg-void) 80%, transparent);
+  overflow: hidden;
+  position: relative;
+  transition: box-shadow 300ms var(--ease), border-color 300ms var(--ease);
+}
+
+.sp-mini-pane:hover {
+  border-color: color-mix(in srgb, var(--rose) 25%, transparent);
+  box-shadow:
+    0 0 20px color-mix(in srgb, var(--rose) 8%, transparent),
+    inset 0 0 12px color-mix(in srgb, var(--rose) 4%, transparent);
+}
+
+.sp-mini-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  height: 20px;
+  border-bottom: 1px solid var(--glass-border);
+  background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
+  flex-shrink: 0;
+}
+
+.sp-mini-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+  flex-shrink: 0;
+}
+
+.sp-mini-label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sp-mini-body {
+  flex: 1;
+  padding: 8px 10px;
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+}
+
+/* Scanline effect inside mini panes */
+.sp-mini-body::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 2px,
+    rgba(0, 0, 0, 0.04) 2px,
+    rgba(0, 0, 0, 0.04) 4px
+  );
+  pointer-events: none;
+  z-index: 1;
+  animation: sp-scanline 8s linear infinite;
+}
+
+@keyframes sp-scanline {
+  from { background-position: 0 0; }
+  to { background-position: 0 200px; }
+}
+
+/* Blinking cursor */
+.sp-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  background: var(--rose-dim);
+  animation: sp-blink 1.2s step-end infinite;
+  opacity: 0.7;
+}
+
+@keyframes sp-blink {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 0; }
+}
+
+/* ── Right: scenario info card ── */
+
+.sp-info {
+  flex: 0 0 40%;
+  max-width: 40%;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  animation: sp-stagger-2 500ms var(--ease) both;
+  animation-delay: 250ms;
+}
+
+.sp-title {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 2rem;
+  font-weight: 300;
+  background: linear-gradient(135deg, var(--rose-glow), var(--rose-bright));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1.2;
+}
+
+.sp-subtitle {
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+  color: var(--text-soft);
+  line-height: 1.6;
+  letter-spacing: 0.01em;
+}
+
+/* Key facts row */
+.sp-facts {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.sp-fact {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sp-fact-icon {
+  font-size: var(--text-xs);
+  color: var(--rose-dim);
+}
+
+/* ── Scenario diagram area ── */
+
+.sp-diagram {
+  padding: 16px;
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, #fff 2%, transparent);
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Flow diagram (PRD pipeline-style) */
+.sp-flow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.sp-flow-node {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 3px;
+  background: color-mix(in srgb, #fff 3%, transparent);
+  white-space: nowrap;
+}
+
+.sp-flow-arrow {
+  color: var(--rose-dim);
+  font-size: var(--text-md);
+  animation: sp-arrow-glow 3s ease-in-out infinite;
+}
+
+@keyframes sp-arrow-glow {
+  0%, 100% { color: var(--rose-dim); }
+  50% { color: var(--rose-bright); text-shadow: 0 0 6px color-mix(in srgb, var(--rose-bright) 40%, transparent); }
+}
+
+/* Race lanes */
+.sp-race-lanes {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+}
+
+.sp-race-lane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  background: color-mix(in srgb, #fff 2%, transparent);
+}
+
+.sp-race-lane-label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.sp-race-track {
+  width: 100%;
+  height: 4px;
+  background: var(--glass-bg);
+  border-radius: 2px;
+  position: relative;
+  overflow: hidden;
+}
+
+.sp-race-track::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  width: 60%;
+  border-radius: 2px;
+  animation: sp-race-pulse 2.5s ease-in-out infinite;
+}
+
+.sp-race-lane:first-child .sp-race-track::after {
+  background: var(--lane-clay);
+}
+
+.sp-race-lane:last-child .sp-race-track::after {
+  background: var(--success);
+}
+
+@keyframes sp-race-pulse {
+  0%, 100% { width: 30%; opacity: 0.6; }
+  50% { width: 70%; opacity: 1; }
+}
+
+/* Retry loop */
+.sp-retry-loop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sp-retry-icon {
+  font-size: 20px;
+  color: var(--rose-dim);
+  animation: sp-retry-spin 3s ease-in-out infinite;
+}
+
+@keyframes sp-retry-spin {
+  0% { transform: rotate(0deg); }
+  30% { transform: rotate(360deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.sp-retry-label {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+/* Provider grid */
+.sp-provider-grid {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.sp-provider-chip {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 6px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: 3px;
+  background: color-mix(in srgb, #fff 3%, transparent);
+}
+
+/* Category grid (explore) */
+.sp-category-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  width: 100%;
+}
+
+.sp-category-cell {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 6px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: 3px;
+  background: color-mix(in srgb, #fff 2%, transparent);
+  text-align: center;
+}
+
+/* Icon diagrams (simple centered icons with labels) */
+.sp-icon-diagram {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.sp-icon-glyph {
+  font-size: 28px;
+  color: var(--rose-dim);
+  line-height: 1;
+}
+
+.sp-icon-label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+
+/* Transfer diagram (two nodes with arrows) */
+.sp-transfer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sp-transfer-node {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 6px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: 3px;
+  background: color-mix(in srgb, #fff 3%, transparent);
+}
+
+.sp-transfer-arrows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--rose-dim);
+  font-size: var(--text-md);
+  animation: sp-arrow-glow 3s ease-in-out infinite;
+}
+
+/* Chain blocks */
+.sp-chain-blocks {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sp-chain-block {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--glass-border);
+  border-radius: 3px;
+  background: color-mix(in srgb, #fff 3%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-xs);
+  color: var(--rose-dim);
+}
+
+.sp-chain-link {
+  width: 8px;
+  height: 2px;
+  background: var(--glass-border);
+}
+
+/* ── Start button ── */
+
+.sp-start-btn {
+  padding: 12px 28px;
+  border: 1px solid var(--rose-dim);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--rose) 16%, transparent);
+  color: var(--text-strong);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: border-color 200ms var(--ease), background 200ms var(--ease), box-shadow 200ms var(--ease);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--rose) 10%, transparent);
+  align-self: flex-start;
+  animation: sp-stagger-3 500ms var(--ease) both;
+  animation-delay: 400ms;
+}
+
+.sp-start-btn:hover:not(:disabled) {
+  border-color: var(--rose-bright);
+  background: color-mix(in srgb, var(--rose) 24%, transparent);
+  box-shadow: 0 0 28px color-mix(in srgb, var(--rose) 18%, transparent);
+}
+
+.sp-start-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Health indicator */
+.sp-health {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+  animation: sp-stagger-3 500ms var(--ease) both;
+  animation-delay: 450ms;
+}
+
+.sp-health-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+}
+
+.sp-health.connected .sp-health-dot {
+  background: var(--success);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--success) 50%, transparent);
+}
+
+.sp-health.connected {
+  color: var(--success);
+}
+
+.sp-health.checking .sp-health-dot {
+  background: var(--warning);
+}
+
+.sp-health.checking {
+  color: var(--warning);
+}
+
+.sp-health.disconnected .sp-health-dot {
+  background: var(--rose-bright);
+}
+
+.sp-health.disconnected {
+  color: var(--rose-bright);
+}
+
+/* ── Stagger animations ── */
+
+@keyframes sp-stagger-1 {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes sp-stagger-2 {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes sp-stagger-3 {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .sp-overlay,
+  .sp-terminals,
+  .sp-info,
+  .sp-start-btn,
+  .sp-health {
+    animation: none !important;
+  }
+
+  .sp-cursor {
+    animation: none;
+    opacity: 0.7;
+  }
+
+  .sp-flow-arrow {
+    animation: none;
+  }
+
+  .sp-race-track::after {
+    animation: none;
+    width: 50%;
+  }
+
+  .sp-retry-icon {
+    animation: none;
+  }
+
+  .sp-mini-body::before {
+    animation: none;
+  }
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 900px) {
+  .sp-overlay {
+    flex-direction: column;
+    gap: 24px;
+    padding: 24px;
+  }
+
+  .sp-terminals {
+    flex: 0 0 auto;
+    max-width: 100%;
+  }
+
+  .sp-info {
+    flex: 0 0 auto;
+    max-width: 100%;
+  }
+}

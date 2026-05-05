@@ -11,7 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolHandler, ToolResult};
 
-use super::client::{McpContent, McpToolResult};
+use super::client::{McpContent, McpError, McpToolResult};
+use super::error_accumulator::McpErrorAccumulator;
 use super::{McpClient, Transport};
 use crate::dispatcher::HandlerResolver;
 
@@ -22,6 +23,7 @@ const MCP_TOOL_SEPARATOR: &str = ".";
 pub struct McpHandlerResolver<T: Transport> {
     static_resolver: Arc<dyn HandlerResolver>,
     mcp_clients: HashMap<String, Arc<McpClient<T>>>,
+    error_accumulator: Option<McpErrorAccumulator>,
 }
 
 impl<T: Transport> McpHandlerResolver<T> {
@@ -35,7 +37,25 @@ impl<T: Transport> McpHandlerResolver<T> {
         Self {
             static_resolver,
             mcp_clients,
+            error_accumulator: None,
         }
+    }
+
+    /// Attach an error accumulator that records MCP failures for later query.
+    ///
+    /// When set, any MCP tool call that fails (transport or server error) will
+    /// be non-blockingly recorded in the accumulator. The session continues
+    /// regardless — errors are informational.
+    #[must_use]
+    pub fn with_error_accumulator(mut self, accumulator: McpErrorAccumulator) -> Self {
+        self.error_accumulator = Some(accumulator);
+        self
+    }
+
+    /// Borrow the attached error accumulator, if any.
+    #[must_use]
+    pub fn error_accumulator(&self) -> Option<&McpErrorAccumulator> {
+        self.error_accumulator.as_ref()
     }
 }
 
@@ -48,20 +68,27 @@ impl<T: Transport + 'static> HandlerResolver for McpHandlerResolver<T> {
         let (server_name, remote_name) = split_prefixed_tool_name(name)?;
         let client = self.mcp_clients.get(server_name)?;
 
-        Some(Arc::new(McpToolHandler::new(
-            Arc::clone(client),
-            name.to_string(),
-            remote_name.to_string(),
-        )))
+        Some(Arc::new(
+            McpToolHandler::new(
+                Arc::clone(client),
+                name.to_string(),
+                remote_name.to_string(),
+            )
+            .with_error_accumulator_opt(self.error_accumulator.clone()),
+        ))
     }
 }
 
 /// Concrete [`ToolHandler`] that executes a routed MCP tool via
 /// `tools/call`.
+///
+/// When an [`McpErrorAccumulator`] is attached, failures are recorded
+/// non-blockingly so the IDE/ACP session can later report them.
 pub struct McpToolHandler<T: Transport> {
     client: Arc<McpClient<T>>,
     exposed_name: String,
     remote_name: String,
+    error_accumulator: Option<McpErrorAccumulator>,
 }
 
 impl<T: Transport> McpToolHandler<T> {
@@ -76,7 +103,29 @@ impl<T: Transport> McpToolHandler<T> {
             client,
             exposed_name: exposed_name.into(),
             remote_name: remote_name.into(),
+            error_accumulator: None,
         }
+    }
+
+    /// Attach an error accumulator to record failures for later query.
+    #[must_use]
+    pub fn with_error_accumulator(mut self, accumulator: McpErrorAccumulator) -> Self {
+        self.error_accumulator = Some(accumulator);
+        self
+    }
+
+    /// Conditionally attach an error accumulator (convenience for the resolver).
+    #[must_use]
+    fn with_error_accumulator_opt(mut self, accumulator: Option<McpErrorAccumulator>) -> Self {
+        self.error_accumulator = accumulator;
+        self
+    }
+
+    /// Extract the server name from the exposed tool name (the prefix before the dot).
+    fn server_name(&self) -> &str {
+        self.exposed_name
+            .split_once(MCP_TOOL_SEPARATOR)
+            .map_or(&self.exposed_name, |(server, _)| server)
     }
 }
 
@@ -92,11 +141,40 @@ impl<T: Transport + 'static> ToolHandler for McpToolHandler<T> {
             .call_tool(&self.remote_name, call.arguments)
             .await
         {
-            Ok(result) => render_mcp_result(&self.exposed_name, result),
-            Err(err) => ToolResult::err(ToolError::Other(format!(
-                "mcp tool `{}` failed: {err}",
-                self.exposed_name
-            ))),
+            Ok(result) => {
+                // Record server-reported tool errors (isError=true) as well.
+                if result.is_error {
+                    if let Some(ref acc) = self.error_accumulator {
+                        let content = mcp_result_text(&result.content);
+                        acc.record(
+                            self.server_name(),
+                            &self.exposed_name,
+                            if content.is_empty() {
+                                "tool returned an error".to_string()
+                            } else {
+                                content.clone()
+                            },
+                            false,
+                        );
+                    }
+                }
+                render_mcp_result(&self.exposed_name, result)
+            }
+            Err(ref err) => {
+                if let Some(ref acc) = self.error_accumulator {
+                    let is_transport = matches!(err, McpError::Transport(_) | McpError::Json(_));
+                    acc.record(
+                        self.server_name(),
+                        &self.exposed_name,
+                        err.to_string(),
+                        is_transport,
+                    );
+                }
+                ToolResult::err(ToolError::Other(format!(
+                    "mcp tool `{}` failed: {err}",
+                    self.exposed_name
+                )))
+            }
         }
     }
 }
@@ -270,5 +348,101 @@ mod tests {
             McpHandlerResolver::new(Arc::new(|_: &str| None), HashMap::new());
         assert!(resolver.resolve("missing.echo").is_none());
         assert!(resolver.resolve("not-prefixed").is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_handler_accumulates_transport_errors() {
+        // Transport returns no responses → triggers a transport error.
+        let transport = Arc::new(MockTransport::new(vec![]));
+        let client = Arc::new(McpClient::new(Arc::clone(&transport)));
+        let accumulator = McpErrorAccumulator::new();
+
+        let resolver = McpHandlerResolver::new(
+            Arc::new(|_: &str| None),
+            HashMap::from([("git".to_string(), client)]),
+        )
+        .with_error_accumulator(accumulator.clone());
+
+        let handler = resolver.resolve("git.status").expect("handler");
+        let call = ToolCall::new("call-err", "git.status", json!({}));
+        let result = handler
+            .execute(call, &ToolContext::testing("/tmp/mcp-err-test"))
+            .await;
+
+        // The tool result should be an error.
+        assert!(matches!(result, ToolResult::Err(_)));
+
+        // The accumulator should have recorded the error.
+        let errors = accumulator.snapshot();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].server, "git");
+        assert_eq!(errors[0].tool_name, "git.status");
+        assert!(errors[0].is_transport_error);
+        assert!(!errors[0].error_message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_handler_accumulates_server_reported_errors() {
+        // Server returns isError=true in the tool result.
+        let transport = Arc::new(MockTransport::new(vec![ok_response(
+            1,
+            json!({
+                "content": [{"type": "text", "text": "permission denied"}],
+                "isError": true
+            }),
+        )]));
+        let client = Arc::new(McpClient::new(Arc::clone(&transport)));
+        let accumulator = McpErrorAccumulator::new();
+
+        let resolver = McpHandlerResolver::new(
+            Arc::new(|_: &str| None),
+            HashMap::from([("fs".to_string(), client)]),
+        )
+        .with_error_accumulator(accumulator.clone());
+
+        let handler = resolver.resolve("fs.write_file").expect("handler");
+        let call = ToolCall::new("call-2", "fs.write_file", json!({"path": "/etc/passwd"}));
+        let result = handler
+            .execute(call, &ToolContext::testing("/tmp/mcp-err-test2"))
+            .await;
+
+        // Tool result is an error (rendered from isError=true).
+        assert!(matches!(result, ToolResult::Err(_)));
+
+        // Accumulator captures the server-reported error.
+        let errors = accumulator.snapshot();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].server, "fs");
+        assert_eq!(errors[0].tool_name, "fs.write_file");
+        assert!(!errors[0].is_transport_error); // Server error, not transport
+        assert!(errors[0].error_message.contains("permission denied"));
+    }
+
+    #[tokio::test]
+    async fn mcp_handler_does_not_accumulate_on_success() {
+        let transport = Arc::new(MockTransport::new(vec![ok_response(
+            1,
+            json!({
+                "content": [{"type": "text", "text": "file contents here"}],
+                "isError": false
+            }),
+        )]));
+        let client = Arc::new(McpClient::new(Arc::clone(&transport)));
+        let accumulator = McpErrorAccumulator::new();
+
+        let resolver = McpHandlerResolver::new(
+            Arc::new(|_: &str| None),
+            HashMap::from([("fs".to_string(), client)]),
+        )
+        .with_error_accumulator(accumulator.clone());
+
+        let handler = resolver.resolve("fs.read_file").expect("handler");
+        let call = ToolCall::new("call-ok", "fs.read_file", json!({"path": "/tmp/test"}));
+        let result = handler
+            .execute(call, &ToolContext::testing("/tmp/mcp-ok-test"))
+            .await;
+
+        assert_eq!(result, ToolResult::text("file contents here"));
+        assert!(accumulator.is_empty());
     }
 }

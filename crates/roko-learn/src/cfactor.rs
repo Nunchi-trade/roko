@@ -794,7 +794,7 @@ fn episode_model_key(episode: &Episode) -> String {
     if !episode.model.trim().is_empty() {
         episode.model.trim().to_string()
     } else {
-        "unknown-model".to_string()
+        String::new()
     }
 }
 
@@ -1786,19 +1786,19 @@ mod tests {
         cascade_c.agent_id = "agent-c".to_string();
 
         let mut groupthink_1 = episode_at("task-group-1", 6, 5.0, 1_000, true);
-        groupthink_1.model = "claude-haiku-3-5".to_string();
+        groupthink_1.model = "claude-haiku-4-5".to_string();
         groupthink_1.agent_template = "implementer".to_string();
         let mut groupthink_2 = episode_at("task-group-2", 5, 5.0, 1_000, true);
-        groupthink_2.model = "claude-haiku-3-5".to_string();
+        groupthink_2.model = "claude-haiku-4-5".to_string();
         groupthink_2.agent_template = "implementer".to_string();
         let mut groupthink_3 = episode_at("task-group-3", 4, 5.0, 1_000, true);
-        groupthink_3.model = "claude-haiku-3-5".to_string();
+        groupthink_3.model = "claude-haiku-4-5".to_string();
         groupthink_3.agent_template = "implementer".to_string();
         let mut groupthink_4 = episode_at("task-group-4", 3, 5.0, 1_000, true);
-        groupthink_4.model = "claude-haiku-3-5".to_string();
+        groupthink_4.model = "claude-haiku-4-5".to_string();
         groupthink_4.agent_template = "implementer".to_string();
         let mut groupthink_5 = episode_at("task-group-5", 2, 5.0, 1_000, true);
-        groupthink_5.model = "claude-haiku-3-5".to_string();
+        groupthink_5.model = "claude-haiku-4-5".to_string();
         groupthink_5.agent_template = "implementer".to_string();
 
         let mut echo_1 = episode_at("task-echo-1", 1, 5.0, 1_000, false);

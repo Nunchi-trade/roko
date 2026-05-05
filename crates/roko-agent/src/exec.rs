@@ -11,11 +11,12 @@ use crate::process::{
     GRACE_STDIN_CLOSE_MS, benign_stderr_warn_once, classify_benign_stderr, kill_tree,
     register_spawned_pid, set_process_group, unregister_pid,
 };
-use crate::provider::current_safety_layer;
 use crate::safety::SafetyLayer;
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
+use roko_core::tool::ToolResult;
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -32,8 +33,8 @@ use tokio::time::timeout;
 ///
 /// ```ignore
 /// // Echo the prompt back (degenerate but demonstrates flow):
-/// let agent = ExecAgent::new("cat", vec![]);
-/// let prompt = Engram::builder(Kind::Prompt).body(Body::text("ping")).build();
+/// let agent = ExecAgent::new("cat", vec![], SafetyLayer::with_defaults());
+/// let prompt = Signal::builder(Kind::Prompt).body(Body::text("ping")).build();
 /// let result = agent.run(&prompt, &Context::now()).await;
 /// assert_eq!(result.output.body.as_text().unwrap().trim(), "ping");
 /// ```
@@ -42,7 +43,7 @@ pub struct ExecAgent {
     args: Vec<String>,
     env: Vec<(String, String)>,
     current_dir: Option<PathBuf>,
-    safety: Option<SafetyLayer>,
+    safety: SafetyLayer,
     timeout_ms: u64,
     name: String,
 }
@@ -50,7 +51,7 @@ pub struct ExecAgent {
 impl ExecAgent {
     /// An agent that invokes `program` with `args`, piping input on stdin.
     #[must_use]
-    pub fn new(program: impl Into<String>, args: Vec<String>) -> Self {
+    pub fn new(program: impl Into<String>, args: Vec<String>, safety: SafetyLayer) -> Self {
         let program = program.into();
         let name = format!("exec:{program}");
         Self {
@@ -58,8 +59,8 @@ impl ExecAgent {
             args,
             env: Vec::new(),
             current_dir: None,
-            safety: None,
-            timeout_ms: 120_000,
+            safety,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             name,
         }
     }
@@ -108,15 +109,8 @@ impl ExecAgent {
 
     /// Attach a safety layer to the subprocess runtime.
     #[must_use]
-    pub fn with_safety_layer(mut self, safety: Option<SafetyLayer>) -> Self {
+    pub fn with_safety_layer(mut self, safety: SafetyLayer) -> Self {
         self.safety = safety;
-        self
-    }
-
-    /// Attach the safety layer currently scoped to provider-backed construction.
-    #[must_use]
-    pub fn with_current_safety(mut self) -> Self {
-        self.safety = current_safety_layer();
         self
     }
 }
@@ -124,11 +118,9 @@ impl ExecAgent {
 #[async_trait]
 #[allow(clippy::too_many_lines)]
 impl Agent for ExecAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
-        if let Some(safety) = &self.safety
-            && let Err(err) = safety.check_exec_command(&self.program, &self.args)
-        {
+        if let Err(err) = self.safety.check_exec_command(&self.program, &self.args) {
             return self.failure_signal(
                 input,
                 &format!("exec blocked by safety layer: {err}"),
@@ -327,6 +319,17 @@ impl Agent for ExecAgent {
             );
         }
 
+        if let Err(err) = self
+            .safety
+            .check_recovery(&ToolResult::text(stdout.clone()))
+        {
+            return self.failure_signal(
+                input,
+                &format!("exec result blocked by safety layer: {err}"),
+                started,
+            );
+        }
+
         eprintln!(
             "[{}] completed successfully ({elapsed_secs}s, {} bytes)",
             self.name,
@@ -367,7 +370,7 @@ impl Agent for ExecAgent {
 }
 
 impl ExecAgent {
-    fn failure_signal(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
+    fn failure_signal(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = derived_output(input, Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
@@ -381,9 +384,7 @@ impl ExecAgent {
     }
 
     fn scrub_text(&self, content: &str) -> String {
-        self.safety
-            .as_ref()
-            .map_or_else(|| content.to_string(), |safety| safety.scrub_text(content))
+        self.safety.scrub_text(content)
     }
 }
 
@@ -405,13 +406,13 @@ fn maybe_warn_and_filter_benign(name: &str, line: &str) -> bool {
     false
 }
 
-fn stderr_trace(name: &str, stderr: &str) -> Vec<Engram> {
+fn stderr_trace(name: &str, stderr: &str) -> Vec<Signal> {
     stderr
         .lines()
         .filter(|line| !line.trim().is_empty())
         .filter(|line| !maybe_warn_and_filter_benign(name, line))
         .map(|line| {
-            Engram::builder(Kind::AgentMessage)
+            Signal::builder(Kind::AgentMessage)
                 .body(Body::text(line))
                 .provenance(Provenance::agent(name))
                 .tag("stream", "stderr")
@@ -438,13 +439,17 @@ where
 mod tests {
     use super::*;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    }
+
+    fn exec_agent(program: impl Into<String>, args: Vec<String>) -> ExecAgent {
+        ExecAgent::new(program, args, SafetyLayer::with_defaults())
     }
 
     #[tokio::test]
     async fn env_vars_reach_subprocess() {
-        let agent = ExecAgent::new("sh", vec!["-c".into(), "echo $ROKO_TEST_VAR".into()])
+        let agent = exec_agent("sh", vec!["-c".into(), "echo $ROKO_TEST_VAR".into()])
             .with_env_var("ROKO_TEST_VAR", "hello_from_env");
         let result = agent.run(&prompt(""), &Context::now()).await;
         assert!(result.success);
@@ -454,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_env_accepts_iterator() {
-        let agent = ExecAgent::new("sh", vec!["-c".into(), "echo $A-$B".into()])
+        let agent = exec_agent("sh", vec!["-c".into(), "echo $A-$B".into()])
             .with_env([("A", "alpha"), ("B", "beta")]);
         let result = agent.run(&prompt(""), &Context::now()).await;
         assert!(result.success);
@@ -464,7 +469,7 @@ mod tests {
     #[tokio::test]
     async fn current_dir_reaches_subprocess() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let agent = ExecAgent::new("pwd", vec![]).with_current_dir(temp.path());
+        let agent = exec_agent("pwd", vec![]).with_current_dir(temp.path());
         let result = agent.run(&prompt(""), &Context::now()).await;
         assert!(result.success);
         let expected = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
@@ -475,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn cat_echoes_prompt() {
-        let agent = ExecAgent::new("cat", vec![]);
+        let agent = exec_agent("cat", vec![]);
         let result = agent.run(&prompt("roundtrip text"), &Context::now()).await;
         assert!(result.success);
         let out = result.output.body.as_text().unwrap();
@@ -485,7 +490,7 @@ mod tests {
     #[tokio::test]
     async fn exit_code_failure_marks_result_failed() {
         // `false` always exits non-zero.
-        let agent = ExecAgent::new("false", vec![]);
+        let agent = exec_agent("false", vec![]);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
         assert_eq!(result.output.tag("failed"), Some("true"));
@@ -493,7 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn nonexistent_binary_fails_gracefully() {
-        let agent = ExecAgent::new("definitely_not_a_real_binary_xyz", vec![]);
+        let agent = exec_agent("definitely_not_a_real_binary_xyz", vec![]);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
         assert!(
@@ -508,7 +513,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn timeout_fails_result() {
-        let agent = ExecAgent::new("sleep", vec!["10".into()]).with_timeout_ms(100);
+        let agent = exec_agent("sleep", vec!["10".into()]).with_timeout_ms(100);
         let input = prompt("x");
         let ctx = Context::now();
         let run = tokio::spawn(async move { agent.run(&input, &ctx).await });
@@ -521,7 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_tracks_input_as_lineage() {
-        let agent = ExecAgent::new("cat", vec![]);
+        let agent = exec_agent("cat", vec![]);
         let input = prompt("lineage test");
         let input_id = input.id;
         let result = agent.run(&input, &Context::now()).await;
@@ -531,7 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn usage_has_estimated_tokens() {
-        let agent = ExecAgent::new("cat", vec![]);
+        let agent = exec_agent("cat", vec![]);
         let text = "x".repeat(400); // ~100 tokens
         let result = agent.run(&prompt(&text), &Context::now()).await;
         assert!(result.success);
@@ -543,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn stderr_becomes_trace_signals() {
         // Use `sh -c` to emit both stdout and stderr.
-        let agent = ExecAgent::new(
+        let agent = exec_agent(
             "sh",
             vec!["-c".into(), "echo hello; echo 'warning: x' 1>&2".into()],
         );
@@ -560,9 +565,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let sentinel = temp.path().join("sentinel");
         let command = format!("touch {}; rm -rf /", sentinel.display());
-        let agent = ExecAgent::new("sh", vec!["-c".into(), command])
+        let agent = exec_agent("sh", vec!["-c".into(), command])
             .with_current_dir(temp.path())
-            .with_safety_layer(Some(SafetyLayer::with_defaults()));
+            .with_safety_layer(SafetyLayer::with_defaults());
         let result = agent.run(&prompt(""), &Context::now()).await;
         assert!(!result.success);
         assert!(
@@ -578,8 +583,8 @@ mod tests {
 
     #[tokio::test]
     async fn safety_allows_safe_shell_wrapper() {
-        let agent = ExecAgent::new("sh", vec!["-c".into(), "echo ok".into()])
-            .with_safety_layer(Some(SafetyLayer::with_defaults()));
+        let agent = exec_agent("sh", vec!["-c".into(), "echo ok".into()])
+            .with_safety_layer(SafetyLayer::with_defaults());
         let result = agent.run(&prompt(""), &Context::now()).await;
         assert!(result.success);
         assert_eq!(result.output.body.as_text().unwrap().trim(), "ok");
@@ -589,8 +594,8 @@ mod tests {
     async fn safety_scrubs_stdout_and_stderr() {
         let secret = "sk-ant-api03-abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234-AAAAAA";
         let command = format!("printf '%s' '{secret}'; printf '%s\\n' '{secret}' 1>&2");
-        let agent = ExecAgent::new("sh", vec!["-c".into(), command])
-            .with_safety_layer(Some(SafetyLayer::with_defaults()));
+        let agent = exec_agent("sh", vec!["-c".into(), command])
+            .with_safety_layer(SafetyLayer::with_defaults());
         let result = agent.run(&prompt(""), &Context::now()).await;
         assert!(result.success);
         let output = result.output.body.as_text().unwrap();
@@ -604,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn safety_blocks_direct_git_force_push_before_spawn() {
-        let agent = ExecAgent::new(
+        let agent = exec_agent(
             "git",
             vec![
                 "push".into(),
@@ -613,7 +618,7 @@ mod tests {
                 "main".into(),
             ],
         )
-        .with_safety_layer(Some(SafetyLayer::with_defaults()));
+        .with_safety_layer(SafetyLayer::with_defaults());
         let result = agent.run(&prompt(""), &Context::now()).await;
         assert!(!result.success);
         assert!(
@@ -628,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn benign_stderr_is_suppressed_from_trace() {
-        let agent = ExecAgent::new(
+        let agent = exec_agent(
             "sh",
             vec![
                 "-c".into(),

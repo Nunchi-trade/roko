@@ -68,7 +68,7 @@ impl PlanTemplateKind {
         }
     }
 
-    /// Gate strictness guidance for the template.
+    /// Verify strictness guidance for the template.
     #[must_use]
     pub(crate) const fn gate_strictness(self) -> &'static str {
         match self {
@@ -123,16 +123,6 @@ pub enum TaskTier {
 }
 
 impl TaskTier {
-    /// Suggested model for this tier.
-    #[must_use]
-    pub const fn model_hint(&self) -> &'static str {
-        match self {
-            Self::Mechanical => "claude-haiku-4-5",
-            Self::Focused | Self::Integrative => "claude-sonnet-4-6",
-            Self::Architectural => "claude-opus-4-6",
-        }
-    }
-
     /// Maximum lines of code change for this tier.
     #[must_use]
     pub const fn max_loc(&self) -> u32 {
@@ -169,16 +159,16 @@ pub const PLAN_GENERATOR_SYSTEM_PROMPT: &str = r#"You are a task decomposition e
 2. **Precise context**: For each task, specify EXACTLY which files and line ranges to read. Not "read the crate" — "read lines 40-80 of src/lib.rs".
 3. **Executable verification**: Every acceptance criterion is a shell command that exits 0 on success, 1 on failure. No subjective criteria.
 4. **Dependency ordering**: Types before implementations. Implementations before wiring. Wiring before tests.
-5. **Model hints**: Assign the cheapest model that can handle each task. Imports → Haiku. Single function → Sonnet. Multi-module wiring → Opus.
+5. **Model hints**: NEVER set `model_hint`. The runtime selects the right model based on the task `tier`. Hardcoded model names break across providers.
 
 ## Task tiers
 
-| Tier | Name | Max LOC | Model | Examples |
-|------|------|---------|-------|----------|
-| 0 | Mechanical | 20 | haiku | Add import, add struct field, rename function |
-| 1 | Focused | 50 | sonnet | Implement function body, write single test |
-| 2 | Integrative | 150 | sonnet/opus | Wire module A→B, implement trait for type |
-| 3 | Architectural | 300 | opus | Design new API, decompose complex feature |
+| Tier | Name | Max LOC | Examples |
+|------|------|---------|----------|
+| 0 | Mechanical | 20 | Add import, add struct field, rename function |
+| 1 | Focused | 50 | Implement function body, write single test |
+| 2 | Integrative | 150 | Wire module A→B, implement trait for type |
+| 3 | Architectural | 300 | Design new API, decompose complex feature |
 
 ## Output format
 
@@ -187,52 +177,125 @@ Create plan directories with these files:
 ### tasks.toml
 ```toml
 [meta]
-plan = "<slug>"
-total = <N>
+plan = "add-funding-rate"  # MUST match the PRD slug exactly
+total = 3
 done = 0
 status = "ready"
-max_parallel = <N>  # how many can run concurrently
+max_parallel = 1  # default to 1 for safety; only increase when tasks are truly independent
 
 [[task]]
 id = "T1"
-title = "<imperative verb phrase>"
-description = "<short outcome description>"
+title = "Add FundingRate struct to core types"
+description = "Define the FundingRate data structure in roko-core for storing funding rate observations."
 status = "ready"
 tier = "mechanical"       # mechanical | focused | integrative | architectural
-model_hint = "haiku"      # cheapest model for this tier
+# model_hint omitted — runtime picks the best model automatically
 max_loc = 20              # maximum lines of change
-files = ["<path>"]        # files this task modifies
+files = ["crates/roko-core/src/types.rs"]   # REAL file paths only, never <path> or <crate>
 allowed_tools = ["read_file", "grep"]
 denied_tools = []
-mcp_servers = ["filesystem"] # MCP servers this task needs
+# mcp_servers omitted — only include when a task genuinely requires an MCP server
 depends_on = []
+role = "implementer"      # REQUIRED: implementer | architect | researcher | strategist | quick-reviewer | scribe
 
 # SURGICAL CONTEXT: exactly what the agent needs to read
 [task.context]
 read_files = [
-    { path = "<file>", lines = "40-80", why = "<reason>" },
+    { path = "crates/roko-core/src/types.rs", lines = "1-50", why = "Find existing type definitions to follow naming conventions." },
 ]
 symbols = [
-    "<TypeName>::<method> — <brief signature description>",
+    "Signal — existing base type to reference",
 ]
 anti_patterns = [
-    "Do NOT create new files. Modify <file> only.",
+    "Do NOT create new files. Modify crates/roko-core/src/types.rs only.",
 ]
 
 # EXECUTABLE VERIFICATION
 [[task.verify]]
 phase = "structural"
-command = "grep -q 'pattern' path/to/file"
-fail_msg = "Pattern not found in file"
+command = "grep -q 'pub struct FundingRate' crates/roko-core/src/types.rs"
+fail_msg = "FundingRate struct not found"
 
 [[task.verify]]
 phase = "compile"
-command = "cargo check -p <crate>"
+command = "cargo check -p roko-core"
 
 [[task.verify]]
 phase = "test"
-command = "cargo test -p <crate> -- <test_name>"
+command = "cargo test -p roko-core"
+
+[[task]]
+id = "T2"
+title = "Wire FundingRate display into CLI status output"
+description = "Import FundingRate from roko-core and add it to the status command output."
+status = "ready"
+tier = "focused"
+# model_hint omitted — runtime selects automatically
+max_loc = 40
+files = ["crates/roko-cli/src/commands/status.rs"]
+allowed_tools = ["read_file", "grep", "write_file"]
+denied_tools = []
+# mcp_servers omitted — only include when a task genuinely requires an MCP server
+depends_on = ["T1"]
+role = "implementer"
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/commands/status.rs", lines = "1-80", why = "Understand current status output format." },
+    { path = "crates/roko-core/src/types.rs", lines = "1-30", why = "Import the new FundingRate type." },
+]
+symbols = [
+    "StatusOutput — struct that collects status display fields",
+]
+anti_patterns = [
+    "Do NOT modify roko-core. Only change the CLI crate.",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'FundingRate' crates/roko-cli/src/commands/status.rs"
+fail_msg = "FundingRate not referenced in status command"
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli"
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-cli"
 ```
+
+## Role selection
+
+Every `[[task]]` MUST include a `role` field. Choose the most specific role:
+
+| Role | Use when |
+|------|----------|
+| `"implementer"` | Writing code, adding fields, modifying functions, creating files |
+| `"architect"` | Designing APIs, planning module structure, major refactors |
+| `"researcher"` | Gathering information, analyzing existing code, reading docs |
+| `"strategist"` | Decomposing requirements, planning approach, making design decisions |
+| `"scribe"` | Writing documentation, updating comments, generating markdown |
+| `"quick-reviewer"` | Code review tasks, auditing for correctness |
+
+Missing or misspelled roles will be rejected by `roko plan validate`. The `role` field is REQUIRED.
+
+## Role-Tool Constraints
+
+Each role has a default tool permission set. Tasks can further restrict via `allowed_tools`/`denied_tools`.
+
+| Role | Read | Write | Execute | Notes |
+|------|------|-------|---------|-------|
+| `"implementer"` | yes | yes | yes | Full access to modify and build |
+| `"architect"` | yes | yes | yes | Same as implementer but for design-level tasks |
+| `"researcher"` | yes | no | no | Read-only; cannot modify files or run commands |
+| `"strategist"` | yes | no | no | Read-only; planning and analysis only |
+| `"scribe"` | yes | yes | no | Can write docs but cannot execute commands |
+| `"quick-reviewer"` | yes | no | no | Read-only; audits code without changes |
+
+## Model hints
+
+**NEVER set `model_hint`.** The runtime's model-selection chain (cascade router, project config, budget pressure) picks the right model automatically. Setting model_hint hardcodes a provider-specific model name that breaks when users run non-Claude providers.
+
+Always omit the `model_hint` field entirely. The task `tier` field (mechanical/focused/integrative/architectural) already tells the runtime what capability level is needed.
 
 ## Before generating tasks, you MUST:
 
@@ -245,7 +308,7 @@ command = "cargo test -p <crate> -- <test_name>"
    `grep -rn 'feature_keyword' crates/ --include='*.rs' | grep -v target/`
 
 4. For each task, verify the context files actually exist:
-   `test -f <path> && echo "exists" || echo "MISSING"`
+   `test -f crates/roko-core/src/types.rs && echo "exists" || echo "MISSING"`
 
 ## Language detection
 
@@ -255,15 +318,136 @@ Detect the project language and use the right commands:
 - go.mod → Go: `go build`, `go test`, `golangci-lint`
 - pyproject.toml/setup.py → Python: `python -m py_compile`, `pytest`, `ruff`
 
+## Verify steps by role
+
+- **implementer/architect**: MUST have at least 1 structural check + 1 compile check (e.g. `cargo check`)
+- **researcher/strategist**: MUST have only structural checks (e.g. `test -f path/to/output.md`, `grep -q ...`). Do NOT add compile/test verify steps — researcher tasks do not modify code.
+- **scribe/quick-reviewer**: structural checks only (verify docs exist, verify reviewed files haven't changed)
+
 ## Quality gates for YOUR output
 
 Before finalizing, verify your tasks against:
+- [ ] `meta.plan` matches the PRD slug exactly (e.g. slug "add-funding-rate" → `plan = "add-funding-rate"`)
+- [ ] `meta.max_parallel` is 1 unless tasks are truly independent (shared files = not independent)
 - [ ] Every task has ≤ max_loc lines of change for its tier
-- [ ] Every task has at least 1 structural check + 1 compile check
+- [ ] Implementer/architect tasks have at least 1 structural + 1 compile verify step
+- [ ] Researcher/strategist tasks have ONLY structural verify steps (no cargo check, no cargo test)
 - [ ] No task requires reading more than 3 files
 - [ ] Anti-patterns are specific (not generic "be careful")
 - [ ] Dependencies form a DAG (no cycles)
-- [ ] The cheapest possible model is assigned to each task
+- [ ] `model_hint` is NEVER set — runtime selects models from `tier`
+
+## File Path Rules
+
+1. Use CONCRETE file paths: `"crates/my-crate/src/lib.rs"` NOT `"crates/"` or `"crates/*/src/*.rs"`.
+2. Never use bare directory references like `"crates/"` or `"src/"`.
+3. Never use glob patterns like `*` in file paths.
+4. Never output angle-bracket placeholders like `<path>`, `<crate>`, `<file>`, `<module>`, or `<relevant-lib>`.
+5. Every `files` entry, every `path` in `read_files`, and every `cargo` command must reference actual files and crates that exist in the workspace or that the plan explicitly creates.
+6. If a task creates a NEW crate, list the specific files: `"crates/new-crate/src/lib.rs"`, `"crates/new-crate/Cargo.toml"`. Use the PRD slug as the crate name (e.g., slug "btc-funding-alert" → `"crates/btc-funding-alert/src/lib.rs"`).
+7. Researcher tasks that only READ files should still list specific file paths they will inspect.
+
+## Complete Example (end-to-end)
+
+A realistic 3-task plan for "Add health check endpoint to roko-serve":
+
+```toml
+[meta]
+plan = "add-health-check"
+total = 3
+done = 0
+status = "ready"
+max_parallel = 1
+
+[[task]]
+id = "T1"
+title = "Define HealthStatus response type"
+description = "Add a HealthStatus struct with uptime, version, and db_connected fields to the serve types module."
+status = "ready"
+tier = "mechanical"
+max_loc = 15
+files = ["crates/roko-serve/src/types.rs"]
+allowed_tools = ["read_file", "write_file", "grep"]
+denied_tools = []
+depends_on = []
+role = "implementer"
+
+[task.context]
+read_files = [
+    { path = "crates/roko-serve/src/types.rs", lines = "1-40", why = "Find existing response types to follow conventions." },
+]
+symbols = ["AppState — shared state struct to reference for db_connected"]
+anti_patterns = ["Do NOT add new dependencies. Use only std and existing crate types."]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pub struct HealthStatus' crates/roko-serve/src/types.rs"
+fail_msg = "HealthStatus struct not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-serve"
+
+[[task]]
+id = "T2"
+title = "Implement GET /health handler"
+description = "Add an async handler that returns HealthStatus as JSON, wired to the router."
+status = "ready"
+tier = "focused"
+max_loc = 35
+files = ["crates/roko-serve/src/routes/health.rs", "crates/roko-serve/src/routes/mod.rs"]
+allowed_tools = ["read_file", "write_file", "grep"]
+denied_tools = []
+depends_on = ["T1"]
+role = "implementer"
+
+[task.context]
+read_files = [
+    { path = "crates/roko-serve/src/routes/mod.rs", lines = "1-30", why = "Understand router setup to add new route." },
+    { path = "crates/roko-serve/src/types.rs", lines = "1-40", why = "Import HealthStatus type." },
+]
+symbols = ["router() — function where routes are registered"]
+anti_patterns = ["Do NOT modify types.rs. Only add the handler and route registration."]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'health' crates/roko-serve/src/routes/mod.rs"
+fail_msg = "Health route not registered"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-serve"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-serve"
+
+[[task]]
+id = "T3"
+title = "Add integration test for /health endpoint"
+description = "Write a test that starts the server and verifies GET /health returns 200 with valid JSON."
+status = "ready"
+tier = "focused"
+max_loc = 40
+files = ["crates/roko-serve/tests/health_check.rs"]
+allowed_tools = ["read_file", "write_file", "grep"]
+denied_tools = []
+depends_on = ["T2"]
+role = "implementer"
+
+[task.context]
+read_files = [
+    { path = "crates/roko-serve/tests/", lines = "1-50", why = "Follow existing test patterns." },
+    { path = "crates/roko-serve/src/routes/health.rs", lines = "1-40", why = "Know what the handler returns." },
+]
+symbols = ["TestClient — test helper if one exists"]
+anti_patterns = ["Do NOT modify production code. Only add the test file."]
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-serve --test health_check"
+fail_msg = "Integration test failed or not found"
+```
 "#;
 
 /// Build the shared system prompt for plan generation and regeneration.
@@ -365,15 +549,15 @@ pub fn build_regeneration_prompt(workdir: &Path, existing_tasks_toml: &str) -> S
     let _ = writeln!(prompt, "## Task: Regenerate plan\n");
     let _ = writeln!(
         prompt,
-        "The following tasks.toml exists but is missing full metadata (description, tier, model_hint, \
+        "The following tasks.toml exists but is missing full metadata (description, tier, \
          read_files, verify, context, max_loc, mcp_servers). Your job is to read the codebase and fill in \
          every field for each task. Keep the existing id, title, description, and depends_on. Add:\n\
          - `tier` (mechanical/focused/integrative/architectural)\n\
-         - `model_hint` (the cheapest model for that tier)\n\
          - `max_loc` (estimated lines of change)\n\
          - `allowed_tools`, `denied_tools`, and `mcp_servers` (per-task tool/MCP constraints)\n\
          - `[task.context]` with read_files, symbols, anti_patterns\n\
-         - `[[task.verify]]` with at least compile + test checks\n\n\
+         - `[[task.verify]]` with at least compile + test checks\n\
+         Do NOT set `model_hint` — the runtime selects models automatically from the task tier.\n\n\
          ## Existing tasks.toml:\n\n```toml\n{existing_tasks_toml}\n```"
     );
     prompt
@@ -428,10 +612,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tier_model_hints() {
-        assert_eq!(TaskTier::Mechanical.model_hint(), "claude-haiku-4-5");
-        assert_eq!(TaskTier::Focused.model_hint(), "claude-sonnet-4-6");
-        assert_eq!(TaskTier::Architectural.model_hint(), "claude-opus-4-6");
+    fn tier_labels() {
+        assert_eq!(TaskTier::Mechanical.label(), "mechanical");
+        assert_eq!(TaskTier::Focused.label(), "focused");
+        assert_eq!(TaskTier::Integrative.label(), "integrative");
+        assert_eq!(TaskTier::Architectural.label(), "architectural");
     }
 
     #[test]
@@ -452,5 +637,19 @@ mod tests {
         assert!(prompt.contains("Add a logging system"));
         assert!(prompt.contains("Surgical scope"));
         assert!(prompt.contains("/test"));
+    }
+
+    #[test]
+    fn build_generator_system_prompt_never_suggests_model_names() {
+        let prompt = build_generator_system_prompt(std::path::Path::new("/test"));
+
+        assert!(prompt.contains("## Model hints"));
+        assert!(prompt.contains("NEVER set `model_hint`"));
+        // Must NOT contain hardcoded model names that break non-Claude providers.
+        assert!(!prompt.contains("claude-haiku-4-5"));
+        assert!(!prompt.contains("claude-sonnet-4-6"));
+        assert!(!prompt.contains("claude-opus-4-6"));
+        // Tier table is still present.
+        assert!(prompt.contains("| 0 | Mechanical | 20 |"));
     }
 }

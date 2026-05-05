@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::jsonl_cursor::JsonlCursor;
 
-const TASK_OUTPUT_TAIL_CAP: usize = 400;
+const TASK_OUTPUT_TAIL_CAP: usize = roko_core::defaults::DEFAULT_TASK_OUTPUT_TAIL_CAP;
 
 /// Bounded incremental tail manager for per-task output files.
 #[derive(Debug, Clone, Default)]

@@ -24,7 +24,6 @@ use roko_agent_server::{
     AgentRegistration, AgentServer, DispatchError, DispatchLike, RelayClientConfig,
 };
 use roko_cli::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
-use roko_core::config::schema::RokoConfig;
 use roko_core::{Body, Context, Engram, Kind, MessageContent};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -136,6 +135,10 @@ pub enum AgentCmd {
         /// roko-serve base URL.
         #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_URL.to_string())]
         serve_url: String,
+        /// Use a direct API provider instead of sidecar/serve routing.
+        /// Accepted values: anthropic_api, openai_compat.
+        #[arg(long)]
+        provider: Option<String>,
     },
 }
 
@@ -356,7 +359,8 @@ impl AgentServeRuntimeConfig {
 
     fn try_build_dispatcher(&self) -> Result<Option<Arc<dyn DispatchLike>>> {
         let workdir = std::env::current_dir().context("read current working directory")?;
-        let mut config = load_roko_config(&workdir)?;
+        let mut config = roko_core::config::loader::load_config_unified(&workdir)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let model = config.agent.default_model.trim().to_string();
         if model.is_empty() {
@@ -552,19 +556,6 @@ fn extract_prompt(request: &ChatRequest) -> Option<String> {
     })
 }
 
-fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let path = std::env::var_os("ROKO_CONFIG")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| workdir.join("roko.toml"));
-    if !path.exists() {
-        return Ok(RokoConfig::default());
-    }
-
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
-}
-
 /// Run `roko agent ...`.
 pub async fn run(cmd: AgentCmd) -> Result<()> {
     match cmd {
@@ -653,8 +644,10 @@ pub async fn run(cmd: AgentCmd) -> Result<()> {
         } => run_agent_stop(&name, force, workdir.as_deref()),
         AgentCmd::Status { name, workdir } => run_agent_status(&name, workdir.as_deref()),
         AgentCmd::Serve(args) => AgentServeRuntimeConfig::from_args(args).run().await,
-        AgentCmd::Chat { agent, serve_url } => {
-            roko_cli::chat::run_chat_repl(&agent, &serve_url).await?;
+        AgentCmd::Chat {
+            agent, serve_url, ..
+        } => {
+            roko_cli::chat_inline::run_chat_inline(&agent, &serve_url).await?;
             Ok(())
         }
     }
@@ -829,31 +822,124 @@ fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
     // Load runtime state.
     let runtime_entries = load_agent_entries(&wd);
 
-    // Print table header.
-    println!(
-        "{:<20} {:<10} {:<8} {:<22} {}",
-        "NAME", "STATUS", "PID", "BIND", "DOMAIN"
-    );
-
-    for (name, domain) in &agents {
+    // Count active/idle.
+    let mut active = 0u32;
+    let mut idle = 0u32;
+    for (name, _) in &agents {
         let rt = runtime_entries.iter().find(|e| e.name == *name);
-        let (status, pid_str, bind_str) = match rt {
-            Some(entry) if is_process_alive(entry.pid) => (
-                "running".to_string(),
-                entry.pid.to_string(),
-                entry.bind.clone(),
+        if rt.is_some_and(|e| is_process_alive(e.pid)) {
+            active += 1;
+        } else {
+            idle += 1;
+        }
+    }
+
+    // Use inline primitives for formatted output when TTY.
+    if roko_cli::inline::should_use_inline() {
+        let theme = roko_cli::tui::Theme::from_env();
+        let total = agents.len();
+        let mut lines = vec![
+            roko_cli::inline::styled::section_start(
+                &theme,
+                "agents",
+                &format!("{total} registered"),
+                Some(&format!("{active} active, {idle} idle")),
             ),
-            Some(entry) => {
-                // Stale entry — process is dead. We'll clean up later.
-                let _ = entry; // suppress unused warning
-                ("stopped".to_string(), "-".to_string(), "-".to_string())
-            }
-            None => ("created".to_string(), "-".to_string(), "-".to_string()),
-        };
+            ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+                roko_cli::inline::symbols::BAR.to_string(),
+                theme.muted(),
+            )]),
+            ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
+                    roko_cli::inline::symbols::BAR.to_string(),
+                    theme.muted(),
+                ),
+                ratatui::text::Span::raw("  "),
+                ratatui::text::Span::styled(
+                    format!(
+                        "{:<16} {:<12} {:<30} {}",
+                        "NAME", "STATUS", "IDENTITY", "DOMAIN"
+                    ),
+                    theme.muted(),
+                ),
+            ]),
+        ];
+
+        for (name, domain) in &agents {
+            let rt = runtime_entries.iter().find(|e| e.name == *name);
+            let (status_icon, status_label) = if rt.is_some_and(|e| is_process_alive(e.pid)) {
+                ("\u{25cf}", "active") // ● active
+            } else {
+                ("\u{25cb}", "idle") // ○ idle
+            };
+            let identity = format!("eid://roko/{name}");
+
+            lines.push(ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
+                    roko_cli::inline::symbols::BAR.to_string(),
+                    theme.muted(),
+                ),
+                ratatui::text::Span::raw("  "),
+                ratatui::text::Span::styled(format!("{:<16}", name), theme.text()),
+                ratatui::text::Span::styled(
+                    format!("{status_icon} "),
+                    if status_label == "active" {
+                        theme.success()
+                    } else {
+                        theme.muted()
+                    },
+                ),
+                ratatui::text::Span::styled(
+                    format!("{:<10}", status_label),
+                    if status_label == "active" {
+                        theme.success()
+                    } else {
+                        theme.muted()
+                    },
+                ),
+                ratatui::text::Span::styled(
+                    format!("{:<30}", identity),
+                    ratatui::style::Style::default().fg(roko_cli::tui::Theme::DREAM),
+                ),
+                ratatui::text::Span::styled(
+                    domain.to_string(),
+                    ratatui::style::Style::default().fg(roko_cli::tui::Theme::TEXT_DIM),
+                ),
+            ]));
+        }
+
+        lines.push(ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(roko_cli::inline::symbols::BAR.to_string(), theme.muted()),
+        ]));
+        lines.push(roko_cli::inline::styled::section_end(
+            &theme,
+            "",
+            &format!("{total} agent{}", if total == 1 { "" } else { "s" }),
+        ));
+
+        roko_cli::inline::plaintext::print_plain(&lines);
+    } else {
+        // Plain fallback
         println!(
             "{:<20} {:<10} {:<8} {:<22} {}",
-            name, status, pid_str, bind_str, domain
+            "NAME", "STATUS", "PID", "BIND", "DOMAIN"
         );
+        for (name, domain) in &agents {
+            let rt = runtime_entries.iter().find(|e| e.name == *name);
+            let (status, pid_str, bind_str) = match rt {
+                Some(entry) if is_process_alive(entry.pid) => (
+                    "running".to_string(),
+                    entry.pid.to_string(),
+                    entry.bind.clone(),
+                ),
+                Some(_) => ("stopped".to_string(), "-".to_string(), "-".to_string()),
+                None => ("created".to_string(), "-".to_string(), "-".to_string()),
+            };
+            println!(
+                "{:<20} {:<10} {:<8} {:<22} {}",
+                name, status, pid_str, bind_str, domain
+            );
+        }
     }
 
     // Clean up stale entries.

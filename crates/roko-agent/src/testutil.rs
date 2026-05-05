@@ -6,6 +6,7 @@ use crate::dispatcher::{HandlerResolver, ToolDispatcher};
 use crate::exec::ExecAgent;
 use crate::http::{HttpPostError, HttpPoster};
 use crate::openai_compat_backend::OpenAiCompatLlmBackend;
+use crate::safety::SafetyLayer;
 use crate::streaming::StreamChunk;
 use crate::streaming::parse_sse_line;
 use crate::tool_loop::{LlmBackend, StopReason, ToolLoop};
@@ -17,7 +18,7 @@ use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolHandler, ToolPermission,
     ToolRegistry, ToolResult, VecToolRegistry,
 };
-use roko_core::{Body, Context, Engram, Kind};
+use roko_core::{Body, Context, Kind, Signal};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -429,6 +430,7 @@ async fn run_exec_happy_path() -> Result<(), String> {
             "-c".to_string(),
             "printf '%s' \"$ROKO_EXEC_STDOUT\"".to_string(),
         ],
+        SafetyLayer::with_defaults(),
     )
     .with_env_var("ROKO_EXEC_STDOUT", scenario.stdout.clone())
     .run(&input, &Context::now())
@@ -458,7 +460,8 @@ async fn run_llm_streaming(backend: ParityBackend) -> Result<(), String> {
     let messages = prompt_messages("streaming parity");
     let rendered_tools = empty_tools();
     let session = SessionState::default();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
 
     let response = match backend {
         ParityBackend::Codex | ParityBackend::OpenAi => {
@@ -642,6 +645,7 @@ async fn run_exec_error_path() -> Result<(), String> {
                 scenario.exit_code
             ),
         ],
+        SafetyLayer::with_defaults(),
     )
     .with_env_var("ROKO_EXEC_STDERR", scenario.stderr.clone())
     .run(&input, &Context::now())
@@ -1059,13 +1063,22 @@ fn openai_compat_backend_with_base_url(
 }
 
 fn cursor_backend(poster: RecordedPoster) -> CursorAgent {
-    CursorAgent::new("test-key", ParityBackend::Cursor.model()).with_http_poster(Arc::new(poster))
+    CursorAgent::new(
+        "test-key",
+        ParityBackend::Cursor.model(),
+        SafetyLayer::with_defaults(),
+    )
+    .with_http_poster(Arc::new(poster))
 }
 
 fn cursor_backend_with_base_url(base_url: String) -> CursorAgent {
-    CursorAgent::new("test-key", ParityBackend::Cursor.model())
-        .with_base_url(base_url)
-        .with_timeout_ms(5_000)
+    CursorAgent::new(
+        "test-key",
+        ParityBackend::Cursor.model(),
+        SafetyLayer::with_defaults(),
+    )
+    .with_base_url(base_url)
+    .with_timeout_ms(5_000)
 }
 
 fn extract_backend_session(backend: &ParityBackend, response: &BackendResponse) -> SessionState {
@@ -1074,7 +1087,8 @@ fn extract_backend_session(backend: &ParityBackend, response: &BackendResponse) 
             OpenAiCompatLlmBackend::new("test-key", backend.model()).extract_session(response)
         }
         ParityBackend::Cursor => {
-            CursorAgent::new("test-key", backend.model()).extract_session(response)
+            CursorAgent::new("test-key", backend.model(), SafetyLayer::with_defaults())
+                .extract_session(response)
         }
         ParityBackend::Exec => SessionState::default(),
     }
@@ -1091,8 +1105,8 @@ fn prompt_messages(text: &str) -> Vec<Value> {
     vec![json!({ "role": "user", "content": text })]
 }
 
-fn prompt_signal(text: &str) -> Engram {
-    Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+fn prompt_signal(text: &str) -> Signal {
+    Signal::builder(Kind::Prompt).body(Body::text(text)).build()
 }
 
 fn empty_tools() -> RenderedTools {

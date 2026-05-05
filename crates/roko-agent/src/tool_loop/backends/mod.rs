@@ -4,13 +4,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 
 use crate::http::{HttpPostError, HttpPoster};
-use crate::provider::AgentCreationError;
 use crate::provider::openai_compat::{
     base_url_for_tool_loop, build_extra_body_params, max_tokens_for_model, resolve_api_key,
 };
+use crate::provider::{AgentCreationError, current_safety_layer};
 use crate::tool_loop::LlmBackend;
 
 /// Tail-latency hedging for latency-sensitive requests.
@@ -46,16 +49,25 @@ pub fn create_openai_compat_backend(
     poster: Arc<dyn HttpPoster>,
 ) -> Result<Arc<dyn LlmBackend>, AgentCreationError> {
     match provider.kind {
-        ProviderKind::OpenAiCompat => Ok(Arc::new(
-            OpenAiCompatBackend::new(resolve_api_key(provider)?, model.slug.clone())
+        ProviderKind::OpenAiCompat => {
+            let api_key = resolve_api_key(provider)?;
+            let mut backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
                 .with_provider_id(model.provider.clone())
                 .with_base_url(base_url_for_tool_loop(provider))
-                .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
+                .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
                 .with_max_tokens(max_tokens_for_model(model))
                 .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                 .with_extra_body_params(build_extra_body_params(provider, model))
-                .with_poster(Box::new(SharedHttpPoster { inner: poster })),
-        )),
+                .with_skip_session_fields(true)
+                .with_use_max_completion_tokens(model.use_max_completion_tokens)
+                .with_ttft_timeout_ms(provider.ttft_timeout_ms)
+                .with_poster(Box::new(SharedHttpPoster { inner: poster }))
+                .with_provider_kind(provider.kind);
+            if let Some(ref env_var) = provider.api_key_env {
+                backend = backend.with_api_key_env(env_var.clone());
+            }
+            Ok(Arc::new(backend))
+        }
         ProviderKind::AnthropicApi => {
             crate::provider::anthropic_api::tool_loop::create_tool_loop_backend(
                 provider,
@@ -76,15 +88,53 @@ pub fn create_openai_compat_backend(
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.perplexity.ai".to_string());
-            Ok(Arc::new(
-                OpenAiCompatBackend::new(api_key, model.slug.clone())
-                    .with_provider_id(model.provider.clone())
-                    .with_base_url(base_url)
-                    .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
-                    .with_max_tokens(max_tokens_for_model(model))
-                    .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
-                    .with_poster(Box::new(SharedHttpPoster { inner: poster })),
-            ))
+            let mut backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
+                .with_provider_id(model.provider.clone())
+                .with_base_url(base_url)
+                .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
+                .with_max_tokens(max_tokens_for_model(model))
+                .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
+                .with_skip_session_fields(true)
+                .with_use_max_completion_tokens(model.use_max_completion_tokens)
+                .with_ttft_timeout_ms(provider.ttft_timeout_ms)
+                .with_poster(Box::new(SharedHttpPoster { inner: poster }))
+                .with_provider_kind(ProviderKind::PerplexityApi);
+            if let Some(ref env_var) = provider.api_key_env {
+                backend = backend.with_api_key_env(env_var.clone());
+            }
+            Ok(Arc::new(backend))
+        }
+        ProviderKind::CerebrasApi => {
+            // Cerebras exposes an OpenAI-compatible chat completions surface.
+            // Small models need: temperature 0 for determinism, no parallel
+            // tool calls, and content normalization (empty string → null).
+            let api_key = resolve_api_key(provider)?;
+            let base_url = provider
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.cerebras.ai/v1".to_string());
+            let mut extra = build_extra_body_params(provider, model);
+            extra
+                .entry("temperature")
+                .or_insert(serde_json::Value::from(0));
+            let mut backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
+                .with_provider_id(model.provider.clone())
+                .with_base_url(base_url)
+                .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
+                .with_max_tokens(max_tokens_for_model(model))
+                .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
+                .with_extra_body_params(extra)
+                .with_skip_session_fields(true)
+                .with_disable_parallel_tool_calls(true)
+                .with_normalize_tool_call_content(true)
+                .with_use_max_completion_tokens(model.use_max_completion_tokens)
+                .with_ttft_timeout_ms(provider.ttft_timeout_ms)
+                .with_poster(Box::new(SharedHttpPoster { inner: poster }))
+                .with_provider_kind(ProviderKind::CerebrasApi);
+            if let Some(ref env_var) = provider.api_key_env {
+                backend = backend.with_api_key_env(env_var.clone());
+            }
+            Ok(Arc::new(backend))
         }
         ProviderKind::GeminiApi => Err(AgentCreationError::MissingConfig(
             "Gemini tool-loop backend is not implemented yet".into(),
@@ -113,6 +163,7 @@ pub fn create_tool_loop_backend(
                     .unwrap_or("https://generativelanguage.googleapis.com"),
                 model.clone(),
                 options,
+                current_safety_layer().unwrap_or_else(crate::safety::SafetyLayer::with_defaults),
             )))
         }
         ProviderKind::GeminiApi => Err(AgentCreationError::MissingConfig(
@@ -131,7 +182,9 @@ pub fn create_tool_loop_backend(
                 "CLI/ACP backends don't use LlmBackend — they own the tool loop".into(),
             ))
         }
-        ProviderKind::PerplexityApi => create_openai_compat_backend(provider, model, poster),
+        ProviderKind::PerplexityApi | ProviderKind::CerebrasApi => {
+            create_openai_compat_backend(provider, model, poster)
+        }
     }
 }
 
@@ -201,7 +254,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(90_000),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: Some(HashMap::from([(
                 "X-Test-Header".to_string(),
@@ -377,7 +430,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(90_000),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
@@ -406,6 +459,7 @@ mod tests {
             cost_cache_write_per_m: None,
             thinking_level: Some("low".to_string()),
             max_tools: None,
+            max_tool_iterations: None,
             tokenizer_ratio: None,
             supports_search: false,
             supports_citations: false,
@@ -413,6 +467,8 @@ mod tests {
             is_embedding_model: false,
             search_context_size: None,
             cost_per_request: None,
+            use_max_completion_tokens: false,
+            tier: None,
         };
         let backend = create_tool_loop_backend(
             &provider,

@@ -408,6 +408,67 @@ impl KnowledgeStore {
         self.ingest(vec![entry])
     }
 
+    /// Record a failed gate turn as AntiKnowledge.
+    ///
+    /// Similar failures are searched for in the existing store first. If a
+    /// matching anti-pattern is found, its confidence is reinforced instead of
+    /// creating a duplicate record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn record_anti_pattern_from_failure(
+        &self,
+        task_id: &str,
+        task_prompt: &str,
+        gate_name: &str,
+        gate_error: &str,
+        agent_output: Option<&str>,
+    ) -> Result<()> {
+        let candidate = extract_anti_pattern_from_failure(
+            task_id,
+            task_prompt,
+            gate_name,
+            gate_error,
+            agent_output,
+        );
+
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+
+        if let Some(index) = entries.iter().position(|entry| entry.id == candidate.id) {
+            let updated = {
+                let existing = &mut entries[index];
+                reinforce_anti_pattern(existing, &candidate);
+                existing.clone()
+            };
+            self.rewrite_all(&entries)?;
+            tracing::debug!(
+                knowledge_id = %updated.id,
+                "reinforced existing AntiKnowledge from gate failure"
+            );
+            return Ok(());
+        }
+
+        if let Some(index) = find_similar_anti_pattern_index(&entries, &candidate) {
+            let updated = {
+                let existing = &mut entries[index];
+                reinforce_anti_pattern(existing, &candidate);
+                existing.clone()
+            };
+            self.rewrite_all(&entries)?;
+            tracing::debug!(
+                knowledge_id = %updated.id,
+                "reinforced similar AntiKnowledge from gate failure"
+            );
+            return Ok(());
+        }
+
+        entries.push(candidate);
+        self.rewrite_all(&entries)?;
+        Ok(())
+    }
+
     /// NEURO-07: Append entries with source-channel confidence discounting.
     ///
     /// Each entry's confidence is multiplied by the channel's trust discount
@@ -681,6 +742,26 @@ impl KnowledgeStore {
             .into_iter()
             .filter(|entry| entry.tier == tier)
             .collect())
+    }
+
+    /// Return the maximum lightweight similarity between `candidate` and
+    /// existing durable entries.
+    ///
+    /// The score is deterministic and file-local: tag Jaccard overlap plus
+    /// content keyword Jaccard overlap. It is intended for admission
+    /// pre-filtering, not semantic ranking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store cannot be read.
+    pub fn max_similarity(&self, candidate: &KnowledgeEntry) -> Result<f64> {
+        let entries = self.read_all()?;
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.id != candidate.id)
+            .map(|entry| entry_similarity(entry, candidate))
+            .fold(0.0, f64::max)
+            .clamp(0.0, 1.0))
     }
 
     fn query_hits_filtered<F>(
@@ -1134,6 +1215,42 @@ impl KnowledgeStore {
         Ok(found)
     }
 
+    /// NEURO-10: Reinforce a batch of entries in one store rewrite.
+    ///
+    /// Returns the number of entries found and reinforced.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn reinforce_batch(
+        &self,
+        entry_ids: &[&str],
+        signal: crate::ReinforcementSignal,
+        novelty: f64,
+    ) -> Result<usize> {
+        if entry_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let id_set = entry_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .collect::<HashSet<_>>();
+        if id_set.is_empty() {
+            return Ok(0);
+        }
+
+        self.update_entries(|entry| {
+            if id_set.contains(entry.id.as_str()) {
+                entry.reinforce(signal, novelty);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
     /// Score knowledge entries by prediction utility (P0-34).
     ///
     /// When a prediction resolves, entries that were in the context pack should
@@ -1337,6 +1454,90 @@ impl KnowledgeStore {
         Ok(changed)
     }
 
+    /// Adjust the confidence score of a knowledge entry by `delta`.
+    ///
+    /// The resulting confidence is clamped to `[0.0, 1.0]`. If the entry
+    /// is not found, this is a no-op and returns `Ok(false)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn update_confidence(&mut self, knowledge_id: &str, delta: f64) -> Result<bool> {
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut found = false;
+
+        for entry in &mut entries {
+            if entry.id == knowledge_id {
+                entry.confidence = (entry.confidence + delta).clamp(0.0, 1.0);
+                Self::maybe_adjust_tier(entry);
+                found = true;
+                break;
+            }
+        }
+
+        if found {
+            self.rewrite_all(&entries)?;
+        }
+
+        Ok(found)
+    }
+
+    /// Record a usage outcome for a knowledge entry.
+    ///
+    /// Successful usage applies a small positive reinforcement (`+0.02`),
+    /// while failed usage applies a stronger negative signal (`-0.05`).
+    /// Entries that drop below confidence `0.1` after repeated failures are
+    /// candidates for the next garbage-collection pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn record_usage(&mut self, knowledge_id: &str, succeeded: bool) -> Result<()> {
+        let delta = if succeeded { 0.02 } else { -0.05 };
+        self.update_confidence(knowledge_id, delta)?;
+        tracing::debug!(
+            knowledge_id,
+            succeeded,
+            delta,
+            "recorded knowledge usage outcome"
+        );
+        Ok(())
+    }
+
+    /// Record usage outcomes for multiple knowledge entries at once.
+    ///
+    /// More efficient than calling [`Self::record_usage`] in a loop because it
+    /// performs a single load-modify-write cycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn batch_record_usage(&mut self, outcomes: &[(String, bool)]) -> Result<usize> {
+        if outcomes.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut updated_ids = HashSet::new();
+
+        for (knowledge_id, succeeded) in outcomes {
+            let delta = if *succeeded { 0.02 } else { -0.05 };
+            if let Some(entry) = entries.iter_mut().find(|entry| entry.id == *knowledge_id) {
+                entry.confidence = (entry.confidence + delta).clamp(0.0, 1.0);
+                Self::maybe_adjust_tier(entry);
+                updated_ids.insert(knowledge_id.clone());
+            }
+        }
+
+        if !updated_ids.is_empty() {
+            self.rewrite_all(&entries)?;
+        }
+
+        Ok(updated_ids.len())
+    }
+
     /// Read all knowledge entries from the store.
     ///
     /// # Errors
@@ -1437,6 +1638,25 @@ impl KnowledgeStore {
         Ok(())
     }
 
+    /// Check if an entry's confidence warrants tier promotion or demotion.
+    fn maybe_adjust_tier(entry: &mut KnowledgeEntry) {
+        if entry.confidence >= 0.9
+            && entry.tier.multiplier() < KnowledgeTier::Consolidated.multiplier()
+        {
+            entry.tier = KnowledgeTier::Consolidated;
+        }
+
+        if entry.confidence <= 0.2
+            && entry.tier.multiplier() > KnowledgeTier::Transient.multiplier()
+        {
+            entry.tier = KnowledgeTier::Transient;
+        }
+
+        if entry.confidence <= 0.05 {
+            entry.half_life_days = 1.0;
+        }
+    }
+
     fn rewrite_all(&self, entries: &[KnowledgeEntry]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("create knowledge directory")?;
@@ -1511,6 +1731,18 @@ impl NeuroStore for KnowledgeStore {
 
     fn gc(&mut self, min_confidence: f64) -> Result<usize> {
         KnowledgeStore::gc(self, min_confidence)
+    }
+
+    fn update_confidence(&mut self, knowledge_id: &str, delta: f64) -> Result<bool> {
+        KnowledgeStore::update_confidence(self, knowledge_id, delta)
+    }
+
+    fn record_usage(&mut self, knowledge_id: &str, succeeded: bool) -> Result<()> {
+        KnowledgeStore::record_usage(self, knowledge_id, succeeded)
+    }
+
+    fn batch_record_usage(&mut self, outcomes: &[(String, bool)]) -> Result<usize> {
+        KnowledgeStore::batch_record_usage(self, outcomes)
     }
 }
 
@@ -1912,6 +2144,40 @@ fn score_entry_for_query(
     })
 }
 
+fn entry_similarity(existing: &KnowledgeEntry, candidate: &KnowledgeEntry) -> f64 {
+    if existing
+        .content
+        .trim()
+        .eq_ignore_ascii_case(candidate.content.trim())
+        && !existing.content.trim().is_empty()
+    {
+        return 1.0;
+    }
+
+    let existing_tags: HashSet<String> = existing.tags.iter().map(|tag| normalize(tag)).collect();
+    let candidate_tags: HashSet<String> = candidate.tags.iter().map(|tag| normalize(tag)).collect();
+    let tag_score = jaccard_similarity(&existing_tags, &candidate_tags);
+
+    let existing_terms: HashSet<String> = tokenize(&existing.content).into_iter().collect();
+    let candidate_terms: HashSet<String> = tokenize(&candidate.content).into_iter().collect();
+    let keyword_score = jaccard_similarity(&existing_terms, &candidate_terms);
+
+    (tag_score * 0.4 + keyword_score * 0.6).clamp(0.0, 1.0)
+}
+
+fn jaccard_similarity(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 0.0;
+    }
+    let intersection = left.intersection(right).count() as f64;
+    let union = left.union(right).count() as f64;
+    if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
 /// Compare two knowledge entries for topic-level similarity using tag
 /// overlap and content keyword matching. This is deliberately lightweight
 /// (no ML, no embedding) to keep `ingest()` fast.
@@ -2081,6 +2347,275 @@ fn check_against_anti_knowledge(
     result
 }
 
+/// Create an AntiKnowledge entry from a failed gate result.
+///
+/// The entry captures the task context, gate name, failure text, and agent
+/// output snippet so future runs can avoid repeating the same mistake.
+#[must_use]
+pub fn extract_anti_pattern_from_failure(
+    task_id: &str,
+    task_prompt: &str,
+    gate_name: &str,
+    gate_error: &str,
+    agent_output: Option<&str>,
+) -> KnowledgeEntry {
+    let created_at = Utc::now();
+    let task_id = if task_id.trim().is_empty() {
+        "unknown-task"
+    } else {
+        task_id.trim()
+    };
+    let gate_name = if gate_name.trim().is_empty() {
+        "unknown-gate"
+    } else {
+        gate_name.trim()
+    };
+    let gate_name_norm = gate_name.to_ascii_lowercase();
+    let task_prompt_text = task_prompt.trim();
+    let gate_error_text = gate_error.trim();
+    let agent_output_text = agent_output.map(|output| output.trim()).unwrap_or("");
+
+    let task_prompt_snippet = if task_prompt_text.is_empty() {
+        "unknown task prompt".to_string()
+    } else {
+        truncate_snippet(task_prompt_text, 100)
+    };
+    let gate_error_snippet = if gate_error_text.is_empty() {
+        "unknown error".to_string()
+    } else {
+        truncate_snippet(gate_error_text, 240)
+    };
+    let agent_output_snippet = if agent_output_text.is_empty() {
+        None
+    } else {
+        Some(truncate_snippet(agent_output_text, 200))
+    };
+
+    let mut content = format!(
+        "Anti-pattern for task type '{task_prompt_snippet}': Gate '{gate_name}' failed with: {gate_error_snippet}."
+    );
+    if let Some(snippet) = &agent_output_snippet {
+        content.push_str(" Agent output snippet: ");
+        content.push_str(snippet);
+    }
+
+    let mut tags = vec![
+        "bench".to_string(),
+        format!("gate:{gate_name_norm}"),
+        format!("task:{task_id}"),
+    ];
+    tags.extend(classify_compilation_error(gate_error_text));
+    tags.extend(compilation_error_code_tags(gate_error_text));
+    tags.sort();
+    tags.dedup();
+
+    let mut refutation_evidence = format!("Gate '{gate_name}' failed with: {gate_error_snippet}");
+    if let Some(snippet) = &agent_output_snippet {
+        refutation_evidence.push_str(" Agent output snippet: ");
+        refutation_evidence.push_str(snippet);
+    }
+
+    let id_payload = format!(
+        "{task_id}\x1f{task_prompt_text}\x1f{gate_name}\x1f{gate_error_text}\x1f{agent_output_text}"
+    );
+
+    KnowledgeEntry {
+        id: format!("anti-{task_id}-{:016x}", stable_hash(id_payload.as_bytes())),
+        kind: KnowledgeKind::AntiKnowledge,
+        source: Some("bench-gate-failure".to_string()),
+        content,
+        confidence: 0.6,
+        confidence_weight: -0.6,
+        refuted_insight_id: None,
+        refutation_evidence: Some(refutation_evidence),
+        source_episodes: Vec::new(),
+        tags,
+        source_model: None,
+        model_generality: 1.0,
+        created_at,
+        half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+        tier: KnowledgeTier::Transient,
+        emotional_tag: None,
+        emotional_provenance: None,
+        hdc_vector: None,
+        confirmation_count: 0,
+        distinct_contexts: Vec::new(),
+        deprecated: false,
+        balance: 1.0,
+        frozen: false,
+        catalytic_score: 0,
+    }
+}
+
+/// Classify common rustc failure codes into semantic AntiKnowledge tags.
+///
+/// The returned tags are intentionally human-readable so future retrieval can
+/// cluster related failures even when the exact compiler wording changes.
+#[must_use]
+pub fn classify_compilation_error(error: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    if error.contains("E0425") {
+        tags.push("error:unresolved-name".to_string());
+    }
+    if error.contains("E0308") {
+        tags.push("error:type-mismatch".to_string());
+    }
+    if error.contains("E0433") {
+        tags.push("error:unresolved-import".to_string());
+    }
+    if error.contains("E0277") {
+        tags.push("error:trait-not-satisfied".to_string());
+    }
+    tags
+}
+
+const ANTI_PATTERN_DUPLICATE_SIMILARITY_THRESHOLD: f64 = 0.45;
+
+fn compilation_error_code_tags(error: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    if error.contains("E0425") {
+        tags.push("error-code:E0425".to_string());
+    }
+    if error.contains("E0308") {
+        tags.push("error-code:E0308".to_string());
+    }
+    if error.contains("E0433") {
+        tags.push("error-code:E0433".to_string());
+    }
+    if error.contains("E0277") {
+        tags.push("error-code:E0277".to_string());
+    }
+    tags
+}
+
+fn find_similar_anti_pattern_index(
+    entries: &[KnowledgeEntry],
+    candidate: &KnowledgeEntry,
+) -> Option<usize> {
+    let mut best_index: Option<usize> = None;
+    let mut best_similarity = 0.0_f64;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let similarity = anti_pattern_similarity(entry, candidate);
+        if similarity >= ANTI_PATTERN_DUPLICATE_SIMILARITY_THRESHOLD && similarity > best_similarity
+        {
+            best_index = Some(index);
+            best_similarity = similarity;
+        }
+    }
+
+    best_index
+}
+
+fn anti_pattern_similarity(existing: &KnowledgeEntry, candidate: &KnowledgeEntry) -> f64 {
+    if existing.kind != KnowledgeKind::AntiKnowledge
+        || candidate.kind != KnowledgeKind::AntiKnowledge
+    {
+        return 0.0;
+    }
+
+    let Some(gate_tag) = candidate.tags.iter().find(|tag| tag.starts_with("gate:")) else {
+        return 0.0;
+    };
+    if !entry_has_normalized_tag(existing, gate_tag) {
+        return 0.0;
+    }
+
+    entry_similarity(existing, candidate)
+}
+
+fn entry_has_normalized_tag(entry: &KnowledgeEntry, tag: &str) -> bool {
+    let normalized = normalize(tag);
+    entry
+        .tags
+        .iter()
+        .any(|entry_tag| normalize(entry_tag) == normalized)
+}
+
+fn reinforce_anti_pattern(existing: &mut KnowledgeEntry, candidate: &KnowledgeEntry) {
+    existing.confidence = (existing.confidence + 0.1).clamp(0.6, 1.0);
+    existing.confidence_weight = -existing.confidence;
+    existing.confirmation_count = existing.confirmation_count.saturating_add(1);
+    existing.half_life_days = KnowledgeKind::AntiKnowledge.default_half_life_days();
+
+    if existing
+        .source
+        .as_deref()
+        .is_none_or(|source| source.trim().is_empty())
+    {
+        existing.source.clone_from(&candidate.source);
+    }
+    if existing
+        .refutation_evidence
+        .as_deref()
+        .is_none_or(|evidence| evidence.trim().is_empty())
+    {
+        existing
+            .refutation_evidence
+            .clone_from(&candidate.refutation_evidence);
+    }
+
+    if let Some(task_tag) = candidate
+        .tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("task:"))
+    {
+        let task_tag = task_tag.trim();
+        if !task_tag.is_empty()
+            && !existing
+                .distinct_contexts
+                .iter()
+                .any(|context| context.eq_ignore_ascii_case(task_tag))
+        {
+            existing.distinct_contexts.push(task_tag.to_string());
+        }
+    }
+
+    if !candidate.source_episodes.is_empty() {
+        let mut seen: HashSet<String> = existing.source_episodes.iter().cloned().collect();
+        for source_episode in &candidate.source_episodes {
+            if seen.insert(source_episode.clone()) {
+                existing.source_episodes.push(source_episode.clone());
+            }
+        }
+    }
+
+    merge_tags(&mut existing.tags, &candidate.tags);
+    KnowledgeStore::maybe_adjust_tier(existing);
+}
+
+fn merge_tags(existing: &mut Vec<String>, additional: &[String]) {
+    let mut seen: HashSet<String> = existing.iter().cloned().collect();
+    for tag in additional {
+        if seen.insert(tag.clone()) {
+            existing.push(tag.clone());
+        }
+    }
+    existing.sort();
+    existing.dedup();
+}
+
+fn truncate_snippet(content: &str, max_chars: usize) -> String {
+    let mut chars = content.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_none() {
+        content.to_string()
+    } else {
+        format!("{truncated}...")
+    }
+}
+
+fn stable_hash(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2133,6 +2668,83 @@ mod tests {
     }
 
     #[test]
+    fn extract_anti_pattern_from_failure_builds_anti_knowledge_entry() {
+        let entry = extract_anti_pattern_from_failure(
+            "task-42",
+            "repair the compile failure in the Rust workspace",
+            "compile",
+            "error[E0425]: cannot find value `foo` in this scope\nerror[E0308]: mismatched types",
+            Some("let bar = foo();"),
+        );
+
+        assert_eq!(entry.kind, KnowledgeKind::AntiKnowledge);
+        assert_eq!(entry.tier, KnowledgeTier::Transient);
+        assert!((entry.confidence - 0.6).abs() < f64::EPSILON);
+        assert!((entry.confidence_weight + 0.6).abs() < f64::EPSILON);
+        assert_eq!(entry.source.as_deref(), Some("bench-gate-failure"));
+        assert!(entry.content.contains("Anti-pattern for task type"));
+        assert!(entry.content.contains("Gate 'compile' failed with:"));
+        assert!(entry.content.contains("Agent output snippet:"));
+        assert!(entry.tags.contains(&"bench".to_string()));
+        assert!(entry.tags.contains(&"gate:compile".to_string()));
+        assert!(entry.tags.contains(&"task:task-42".to_string()));
+        assert!(entry.tags.contains(&"error:unresolved-name".to_string()));
+        assert!(entry.tags.contains(&"error:type-mismatch".to_string()));
+        assert!(entry.tags.contains(&"error-code:E0425".to_string()));
+        assert!(entry.tags.contains(&"error-code:E0308".to_string()));
+    }
+
+    #[test]
+    fn classify_compilation_error_labels_common_codes() {
+        let tags = classify_compilation_error(
+            "error[E0425]: cannot find value `foo` in this scope\nerror[E0277]: trait bound not satisfied",
+        );
+
+        assert!(tags.contains(&"error:unresolved-name".to_string()));
+        assert!(tags.contains(&"error:trait-not-satisfied".to_string()));
+    }
+
+    #[test]
+    fn record_anti_pattern_from_failure_reinforces_existing_entry() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::for_roko_dir(tmp.path());
+        let task_id = "task-42";
+        let task_prompt = "repair the compile failure in the Rust workspace";
+        let gate_name = "compile";
+        let gate_error = "error[E0425]: cannot find value `foo` in this scope";
+        let agent_output = Some("let bar = foo();");
+
+        let initial = extract_anti_pattern_from_failure(
+            task_id,
+            task_prompt,
+            gate_name,
+            gate_error,
+            agent_output,
+        );
+
+        store.add(initial.clone()).expect("seed anti knowledge");
+        store
+            .record_anti_pattern_from_failure(
+                task_id,
+                task_prompt,
+                gate_name,
+                gate_error,
+                agent_output,
+            )
+            .expect("record repeated failure");
+
+        let entries = store.read_all().expect("read entries");
+        assert_eq!(entries.len(), 1);
+        let updated = &entries[0];
+        assert_eq!(updated.kind, KnowledgeKind::AntiKnowledge);
+        assert!(updated.confidence > initial.confidence);
+        assert!(updated.confidence_weight.is_sign_negative());
+        assert_eq!(updated.confirmation_count, 1);
+        assert!(updated.tags.contains(&"gate:compile".to_string()));
+        assert!(updated.tags.contains(&"task:task-42".to_string()));
+    }
+
+    #[test]
     fn add_query_and_gc_roundtrip() {
         let tmp = TempDir::new().expect("tempdir");
         let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
@@ -2181,6 +2793,112 @@ mod tests {
         let all = store.read_all().expect("read after gc");
         assert_eq!(all.len(), 2);
         assert!(all.iter().all(|entry| entry.id != "k3"));
+    }
+
+    #[test]
+    fn update_confidence_clamps_and_promotes_tier() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let mut knowledge = entry(
+            KnowledgeKind::Insight,
+            "confidence-up",
+            "Confidence reinforcement should promote validated knowledge.",
+            &["confidence"],
+            0.89,
+            &["ep1"],
+            Utc::now(),
+        );
+        knowledge.tier = KnowledgeTier::Working;
+        store.add(knowledge).expect("add knowledge");
+
+        assert!(
+            store
+                .update_confidence("confidence-up", 0.20)
+                .expect("update confidence")
+        );
+        assert!(
+            !store
+                .update_confidence("missing", 0.20)
+                .expect("missing update")
+        );
+
+        let all = store.read_all().expect("read all");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].confidence, 1.0);
+        assert_eq!(all[0].tier, KnowledgeTier::Consolidated);
+    }
+
+    #[test]
+    fn record_usage_demotes_low_confidence_entry() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let mut knowledge = entry(
+            KnowledgeKind::Heuristic,
+            "confidence-down",
+            "Failed usage should reduce confidence.",
+            &["confidence"],
+            0.23,
+            &["ep1"],
+            Utc::now(),
+        );
+        knowledge.tier = KnowledgeTier::Persistent;
+        store.add(knowledge).expect("add knowledge");
+
+        store
+            .record_usage("confidence-down", false)
+            .expect("record usage");
+
+        let all = store.read_all().expect("read all");
+        assert!((all[0].confidence - 0.18).abs() < 1e-9);
+        assert_eq!(all[0].tier, KnowledgeTier::Transient);
+    }
+
+    #[test]
+    fn batch_record_usage_updates_once_and_shortens_weak_entries() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let mut weak = entry(
+            KnowledgeKind::Warning,
+            "weak",
+            "Repeated misses should make this decay quickly.",
+            &["confidence"],
+            0.08,
+            &["ep1"],
+            Utc::now(),
+        );
+        weak.tier = KnowledgeTier::Working;
+        weak.half_life_days = 30.0;
+        let stable = entry(
+            KnowledgeKind::Insight,
+            "stable",
+            "Successful usage should reinforce this entry.",
+            &["confidence"],
+            0.50,
+            &["ep2"],
+            Utc::now(),
+        );
+        store.add(weak).expect("add weak");
+        store.add(stable).expect("add stable");
+
+        let updated = store
+            .batch_record_usage(&[
+                ("weak".to_owned(), false),
+                ("stable".to_owned(), true),
+                ("missing".to_owned(), true),
+            ])
+            .expect("batch record usage");
+
+        assert_eq!(updated, 2);
+        let all = store.read_all().expect("read all");
+        let weak = all.iter().find(|entry| entry.id == "weak").expect("weak");
+        let stable = all
+            .iter()
+            .find(|entry| entry.id == "stable")
+            .expect("stable");
+        assert!((weak.confidence - 0.03).abs() < 1e-9);
+        assert_eq!(weak.tier, KnowledgeTier::Transient);
+        assert_eq!(weak.half_life_days, 1.0);
+        assert!((stable.confidence - 0.52).abs() < 1e-9);
     }
 
     #[test]
@@ -3953,5 +4671,81 @@ mod tests {
         let updated = entries.iter().find(|e| e.id == "thaw-me").unwrap();
         assert!(!updated.frozen);
         assert!((updated.balance - 0.3).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod anti_pattern_tests {
+    use super::*;
+    use crate::{KnowledgeKind, KnowledgeTier};
+
+    #[test]
+    fn test_extract_creates_anti_knowledge() {
+        let entry = extract_anti_pattern_from_failure(
+            "task-1",
+            "Implement add function",
+            "compile",
+            "error[E0425]: cannot find value `x` in this scope",
+            Some("fn add(a: i32, b: i32) -> i32 { x + y }"),
+        );
+
+        assert_eq!(entry.kind, KnowledgeKind::AntiKnowledge);
+        assert_eq!(entry.tier, KnowledgeTier::Transient);
+        assert!(entry.content.contains("compile"));
+        assert!(entry.content.contains("E0425"));
+        assert!(entry.tags.contains(&"gate:compile".to_string()));
+        assert!(entry.tags.contains(&"task:task-1".to_string()));
+        assert!(entry.confidence > 0.0 && entry.confidence <= 1.0);
+    }
+
+    #[test]
+    fn test_extract_without_agent_output() {
+        let entry = extract_anti_pattern_from_failure(
+            "task-2",
+            "Fix imports",
+            "test",
+            "test failed: expected true, got false",
+            None,
+        );
+
+        assert_eq!(entry.kind, KnowledgeKind::AntiKnowledge);
+        assert!(entry.content.contains("test"));
+        assert!(!entry.content.contains("Agent output"));
+    }
+
+    #[test]
+    fn test_extract_tags_include_error_codes() {
+        let entry = extract_anti_pattern_from_failure(
+            "task-3",
+            "Type error task",
+            "compile",
+            "error[E0308]: mismatched types",
+            None,
+        );
+
+        assert!(entry.tags.iter().any(|tag| tag.starts_with("error:")));
+    }
+
+    #[test]
+    fn test_anti_pattern_is_queryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KnowledgeStore::new(dir.path().join("knowledge.jsonl"));
+
+        let entry = extract_anti_pattern_from_failure(
+            "task-4",
+            "Implement iterator",
+            "compile",
+            "error[E0277]: trait bound not satisfied",
+            None,
+        );
+
+        store.add(entry).unwrap();
+
+        let results = store
+            .query_kind("Implement iterator", KnowledgeKind::AntiKnowledge, 5)
+            .unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].kind, KnowledgeKind::AntiKnowledge);
+        assert!(results[0].content.contains("E0277"));
     }
 }

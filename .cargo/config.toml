@@ -1,0 +1,21 @@
+# Roko cargo build optimizations
+# See tmp/DEV-WORKFLOW.md for context
+
+[build]
+# sccache: caches compiled artifacts. Massive win on rebuilds after cargo clean,
+# branch switching, or when deps haven't changed.
+rustc-wrapper = "/opt/homebrew/bin/sccache"
+
+# Parallel frontend threads (nightly only, ignored on stable)
+# rustflags = ["-Z", "threads=8"]
+
+[target.aarch64-apple-darwin]
+# macOS arm64: use lld for faster linking (not mold — doesn't support Mach-O)
+# Uncomment if linking is the bottleneck (check with `cargo build --timings`):
+# rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/lld"]
+
+[registries.crates-io]
+protocol = "sparse"
+
+[net]
+git-fetch-with-cli = true

@@ -1,0 +1,216 @@
+/* CyberneticIntensity -- progressive visual wrapper driven by 0-1 confidence */
+
+.cybernetic-intensity {
+  position: relative;
+  border-radius: var(--radius-md);
+  padding: var(--sp-3);
+  transition: border-color 400ms var(--ease),
+              background 400ms var(--ease),
+              color 400ms var(--ease),
+              box-shadow 400ms var(--ease);
+}
+
+/* ── Label (percentage) ── */
+
+.cybernetic-intensity__label {
+  position: absolute;
+  top: var(--sp-1);
+  right: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  color: var(--text-ghost);
+  pointer-events: none;
+  transition: color 400ms var(--ease);
+}
+
+/* ══════════════════════════════════════════
+   Ghost state  (intensity 0-2)
+   ══════════════════════════════════════════ */
+
+.cybernetic-intensity[data-intensity="0"],
+.cybernetic-intensity[data-intensity="1"],
+.cybernetic-intensity[data-intensity="2"] {
+  border: 1px dotted var(--border-soft);
+  background: transparent;
+  color: var(--text-ghost);
+  box-shadow: none;
+}
+
+.cybernetic-intensity[data-intensity="0"] .cybernetic-intensity__label,
+.cybernetic-intensity[data-intensity="1"] .cybernetic-intensity__label,
+.cybernetic-intensity[data-intensity="2"] .cybernetic-intensity__label {
+  color: var(--text-ghost);
+}
+
+/* ══════════════════════════════════════════
+   Emerging  (intensity 3-4)
+   ══════════════════════════════════════════ */
+
+.cybernetic-intensity[data-intensity="3"],
+.cybernetic-intensity[data-intensity="4"] {
+  border: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--rose-dim) 2%, transparent);
+  color: var(--text-dim);
+  box-shadow: none;
+}
+
+.cybernetic-intensity[data-intensity="3"] .cybernetic-intensity__label,
+.cybernetic-intensity[data-intensity="4"] .cybernetic-intensity__label {
+  color: var(--text-dim);
+}
+
+/* ══════════════════════════════════════════
+   Building  (intensity 5-6)
+   ══════════════════════════════════════════ */
+
+.cybernetic-intensity[data-intensity="5"],
+.cybernetic-intensity[data-intensity="6"] {
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--rose-dim) 4%, transparent);
+  color: var(--text-soft);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--rose-dim) 10%, transparent);
+}
+
+.cybernetic-intensity[data-intensity="5"] .cybernetic-intensity__label,
+.cybernetic-intensity[data-intensity="6"] .cybernetic-intensity__label {
+  color: var(--text-soft);
+}
+
+/* ══════════════════════════════════════════
+   Confident  (intensity 7-8)
+   ══════════════════════════════════════════ */
+
+.cybernetic-intensity[data-intensity="7"],
+.cybernetic-intensity[data-intensity="8"] {
+  border: 1px solid var(--rose-dim);
+  background: color-mix(in srgb, var(--rose-dim) 6%, transparent);
+  color: var(--text-primary);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 20%, transparent);
+}
+
+.cybernetic-intensity[data-intensity="7"] .cybernetic-intensity__label,
+.cybernetic-intensity[data-intensity="8"] .cybernetic-intensity__label {
+  color: var(--text-primary);
+}
+
+/* ══════════════════════════════════════════
+   Crystallized  (intensity 9-10)
+   ══════════════════════════════════════════ */
+
+.cybernetic-intensity[data-intensity="9"],
+.cybernetic-intensity[data-intensity="10"] {
+  border: 1px solid var(--rose-bright);
+  background: color-mix(in srgb, var(--rose-dim) 8%, transparent);
+  color: var(--text-strong);
+  box-shadow: var(--glow-rose-bright);
+  animation: ci-shimmer 3s ease-in-out infinite;
+}
+
+.cybernetic-intensity[data-intensity="9"] .cybernetic-intensity__label,
+.cybernetic-intensity[data-intensity="10"] .cybernetic-intensity__label {
+  color: var(--rose-bright);
+}
+
+/* Sparkle pseudo-elements at crystallized intensity */
+
+.cybernetic-intensity[data-intensity="9"]::before,
+.cybernetic-intensity[data-intensity="10"]::before,
+.cybernetic-intensity[data-intensity="9"]::after,
+.cybernetic-intensity[data-intensity="10"]::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  background: var(--rose-glow);
+  pointer-events: none;
+  opacity: 0;
+  animation: ci-sparkle 2.4s ease-in-out infinite;
+}
+
+.cybernetic-intensity[data-intensity="9"]::before,
+.cybernetic-intensity[data-intensity="10"]::before {
+  width: 3px;
+  height: 3px;
+  top: 15%;
+  right: 12%;
+  animation-delay: 0s;
+}
+
+.cybernetic-intensity[data-intensity="9"]::after,
+.cybernetic-intensity[data-intensity="10"]::after {
+  width: 2px;
+  height: 2px;
+  bottom: 20%;
+  left: 18%;
+  animation-delay: 1.2s;
+}
+
+/* ── Variant overrides ── */
+
+.cybernetic-intensity--background-only {
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+.cybernetic-intensity--border-only {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.cybernetic-intensity--glow-only {
+  border-color: transparent !important;
+  background: transparent !important;
+}
+
+/* ── Keyframes ── */
+
+@keyframes ci-shimmer {
+  0%, 100% {
+    background: color-mix(in srgb, var(--rose-dim) 8%, transparent);
+  }
+  50% {
+    background: color-mix(in srgb, var(--rose-dim) 12%, transparent);
+  }
+}
+
+@keyframes ci-sparkle {
+  0%, 100% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  40% {
+    opacity: 0.8;
+    transform: scale(1.2);
+  }
+  60% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  80% {
+    opacity: 0;
+    transform: scale(0.3) translateY(-4px);
+  }
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .cybernetic-intensity {
+    transition: none;
+  }
+
+  .cybernetic-intensity[data-intensity="9"],
+  .cybernetic-intensity[data-intensity="10"] {
+    animation: none;
+  }
+
+  .cybernetic-intensity[data-intensity="9"]::before,
+  .cybernetic-intensity[data-intensity="10"]::before,
+  .cybernetic-intensity[data-intensity="9"]::after,
+  .cybernetic-intensity[data-intensity="10"]::after {
+    animation: none;
+    display: none;
+  }
+}

@@ -1,0 +1,118 @@
+/* AgentHeartbeat — 3-timescale lifecycle indicator */
+
+.agent-heartbeat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+}
+
+/* ── Dot ── */
+
+.agent-heartbeat__dot {
+  flex-shrink: 0;
+  border-radius: 50%;
+  transition: background var(--duration-smooth), box-shadow var(--duration-smooth);
+}
+
+/* ── Sizes ── */
+
+.agent-heartbeat__dot--8  { width: 8px;  height: 8px; }
+.agent-heartbeat__dot--10 { width: 10px; height: 10px; }
+.agent-heartbeat__dot--12 { width: 12px; height: 12px; }
+.agent-heartbeat__dot--14 { width: 14px; height: 14px; }
+.agent-heartbeat__dot--16 { width: 16px; height: 16px; }
+
+/* ── Status colors ── */
+
+.agent-heartbeat--healthy .agent-heartbeat__dot {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+}
+
+.agent-heartbeat--degraded .agent-heartbeat__dot {
+  background: var(--warning);
+  box-shadow: 0 0 6px var(--warning);
+}
+
+.agent-heartbeat--critical .agent-heartbeat__dot {
+  background: var(--status-error);
+  box-shadow: 0 0 6px var(--status-error);
+}
+
+.agent-heartbeat--offline .agent-heartbeat__dot {
+  background: var(--text-ghost);
+  box-shadow: none;
+}
+
+/* ── Speed animations ── */
+
+.agent-heartbeat--fast .agent-heartbeat__dot {
+  animation: hb-pulse 0.7s ease-in-out infinite;
+}
+
+.agent-heartbeat--medium .agent-heartbeat__dot {
+  animation: hb-breathe 3s ease-in-out infinite;
+}
+
+.agent-heartbeat--slow .agent-heartbeat__dot {
+  animation: hb-slow 8s ease-in-out infinite;
+}
+
+.agent-heartbeat--none .agent-heartbeat__dot {
+  animation: none;
+}
+
+@keyframes hb-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.7;
+  }
+}
+
+@keyframes hb-breathe {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+    box-shadow: 0 0 6px currentColor;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.7;
+    box-shadow: 0 0 10px currentColor;
+  }
+}
+
+@keyframes hb-slow {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+/* ── Label ── */
+
+.agent-heartbeat__label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  line-height: 1;
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-heartbeat--fast .agent-heartbeat__dot,
+  .agent-heartbeat--medium .agent-heartbeat__dot,
+  .agent-heartbeat--slow .agent-heartbeat__dot {
+    animation: none;
+  }
+}

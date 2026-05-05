@@ -145,7 +145,7 @@ fn default_patterns() -> &'static Vec<Pattern> {
     })
 }
 
-// ─── Policy ────────────────────────────────────────────────────────────────
+// ─── React ────────────────────────────────────────────────────────────────
 
 /// Rules describing which patterns to scrub.
 #[derive(Debug, Clone, Default)]

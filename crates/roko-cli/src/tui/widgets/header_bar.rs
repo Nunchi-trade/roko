@@ -74,12 +74,7 @@ fn format_elapsed(secs: u64) -> String {
     }
 }
 
-fn shorten_model(slug: &str) -> String {
-    slug.replace("claude-", "")
-        .replace("sonnet-", "s")
-        .replace("opus-", "o")
-        .replace("haiku-", "h")
-}
+use crate::tui::display_utils::shorten_model;
 
 // ---------------------------------------------------------------------------
 // Public render entry-point

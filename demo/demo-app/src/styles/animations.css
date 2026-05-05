@@ -1,0 +1,146 @@
+/* ===================================================================
+   SHARED ANIMATIONS
+   Consolidated keyframes used across multiple components.
+   Design-system-only keyframes (ambientShift, shimmerMove, etc.)
+   live in rosedust.css.
+   =================================================================== */
+
+/* ── fadeIn ──
+   Used by: rosedust.css (entrance), Explorer.css (.expl-card-detail)
+   Unified duration: 200ms (set at call site via animation shorthand)
+*/
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ── pulse-dot ──
+   Used by: rosedust.css, TopNav.css (.status-dot), Explorer.css (pulse-dot),
+            CostDashboard.tsx (inline style)
+   Unified: 2.4s ease-in-out at call site
+*/
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ── benchlive-pulse ──
+   Used by: Bench.css (.benchlive-dot, .task-running),
+            MatrixBuilder.css (.matrix-cell--running),
+            MatrixDetailView.css (.chip-running)
+*/
+@keyframes benchlive-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px color-mix(in srgb, var(--success) 50%, transparent); }
+  50% { opacity: 0.5; box-shadow: 0 0 12px color-mix(in srgb, var(--success) 80%, transparent); }
+}
+
+/* ── status-blink ──
+   Merged from: conn-blink (Builder.css) + term-dot-blink (Terminal.css)
+   Used by: Builder.css (.conn-dot.connecting), Terminal.css (.term-conn-dot.connecting)
+*/
+@keyframes status-blink {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* ── scaleIn ──
+   Used by: motion/Transition.tsx
+*/
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* ── slideRight ──
+   Used by: motion/Transition.tsx
+*/
+@keyframes slideRight {
+  from { opacity: 0; transform: translateX(-20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ── fadeInUp ──
+   Fade in + slide up. Consolidated from: fadeSlideUp (Settings, Explorer),
+   dash-fadeSlideUp (dashboard), pp-fade-in (PrdPipeline), cellFadeIn (Cell),
+   vtl-fade-in (VerticalTimeline), cellGridFadeUp (CellGrid).
+   Call sites set their own translateY distance via the animation shorthand.
+   Canonical distance: 18px (matches Settings/Explorer).
+*/
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── fadeInDown ──
+   Fade in + slide down (e.g. statusBarFadeIn, dropdowns).
+*/
+@keyframes fadeInDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── breathe ──
+   Gentle opacity+scale cycle. Consolidated from: shareBreathe, dash-breathe,
+   motionBreathe, active-dot-breathe, mark-breathe, focusBreathe, etc.
+   Canonical: 3-4s ease-in-out infinite at call site.
+*/
+@keyframes breathe {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.02); }
+}
+
+/* ── slideIn ──
+   Generic horizontal slide-in (left to right).
+   Consolidated from: feedSlideIn (Bench), bannerSlideIn (Bench),
+   eventSlideIn (Explorer), handoff-slide-in, etc.
+*/
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ── slideInLeft ──
+   Slide from right toward left.
+*/
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ── shimmer ──
+   Background-position sweep for loading/skeleton effects.
+   Consolidated from: motionShimmer, rosedust shimmer, shimmerOverlayMove,
+   bench-bar-shimmer, ebarShimmer, refreshShimmer, shareShimmer.
+*/
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SPEC KEYFRAMES — Required by design spec
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── value-flash ──
+   Brief rosedust highlight on value change.
+*/
+@keyframes value-flash {
+  0%   { background: color-mix(in srgb, var(--rose-bright) 15%, transparent); }
+  100% { background: transparent; }
+}
+
+/* ── line-draw ──
+   SVG path reveal via stroke-dashoffset.
+*/
+@keyframes line-draw {
+  0%   { stroke-dashoffset: 100%; }
+  100% { stroke-dashoffset: 0; }
+}
+
+/* ── error-flash ──
+   Rose flash on failure/error state.
+*/
+@keyframes error-flash {
+  0%   { background: color-mix(in srgb, var(--rose-dim) 20%, transparent); }
+  100% { background: transparent; }
+}

@@ -44,12 +44,15 @@ use crate::agent::{Agent, AgentResult};
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::safety::SafetyLayer;
 use crate::streaming::{StreamAccumulator, StreamChunk, parse_sse_line};
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
-use crate::usage::Usage;
+use crate::usage::{Usage, UsageObservation, UsageSource};
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
+use roko_core::tool::{ToolCall, ToolContext, ToolResult};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -78,12 +81,31 @@ struct AcpMessage {
 }
 
 /// ACP usage block (token counts only — no cache tokens, no cost).
+///
+/// Fields are `Option` so an absent token field stays `None` rather than
+/// silently collapsing to `0`. The distinction is preserved in the
+/// downstream [`UsageObservation`].
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct ApiUsage {
     #[serde(default)]
-    input_tokens: u32,
+    input_tokens: Option<u32>,
     #[serde(default)]
-    output_tokens: u32,
+    output_tokens: Option<u32>,
+}
+
+impl ApiUsage {
+    fn into_observation(self, wall_ms: u64, model: Option<String>) -> UsageObservation {
+        UsageObservation {
+            input_tokens: self.input_tokens.map(u64::from),
+            output_tokens: self.output_tokens.map(u64::from),
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            cost_usd: None,
+            source: UsageSource::ProviderReported,
+            model,
+            wall_ms,
+        }
+    }
 }
 
 /// Top-level Cursor ACP response.
@@ -133,7 +155,7 @@ struct StreamResponseMetadata {
 ///
 /// ```ignore
 /// use roko_agent::cursor_agent::CursorAgent;
-/// let agent = CursorAgent::new("sk-cursor-...", "cursor-composer");
+/// let agent = CursorAgent::new("sk-cursor-...", "cursor-composer", SafetyLayer::with_defaults());
 /// ```
 pub struct CursorAgent {
     api_key: String,
@@ -143,6 +165,7 @@ pub struct CursorAgent {
     timeout_ms: u64,
     protocol_version: String,
     extra_headers: Vec<(String, String)>,
+    safety: SafetyLayer,
     poster: Arc<dyn HttpPoster>,
 }
 
@@ -161,7 +184,7 @@ impl std::fmt::Debug for CursorAgent {
 impl CursorAgent {
     /// Construct a new `CursorAgent` with the given API key and model slug.
     #[must_use]
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(api_key: impl Into<String>, model: impl Into<String>, safety: SafetyLayer) -> Self {
         let model = model.into();
         let name = format!("cursor:{model}");
         Self {
@@ -169,9 +192,10 @@ impl CursorAgent {
             model,
             name,
             base_url: DEFAULT_BASE_URL.to_owned(),
-            timeout_ms: 120_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             protocol_version: DEFAULT_PROTOCOL_VERSION.to_owned(),
             extra_headers: Vec::new(),
+            safety,
             poster: Arc::new(ReqwestPoster::new()),
         }
     }
@@ -326,10 +350,10 @@ impl CursorAgent {
         }
     }
 
-    fn push_stream_line(
+    async fn push_stream_line(
         line: &[u8],
         accumulator: &mut StreamAccumulator,
-        event_tx: &mpsc::UnboundedSender<StreamChunk>,
+        event_tx: &mpsc::Sender<StreamChunk>,
     ) {
         let line = String::from_utf8_lossy(line);
         let line = line.trim_end_matches(['\r', '\n']);
@@ -339,7 +363,7 @@ impl CursorAgent {
 
         if let Some(chunk) = parse_sse_line(line) {
             accumulator.push(chunk.clone());
-            let _ = event_tx.send(chunk);
+            let _ = event_tx.send(chunk).await;
             return;
         }
 
@@ -385,7 +409,7 @@ impl CursorAgent {
         Ok(json)
     }
 
-    fn fail(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
+    fn fail(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -393,16 +417,57 @@ impl CursorAgent {
             .tag("agent", &self.name)
             .tag("failed", "true")
             .build();
-        AgentResult::fail(output).with_usage(Usage {
+        AgentResult::fail(output).with_usage_obs(UsageObservation {
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            cost_usd: None,
+            source: UsageSource::Unknown,
+            model: Some(self.model.clone()),
             wall_ms,
-            ..Default::default()
         })
+    }
+
+    fn check_tool_calls_for_safety(&self, response: &Value) -> Result<(), LlmError> {
+        let Some(calls) = response
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(Value::as_array)
+        else {
+            return Ok(());
+        };
+
+        let tool_ctx = ToolContext::testing(std::env::current_dir().unwrap_or_else(|_| ".".into()));
+        for raw_call in calls {
+            let id = raw_call
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let name = raw_call
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| LlmError::Backend("missing cursor tool call name".into()))?;
+            let args = raw_call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+            let arguments = serde_json::from_str(args)
+                .unwrap_or_else(|_| serde_json::json!({ "__raw_arguments": args }));
+            let call = ToolCall::new(id, name, arguments);
+            if let Err(err) = self.safety.check_pre_execution(&call, &tool_ctx) {
+                return Err(LlmError::Backend(format!(
+                    "cursor tool call blocked by safety layer: {err}"
+                )));
+            }
+        }
+
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Agent for CursorAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -475,15 +540,22 @@ impl Agent for CursorAgent {
         };
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let usage = Usage {
-            input_tokens: parsed.usage.input_tokens,
-            output_tokens: parsed.usage.output_tokens,
-            cache_read_tokens: 0,
-            cache_create_tokens: 0,
-            cost_usd: 0.0,
+        let observation = parsed.usage.into_observation(
             wall_ms,
-        };
+            parsed.model.clone().or_else(|| Some(self.model.clone())),
+        );
 
+        let assistant_text = self.safety.scrub_text(&assistant_text);
+        if let Err(err) = self
+            .safety
+            .check_recovery(&ToolResult::text(assistant_text.clone()))
+        {
+            return self.fail(
+                input,
+                &format!("cursor output blocked by safety layer: {err}"),
+                started,
+            );
+        }
         let mut builder = input
             .derive(Kind::AgentOutput, Body::text(assistant_text))
             .provenance(Provenance::agent(&self.name))
@@ -497,7 +569,7 @@ impl Agent for CursorAgent {
         }
         let output = builder.build();
 
-        AgentResult::ok(output).with_usage(usage)
+        AgentResult::ok(output).with_usage_obs(observation)
     }
 
     fn name(&self) -> &str {
@@ -573,6 +645,7 @@ impl LlmBackend for CursorAgent {
 
         let json = serde_json::from_str(&raw)
             .map_err(|err| LlmError::Backend(format!("parse response: {err}")))?;
+        self.check_tool_calls_for_safety(&json)?;
         Ok(BackendResponse::Json(json))
     }
 
@@ -581,32 +654,38 @@ impl LlmBackend for CursorAgent {
         messages: &[Value],
         tools: &RenderedTools,
         session: &SessionState,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
         let body = self.build_chat_completion_body(messages, tools, session, true)?;
 
-        let mut req = reqwest::Client::new()
+        let mut req = crate::provider::shared_http_client()
             .post(self.chat_completion_endpoint())
             .timeout(Duration::from_millis(self.timeout_ms));
         for (key, value) in self.headers() {
             req = req.header(key, value);
         }
 
-        let response = req.body(body).send().await.map_err(|err| {
-            let message = format!("request failed: {err}");
-            let _ = event_tx.send(StreamChunk::Error(message.clone()));
-            LlmError::Network(message)
-        })?;
+        let response = match req.body(body).send().await {
+            Ok(response) => response,
+            Err(err) => {
+                let message = format!("request failed: {err}");
+                let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                return Err(LlmError::Network(message));
+            }
+        };
 
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.map_err(|err| {
-                let message = format!("read body failed: {err}");
-                let _ = event_tx.send(StreamChunk::Error(message.clone()));
-                LlmError::Network(message)
-            })?;
+            let text = match response.text().await {
+                Ok(text) => text,
+                Err(err) => {
+                    let message = format!("read body failed: {err}");
+                    let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                    return Err(LlmError::Network(message));
+                }
+            };
             let message = crate::http::HttpPostError::http(status.as_u16(), text).to_string();
-            let _ = event_tx.send(StreamChunk::Error(message.clone()));
+            let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
             return Err(LlmError::Network(message));
         }
 
@@ -616,11 +695,14 @@ impl LlmBackend for CursorAgent {
         let mut metadata = StreamResponseMetadata::default();
 
         loop {
-            let chunk = response.chunk().await.map_err(|err| {
-                let message = format!("read chunk failed: {err}");
-                let _ = event_tx.send(StreamChunk::Error(message.clone()));
-                LlmError::Network(message)
-            })?;
+            let chunk = match response.chunk().await {
+                Ok(c) => c,
+                Err(err) => {
+                    let message = format!("read chunk failed: {err}");
+                    let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                    return Err(LlmError::Network(message));
+                }
+            };
             let Some(chunk) = chunk else {
                 break;
             };
@@ -629,16 +711,17 @@ impl LlmBackend for CursorAgent {
             while let Some(newline_idx) = pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = pending.drain(..=newline_idx).collect();
                 Self::capture_stream_metadata(&line, &mut metadata);
-                Self::push_stream_line(&line, &mut accumulator, &event_tx);
+                Self::push_stream_line(&line, &mut accumulator, &event_tx).await;
             }
         }
 
         if !pending.is_empty() {
             Self::capture_stream_metadata(&pending, &mut metadata);
-            Self::push_stream_line(&pending, &mut accumulator, &event_tx);
+            Self::push_stream_line(&pending, &mut accumulator, &event_tx).await;
         }
 
         let json = Self::stream_response_to_json(accumulator.finalize(), metadata)?;
+        self.check_tool_calls_for_safety(&json)?;
         Ok(BackendResponse::Json(json))
     }
 
@@ -729,12 +812,12 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(poster: Arc<dyn HttpPoster>) -> CursorAgent {
-        CursorAgent::new("test-key", "cursor-composer")
+        CursorAgent::new("test-key", "cursor-composer", SafetyLayer::with_defaults())
             .with_base_url("https://example.test")
             .with_http_poster(poster)
     }
@@ -914,7 +997,7 @@ mod tests {
         })
         .to_string();
         let poster = MockPoster::ok(body);
-        let agent = CursorAgent::new("k", "m")
+        let agent = CursorAgent::new("k", "m", SafetyLayer::with_defaults())
             .with_base_url("https://custom.test/api///")
             .with_http_poster(poster.clone());
         assert_eq!(agent.base_url(), "https://custom.test/api");
@@ -931,7 +1014,8 @@ mod tests {
         })
         .to_string();
         let poster = MockPoster::ok(body);
-        let agent = CursorAgent::new("secret-key", "cursor-x").with_http_poster(poster.clone());
+        let agent = CursorAgent::new("secret-key", "cursor-x", SafetyLayer::with_defaults())
+            .with_http_poster(poster.clone());
         let _ = agent.run(&prompt("x"), &Context::now()).await;
         let call = poster.last_call().expect("call recorded");
         let header_map: std::collections::HashMap<String, String> =
@@ -958,7 +1042,7 @@ mod tests {
         })
         .to_string();
         let poster = MockPoster::ok(body);
-        let agent = CursorAgent::new("k", "m")
+        let agent = CursorAgent::new("k", "m", SafetyLayer::with_defaults())
             .with_http_poster(poster.clone())
             .with_timeout_ms(42_000);
         let _ = agent.run(&prompt("x"), &Context::now()).await;
@@ -974,7 +1058,8 @@ mod tests {
         })
         .to_string();
         let poster = MockPoster::ok(body);
-        let agent = CursorAgent::new("k", "my-model").with_http_poster(poster.clone());
+        let agent = CursorAgent::new("k", "my-model", SafetyLayer::with_defaults())
+            .with_http_poster(poster.clone());
         let _ = agent.run(&prompt("hello there"), &Context::now()).await;
         let call = poster.last_call().expect("call recorded");
         let v: serde_json::Value =
@@ -993,7 +1078,7 @@ mod tests {
         })
         .to_string();
         let poster = MockPoster::ok(body);
-        let agent = CursorAgent::new("k", "m")
+        let agent = CursorAgent::new("k", "m", SafetyLayer::with_defaults())
             .with_http_poster(poster.clone())
             .with_protocol_version("acp/2");
         let _ = agent.run(&prompt("x"), &Context::now()).await;
@@ -1027,19 +1112,95 @@ mod tests {
 
     #[tokio::test]
     async fn name_defaults_include_model_prefix() {
-        let agent = CursorAgent::new("k", "cursor-composer");
+        let agent = CursorAgent::new("k", "cursor-composer", SafetyLayer::with_defaults());
         assert_eq!(agent.name(), "cursor:cursor-composer");
     }
 
     #[tokio::test]
     async fn supports_streaming_returns_true() {
-        let agent = CursorAgent::new("k", "m");
+        let agent = CursorAgent::new("k", "m", SafetyLayer::with_defaults());
         assert!(agent.supports_streaming());
     }
 
     #[tokio::test]
     async fn with_name_overrides_default() {
-        let agent = CursorAgent::new("k", "m").with_name("my-cursor-agent");
+        let agent =
+            CursorAgent::new("k", "m", SafetyLayer::with_defaults()).with_name("my-cursor-agent");
         assert_eq!(agent.name(), "my-cursor-agent");
+    }
+
+    #[tokio::test]
+    async fn cursor_usage_distinguishes_absent_from_zero() {
+        // Explicit zeros — observation must be Some(0).
+        let body_zero = serde_json::json!({
+            "session_id": "z",
+            "messages": [
+                {"role": "assistant", "content": "ok"}
+            ],
+            "usage": {"input_tokens": 0, "output_tokens": 0}
+        })
+        .to_string();
+        let agent_zero = agent_with(MockPoster::ok(body_zero));
+        let result_zero = agent_zero.run(&prompt("hi"), &Context::now()).await;
+        let obs_zero = result_zero.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs_zero.input_tokens, Some(0));
+        assert_eq!(obs_zero.output_tokens, Some(0));
+        assert_eq!(obs_zero.source, UsageSource::ProviderReported);
+
+        // Absent: empty usage block — observation must be None.
+        let body_absent = serde_json::json!({
+            "session_id": "a",
+            "messages": [
+                {"role": "assistant", "content": "ok"}
+            ],
+            "usage": {}
+        })
+        .to_string();
+        let agent_absent = agent_with(MockPoster::ok(body_absent));
+        let result_absent = agent_absent.run(&prompt("hi"), &Context::now()).await;
+        let obs_absent = result_absent.usage_obs.expect("usage_obs populated");
+        assert_eq!(obs_absent.input_tokens, None);
+        assert_eq!(obs_absent.output_tokens, None);
+        // Legacy view collapses absent to 0 for back-compat.
+        assert_eq!(result_absent.usage.input_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn cursor_llm_backend_blocks_dangerous_tool_call_before_dispatch() {
+        let poster = MockPoster::ok(
+            serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call-danger",
+                            "type": "function",
+                            "function": {
+                                "name": "bash",
+                                "arguments": "{\"command\":\"rm -rf /\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })
+            .to_string(),
+        );
+        let agent = agent_with(poster);
+
+        let result = agent
+            .send_turn(
+                &[serde_json::json!({"role": "user", "content": "clean up"})],
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+            )
+            .await;
+
+        let err = result.expect_err("dangerous tool call must be blocked");
+        assert!(
+            err.to_string().contains("blocked by safety layer"),
+            "unexpected error: {err}"
+        );
     }
 }

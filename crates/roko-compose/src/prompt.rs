@@ -4,13 +4,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use roko_core::{
-    Body, Budget, Composer, Context, Engram, Kind, Provenance, Scorer,
+    Body, Budget, Compose, Context, Kind, PromptSectionAudit, Provenance, Signal,
     error::{Result, RokoError},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auction::LearningBidder;
+use crate::auction::{
+    AffectModulation, AuctionDiagnostics, LearningBidder, VcgAllocation, VcgBid, vcg_allocate,
+};
 use crate::foraging::{MultiPatchForager, should_stop_searching};
+use crate::strategy::{CompositionStrategy, DEFAULT_VCG_WARMUP_OBSERVATIONS};
 
 /// Estimate token count for a text blob.
 ///
@@ -100,6 +103,9 @@ pub enum AttentionBidder {
 /// A single labeled fragment of a prompt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSection {
+    /// Stable section identifier. Defaults to `prompt:<normalized name>`.
+    #[serde(default)]
+    pub section_id: String,
     /// Human-readable label (e.g. "role", "task", "`workspace_map`").
     pub name: String,
     /// The section's text content.
@@ -118,21 +124,46 @@ pub struct PromptSection {
     /// Which subsystem is bidding for this section's inclusion.
     #[serde(default)]
     pub bidder: AttentionBidder,
+    /// Stable source type key, if the section was derived from a structured source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    /// Stable source identifier, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    /// Compact provenance label. Raw section content must not be copied here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    /// Experiment id that caused this section to be considered, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<String>,
 }
 
 impl PromptSection {
     /// Create a new section with defaults (Normal priority, Plan cache layer, Middle placement).
     #[must_use]
     pub fn new(name: impl Into<String>, content: impl Into<String>) -> Self {
+        let name = name.into();
         Self {
-            name: name.into(),
+            section_id: stable_section_id("prompt", &name, None, None),
+            name,
             content: content.into(),
             priority: SectionPriority::Normal,
             cache_layer: CacheLayer::Plan,
             placement: Placement::Middle,
             hard_cap: None,
             bidder: AttentionBidder::default(),
+            source_type: None,
+            source_id: None,
+            provenance: None,
+            experiment_id: None,
         }
+    }
+
+    /// Override the stable section id.
+    #[must_use]
+    pub fn with_section_id(mut self, section_id: impl Into<String>) -> Self {
+        self.section_id = section_id.into();
+        self
     }
 
     /// Set the priority.
@@ -171,6 +202,97 @@ impl PromptSection {
         self
     }
 
+    /// Attach compact source metadata.
+    #[must_use]
+    pub fn with_source(
+        mut self,
+        source_type: impl Into<String>,
+        source_id: impl Into<String>,
+    ) -> Self {
+        self.source_type = Some(source_type.into());
+        self.source_id = Some(source_id.into());
+        if self.section_id.trim().is_empty()
+            || self.section_id == stable_section_id("prompt", &self.name, None, None)
+        {
+            self.section_id = stable_section_id(
+                "prompt",
+                &self.name,
+                self.source_type.as_deref(),
+                self.source_id.as_deref(),
+            );
+        }
+        self
+    }
+
+    /// Attach compact provenance metadata.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: impl Into<String>) -> Self {
+        self.provenance = Some(provenance.into());
+        self
+    }
+
+    /// Attach an experiment id.
+    #[must_use]
+    pub fn with_experiment_id(mut self, experiment_id: impl Into<String>) -> Self {
+        self.experiment_id = Some(experiment_id.into());
+        self
+    }
+
+    /// Stable action id for future prompt/context bandits.
+    #[must_use]
+    pub fn action_id(&self) -> String {
+        section_action_id(
+            "prompt_section",
+            &self.name,
+            self.source_type.as_deref(),
+            self.source_id.as_deref(),
+            self.experiment_id.as_deref(),
+        )
+    }
+
+    /// Stable section id, deriving one for deserialized legacy sections.
+    #[must_use]
+    pub fn stable_section_id(&self) -> String {
+        if self.section_id.trim().is_empty() {
+            stable_section_id(
+                "prompt",
+                &self.name,
+                self.source_type.as_deref(),
+                self.source_id.as_deref(),
+            )
+        } else {
+            self.section_id.clone()
+        }
+    }
+
+    /// Build a raw-content-free audit row for this section.
+    #[must_use]
+    pub fn audit_row(
+        &self,
+        included: bool,
+        tokens_used: usize,
+        reason: impl Into<String>,
+    ) -> PromptSectionAudit {
+        PromptSectionAudit {
+            section_id: self.stable_section_id(),
+            section_name: self.name.clone(),
+            action_id: self.action_id(),
+            included,
+            estimated_tokens: self.estimated_tokens(),
+            tokens_used,
+            token_budget: self.hard_cap,
+            priority: priority_tag(self.priority).to_string(),
+            cache_layer: cache_tag(self.cache_layer).to_string(),
+            placement: placement_tag(self.placement).to_string(),
+            bidder: bidder_tag(self.bidder).to_string(),
+            source_type: self.source_type.clone(),
+            source_id: self.source_id.clone(),
+            provenance: self.provenance.clone(),
+            experiment_id: self.experiment_id.clone(),
+            reason: reason.into(),
+        }
+    }
+
     /// Approximate token count (≈4 bytes per token).
     #[must_use]
     pub fn estimated_tokens(&self) -> usize {
@@ -206,16 +328,18 @@ impl PromptSection {
         self
     }
 
-    /// Wrap this section in a `Engram<Kind::PromptSection>`.
+    /// Wrap this section in a `Signal<Kind::PromptSection>`.
     ///
     /// # Errors
     ///
     /// Returns an error if the section cannot be serialized to JSON.
-    pub fn into_signal(self) -> Result<Engram> {
+    pub fn into_signal(self) -> Result<Signal> {
         let body = Body::from_json(&self)?;
-        Ok(Engram::builder(Kind::PromptSection)
+        Ok(Signal::builder(Kind::PromptSection)
             .body(body)
             .provenance(Provenance::trusted("prompt_section"))
+            .tag("section_id", self.stable_section_id())
+            .tag("action_id", self.action_id())
             .tag("name", &self.name)
             .tag("priority", priority_tag(self.priority))
             .tag("cache_layer", cache_tag(self.cache_layer))
@@ -228,7 +352,7 @@ impl PromptSection {
     /// # Errors
     ///
     /// Returns an error if the signal body isn't a `PromptSection` JSON value.
-    pub fn from_signal(signal: &Engram) -> Result<Self> {
+    pub fn from_signal(signal: &Signal) -> Result<Self> {
         signal.body.as_json()
     }
 }
@@ -264,9 +388,195 @@ const fn bidder_tag(bidder: AttentionBidder) -> &'static str {
     }
 }
 
-// ─── Composer ──────────────────────────────────────────────────────────────
+const fn placement_tag(placement: Placement) -> &'static str {
+    match placement {
+        Placement::Start => "start",
+        Placement::Middle => "middle",
+        Placement::End => "end",
+    }
+}
 
-/// Assembles `Engram<PromptSection>` inputs into a final `Engram<Prompt>`
+fn stable_section_id(
+    kind: &str,
+    name: &str,
+    source_type: Option<&str>,
+    source_id: Option<&str>,
+) -> String {
+    let mut id = format!("{kind}:{}", normalize_action_part(name));
+    if let Some(source_type) = source_type.and_then(non_empty) {
+        id.push(':');
+        id.push_str(&normalize_action_part(source_type));
+    }
+    if let Some(source_id) = source_id.and_then(non_empty) {
+        id.push(':');
+        id.push_str(&normalize_action_part(source_id));
+    }
+    id
+}
+
+fn section_action_id(
+    kind: &str,
+    name: &str,
+    source_type: Option<&str>,
+    source_id: Option<&str>,
+    experiment_id: Option<&str>,
+) -> String {
+    let mut id = stable_section_id(kind, name, source_type, source_id);
+    if let Some(experiment_id) = experiment_id.and_then(non_empty) {
+        id.push_str("|experiment:");
+        id.push_str(&normalize_action_part(experiment_id));
+    }
+    id
+}
+
+fn normalize_action_part(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_sep = false;
+    for ch in raw.trim().chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_sep = false;
+        } else if !last_sep {
+            out.push('-');
+            last_sep = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Signal tag containing a JSON-encoded [`CompositionManifest`].
+pub const COMPOSITION_MANIFEST_TAG: &str = "composition_manifest";
+
+/// Metadata from one prompt-composition pass.
+///
+/// This is intentionally raw-content-free: it records selection, auction, and
+/// attribution identifiers without copying prompt text into telemetry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompositionManifest {
+    /// Strategy requested by the caller.
+    pub requested_strategy: CompositionStrategy,
+    /// Strategy actually used after `Auto` resolution.
+    pub selected_strategy: CompositionStrategy,
+    /// Sections included in the rendered prompt.
+    pub included: Vec<IncludedSectionMeta>,
+    /// Sections excluded by budget or auction pressure.
+    pub excluded: Vec<ExcludedSectionMeta>,
+    /// VCG diagnostics when the selected strategy is VCG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcg_diagnostics: Option<AuctionDiagnostics>,
+    /// Sum of estimated tokens included in the rendered prompt.
+    pub total_tokens: usize,
+    /// Budget token limit used for selection.
+    pub token_budget_limit: Option<usize>,
+}
+
+impl CompositionManifest {
+    /// Serialize for storage in a Signal tag.
+    #[must_use]
+    pub fn to_tag_value(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Parse a manifest from a Signal tag value.
+    #[must_use]
+    pub fn from_tag_value(value: &str) -> Option<Self> {
+        serde_json::from_str(value).ok()
+    }
+
+    /// VCG payments keyed by section id.
+    #[must_use]
+    pub fn vcg_payments(&self) -> Vec<(String, f64)> {
+        self.included
+            .iter()
+            .filter_map(|section| {
+                section
+                    .vcg_payment
+                    .map(|payment| (section.section_id.clone(), payment))
+            })
+            .collect()
+    }
+
+    /// Included sections in the shape expected by [`crate::CostAttribution`].
+    #[must_use]
+    pub fn included_for_cost_attribution(&self) -> Vec<(String, String, AttentionBidder, usize)> {
+        self.included
+            .iter()
+            .map(|section| {
+                (
+                    section.section_id.clone(),
+                    section.name.clone(),
+                    section.bidder,
+                    section.estimated_tokens,
+                )
+            })
+            .collect()
+    }
+}
+
+/// Included section metadata for composition learning and attribution.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IncludedSectionMeta {
+    /// Stable section id.
+    pub section_id: String,
+    /// Stable action id for bandits/learning.
+    pub action_id: String,
+    /// Human-readable section name.
+    pub name: String,
+    /// Owning subsystem bidder.
+    pub bidder: AttentionBidder,
+    /// Estimated section tokens after hard caps.
+    pub estimated_tokens: usize,
+    /// Base section score before token-density conversion.
+    pub score: f32,
+    /// Selection bid value used by the chosen strategy.
+    pub bid_value: f32,
+    /// VCG payment when selected by VCG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcg_payment: Option<f64>,
+    /// Inclusion reason.
+    pub reason: String,
+}
+
+/// Excluded section metadata for composition diagnostics.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExcludedSectionMeta {
+    /// Stable section id.
+    pub section_id: String,
+    /// Stable action id for bandits/learning.
+    pub action_id: String,
+    /// Human-readable section name.
+    pub name: String,
+    /// Owning subsystem bidder.
+    pub bidder: AttentionBidder,
+    /// Estimated section tokens after hard caps.
+    pub estimated_tokens: usize,
+    /// Base section score before token-density conversion.
+    pub score: f32,
+    /// Selection bid value used by the chosen strategy.
+    pub bid_value: f32,
+    /// Exclusion reason.
+    pub reason: String,
+}
+
+// ─── Compose ──────────────────────────────────────────────────────────────
+
+/// Assembles `Signal<PromptSection>` inputs into a final `Signal<Prompt>`
 /// under a token budget.
 ///
 /// # Algorithm
@@ -274,11 +584,11 @@ const fn bidder_tag(bidder: AttentionBidder) -> &'static str {
 /// 1. Decode all input sections from signal bodies.
 /// 2. Drop any that don't decode (provenance-tainted or wrong kind).
 /// 3. Sort by `cache_layer` ASC (cache-wins first) then priority DESC.
-/// 4. Greedily include sections until budget is exhausted — but NEVER drop
-///    `Critical` priority sections (that's a contract violation).
+/// 4. Allocate optional sections with the configured composition strategy,
+///    but NEVER drop `Critical` priority sections (that's a contract violation).
 /// 5. Order the kept sections by placement (Start → Middle → End), ties
 ///    broken by `cache_layer` order.
-/// 6. Concatenate with section headers, wrap in a `Engram<Kind::Prompt>`.
+/// 6. Concatenate with section headers, wrap in a `Signal<Kind::Prompt>`.
 ///
 /// # Budget
 ///
@@ -289,6 +599,10 @@ pub struct PromptComposer {
     name: String,
     /// Include section headers (e.g. `--- role ---`) in the output.
     include_headers: bool,
+    /// Budget allocation strategy.
+    composition_strategy: CompositionStrategy,
+    /// Minimum observations per active bidder before `Auto` activates VCG.
+    vcg_warmup_observations: u32,
     /// COMP-02: Per-subsystem learning bidders that adjust bids based on
     /// prior task outcomes. When populated, the composer multiplies each
     /// candidate's base bid by the bidder's learned section value.
@@ -316,6 +630,8 @@ impl PromptComposer {
         Self {
             name: "prompt_composer".into(),
             include_headers: true,
+            composition_strategy: CompositionStrategy::Auto,
+            vcg_warmup_observations: DEFAULT_VCG_WARMUP_OBSERVATIONS,
             learning_bidders: HashMap::new(),
             foraging: None,
             hdc_dedup_threshold: 0.0,
@@ -333,6 +649,20 @@ impl PromptComposer {
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
+        self
+    }
+
+    /// Select a budget-allocation strategy.
+    #[must_use]
+    pub const fn with_strategy(mut self, strategy: CompositionStrategy) -> Self {
+        self.composition_strategy = strategy;
+        self
+    }
+
+    /// Configure the `Auto` warmup threshold for VCG activation.
+    #[must_use]
+    pub const fn with_vcg_warmup_observations(mut self, observations: u32) -> Self {
+        self.vcg_warmup_observations = observations;
         self
     }
 
@@ -367,10 +697,56 @@ impl PromptComposer {
         }
     }
 
+    /// Update registered bidders from section-level cost attribution.
+    pub fn update_bidders_with_cost(
+        &mut self,
+        section_costs: &[(AttentionBidder, String, bool, bool, f64, usize)],
+    ) {
+        for (
+            bidder_id,
+            section_name,
+            was_included,
+            gate_passed,
+            attributed_cost_usd,
+            estimated_tokens,
+        ) in section_costs
+        {
+            if let Some(bidder) = self.learning_bidders.get_mut(bidder_id) {
+                bidder.update_with_cost(
+                    section_name,
+                    *was_included,
+                    *gate_passed,
+                    *attributed_cost_usd,
+                    *estimated_tokens,
+                );
+            }
+        }
+    }
+
     /// Borrow the current learning bidders (for persistence).
     #[must_use]
     pub fn learning_bidders(&self) -> &HashMap<AttentionBidder, LearningBidder> {
         &self.learning_bidders
+    }
+
+    fn bidder_observation_counts(
+        &self,
+        candidates: &[AuctionCandidate<'_>],
+    ) -> HashMap<AttentionBidder, u32> {
+        candidates
+            .iter()
+            .map(|candidate| candidate.section.bidder)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .map(|bidder| {
+                let observations = self
+                    .learning_bidders
+                    .get(&bidder)
+                    .map(LearningBidder::observation_count)
+                    .unwrap_or(0);
+                (bidder, observations)
+            })
+            .collect()
     }
 
     // ── COMP-03: MVT foraging pre-pass ──────────────────────────────
@@ -401,14 +777,14 @@ impl PromptComposer {
     }
 }
 
-impl Composer for PromptComposer {
+impl Compose for PromptComposer {
     fn compose(
         &self,
-        signals: &[Engram],
+        signals: &[Signal],
         budget: &Budget,
-        scorer: &dyn Scorer,
+        scorer: &dyn roko_core::traits::Score,
         ctx: &Context,
-    ) -> Result<Engram> {
+    ) -> Result<Signal> {
         // Decode sections; skip anything that doesn't parse. Enforce any
         // per-section hard cap at decode time so downstream accounting
         // reflects the actual bytes that will land in the prompt.
@@ -445,7 +821,7 @@ impl Composer for PromptComposer {
             .max_pulses
             .map_or(usize::MAX, |m| m.saturating_sub(critical.len()));
 
-        let mut kept: Vec<(PromptSection, &Engram)> = critical;
+        let mut kept: Vec<(PromptSection, &Signal)> = critical;
         let mut token_total = critical_tokens;
         let affect = AuctionAffectState::from_context(ctx);
 
@@ -453,15 +829,19 @@ impl Composer for PromptComposer {
         let mut optional = optional
             .into_iter()
             .map(|(section, source_signal)| {
-                let base_density = candidate_bid_density(&section, source_signal, scorer, ctx);
+                let score = candidate_score(&section, source_signal, scorer, ctx);
+                let token_cost = section.estimated_tokens().max(1) as f32;
                 // Multiply by the learning bidder's posterior for this section.
                 let learned_multiplier = self
                     .learning_bidders
                     .get(&section.bidder)
-                    .map(|bidder| bidder.bid(&section.name, 1.0) as f32)
+                    .map(|bidder| bidder.bid_with_cost(&section.name, 1.0) as f32)
                     .unwrap_or(1.0);
+                let bid_value = score * learned_multiplier;
                 AuctionCandidate {
-                    bid_density: base_density * learned_multiplier,
+                    score,
+                    bid_value,
+                    bid_density: bid_value / token_cost,
                     section,
                     source_signal,
                 }
@@ -480,28 +860,41 @@ impl Composer for PromptComposer {
             optional = foraging_prepass(optional, forager);
         }
 
-        optional.sort_by(|a, b| {
-            b.bid_density
-                .partial_cmp(&a.bid_density)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.section.cache_layer.cmp(&b.section.cache_layer))
-                .then_with(|| (b.section.priority as u8).cmp(&(a.section.priority as u8)))
-        });
+        let bidder_observations = self.bidder_observation_counts(&optional);
+        let selected_strategy = self
+            .composition_strategy
+            .resolve(&bidder_observations, self.vcg_warmup_observations);
 
-        let allocation = select_optional_candidates(
-            &optional,
-            remaining_tokens,
-            remaining_signals,
-            affect.as_ref(),
-            None,
-        );
-        let payment_summary = vcg_payment_summary(
-            &optional,
-            &allocation.selected,
-            remaining_tokens,
-            remaining_signals,
-            affect.as_ref(),
-        );
+        let (allocation, payment_summary, vcg_allocation) =
+            if selected_strategy == CompositionStrategy::Vcg {
+                let (allocation, payment_summary, vcg_allocation) =
+                    select_vcg_candidates(&optional, remaining_tokens, remaining_signals, affect);
+                (allocation, payment_summary, Some(vcg_allocation))
+            } else {
+                optional.sort_by(|a, b| {
+                    b.bid_density
+                        .partial_cmp(&a.bid_density)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.section.cache_layer.cmp(&b.section.cache_layer))
+                        .then_with(|| (b.section.priority as u8).cmp(&(a.section.priority as u8)))
+                });
+
+                let allocation = select_optional_candidates(
+                    &optional,
+                    remaining_tokens,
+                    remaining_signals,
+                    affect.as_ref(),
+                    None,
+                );
+                let payment_summary = vcg_payment_summary(
+                    &optional,
+                    &allocation.selected,
+                    remaining_tokens,
+                    remaining_signals,
+                    affect.as_ref(),
+                );
+                (allocation, payment_summary, None)
+            };
 
         for winner in &allocation.selected {
             let candidate = &optional[winner.candidate_index];
@@ -520,6 +913,10 @@ impl Composer for PromptComposer {
             .iter()
             .map(|(section, _)| section.name.clone())
             .collect::<Vec<_>>();
+        let kept_section_action_ids = kept
+            .iter()
+            .map(|(section, _)| section.action_id())
+            .collect::<Vec<_>>();
         let kept_name_set = kept_section_names
             .iter()
             .cloned()
@@ -529,13 +926,34 @@ impl Composer for PromptComposer {
             .filter(|name| !kept_name_set.contains(*name))
             .cloned()
             .collect::<Vec<_>>();
+        let kept_action_id_set = kept_section_action_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<String>>();
+        let dropped_section_action_ids = optional
+            .iter()
+            .filter(|candidate| !kept_action_id_set.contains(&candidate.section.action_id()))
+            .map(|candidate| candidate.section.action_id())
+            .collect::<Vec<_>>();
+        let manifest = build_composition_manifest(
+            self.composition_strategy,
+            selected_strategy,
+            &kept,
+            &optional,
+            &allocation.selected,
+            vcg_allocation.as_ref(),
+            token_total,
+            budget.max_tokens,
+            scorer,
+            ctx,
+        );
 
         // Concatenate.
         let prompt_text = render_sections(&kept, self.include_headers);
 
         // Build the output signal. Lineage = all source signal ids.
         let lineage: Vec<_> = kept.iter().map(|(_, s)| s.id).collect();
-        let sig = Engram::builder(Kind::Prompt)
+        let sig = Signal::builder(Kind::Prompt)
             .body(Body::text(prompt_text))
             .provenance(Provenance::trusted(&self.name))
             .lineage(lineage)
@@ -543,6 +961,12 @@ impl Composer for PromptComposer {
             .tag("sections_decoded", decoded_section_names.len().to_string())
             .tag("sections_dropped", dropped_section_names.len().to_string())
             .tag("tokens", token_total.to_string())
+            .tag("composition_strategy", strategy_tag(selected_strategy))
+            .tag(
+                "composition_strategy_requested",
+                strategy_tag(self.composition_strategy),
+            )
+            .tag(COMPOSITION_MANIFEST_TAG, manifest.to_tag_value())
             .tag(
                 "budget_tokens_limit",
                 budget
@@ -551,6 +975,11 @@ impl Composer for PromptComposer {
             )
             .tag("kept_section_names", kept_section_names.join(","))
             .tag("dropped_section_names", dropped_section_names.join(","))
+            .tag("kept_section_action_ids", kept_section_action_ids.join(","))
+            .tag(
+                "dropped_section_action_ids",
+                dropped_section_action_ids.join(","),
+            )
             .tag("distinct_bidders", bidder_count(&kept).to_string())
             .tag("auction_total_bid", format!("{:.4}", allocation.total_bid))
             .tag(
@@ -596,9 +1025,11 @@ impl Composer for PromptComposer {
 
 #[derive(Clone)]
 struct AuctionCandidate<'a> {
+    score: f32,
+    bid_value: f32,
     bid_density: f32,
     section: PromptSection,
-    source_signal: &'a Engram,
+    source_signal: &'a Signal,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -656,7 +1087,7 @@ struct PaymentSummary {
     highest_payment_section: Option<String>,
 }
 
-fn bidder_count(kept: &[(PromptSection, &Engram)]) -> usize {
+fn bidder_count(kept: &[(PromptSection, &Signal)]) -> usize {
     kept.iter()
         .map(|(section, _)| section.bidder)
         .collect::<HashSet<_>>()
@@ -753,6 +1184,71 @@ fn vcg_payment_summary(
     }
 
     summary
+}
+
+fn select_vcg_candidates(
+    candidates: &[AuctionCandidate<'_>],
+    remaining_tokens: usize,
+    remaining_signals: usize,
+    affect: Option<AuctionAffectState>,
+) -> (AuctionAllocation, PaymentSummary, VcgAllocation) {
+    let modulation = affect
+        .map(AuctionAffectState::to_vcg_modulation)
+        .unwrap_or_default();
+    let bids = candidates
+        .iter()
+        .map(|candidate| {
+            let raw_bid = candidate.bid_value.max(0.0) as f64;
+            let valence = section_valence(&candidate.section);
+            VcgBid {
+                bidder: candidate.section.bidder,
+                section_name: candidate.section.stable_section_id(),
+                tokens: candidate.section.estimated_tokens(),
+                raw_bid,
+                adjusted_bid: modulation.adjust_bid(raw_bid, valence),
+                valence,
+            }
+        })
+        .collect::<Vec<_>>();
+    let vcg_allocation = vcg_allocate(bids, remaining_tokens, &modulation);
+
+    let candidate_by_id = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.section.stable_section_id(), index))
+        .collect::<HashMap<_, _>>();
+    let payment_by_id = vcg_allocation
+        .payments
+        .iter()
+        .cloned()
+        .collect::<HashMap<_, _>>();
+
+    let mut allocation = AuctionAllocation::default();
+    let mut summary = PaymentSummary::default();
+    for winner in vcg_allocation.winners.iter().take(remaining_signals) {
+        let Some(candidate_index) = candidate_by_id.get(&winner.section_name).copied() else {
+            continue;
+        };
+        let adjusted_bid = winner.adjusted_bid as f32;
+        allocation.total_bid += adjusted_bid;
+        allocation.selected.push(SelectedCandidate {
+            candidate_index,
+            adjusted_bid,
+        });
+
+        let payment = payment_by_id
+            .get(&winner.section_name)
+            .copied()
+            .unwrap_or(0.0) as f32;
+        summary.total_payments += payment;
+        if payment > summary.highest_payment_value {
+            summary.highest_payment_value = payment;
+            summary.highest_payment_section =
+                Some(candidates[candidate_index].section.name.clone());
+        }
+    }
+
+    (allocation, summary, vcg_allocation)
 }
 
 fn effective_candidate_bid(
@@ -890,6 +1386,12 @@ fn bidder_affect_multiplier(section: &PromptSection, affect: Option<&AuctionAffe
     urgency * affect_weight * subsystem_bias
 }
 
+impl AuctionAffectState {
+    fn to_vcg_modulation(self) -> AffectModulation {
+        AffectModulation::from_pad(self.pleasure as f64, self.arousal as f64)
+    }
+}
+
 fn keyword_weight(text: &str, keywords: &[&str]) -> f32 {
     if keywords.iter().any(|keyword| text.contains(keyword)) {
         1.0
@@ -898,21 +1400,171 @@ fn keyword_weight(text: &str, keywords: &[&str]) -> f32 {
     }
 }
 
-fn candidate_bid_density(
+fn section_valence(section: &PromptSection) -> f64 {
+    let text = format!(
+        "{} {}",
+        section.name.to_ascii_lowercase(),
+        section.content.to_ascii_lowercase()
+    );
+    let positive = keyword_weight(
+        &text,
+        &[
+            "success",
+            "passed",
+            "proven",
+            "stable",
+            "known good",
+            "opportunity",
+        ],
+    );
+    let negative = keyword_weight(
+        &text,
+        &[
+            "failure",
+            "failed",
+            "error",
+            "warning",
+            "risk",
+            "regression",
+            "threat",
+        ],
+    );
+    (positive as f64 - negative as f64).clamp(-1.0, 1.0)
+}
+
+fn strategy_tag(strategy: CompositionStrategy) -> &'static str {
+    match strategy {
+        CompositionStrategy::Auto => "auto",
+        CompositionStrategy::DensityGreedy => "density_greedy",
+        CompositionStrategy::WeightedSum => "weighted_sum",
+        CompositionStrategy::Vcg => "vcg",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_composition_manifest(
+    requested_strategy: CompositionStrategy,
+    selected_strategy: CompositionStrategy,
+    kept: &[(PromptSection, &Signal)],
+    optional: &[AuctionCandidate<'_>],
+    selected: &[SelectedCandidate],
+    vcg_allocation: Option<&VcgAllocation>,
+    total_tokens: usize,
+    token_budget_limit: Option<usize>,
+    scorer: &dyn roko_core::traits::Score,
+    ctx: &Context,
+) -> CompositionManifest {
+    let selected_indices = selected
+        .iter()
+        .map(|winner| winner.candidate_index)
+        .collect::<HashSet<_>>();
+    let optional_by_id = optional
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.section.stable_section_id(), (index, candidate)))
+        .collect::<HashMap<_, _>>();
+    let adjusted_bid_by_index = selected
+        .iter()
+        .map(|winner| (winner.candidate_index, winner.adjusted_bid))
+        .collect::<HashMap<_, _>>();
+    let payment_by_id = vcg_allocation
+        .map(|allocation| {
+            allocation
+                .payments
+                .iter()
+                .cloned()
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let included = kept
+        .iter()
+        .map(|(section, source_signal)| {
+            let section_id = section.stable_section_id();
+            if let Some((index, candidate)) = optional_by_id.get(&section_id).copied() {
+                let bid_value = adjusted_bid_by_index
+                    .get(&index)
+                    .copied()
+                    .unwrap_or(candidate.bid_value);
+                IncludedSectionMeta {
+                    section_id: section_id.clone(),
+                    action_id: section.action_id(),
+                    name: section.name.clone(),
+                    bidder: section.bidder,
+                    estimated_tokens: section.estimated_tokens(),
+                    score: candidate.score,
+                    bid_value,
+                    vcg_payment: payment_by_id.get(&section_id).copied(),
+                    reason: if selected_strategy == CompositionStrategy::Vcg {
+                        "selected_by_vcg".to_string()
+                    } else {
+                        "selected_by_density".to_string()
+                    },
+                }
+            } else {
+                let score = candidate_score(section, source_signal, scorer, ctx);
+                IncludedSectionMeta {
+                    section_id,
+                    action_id: section.action_id(),
+                    name: section.name.clone(),
+                    bidder: section.bidder,
+                    estimated_tokens: section.estimated_tokens(),
+                    score,
+                    bid_value: score,
+                    vcg_payment: None,
+                    reason: "critical".to_string(),
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let excluded = optional
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !selected_indices.contains(index))
+        .map(|(_, candidate)| {
+            let section_id = candidate.section.stable_section_id();
+            ExcludedSectionMeta {
+                section_id,
+                action_id: candidate.section.action_id(),
+                name: candidate.section.name.clone(),
+                bidder: candidate.section.bidder,
+                estimated_tokens: candidate.section.estimated_tokens(),
+                score: candidate.score,
+                bid_value: candidate.bid_value,
+                reason: if selected_strategy == CompositionStrategy::Vcg {
+                    "excluded_by_vcg".to_string()
+                } else {
+                    "dropped_by_density_budget".to_string()
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    CompositionManifest {
+        requested_strategy,
+        selected_strategy,
+        included,
+        excluded,
+        vcg_diagnostics: vcg_allocation.map(|allocation| allocation.diagnostics.clone()),
+        total_tokens,
+        token_budget_limit,
+    }
+}
+
+fn candidate_score(
     section: &PromptSection,
-    signal: &Engram,
-    scorer: &dyn Scorer,
+    signal: &Signal,
+    scorer: &dyn roko_core::traits::Score,
     ctx: &Context,
 ) -> f32 {
     let score = scorer.score(signal, ctx);
     let learned = score.effective();
     let fallback = fallback_section_score(section, signal, ctx);
-    let value = learned.max(fallback);
-    let token_cost = section.estimated_tokens().max(1) as f32;
-    value / token_cost
+    learned.max(fallback)
 }
 
-fn fallback_section_score(section: &PromptSection, signal: &Engram, ctx: &Context) -> f32 {
+fn fallback_section_score(section: &PromptSection, signal: &Signal, ctx: &Context) -> f32 {
     let priority = match section.priority {
         SectionPriority::Critical => 1.0,
         SectionPriority::High => 0.82,
@@ -1071,7 +1723,7 @@ pub enum ContextStrategy {
 /// Matches Mori's `PromptBuild` in `apps/mori/src/orchestrator/prompts/assembly.rs`.
 /// Used by agent spawners to attach the prompt to a turn while recording
 /// metadata for observability (cache hit rate, playbook retrieval count, etc.).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PromptBuild {
     /// The assembled prompt text.
     pub prompt: String,
@@ -1087,6 +1739,12 @@ pub struct PromptBuild {
     pub sections_kept: usize,
     /// Number of sections dropped by budget pressure.
     pub sections_dropped: usize,
+    /// Raw-content-free section audit rows for kept and dropped sections.
+    #[serde(default)]
+    pub section_metadata: Vec<PromptSectionAudit>,
+    /// Raw-content-free auction/selection metadata for this build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition_manifest: Option<CompositionManifest>,
 }
 
 impl PromptBuild {
@@ -1103,6 +1761,8 @@ impl PromptBuild {
             tokens,
             sections_kept: 0,
             sections_dropped: 0,
+            section_metadata: Vec::new(),
+            composition_manifest: None,
         }
     }
 
@@ -1134,6 +1794,20 @@ impl PromptBuild {
         self.sections_dropped = dropped;
         self
     }
+
+    /// Record raw-content-free section metadata.
+    #[must_use]
+    pub fn with_section_metadata(mut self, metadata: Vec<PromptSectionAudit>) -> Self {
+        self.section_metadata = metadata;
+        self
+    }
+
+    /// Record raw-content-free composition selection metadata.
+    #[must_use]
+    pub fn with_composition_manifest(mut self, manifest: CompositionManifest) -> Self {
+        self.composition_manifest = Some(manifest);
+        self
+    }
 }
 
 const fn placement_order(p: Placement) -> u8 {
@@ -1144,7 +1818,7 @@ const fn placement_order(p: Placement) -> u8 {
     }
 }
 
-fn render_sections(kept: &[(PromptSection, &Engram)], headers: bool) -> String {
+fn render_sections(kept: &[(PromptSection, &Signal)], headers: bool) -> String {
     let mut out = String::new();
     for (section, _) in kept {
         if headers {
@@ -1168,7 +1842,7 @@ mod tests {
     use super::*;
     use roko_std::NoOpScorer;
 
-    fn section(name: &str, content: &str, pri: SectionPriority) -> Engram {
+    fn section(name: &str, content: &str, pri: SectionPriority) -> Signal {
         PromptSection::new(name, content)
             .with_priority(pri)
             .into_signal()
@@ -1354,6 +2028,123 @@ mod tests {
     }
 
     #[test]
+    fn composer_emits_composition_manifest_tag() {
+        let composer = PromptComposer::new().without_headers();
+        let sections = [
+            PromptSection::new("role", "you are an agent")
+                .with_priority(SectionPriority::Critical)
+                .into_signal()
+                .unwrap(),
+            PromptSection::new("task", "implement feature")
+                .with_priority(SectionPriority::High)
+                .into_signal()
+                .unwrap(),
+            PromptSection::new("extra", &"optional ".repeat(80))
+                .with_priority(SectionPriority::Low)
+                .into_signal()
+                .unwrap(),
+        ];
+
+        let out = composer
+            .compose(&sections, &Budget::tokens(24), &NoOpScorer, &Context::at(0))
+            .unwrap();
+        let manifest = CompositionManifest::from_tag_value(
+            out.tag(COMPOSITION_MANIFEST_TAG)
+                .expect("composition manifest tag"),
+        )
+        .expect("manifest parses");
+
+        assert_eq!(
+            manifest.selected_strategy,
+            CompositionStrategy::DensityGreedy
+        );
+        assert!(
+            manifest
+                .included
+                .iter()
+                .any(|section| section.name == "role")
+        );
+        assert!(
+            manifest
+                .excluded
+                .iter()
+                .any(|section| section.name == "extra")
+        );
+        assert!(
+            manifest
+                .included
+                .iter()
+                .all(|section| !section.action_id.is_empty())
+        );
+    }
+
+    #[test]
+    fn composer_vcg_path_emits_diagnostics_and_payments() {
+        let composer = PromptComposer::new()
+            .without_headers()
+            .with_strategy(CompositionStrategy::Vcg);
+        let sections = [
+            PromptSection::new("code", "relevant symbol context")
+                .with_priority(SectionPriority::High)
+                .with_bidder(AttentionBidder::CodeIntelligence)
+                .into_signal()
+                .unwrap(),
+            PromptSection::new("research", "important research memo")
+                .with_priority(SectionPriority::High)
+                .with_bidder(AttentionBidder::Research)
+                .into_signal()
+                .unwrap(),
+            PromptSection::new("large", &"low value ".repeat(80))
+                .with_priority(SectionPriority::Low)
+                .with_bidder(AttentionBidder::Research)
+                .into_signal()
+                .unwrap(),
+        ];
+
+        let out = composer
+            .compose(&sections, &Budget::tokens(16), &NoOpScorer, &Context::at(0))
+            .unwrap();
+        let manifest =
+            CompositionManifest::from_tag_value(out.tag(COMPOSITION_MANIFEST_TAG).unwrap())
+                .expect("manifest parses");
+
+        assert_eq!(manifest.selected_strategy, CompositionStrategy::Vcg);
+        assert!(manifest.vcg_diagnostics.is_some());
+        assert!(manifest.total_tokens <= 16);
+        assert!(
+            manifest
+                .included
+                .iter()
+                .any(|section| section.vcg_payment.is_some())
+        );
+    }
+
+    #[test]
+    fn composer_auto_selects_vcg_when_bidders_are_warm() {
+        let mut bidder = LearningBidder::new(AttentionBidder::TaskContext, 1.0);
+        for _ in 0..10 {
+            bidder.update_with_cost("task", true, true, 0.001, 10);
+        }
+        let composer = PromptComposer::new()
+            .without_headers()
+            .with_learning_bidders(HashMap::from([(AttentionBidder::TaskContext, bidder)]));
+        let sections = [PromptSection::new("task", "implement feature")
+            .with_priority(SectionPriority::High)
+            .with_bidder(AttentionBidder::TaskContext)
+            .into_signal()
+            .unwrap()];
+
+        let out = composer
+            .compose(&sections, &Budget::tokens(16), &NoOpScorer, &Context::at(0))
+            .unwrap();
+        let manifest =
+            CompositionManifest::from_tag_value(out.tag(COMPOSITION_MANIFEST_TAG).unwrap())
+                .expect("manifest parses");
+
+        assert_eq!(manifest.selected_strategy, CompositionStrategy::Vcg);
+    }
+
+    #[test]
     fn composer_never_drops_critical_sections() {
         let composer = PromptComposer::new();
         let sections = [
@@ -1446,10 +2237,30 @@ mod tests {
     }
 
     #[test]
+    fn prompt_section_records_stable_action_ids_without_content() {
+        let section = PromptSection::new("Workspace Map", "secret prompt text")
+            .with_source("file", "src/lib.rs:1-20")
+            .with_experiment_id("exp-a");
+
+        assert_eq!(
+            section.stable_section_id(),
+            "prompt:workspace-map:file:src-lib-rs-1-20"
+        );
+        assert_eq!(
+            section.action_id(),
+            "prompt_section:workspace-map:file:src-lib-rs-1-20|experiment:exp-a"
+        );
+        let audit = section.audit_row(true, section.estimated_tokens(), "included");
+        let encoded = serde_json::to_string(&audit).expect("audit serializes");
+        assert!(encoded.contains("prompt_section:workspace-map"));
+        assert!(!encoded.contains("secret prompt text"));
+    }
+
+    #[test]
     fn composer_ignores_non_section_signals() {
         let composer = PromptComposer::new();
         let real_section = section("task", "implement X", SectionPriority::High);
-        let fake = Engram::builder(Kind::Task)
+        let fake = Signal::builder(Kind::Task)
             .body(Body::text("this is not a section"))
             .build();
         let out = composer

@@ -74,7 +74,7 @@ impl ReplayUtility {
         }
     }
 
-    /// Gain: derived from prediction error.  Gate failures have high gain
+    /// Gain: derived from prediction error.  Verify failures have high gain
     /// (more to learn), clean passes have low gain.
     fn compute_gain(episode: &Episode) -> f64 {
         let gate_total = episode.gate_verdicts.len().max(1) as f64;

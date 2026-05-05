@@ -40,12 +40,12 @@ impl Theme {
 
     // -- Text --
     pub(crate) const TEXT: Color = Color::Rgb(165, 142, 158);
-    pub(crate) const TEXT_DIM: Color = Color::Rgb(145, 120, 138);
+    pub const TEXT_DIM: Color = Color::Rgb(145, 120, 138);
     pub(crate) const TEXT_GHOST: Color = Color::Rgb(110, 85, 105);
     pub(crate) const TEXT_PHANTOM: Color = Color::Rgb(55, 42, 55);
 
     // -- Accents --
-    pub(crate) const DREAM: Color = Color::Rgb(120, 115, 165);
+    pub const DREAM: Color = Color::Rgb(120, 115, 165);
     pub(crate) const SAGE: Color = Color::Rgb(125, 158, 140);
     pub(crate) const EMBER: Color = Color::Rgb(195, 110, 85);
     pub(crate) const WARNING: Color = Color::Rgb(195, 155, 95);

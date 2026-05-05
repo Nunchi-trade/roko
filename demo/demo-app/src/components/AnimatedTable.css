@@ -1,0 +1,198 @@
+/* ═══════════════════════════════════════════════════════════
+   ANIMATED TABLE · Reusable table animation system
+   Uses rosedust tokens. Apply via AnimatedTable wrapper.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Row entrance: staggered fadeInUp ────────────────── */
+
+.atbl-row {
+  opacity: 0;
+  animation: fadeInUp 0.4s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+  animation-delay: calc(var(--row-i, 0) * 30ms);
+  transition:
+    background var(--duration-snap, 150ms),
+    transform var(--duration-snap, 150ms) var(--ease),
+    box-shadow var(--duration-snap, 150ms);
+}
+
+/* ── Row hover: subtle lift + background glow ──────────── */
+
+.atbl-row:hover {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--rose-dim) 4%, transparent) 0%,
+    rgba(255, 255, 255, 0.025) 60%,
+    transparent 100%
+  );
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* ── Column header sort indicator ──────────────────────── */
+
+.atbl-sort-arrow {
+  display: inline-block;
+  transition: transform 0.25s var(--ease);
+  margin-left: 4px;
+  font-size: 0.7em;
+  vertical-align: middle;
+}
+
+.atbl-sort-arrow--asc {
+  transform: rotate(0deg);
+}
+
+.atbl-sort-arrow--desc {
+  transform: rotate(180deg);
+}
+
+/* ── Header hover ──────────────────────────────────────── */
+
+.atbl-header-cell {
+  transition: color var(--duration-snap, 150ms);
+  cursor: pointer;
+  user-select: none;
+}
+
+.atbl-header-cell:hover {
+  color: var(--rose-glow);
+}
+
+.atbl-header-cell--active {
+  color: var(--rose-bright);
+}
+
+/* ── Cell value flash on change ────────────────────────── */
+
+@keyframes atbl-cellFlash {
+  0% {
+    background: color-mix(in srgb, var(--bone) 15%, transparent);
+    box-shadow: inset 0 0 8px color-mix(in srgb, var(--bone) 10%, transparent);
+  }
+  100% {
+    background: transparent;
+    box-shadow: none;
+  }
+}
+
+.atbl-cell-changed {
+  animation: atbl-cellFlash 0.8s var(--ease) forwards;
+  border-radius: var(--radius-sm, 3px);
+}
+
+/* ── Expandable row ────────────────────────────────────── */
+
+.atbl-expandable {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transition:
+    max-height 0.35s var(--ease),
+    opacity 0.25s var(--ease),
+    padding 0.25s var(--ease);
+}
+
+.atbl-expandable--open {
+  max-height: 600px;
+  opacity: 1;
+}
+
+/* ── Empty state ───────────────────────────────────────── */
+
+.atbl-empty {
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--text-ghost, #605060);
+  font-family: var(--mono);
+  font-size: var(--text-sm, 14px);
+  letter-spacing: 0.06em;
+  animation: fadeInUp 0.5s var(--ease) forwards;
+}
+
+.atbl-empty-icon {
+  display: block;
+  margin: 0 auto 12px;
+  font-size: 24px;
+  opacity: 0.4;
+}
+
+/* ── Pagination crossfade ──────────────────────────────── */
+
+.atbl-page-transition {
+  animation: fadeIn 0.25s var(--ease);
+}
+
+/* Stagger rows within a page transition */
+.atbl-page-transition .atbl-row {
+  animation-delay: calc(var(--row-i, 0) * 25ms + 80ms);
+}
+
+/* ── Selection ─────────────────────────────────────────── */
+
+.atbl-row--selected {
+  border-left: 2px solid var(--rose-bright, #d89ab2);
+  background: color-mix(in srgb, var(--rose-dim) 6%, transparent);
+}
+
+@keyframes atbl-checkScale {
+  from {
+    transform: scale(0);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.atbl-check {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border, rgba(255,255,255,0.10));
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background var(--duration-snap, 150ms),
+    border-color var(--duration-snap, 150ms),
+    transform 0.2s var(--ease);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  padding: 0;
+}
+
+.atbl-check:hover {
+  border-color: var(--rose-dim, #8a5a70);
+}
+
+.atbl-check--checked {
+  background: var(--rose-deep, #3a2030);
+  border-color: var(--rose-bright, #d89ab2);
+  animation: atbl-checkScale 0.2s var(--ease);
+}
+
+.atbl-check--checked::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--rose-bright, #d89ab2);
+}
+
+/* ── Reduced motion ────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .atbl-row,
+  .atbl-empty,
+  .atbl-cell-changed,
+  .atbl-expandable,
+  .atbl-page-transition,
+  .atbl-page-transition .atbl-row,
+  .atbl-check--checked,
+  .atbl-sort-arrow {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

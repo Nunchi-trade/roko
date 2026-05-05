@@ -32,3 +32,6 @@ reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+
+[package.metadata.roko]
+layer = 2

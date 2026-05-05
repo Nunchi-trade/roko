@@ -1,7 +1,7 @@
 //! System prompt and quality standards for PRD generation.
 //!
 //! This module defines the prompt template that produces PRD documents
-//! matching the quality bar of `/Users/will/dev/uniswap/bardo/prd/`.
+//! matching the quality bar of the project's `.roko/prd/` directory.
 
 /// The system prompt for PRD generation. Injected via `--append-system-prompt`
 /// or as the `system` field in API calls.
@@ -47,13 +47,13 @@ graph TD
     classDef data fill:#16213e,stroke:#0f3460,color:#eee,stroke-width:1px
     classDef action fill:#0f3460,stroke:#533483,color:#eee,stroke-width:1px
 
-    A[Engram Input] --> B[Scorer]
-    B --> C{Router}
+    A[Engram Input] --> B[Score]
+    B --> C{Route}
     C -->|high confidence| D[Direct Execute]
     C -->|low confidence| E[LLM Deliberation]
-    D --> F[Gate Pipeline]
+    D --> F[Verify Pipeline]
     E --> F
-    F --> G[Substrate Write]
+    F --> G[Store Write]
 
     class A,B core
     class C,D,E action
@@ -85,7 +85,7 @@ sequenceDiagram
     participant C as CLI
     participant O as Orchestrator
     participant A as Agent
-    participant G as Gate
+    participant G as Verify
 
     U->>C: roko plan run
     C->>O: discover plans
@@ -117,6 +117,45 @@ Every PRD MUST have these sections:
 10. **Acceptance criteria** — Machine-verifiable checkboxes
 11. **Cross-references** — Links to related documents
 12. **References** — Full academic citations, 10-30 per document
+13. **Repository Grounding** — Required section (see §7 below)
+
+### 7. Repository Grounding (REQUIRED)
+
+Every PRD MUST include a `## Repository Grounding` section. This section is validated
+post-generation; a PRD missing it will be **rejected** (artifact_valid = false).
+
+The section must contain these four subsections:
+
+- **Existing crates**: Which workspace crates this feature touches. Use exact crate names
+  from the repository (e.g., `roko-core`, `roko-agent`, `roko-compose`). If no existing
+  crates are relevant, state "None — this is a new subsystem."
+- **Source files**: Key source files that will be modified or read. Use relative paths
+  (e.g., `crates/roko-cli/src/prd.rs`). Each path listed must actually exist in the
+  repository.
+- **New crates**: Any new crates to create. For each, justify why existing crates are
+  insufficient. If no new crates are needed, state "None."
+- **Non-goals**: What this PRD explicitly does NOT change. Be specific (e.g., "Does not
+  modify the gate pipeline", "Does not change the TOML schema").
+
+If Repository Context is provided in the prompt below, use it. If not available, state
+"No repository context available." and use your knowledge of the workspace.
+
+Example:
+
+```markdown
+## Repository Grounding
+
+**Existing crates**: `roko-cli`, `roko-core`, `roko-agent`
+
+**Source files**:
+- `crates/roko-cli/src/prd.rs` — PRD lifecycle management, adding validation
+- `crates/roko-cli/src/prd_prompt.rs` — PRD system prompt, adding grounding section
+
+**New crates**: None.
+
+**Non-goals**: Does not modify the gate pipeline, does not change roko.toml schema,
+does not affect plan generation logic.
+```
 
 ### 5. Writing style
 
@@ -148,10 +187,11 @@ plan_template: <optional-template-name>
 
 ## Reference examples
 
-For the quality bar, study these documents:
-- `/Users/will/dev/uniswap/bardo/prd/03-daimon/00-overview.md` — 30+ citations, PAD vectors, somatic markers
-- `/Users/will/dev/uniswap/bardo/prd/10-safety/00-defense.md` — Defense-in-depth architecture, capability tokens
-- `/Users/will/dev/uniswap/bardo/prd/01-golem/01-cognition.md` — Cognitive architecture, heartbeat cycle
+For the quality bar, study existing PRD documents under the project's `.roko/prd/` directory.
+Each PRD should demonstrate:
+- 30+ academic citations with PAD vectors and somatic markers
+- Defense-in-depth architecture descriptions with capability tokens
+- Cognitive architecture details and heartbeat cycle specifications
 "#;
 
 /// Short quality checklist that can be appended to any PRD generation prompt.

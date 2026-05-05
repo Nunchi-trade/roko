@@ -1,4 +1,4 @@
-//! Filesystem-backed [`Substrate`](roko_core::Substrate).
+//! Filesystem-backed [`Store`](roko_core::Store).
 //!
 //! `FileSubstrate` persists signals to an append-only JSONL log under a
 //! directory (typically `.roko/signals/`). It keeps an in-memory index of
@@ -15,7 +15,7 @@
 //!   Memory cost is low: tens of MB per million signals.
 //!
 //! When workload grows beyond in-memory capacity, we can swap in a different
-//! backend (`SQLite`, `sled`) behind the same `Substrate` trait — the callers
+//! backend (`SQLite`, `sled`) behind the same `Store` trait — the callers
 //! won't change.
 
 #![allow(
@@ -28,8 +28,10 @@
 )]
 
 pub mod archive;
+/// Shared atomic-write helpers (write-tmp-rename pattern).
+pub mod atomic;
 pub mod bandit;
-/// Archive-backed [`ColdSubstrate`](roko_core::ColdSubstrate) for aged-out engrams.
+/// Archive-backed [`ColdStore`](roko_core::ColdStore) for aged-out engrams.
 pub mod cold_substrate;
 pub mod file_substrate;
 pub mod gc;
@@ -42,6 +44,7 @@ pub mod tool_metrics_sink;
 pub mod trace_sink;
 
 pub use archive::{ArchiveEntry, ArchiveKind, ArchiveStats, Archiver};
+pub use atomic::{atomic_write_bytes, atomic_write_json};
 pub use bandit::{ArmSnapshot, BanditStore};
 pub use cold_substrate::{ArchiveColdSubstrate, SubstrateMigrator};
 pub use file_substrate::FileSubstrate;
@@ -52,4 +55,4 @@ pub use observability::FsObservabilitySinks;
 pub use pointer::PointerStore;
 pub use tool_audit::ToolAuditLog;
 pub use tool_metrics_sink::{JsonlMetricsSink, ToolMetricsRecord};
-pub use trace_sink::JsonlTraceSink;
+pub use trace_sink::{JsonlTraceSink, default_trace_sink};

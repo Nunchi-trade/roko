@@ -1,4 +1,4 @@
-//! Gate environment builder — constructs [`GateEnv`] for each gate rung.
+//! Verify environment builder — constructs [`GateEnv`] for each gate rung.
 //!
 //! Replaces scattered `apply_gate_env` calls with a single builder that
 //! knows how to construct the right environment for each rung and build
@@ -114,7 +114,7 @@ impl GateEnvBuilder {
 ///
 /// Rung semantics:
 ///
-/// | Rung | Gate kind      | Notable env tweaks                        |
+/// | Rung | Verify kind      | Notable env tweaks                        |
 /// |------|---------------|-------------------------------------------|
 /// | 0    | Compile       | Warnings suppressed for fast feedback      |
 /// | 1    | Lint          | Warnings promoted to errors                |

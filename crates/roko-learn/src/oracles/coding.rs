@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    CodingMetric, Context, Engram, Oracle, OracleDomain, OracleQuery, PredictedValue, Prediction,
-    PredictionAccuracy, PredictionInterval, PredictionProvenance, QueryPayload,
+    CodingMetric, Context, Oracle, OracleDomain, OracleQuery, PredictedValue, Prediction,
+    PredictionAccuracy, PredictionInterval, PredictionProvenance, QueryPayload, Signal,
 };
 use std::collections::VecDeque;
 
@@ -249,7 +249,7 @@ impl Oracle for CodingOracle {
     async fn evaluate(
         &self,
         prediction: &Prediction,
-        outcome: &Engram,
+        outcome: &Signal,
     ) -> roko_core::error::Result<PredictionAccuracy> {
         let predicted = prediction.value.as_f64().unwrap_or(0.5);
         let actual = outcome

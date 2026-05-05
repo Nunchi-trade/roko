@@ -1,0 +1,189 @@
+/* ═══════════════════════════════════════════════════════════
+   ROSEDUST Design System · Canonical Tokens
+   Source: nunchi_5.html · April 2026
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── backgrounds ── */
+  --bg-void: #08080c;
+  --bg-raised: #12101a;
+  --bg-mid: #140f18;
+  --bg-deeper: #0c0a12;
+  --surface: #1e1826;
+  --glass-bg: rgba(255,255,255,0.05);
+  --bg-glass: rgba(255,255,255,0.05);
+  --bg-glass-hover: rgba(255,255,255,0.06);
+  --bg-glass-active: rgba(255,255,255,0.08);
+  --glass-border: rgba(255,255,255,0.10);
+
+  /* ── borders ── */
+  --border: rgba(255,255,255,0.10);
+  --border-soft: rgba(255,255,255,0.07);
+  --border-strong: rgba(255,255,255,0.14);
+  --border-active: rgba(204,144,168,0.3);
+
+  /* ── rose spectrum ── */
+  --rose: #b87a94;
+  --rose-bright: #d89ab2;
+  --rose-glow: #e8b5ce;
+  --rose-dim: #8a5a70;
+  --rose-deep: #3a2030;
+  --rose-ember: #482838;
+
+  /* ── bone spectrum ── */
+  --bone: #d4c89c;
+  --bone-bright: #e4d8b0;
+  --bone-dim: #9a8a68;
+  --bone-bloom: 0 0 12px rgba(228,216,176,0.4), 0 0 32px rgba(228,216,176,0.15);
+
+  /* ── text (brightened — was too dim/muted) ── */
+  --text-primary: #e8dce8;
+  --text-strong: #f8f0f8;
+  --text-soft: #c8b8c4;
+  --text-dim: #9a8a98;
+  --text-ghost: #605060;
+
+  /* ── accent ── */
+  --dream: #8888a8;
+  --dream-bright: #a4a4c8;
+  --dream-deep: #282848;
+  --warning: #d8a878;
+  --success: #8a9c86;
+
+  /* ── status (chart / data-viz) ── */
+  --status-active: #2dd4bf;
+  --status-success: #4ade80;
+  --status-error: #fb7185;
+  --status-warning: #fbbf24;
+  --status-blocked: #a78bfa;
+
+  /* ── chart lane palette (extended) ── */
+  --lane-sage: #7FA8A4;
+  --lane-clay: #B7918F;
+  --lane-camel: #C49B6E;
+
+  /* ── fonts ── */
+  --sans: 'General Sans', 'Inter', system-ui, sans-serif;
+  --serif: 'Instrument Serif', Georgia, serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --display: "Fraunces", "Times New Roman", serif;
+
+  /* ── font weights ── */
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* ── type scale (terminal-dense) ── */
+  --text-xs: 10px;
+  --text-sm: 11px;
+  --text-md: 12px;
+  --text-lg: 14px;
+  --text-xl: 18px;
+  --text-2xl: 24px;
+  --text-3xl: 32px;
+
+  /* ── spacing scale (8px base) ── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* ── radius scale ── */
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* ── z-index layers ── */
+  --z-base: 1;
+  --z-sticky: 10;
+  --z-drawer: 15;
+  --z-header: 20;
+  --z-floating: 100;
+  --z-nav: 9995;
+  --z-atmo-vignette: 9996;
+  --z-atmo-grain: 9997;
+  --z-atmo-scanlines: 9998;
+
+  /* ── glow tokens ── */
+  --glow-rose-soft: 0 0 20px rgba(204,144,168,.3);
+  --glow-rose-bright: 0 0 30px rgba(220,165,189,.5), 0 0 60px rgba(220,165,189,.25);
+  --glow-bone-soft: 0 0 12px rgba(228,216,176,.3);
+  --glow-bone-bright: 0 0 12px rgba(228,216,176,.4), 0 0 32px rgba(228,216,176,.15);
+
+  /* ── timing ── */
+  --duration-snap: 150ms;
+  --duration-smooth: 300ms;
+  --duration-reveal: 600ms;
+
+  /* ── aliases (match inline usage) ── */
+  --font-serif: var(--serif);
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+  --glass-2-border: var(--glass-border);
+  --raised: var(--bg-raised);
+  --text: var(--text-primary);
+  --fail: var(--rose-bright);
+  --danger: #cc5555;
+
+  /* ── status (idle) ── */
+  --status-idle: rgba(194,184,201,0.5);
+
+  /* ── motion easing ── */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-snappy: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+
+  /* ── motion durations ── */
+  --duration-instant: 80ms;
+  --duration-fast: 150ms;
+  --duration-normal: 220ms;
+  --duration-slow: 350ms;
+
+  /* ── glow (status) ── */
+  --glow-active: 0 0 8px rgba(184,122,148,0.4);
+  --glow-success: 0 0 6px rgba(122,138,120,0.6);
+  --glow-warning: 0 0 6px rgba(216,168,120,.6);
+  --glow-error: 0 0 6px rgba(204,120,120,0.6);
+  --glow-ambient: 0 0 12px rgba(184,122,148,0.08);
+  --glow-rose: 0 0 10px rgba(220,165,189,0.5);
+
+  /* ── shadows ── */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.25);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.3);
+  --shadow-glow-rose: 0 8px 32px rgba(220,165,189,0.12);
+
+  /* ── focus ring ── */
+  --focus-ring: 0 0 0 2px var(--rose-bright), 0 0 0 4px rgba(220,165,189,0.2);
+
+  /* ── cell tokens ── */
+  --cell-radius: 6px;
+  --cell-padding: 12px;
+  --cell-gap: 8px;
+  --cell-border: 1px solid var(--glass-border);
+
+  /* ── glass variants ── */
+  --glass-bg-hover: rgba(255,255,255,0.07);
+  --glass-bg-active: rgba(255,255,255,0.09);
+
+  /* ── layout ── */
+  --nav-h: 48px;
+  --wrap: 1240px;
+  --gutter: 64px;
+  --section-y: 200px;
+}
+
+/* ── responsive token overrides ── */
+
+@media (max-width: 768px) {
+  :root {
+    --gutter: 24px;
+    --section-y: 120px;
+  }
+}

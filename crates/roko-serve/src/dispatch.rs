@@ -25,7 +25,7 @@ use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::{Agent, AgentResult};
 use roko_compose::SystemPromptBuilder;
 use roko_core::OperatingFrequency;
-use roko_core::agent::AgentRole;
+use roko_core::agent::{AgentRole, resolve_model};
 use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilterConfig};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
@@ -38,6 +38,9 @@ use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
+use roko_learn::model_call_feedback::{
+    ModelCallFeedback, ModelCallFeedbackRecorder, observe_model_call_on_router,
+};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_neuro::spawn_episode_distillation;
 use roko_std::tool::StaticToolRegistry;
@@ -244,6 +247,7 @@ impl EfficiencyTracker {
             model: template_name.to_string(),
             plan_id: String::new(),
             task_id: String::new(),
+            attempt_id: format!("roko-serve:{template_name}:{turns}"),
             input_tokens: tokens,
             output_tokens: 0,
             reasoning_tokens: 0,
@@ -1703,6 +1707,7 @@ async fn dispatch_template(
         Arc::clone(&dispatcher)
     };
 
+    let agent_started = Instant::now();
     let dispatch_result = match effective_dispatcher
         .dispatch(routed_template.clone(), dispatch_signal.clone())
         .await
@@ -1734,6 +1739,7 @@ async fn dispatch_template(
             });
         }
     };
+    let agent_latency_ms = agent_started.elapsed().as_millis() as u64;
     let output = dispatch_result.output.clone();
     let output_text = signal_body_to_text(&output.body);
     let agent_name = output
@@ -1773,6 +1779,24 @@ async fn dispatch_template(
         if success { 1.0 } else { 0.0 },
         budget_limit,
     );
+    let state_config = state.load_roko_config();
+    let feedback_config = repo_ctx
+        .and_then(|ctx| ctx.repo_config.as_ref())
+        .unwrap_or(state_config.as_ref());
+    let learn_dir = repo_ctx
+        .map(|ctx| ctx.layout.learn_dir())
+        .unwrap_or_else(|| state.layout.learn_dir());
+    record_template_dispatch_feedback(
+        &state,
+        feedback_config,
+        &routed_template,
+        &signal,
+        &dispatch_result,
+        success,
+        &learn_dir,
+        agent_latency_ms,
+    )
+    .await;
     record_template_run(&state, &template.name, success).await;
 
     let completion_kind = format!("template_dispatch:{}", template.name);
@@ -1822,9 +1846,125 @@ fn build_agent(
             bare_mode: roko_config.agent.bare_mode,
             dangerously_skip_permissions: true,
             name: String::new(),
+            pre_discovered_mcp_tools: None,
         },
     )
     .with_context(|| format!("create agent for template '{}'", template.name))
+}
+
+async fn record_template_dispatch_feedback(
+    state: &Arc<AppState>,
+    config: &RokoConfig,
+    template: &AgentTemplate,
+    signal: &Engram,
+    result: &AgentResult,
+    learning_success: bool,
+    learn_dir: &Path,
+    latency_ms: u64,
+) {
+    let resolved = resolve_model(config, &template.model);
+    let model_slug = resolved.slug;
+    let provider_id = provider_id_for_template_model(config, &template.model)
+        .or_else(|| {
+            resolved
+                .profile
+                .as_ref()
+                .map(|profile| profile.provider.clone())
+        })
+        .unwrap_or_else(|| resolved.provider_kind.label().to_string());
+
+    if result.success {
+        state.provider_health.record_success(&provider_id);
+    } else {
+        state.provider_health.record_failure(&provider_id);
+    }
+
+    let cascade_model_slugs = template_cascade_model_slugs(config, &model_slug);
+    let global_learn_dir = state.layout.learn_dir();
+    let cascade_path = learn_dir.join("cascade-router.json");
+    let used_cached_router = if learn_dir == global_learn_dir.as_path() {
+        let router_guard = state.cascade_router.read().await;
+        if let Some(router) = router_guard.as_ref() {
+            observe_model_call_on_router(
+                router,
+                &model_slug,
+                "template_dispatch",
+                learning_success,
+                latency_ms,
+            );
+            if let Err(error) = router.save(&cascade_path) {
+                warn!(
+                    path = %cascade_path.display(),
+                    error = %error,
+                    "failed to persist cached template dispatch cascade observation"
+                );
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let recorder = if used_cached_router || cascade_model_slugs.is_empty() {
+        ModelCallFeedbackRecorder::without_cascade_router(learn_dir.to_path_buf())
+    } else {
+        ModelCallFeedbackRecorder::from_learn_dir(learn_dir.to_path_buf(), cascade_model_slugs)
+    };
+
+    if let Err(error) = recorder
+        .record(ModelCallFeedback {
+            run_id: None,
+            request_id: Some(format!(
+                "template-dispatch-{}-{}",
+                template.name,
+                signal.id.to_hex()
+            )),
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
+            model: model_slug.clone(),
+            provider: provider_id.clone(),
+            role: "template_dispatch".to_string(),
+            input_tokens: u64::from(result.usage.input_tokens),
+            output_tokens: u64::from(result.usage.output_tokens),
+            cost_usd: f64::from(result.usage.cost_usd),
+            latency_ms,
+            success: learning_success,
+            provider_success: Some(result.success),
+        })
+        .await
+    {
+        warn!(
+            provider = %provider_id,
+            model = %model_slug,
+            template = %template.name,
+            error = %error,
+            "failed to record template dispatch feedback"
+        );
+    }
+}
+
+fn provider_id_for_template_model(config: &RokoConfig, model_key_or_slug: &str) -> Option<String> {
+    let models = config.effective_models();
+    models
+        .get(model_key_or_slug)
+        .or_else(|| {
+            models
+                .values()
+                .find(|profile| profile.slug == model_key_or_slug)
+        })
+        .map(|profile| profile.provider.clone())
+        .filter(|provider| !provider.trim().is_empty())
+}
+
+fn template_cascade_model_slugs(config: &RokoConfig, model_slug: &str) -> Vec<String> {
+    let mut model_slugs = config.model_slugs_for_cascade();
+    if !model_slug.trim().is_empty() && !model_slugs.iter().any(|slug| slug == model_slug) {
+        model_slugs.push(model_slug.to_string());
+    }
+    model_slugs.sort();
+    model_slugs.dedup();
+    model_slugs
 }
 
 fn build_template_system_prompt(
@@ -2171,7 +2311,7 @@ async fn append_dispatch_episode(
     }
 
     episode.attach_all_fingerprints();
-    apply_affect_signature(state, &mut episode);
+    apply_affect_signature(state, &mut episode).await;
 
     // Use per-repo layout for data isolation when a repo context is available.
     // This writes episodes, efficiency, and cascade router data under
@@ -2197,7 +2337,9 @@ async fn append_dispatch_episode(
     let distill_workdir = repo_ctx
         .map(|ctx| ctx.repo_workdir.clone())
         .unwrap_or_else(|| state.workdir.clone());
-    spawn_episode_distillation(distill_workdir, episode.clone());
+    let distillation_caller: Arc<dyn roko_core::foundation::ModelCaller> =
+        state.model_call_service.clone();
+    spawn_episode_distillation(distill_workdir, episode.clone(), Some(distillation_caller));
 
     if let Err(err) = publish_dispatch_learning_feedback(
         state,
@@ -2308,14 +2450,14 @@ async fn drain_dispatch_learning_events(
     Ok(())
 }
 
-fn apply_affect_signature(state: &AppState, episode: &mut Episode) {
+async fn apply_affect_signature(state: &AppState, episode: &mut Episode) {
     let task_key = if episode.task_id.trim().is_empty() {
         episode.agent_id.clone()
     } else {
         episode.task_id.clone()
     };
 
-    let mut engine = state.affect_engine.lock();
+    let mut engine = state.affect_engine.lock().await;
     for (rung, verdict) in episode.gate_verdicts.iter().enumerate() {
         let _ = engine.appraise(AffectEvent::GateResult {
             plan_id: String::new(),
@@ -2411,7 +2553,7 @@ fn record_cascade_router_observation_at(
     }
 
     let cascade_router = CascadeRouter::load_or_new(path, model_slugs);
-    if cascade_router.record_outcome(model_slug, success) {
+    if cascade_router.record_confidence_outcome(model_slug, success) {
         cascade_router
             .save(path)
             .with_context(|| format!("save {}", path.display()))?;
@@ -2456,8 +2598,30 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::agent::ProviderKind;
+    use roko_core::config::schema::{ModelProfile, ProviderConfig};
+    use roko_core::defaults::{
+        DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS,
+    };
     use roko_core::{Body, Kind, Provenance};
     use uuid::Uuid;
+
+    use crate::deploy::create_backend;
+    use crate::runtime::NoOpRuntime;
+
+    fn write_fake_claude_script(tmp: &tempfile::TempDir, body: &str) -> PathBuf {
+        let script = tmp.path().join("claude-fake.sh");
+        std::fs::write(&script, body).expect("write fake claude script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).expect("chmod");
+        }
+        script
+    }
 
     #[test]
     fn glob_match_supports_prefix_patterns() {
@@ -2841,6 +3005,117 @@ filter = { path = "src/*.rs" }
         assert_eq!(effective, repo_dir.path());
     }
 
+    #[tokio::test]
+    async fn template_dispatch_records_feedback_and_provider_health() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir = tmp.path().to_path_buf();
+        let script = write_fake_claude_script(
+            &tmp,
+            r#"#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"content_block_delta","delta":{"text":"template-ok"}}'
+"#,
+        );
+
+        let mut config = RokoConfig::default();
+        config.providers.clear();
+        config.models.clear();
+        config.agent.default_model = "template-model".to_string();
+        config.providers.insert(
+            "template-cli".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::ClaudeCli,
+                base_url: None,
+                api_key_env: None,
+                command: Some(script.display().to_string()),
+                args: None,
+                timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(DEFAULT_CONNECT_TIMEOUT_MS),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        config.models.insert(
+            "template-model".to_string(),
+            ModelProfile {
+                provider: "template-cli".to_string(),
+                slug: "claude-sonnet-4-6".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let state = Arc::new(
+            AppState::new(
+                workdir.clone(),
+                Arc::new(NoOpRuntime),
+                config.clone(),
+                deploy_backend,
+            )
+            .expect("AppState::new"),
+        );
+        let cascade_path = state.layout.cascade_router_path();
+        let cascade_slugs = config.model_slugs_for_cascade();
+        *state.cascade_router.write().await =
+            Some(CascadeRouter::load_or_new(&cascade_path, cascade_slugs));
+
+        let template = AgentTemplate {
+            name: "feedback-template".into(),
+            description: "Test template feedback".into(),
+            model: "template-model".into(),
+            role: "implementer".into(),
+            system_prompt: "You are the template role.".into(),
+            max_turns: 4,
+            output_format: crate::templates::TemplateOutputFormat::Markdown,
+            mcp_servers: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+            experiment: None,
+            provider: None,
+        };
+        let signal = Engram::builder(Kind::Prompt)
+            .body(Body::text("dispatch this"))
+            .provenance(Provenance::trusted("test"))
+            .build();
+        let dispatcher: Arc<dyn AgentDispatcher> =
+            Arc::new(TemplateAgentDispatcher::new(workdir.clone(), None, config));
+
+        let outcome = dispatch_template(Arc::clone(&state), template, signal, dispatcher, None)
+            .await
+            .expect("dispatch template");
+
+        assert!(outcome.success);
+        assert_eq!(
+            outcome.result.output.body.as_text().unwrap_or(""),
+            "template-ok"
+        );
+
+        let efficiency = std::fs::read_to_string(workdir.join(".roko/learn/efficiency.jsonl"))
+            .expect("read efficiency");
+        assert!(efficiency.contains(r#""kind":"model_call""#));
+        assert!(efficiency.contains(r#""role":"template_dispatch""#));
+        assert!(efficiency.contains(r#""model":"claude-sonnet-4-6""#));
+        assert!(efficiency.contains(r#""provider":"template-cli""#));
+        assert!(efficiency.contains(r#""success":true"#));
+
+        let provider_health =
+            std::fs::read_to_string(workdir.join(".roko/learn/provider-health.json"))
+                .expect("read provider health");
+        assert!(provider_health.contains("template-cli"));
+
+        let cascade_router =
+            std::fs::read_to_string(workdir.join(".roko/learn/cascade-router.json"))
+                .expect("read cascade router");
+        assert!(cascade_router.contains("claude-sonnet-4-6"));
+
+        let health = state.provider_health.get("template-cli");
+        assert_eq!(health.total_attempts, 1);
+        assert_eq!(health.total_successes, 1);
+    }
+
     #[test]
     fn anomaly_dispatch_prompt_loop_halts_after_five_identical_prompts() {
         let session_root = tempfile::tempdir().expect("session tempdir");
@@ -2870,9 +3145,9 @@ filter = { path = "src/*.rs" }
     #[test]
     fn anomaly_dispatch_model_downgrade_prefers_configured_fallback() {
         let mut config = RokoConfig::default();
-        config.agent.fallback_model = Some("claude-haiku-3-5".to_string());
+        config.agent.fallback_model = Some("claude-haiku-4-5".to_string());
 
-        let downgraded = downgrade_model_slug("claude-opus-4", &config);
-        assert_eq!(downgraded.as_deref(), Some("claude-haiku-3-5"));
+        let downgraded = downgrade_model_slug("claude-opus-4-6", &config);
+        assert_eq!(downgraded.as_deref(), Some("claude-haiku-4-5"));
     }
 }

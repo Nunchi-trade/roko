@@ -7,12 +7,12 @@
 //!
 //! | Trait | Purpose |
 //! |---|---|
-//! | [`Substrate`] | Store and query engrams |
-//! | [`Scorer`] | Rate engrams along multi-dimensional axes |
-//! | [`Gate`] | Verify engrams against ground truth |
-//! | [`Router`] | Select one engram from many candidates |
-//! | [`Composer`] | Combine engrams into a new engram under a budget |
-//! | [`Policy`] | Watch engram streams and emit new engrams (interventions) |
+//! | [`Store`] | Store and query engrams |
+//! | [`Score`](traits::Score) | Rate engrams along multi-dimensional axes |
+//! | [`Verify`] | Verify engrams against ground truth |
+//! | [`Route`] | Select one engram from many candidates |
+//! | [`Compose`] | Combine engrams into a new engram under a budget |
+//! | [`React`] | Watch engram streams and emit new engrams (interventions) |
 //!
 //! Every capability — coding-agent spawning, verification gates, context assembly,
 //! model routing, memory retrieval, chain participation, bounty markets, HDC search
@@ -46,6 +46,18 @@
     clippy::pedantic
 )]
 
+/// Generate a short share token: `<unix_millis_hex>-<rand_hex>`.
+pub fn generate_share_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let rand_part: u16 = (millis as u16) ^ (std::process::id() as u16);
+    format!("{millis:x}-{rand_part:04x}")
+}
+
 pub mod affect;
 pub mod agent;
 /// Cross-cut arbitration protocol for resolving Daimon/Neuro/Dreams conflicts (INT-21).
@@ -56,9 +68,12 @@ pub mod build;
 /// Additional Bus backend implementations: BroadcastBus, MemoryBus, MultiBus.
 pub mod bus_backends;
 pub mod catalyst;
+/// The Cell trait — universal computation unit for all protocol implementations.
+pub mod cell;
 pub mod cfactor;
 /// Canonical provider-agnostic chat message types.
 pub mod chat_types;
+pub mod cognitive_workspace;
 pub mod conductor;
 pub mod config;
 /// Connector trait for external system I/O (MCP, API, Database, Blockchain, Feed, Custom).
@@ -67,7 +82,11 @@ pub mod context;
 pub mod dashboard_snapshot;
 pub mod datum;
 pub mod decay;
+/// Central constants — import from here instead of hardcoding magic numbers.
+pub mod defaults;
+
 pub mod demurrage;
+pub mod dispatch_plan;
 /// Domain profiles for agent specialization: gate defaults, tool sets, context templates.
 pub mod domain_profile;
 pub mod engram;
@@ -77,11 +96,14 @@ pub mod extension;
 pub mod feed;
 /// Forensic replay engine for causal decision reconstruction (SAFE-12).
 pub mod forensic;
+pub mod foundation;
 pub mod hash;
 /// Heartbeat protocol types for health monitoring.
 pub mod heartbeat;
 /// Cognitive immune system -- quarantine, anomaly detection, incident linking.
 pub mod immune;
+/// Atomic file I/O utilities for crash-safe state persistence.
+pub mod io;
 /// Marketplace job types shared between serve, TUI, and CLI.
 pub mod job;
 pub mod kind;
@@ -89,26 +111,53 @@ pub mod language;
 pub mod loop_tick;
 pub mod metric;
 pub mod namespace;
-pub mod obs;
+pub mod obs {
+    #[path = "../obs/health.rs"]
+    pub mod health;
+    #[path = "../obs/histograms.rs"]
+    pub mod histograms;
+    #[path = "../obs/metrics.rs"]
+    pub mod metrics;
+    #[path = "../obs/schema.rs"]
+    pub mod schema;
+    #[path = "../obs/scrub.rs"]
+    pub mod scrub;
+
+    pub use health::{
+        AlwaysUpProbe, DegradedReason, HealthStatus, NamedProbe, Probe, ProbeRegistry,
+        ReadinessStatus,
+    };
+    pub use histograms::{Histogram, HistogramSnapshot, LLM_LATENCY_BUCKETS};
+    pub use metrics::{
+        Counter, Gauge, LabelSet, MetricKind, MetricRegistry, MetricSnapshot, MetricValue,
+        STANDARD_METRICS, register_standard_metrics,
+    };
+    pub use schema::{CanonicalMetricSchema, MetricDescriptor, MetricSchema, SCHEMA_VERSION};
+    pub use scrub::{LogScrubber, REDACTED};
+}
 pub mod operating_frequency;
 pub mod phase;
+pub mod policy_manifest;
 pub mod polyglot;
 pub mod prediction;
 pub mod project;
 pub mod provenance;
 pub mod pulse;
-pub mod pulse_bus;
 pub mod query;
+pub mod runtime_event;
 pub mod score;
 pub mod secrets;
 pub mod shutdown;
+/// Signal — forward-compatible alias for `Engram` (Phase 1 prep).
+pub mod signal;
 pub mod signal_kinds;
-pub mod state_hub;
 pub mod task;
 pub mod temperament;
 pub mod tool;
 pub mod traits;
+pub mod usage;
 pub mod verdict;
+pub mod workspace;
 
 pub use affect::{BehavioralState, DaimonPolicy, EmotionalTag, PadVector};
 pub use agent::{
@@ -126,11 +175,18 @@ pub use bus_backends::{
     BroadcastBus, BroadcastBusReceiver, BusErased, MemoryBus, MemoryBusReceiver, MultiBus,
 };
 pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
+pub use cell::*;
 pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use chat_types::{
     ChatMessage, ChatRequest, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
     RequestOptions, ResponseFormat, ResponseMetadata, SessionState, ToolCallFunction,
     ToolCallMessage, ToolChoice, Usage,
+};
+pub use cognitive_workspace::{
+    COGNITIVE_WORKSPACE_SCHEMA_VERSION, CapabilityGrant, CognitiveWorkspace, ContextPolicyAuditRef,
+    ContextRejectionAudit, ContextRejectionAuditReason, ContextScopeAudit, ContextSectionAudit,
+    InvocationGateOutcome, InvocationReviewVerdictOutcome, ModelChoice, OutputParseResult,
+    PolicyVersionRef, PromptSectionAudit, RewardObservation, TaskInvocationContract,
 };
 pub use conductor::{CognitiveSignal, ConductorDecision, ConductorEvaluation};
 pub use connector::{
@@ -141,6 +197,11 @@ pub use context::Context;
 pub use datum::Datum;
 pub use decay::Decay;
 pub use demurrage::Demurrage;
+pub use dispatch_plan::{
+    DispatchAttempt, DispatchAttemptKind, DispatchAuthStatus, DispatchCaller, DispatchError,
+    DispatchPlan, DispatchRequest, DispatchRequirement, FallbackPolicy, TransportAuth,
+    TransportPlan,
+};
 pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
@@ -148,6 +209,13 @@ pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry};
 pub use forensic::{
     ForensicReplay, ForensicReplayLogger, GateVerdictRecord, PolicyDecisionRecord, PolicyOutcome,
     ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,
+};
+pub use foundation::{
+    BoxModelStream, ChatMessage as FoundationChatMessage, Effect, EffectExecutor, EffectOutcome,
+    EventConsumer, FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner, GateVerdict,
+    MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, ModelStreamEvent,
+    PromptAssembler, PromptSpec, ShellGateCommand, TokenUsage, model_call_failure_to_stream,
+    model_call_response_to_stream,
 };
 pub use hash::ContentHash;
 pub use heartbeat::{
@@ -167,6 +235,14 @@ pub use operating_frequency::{
     OperatingFrequencyScheduler,
 };
 pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
+pub use policy_manifest::{
+    BUILTIN_ROLE_POLICY_MANIFEST_PATH, BUILTIN_ROLE_POLICY_MANIFEST_TOML,
+    CURRENT_POLICY_MANIFEST_SCHEMA_VERSION, ContextPolicyRef, FallbackBehavior, GateExpectation,
+    InclusionMode, InclusionRule, MANIFEST_BACKED_BUILTIN_ROLE_IDS, ManifestError,
+    ManifestLookupError, ManifestValidationError, OutputFormat, OutputSchemaExpectation,
+    PolicyProvenance, PromptBudgetPolicy, PromptPolicy, PromptPolicySection, PromptSectionSource,
+    RolePolicyManifest, RoleProfile, RoleSafetyPolicy, SectionBudget, ToolCapabilityPolicy,
+};
 pub use polyglot::{PolyglotProject, detect_polyglot};
 pub use prediction::{
     AccuracyStats, CalibrationStats, CalibrationTracker, ChainCondition, ChainMetric,
@@ -185,15 +261,17 @@ pub use provenance::{
     Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, Taint, TaintInfo,
 };
 pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
-pub use pulse_bus::{PulseBus, PulseBusReceiver};
 pub use query::{Budget, Query};
 pub use roko_primitives::HdcVector;
+pub use runtime_event::{RuntimeEvent, ToolCallSummary, WorkflowOutcome};
 pub use score::Score;
+pub use signal::{Signal, SignalBuilder};
 pub use signal_kinds::*;
 pub use task::{
     GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight,
     TaskDomain, TaskMeta, TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
 };
+pub use usage::{UsageObservation, UsageSource};
 // Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
 // `roko_core::tool::FailureKind`.
@@ -212,7 +290,6 @@ pub use job::{
 pub use namespace::{
     Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
 };
-pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use temperament::Temperament;
 pub use tool::{
     ArmEntry, Artifact, AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit,
@@ -221,7 +298,14 @@ pub use tool::{
     ToolError, ToolFormat, ToolFormatProfile, ToolHandler, ToolMetrics, ToolOutcome,
     ToolPermission, ToolRegistry, ToolRelevanceScorer, ToolResult, ToolSchema, ToolSource,
     ToolTrace, ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
-    compute_reward, galileo_tsq, profile_for_model,
+    classify_tool_error, compute_reward, galileo_tsq, profile_for_model,
 };
-pub use traits::{Bus, ColdSubstrate, Composer, Gate, Policy, Router, Scorer, Substrate};
+pub use traits::{
+    Bus, ColdStore, Compose, Connect, Observe, React, Route, Store, Substrate, Trigger, Verify,
+};
+// Note: The `Score` protocol trait (formerly `Scorer`) is NOT re-exported at
+// the crate root to avoid colliding with the `Score` value struct. Access it
+// via `roko_core::traits::Score` or import with an alias.
 pub use verdict::{Outcome, Selection, TestCount, Verdict};
+#[allow(deprecated)]
+pub use workspace::Workspace;

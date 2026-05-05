@@ -15,7 +15,7 @@ use roko_core::tool::{ToolContext, ToolDef, ToolError};
 use super::hooks::{HookDecision, SafetyHook};
 
 /// Maximum allowed file path length in bytes.
-const MAX_PATH_LEN: usize = 4096;
+const MAX_PATH_LEN: usize = roko_core::defaults::DEFAULT_MAX_PATH_LEN;
 
 /// Maximum line number / offset allowed before flagging as suspicious.
 const MAX_LINE_NUMBER: u64 = 10_000_000;

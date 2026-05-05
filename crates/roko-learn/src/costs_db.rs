@@ -445,7 +445,7 @@ impl CostTable {
             },
         );
         models.insert(
-            "claude-haiku-3-5".to_string(),
+            "claude-haiku-4-5".to_string(),
             ModelPricing {
                 input_per_m: 0.25,
                 output_per_m: 1.25,

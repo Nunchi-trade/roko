@@ -14,7 +14,9 @@ use base64::Engine;
 use futures::future::join_all;
 use futures::{SinkExt, StreamExt};
 use roko_agent_server::registration::AgentCard;
-use roko_core::{AgentTopology, AgentTopologyNode};
+// AgentTopology/AgentTopologyNode no longer used — topology handler returns
+// raw JSON matching the frontend shape.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -131,7 +133,7 @@ struct MuxEnvelope {
 }
 
 struct AgentStreamHandle {
-    sender: mpsc::UnboundedSender<String>,
+    sender: mpsc::Sender<String>,
     task: JoinHandle<()>,
 }
 
@@ -320,31 +322,57 @@ async fn agent_trace(
     })))
 }
 
-async fn agent_topology(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<AgentTopology>, ApiError> {
+async fn agent_topology(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let agents = known_agents(&state).await?;
-    let nodes = agents
+
+    // Build nodes with the fields the frontend `AgentFleet` component expects:
+    //   { agent_id, role, endpoints }
+    let nodes: Vec<Value> = agents
         .iter()
-        .map(|agent| AgentTopologyNode {
-            id: agent.agent_id.clone(),
-            address: agent
+        .map(|agent| {
+            let role = agent
+                .capabilities
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "agent".to_string());
+            let endpoint = agent
                 .endpoints
                 .rest
                 .clone()
-                .unwrap_or_else(|| agent.card_uri.clone().unwrap_or_default()),
-            insights_posted: 0,
-            confirmations_given: 0,
-            challenges_given: 0,
-            total_weight: 0.0,
+                .unwrap_or_else(|| agent.card_uri.clone().unwrap_or_default());
+            json!({
+                "agent_id": agent.agent_id,
+                "role": role,
+                "endpoints": [endpoint],
+            })
         })
         .collect();
 
-    Ok(Json(AgentTopology {
-        nodes,
-        edges: Vec::new(),
-        timestamp: now_secs(),
-    }))
+    // Compute edges: agents that share domain tags are connected.
+    let mut edges: Vec<Value> = Vec::new();
+    for (i, a) in agents.iter().enumerate() {
+        for b in agents.iter().skip(i + 1) {
+            let shared = a
+                .domain_tags
+                .iter()
+                .filter(|tag| b.domain_tags.contains(tag))
+                .count();
+            if shared > 0 || a.domain_tags.is_empty() || b.domain_tags.is_empty() {
+                // Connect agents that share domain context, or all agents if
+                // domain tags are absent (sparse graphs are boring).
+                edges.push(json!({
+                    "from": a.agent_id,
+                    "to": b.agent_id,
+                    "weight": shared.max(1),
+                }));
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "nodes": nodes,
+        "edges": edges,
+    })))
 }
 
 async fn list_prediction_sessions(
@@ -417,7 +445,28 @@ async fn list_knowledge_entries(
     if let Some(cached) = state.cached_json(cache_key).await {
         return Ok(Json(cached));
     }
-    let body = json!(PaginatedResponse::<Value>::new(Vec::new(), 0, 0, 0));
+    let store = roko_neuro::knowledge_store::KnowledgeStore::for_layout(&state.layout);
+    let all = store.read_all().unwrap_or_default();
+    let items: Vec<Value> = all
+        .iter()
+        .map(|e| {
+            let domain = domain_from_entry(e);
+            let label = if e.content.len() > 80 {
+                format!("{}…", &e.content[..80])
+            } else {
+                e.content.clone()
+            };
+            json!({
+                "id": e.id,
+                "domain": domain,
+                "citations": e.source_episodes.len() + e.confirmation_count as usize,
+                "label": label,
+                "confidence": e.confidence,
+            })
+        })
+        .collect();
+    let total = items.len();
+    let body = json!(PaginatedResponse::new(items, total, 0, total));
     state
         .put_cached_json(cache_key, KNOWLEDGE_TTL, body.clone())
         .await;
@@ -429,11 +478,107 @@ async fn list_knowledge_edges(State(state): State<Arc<AppState>>) -> Result<Json
     if let Some(cached) = state.cached_json(cache_key).await {
         return Ok(Json(cached));
     }
-    let body = json!(PaginatedResponse::<Value>::new(Vec::new(), 0, 0, 0));
+    let store = roko_neuro::knowledge_store::KnowledgeStore::for_layout(&state.layout);
+    let all = store.read_all().unwrap_or_default();
+    let mut edges: Vec<Value> = Vec::new();
+    // Build edges from refutation links (anti-knowledge → refuted entry).
+    for entry in &all {
+        if let Some(ref target) = entry.refuted_insight_id {
+            edges.push(json!({
+                "source": entry.id,
+                "target": target,
+                "frequency": 1,
+            }));
+        }
+    }
+    // Build edges from shared source episodes and shared semantic tags.
+    // Entries sharing an episode or a meaningful tag (plan:*, agent:*, gate:*)
+    // are connected; frequency counts shared dimensions.
+    let mut group_to_entries: HashMap<String, Vec<&str>> = HashMap::new();
+    for entry in &all {
+        for ep in &entry.source_episodes {
+            group_to_entries
+                .entry(format!("ep:{ep}"))
+                .or_default()
+                .push(&entry.id);
+        }
+        for tag in &entry.tags {
+            if tag.starts_with("plan:") || tag.starts_with("agent:") || tag.starts_with("model:") {
+                group_to_entries
+                    .entry(tag.clone())
+                    .or_default()
+                    .push(&entry.id);
+            }
+        }
+    }
+    let mut pair_freq: HashMap<(&str, &str), u32> = HashMap::new();
+    for ids in group_to_entries.values() {
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                let pair = if ids[i] < ids[j] {
+                    (ids[i], ids[j])
+                } else {
+                    (ids[j], ids[i])
+                };
+                *pair_freq.entry(pair).or_insert(0) += 1;
+            }
+        }
+    }
+    for (pair, freq) in &pair_freq {
+        edges.push(json!({
+            "source": pair.0,
+            "target": pair.1,
+            "frequency": freq,
+        }));
+    }
+    let total = edges.len();
+    let body = json!(PaginatedResponse::new(edges, total, 0, total));
     state
         .put_cached_json(cache_key, KNOWLEDGE_TTL, body.clone())
         .await;
     Ok(Json(body))
+}
+
+/// Derive a domain label from a knowledge entry's kind, source, and tags.
+fn domain_from_entry(e: &roko_neuro::KnowledgeEntry) -> &'static str {
+    // Check source field first (most specific).
+    if let Some(ref src) = e.source {
+        if src.contains("gate") {
+            return "gate";
+        }
+        if src.contains("agent") || src.contains("dispatch") {
+            return "agent";
+        }
+        if src.contains("plan") || src.contains("task") {
+            return "plan";
+        }
+        if src.contains("config") {
+            return "config";
+        }
+    }
+    // Check tags.
+    for tag in &e.tags {
+        let t = tag.to_lowercase();
+        if t.contains("gate") {
+            return "gate";
+        }
+        if t.contains("agent") {
+            return "agent";
+        }
+        if t.contains("plan") || t.contains("task") {
+            return "plan";
+        }
+        if t.contains("config") {
+            return "config";
+        }
+    }
+    // Fall back to kind.
+    match e.kind {
+        roko_neuro::KnowledgeKind::Warning | roko_neuro::KnowledgeKind::AntiKnowledge => "gate",
+        roko_neuro::KnowledgeKind::StrategyFragment => "plan",
+        roko_neuro::KnowledgeKind::CausalLink => "agent",
+        _ => "knowledge",
+    }
 }
 
 async fn search_knowledge(
@@ -577,7 +722,7 @@ async fn get_task(
 }
 
 async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+    super::ws::apply_ws_size_limits(ws).on_upgrade(move |socket| handle_ws(socket, state))
 }
 
 async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
@@ -589,7 +734,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    let (mux_tx, mut mux_rx) = mpsc::unbounded_channel::<MuxEnvelope>();
+    let (mux_tx, mut mux_rx) =
+        mpsc::channel::<MuxEnvelope>(roko_core::defaults::DEFAULT_MUX_CHANNEL_BUFFER);
     let mut agent_streams = HashMap::<String, AgentStreamHandle>::new();
     sync_agent_streams(&state, &mux_tx, &mut agent_streams).await;
 
@@ -666,14 +812,14 @@ async fn route_client_stream_message(
 
     if target_ids.is_empty() {
         for handle in agent_streams.values() {
-            if handle.sender.send(payload.clone()).is_ok() {
+            if handle.sender.try_send(payload.clone()).is_ok() {
                 delivered += 1;
             }
         }
     } else {
         for target in target_ids {
             if let Some(handle) = agent_streams.get(&target)
-                && handle.sender.send(payload.clone()).is_ok()
+                && handle.sender.try_send(payload.clone()).is_ok()
             {
                 delivered += 1;
             }
@@ -695,7 +841,7 @@ async fn route_client_stream_message(
 
 async fn sync_agent_streams(
     state: &Arc<AppState>,
-    mux_tx: &mpsc::UnboundedSender<MuxEnvelope>,
+    mux_tx: &mpsc::Sender<MuxEnvelope>,
     streams: &mut HashMap<String, AgentStreamHandle>,
 ) {
     let Ok(agents) = known_agents(state).await else {
@@ -724,7 +870,7 @@ async fn sync_agent_streams(
             continue;
         }
 
-        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
         let tx = mux_tx.clone();
         let task = tokio::spawn(async move {
             forward_agent_stream(agent, input_rx, tx).await;
@@ -741,8 +887,8 @@ async fn sync_agent_streams(
 
 async fn forward_agent_stream(
     agent: DiscoveredAgent,
-    mut input_rx: mpsc::UnboundedReceiver<String>,
-    mux_tx: mpsc::UnboundedSender<MuxEnvelope>,
+    mut input_rx: mpsc::Receiver<String>,
+    mux_tx: mpsc::Sender<MuxEnvelope>,
 ) {
     let Some(url) = agent_stream_url(&agent) else {
         return;
@@ -756,7 +902,7 @@ async fn forward_agent_stream(
 
         match connect_async(request).await {
             Ok((stream, _)) => {
-                let _ = mux_tx.send(MuxEnvelope {
+                let _ = mux_tx.try_send(MuxEnvelope {
                     source: agent.agent_id.clone(),
                     event: json!({
                         "type": "stream_status",
@@ -781,7 +927,7 @@ async fn forward_agent_stream(
                         inbound = read.next() => {
                             match inbound {
                                 Some(Ok(WsMessage::Text(text))) => {
-                                    let _ = mux_tx.send(MuxEnvelope {
+                                    let _ = mux_tx.try_send(MuxEnvelope {
                                         source: agent.agent_id.clone(),
                                         event: parse_stream_event(&text),
                                     });
@@ -794,7 +940,7 @@ async fn forward_agent_stream(
                                         .unwrap_or_else(|| json!({
                                             "binary_base64": base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes),
                                         }));
-                                    let _ = mux_tx.send(MuxEnvelope {
+                                    let _ = mux_tx.try_send(MuxEnvelope {
                                         source: agent.agent_id.clone(),
                                         event,
                                     });
@@ -1287,12 +1433,15 @@ mod tests {
 
     fn test_state() -> Arc<AppState> {
         let dir = tempdir().expect("tempdir");
-        Arc::new(AppState::new(
-            dir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ))
+        Arc::new(
+            AppState::new(
+                dir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        )
     }
 
     async fn call_json(router: &Router, uri: &str) -> Value {

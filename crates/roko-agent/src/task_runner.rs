@@ -5,12 +5,14 @@
 //! and cost accounting across task iterations.
 
 use crate::{Agent, Usage, chat_types::FinishReason};
-use roko_core::{Context, Engram};
+use indexmap::IndexMap;
+use roko_core::config::schema::ModelProfile;
+use roko_core::{Context, Signal};
 use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
-const DEFAULT_EVENT_BUS_CAPACITY: usize = 32;
+const DEFAULT_EVENT_BUS_CAPACITY: usize = roko_core::defaults::DEFAULT_EVENT_BUS_CAPACITY;
 const PROMPT_LOOP_WINDOW: usize = 20;
 const PROMPT_LOOP_THRESHOLD: usize = 5;
 
@@ -40,7 +42,7 @@ pub struct TaskRunner {
 #[derive(Debug, Clone)]
 pub struct TaskResult {
     /// Final output signal emitted by the agent pipeline.
-    pub output: Engram,
+    pub output: Signal,
     /// Total usage accumulated across all iterations.
     pub total_usage: Usage,
     /// Total cost accumulated across all iterations.
@@ -413,17 +415,86 @@ pub struct CostTable {
     pub models: HashMap<String, ModelPricing>,
 }
 
+/// Sonnet-rate fallback used when a model slug is unknown but tokens > 0.
+const SONNET_FALLBACK: ModelPricing = ModelPricing {
+    input_per_m: 3.00,
+    output_per_m: 15.00,
+    cache_read_per_m: 0.30,
+    cache_write_per_m: 3.75,
+};
+
+/// Hardcoded pricing for well-known models: (slug, input, output, cache_read, cache_write).
+const KNOWN_MODEL_PRICING: &[(&str, f64, f64, f64, f64)] = &[
+    ("claude-opus-4-6", 15.00, 75.00, 3.75, 18.75),
+    ("claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75),
+    ("claude-haiku-4-5", 0.80, 4.00, 0.08, 1.00),
+    ("glm-5.1", 1.40, 4.40, 0.26, 1.75),
+    ("glm-5", 1.00, 3.20, 0.50, 1.25),
+    ("kimi-k2.5", 0.60, 3.00, 0.10, 0.75),
+    ("gpt-5.2", 2.00, 8.00, 0.50, 2.50),
+    ("gpt-5.4", 2.50, 10.00, 0.63, 3.13),
+    ("gpt-5.4-mini", 0.40, 1.60, 0.10, 0.50),
+];
+
 impl CostTable {
     /// Insert or replace pricing for a model.
     pub fn insert(&mut self, model_slug: impl Into<String>, pricing: ModelPricing) {
         self.models.insert(model_slug.into(), pricing);
     }
 
+    /// Build a cost table from config model profiles, then merge hardcoded defaults
+    /// for known models (without overriding config-supplied pricing).
+    #[must_use]
+    pub fn from_config_with_defaults(models: &IndexMap<String, ModelProfile>) -> Self {
+        let mut table = Self::default();
+
+        // Populate from config profiles.
+        for profile in models.values() {
+            if let (Some(input), Some(output)) =
+                (profile.cost_input_per_m, profile.cost_output_per_m)
+            {
+                table.insert(
+                    profile.slug.clone(),
+                    ModelPricing {
+                        input_per_m: input,
+                        output_per_m: output,
+                        cache_read_per_m: profile.cost_cache_read_per_m.unwrap_or(input * 0.5),
+                        cache_write_per_m: profile.cost_cache_write_per_m.unwrap_or(input * 1.25),
+                    },
+                );
+            }
+        }
+
+        // Merge hardcoded defaults for known models (won't override config).
+        for &(slug, input, output, cache_r, cache_w) in KNOWN_MODEL_PRICING {
+            table
+                .models
+                .entry(slug.to_string())
+                .or_insert(ModelPricing {
+                    input_per_m: input,
+                    output_per_m: output,
+                    cache_read_per_m: cache_r,
+                    cache_write_per_m: cache_w,
+                });
+        }
+
+        table
+    }
+
     /// Calculate request cost from raw token counts.
+    ///
+    /// Falls back to Sonnet rates when the model is unknown but tokens > 0.
     #[must_use]
     pub fn calculate(&self, model_slug: &str, usage: &Usage) -> f64 {
-        let Some(pricing) = self.models.get(model_slug) else {
-            return 0.0;
+        let total_tokens = usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_read_tokens
+            + usage.cache_create_tokens;
+
+        let pricing = match self.models.get(model_slug) {
+            Some(p) => p,
+            None if total_tokens > 0 => &SONNET_FALLBACK,
+            None => return 0.0,
         };
 
         (usage.input_tokens as f64 * pricing.input_per_m / 1_000_000.0)
@@ -437,7 +508,7 @@ impl TaskRunner {
     /// Run the full task pipeline until success, abort, escalation, or a hard stop.
     pub async fn run_task(
         &mut self,
-        task_signal: &Engram,
+        task_signal: &Signal,
         ctx: &Context,
     ) -> Result<TaskResult, TaskRunnerError> {
         let mut iterations = 0;
@@ -517,8 +588,8 @@ impl TaskRunner {
                 error_pattern: classify_error_pattern(&result.output),
                 elapsed_ms: total_usage.wall_ms,
                 cost_so_far_usd: total_cost_usd,
-                model_tier: ctx.attr("model_tier").unwrap_or("unknown").to_string(),
-                task_complexity: ctx.attr("task_complexity").unwrap_or("unknown").to_string(),
+                model_tier: ctx.attr("model_tier").unwrap_or_default().to_string(),
+                task_complexity: ctx.attr("task_complexity").unwrap_or_default().to_string(),
             };
             let action = self.conductor.select_action(&conductor_state);
             conductor_actions.push(action);
@@ -557,7 +628,7 @@ impl TaskRunner {
     }
 }
 
-fn prompt_hash_u64(signal: &Engram) -> u64 {
+fn prompt_hash_u64(signal: &Signal) -> u64 {
     let hash = signal.content_hash();
     let bytes: [u8; 8] = hash.0[..8].try_into().expect("content hash prefix");
     u64::from_be_bytes(bytes)
@@ -579,29 +650,71 @@ fn event_timestamp_ms(ctx: &Context) -> i64 {
     }
 }
 
-fn classify_error_pattern(output: &Engram) -> ErrorPattern {
+fn classify_error_pattern(output: &Signal) -> ErrorPattern {
     let Ok(text) = output.body.as_text() else {
         return ErrorPattern::Unknown;
     };
     let text = text.to_ascii_lowercase();
 
-    if text.contains("compile") || text.contains("borrow checker") || text.contains("rustc") {
-        ErrorPattern::Compile
-    } else if text.contains("test") || text.contains("assert") {
-        ErrorPattern::Test
-    } else if text.contains("tool") {
-        ErrorPattern::ToolCall
-    } else if text.contains("timeout") || text.contains("timed out") {
-        ErrorPattern::Timeout
-    } else if text.contains("io error")
-        || text.contains("filesystem")
-        || text.contains("permission denied")
-        || text.contains("network")
+    // Priority-ordered matching: more specific patterns first to avoid
+    // false positives (e.g. "this test compiles fine" should match Test,
+    // not Compile).
+
+    // Timeout is the most unambiguous signal.
+    if text.contains("timed out") || text.contains("timeout") || text.contains("deadline exceeded")
     {
-        ErrorPattern::Infrastructure
-    } else {
-        ErrorPattern::Unknown
+        return ErrorPattern::Timeout;
     }
+
+    // Infrastructure: network/IO errors are unambiguous when they include
+    // specific keywords.
+    if text.contains("io error")
+        || text.contains("permission denied")
+        || text.contains("connection refused")
+        || text.contains("dns resolution")
+        || text.contains("network error")
+        || text.contains("econnreset")
+        || text.contains("broken pipe")
+    {
+        return ErrorPattern::Infrastructure;
+    }
+
+    // Tool call failures -- look for specific tool error patterns.
+    if text.contains("tool call failed")
+        || text.contains("tool execution error")
+        || text.contains("tool_use_error")
+    {
+        return ErrorPattern::ToolCall;
+    }
+
+    // Compile: look for compiler-specific indicators, not just "compile".
+    if text.contains("error[e") // rustc error codes like error[E0308]
+        || text.contains("borrow checker")
+        || text.contains("cannot find")
+        || text.contains("mismatched types")
+        || text.contains("unresolved import")
+        || (text.contains("rustc") && text.contains("error"))
+        || (text.contains("cargo build") && text.contains("failed"))
+    {
+        return ErrorPattern::Compile;
+    }
+
+    // Test: look for test runner output patterns.
+    if text.contains("test result: failed")
+        || text.contains("assertion failed")
+        || text.contains("panicked at")
+        || (text.contains("cargo test") && text.contains("failed"))
+    {
+        return ErrorPattern::Test;
+    }
+
+    // Fallback: broad filesystem/network patterns (lower priority to avoid
+    // false positives).
+    if text.contains("filesystem") || text.contains("no such file") {
+        return ErrorPattern::Infrastructure;
+    }
+
+    ErrorPattern::Unknown
 }
 
 #[cfg(test)]
@@ -636,7 +749,7 @@ mod tests {
 
     #[async_trait]
     impl Agent for SequenceAgent {
-        async fn run(&self, _input: &Engram, _ctx: &Context) -> AgentResult {
+        async fn run(&self, _input: &Signal, _ctx: &Context) -> AgentResult {
             self.run_count.fetch_add(1, Ordering::SeqCst);
             self.results
                 .lock()
@@ -650,12 +763,12 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_result(text: &str, success: bool, usage: Usage) -> AgentResult {
-        let output = Engram::builder(Kind::AgentOutput)
+        let output = Signal::builder(Kind::AgentOutput)
             .body(Body::text(text))
             .provenance(Provenance::agent("sequence"))
             .build();

@@ -1,0 +1,114 @@
+/* ConnectionGuard — connection gate wrapper */
+
+.connection-guard {
+  position: relative;
+}
+
+/* ── Connecting state ── */
+
+.connection-guard__connecting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 120px;
+  padding: 24px 16px;
+}
+
+.connection-guard__spinner {
+  font-family: var(--mono);
+  font-size: var(--text-xl);
+  color: var(--rose-glow);
+  animation: braille-spin 0.8s steps(8) infinite;
+  line-height: 1;
+}
+
+@keyframes braille-spin {
+  0%   { content: '\2840'; }
+  12%  { content: '\2844'; }
+  25%  { content: '\2846'; }
+  37%  { content: '\2807'; }
+  50%  { content: '\2823'; }
+  62%  { content: '\2831'; }
+  75%  { content: '\2838'; }
+  87%  { content: '\2834'; }
+}
+
+.connection-guard__label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+
+/* ── Error state ── */
+
+.connection-guard__error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 120px;
+  padding: 24px 16px;
+}
+
+.connection-guard__error-icon {
+  font-size: var(--text-xl);
+  color: var(--status-error);
+  line-height: 1;
+}
+
+.connection-guard__error-msg {
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  color: var(--text-dim);
+  text-align: center;
+  max-width: 400px;
+}
+
+.connection-guard__retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 6px 14px;
+  transition: border-color 150ms, color 150ms;
+}
+
+.connection-guard__retry:hover {
+  border-color: var(--border-strong);
+  color: var(--text-soft);
+}
+
+.connection-guard__countdown {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  letter-spacing: 0.06em;
+}
+
+/* ── Children (connected) ── */
+
+.connection-guard__content {
+  animation: fadeIn 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connection-guard__spinner {
+    animation: none;
+  }
+  .connection-guard__content {
+    animation: none;
+  }
+}

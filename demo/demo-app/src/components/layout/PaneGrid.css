@@ -1,0 +1,85 @@
+/* PaneGrid -- resizable CSS grid with column/row drag handles */
+
+.pane-grid {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.pane-grid__col-handle {
+  width: 4px;
+  cursor: col-resize;
+  z-index: 10;
+  background: transparent;
+  transition:
+    background 0.2s ease,
+    width 0.2s ease,
+    box-shadow 0.2s ease;
+  position: relative;
+}
+
+.pane-grid__col-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 3px;
+  height: 16px;
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--rose-bright) 50%, transparent) 1px, transparent 1px);
+  background-size: 3px 4px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.pane-grid__col-handle:hover {
+  width: 6px;
+  background: color-mix(in srgb, var(--rose-bright) 15%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 20%, transparent);
+}
+
+.pane-grid__col-handle:hover::after {
+  opacity: 1;
+}
+
+.pane-grid__row-handle {
+  height: 4px;
+  cursor: row-resize;
+  z-index: 10;
+  background: transparent;
+  transition:
+    background 0.2s ease,
+    height 0.2s ease,
+    box-shadow 0.2s ease;
+  position: relative;
+}
+
+.pane-grid__row-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 16px;
+  height: 3px;
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--rose-bright) 50%, transparent) 1px, transparent 1px);
+  background-size: 4px 3px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.pane-grid__row-handle:hover {
+  height: 6px;
+  background: color-mix(in srgb, var(--rose-bright) 15%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 20%, transparent);
+}
+
+.pane-grid__row-handle:hover::after {
+  opacity: 1;
+}
+
+.pane-grid__col-handle:active,
+.pane-grid__row-handle:active {
+  background: color-mix(in srgb, var(--rose-dim) 25%, transparent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--rose) 40%, transparent);
+}

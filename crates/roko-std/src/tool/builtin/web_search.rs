@@ -8,11 +8,16 @@
 //! environment variable to be set.
 
 use async_trait::async_trait;
+use roko_core::foundation::{
+    CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, caller,
+};
 use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolHandler,
     ToolPermission, ToolResult, ToolSchema,
 };
 use std::fmt::Write as _;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::sandbox::require_string;
@@ -32,6 +37,8 @@ const DEFAULT_MODEL: &str = "sonar";
 /// Request timeout in seconds.
 const SEARCH_TIMEOUT_SECS: u64 = 30;
 
+static WARNED_DIRECT_API_KEY_PATH: AtomicBool = AtomicBool::new(false);
+
 /// Build the [`ToolDef`] for `web_search`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
@@ -41,7 +48,21 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Network,
         ToolPermission::networked(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query to send to the search provider."
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "Maximum number of results to return (default: 5)."
+            }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(true)
     .with_timeout_ms(30_000)
@@ -175,6 +196,40 @@ async fn call_perplexity(query: &str, api_key: &str) -> ToolResult {
     parse_perplexity_response(response).await
 }
 
+async fn call_gateway(model_caller: Arc<dyn ModelCaller>, query: &str) -> ToolResult {
+    let response = model_caller
+        .call(ModelCallRequest {
+            model: DEFAULT_MODEL.to_string(),
+            system: None,
+            messages: vec![ChatMessage {
+                role: MessageRole::User,
+                content: query.to_string(),
+            }],
+            max_tokens: None,
+            temperature: None,
+            role: Some("web-search".to_string()),
+            caller: Some(caller::CLI.to_string()),
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
+            budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
+            cache_policy: CachePolicy::Default,
+        })
+        .await;
+
+    match response {
+        Ok(response) if !response.content.trim().is_empty() => ToolResult::text(response.content),
+        Ok(_) => ToolResult::Err(ToolError::Other(
+            "web_search: gateway returned an empty response".into(),
+        )),
+        Err(error) => ToolResult::Err(ToolError::Other(format!(
+            "web_search: gateway search failed: {error}"
+        ))),
+    }
+}
+
 /// Parse the HTTP response from Perplexity into a formatted `ToolResult`.
 async fn parse_perplexity_response(response: reqwest::Response) -> ToolResult {
     let status = response.status();
@@ -232,8 +287,32 @@ async fn parse_perplexity_response(response: reqwest::Response) -> ToolResult {
 /// Calls the Perplexity sonar model via their chat/completions API to
 /// perform search-grounded generation. Returns the answer text plus
 /// citations and search result snippets.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Handler;
+#[derive(Clone, Default)]
+pub struct Handler {
+    model_caller: Option<Arc<dyn ModelCaller>>,
+}
+
+/// Default web-search handler that uses the legacy direct API-key path.
+#[allow(non_upper_case_globals)]
+pub const Handler: Handler = Handler { model_caller: None };
+
+impl std::fmt::Debug for Handler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handler")
+            .field("model_caller", &self.model_caller.is_some())
+            .finish()
+    }
+}
+
+impl Handler {
+    /// Construct a web-search handler that calls through the model gateway.
+    #[must_use]
+    pub fn with_model_caller(model_caller: Arc<dyn ModelCaller>) -> Self {
+        Self {
+            model_caller: Some(model_caller),
+        }
+    }
+}
 
 #[async_trait]
 impl ToolHandler for Handler {
@@ -258,6 +337,12 @@ impl ToolHandler for Handler {
             ));
         }
 
+        if let Some(model_caller) = self.model_caller.clone() {
+            return call_gateway(model_caller, &query).await;
+        }
+
+        // TODO(gateway): wire ModelCaller from runtime ToolContext.
+        warn_direct_api_key_path_once();
         let api_key = match std::env::var("PERPLEXITY_API_KEY") {
             Ok(k) if !k.is_empty() => k,
             _ => {
@@ -270,6 +355,12 @@ impl ToolHandler for Handler {
         };
 
         call_perplexity(&query, &api_key).await
+    }
+}
+
+fn warn_direct_api_key_path_once() {
+    if !WARNED_DIRECT_API_KEY_PATH.swap(true, Ordering::Relaxed) {
+        eprintln!("web_search using direct API key; gateway not available");
     }
 }
 

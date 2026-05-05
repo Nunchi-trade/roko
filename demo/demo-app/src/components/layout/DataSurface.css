@@ -1,0 +1,10 @@
+/* DataSurface — universal data container with loading/empty/error states */
+
+.data-surface {
+  position: relative;
+}
+
+.data-surface--centered {
+  display: grid;
+  place-items: center;
+}

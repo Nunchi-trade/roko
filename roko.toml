@@ -1,48 +1,1037 @@
-# Project-specific config for the roko repo.
-# Global settings (agent, tools, prompt, providers, models, budget, serve)
-# live in ~/.roko/config.toml. Secrets in ~/.roko/.env.
+config_version = 2
+schema_version = 2
 
-auto_plan = false
-
-[dreams]
-auto_dream = true
-idle_threshold_mins = 15
-min_episodes_for_dream = 5
-
-[daimon.strategy_space]
-domain = "coding"
-dimensions = [
-    "complexity",
-    "risk",
-    "novelty",
-    "confidence",
-    "time_pressure",
-    "scope",
-    "reversibility",
-    "dependency_depth",
-]
-
-[[gate]]
-kind = "shell"
-program = "true"
-args = []
-timeout_ms = 60000
-
-[executor]
-max_concurrent_plans = 4
-max_concurrent_tasks = 8
-max_auto_fix_iterations = 5
-max_merge_attempts = 3
-task_timeout_secs = 600
-speculative_threshold_multiplier = 2.0
-auto_replan = false
-use_worktrees = false
-
-[executor.resource_budget]
-max_concurrent = 8
+[project]
+name = "roko-project"
+root = "."
+fresh_base_branch = "main"
 
 [prd]
 auto_plan = false
+
+[agent]
+default_model = "gpt54-mini"
+default_backend = "openai"
+default_effort = "medium"
+temperament = "balanced"
+context_limit_k = 200
+bare_mode = true
+command = "claude"
+mode = "ephemeral"
+
+[agent.roles]
+
+[providers.moonshot]
+kind = "openai_compat"
+base_url = "https://api.moonshot.ai/v1"
+api_key_env = "MOONSHOT_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.ollama]
+kind = "openai_compat"
+base_url = "http://localhost:11434/v1"
+api_key_env = ""
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.openrouter]
+kind = "openai_compat"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.anthropic]
+kind = "claude_cli"
+command = "claude"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.claude_cli]
+kind = "claude_cli"
+command = "claude"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+timeout_ms = 180000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.zhipu]
+kind = "openai_compat"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.perplexity]
+kind = "perplexity_api"
+api_key_env = "PERPLEXITY_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.cerebras]
+kind = "cerebras_api"
+base_url = "https://api.cerebras.ai/v1"
+api_key_env = "CEREBRAS_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.openai]
+kind = "openai_compat"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[providers.gemini]
+kind = "openai_compat"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key_env = "GEMINI_API_KEY"
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+
+[models.o3-mini]
+provider = "openai"
+slug = "o3-mini"
+context_window = 200000
+max_output = 100000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = false
+
+[models.sonar-reasoning]
+provider = "perplexity"
+slug = "sonar-reasoning-pro"
+context_window = 128000
+max_output = 16384
+supports_tools = false
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = false
+
+[models.gpt54]
+provider = "openai"
+slug = "gpt-5.4"
+context_window = 128000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = true
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+cost_input_per_m = 2.5
+cost_output_per_m = 10.0
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = true
+
+[models.gemini-pro]
+provider = "gemini"
+slug = "gemini-2.5-pro"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = false
+
+[models.gemini-2-5-pro]
+provider = "gemini"
+slug = "gemini-2.5-pro"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = false
+
+[models.gemini-2-5-flash]
+provider = "gemini"
+slug = "gemini-2.5-flash"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+context_window = 200000
+max_output = 16384
+supports_tools = true
+supports_thinking = true
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+cost_input_per_m = 1.4
+cost_output_per_m = 4.4
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.kimi-k2-6]
+provider = "moonshot"
+slug = "kimi-k2.6"
+context_window = 262144
+max_output = 65535
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = false
+
+[models.haiku]
+provider = "anthropic"
+slug = "claude-haiku-4-5"
+context_window = 128000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "anthropic_blocks"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.llama32]
+provider = "ollama"
+slug = "llama3.2:latest"
+context_window = 8192
+max_output = 4096
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.claude-opus]
+provider = "anthropic"
+slug = "claude-opus-4-6"
+context_window = 200000
+max_output = 32768
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "anthropic_blocks"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = false
+
+[models.sonar]
+provider = "perplexity"
+slug = "sonar-pro"
+context_window = 127000
+max_output = 16384
+supports_tools = false
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.cerebras-scout]
+provider = "cerebras"
+slug = "gpt-oss-120b"
+context_window = 128000
+max_output = 32768
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.gemini-flash]
+provider = "gemini"
+slug = "gemini-2.5-flash"
+context_window = 128000
+max_output = 65536
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.glm45-flash]
+provider = "zhipu"
+slug = "glm-4.5-flash"
+context_window = 128000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+cost_input_per_m = 0.0
+cost_output_per_m = 0.0
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.kimi-k2-5]
+provider = "moonshot"
+slug = "kimi-k2.5"
+context_window = 262144
+max_output = 65535
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.glm5-turbo]
+provider = "zhipu"
+slug = "glm-5-turbo"
+context_window = 128000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+cost_input_per_m = 1.2
+cost_output_per_m = 4.0
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.sonar-pro]
+provider = "perplexity"
+slug = "sonar-pro"
+context_window = 127000
+max_output = 16384
+supports_tools = false
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.gemma4]
+provider = "ollama"
+slug = "gemma4:26b-a4b-it-q8_0"
+context_window = 8192
+max_output = 8192
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.glm51]
+provider = "zhipu"
+slug = "glm-5.1"
+context_window = 200000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+cost_input_per_m = 1.4
+cost_output_per_m = 4.4
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.gpt54-mini]
+provider = "openai"
+slug = "gpt-5.4-mini"
+context_window = 128000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = true
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+cost_input_per_m = 0.4
+cost_output_per_m = 1.6
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = true
+
+[models.sonnet]
+provider = "anthropic"
+slug = "claude-sonnet-4-6"
+context_window = 200000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "anthropic_blocks"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.glm-5v-turbo]
+provider = "zai"
+slug = "glm-5v-turbo"
+context_window = 131072
+max_output = 131072
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+cost_input_per_m = 1.2
+cost_output_per_m = 4.0
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.kimi-k2]
+provider = "moonshot"
+slug = "kimi-k2"
+context_window = 128000
+max_output = 65535
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.claude-sonnet]
+provider = "anthropic"
+slug = "claude-sonnet-4-6"
+context_window = 200000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "anthropic_blocks"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.o3]
+provider = "openai"
+slug = "o3"
+context_window = 200000
+max_output = 100000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = true
+
+[models.gpt53-codex]
+provider = "openai"
+slug = "gpt-5.3-codex"
+context_window = 192000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = true
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.cerebras-8b]
+provider = "cerebras"
+slug = "llama3.1-8b"
+context_window = 128000
+max_output = 8192
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.gpt52-codex]
+provider = "openai"
+slug = "gpt-5.2-codex"
+context_window = 192000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = true
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.o4-mini]
+provider = "openai"
+slug = "o4-mini"
+context_window = 128000
+max_output = 100000
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = false
+
+[models.opus]
+provider = "anthropic"
+slug = "claude-opus-4-6"
+context_window = 200000
+max_output = 32768
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "anthropic_blocks"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "premium"
+use_max_completion_tokens = false
+
+[models.glm4]
+provider = "zhipu"
+slug = "glm-4-plus"
+context_window = 128000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+cost_input_per_m = 0.6
+cost_output_per_m = 2.2
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.cerebras-70b]
+provider = "cerebras"
+slug = "gpt-oss-120b"
+context_window = 128000
+max_output = 32768
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "fast"
+use_max_completion_tokens = false
+
+[models.gpt51-codex]
+provider = "openai"
+slug = "gpt-5.1-codex"
+context_window = 192000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = true
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[models.gpt-4o]
+provider = "openai"
+slug = "gpt-4o"
+context_window = 128000
+max_output = 16384
+supports_tools = true
+supports_thinking = false
+supports_vision = false
+supports_web_search = false
+supports_mcp_tools = false
+supports_partial = false
+supports_grounding = false
+supports_code_execution = false
+supports_caching = false
+tool_format = "openai_json"
+supports_search = false
+supports_citations = false
+supports_async = false
+is_embedding_model = false
+tier = "standard"
+use_max_completion_tokens = false
+
+[gates]
+clippy_enabled = true
+skip_tests = false
+max_iterations = 3
+
+[routing]
+mode = "auto_override"
+algorithm = "linucb"
+discount_factor = 0.99
+fast_task_model = "claude-haiku-4-5"
+standard_task_model = "claude-sonnet-4-6"
+complex_task_model = "claude-opus-4-6"
+context_strategy = "mcp_first"
+
+[routing.weights]
+quality = 0.5
+cost = 0.3
+latency = 0.2
+
+[pipeline]
+default_template = "standard"
+
+[pipeline.mechanical]
+strategist = false
+reviewers = false
+reviewer_mode = "quick"
+max_iterations = 1
+
+[pipeline.focused]
+strategist = false
+reviewers = false
+reviewer_mode = "quick"
+max_iterations = 2
+
+[pipeline.integrative]
+strategist = true
+reviewers = true
+reviewer_mode = "quick"
+max_iterations = 2
+
+[pipeline.architectural]
+strategist = true
+reviewers = true
+reviewer_mode = "full"
+max_iterations = 3
+
+[budget]
+max_plan_usd = 25.0
+max_turn_usd = 3.0
+prompt_token_budget = 10000
+
+[conductor]
+max_agents = 8
+max_parallel_plans = 1
+parallel_enabled = false
+express_mode = false
+max_auto_fix_attempts = 3
+auto_fix_model = "claude-haiku-4-5"
+
+[conductor.watchers]
+
+[learning]
+auto_playbook_refresh = true
+knowledge_file_intel = true
+knowledge_warnings = true
+knowledge_wave_context = true
+knowledge_error_patterns = true
+learning_min_occurrences = 2
+file_intel_max_entries = 15
+warning_max_entries = 5
+replan_on_gate_failure = true
+replan_max_per_plan = 2
+replan_gate_attempts = 3
+dream_on_completion = true
+use_lookahead_router = false
+lookahead_threshold = 0.7
+
+[tui]
+refresh_rate_ms = 250
+
+[serve]
+share_ttl_days = 7
+terminal_enabled = true
+auto_orchestrate = true
+auto_start = false
+acknowledge_public_risk = false
+
+[serve.auth]
+enabled = false
+api_key = ""
+privy_app_id = "cmhw01vut003tjx0d5lmqc8zs"
+
+[serve.deploy]
+provider = "railway"
+environment = [
+    "GITHUB_TOKEN",
+    "GITHUB_WEBHOOK_SECRET",
+    "SLACK_BOT_TOKEN",
+    "SLACK_SIGNING_SECRET",
+]
+
+[scheduler]
+
+[webhooks.github]
+secret = ""
+
+[server]
+bind = "127.0.0.1"
+port = 6677
+# CORS origins allowed for cross-origin browser requests.
+# Empty = local origins only (localhost/127.0.0.1). Non-local origins are rejected.
+# For production, list explicit origins:
+#   cors_origins = ["https://app.example.com", "https://dashboard.example.com"]
+# To allow ALL origins (dangerous, exposes API to any site):
+#   unsafe_public_cors = true
+cors_origins = []
+unsafe_public_cors = false
+
+[deploy]
+backend = "manual"
+worker_image = "ghcr.io/nunchi-trade/roko-worker:latest"
+
+[perplexity]
+search_recency_filter = "year"
+academic_mode = false
+search_domain_filter = []
+return_images = false
+return_related_questions = true
+
+[gemini]
+use_free_tier = false
+thinking_level = "medium"
+enable_context_caching = false
+safety_settings = []
+
+[tools]
+allow = []
+deny = []
+
+[tools.profiles]
 
 [chain]
 rpc_url = "http://127.0.0.1:8545"
@@ -50,3 +1039,10 @@ chain_id = 31337
 wallet_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 agent_registry = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
 bounty_market = "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+
+[relay]
+heartbeat_interval_secs = 30
+
+[runner]
+plan_timeout_secs = 3600
+dangerously_skip_permissions = true

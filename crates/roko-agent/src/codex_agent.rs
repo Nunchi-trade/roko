@@ -23,7 +23,8 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::ProviderSemaphores;
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -35,9 +36,6 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
 /// Default model slug used when the caller omits one.
 pub const DEFAULT_MODEL: &str = "gpt-5-codex";
-
-/// Maximum output tokens requested per call (default).
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 // ─── OpenAI Chat Completions wire types (minimal subset) ───────────────────
 
@@ -112,7 +110,6 @@ struct RequestMessage<'a> {
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    max_tokens: u32,
     messages: Vec<RequestMessage<'a>>,
     #[serde(flatten)]
     extra_body_params: Map<String, Value>,
@@ -140,6 +137,8 @@ pub struct CodexAgent {
     base_url: String,
     timeout_ms: u64,
     max_tokens: u32,
+    /// When true, emit `max_completion_tokens` instead of `max_tokens`.
+    use_max_completion_tokens: bool,
     extra_headers: Vec<(String, String)>,
     extra_body_params: Map<String, Value>,
     poster: Arc<dyn HttpPoster>,
@@ -170,8 +169,9 @@ impl CodexAgent {
             model,
             name,
             base_url: DEFAULT_BASE_URL.to_owned(),
-            timeout_ms: 120_000,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            use_max_completion_tokens: false,
             extra_headers: Vec::new(),
             extra_body_params: Map::new(),
             poster: Arc::new(ReqwestPoster::new()),
@@ -205,6 +205,16 @@ impl CodexAgent {
     #[must_use]
     pub const fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Emit `max_completion_tokens` instead of `max_tokens` in request bodies.
+    ///
+    /// Newer OpenAI models (o1, o3, gpt-4o, gpt-5.x) reject `max_tokens`
+    /// and require `max_completion_tokens`.
+    #[must_use]
+    pub const fn with_use_max_completion_tokens(mut self, use_it: bool) -> Self {
+        self.use_max_completion_tokens = use_it;
         self
     }
 
@@ -279,7 +289,7 @@ impl CodexAgent {
         headers
     }
 
-    fn fail(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
+    fn fail(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -296,7 +306,7 @@ impl CodexAgent {
 
 #[async_trait]
 impl Agent for CodexAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -313,14 +323,21 @@ impl Agent for CodexAgent {
             },
         };
 
+        let mut extra = self.extra_body_params.clone();
+        let token_key = if self.use_max_completion_tokens {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        extra.insert(token_key.to_string(), Value::from(self.max_tokens));
+
         let req = ChatRequest {
             model: &self.model,
-            max_tokens: self.max_tokens,
             messages: vec![RequestMessage {
                 role: "user",
                 content: &prompt_text,
             }],
-            extra_body_params: self.extra_body_params.clone(),
+            extra_body_params: extra,
         };
         let body = match serde_json::to_vec(&req) {
             Ok(v) => v,
@@ -335,7 +352,7 @@ impl Agent for CodexAgent {
         let response_text = {
             let _permit = match (&self.provider_id, &self.provider_semaphores) {
                 (Some(provider_id), Some(provider_semaphores)) => {
-                    Some(provider_semaphores.acquire(provider_id).await)
+                    provider_semaphores.acquire(provider_id).await.ok()
                 }
                 _ => None,
             };
@@ -422,6 +439,7 @@ impl Agent for CodexAgent {
 mod tests {
     use super::*;
     use roko_core::agent::ProviderKind;
+    use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
     use roko_core::config::schema::ProviderConfig;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -568,8 +586,8 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(poster: Arc<dyn HttpPoster>) -> CodexAgent {
@@ -875,7 +893,7 @@ mod tests {
 
     #[tokio::test]
     async fn semaphore_wired_blocks_second_openai_compat_request() {
-        let mut configs = HashMap::new();
+        let mut configs = indexmap::IndexMap::new();
         configs.insert(
             "zai".to_string(),
             ProviderConfig {
@@ -885,7 +903,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(1_500),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: Some(1),
@@ -946,6 +964,22 @@ mod tests {
         assert_eq!(v["max_tokens"], 256);
         assert_eq!(v["messages"][0]["role"], "user");
         assert_eq!(v["messages"][0]["content"], "hello there");
+    }
+
+    #[tokio::test]
+    async fn request_body_can_use_max_completion_tokens() {
+        let poster = MockPoster::ok(canned_ok("ok", 1, 1));
+        let agent = CodexAgent::new("k", "my-codex-model")
+            .with_http_poster(poster.clone())
+            .with_max_tokens(256)
+            .with_use_max_completion_tokens(true);
+        let _ = agent.run(&prompt("hello there"), &Context::now()).await;
+        let call = poster.last_call().expect("call recorded");
+        let v: serde_json::Value =
+            serde_json::from_slice(&call.body).expect("request body is valid JSON");
+        assert_eq!(v["model"], "my-codex-model");
+        assert_eq!(v["max_completion_tokens"], 256);
+        assert!(v.get("max_tokens").is_none());
     }
 
     #[tokio::test]

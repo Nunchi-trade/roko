@@ -1,0 +1,42 @@
+/* ===================================================================
+   MetricStrip
+   Horizontal bar of live metrics with animated values.
+   =================================================================== */
+
+.metric-strip {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-6, 24px);
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.metric-strip__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.metric-strip__label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.metric-strip__value {
+  font-family: var(--display, 'Fraunces', serif);
+  font-style: italic;
+  font-weight: 300;
+  font-size: var(--text-xl, 24px);
+  color: var(--bone-bright);
+  line-height: 1.1;
+}
+
+.metric-strip__suffix {
+  font-family: var(--mono);
+  font-size: var(--text-xs, 12px);
+  color: var(--text-dim);
+  margin-left: 2px;
+}

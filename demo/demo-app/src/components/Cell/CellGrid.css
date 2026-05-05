@@ -1,0 +1,15 @@
+/* CellGrid — responsive grid layout for cells */
+
+.cell-grid {
+  display: grid;
+}
+
+.cell-grid--auto {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+/* ── Gap scale ── */
+
+.cell-grid--gap-sm { gap: 4px; }
+.cell-grid--gap-md { gap: var(--cell-gap); }
+.cell-grid--gap-lg { gap: 16px; }

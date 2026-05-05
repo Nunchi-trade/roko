@@ -1,13 +1,13 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "docker/mirage-demo.Dockerfile"
+dockerfilePath = "Dockerfile"
 watchPatterns = [
-  "apps/mirage-rs/**",
-  "apps/agent-relay/**",
-  "crates/roko-core/**",
-  "docker/mirage-demo.Dockerfile",
-  "docker/entrypoint.sh",
-  "docker/start-mirage-with-relay.sh",
+  "apps/**",
+  "crates/**",
+  "demo/demo-app/**",
+  "docker/start-railway.sh",
+  "roko.toml",
+  "Dockerfile",
   "Cargo.toml",
   "Cargo.lock",
 ]

@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Cheap enrichment pass for noisy gate failures before retry.
 //!
 //! The caller is expected to provide a low-cost agent (for example a
@@ -6,7 +8,7 @@
 //! the enrichment agent fails.
 
 use roko_agent::Agent;
-use roko_core::{Body, Context, Engram, Kind};
+use roko_core::{Body, Context, Kind, Signal};
 
 const RAW_ERROR_LIMIT: usize = 4_000;
 const TASK_CONTEXT_LIMIT: usize = 1_000;
@@ -30,7 +32,7 @@ pub async fn enrich_error_digest(raw_error: &str, agent: &dyn Agent, task_contex
         truncate_chars(task_context, TASK_CONTEXT_LIMIT),
     );
 
-    let input = Engram::builder(Kind::Prompt)
+    let input = Signal::builder(Kind::Prompt)
         .body(Body::text(prompt))
         .build();
     let result = agent.run(&input, &Context::now()).await;

@@ -4,7 +4,7 @@
 //! against the budget set via `name=plan_budget`. Fires when cost
 //! exceeds budget.
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 
 /// Tag key marking signals from this watcher.
 pub const WATCHER_NAME: &str = "cost-overrun";
@@ -59,7 +59,7 @@ fn latest_metric(stream: &[Engram], name: &str) -> Option<f64> {
         .and_then(|v| v.parse().ok())
 }
 
-impl Policy for CostOverrunWatcher {
+impl React for CostOverrunWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         let Some(cost) = latest_metric(stream, PLAN_COST_METRIC) else {
             return Vec::new();

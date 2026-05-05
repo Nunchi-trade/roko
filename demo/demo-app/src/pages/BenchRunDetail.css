@@ -1,0 +1,206 @@
+/* ── BenchRunDetail · Inline style extraction ─────────────── */
+
+/* GateBadge pill (animated visibility) */
+.gate-badge-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity var(--duration-smooth) var(--ease),
+              transform var(--duration-smooth) var(--ease);
+}
+.gate-badge-pill--hidden {
+  opacity: 0;
+  transform: scale(0.5);
+}
+.gate-badge-pill--visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* SVG stroke path draw animation */
+.gate-badge-path {
+  transition: stroke-dashoffset 500ms var(--ease);
+}
+.gate-badge-path--x {
+  transition: stroke-dashoffset 400ms var(--ease);
+}
+
+/* CostBreakdown chart container */
+.cost-breakdown-container {
+  display: flex;
+  flex-direction: column;
+}
+.cost-breakdown-controls {
+  display: flex;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  flex: 0 0 auto;
+}
+.cost-breakdown-canvas-wrap {
+  flex: 1;
+  min-height: 0;
+}
+.cost-breakdown-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* TokenFlow chart empty state */
+.token-flow-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* OutputPreviewPanel */
+.output-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.output-preview-card {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  overflow: hidden;
+}
+.output-preview-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  background: color-mix(in srgb, white 2%, transparent);
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+.output-preview-chevron {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  width: 12px;
+  display: inline-block;
+  transition: transform var(--duration-smooth) var(--ease);
+}
+.output-preview-chevron--open {
+  transform: rotate(90deg);
+}
+.output-preview-name {
+  flex: 1;
+  color: var(--text-strong);
+}
+.output-preview-gates {
+  display: flex;
+  gap: 2px;
+}
+.output-preview-body {
+  overflow: hidden;
+  transition: max-height var(--duration-smooth) var(--ease),
+              opacity var(--duration-smooth) var(--ease);
+}
+.output-preview-body--collapsed {
+  max-height: 0;
+  opacity: 0;
+}
+.output-preview-body--expanded {
+  max-height: 400px;
+  opacity: 1;
+}
+.output-preview-content {
+  padding: 0 var(--sp-3) var(--sp-3);
+}
+.output-preview-error {
+  margin-top: var(--sp-2);
+}
+.output-preview-code {
+  margin-top: var(--sp-2);
+  padding: var(--sp-3);
+  background: color-mix(in srgb, black 30%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-md);
+  color: var(--text-primary);
+  overflow: auto;
+  max-height: 200px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* AnimatedSection (stagger fade-up) */
+.bench-animated-section {
+  transition: opacity 500ms var(--ease),
+              transform 500ms var(--ease);
+}
+.bench-animated-section--hidden {
+  opacity: 0;
+  transform: translateY(16px);
+}
+.bench-animated-section--visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ModelBadge (slide-in) */
+.bench-model-badge {
+  display: inline-block;
+  padding: 2px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--rose-bright);
+  transition: opacity var(--duration-smooth) var(--ease),
+              transform var(--duration-smooth) var(--ease);
+}
+.bench-model-badge--hidden {
+  opacity: 0;
+  transform: translateX(-12px);
+}
+.bench-model-badge--visible {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* Hero header layout */
+.bench-hero-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.bench-back-link {
+  animation: scaleIn 400ms var(--ease) both;
+  display: inline-block;
+  transition: color 200ms var(--ease),
+              transform 200ms var(--ease);
+}
+.bench-back-link:hover {
+  transform: translateY(-1px) scale(1.05);
+}
+.bench-page-sub-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* Compare button row */
+.bench-compare-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-4);
+  margin-bottom: var(--sp-2);
+}
+.bench-compare-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Status badge font-size override */
+.status-badge-lg {
+  font-size: var(--text-md);
+}

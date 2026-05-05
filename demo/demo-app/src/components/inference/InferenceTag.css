@@ -1,0 +1,89 @@
+/* InferenceTag -- compact inference annotation pill */
+
+.inference-tag {
+  --tier-t0: var(--success);
+  --tier-t1: var(--bone);
+  --tier-t2: var(--rose-bright);
+
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  white-space: nowrap;
+}
+
+/* ── Tier indicator ── */
+
+.inference-tag__tier {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.inference-tag__tier--t0 { background: var(--tier-t0); }
+.inference-tag__tier--t1 { background: var(--tier-t1); }
+.inference-tag__tier--t2 { background: var(--tier-t2); }
+
+/* ── Tier label ── */
+
+.inference-tag__tier-label {
+  color: var(--text-dim);
+}
+
+.inference-tag__tier-label--t0 { color: var(--tier-t0); }
+.inference-tag__tier-label--t1 { color: var(--tier-t1); }
+.inference-tag__tier-label--t2 { color: var(--tier-t2); }
+
+/* ── Separator ── */
+
+.inference-tag__sep {
+  color: var(--text-ghost);
+}
+
+/* ── Model name ── */
+
+.inference-tag__model {
+  color: var(--text-soft);
+}
+
+/* ── Token counts ── */
+
+.inference-tag__tokens {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.inference-tag__tok-in {
+  color: var(--text-dim);
+}
+
+.inference-tag__tok-out {
+  color: var(--text-soft);
+}
+
+/* ── Cost ── */
+
+.inference-tag__cost {
+  color: var(--text-dim);
+}
+
+.inference-tag__cost--low  { color: var(--tier-t0); }
+.inference-tag__cost--mid  { color: var(--bone); }
+.inference-tag__cost--high { color: var(--rose-bright); }
+
+/* ── Latency ── */
+
+.inference-tag__latency {
+  color: var(--text-ghost);
+}

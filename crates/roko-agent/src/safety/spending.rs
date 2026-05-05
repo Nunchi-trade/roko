@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use roko_core::tool::{ToolContext, ToolDef, ToolError};
 
 use crate::lifecycle::{BudgetStatus, BudgetTracker};
@@ -40,7 +41,7 @@ pub struct ToolCostEstimate {
 #[derive(Debug, Clone)]
 pub struct SpendingLimiter {
     /// Shared budget tracker (same instance used by the tool loop).
-    budget: Arc<std::sync::Mutex<BudgetTracker>>,
+    budget: Arc<Mutex<BudgetTracker>>,
     /// Per-tool cost estimates for pre-flight budget checks.
     cost_estimates: Vec<ToolCostEstimate>,
     /// Whether to reject on Warning status (conservative mode).
@@ -50,7 +51,7 @@ pub struct SpendingLimiter {
 
 impl SpendingLimiter {
     /// Create a spending limiter from a shared budget tracker.
-    pub fn new(budget: Arc<std::sync::Mutex<BudgetTracker>>) -> Self {
+    pub fn new(budget: Arc<Mutex<BudgetTracker>>) -> Self {
         Self {
             budget,
             cost_estimates: Vec::new(),
@@ -92,11 +93,7 @@ impl SafetyHook for SpendingLimiter {
         _params: &serde_json::Value,
         _ctx: &ToolContext,
     ) -> Result<HookDecision, ToolError> {
-        let guard = self.budget.lock().map_err(|e| {
-            ToolError::Other(format!(
-                "SpendingLimiter: failed to lock budget tracker: {e}"
-            ))
-        })?;
+        let guard = self.budget.lock();
 
         let status = guard.check();
 
@@ -154,15 +151,15 @@ mod tests {
         )
     }
 
-    fn make_budget(max_daily: f64) -> Arc<std::sync::Mutex<BudgetTracker>> {
-        Arc::new(std::sync::Mutex::new(BudgetTracker::new(BudgetConfig {
+    fn make_budget(max_daily: f64) -> Arc<parking_lot::Mutex<BudgetTracker>> {
+        Arc::new(parking_lot::Mutex::new(BudgetTracker::new(BudgetConfig {
             max_daily_inference_usd: max_daily,
             ..BudgetConfig::default()
         })))
     }
 
-    fn spend(budget: &Arc<std::sync::Mutex<BudgetTracker>>, amount: f64) {
-        let mut guard = budget.lock().unwrap();
+    fn spend(budget: &Arc<parking_lot::Mutex<BudgetTracker>>, amount: f64) {
+        let mut guard = budget.lock();
         guard.record_turn(&TurnCostRecord {
             turn_id: "test".into(),
             model: "test".into(),

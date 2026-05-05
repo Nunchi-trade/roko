@@ -1,0 +1,54 @@
+[meta]
+plan = "live-demo-phase1"
+total = 2
+done = 0
+status = "ready"
+max_parallel = 1
+skip_enrichment = true
+
+[[task]]
+id = "T1-add-greeting"
+title = "Add greeting helper function to roko-std"
+status = "ready"
+tier = "mechanical"
+prompt = """Add a small public helper function `format_greeting(name: &str) -> String` to a new file
+`crates/roko-std/src/greeting.rs` that returns `format!("Hello, {name}! Roko is ready.")`.
+
+Then add `pub mod greeting;` to `crates/roko-std/src/lib.rs`.
+
+This is a trivial function — keep the change minimal. Do NOT modify any other files."""
+role = "implementer"
+files = ["crates/roko-std/src/greeting.rs", "crates/roko-std/src/lib.rs"]
+depends_on = []
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-std"
+
+[[task]]
+id = "T2-add-greeting-test"
+title = "Add unit test for greeting helper function in roko-std"
+status = "ready"
+tier = "mechanical"
+prompt = """Add a unit test for the `format_greeting` function in `crates/roko-std/src/greeting.rs`.
+
+Add a `#[cfg(test)] mod tests` block at the bottom of `greeting.rs` with a single test:
+```rust
+#[test]
+fn test_format_greeting() {
+    assert_eq!(format_greeting("World"), "Hello, World! Roko is ready.");
+}
+```
+
+Do NOT modify any other files. Keep the change minimal."""
+role = "implementer"
+files = ["crates/roko-std/src/greeting.rs"]
+depends_on = ["T1-add-greeting"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-std"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-std -- greeting"

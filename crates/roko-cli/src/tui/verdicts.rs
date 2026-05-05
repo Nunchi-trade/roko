@@ -1,4 +1,4 @@
-//! Substrate-backed verdict aggregation for gate observability.
+//! Store-backed verdict aggregation for gate observability.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, TimeZone, Utc};
-use roko_core::{ContentHash, Context, Engram, FailureEntry, Kind, Query, Substrate, TrendBuckets};
+use roko_core::{ContentHash, Context, Engram, FailureEntry, Kind, Query, Store, TrendBuckets};
 use roko_fs::FileSubstrate;
 use tokio::runtime::{Builder, Runtime};
 
-const DEFAULT_BUCKET_SECS: u64 = 3_600;
-const DEFAULT_BUCKET_COUNT: usize = 24;
+const DEFAULT_BUCKET_SECS: u64 = roko_core::defaults::DEFAULT_VERDICT_BUCKET_SECS;
+const DEFAULT_BUCKET_COUNT: usize = roko_core::defaults::DEFAULT_VERDICT_BUCKET_COUNT;
 const FAILURE_CAP: usize = 50;
 
 /// Incremental lower-bound cursor for verdict substrate queries.
@@ -63,7 +63,7 @@ impl SubstrateCursor {
 /// Rolling per-gate statistics derived from persisted verdict engrams.
 #[derive(Debug, Clone, Default)]
 pub struct GateStats {
-    /// Gate name.
+    /// Verify name.
     pub name: String,
     /// Rolling 24x1h pass/fail buckets.
     pub buckets: TrendBuckets,
@@ -93,9 +93,11 @@ pub struct VerdictsAggregator {
 impl VerdictsAggregator {
     /// Open the workspace substrate and prepare a verdict reader.
     ///
-    /// Safe to call from inside a tokio runtime — spawns a dedicated thread
-    /// for `block_on()` when `Handle::try_current()` detects a live runtime.
-    pub fn open(workdir: impl AsRef<Path>) -> Result<Self> {
+    /// When called inside a Tokio runtime, offloads the blocking substrate
+    /// open to `tokio::task::spawn_blocking` (reuses the Tokio thread pool
+    /// instead of creating a fresh OS thread on every call). When no runtime
+    /// is active, creates a local current-thread runtime for the open.
+    pub async fn open(workdir: impl AsRef<Path>) -> Result<Self> {
         let workdir = workdir.as_ref().to_path_buf();
         let load = move || -> Result<(Runtime, Arc<FileSubstrate>)> {
             let runtime = Builder::new_current_thread()
@@ -109,9 +111,9 @@ impl VerdictsAggregator {
         };
 
         let (runtime, substrate) = if tokio::runtime::Handle::try_current().is_ok() {
-            std::thread::spawn(load)
-                .join()
-                .map_err(|_| anyhow::anyhow!("verdict loader thread panicked"))??
+            tokio::task::spawn_blocking(load)
+                .await
+                .map_err(|e| anyhow::anyhow!("verdict loader task panicked: {e}"))??
         } else {
             load()?
         };
@@ -127,26 +129,86 @@ impl VerdictsAggregator {
 
     /// Advance the reader and fold any newly observed verdict signals.
     ///
-    /// Safe to call from inside a tokio runtime — offloads `block_on()` to
-    /// a dedicated thread when necessary.
-    pub fn tick(&mut self) -> Result<()> {
+    /// When called inside a Tokio runtime, offloads the blocking substrate
+    /// query to `tokio::task::spawn_blocking` (reuses the Tokio thread pool
+    /// instead of creating a fresh OS thread on every tick). When no runtime
+    /// is active, uses the embedded current-thread runtime directly.
+    pub async fn tick(&mut self) -> Result<()> {
         let now = Utc::now();
         let ctx = Context::now();
         let query = self.cursor.query();
         let substrate = Arc::clone(&self.substrate);
         let mut verdicts = if tokio::runtime::Handle::try_current().is_ok() {
             // We're inside a tokio runtime — cannot call block_on on our
-            // current-thread runtime here, so offload to a thread.
+            // current-thread runtime here, so offload to a blocking task.
             let rt_handle = self.runtime.handle().clone();
-            std::thread::spawn(move || rt_handle.block_on(substrate.query(&query, &ctx)))
-                .join()
-                .map_err(|_| anyhow::anyhow!("verdict tick thread panicked"))?
+            tokio::task::spawn_blocking(move || rt_handle.block_on(substrate.query(&query, &ctx)))
+                .await
+                .map_err(|e| anyhow::anyhow!("verdict tick task panicked: {e}"))?
                 .context("query verdict substrate")?
         } else {
             self.runtime
                 .block_on(substrate.query(&query, &ctx))
                 .context("query verdict substrate")?
         };
+        verdicts.sort_by(|lhs, rhs| {
+            lhs.created_at_ms
+                .cmp(&rhs.created_at_ms)
+                .then_with(|| lhs.id.to_hex().cmp(&rhs.id.to_hex()))
+        });
+
+        for verdict in verdicts {
+            if !self.cursor.should_visit(&verdict) {
+                continue;
+            }
+            self.ingest(verdict, now);
+        }
+
+        for stats in self.per_gate.values_mut() {
+            stats.buckets.align_to(now);
+        }
+
+        Ok(())
+    }
+
+    /// Blocking wrapper for [`Self::open`] — for use in sync contexts where
+    /// no Tokio runtime is active (e.g. the standalone `main_loop`).
+    ///
+    /// Creates a current-thread runtime internally and blocks on substrate
+    /// open. Panics if called from inside a Tokio runtime (use the async
+    /// `open()` instead).
+    pub fn open_blocking(workdir: impl AsRef<Path>) -> Result<Self> {
+        let workdir = workdir.as_ref().to_path_buf();
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build verdict reader runtime")?;
+        let substrate = runtime
+            .block_on(FileSubstrate::open(workdir.join(".roko")))
+            .context("open verdict substrate")?;
+        Ok(Self {
+            runtime,
+            substrate: Arc::new(substrate),
+            cursor: SubstrateCursor::default(),
+            per_gate: HashMap::new(),
+            recent_failures: VecDeque::new(),
+        })
+    }
+
+    /// Blocking wrapper for [`Self::tick`] — for use in sync contexts where
+    /// no Tokio runtime is active (e.g. the standalone `main_loop`).
+    ///
+    /// Uses the embedded current-thread runtime directly. Panics if called
+    /// from inside a Tokio runtime (use the async `tick()` instead).
+    pub fn tick_blocking(&mut self) -> Result<()> {
+        let now = Utc::now();
+        let ctx = Context::now();
+        let query = self.cursor.query();
+        let substrate = Arc::clone(&self.substrate);
+        let mut verdicts = self
+            .runtime
+            .block_on(substrate.query(&query, &ctx))
+            .context("query verdict substrate")?;
         verdicts.sort_by(|lhs, rhs| {
             lhs.created_at_ms
                 .cmp(&rhs.created_at_ms)
@@ -332,24 +394,24 @@ mod tests {
         builder.build()
     }
 
-    #[test]
-    fn aggregates_new_verdicts_once() {
+    #[tokio::test]
+    async fn aggregates_new_verdicts_once() {
         let dir = tempdir().unwrap();
         let substrate_root = dir.path().join(".roko");
-        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-        let substrate = runtime
-            .block_on(FileSubstrate::open(&substrate_root))
-            .unwrap();
+        let substrate = FileSubstrate::open(&substrate_root).await.unwrap();
         let now_ms = Utc::now().timestamp_millis();
-        runtime
-            .block_on(substrate.put(verdict_signal(now_ms - 1_000, "compile", true, None)))
+        substrate
+            .put(verdict_signal(now_ms - 1_000, "compile", true, None))
+            .await
             .unwrap();
-        runtime
-            .block_on(substrate.put(verdict_signal(now_ms, "compile", false, Some("task-1"))))
+        substrate
+            .put(verdict_signal(now_ms, "compile", false, Some("task-1")))
+            .await
             .unwrap();
+        drop(substrate);
 
-        let mut aggregator = VerdictsAggregator::open(dir.path()).unwrap();
-        aggregator.tick().unwrap();
+        let mut aggregator = VerdictsAggregator::open(dir.path()).await.unwrap();
+        aggregator.tick().await.unwrap();
 
         let trend = aggregator
             .gate_trends()
@@ -371,7 +433,7 @@ mod tests {
             Some("/tmp/out.txt".to_string())
         );
 
-        aggregator.tick().unwrap();
+        aggregator.tick().await.unwrap();
         let trend = aggregator
             .gate_trends()
             .remove("compile")

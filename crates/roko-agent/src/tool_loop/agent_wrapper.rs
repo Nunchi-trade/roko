@@ -5,13 +5,16 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use roko_core::tool::{ToolContext, ToolDef};
-use roko_core::{Body, Context, Engram, Kind};
+use roko_core::{Body, Context, Kind, Signal};
 use roko_fs::RokoLayout;
 
 use crate::agent::{Agent, AgentResult, derived_output};
+use crate::streaming::StreamChunk;
 use crate::task_runner::task_id_from_context;
 
-use super::{StopReason, ToolLoop};
+use super::{StopReason, ToolLoop, ToolLoopOutput, ToolLoopTurnTrace};
+
+use tokio::sync::mpsc;
 
 /// Runtime-facing wrapper that lets the orchestrator drive [`ToolLoop`] via
 /// the existing [`Agent`] trait.
@@ -64,7 +67,7 @@ impl ToolLoopAgent {
         self
     }
 
-    fn output_signal(input: &Engram, text: &str, stop_reason: &str, iterations: usize) -> Engram {
+    fn output_signal(input: &Signal, text: &str, stop_reason: &str, iterations: usize) -> Signal {
         derived_output(input, Kind::AgentOutput, Body::text(text))
             .tag("stop_reason", stop_reason)
             .tag("iterations", iterations.to_string())
@@ -84,11 +87,58 @@ impl ToolLoopAgent {
                 .join(format!("tool-loop-{safe_task_id}.json")),
         )
     }
+
+    fn attach_trace_metadata(
+        mut result: AgentResult,
+        input: &Signal,
+        output: &ToolLoopOutput,
+    ) -> AgentResult {
+        result.trace.extend(
+            output
+                .turn_traces
+                .iter()
+                .map(|trace| Self::trace_signal(input, trace)),
+        );
+        result
+    }
+
+    fn trace_signal(input: &Signal, trace: &ToolLoopTurnTrace) -> Signal {
+        let tool_calls = trace
+            .tool_calls
+            .iter()
+            .enumerate()
+            .map(|(idx, call)| {
+                serde_json::json!({
+                    "name": call.name.as_str(),
+                    "result_preview": trace.tool_results.get(idx).cloned().unwrap_or_default(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        derived_output(
+            input,
+            Kind::Custom("agent.trace".to_string()),
+            Body::Json(serde_json::json!({
+                "turn": trace.turn,
+                "tool_calls": tool_calls,
+                "reasoning": trace.reasoning.clone(),
+                "usage": {
+                    "input_tokens": trace.usage.input_tokens,
+                    "output_tokens": trace.usage.output_tokens,
+                    "cache_read_tokens": trace.usage.cache_read_tokens,
+                    "cache_write_tokens": trace.usage.cache_create_tokens,
+                    "total_tokens": trace.usage.total_tokens(),
+                    "cost_usd": trace.usage.cost_usd,
+                },
+            })),
+        )
+        .build()
+    }
 }
 
 #[async_trait]
 impl Agent for ToolLoopAgent {
-    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         let prompt = input.body.as_text().unwrap_or_default();
         let tool_ctx = ToolContext::testing(&self.worktree_path);
         let tool_loop = match self.checkpoint_path(ctx) {
@@ -104,7 +154,7 @@ impl Agent for ToolLoopAgent {
             )
             .await;
 
-        match output.stop_reason {
+        let result = match &output.stop_reason {
             StopReason::Stop => AgentResult::ok(Self::output_signal(
                 input,
                 &output.final_text,
@@ -128,7 +178,7 @@ impl Agent for ToolLoopAgent {
             .with_usage(output.total_usage),
             StopReason::BackendError(err) => AgentResult::fail(Self::output_signal(
                 input,
-                &err,
+                err,
                 "backend_error",
                 output.iterations,
             ))
@@ -140,7 +190,9 @@ impl Agent for ToolLoopAgent {
                 output.iterations,
             ))
             .with_usage(output.total_usage),
-        }
+        };
+
+        Self::attach_trace_metadata(result, input, &output)
     }
 
     fn name(&self) -> &str {
@@ -152,7 +204,70 @@ impl Agent for ToolLoopAgent {
     }
 
     fn supports_streaming(&self) -> bool {
-        false
+        true
+    }
+
+    async fn run_streaming(
+        &self,
+        input: &Signal,
+        ctx: &Context,
+        event_tx: mpsc::Sender<StreamChunk>,
+    ) -> AgentResult {
+        let prompt = input.body.as_text().unwrap_or_default();
+        let tool_ctx = ToolContext::testing(&self.worktree_path);
+        let tool_loop = match self.checkpoint_path(ctx) {
+            Some(path) => self.tool_loop.clone().with_checkpoint_path(path),
+            None => self.tool_loop.clone(),
+        };
+        let output = tool_loop
+            .run_streaming(
+                self.system_prompt.as_deref().unwrap_or(""),
+                prompt,
+                &self.tools,
+                &tool_ctx,
+                event_tx,
+            )
+            .await;
+
+        let result = match &output.stop_reason {
+            StopReason::Stop => AgentResult::ok(Self::output_signal(
+                input,
+                &output.final_text,
+                "stop",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+            StopReason::MaxIterations => AgentResult::fail(Self::output_signal(
+                input,
+                &format!("Max iterations ({}) reached", output.iterations),
+                "max_iterations",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+            StopReason::Cancelled => AgentResult::fail(Self::output_signal(
+                input,
+                "Tool loop cancelled",
+                "cancelled",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+            StopReason::BackendError(err) => AgentResult::fail(Self::output_signal(
+                input,
+                err,
+                "backend_error",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+            StopReason::BudgetExhausted => AgentResult::fail(Self::output_signal(
+                input,
+                "Budget exhausted",
+                "budget_exhausted",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
+        };
+
+        Self::attach_trace_metadata(result, input, &output)
     }
 }
 
@@ -327,10 +442,10 @@ mod tests {
             .with_system_prompt("system prompt")
             .with_tools(test_tools())
             .with_worktree_path("/tmp");
-        let ancestor = Engram::builder(Kind::Prompt)
+        let ancestor = Signal::builder(Kind::Prompt)
             .body(Body::text("ancestor"))
             .build();
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text("call the tool"))
             .lineage([ancestor.id])
             .build();
@@ -346,7 +461,7 @@ mod tests {
         assert_eq!(result.output.tag("stop_reason"), Some("stop"));
         assert_eq!(result.output.tag("iterations"), Some("1"));
         assert_eq!(agent.name(), "glm-tool-loop");
-        assert!(!agent.supports_streaming());
+        assert!(agent.supports_streaming());
     }
 
     #[tokio::test]
@@ -354,7 +469,7 @@ mod tests {
         let agent = ToolLoopAgent::new(make_tool_loop(Arc::new(ErrorBackend)))
             .with_tools(test_tools())
             .with_worktree_path("/tmp");
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text("fail"))
             .build();
 

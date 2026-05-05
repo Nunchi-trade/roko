@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use roko_agent::Agent;
 use roko_agent::gemini::{CodeExecutionResultPart, GeminiMetadata, GeminiNativeAgent};
-use roko_core::{Body, Context, Engram, Gate, Kind, Verdict};
+use roko_core::{Body, Context, Kind, Signal, Verdict, Verify};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -49,7 +49,7 @@ impl CodeExecutionBackend for GeminiNativeAgent {
         prompt: &str,
         ctx: &Context,
     ) -> Result<CodeExecutionOutcome, String> {
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text(prompt))
             .build();
         let result = self.run(&input, ctx).await;
@@ -75,7 +75,7 @@ impl CodeExecutionBackend for GeminiNativeAgent {
     }
 }
 
-/// Gate that verifies changes using Gemini's built-in Python sandbox.
+/// Verify that verifies changes using Gemini's built-in Python sandbox.
 pub struct CodeExecutionGate<A = GeminiNativeAgent> {
     agent: A,
     name: String,
@@ -98,7 +98,7 @@ impl<A> CodeExecutionGate<A> {
         self
     }
 
-    fn extract_payload(signal: &Engram) -> Option<CodeExecutionPayload> {
+    fn extract_payload(signal: &Signal) -> Option<CodeExecutionPayload> {
         if let Ok(payload) = signal.body.as_json::<CodeExecutionPayload>() {
             return Some(payload);
         }
@@ -137,11 +137,11 @@ impl<A> CodeExecutionGate<A> {
 }
 
 #[async_trait]
-impl<A> Gate for CodeExecutionGate<A>
+impl<A> Verify for CodeExecutionGate<A>
 where
     A: CodeExecutionBackend,
 {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
         let started = Instant::now();
         let elapsed_ms = |t: Instant| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -232,8 +232,8 @@ mod tests {
         }
     }
 
-    fn prompt_signal(payload: &CodeExecutionPayload) -> Engram {
-        Engram::builder(Kind::Task)
+    fn prompt_signal(payload: &CodeExecutionPayload) -> Signal {
+        Signal::builder(Kind::Task)
             .body(Body::from_json(payload).expect("json body"))
             .build()
     }
@@ -316,7 +316,7 @@ mod tests {
             output: "ok".to_string(),
         });
         let gate = CodeExecutionGate::new(backend);
-        let signal = Engram::builder(Kind::Task)
+        let signal = Signal::builder(Kind::Task)
             .body(Body::text("diff --git a/x b/x"))
             .tag("task", "Validate diff output")
             .build();

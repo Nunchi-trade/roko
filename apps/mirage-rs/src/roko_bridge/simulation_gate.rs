@@ -24,7 +24,7 @@
 //!   - `detail`: JSON summary with gas_used and hex-encoded output
 
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, traits::Gate, verdict::Verdict};
+use roko_core::{Body, Context, Engram, traits::Verify, verdict::Verdict};
 use serde::Deserialize;
 
 use crate::{
@@ -119,7 +119,7 @@ struct ParsedRequest {
 }
 
 #[async_trait]
-impl Gate for SimulationGate {
+impl Verify for SimulationGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = std::time::Instant::now();
         let parsed = match self.parse_request(signal) {

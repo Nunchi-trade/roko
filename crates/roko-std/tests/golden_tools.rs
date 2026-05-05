@@ -126,8 +126,8 @@ fn golden_run_tests() {
 
 #[test]
 fn golden_all_16_present() {
-    // 16 std + 14 chain = 30 total built-in tools.
-    assert_eq!(ROKO_BUILTIN_TOOLS.len(), 30);
+    // 16 std + 17 chain = 33 total built-in tools.
+    assert_eq!(ROKO_BUILTIN_TOOLS.len(), 33);
     let expected = [
         "read_file",
         "write_file",
@@ -160,6 +160,9 @@ fn golden_all_16_present() {
         "chain.wallet_list",
         "chain.wallet_info",
         "chain.wallet_export_address",
+        "chain.post_insight",
+        "chain.search_insights",
+        "chain.confirm_insight",
     ];
     for name in expected {
         assert_golden(name);

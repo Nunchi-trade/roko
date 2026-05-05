@@ -11,7 +11,7 @@
 # The `mirage-rs` crate's binary is named `mirage-rs` (see apps/mirage-rs/Cargo.toml).
 # Build context is expected to be the `roko/` workspace root.
 
-ARG BUILDPLATFORM=linux/amd64
+ARG BUILDPLATFORM
 
 FROM --platform=$BUILDPLATFORM rust:1.91-slim-bookworm AS builder
 WORKDIR /src
@@ -71,4 +71,4 @@ EXPOSE 8545
 
 # entrypoint.sh runs as root, fixes volume permissions, then drops to mirage via gosu.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["/usr/local/bin/start-mirage-with-relay", "--chain-id", "88888"]
+CMD ["/usr/local/bin/start-mirage-with-relay"]

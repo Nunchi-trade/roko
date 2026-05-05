@@ -1,10 +1,11 @@
 //! Shared API auth and scrubbing middleware for `/api/*` routes.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::AUTHORIZATION;
+use axum::http::HeaderName;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, Method, Request};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -13,10 +14,12 @@ use chrono::Utc;
 use roko_core::config::{ApiKeyEntry, ServeAuthConfig};
 use roko_core::obs::LogScrubber;
 use sha2::{Digest, Sha256};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+
+static UNSAFE_PUBLIC_CORS_WARNING: OnceLock<()> = OnceLock::new();
 
 /// Extract a bearer token from an `Authorization` header value.
 ///
@@ -362,6 +365,11 @@ fn required_scope_for(method: &Method, path: &str) -> &'static str {
     {
         return "admin";
     }
+    // Event ingest accepts runtime events from subprocesses and agent-like
+    // integrations, so read-only API keys must not be enough.
+    if path.starts_with("/api/events/ingest") {
+        return "agent:write";
+    }
     // Agent write routes.
     if path.starts_with("/api/agents") {
         return "agent:write";
@@ -369,6 +377,10 @@ fn required_scope_for(method: &Method, path: &str) -> &'static str {
     // Plan/PRD write routes.
     if path.starts_with("/api/plans") || path.starts_with("/api/prd") {
         return "plan:write";
+    }
+    // Workspace write routes.
+    if path.starts_with("/api/workspaces") {
+        return "write";
     }
     "read"
 }
@@ -422,18 +434,87 @@ pub async fn require_scope(req: Request<Body>, next: Next) -> Result<Response, A
     Ok(next.run(req).await)
 }
 
+/// Methods the server actually serves on browser-callable routes.
+///
+/// T3-28: previously the CORS layer answered preflight checks with
+/// `Access-Control-Allow-Methods: *`, which is permissive enough to accept
+/// arbitrary verbs (TRACE, CONNECT, …) the server has no handler for.
+fn allowed_cors_methods() -> [Method; 6] {
+    [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::PATCH,
+        Method::OPTIONS,
+    ]
+}
+
+/// Headers the server actually consumes on browser-callable routes.
+///
+/// T3-28: replaces the previous `Any` allow-list. Webhook-only headers
+/// (`X-Hub-Signature-256`, `X-Slack-Signature`, …) are intentionally
+/// omitted because those endpoints are server-to-server, not browser.
+fn allowed_cors_headers() -> [HeaderName; 5] {
+    [
+        CONTENT_TYPE,
+        AUTHORIZATION,
+        HeaderName::from_static("x-api-key"),
+        HeaderName::from_static("x-user-id"),
+        HeaderName::from_static("x-user-email"),
+    ]
+}
+
 /// Build the CORS layer from configured origins.
-pub fn cors_layer(cors_origins: &[String]) -> CorsLayer {
-    if cors_origins.is_empty() {
-        CorsLayer::permissive()
-    } else {
+pub fn cors_layer(cors_origins: &[String], unsafe_public: bool) -> CorsLayer {
+    if !cors_origins.is_empty() {
         let allowed: Vec<axum::http::HeaderValue> =
             cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
-        CorsLayer::new()
+        return CorsLayer::new()
             .allow_origin(allowed)
-            .allow_methods(Any)
-            .allow_headers(Any)
+            .allow_methods(allowed_cors_methods())
+            .allow_headers(allowed_cors_headers());
     }
+
+    if unsafe_public {
+        if UNSAFE_PUBLIC_CORS_WARNING.set(()).is_ok() {
+            tracing::warn!(
+                "CORS is unrestricted (allow *) because server.unsafe_public_cors = true and no \
+                 cors_origins are configured. Set cors_origins to limit access."
+            );
+        }
+        return CorsLayer::permissive();
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(
+            |origin: &axum::http::HeaderValue, _parts: &axum::http::request::Parts| match origin
+                .to_str()
+            {
+                Ok(origin) => is_local_origin(origin),
+                Err(_) => false,
+            },
+        ))
+        .allow_methods(allowed_cors_methods())
+        .allow_headers(allowed_cors_headers())
+}
+
+/// Returns `true` when `origin` is a localhost or loopback origin on any port.
+fn is_local_origin(origin: &str) -> bool {
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str() else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https") {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let host = authority.host();
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 /// Returns `true` when the response content-type indicates a text-like body
@@ -447,6 +528,10 @@ fn is_scrubbable_content_type(response: &Response) -> bool {
         return false;
     };
     let ct_lower = ct_str.to_ascii_lowercase();
+    // SSE responses are infinite streams — buffering them would block forever.
+    if ct_lower.contains("text/event-stream") {
+        return false;
+    }
     ct_lower.contains("json")
         || ct_lower.contains("text/")
         || ct_lower.contains("javascript")
@@ -474,7 +559,7 @@ pub async fn scrub_secrets(
     // empty 500 rather than leaking unscrubbed partial data.
     // Cap at 16 MiB to avoid unbounded memory growth.
     let Ok(bytes) = axum::body::to_bytes(body, 16 * 1024 * 1024).await else {
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        return ApiError::internal("response body collection failed").into_response();
     };
 
     // Fast path: if the body is empty or not valid UTF-8, pass through.
@@ -548,12 +633,15 @@ mod tests {
         let tempdir = tempdir().expect("invariant: tempdir creates");
         let mut config = RokoConfig::default();
         config.serve.auth = auth;
-        Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            config,
-            Arc::new(ManualBackend::default()),
-        ))
+        Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                config,
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        )
     }
 
     fn auth_test_app(auth: ServeAuthConfig) -> Router {
@@ -891,6 +979,15 @@ mod tests {
     }
 
     #[test]
+    fn is_scrubbable_rejects_event_stream() {
+        let resp = Response::builder()
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::empty())
+            .expect("invariant: response builder constructs sse response");
+        assert!(!is_scrubbable_content_type(&resp));
+    }
+
+    #[test]
     fn is_scrubbable_assumes_json_when_no_content_type() {
         let resp = Response::builder()
             .body(Body::empty())
@@ -1046,10 +1143,27 @@ mod tests {
     }
 
     #[test]
+    fn required_scope_for_post_workspaces_is_write() {
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/workspaces"),
+            "write"
+        );
+    }
+
+    #[test]
+    fn required_scope_for_delete_workspaces_is_write() {
+        assert_eq!(
+            required_scope_for(&Method::DELETE, "/api/workspaces/abc123"),
+            "write"
+        );
+    }
+
+    #[test]
     fn admin_scope_is_sufficient_for_everything() {
         assert!(is_scope_sufficient("admin", "admin"));
         assert!(is_scope_sufficient("admin", "agent:write"));
         assert!(is_scope_sufficient("admin", "plan:write"));
+        assert!(is_scope_sufficient("admin", "write"));
         assert!(is_scope_sufficient("admin", "read"));
     }
 
@@ -1058,5 +1172,253 @@ mod tests {
         assert!(is_scope_sufficient("read", "read"));
         assert!(!is_scope_sufficient("read", "admin"));
         assert!(!is_scope_sufficient("read", "agent:write"));
+    }
+
+    // --- cors / local origin tests ---
+
+    #[test]
+    fn local_origin_accepts_localhost() {
+        assert!(is_local_origin("http://localhost:5173"));
+        assert!(is_local_origin("https://localhost:443"));
+        assert!(is_local_origin("http://localhost"));
+    }
+
+    #[test]
+    fn local_origin_accepts_127_0_0_1() {
+        assert!(is_local_origin("http://127.0.0.1:3000"));
+        assert!(is_local_origin("https://127.0.0.1"));
+    }
+
+    #[test]
+    fn local_origin_accepts_ipv6_loopback() {
+        assert!(is_local_origin("http://[::1]:3000"));
+    }
+
+    #[test]
+    fn local_origin_rejects_external_or_malformed() {
+        assert!(!is_local_origin("http://evil.com"));
+        assert!(!is_local_origin("https://api.example.com"));
+        assert!(!is_local_origin("localhost:3000"));
+        assert!(!is_local_origin("http://192.168.1.1:6677"));
+    }
+
+    // --- T3-28: CORS allow-list tests ----------------------------------
+
+    /// Build a tiny router protected by the production `cors_layer` so
+    /// preflight OPTIONS requests exercise the real allow-lists.
+    fn cors_test_app(allowed_origin: &str) -> axum::Router {
+        let cors = cors_layer(&[allowed_origin.to_string()], false);
+        axum::Router::new()
+            .route("/api/ping", axum::routing::get(|| async { "pong" }))
+            .layer(cors)
+    }
+
+    async fn preflight(
+        app: &axum::Router,
+        origin: &str,
+        method: &str,
+        request_headers: Option<&str>,
+    ) -> axum::http::Response<Body> {
+        let mut req = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/ping")
+            .header(axum::http::header::ORIGIN, origin)
+            .header("access-control-request-method", method);
+        if let Some(headers) = request_headers {
+            req = req.header("access-control-request-headers", headers);
+        }
+        let req = req.body(Body::empty()).expect("request");
+        tower::ServiceExt::oneshot(app.clone(), req)
+            .await
+            .expect("oneshot")
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_listed_method_and_header() {
+        let app = cors_test_app("https://app.example.com");
+        let resp = preflight(
+            &app,
+            "https://app.example.com",
+            "POST",
+            Some("content-type, x-api-key"),
+        )
+        .await;
+
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let allow_methods = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        for verb in ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"] {
+            assert!(
+                allow_methods.contains(verb),
+                "{verb} missing from {allow_methods:?}"
+            );
+        }
+
+        let allow_headers = resp
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        for header in ["content-type", "authorization", "x-api-key"] {
+            assert!(
+                allow_headers.contains(header),
+                "{header} missing from {allow_headers:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_rejects_disallowed_method() {
+        let app = cors_test_app("https://app.example.com");
+        let resp = preflight(&app, "https://app.example.com", "TRACE", None).await;
+
+        // tower-http answers with 200 for any preflight but only echoes the
+        // matching headers. The absence of `access-control-allow-methods`
+        // is what makes the browser refuse the actual request.
+        let allow_methods = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        assert!(
+            !allow_methods.contains("TRACE"),
+            "TRACE leaked into allow-methods: {allow_methods:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_rejects_disallowed_header() {
+        let app = cors_test_app("https://app.example.com");
+        let resp = preflight(
+            &app,
+            "https://app.example.com",
+            "POST",
+            Some("x-totally-fake"),
+        )
+        .await;
+
+        // Same shape as the method case: the request-header is not echoed
+        // back, so the browser refuses the cross-origin call.
+        let allow_headers = resp
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        assert!(
+            !allow_headers.contains("x-totally-fake"),
+            "x-totally-fake leaked into allow-headers: {allow_headers:?}"
+        );
+    }
+
+    // --- T55: default local-only and unsafe_public_cors tests ---
+
+    /// Build a router using the default cors_layer (empty origins, not unsafe).
+    /// This should only allow local origins.
+    fn cors_default_local_app() -> axum::Router {
+        let cors = cors_layer(&[], false);
+        axum::Router::new()
+            .route("/api/ping", axum::routing::get(|| async { "pong" }))
+            .layer(cors)
+    }
+
+    /// Build a router using unsafe_public_cors = true (wildcard CORS).
+    fn cors_unsafe_public_app() -> axum::Router {
+        let cors = cors_layer(&[], true);
+        axum::Router::new()
+            .route("/api/ping", axum::routing::get(|| async { "pong" }))
+            .layer(cors)
+    }
+
+    #[tokio::test]
+    async fn cors_default_allows_local_origin() {
+        let app = cors_default_local_app();
+        let resp = preflight(&app, "http://localhost:5173", "GET", None).await;
+
+        // Local origin should be reflected back in access-control-allow-origin.
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            allow_origin, "http://localhost:5173",
+            "local origin should be allowed by default"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_default_allows_127_0_0_1_origin() {
+        let app = cors_default_local_app();
+        let resp = preflight(&app, "http://127.0.0.1:3000", "POST", None).await;
+
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            allow_origin, "http://127.0.0.1:3000",
+            "127.0.0.1 origin should be allowed by default"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_default_rejects_non_local_origin() {
+        let app = cors_default_local_app();
+        let resp = preflight(&app, "https://evil.com", "GET", None).await;
+
+        // Non-local origin should NOT get an access-control-allow-origin header.
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            allow_origin.is_empty() || allow_origin == "null",
+            "non-local origin should be rejected, got: {allow_origin:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_unsafe_public_allows_any_origin() {
+        let app = cors_unsafe_public_app();
+        let resp = preflight(&app, "https://anything.evil.com", "POST", None).await;
+
+        // Wildcard CORS should respond with `*` or the request origin.
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            allow_origin == "*" || allow_origin == "https://anything.evil.com",
+            "unsafe_public_cors should allow any origin, got: {allow_origin:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_exact_origin_rejects_unlisted_origin() {
+        let app = cors_test_app("https://app.example.com");
+        let resp = preflight(&app, "https://not-allowed.com", "GET", None).await;
+
+        // An origin not in the allow-list should not get reflected.
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            allow_origin.is_empty()
+                || allow_origin == "null"
+                || !allow_origin.contains("not-allowed"),
+            "unlisted origin should be rejected, got: {allow_origin:?}"
+        );
     }
 }

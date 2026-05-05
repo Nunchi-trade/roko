@@ -1,0 +1,19 @@
+/* ScrollArea — scrollable container with styled scrollbar and fade gradient */
+
+.scroll-area {
+  overflow-y: auto;
+  position: relative;
+}
+
+/* Bottom fade gradient when content overflows */
+.scroll-area::after {
+  content: '';
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: block;
+  height: 24px;
+  background: linear-gradient(to bottom, transparent, var(--bg-void));
+  pointer-events: none;
+}

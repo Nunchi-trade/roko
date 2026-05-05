@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use roko_agent::Agent;
 use roko_agent::gemini::{GeminiAdapter, GeminiMetadata, GeminiNativeAgent};
 use roko_agent::provider::{AgentOptions, ProviderAdapter, ProviderError, create_agent_for_model};
 use roko_agent::translate::{BackendResponse, GeminiTranslator, RenderedResults, Translator};
+use roko_agent::{Agent, SafetyLayer};
 use roko_core::agent::ProviderKind;
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::tool::ToolResult;
 use roko_core::{Body, Context, Engram, Kind};
@@ -186,7 +187,7 @@ fn gemini_provider(base_url: impl Into<String>) -> ProviderConfig {
         command: None,
         args: None,
         timeout_ms: Some(1_500),
-        ttft_timeout_ms: Some(15_000),
+        ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
         connect_timeout_ms: Some(5_000),
         extra_headers: None,
         max_concurrent: None,
@@ -218,6 +219,7 @@ fn gemini_model(slug: &str) -> ModelProfile {
         cost_cache_write_per_m: None,
         thinking_level: Some("high".to_string()),
         max_tools: None,
+        max_tool_iterations: None,
         tokenizer_ratio: None,
         supports_search: false,
         supports_citations: false,
@@ -225,6 +227,8 @@ fn gemini_model(slug: &str) -> ModelProfile {
         is_embedding_model: false,
         search_context_size: None,
         cost_per_request: None,
+        use_max_completion_tokens: false,
+        tier: None,
     }
 }
 
@@ -268,6 +272,7 @@ async fn gemini_native_generate_content_with_function_calling() {
         server.base_url().to_string(),
         gemini_model("gemini-2.5-pro"),
         &AgentOptions::default(),
+        SafetyLayer::with_defaults(),
     );
 
     let result = agent
@@ -350,6 +355,7 @@ async fn gemini_native_generate_content_with_google_search_grounding() {
             ..gemini_model("gemini-3-flash-preview")
         },
         &AgentOptions::default(),
+        SafetyLayer::with_defaults(),
     );
 
     let result = agent
@@ -437,6 +443,7 @@ async fn gemini_native_generate_content_with_code_execution() {
             ..gemini_model("gemini-2.5-pro")
         },
         &AgentOptions::default(),
+        SafetyLayer::with_defaults(),
     );
 
     let result = agent.run(&prompt("Verify 2 + 2"), &Context::now()).await;
@@ -492,6 +499,7 @@ async fn gemini_native_generate_content_with_thinking() {
             effort: Some("high".to_string()),
             ..Default::default()
         },
+        SafetyLayer::with_defaults(),
     );
 
     let result = agent.run(&prompt("Think carefully"), &Context::now()).await;

@@ -5,34 +5,24 @@
 //! [`wait_cancelled`] watcher. When either future resolves first, the
 //! other is dropped.
 //!
-//! [`CancelToken`] is a **sync** trait (no async method; not a tokio
-//! primitive), so we can't just `.await` a notification. Instead we poll
-//! on a bounded cadence (default 50 ms) — cheap, wake-free, and matches
-//! the conductor's own heartbeat granularity.
-
-use std::time::Duration;
+//! [`CancelToken`] now has an async [`CancelToken::cancelled`] method that
+//! implementations can back with a real notification primitive (e.g.
+//! [`AtomicCancel`] uses `tokio::sync::Notify` for instant wake-up).
+//! Foreign impls that only provide `is_cancelled` automatically get a
+//! 50 ms polling fallback via the trait's default implementation. In debug
+//! builds, the default logs a warning once per type to surface impls that
+//! silently rely on polling.
 
 use roko_core::tool::CancelToken;
 
-/// Default poll cadence for the cancellation watcher.
-pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Await until `token.is_cancelled()` returns `true`.
+/// Await until the token fires.
 ///
-/// If the token is already tripped, returns on the next scheduler tick
-/// (no sleep). Otherwise polls every [`DEFAULT_POLL_INTERVAL`] until the
-/// token trips. Never returns a cancel _result_ — it just completes so
-/// the caller's `tokio::select!` branch can fire.
+/// Delegates entirely to [`CancelToken::cancelled`]. Tokens backed by
+/// `tokio::sync::Notify` (e.g. [`AtomicCancel`]) wake instantly with zero
+/// CPU overhead; others fall back to 50 ms polling via the trait default
+/// (with a debug-mode warning).
 pub async fn wait_cancelled(token: &dyn CancelToken) {
-    if token.is_cancelled() {
-        return;
-    }
-    loop {
-        tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
-        if token.is_cancelled() {
-            return;
-        }
-    }
+    token.cancelled().await;
 }
 
 #[cfg(test)]
@@ -40,7 +30,7 @@ mod tests {
     use super::*;
     use roko_core::tool::{AtomicCancel, CancelToken};
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn wait_cancelled_returns_immediately_if_already_tripped() {

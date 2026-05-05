@@ -18,6 +18,9 @@ pub enum ExecutionEvent {
     TaskStarted {
         /// Task identifier.
         task_id: String,
+        /// Human-readable task title.
+        #[serde(default)]
+        title: String,
         /// Phase the task is starting in.
         phase: String,
     },
@@ -36,7 +39,7 @@ pub enum ExecutionEvent {
     GateResult {
         /// Task identifier.
         task_id: String,
-        /// Gate name.
+        /// Verify name.
         gate: String,
         /// Whether the gate passed.
         passed: bool,
@@ -89,7 +92,12 @@ pub enum ServerEvent {
     PlanCompleted { plan_id: String, success: bool },
 
     /// An agent process was spawned.
-    AgentSpawned { agent_id: String, role: String },
+    AgentSpawned {
+        agent_id: String,
+        role: String,
+        #[serde(default)]
+        model: String,
+    },
 
     /// Incremental agent output (streamed, sanitized for consumers).
     AgentOutput {
@@ -127,7 +135,7 @@ pub enum ServerEvent {
     GateResult {
         plan_id: String,
         task_id: String,
-        /// Gate name (also exposed as `rung` for dashboard compat).
+        /// Verify name (also exposed as `rung` for dashboard compat).
         gate: String,
         /// Numeric rung index for dashboard display.
         #[serde(default)]
@@ -163,6 +171,52 @@ pub enum ServerEvent {
         task_id: String,
         metric: String,
         value: f64,
+    },
+
+    /// A gateway inference request was started.
+    InferenceStarted {
+        /// Unique request identifier.
+        request_id: String,
+        /// Model slug selected for this request.
+        model: String,
+        /// Agent that initiated the request.
+        #[serde(default)]
+        agent_id: String,
+        /// Whether the model was explicitly requested or auto-selected.
+        #[serde(default)]
+        auto_routed: bool,
+    },
+
+    /// A gateway inference request completed successfully.
+    InferenceCompleted {
+        /// Unique request identifier.
+        request_id: String,
+        /// Model that actually served the request.
+        model: String,
+        /// Agent that initiated the request.
+        #[serde(default)]
+        agent_id: String,
+        /// Input tokens consumed.
+        input_tokens: u64,
+        /// Output tokens generated.
+        output_tokens: u64,
+        /// Estimated cost in USD.
+        cost_usd: f64,
+        /// Wall-clock duration in milliseconds.
+        duration_ms: u64,
+    },
+
+    /// A gateway inference request failed.
+    InferenceFailed {
+        /// Unique request identifier.
+        request_id: String,
+        /// Model that was targeted.
+        model: String,
+        /// Agent that initiated the request.
+        #[serde(default)]
+        agent_id: String,
+        /// Error description.
+        error: String,
     },
 
     /// A strong somatic marker fired for the current task situation.
@@ -337,6 +391,22 @@ pub enum ServerEvent {
     /// A webhook signal was accepted and published for downstream processing.
     WebhookReceived { signal: Engram },
 
+    /// A vision-loop iteration completed.
+    VisionLoopIteration {
+        run_id: String,
+        iteration: u32,
+        score: f64,
+        notes: String,
+    },
+
+    /// A vision-loop run completed.
+    VisionLoopCompleted {
+        run_id: String,
+        iterations: u32,
+        best_score: f64,
+        stop_reason: String,
+    },
+
     /// Configuration was reloaded from disk (LIFE-07).
     ConfigReloaded {
         /// Summaries of sections that were hot-reloaded.
@@ -351,6 +421,155 @@ pub enum ServerEvent {
         goals_count: usize,
         /// Number of parsed tactics.
         tactics_count: usize,
+    },
+
+    /// A bench run was started.
+    #[serde(rename = "BenchRunStarted")]
+    BenchRunStarted {
+        bench_id: String,
+        suite_id: String,
+        total_tasks: usize,
+    },
+
+    /// A bench task started executing.
+    #[serde(rename = "BenchTaskStarted")]
+    BenchTaskStarted {
+        bench_id: String,
+        task_id: String,
+        task_name: String,
+        task_index: usize,
+        total_tasks: usize,
+    },
+
+    /// A bench task completed — includes the full `BenchTaskResult` object
+    /// that the frontend expects under the `result` key.
+    #[serde(rename = "BenchTaskCompleted")]
+    BenchTaskCompleted {
+        bench_id: String,
+        task_id: String,
+        result: serde_json::Value,
+    },
+
+    /// Learning artifacts created while finishing a bench task.
+    #[serde(rename = "BenchLearningEvent")]
+    BenchLearningEvent {
+        /// Bench run identifier.
+        bench_id: String,
+        /// Bench task identifier.
+        task_id: String,
+        /// Playbooks created for this task.
+        playbooks_created: u32,
+        /// Anti-patterns created for this task.
+        anti_patterns_created: u32,
+        /// Total playbooks observed after this task.
+        total_playbooks: u32,
+        /// Total anti-patterns observed after this task.
+        total_anti_patterns: u32,
+    },
+
+    /// Overall progress of a bench run.
+    #[serde(rename = "BenchProgress")]
+    BenchProgress {
+        bench_id: String,
+        completed: usize,
+        total: usize,
+        cost_so_far: f64,
+    },
+
+    /// A bench run completed — includes the full `BenchRunSummary` that
+    /// the frontend expects under the `summary` key.
+    #[serde(rename = "BenchRunCompleted")]
+    BenchRunCompleted {
+        bench_id: String,
+        summary: serde_json::Value,
+    },
+
+    /// A matrix (multi-lane) bench run was started.
+    #[serde(rename = "MatrixRunStarted")]
+    MatrixRunStarted {
+        matrix_id: String,
+        suite_id: String,
+        lane_ids: Vec<String>,
+        total_lanes: usize,
+    },
+
+    /// A single lane of a matrix run completed.
+    #[serde(rename = "MatrixLaneCompleted")]
+    MatrixLaneCompleted {
+        matrix_id: String,
+        lane_id: String,
+        pass_rate: f64,
+        cost_usd: f64,
+    },
+
+    /// A matrix run completed — includes per-lane summaries.
+    #[serde(rename = "MatrixRunCompleted")]
+    MatrixRunCompleted {
+        matrix_id: String,
+        summary: Vec<serde_json::Value>,
+    },
+
+    /// A gate verdict for a bench task.
+    #[serde(rename = "BenchGateVerdict")]
+    BenchGateVerdict {
+        bench_id: String,
+        task_id: String,
+        gate: String,
+        passed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        duration_ms: u64,
+    },
+
+    /// Token throughput for a bench task.
+    #[serde(rename = "BenchTokenVelocity")]
+    BenchTokenVelocity {
+        bench_id: String,
+        task_id: String,
+        tokens_per_second: f64,
+        tokens_in: u64,
+        tokens_out: u64,
+        duration_ms: u64,
+    },
+
+    /// Agent output snapshot for a bench task.
+    #[serde(rename = "BenchAgentOutput")]
+    BenchAgentOutput {
+        bench_id: String,
+        task_id: String,
+        agent_id: String,
+        content: String,
+        done: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_calls: Option<Vec<Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+    },
+
+    /// A SWE-bench run was started.
+    #[serde(rename = "SweRunStarted")]
+    SweRunStarted {
+        run_id: String,
+        dataset: String,
+        total_instances: usize,
+    },
+
+    /// A SWE-bench instance completed.
+    #[serde(rename = "SweInstanceCompleted")]
+    SweInstanceCompleted {
+        run_id: String,
+        instance_id: String,
+        resolved: bool,
+        duration_ms: u64,
+    },
+
+    /// A SWE-bench run completed with summary stats.
+    #[serde(rename = "SweRunCompleted")]
+    SweRunCompleted {
+        run_id: String,
+        resolved: u32,
+        total: u32,
+        pass_rate: f64,
     },
 }
 
@@ -456,6 +675,39 @@ mod tests {
             ServerEvent::Error {
                 message: "err".into(),
             },
+            ServerEvent::VisionLoopIteration {
+                run_id: "v1".into(),
+                iteration: 1,
+                score: 7.5,
+                notes: "good".into(),
+            },
+            ServerEvent::VisionLoopCompleted {
+                run_id: "v1".into(),
+                iterations: 5,
+                best_score: 9.0,
+                stop_reason: "target_reached".into(),
+            },
+            ServerEvent::InferenceStarted {
+                request_id: "req-1".into(),
+                model: "sonnet".into(),
+                agent_id: "a".into(),
+                auto_routed: true,
+            },
+            ServerEvent::InferenceCompleted {
+                request_id: "req-1".into(),
+                model: "sonnet".into(),
+                agent_id: "a".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+                cost_usd: 0.001,
+                duration_ms: 1500,
+            },
+            ServerEvent::InferenceFailed {
+                request_id: "req-1".into(),
+                model: "sonnet".into(),
+                agent_id: "a".into(),
+                error: "timeout".into(),
+            },
             ServerEvent::ServerShutdown,
         ];
 
@@ -487,5 +739,86 @@ mod tests {
         assert_eq!(json["content"], "hello");
         assert_eq!(json["done"], true);
         assert_eq!(json["metadata"]["cost_usd"], 0.1);
+    }
+
+    #[test]
+    fn bench_learning_event_serializes_with_counts() {
+        let event = ServerEvent::BenchLearningEvent {
+            bench_id: "run-1".into(),
+            task_id: "task-7".into(),
+            playbooks_created: 1,
+            anti_patterns_created: 2,
+            total_playbooks: 9,
+            total_anti_patterns: 4,
+        };
+
+        let json = serde_json::to_value(event).expect("serialize bench learning event");
+        assert_eq!(json["type"], "BenchLearningEvent");
+        assert_eq!(json["bench_id"], "run-1");
+        assert_eq!(json["task_id"], "task-7");
+        assert_eq!(json["playbooks_created"], 1);
+        assert_eq!(json["anti_patterns_created"], 2);
+        assert_eq!(json["total_playbooks"], 9);
+        assert_eq!(json["total_anti_patterns"], 4);
+    }
+
+    #[test]
+    fn bench_gate_verdict_serializes() {
+        let event = ServerEvent::BenchGateVerdict {
+            bench_id: "run-1".into(),
+            task_id: "task-3".into(),
+            gate: "compile".into(),
+            passed: true,
+            message: Some("ok".into()),
+            duration_ms: 1200,
+        };
+
+        let json = serde_json::to_value(event).expect("serialize bench gate verdict");
+        assert_eq!(json["type"], "BenchGateVerdict");
+        assert_eq!(json["bench_id"], "run-1");
+        assert_eq!(json["gate"], "compile");
+        assert_eq!(json["passed"], true);
+        assert_eq!(json["message"], "ok");
+        assert_eq!(json["duration_ms"], 1200);
+    }
+
+    #[test]
+    fn bench_token_velocity_serializes() {
+        let event = ServerEvent::BenchTokenVelocity {
+            bench_id: "run-1".into(),
+            task_id: "task-3".into(),
+            tokens_per_second: 42.5,
+            tokens_in: 100,
+            tokens_out: 50,
+            duration_ms: 3529,
+        };
+
+        let json = serde_json::to_value(event).expect("serialize bench token velocity");
+        assert_eq!(json["type"], "BenchTokenVelocity");
+        assert_eq!(json["tokens_per_second"], 42.5);
+        assert_eq!(json["tokens_in"], 100);
+        assert_eq!(json["tokens_out"], 50);
+        assert_eq!(json["duration_ms"], 3529);
+    }
+
+    #[test]
+    fn bench_agent_output_serializes() {
+        let event = ServerEvent::BenchAgentOutput {
+            bench_id: "run-1".into(),
+            task_id: "task-3".into(),
+            agent_id: "sonnet".into(),
+            content: "hello world".into(),
+            done: true,
+            tool_calls: None,
+            reasoning: Some("thought about it".into()),
+        };
+
+        let json = serde_json::to_value(event).expect("serialize bench agent output");
+        assert_eq!(json["type"], "BenchAgentOutput");
+        assert_eq!(json["agent_id"], "sonnet");
+        assert_eq!(json["content"], "hello world");
+        assert_eq!(json["done"], true);
+        assert!(json.get("tool_calls").is_none());
+        assert_eq!(json["reasoning"], "thought about it");
     }
 }

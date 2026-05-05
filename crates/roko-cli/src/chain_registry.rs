@@ -15,6 +15,16 @@ pub fn chain_handler_map(
     client: Arc<dyn ChainClient>,
     wallet: Option<Arc<dyn ChainWallet>>,
 ) -> HashMap<String, Arc<dyn ToolHandler>> {
+    chain_handler_map_with_rpc(client, wallet, None)
+}
+
+/// Build a map of chain tool name -> handler, with an explicit mirage RPC URL
+/// for knowledge graph operations (chain.post_insight, etc.).
+pub fn chain_handler_map_with_rpc(
+    client: Arc<dyn ChainClient>,
+    wallet: Option<Arc<dyn ChainWallet>>,
+    rpc_url: Option<String>,
+) -> HashMap<String, Arc<dyn ToolHandler>> {
     CHAIN_TOOL_NAMES
         .iter()
         .map(|&name| {
@@ -22,6 +32,7 @@ pub fn chain_handler_map(
                 client: Arc::clone(&client),
                 wallet: wallet.clone(),
                 tool_name: name.to_string(),
+                rpc_url: rpc_url.clone(),
             });
             (name.to_string(), h)
         })

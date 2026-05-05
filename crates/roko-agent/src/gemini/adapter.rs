@@ -12,20 +12,30 @@ use crate::http::ReqwestPoster;
 use crate::provider::openai_compat::{max_tokens_for_model, tool_registry_for_options};
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
-    tool_loop_max_iterations,
+    current_safety_layer, tool_loop_max_iterations_for_profile,
 };
+use crate::safety::SafetyLayer;
 use crate::tool_loop::backends::create_tool_loop_backend;
 use crate::tool_loop::{OpenAiCompatBackend, ToolLoop, ToolLoopAgent};
 use crate::translate::{GeminiTranslator, OpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde_json::Value;
 use std::sync::Arc;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
 fn gemini_tool_loop_base_url(base_url: &str) -> String {
-    format!("{}/v1beta/openai/v1", base_url.trim_end_matches('/'))
+    // Strip the path suffix if already present in base_url (idempotent).
+    let trimmed = base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1beta/openai/v1")
+        .trim_end_matches("/v1beta/openai")
+        .trim_end_matches('/');
+    format!("{trimmed}/v1beta/openai/v1")
 }
 
 fn gemini_tool_loop_agent(
@@ -39,7 +49,7 @@ fn gemini_tool_loop_agent(
         Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
     let dispatcher = build_tool_dispatcher(registry, resolver);
     let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
-    let timeout_ms = options.timeout_ms.unwrap_or(120_000);
+    let timeout_ms = options.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
     let mut extra_body_params = serde_json::Map::new();
     if let Some(cached_content) = options.cached_content.as_deref() {
         extra_body_params.insert(
@@ -60,7 +70,7 @@ fn gemini_tool_loop_agent(
         .with_poster(Box::new(ReqwestPoster::new()));
 
     let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend))
-        .with_max_iterations(tool_loop_max_iterations(50))
+        .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -75,6 +85,9 @@ fn gemini_tool_loop_agent(
         .with_name(name);
     if let Some(prompt) = &options.system_prompt {
         agent = agent.with_system_prompt(prompt.clone());
+    }
+    if let Some(ref dir) = options.working_dir {
+        agent = agent.with_worktree_path(dir.clone());
     }
 
     Ok(Box::new(agent))
@@ -94,7 +107,7 @@ fn gemini_native_tool_loop_agent(
         create_tool_loop_backend(provider, model, options, Arc::new(ReqwestPoster::new()))?;
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-        .with_max_iterations(tool_loop_max_iterations(50))
+        .with_max_iterations(tool_loop_max_iterations_for_profile(Some(model)))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -109,6 +122,9 @@ fn gemini_native_tool_loop_agent(
         .with_name(name);
     if let Some(prompt) = &options.system_prompt {
         agent = agent.with_system_prompt(prompt.clone());
+    }
+    if let Some(ref dir) = options.working_dir {
+        agent = agent.with_worktree_path(dir.clone());
     }
 
     Ok(Box::new(agent))
@@ -167,6 +183,7 @@ impl ProviderAdapter for GeminiAdapter {
                 base_url,
                 model.clone(),
                 &options,
+                current_safety_layer().unwrap_or_else(SafetyLayer::with_defaults),
             )))
         } else if model.supports_tools && model.tool_format == "gemini_native" {
             gemini_native_tool_loop_agent(provider, model, &options)
@@ -222,7 +239,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(90_000),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
@@ -254,6 +271,7 @@ mod tests {
             cost_cache_write_per_m: None,
             thinking_level: None,
             max_tools: None,
+            max_tool_iterations: None,
             tokenizer_ratio: None,
             supports_search: false,
             supports_citations: false,
@@ -261,6 +279,8 @@ mod tests {
             is_embedding_model: false,
             search_context_size: None,
             cost_per_request: None,
+            use_max_completion_tokens: false,
+            tier: None,
         }
     }
 
@@ -425,5 +445,39 @@ mod tests {
             GeminiAdapter.classify_error(503, &Value::Null),
             ProviderError::ServerError(503)
         ));
+    }
+
+    #[test]
+    fn gemini_tool_loop_base_url_idempotent_with_suffix() {
+        let with_suffix = "https://generativelanguage.googleapis.com/v1beta/openai";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(
+            gemini_tool_loop_base_url(with_suffix),
+            gemini_tool_loop_base_url(bare)
+        );
+        assert_eq!(
+            gemini_tool_loop_base_url(with_suffix),
+            "https://generativelanguage.googleapis.com/v1beta/openai/v1"
+        );
+    }
+
+    #[test]
+    fn gemini_tool_loop_base_url_idempotent_with_trailing_slash() {
+        let with_slash = "https://generativelanguage.googleapis.com/v1beta/openai/";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(
+            gemini_tool_loop_base_url(with_slash),
+            gemini_tool_loop_base_url(bare)
+        );
+    }
+
+    #[test]
+    fn gemini_tool_loop_base_url_idempotent_with_v1_suffix() {
+        let with_v1 = "https://generativelanguage.googleapis.com/v1beta/openai/v1";
+        let bare = "https://generativelanguage.googleapis.com";
+        assert_eq!(
+            gemini_tool_loop_base_url(with_v1),
+            gemini_tool_loop_base_url(bare)
+        );
     }
 }

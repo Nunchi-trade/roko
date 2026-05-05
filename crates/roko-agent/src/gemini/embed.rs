@@ -10,13 +10,13 @@ use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::{Agent, AgentResult, Usage};
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Kind, Provenance};
+use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::{Value, json};
 
 /// Default Gemini embedding model.
 const DEFAULT_MODEL: &str = "gemini-embedding-2-preview";
 /// Default per-request timeout in milliseconds.
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_TIMEOUT_MS: u64 = roko_core::defaults::DEFAULT_EMBED_TIMEOUT_MS;
 
 fn compat_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
@@ -169,7 +169,7 @@ impl GeminiEmbedAgent {
         self.post_and_parse(body).await
     }
 
-    fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
+    fn failure(&self, input: &Signal, reason: String, started: &Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -196,7 +196,7 @@ impl Default for GeminiEmbedAgent {
 
 #[async_trait]
 impl Agent for GeminiEmbedAgent {
-    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
         let prompt_text = match input.body.as_text() {
             Ok(text) => text.to_string(),
@@ -408,7 +408,7 @@ mod tests {
     async fn gemini_embed_agent_run_serializes_first_vector() {
         let (mock, _) = MockPoster::ok(canned_embeddings(&[vec![0.1, 0.2, 0.3]]));
         let agent = agent_with(Box::new(mock));
-        let input = Engram::builder(Kind::Prompt)
+        let input = Signal::builder(Kind::Prompt)
             .body(Body::text("index this"))
             .build();
 

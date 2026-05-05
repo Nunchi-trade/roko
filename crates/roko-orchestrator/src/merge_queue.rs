@@ -17,9 +17,15 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+/// Default number of failed merge attempts before a request is considered
+/// permanently failed (callers can still manually re-enqueue).
+///
+/// Sourced from [`roko_core::defaults::DEFAULT_MAX_MERGE_RETRIES`].
+pub const DEFAULT_MAX_MERGE_RETRIES: u32 = roko_core::defaults::DEFAULT_MAX_MERGE_RETRIES;
+
 /// Maximum number of retries before a request is considered permanently
 /// failed (callers can still manually re-enqueue).
-const MAX_RETRIES: u32 = 5;
+const MAX_RETRIES: u32 = DEFAULT_MAX_MERGE_RETRIES;
 
 // ─── MergeRequest ──────────────────────────────────────────────────────
 
@@ -66,13 +72,66 @@ impl MergeRequest {
 
 // ─── MergeStatus ───────────────────────────────────────────────────────
 
-/// Internal status of a request inside the queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MergeStatus {
+/// Status of a request inside the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeStatus {
     /// Waiting in the queue.
     Queued,
     /// Currently being merged (files are locked).
     Merging,
+}
+
+// ─── Serializable queue state ──────────────────────────────────────────
+
+/// Serializable entry in a [`MergeQueueSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeQueueEntrySnapshot {
+    /// The merge request.
+    pub request: MergeRequest,
+    /// The request's current queue status.
+    pub status: MergeStatus,
+}
+
+/// Serializable snapshot of the merge queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeQueueSnapshot {
+    /// Entries in deterministic `plan_id` order.
+    pub entries: Vec<MergeQueueEntrySnapshot>,
+    /// File locks held by in-progress merges, `path -> plan_id`.
+    pub locked_files: BTreeMap<String, String>,
+    /// Permanently failed plan IDs with their last failure reason.
+    pub failed: BTreeMap<String, String>,
+    /// Queued plan IDs in effective-priority order.
+    pub queued_order: Vec<String>,
+    /// Retry limit used by this queue implementation.
+    pub max_retries: u32,
+}
+
+/// Point-in-time merge queue metrics for dashboards and recovery checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeQueueMetrics {
+    /// Requests waiting to merge.
+    pub queued: usize,
+    /// Requests currently merging.
+    pub merging: usize,
+    /// Requests that exhausted retry budget.
+    pub failed: usize,
+    /// Number of files currently locked by in-progress merges.
+    pub locked_files: usize,
+    /// Number of queued requests mergeable under the current locks.
+    pub ready: usize,
+}
+
+/// A queued merge blocked by an in-progress merge that owns one or more files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeConflict {
+    /// The queued plan that is currently blocked.
+    pub waiting_plan_id: String,
+    /// The in-progress plan holding the conflicting file lock.
+    pub blocking_plan_id: String,
+    /// Locked files shared by both plans.
+    pub files: Vec<String>,
 }
 
 // ─── Inner state ───────────────────────────────────────────────────────
@@ -117,6 +176,43 @@ impl Inner {
         });
         self.order = ids;
     }
+}
+
+fn locked_conflicts(
+    locked_files: &BTreeMap<String, String>,
+    files_changed: &[String],
+) -> Vec<(String, String)> {
+    let files: HashSet<&str> = files_changed.iter().map(String::as_str).collect();
+    locked_files
+        .iter()
+        .filter(|(file, _owner)| files.contains(file.as_str()))
+        .map(|(file, owner)| (file.clone(), owner.clone()))
+        .collect()
+}
+
+fn build_conflicts_for_request(
+    locked_files: &BTreeMap<String, String>,
+    request: &MergeRequest,
+) -> Vec<MergeConflict> {
+    let mut by_owner: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (file, owner) in locked_conflicts(locked_files, &request.files_changed) {
+        if owner != request.plan_id {
+            by_owner.entry(owner).or_default().push(file);
+        }
+    }
+
+    by_owner
+        .into_iter()
+        .map(|(blocking_plan_id, mut files)| {
+            files.sort();
+            files.dedup();
+            MergeConflict {
+                waiting_plan_id: request.plan_id.clone(),
+                blocking_plan_id,
+                files,
+            }
+        })
+        .collect()
 }
 
 // ─── MergeQueue ────────────────────────────────────────────────────────
@@ -167,21 +263,72 @@ impl MergeQueue {
             if entry.status != MergeStatus::Queued {
                 continue;
             }
-            let files: HashSet<&str> = entry
-                .request
-                .files_changed
-                .iter()
-                .map(String::as_str)
-                .collect();
-            let conflicts = guard
-                .locked_files
-                .keys()
-                .any(|f| files.contains(f.as_str()));
-            if !conflicts {
+            if locked_conflicts(&guard.locked_files, &entry.request.files_changed).is_empty() {
                 return Some(entry.request.clone());
             }
         }
         None
+    }
+
+    /// Atomically reserve the next mergeable request.
+    ///
+    /// This combines [`next_mergeable`](Self::next_mergeable) and
+    /// [`mark_merging`](Self::mark_merging) under a single lock so multiple
+    /// queue-draining workers cannot race to claim the same request.
+    pub fn reserve_next_mergeable(&self) -> Option<MergeRequest> {
+        let mut guard = self.inner.lock();
+        let plan_id = guard
+            .order
+            .iter()
+            .find(|plan_id| {
+                let entry = &guard.entries[*plan_id];
+                entry.status == MergeStatus::Queued
+                    && locked_conflicts(&guard.locked_files, &entry.request.files_changed)
+                        .is_empty()
+            })
+            .cloned()?;
+
+        let request = guard.entries[&plan_id].request.clone();
+        if let Some(entry) = guard.entries.get_mut(&plan_id) {
+            entry.status = MergeStatus::Merging;
+        }
+        for file in &request.files_changed {
+            guard.locked_files.insert(file.clone(), plan_id.clone());
+        }
+        guard.rebuild_order();
+        Some(request)
+    }
+
+    /// Return a non-mutating batch of mutually non-conflicting requests
+    /// that could be reserved now.
+    ///
+    /// `limit == 0` means unbounded. The method accounts for current file
+    /// locks and for locks that would be acquired by earlier requests in the
+    /// returned batch.
+    #[must_use]
+    pub fn ready_batch(&self, limit: usize) -> Vec<MergeRequest> {
+        let guard = self.inner.lock();
+        let mut virtual_locks = guard.locked_files.clone();
+        let mut out = Vec::new();
+
+        for plan_id in &guard.order {
+            if limit > 0 && out.len() >= limit {
+                break;
+            }
+            let entry = &guard.entries[plan_id];
+            if entry.status != MergeStatus::Queued {
+                continue;
+            }
+            if !locked_conflicts(&virtual_locks, &entry.request.files_changed).is_empty() {
+                continue;
+            }
+            for file in &entry.request.files_changed {
+                virtual_locks.insert(file.clone(), plan_id.clone());
+            }
+            out.push(entry.request.clone());
+        }
+
+        out
     }
 
     /// Check whether two merge requests have overlapping file sets.
@@ -297,6 +444,31 @@ impl MergeQueue {
         self.inner.lock().failed.clone()
     }
 
+    /// Requests currently in queued state, in merge priority order.
+    #[must_use]
+    pub fn queued_requests(&self) -> Vec<MergeRequest> {
+        let guard = self.inner.lock();
+        guard
+            .order
+            .iter()
+            .filter_map(|id| guard.entries.get(id))
+            .filter(|entry| entry.status == MergeStatus::Queued)
+            .map(|entry| entry.request.clone())
+            .collect()
+    }
+
+    /// Requests currently marked as in-progress.
+    #[must_use]
+    pub fn in_progress_requests(&self) -> Vec<MergeRequest> {
+        let guard = self.inner.lock();
+        guard
+            .entries
+            .values()
+            .filter(|entry| entry.status == MergeStatus::Merging)
+            .map(|entry| entry.request.clone())
+            .collect()
+    }
+
     /// Returns plan IDs in current priority order (queued only).
     #[must_use]
     pub fn queued_order(&self) -> Vec<String> {
@@ -311,6 +483,130 @@ impl MergeQueue {
             .entries
             .get(plan_id)
             .map(|e| e.request.clone())
+    }
+
+    /// Return the status of a queued or in-progress request.
+    #[must_use]
+    pub fn status_of(&self, plan_id: &str) -> Option<MergeStatus> {
+        self.inner.lock().entries.get(plan_id).map(|e| e.status)
+    }
+
+    /// Return current lock conflicts for `plan_id`.
+    #[must_use]
+    pub fn lock_conflicts_for(&self, plan_id: &str) -> Vec<MergeConflict> {
+        let guard = self.inner.lock();
+        let Some(entry) = guard.entries.get(plan_id) else {
+            return Vec::new();
+        };
+        build_conflicts_for_request(&guard.locked_files, &entry.request)
+    }
+
+    /// Return all queued requests currently blocked by in-progress file locks.
+    #[must_use]
+    pub fn blocked_conflicts(&self) -> Vec<MergeConflict> {
+        let guard = self.inner.lock();
+        let mut out = Vec::new();
+        for plan_id in &guard.order {
+            let entry = &guard.entries[plan_id];
+            if entry.status == MergeStatus::Queued {
+                out.extend(build_conflicts_for_request(
+                    &guard.locked_files,
+                    &entry.request,
+                ));
+            }
+        }
+        out
+    }
+
+    /// Return queue metrics for dashboards or recovery assertions.
+    #[must_use]
+    pub fn metrics(&self) -> MergeQueueMetrics {
+        let guard = self.inner.lock();
+        let queued = guard
+            .entries
+            .values()
+            .filter(|entry| entry.status == MergeStatus::Queued)
+            .count();
+        let merging = guard
+            .entries
+            .values()
+            .filter(|entry| entry.status == MergeStatus::Merging)
+            .count();
+        let ready = guard
+            .order
+            .iter()
+            .filter(|plan_id| {
+                let entry = &guard.entries[*plan_id];
+                entry.status == MergeStatus::Queued
+                    && locked_conflicts(&guard.locked_files, &entry.request.files_changed)
+                        .is_empty()
+            })
+            .count();
+
+        MergeQueueMetrics {
+            queued,
+            merging,
+            failed: guard.failed.len(),
+            locked_files: guard.locked_files.len(),
+            ready,
+        }
+    }
+
+    /// Serialize the queue state for crash recovery.
+    #[must_use]
+    pub fn snapshot(&self) -> MergeQueueSnapshot {
+        let guard = self.inner.lock();
+        let entries = guard
+            .entries
+            .values()
+            .map(|entry| MergeQueueEntrySnapshot {
+                request: entry.request.clone(),
+                status: entry.status,
+            })
+            .collect();
+
+        MergeQueueSnapshot {
+            entries,
+            locked_files: guard.locked_files.clone(),
+            failed: guard.failed.clone(),
+            queued_order: guard.order.clone(),
+            max_retries: MAX_RETRIES,
+        }
+    }
+
+    /// Restore a merge queue from a previously captured snapshot.
+    ///
+    /// File locks are rebuilt from `Merging` entries instead of trusting the
+    /// snapshot's lock map, preventing stale locks from becoming durable.
+    #[must_use]
+    pub fn from_snapshot(snapshot: MergeQueueSnapshot) -> Self {
+        let mut inner = Inner {
+            failed: snapshot.failed,
+            ..Inner::default()
+        };
+
+        for entry in snapshot.entries {
+            let plan_id = entry.request.plan_id.clone();
+            inner.entries.insert(
+                plan_id.clone(),
+                QueueEntry {
+                    request: entry.request,
+                    status: entry.status,
+                },
+            );
+            if entry.status == MergeStatus::Merging {
+                if let Some(stored) = inner.entries.get(&plan_id) {
+                    for file in &stored.request.files_changed {
+                        inner.locked_files.insert(file.clone(), plan_id.clone());
+                    }
+                }
+            }
+        }
+
+        inner.rebuild_order();
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }
     }
 }
 

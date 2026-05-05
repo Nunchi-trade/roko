@@ -10,20 +10,33 @@ description = "The `roko` binary: minimal CLI that drives the universal loop (pr
 [lints]
 workspace = true
 
+[features]
+## Enable the legacy orchestrate.rs plan runner (the pre-WorkflowEngine path).
+default = []
+legacy-orchestrate = ["legacy-direct-dispatch"]
+## Enable the legacy `dispatch_direct` module (raw single-shot dispatch, no
+## tools / system prompt / MCP). Deprecated; will be removed once T5-36
+## migrates the remaining callers to `ModelCallService`.
+legacy-direct-dispatch = []
+
 [[bin]]
 name = "roko"
 path = "src/main.rs"
+
+[[bin]]
+name = "layer_check"
+path = "../../scripts/layer_check.rs"
 
 [dependencies]
 roko-core = { path = "../roko-core" }
 roko-std = { path = "../roko-std" }
 roko-fs = { path = "../roko-fs" }
+roko-learn = { path = "../roko-learn" }
 roko-compose = { path = "../roko-compose" }
 roko-agent = { path = "../roko-agent" }
 roko-agent-server = { path = "../roko-agent-server" }
 roko-gate = { path = "../roko-gate" }
 roko-orchestrator = { path = "../roko-orchestrator" }
-roko-learn = { path = "../roko-learn" }
 roko-dreams = { path = "../roko-dreams" }
 roko-daimon = { path = "../roko-daimon" }
 roko-neuro = { path = "../roko-neuro" }
@@ -32,18 +45,24 @@ roko-plugin = { path = "../roko-plugin" }
 roko-runtime = { path = "../roko-runtime" }
 roko-serve = { path = "../roko-serve" }
 roko-index = { path = "../roko-index" }
+roko-graph = { path = "../roko-graph" }
 roko-chain = { path = "../roko-chain", features = ["alloy-backend"] }
+roko-acp = { path = "../roko-acp" }
 
 clap = { workspace = true, features = ["derive"] }
+cargo_metadata = "0.23"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "signal", "io-util"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
+indexmap = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+thiserror = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
@@ -59,13 +78,16 @@ base64 = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 sysinfo = { workspace = true }
-ratatui = "0.29"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 dotenvy = "0.15"
 dirs = "6"
+indicatif = "0.17"
 notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-full = "0.3"
 libc = "0.2"
+fs2 = "0.4"
+pulldown-cmark = "0.12"
 webbrowser = { workspace = true }
 
 [dev-dependencies]
@@ -73,3 +95,13 @@ agent-relay = { path = "../../apps/agent-relay" }
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+
+[package.metadata.roko]
+layer = 4
+
+# `tests/snapshot.rs` uses `roko_cli::orchestrate`, which is only built with
+# `--features legacy-orchestrate`.
+[[test]]
+name = "snapshot"
+path = "tests/snapshot.rs"
+required-features = ["legacy-orchestrate"]

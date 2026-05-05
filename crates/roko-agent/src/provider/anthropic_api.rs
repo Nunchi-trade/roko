@@ -1,10 +1,47 @@
+//! Adapter for the Anthropic Messages API (direct HTTP, not Claude CLI subprocess).
+//!
+//! # STATUS: WIRED but GATED by config (not active in default `roko.toml`)
+//!
+//! This adapter implements the full Anthropic Messages API tool loop via HTTP
+//! requests to `https://api.anthropic.com/v1/messages`. The code path is fully
+//! reachable at runtime: `ProviderRegistry` dispatches to `AnthropicApiAdapter`
+//! when a provider has `kind = "anthropic_api"`, and the tool loop activates
+//! when the model profile has `supports_tools = true`.
+//!
+//! It is NOT active in the default configuration because all Claude models in
+//! the shipped `roko.toml` route through `claude_cli` (subprocess-based).
+//! This is intentional: the CLI backend supports MCP passthrough, `--resume`,
+//! and prompt caching, which the direct HTTP path does not yet replicate.
+//!
+//! The tool loop sub-module (`tool_loop.rs`) IS exercised by integration tests
+//! and proven functional. It is NOT dead code -- it just requires explicit
+//! opt-in via config.
+//!
+//! ## To activate
+//!
+//! Add a provider entry to `roko.toml`:
+//! ```toml
+//! [providers.anthropic_api_direct]
+//! kind = "anthropic_api"
+//! base_url = "https://api.anthropic.com/v1"
+//! api_key_env = "ANTHROPIC_API_KEY"
+//! timeout_ms = 120000
+//! ttft_timeout_ms = 15000
+//! connect_timeout_ms = 5000
+//! ```
+//! Then add a model entry pointing to it (with `tool_format = "anthropic_blocks"`).
+//! Run `cargo test -p roko-agent -- anthropic` to verify the adapter before enabling.
+
 pub mod tool_loop;
 
 use crate::Agent;
-use crate::claude_agent::{ClaudeAgent, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS};
+use crate::claude_agent::{ClaudeAgent, DEFAULT_BASE_URL};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use roko_core::agent::ProviderKind;
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
 use serde_json::Value;
 
 /// Adapter for the Anthropic Messages API.
@@ -43,11 +80,11 @@ impl ProviderAdapter for AnthropicApiAdapter {
         let timeout_ms = options
             .timeout_ms
             .or(provider.timeout_ms)
-            .unwrap_or(120_000);
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
         let max_tokens = model
             .max_output
             .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
 
         if model.supports_tools {
             return tool_loop::create_tool_loop_agent(api_key, provider, model, options);
@@ -91,15 +128,15 @@ impl ProviderAdapter for AnthropicApiAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn spawn_messages_server(
@@ -290,7 +327,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
@@ -382,7 +419,7 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
-            ttft_timeout_ms: Some(15_000),
+            ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
             connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,

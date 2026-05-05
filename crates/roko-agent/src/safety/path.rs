@@ -62,7 +62,7 @@ pub struct CanonicalPath {
     pub relative: PathBuf,
 }
 
-/// Policy configuration for path validation.
+/// React configuration for path validation.
 ///
 /// Callers can opt into stricter behavior (rejecting symlinks) or
 /// loosen the default by allowing escapes. `Default` mirrors the

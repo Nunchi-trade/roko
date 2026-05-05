@@ -11,12 +11,18 @@ use std::path::Path;
 use tempfile::TempDir;
 
 /// Helper: run a roko CLI command against the given workdir.
+///
+/// Isolates from the user's global config and API keys so tests use only
+/// the config written into the test workdir.
 fn roko(workdir: &Path, args: &[&str]) -> assert_cmd::assert::Assert {
     Command::cargo_bin("roko")
         .unwrap()
         .current_dir(workdir)
         .args(args)
         .env("ROKO_LOG", "warn")
+        .env("HOME", workdir)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
 }
 

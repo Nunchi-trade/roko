@@ -283,8 +283,8 @@ fn render(frame: &mut ratatui::Frame<'_>, state: &TuiState, title: &str) {
                 )),
                 Line::from(format!(
                     "{} · rep {} · earned {}",
-                    blank_if_empty(&agent.model, "unknown"),
-                    blank_if_empty(&agent.reputation, "n/a"),
+                    blank_if_empty(&agent.model, ""),
+                    blank_if_empty(&agent.reputation, ""),
                     agent.earned
                 )),
                 Line::from(blank_if_empty(&agent.status, "Idle")),
@@ -333,7 +333,7 @@ fn render(frame: &mut ratatui::Frame<'_>, state: &TuiState, title: &str) {
         Line::from(format!("Treasury: {}", state.economics.treasury)),
         Line::from(format!(
             "Current winner: {}",
-            state.active_winner.clone().unwrap_or_else(|| "n/a".into())
+            state.active_winner.clone().unwrap_or_default()
         )),
     ])
     .block(Block::default().borders(Borders::ALL).title("Economics"))

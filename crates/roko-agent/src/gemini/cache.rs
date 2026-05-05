@@ -8,7 +8,9 @@ use crate::http::{HttpPoster, ReqwestPoster};
 
 use super::types::Content;
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
+
+const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_REQUEST_TIMEOUT_MS;
 
 /// Error returned by the Gemini cache lifecycle client.
 #[derive(Debug, thiserror::Error)]

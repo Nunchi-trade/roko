@@ -4,7 +4,7 @@
 //! phase, this watcher fires a warning so the conductor can restart or
 //! escalate.
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 
 /// Maximum times the same review feedback can appear before firing.
 pub const MAX_REVIEW_CYCLES: usize = 3;
@@ -75,7 +75,7 @@ fn plan_event(signal: &Engram) -> Option<String> {
         })
 }
 
-impl Policy for ReviewLoopWatcher {
+impl React for ReviewLoopWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         let Some(plan_id) = latest_plan_id(stream) else {
             return Vec::new();

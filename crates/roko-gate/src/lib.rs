@@ -1,13 +1,13 @@
 //! Concrete verification gates and orchestration primitives for Roko.
 //!
-//! This crate ships the verification stack described in `docs/04-verification`:
+//! This crate ships the verification stack described in `docs/v1/04-verification`:
 //! concrete gate implementations, the rung selector, the sequential pipeline,
 //! adaptive thresholds, runtime dispatch, and the agent feedback filter.
 //! Gates verify a signal against ground truth and produce
 //! [`Verdict`](roko_core::Verdict)s that flow back into the substrate as
 //! signals.
 //!
-//! # Gate architecture: two-tier system
+//! # Verify architecture: two-tier system
 //!
 //! ## Rung-dispatched gates (7 rungs)
 //!
@@ -75,11 +75,13 @@
     clippy::struct_field_names,
     clippy::suboptimal_flops,
     clippy::too_many_lines,
+    clippy::unnecessary_literal_bound,
     clippy::unreadable_literal
 )]
 
 pub mod adaptive_threshold;
 
+pub mod acceptance_contract;
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod code_exec;
@@ -90,12 +92,15 @@ pub mod compile_errors;
 pub mod composition;
 pub mod diff_gate;
 pub mod env_builder;
+pub mod error;
+pub mod error_patterns;
 pub mod eval_generator;
 pub mod fact_check;
 pub mod feedback;
 /// Forensic causal chain reconstruction from content-addressed artifacts (GATE-07).
 pub mod forensic;
 pub mod gate_pipeline;
+pub mod gate_service;
 pub mod generated;
 pub mod generated_test_gate;
 /// Multi-gate joint anomaly detection via Hotelling's T-squared (GATE-08).
@@ -108,6 +113,8 @@ pub mod pelt;
 pub mod process_reward;
 pub mod property_test_gate;
 pub mod ratchet;
+/// Shared gate metadata, status conversion, and alias/rung resolution.
+pub mod registry;
 pub mod review_verdict;
 pub mod rung_dispatch;
 pub mod rung_selector;
@@ -119,6 +126,14 @@ pub mod test_gate;
 pub mod verdict_publisher;
 pub mod verify_chain_gate;
 
+pub use acceptance_contract::{
+    AcceptanceContract, AcceptanceDecision, AcceptanceEvidence, AcceptanceIssue, AcceptanceOutcome,
+    GateEvidence, GateRequirement, GateRequirementKind, NoStubEvidence, NoStubRequirement,
+    ParityLedgerEvidenceRow, ParityLedgerRequirement, ParityLedgerRequirementRow,
+    ParityLedgerStatus, RecoveryEvidence, RecoveryRequirement, RequiredNextAction,
+    ReviewVerdictEvidence, ReviewVerdictRequirement, StructuredAgentOutputRequirement,
+    StructuredOutputEvidence,
+};
 pub use adaptive_threshold::{AdaptiveThresholds, RungStats};
 pub use artifact_store::ArtifactStore;
 pub use clippy_gate::ClippyGate;
@@ -126,9 +141,20 @@ pub use code_exec::{
     CodeExecutionBackend, CodeExecutionGate, CodeExecutionOutcome, CodeExecutionPayload,
 };
 pub use compile::CompileGate;
+pub use compile_errors::{
+    CompileError, CompileErrorSummary, ErrorCategory, FailureClass, GateFailureAction,
+    GateFailureClassification, GateFailureKind, GateRetryPolicy, classify_error_code,
+    classify_gate_failure, parse_cargo_json, parse_plain_stderr, render_failure_classification,
+    structured_gate_failure,
+};
 pub use composition::{FallbackGate, ParallelGate, VotingGate};
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
 pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
+pub use error::GateError;
+pub use error_patterns::{
+    FailurePatternRecord, error_key, extract_error_digest, records_from_classification,
+    records_from_parsed_review_verdict,
+};
 pub use eval_generator::{EvalGenerator, EvalStrategy, EvalTemplate, Evaluation};
 pub use fact_check::{FactCheckGate, SearchHit, SearchOracle};
 pub use feedback::{FeedbackItem, GateFeedback, Severity, feedback_for_agent};
@@ -136,14 +162,22 @@ pub use forensic::{
     ArtifactMetadata, CausalChain, ForensicError, ForensicReplayBuilder, TurnRecord,
 };
 pub use gate_pipeline::{ComposedGatePipeline, GateComposition, GatePipeline};
-pub use generated::{GateError, GateGenerator, GeneratedCheck};
+pub use gate_service::GateService;
+pub use generated::{GateGenerator, GeneratedCheck};
 pub use hotelling::{HotellingDetector, JointAnomalyResult};
 pub use payload::{BuildSystem, GatePayload, TestSelector};
 pub use process_reward::{
     AggregateMethod, ProcessRewardModel, ReasoningStep, StepVerdict, TurnSnapshot,
 };
 pub use ratchet::GateRatchet;
-pub use rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_canonical_rung, run_rung};
+pub use registry::{GateKind, GateRegistry, GateSpec, GateStatus};
+pub use review_verdict::{
+    ParsedReviewVerdict, ReviewParseSource, ReviewVerdict, ReviewVerdictContext,
+    parse_structured_review_verdict,
+};
+pub use rung_dispatch::{
+    GatePipelineBuilder, RungExecutionConfig, RungExecutionInputs, run_canonical_rung, run_rung,
+};
 pub use rung_selector::{PlanComplexity, Rung, RungCaps, is_selected, select_rungs};
 pub use shell::ShellGate;
 pub use spc::{

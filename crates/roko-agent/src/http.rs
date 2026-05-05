@@ -18,6 +18,7 @@
 //! forcing an extra allocation.
 
 use async_trait::async_trait;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// An error returned by the low-level HTTP transport.
@@ -118,11 +119,14 @@ pub struct ReqwestPoster {
 }
 
 impl ReqwestPoster {
-    /// Build a new poster with a fresh `reqwest::Client`.
+    /// Build a new poster backed by the shared `reqwest::Client`.
+    ///
+    /// This reuses the process-wide connection pool so agent instances do not
+    /// pay a fresh TCP+TLS handshake for every new backend.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::shared_http_client(),
         }
     }
 
@@ -145,8 +149,7 @@ impl HttpPoster for ReqwestPoster {
         let mut req = self
             .client
             .post(url)
-            .timeout(Duration::from_millis(timeout_ms))
-            .header("content-type", "application/json");
+            .timeout(Duration::from_millis(timeout_ms));
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
         }
@@ -224,6 +227,21 @@ impl HttpPoster for ReqwestPoster {
             Err(HttpPostError::http(status.as_u16(), text))
         }
     }
+}
+
+/// Create a shared HTTP poster for the process.
+///
+/// Call this once at startup and clone the returned [`Arc`] wherever HTTP
+/// dispatch is needed.
+#[must_use]
+pub fn shared_http_client() -> Arc<ReqwestPoster> {
+    Arc::new(ReqwestPoster::new())
+}
+
+/// Create a shared HTTP poster from an existing `reqwest::Client`.
+#[must_use]
+pub fn shared_http_client_from(client: reqwest::Client) -> Arc<ReqwestPoster> {
+    Arc::new(ReqwestPoster::with_client(client))
 }
 
 #[cfg(test)]

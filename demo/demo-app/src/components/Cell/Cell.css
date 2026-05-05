@@ -1,0 +1,85 @@
+/* Cell — universal container component */
+
+.cell {
+  position: relative;
+  border-radius: var(--cell-radius);
+  border: var(--cell-border);
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease),
+    transform var(--duration-fast) var(--ease);
+}
+
+/* ── Variants ── */
+
+.cell--surface {
+  background: color-mix(in srgb, var(--bg-mid) 88%, transparent);
+}
+
+.cell--raised {
+  background: color-mix(in srgb, var(--bg-raised) 90%, transparent);
+  box-shadow: var(--shadow-sm);
+}
+
+.cell--sunken {
+  background: color-mix(in srgb, var(--bg-deeper) 92%, transparent);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+.cell--glass {
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px) saturate(180%);
+  border-color: var(--glass-border);
+}
+
+/* ── Padding ── */
+
+.cell--pad-none { padding: 0; }
+.cell--pad-sm   { padding: 8px; }
+.cell--pad-md   { padding: 16px; }
+.cell--pad-lg   { padding: 24px; }
+
+/* ── Glow ── */
+
+.cell--glow-rose    { box-shadow: var(--glow-rose); }
+.cell--glow-success { box-shadow: var(--glow-success); }
+.cell--glow-error   { box-shadow: var(--glow-error); }
+.cell--glow-ambient { box-shadow: var(--glow-ambient); }
+
+/* Glow + raised needs combined shadow */
+.cell--raised.cell--glow-rose    { box-shadow: var(--shadow-sm), var(--glow-rose); }
+.cell--raised.cell--glow-success { box-shadow: var(--shadow-sm), var(--glow-success); }
+.cell--raised.cell--glow-error   { box-shadow: var(--shadow-sm), var(--glow-error); }
+.cell--raised.cell--glow-ambient { box-shadow: var(--shadow-sm), var(--glow-ambient); }
+
+/* ── Interactive ── */
+
+.cell--interactive {
+  cursor: pointer;
+}
+
+.cell--interactive:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+.cell--interactive:active {
+  transform: translateY(0);
+}
+
+/* Interactive + variant combined hover shadows */
+.cell--interactive.cell--raised:hover {
+  box-shadow: var(--shadow-md);
+}
+
+.cell--interactive.cell--glass:hover {
+  background: var(--bg-glass-hover);
+  box-shadow: var(--shadow-md);
+}
+
+/* ── Selected ── */
+
+.cell--selected {
+  border-color: var(--rose-bright);
+  box-shadow: 0 0 0 1px var(--rose-bright), var(--glow-rose);
+}

@@ -1,0 +1,11 @@
+/* Pulse — animated LED dot indicator */
+
+.pulse {
+  display: inline-block;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.pulse--animate {
+  animation: pulse-dot 2.4s ease-in-out infinite;
+}

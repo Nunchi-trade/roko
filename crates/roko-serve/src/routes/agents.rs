@@ -1,5 +1,7 @@
 //! Agent registration, token, and process management endpoints.
 
+use std::collections::BTreeMap;
+use std::path::{Component, Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +28,9 @@ use roko_chain::alloy_impl::AlloyChainWallet;
 use roko_core::HeartbeatPayload;
 use roko_core::config::schema::{ModelProfile, RokoConfig};
 use roko_learn::provider_health::HealthState;
-use roko_runtime::process::{ProcessId, SpawnConfig};
+use roko_runtime::process::{
+    ProcessId, ProcessSessionConfig, SpawnConfig, default_process_session_ledger_path,
+};
 
 use crate::error::ApiError;
 use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
@@ -35,7 +39,19 @@ use crate::runtime::RunResult;
 use crate::sanitize::sanitize_agent_content;
 use crate::state::{AgentRegistrationRecord, AppState, DiscoveredAgent, OperationStatus};
 
-const AGENT_MESSAGE_INLINE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Fallback inline timeout when no config is loaded.
+const AGENT_MESSAGE_INLINE_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
+
+/// Derive the agent message inline timeout from config, falling back to the default.
+fn agent_message_inline_timeout(state: &AppState) -> Duration {
+    let cfg = state.load_roko_config();
+    let t = cfg.timeouts.http_request();
+    if t.is_zero() {
+        AGENT_MESSAGE_INLINE_TIMEOUT_DEFAULT
+    } else {
+        t
+    }
+}
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -44,6 +60,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/agents/create", post(create_agent))
         .route("/agents/{id}", get(get_agent))
         .route("/agents/{id}/profile", get(get_agent_profile))
+        .route("/agents/{id}/config", get(get_agent_config))
         .route("/agents/{id}/stop", post(stop_agent))
         .route("/agents/{id}/episodes", get(agent_episodes))
         .route("/agents/{id}/logs", get(proxy_agent_logs))
@@ -161,8 +178,7 @@ fn agent_dashboard_payload(
         .and_then(|model| model_profile_for(config, model));
     let provider = profile
         .as_ref()
-        .map(|(_, profile)| profile.provider.clone())
-        .or_else(|| infer_provider_from_model(model.as_deref()));
+        .map(|(_, profile)| profile.provider.clone());
     let model_profile = profile
         .as_ref()
         .map(|(key, profile)| model_profile_json(key, profile));
@@ -242,7 +258,7 @@ fn agent_dashboard_payload(
             "message_endpoint": message_endpoint,
             "streaming_supported": stream_url.is_some(),
             "stream_endpoint": stream_url,
-            "inline_timeout_ms": AGENT_MESSAGE_INLINE_TIMEOUT.as_millis(),
+            "inline_timeout_ms": config.timeouts.http_request().as_millis(),
             "correlation": "run_id",
         },
     })
@@ -307,26 +323,6 @@ fn model_profile_json(key: &str, profile: &ModelProfile) -> Value {
             "per_request": profile.cost_per_request,
         },
     })
-}
-
-fn infer_provider_from_model(model: Option<&str>) -> Option<String> {
-    let model = model?.to_ascii_lowercase();
-    let provider = if model.contains("claude") {
-        "anthropic"
-    } else if model.contains("gpt") || model.contains("o3") || model.contains("o4") {
-        "openai"
-    } else if model.contains("gemini") {
-        "gemini"
-    } else if model.contains("glm") || model.contains("z-ai") {
-        "zai"
-    } else if model.contains("sonar") {
-        "perplexity"
-    } else if model.contains("llama") || model.contains("qwen") {
-        "openrouter"
-    } else {
-        return None;
-    };
-    Some(provider.to_string())
 }
 
 fn provider_health_json(state: &AppState, provider: &str) -> Value {
@@ -600,11 +596,18 @@ impl RequestPayload for CreateAgentRequest {
 ///
 /// Writes a minimal manifest to `.roko/agents/<name>/manifest.toml` and upserts
 /// a discovery entry so the agent appears in the fleet roster immediately.
+///
+/// T3-27: the agent name must be a single, traversal-free filesystem segment
+/// and the resolved path is verified to live inside the workspace's
+/// `.roko/agents` root before any directory is touched. The manifest body is
+/// serialised through `toml::to_string_pretty` so user-controlled strings
+/// (prompts, domain labels, …) cannot inject sibling tables.
 async fn create_agent(
     State(state): State<Arc<AppState>>,
     ValidJson(req): ValidJson<CreateAgentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let agents_dir = state.workdir.join(".roko").join("agents").join(&req.name);
+    let agents_root = state.workdir.join(".roko").join("agents");
+    let agents_dir = resolve_agent_dir(&agents_root, &req.name)?;
     let manifest_path = agents_dir.join("manifest.toml");
 
     // Don't overwrite an existing agent.
@@ -616,23 +619,22 @@ async fn create_agent(
         )));
     }
 
-    // Build a minimal TOML manifest.
     let prompt = req
         .prompt
-        .as_deref()
-        .unwrap_or("You are a helpful autonomous agent.");
-    let manifest_toml = format!(
-        r#"# Auto-generated by POST /api/agents/create
-schema_version = 1
-
-[core]
-prompt = {prompt}
-mode = "self_hosted"
-
-[core.domain.{domain}]
-"#,
-        prompt = toml_quote(prompt),
-        domain = req.domain,
+        .clone()
+        .unwrap_or_else(|| "You are a helpful autonomous agent.".to_string());
+    let manifest_struct = AgentManifest {
+        schema_version: 1,
+        core: AgentManifestCore {
+            prompt,
+            mode: "self_hosted".to_string(),
+            domain: BTreeMap::from([(req.domain.clone(), toml::value::Table::new())]),
+        },
+    };
+    let mut manifest_toml = String::from("# Auto-generated by POST /api/agents/create\n");
+    manifest_toml.push_str(
+        &toml::to_string_pretty(&manifest_struct)
+            .map_err(|e| ApiError::internal(format!("serialize manifest: {e}")))?,
     );
 
     tokio::fs::create_dir_all(&agents_dir)
@@ -694,13 +696,86 @@ mode = "self_hosted"
     ))
 }
 
-/// Quote a string for TOML (triple-quoted for multi-line safety).
-fn toml_quote(s: &str) -> String {
-    if s.contains('\n') || s.contains('"') {
-        format!("\"\"\"{}\"\"\"", s.replace('\\', "\\\\"))
-    } else {
-        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+/// Strongly-typed manifest written to disk by `POST /api/agents/create`. The
+/// fields exactly mirror the legacy hand-rolled TOML so existing manifest
+/// readers do not have to change. Serialising through `toml::to_string_pretty`
+/// (rather than `format!`) is what defeats the prompt-driven TOML-injection
+/// attack: every string is encoded as a quoted TOML value, so a user-supplied
+/// `prompt = "x\"\n[malicious]\nsecret = \"y\""` becomes a single multi-line
+/// quoted string instead of a sibling `[malicious]` table.
+#[derive(Debug, Serialize)]
+struct AgentManifest {
+    schema_version: u32,
+    core: AgentManifestCore,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentManifestCore {
+    prompt: String,
+    mode: String,
+    // Each domain section is a TOML sub-table so the rendered manifest
+    // contains a `[core.domain.<name>]` header even when the body is
+    // empty. We use `toml::value::Table` (a `BTreeMap<String, toml::Value>`)
+    // so the value type is not zero-sized — clippy's
+    // `zero_sized_map_values` lint flags maps whose value type carries
+    // no information, which would otherwise trip on a marker struct.
+    domain: BTreeMap<String, toml::value::Table>,
+}
+
+/// Validate `name` as a single safe filesystem segment under `agents_root`
+/// and return the resolved (still possibly non-existent) directory.
+///
+/// We refuse the request if any of the following hold:
+/// * the name is empty after trimming;
+/// * the name contains a path separator (`/` or platform-native);
+/// * the name contains `..` or `.` segments, or any non-`Normal` component;
+/// * the name is exactly `..` or `.`;
+/// * the resolved absolute path does not start with the canonicalised
+///   `agents_root` (defence-in-depth against any escape we missed above).
+///
+/// Canonicalisation is performed on the parent directory only, because the
+/// agent directory does not exist at request time.
+fn resolve_agent_dir(agents_root: &StdPath, name: &str) -> Result<PathBuf, ApiError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request("agent name must not be empty"));
     }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(ApiError::bad_request(
+            "agent name must not contain path separators",
+        ));
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err(ApiError::bad_request("agent name must not be '.' or '..'"));
+    }
+    let candidate = StdPath::new(trimmed);
+    let mut components = candidate.components();
+    match components.next() {
+        Some(Component::Normal(_)) if components.next().is_none() => {}
+        _ => {
+            return Err(ApiError::bad_request(
+                "agent name must be a single non-empty path segment",
+            ));
+        }
+    }
+
+    // Defence-in-depth: ensure the resolved path actually lives under the
+    // canonical agents root. We canonicalise the workdir's `.roko/agents`
+    // parent (which we create lazily on the very first agent registration).
+    if !agents_root.exists() {
+        std::fs::create_dir_all(agents_root)
+            .map_err(|e| ApiError::internal(format!("create agents root: {e}")))?;
+    }
+    let canonical_root = agents_root
+        .canonicalize()
+        .map_err(|e| ApiError::internal(format!("canonicalize agents root: {e}")))?;
+    let resolved = canonical_root.join(trimmed);
+    if !resolved.starts_with(&canonical_root) {
+        return Err(ApiError::bad_request(
+            "resolved agent path escapes the workspace agents root",
+        ));
+    }
+    Ok(resolved)
 }
 
 // ─── Agent lifecycle: start / restart ────────────────────────────────────
@@ -795,6 +870,16 @@ async fn start_agent(
         program: roko_bin.to_string_lossy().into_owned(),
         args,
         working_dir: Some(state.workdir.clone()),
+        session: Some(ProcessSessionConfig {
+            session_id: format!("agent:{agent_id}"),
+            invocation_id: uuid::Uuid::new_v4().to_string(),
+            backend_id: "roko-agent-sidecar".to_string(),
+            task_id: Some(agent_id.clone()),
+            reuse_policy_id: Some("serve-agent-sidecar".to_string()),
+            resumable: true,
+            timeout_ms: None,
+            ledger_path: default_process_session_ledger_path(&state.workdir),
+        }),
         label: agent_id.clone(),
         ..Default::default()
     };
@@ -952,6 +1037,55 @@ async fn get_agent_profile(
     get_agent(State(state), Path(id)).await
 }
 
+/// `GET /api/agents/{id}/config` — return the agent manifest plus runtime metadata.
+async fn get_agent_config(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let agents_root = state.workdir.join(".roko").join("agents");
+    let agent_dir = resolve_agent_dir(&agents_root, &id)?;
+    let manifest_path = agent_dir.join("manifest.toml");
+    let deleted = agent_dir.join("DELETED").exists();
+    let manifest_text = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(ApiError::internal(format!("read agent manifest: {error}"))),
+    };
+
+    let discovered = state.discovered_agent(&id).await;
+    if manifest_text.is_none() && discovered.is_none() {
+        return Err(ApiError::not_found(format!(
+            "agent '{id}' not found (no manifest at {})",
+            manifest_path.display()
+        )));
+    }
+
+    let manifest = manifest_text
+        .as_deref()
+        .and_then(|text| toml::from_str::<toml::Value>(text).ok())
+        .and_then(|value| serde_json::to_value(value).ok());
+    let process_info = state.find_process_by_label(&id).await;
+    let (process_status, uptime_secs, os_pid) = match process_info {
+        Some((_, os, uptime)) => ("running", Some(uptime.as_secs()), os),
+        None => ("stopped", None, None),
+    };
+
+    Ok(Json(json!({
+        "agent_id": id,
+        "manifest_path": manifest_path.display().to_string(),
+        "manifest_exists": manifest_text.is_some(),
+        "deleted": deleted,
+        "manifest_toml": manifest_text,
+        "manifest": manifest,
+        "runtime": {
+            "process_status": process_status,
+            "uptime_secs": uptime_secs,
+            "os_pid": os_pid,
+        },
+        "registration": discovered,
+    })))
+}
+
 /// `POST /api/agents/{id}/stop` — shut down a specific supervised process.
 async fn stop_agent(
     State(state): State<Arc<AppState>>,
@@ -1086,7 +1220,7 @@ async fn send_message(
         if let Some(ws_url) = stream_url_for_agent(&agent) {
             let (run_id, rx) =
                 spawn_sidecar_stream(Arc::clone(&state), agent_id.clone(), ws_url, &agent, &req);
-            match wait_for_sidecar_stream(rx, AGENT_MESSAGE_INLINE_TIMEOUT).await {
+            match wait_for_sidecar_stream(rx, agent_message_inline_timeout(&state)).await {
                 Some(Ok(response_text)) => {
                     return Ok((
                         StatusCode::OK,
@@ -1201,7 +1335,7 @@ async fn send_message(
     let run_id = spawn_background_run(&state, prompt, None, Some(agent_id.clone())).await;
 
     if let Some(completion) =
-        wait_for_background_run(&state, &run_id, AGENT_MESSAGE_INLINE_TIMEOUT).await
+        wait_for_background_run(&state, &run_id, agent_message_inline_timeout(&state)).await
     {
         return match completion {
             RunCompletion::Completed { response } => Ok((
@@ -1319,11 +1453,11 @@ async fn proxy_sidecar_stream(
             .insert(header::AUTHORIZATION, header_value);
     }
 
-    let (mut socket, _response) =
-        tokio::time::timeout(Duration::from_secs(3), connect_async(request))
-            .await
-            .map_err(|_| "connect sidecar stream timed out".to_string())?
-            .map_err(|error| format!("connect sidecar stream: {error}"))?;
+    let connect_timeout = state.load_roko_config().timeouts.health_check();
+    let (mut socket, _response) = tokio::time::timeout(connect_timeout, connect_async(request))
+        .await
+        .map_err(|_| "connect sidecar stream timed out".to_string())?
+        .map_err(|error| format!("connect sidecar stream: {error}"))?;
     socket
         .send(WsMessage::Text(prompt.into()))
         .await
@@ -1620,6 +1754,40 @@ fn build_agent_prompt(agent_id: &str, message: &str, context: Option<&Value>) ->
     prompt
 }
 
+fn validate_agent_url(url: &str) -> Result<(), ApiError> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| ApiError::bad_request("invalid URL"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => {
+            return Err(ApiError::bad_request(format!("unsupported scheme: {s}")));
+        }
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ApiError::bad_request("URL has no host"))?;
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(ApiError::bad_request("internal/private URLs not allowed"));
+    }
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if blocked_agent_endpoint_ip(ip) {
+            return Err(ApiError::bad_request("internal/private URLs not allowed"));
+        }
+    }
+
+    Ok(())
+}
+
+fn blocked_agent_endpoint_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local()
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Validate)]
 struct RegisterAgentRequest {
     #[validate(
@@ -1667,7 +1835,20 @@ struct RegisterAgentRequest {
 
 impl RequestPayload for RegisterAgentRequest {
     fn validate_payload(&self) -> Result<(), ApiError> {
-        validate_with_validator(self)
+        validate_with_validator(self)?;
+        if let Some(ref url) = self.rest_endpoint {
+            validate_agent_url(url)?;
+        }
+        if let Some(ref url) = self.websocket_endpoint {
+            validate_agent_url(url)?;
+        }
+        if let Some(ref url) = self.a2a_endpoint {
+            validate_agent_url(url)?;
+        }
+        if let Some(ref url) = self.mcp_endpoint {
+            validate_agent_url(url)?;
+        }
+        Ok(())
     }
 }
 
@@ -1696,6 +1877,206 @@ mod tests {
     use crate::events::ServerEvent;
     use crate::runtime::NoOpRuntime;
     use crate::state::{AgentEndpoints, AgentRegistrationRecord, AppState};
+
+    #[test]
+    fn validate_agent_url_rejects_internal_and_private_hosts() {
+        assert!(validate_agent_url("http://169.254.169.254/").is_err());
+        assert!(validate_agent_url("http://10.0.0.1/").is_err());
+        assert!(validate_agent_url("http://localhost/").is_err());
+        assert!(validate_agent_url("http://127.0.0.1/").is_err());
+        assert!(validate_agent_url("https://api.example.com/v1").is_ok());
+    }
+
+    // ---- T3-27: agent_manifest path-traversal & TOML-injection ---------
+
+    #[test]
+    fn agent_manifest_resolve_agent_dir_rejects_dotdot_segments() {
+        let tempdir = tempdir().expect("tempdir");
+        let agents_root = tempdir.path().join(".roko").join("agents");
+
+        for hostile in [
+            "..",
+            "../",
+            "../etc",
+            "../../../etc",
+            "..\\..\\windows",
+            "/etc/passwd",
+            "./hidden",
+            "name/with/slashes",
+            "",
+            "   ",
+        ] {
+            let err = resolve_agent_dir(&agents_root, hostile)
+                .err()
+                .unwrap_or_else(|| panic!("expected rejection for {hostile:?}"));
+            assert_eq!(
+                err.status,
+                StatusCode::BAD_REQUEST,
+                "{hostile:?} should be 4xx, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_manifest_resolve_agent_dir_accepts_simple_names() {
+        let tempdir = tempdir().expect("tempdir");
+        let agents_root = tempdir.path().join(".roko").join("agents");
+        let resolved = resolve_agent_dir(&agents_root, "research-bot.v2").expect("resolve");
+        let canonical_root = agents_root.canonicalize().expect("canonicalize root");
+        assert_eq!(resolved, canonical_root.join("research-bot.v2"));
+    }
+
+    #[tokio::test]
+    async fn agent_manifest_create_rejects_traversal_name() {
+        let tempdir = tempdir().expect("tempdir");
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
+
+        let result = create_agent(
+            State(Arc::clone(&state)),
+            ValidJson(CreateAgentRequest {
+                name: "../../../etc".into(),
+                domain: "general".into(),
+                prompt: None,
+                skills: Vec::new(),
+                tier: None,
+                model: None,
+                reputation: 0,
+                max_concurrent_jobs: 0,
+                capabilities: Vec::new(),
+            }),
+        )
+        .await;
+
+        let err = result.err().expect("traversal name must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+
+        // No directories should have been created outside the workspace.
+        let escaped = tempdir.path().parent().unwrap().join("etc");
+        assert!(
+            !escaped.exists(),
+            "traversal must not create {}",
+            escaped.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_manifest_prompt_cannot_inject_toml_table() {
+        let tempdir = tempdir().expect("tempdir");
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
+
+        let hostile_prompt = "innocent prompt\"\n[malicious]\nsecret = \"x\"\n# tail";
+        let response = create_agent(
+            State(Arc::clone(&state)),
+            ValidJson(CreateAgentRequest {
+                name: "injection-bot".into(),
+                domain: "general".into(),
+                prompt: Some(hostile_prompt.to_string()),
+                skills: Vec::new(),
+                tier: None,
+                model: None,
+                reputation: 0,
+                max_concurrent_jobs: 0,
+                capabilities: Vec::new(),
+            }),
+        )
+        .await
+        .expect("create_agent")
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let manifest_path = tempdir
+            .path()
+            .join(".roko")
+            .join("agents")
+            .join("injection-bot")
+            .join("manifest.toml");
+        let on_disk = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        let parsed: toml::Value = toml::from_str(&on_disk).expect("parse manifest");
+
+        assert!(
+            parsed.get("malicious").is_none(),
+            "TOML injection succeeded, manifest contained `[malicious]`:\n{on_disk}"
+        );
+        let prompt = parsed
+            .get("core")
+            .and_then(|c| c.get("prompt"))
+            .and_then(|p| p.as_str())
+            .expect("core.prompt is a string");
+        assert_eq!(prompt, hostile_prompt);
+    }
+
+    #[tokio::test]
+    async fn agent_config_returns_manifest_and_runtime_metadata() {
+        let tempdir = tempdir().expect("tempdir");
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
+        let agent_dir = tempdir.path().join(".roko").join("agents").join("demo");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        std::fs::write(
+            agent_dir.join("manifest.toml"),
+            r#"
+schema_version = 1
+
+[core]
+prompt = "hello"
+mode = "self_hosted"
+"#,
+        )
+        .expect("write manifest");
+
+        let Json(payload) = get_agent_config(State(state), Path("demo".to_string()))
+            .await
+            .expect("agent config");
+
+        assert_eq!(payload["agent_id"], "demo");
+        assert_eq!(payload["manifest_exists"], true);
+        assert_eq!(payload["runtime"]["process_status"], "stopped");
+        assert_eq!(payload["manifest"]["core"]["prompt"], "hello");
+    }
+
+    #[tokio::test]
+    async fn agent_config_rejects_path_traversal_ids() {
+        let tempdir = tempdir().expect("tempdir");
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
+
+        let err = get_agent_config(State(state), Path("../escape".to_string()))
+            .await
+            .expect_err("path traversal id should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
 
     #[derive(Debug)]
     struct MockLogsServerState {
@@ -1769,12 +2150,15 @@ mod tests {
     #[tokio::test]
     async fn send_message_creates_tracked_run_and_events() {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         let response = send_message(
             State(Arc::clone(&state)),
@@ -1820,12 +2204,15 @@ mod tests {
     #[tokio::test]
     async fn register_and_issue_token() {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         let _ = register_agent(
             State(Arc::clone(&state)),
@@ -1837,7 +2224,7 @@ mod tests {
                 capabilities: vec!["research".into()],
                 domain_tags: vec!["roko".into()],
                 card_uri: None,
-                rest_endpoint: Some("http://127.0.0.1:9001".into()),
+                rest_endpoint: Some("https://example.com:9001".into()),
                 websocket_endpoint: None,
                 a2a_endpoint: None,
                 mcp_endpoint: None,
@@ -1865,12 +2252,15 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         let mut config = RokoConfig::default();
         config.agent.default_model = "claude-sonnet-4-20250514".into();
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            config,
-            Arc::new(ManualBackend::default()),
-        ));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                config,
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         state
             .upsert_discovered_agent(AgentRegistrationRecord {
@@ -1933,12 +2323,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_logs_proxy_forwards_tail_and_body() -> std::result::Result<(), Box<dyn Error>> {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
         let (logs_url, logs_state, _handle) = spawn_mock_logs_server(
             StatusCode::OK,
             json!({
@@ -1990,12 +2383,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_logs_missing_agent_returns_404() -> std::result::Result<(), Box<dyn Error>> {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
 
         let response = router(state)
             .oneshot(
@@ -2020,12 +2416,15 @@ mod tests {
     async fn agent_logs_sidecar_not_found_is_propagated() -> std::result::Result<(), Box<dyn Error>>
     {
         let tempdir = tempdir().expect("tempdir");
-        let state = Arc::new(AppState::new(
-            tempdir.path().to_path_buf(),
-            Arc::new(NoOpRuntime),
-            RokoConfig::default(),
-            Arc::new(ManualBackend::default()),
-        ));
+        let state = Arc::new(
+            AppState::new(
+                tempdir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                RokoConfig::default(),
+                Arc::new(ManualBackend::default()),
+            )
+            .expect("AppState::new"),
+        );
         let (logs_url, logs_state, _handle) = spawn_mock_logs_server(
             StatusCode::NOT_FOUND,
             json!({ "error": "log file missing" }),

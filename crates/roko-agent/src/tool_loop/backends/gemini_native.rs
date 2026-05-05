@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde_json::Value;
 
 use crate::gemini::native::{
@@ -18,10 +19,14 @@ use crate::gemini::wire::{
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::AgentOptions;
+use crate::safety::SafetyLayer;
 use crate::tool_loop::{LlmBackend, LlmError};
-use crate::translate::{BackendResponse, RenderedTools, SessionState};
+use crate::translate::{
+    BackendResponse, GeminiTranslator, RenderedTools, SessionState, Translator,
+};
+use roko_core::tool::ToolContext;
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_REQUEST_TIMEOUT_MS;
 
 /// HTTP backend for Gemini-native `generateContent` models.
 pub struct GeminiNativeBackend {
@@ -31,6 +36,7 @@ pub struct GeminiNativeBackend {
     thinking_level: Option<String>,
     cached_content: Option<String>,
     timeout_ms: u64,
+    safety: SafetyLayer,
     poster: Box<dyn HttpPoster>,
 }
 
@@ -42,6 +48,7 @@ impl GeminiNativeBackend {
         base_url: impl Into<String>,
         model: ModelProfile,
         options: &AgentOptions,
+        safety: SafetyLayer,
     ) -> Self {
         Self {
             api_key: api_key.into(),
@@ -52,6 +59,7 @@ impl GeminiNativeBackend {
                 .or_else(|| model.thinking_level.clone()),
             cached_content: options.cached_content.clone(),
             timeout_ms: options.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+            safety,
             model,
             poster: Box::new(ReqwestPoster::new()),
         }
@@ -177,7 +185,20 @@ impl LlmBackend for GeminiNativeBackend {
         serde_json::from_value::<GenerateContentResponse>(json.clone())
             .map_err(|err| LlmError::Backend(format!("validate response: {err}")))?;
 
-        Ok(BackendResponse::Json(json))
+        let response = BackendResponse::Json(json);
+        let calls = GeminiTranslator
+            .parse_calls(&response)
+            .map_err(|err| LlmError::Backend(format!("parse tool calls for safety: {err}")))?;
+        let tool_ctx = ToolContext::testing(std::env::current_dir().unwrap_or_else(|_| ".".into()));
+        for call in &calls {
+            if let Err(err) = self.safety.check_pre_execution(call, &tool_ctx) {
+                return Err(LlmError::Backend(format!(
+                    "gemini tool call blocked by safety layer: {err}"
+                )));
+            }
+        }
+
+        Ok(response)
     }
 
     fn backend_id(&self) -> &'static str {
@@ -260,6 +281,7 @@ mod tests {
             cost_cache_write_per_m: None,
             thinking_level: Some("dynamic".to_string()),
             max_tools: None,
+            max_tool_iterations: None,
             tokenizer_ratio: None,
             supports_search: false,
             supports_citations: false,
@@ -267,6 +289,8 @@ mod tests {
             is_embedding_model: false,
             search_context_size: None,
             cost_per_request: None,
+            use_max_completion_tokens: false,
+            tier: None,
         }
     }
 
@@ -301,6 +325,7 @@ mod tests {
                 effort: Some("high".to_string()),
                 ..Default::default()
             },
+            SafetyLayer::with_defaults(),
         )
         .with_poster(Box::new(mock));
 
@@ -357,6 +382,51 @@ mod tests {
         assert_eq!(
             request[0].body["tools"][0]["functionDeclarations"][0]["name"],
             "echo"
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_native_backend_blocks_dangerous_tool_call_before_dispatch() {
+        let response = json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "name": "bash",
+                            "args": { "command": "rm -rf /" },
+                            "id": "gemini-danger"
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }]
+        })
+        .to_string();
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mock = MockPoster::new(response, Arc::clone(&requests));
+        let backend = GeminiNativeBackend::new(
+            "test-key".to_string(),
+            "https://generativelanguage.googleapis.com".to_string(),
+            tool_model(),
+            &AgentOptions::default(),
+            SafetyLayer::with_defaults(),
+        )
+        .with_poster(Box::new(mock));
+
+        let result = backend
+            .send_turn(
+                &[json!({ "role": "user", "content": "clean up" })],
+                &RenderedTools::JsonArray(json!([])),
+                &SessionState::default(),
+            )
+            .await;
+
+        let err = result.expect_err("dangerous tool call must be blocked");
+        assert!(
+            err.to_string().contains("blocked by safety layer"),
+            "unexpected error: {err}"
         );
     }
 }

@@ -1,0 +1,19 @@
+{
+  "reply": "simulated agent failure after writing the draft",
+  "fail": true,
+  "name": "prd-draft-write-then-fail-turn-01",
+  "writes": [
+    {
+      "path": ".roko/prd/drafts/failing-but-written.md",
+      "content": "---\nid: prd-failing-but-written\ntitle: failing-but-written\nstatus: draft\nversion: 1\ncreated: 2026-05-04\nupdated: 2026-05-04\ndepends_on: []\ncrates: []\nplans_generated: []\ncoverage: 0\ntags: [\"regression\"]\n---\n\n# Failing But Written\n\n## Overview\nThe agent wrote this draft before returning a failing process status.\n\n## Requirements\n- REQ-001: Preserve a substantive draft artifact even when the agent exits non-zero.\n\n## Acceptance criteria\n- `roko prd draft new \"failing but written\"` exits successfully when this file exists.\n"
+    }
+  ],
+  "usage": {
+    "input_tokens": 8,
+    "output_tokens": 8,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

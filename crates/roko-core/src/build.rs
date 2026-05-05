@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 /// A fully-specified command descriptor: program, args, env, and working dir.
 ///
-/// This is a pure data structure — it does **not** execute. Gate or orchestrator
+/// This is a pure data structure — it does **not** execute. Verify or orchestrator
 /// code converts it into a `tokio::process::Command` (or similar) at the
 /// execution boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]

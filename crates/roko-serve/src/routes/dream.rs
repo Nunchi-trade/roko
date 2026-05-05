@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::IntoResponse;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -15,7 +16,9 @@ use crate::extract::{RequestPayload, ValidJson};
 use crate::state::{AppState, OperationHandle, OperationStatus};
 
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/dream/run", post(dream_run))
+    Router::new()
+        .route("/dream/run", post(dream_run))
+        .route("/dream/journal", get(dream_journal))
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +68,7 @@ async fn dream_run(
                         bare_mode: true,
                         effort: effort.to_string(),
                         fallback_model: None,
-                        timeout_ms: 120_000,
+                        timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
                         env: Vec::new(),
                     },
                 };
@@ -110,4 +113,84 @@ async fn dream_run(
         axum::http::StatusCode::ACCEPTED,
         Json(json!({ "id": op_id })),
     ))
+}
+
+/// `GET /api/dream/journal` — return the dream journal shaped for the
+/// `DreamPhaseViz` component.
+///
+/// Returns `{ last_cycle, cycle_count, phases: [{ name, status, ... }] }`.
+async fn dream_journal(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let journal_path = state.workdir.join(".roko/dreams/journal.jsonl");
+
+    // Parse journal entries if the file exists.
+    let entries: Vec<serde_json::Value> = if journal_path.exists() {
+        let content = tokio::fs::read_to_string(&journal_path)
+            .await
+            .unwrap_or_default();
+        content
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let cycle_count = entries.len();
+    let last_cycle = entries
+        .last()
+        .and_then(|e| e.get("timestamp").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    // Build per-phase summaries from the latest cycle (or zeros).
+    let phase_names = ["Hypnagogia", "NREM", "REM", "Integration"];
+    let phases: Vec<serde_json::Value> = phase_names
+        .iter()
+        .map(|name| {
+            // Look for phase data in the latest journal entry.
+            let phase_data = entries
+                .last()
+                .and_then(|e| e.get("phases"))
+                .and_then(|p| p.as_array())
+                .and_then(|arr| arr.iter().find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name)));
+
+            if let Some(data) = phase_data {
+                json!({
+                    "name": name,
+                    "status": data.get("status").and_then(|v| v.as_str()).unwrap_or("pending"),
+                    "episodes_processed": data.get("episodes_processed").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "clusters_formed": data.get("clusters_formed").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "knowledge_entries_written": data.get("knowledge_entries_written").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "playbooks_created": data.get("playbooks_created").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "duration_secs": data.get("duration_secs").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "trend": data.get("trend").cloned().unwrap_or(json!([])),
+                })
+            } else {
+                // Synthesize from aggregate stats if no per-phase breakdown exists.
+                let episodes_total = entries
+                    .last()
+                    .and_then(|e| e.get("episodes_processed").and_then(|v| v.as_u64()))
+                    .unwrap_or(0);
+                let status = if cycle_count > 0 { "completed" } else { "pending" };
+                json!({
+                    "name": name,
+                    "status": status,
+                    "episodes_processed": episodes_total / 4,
+                    "clusters_formed": 0,
+                    "knowledge_entries_written": 0,
+                    "playbooks_created": 0,
+                    "duration_secs": 0,
+                    "trend": [],
+                })
+            }
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "last_cycle": last_cycle,
+        "cycle_count": cycle_count,
+        "phases": phases,
+    })))
 }

@@ -1,0 +1,99 @@
+/* CellGraph — lightweight SVG relationship graph */
+
+.cell-graph {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background: var(--bg-deeper);
+  border: 1px solid var(--border);
+}
+
+.cell-graph__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Edges ── */
+
+.cell-graph__edge {
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
+  fill: none;
+  transition: stroke var(--duration-snap) var(--ease);
+}
+
+.cell-graph__edge--highlighted {
+  stroke: var(--rose-dim);
+  stroke-width: 2;
+}
+
+.cell-graph__edge-label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  fill: var(--text-ghost);
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+/* ── Nodes ── */
+
+.cell-graph__node {
+  cursor: pointer;
+  transition: transform var(--duration-snap) var(--ease);
+}
+
+.cell-graph__node:hover {
+  filter: brightness(1.15);
+}
+
+.cell-graph__node-rect {
+  rx: 4;
+  ry: 4;
+  stroke-width: 1;
+  transition:
+    stroke var(--duration-snap) var(--ease),
+    fill var(--duration-snap) var(--ease);
+}
+
+.cell-graph__node-rect--idle {
+  fill: var(--glass-bg);
+  stroke: var(--border);
+}
+
+.cell-graph__node-rect--active {
+  fill: color-mix(in srgb, var(--status-active) 8%, transparent);
+  stroke: var(--status-active);
+}
+
+.cell-graph__node-rect--success {
+  fill: color-mix(in srgb, var(--success) 8%, transparent);
+  stroke: var(--status-success);
+}
+
+.cell-graph__node-rect--error {
+  fill: color-mix(in srgb, var(--danger) 8%, transparent);
+  stroke: var(--status-error);
+}
+
+.cell-graph__node-rect--blocked {
+  fill: color-mix(in srgb, var(--status-blocked) 8%, transparent);
+  stroke: var(--status-blocked);
+}
+
+.cell-graph__node-rect--highlighted {
+  stroke-width: 2;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--rose) 30%, transparent));
+}
+
+.cell-graph__node-label {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  fill: var(--text-primary);
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+  overflow: hidden;
+}

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use roko_core::{Body, ContentHash, Context, Engram, Query, error::Result, traits::Substrate};
+use roko_core::{Body, ContentHash, Context, Engram, Query, error::Result, traits::Store};
 use roko_primitives::HdcVector;
 
 use crate::chain::{
@@ -81,7 +81,7 @@ impl HdcSubstrate {
 }
 
 #[async_trait]
-impl Substrate for HdcSubstrate {
+impl Store for HdcSubstrate {
     async fn put(&self, signal: Engram) -> Result<ContentHash> {
         let hash = signal.content_hash();
         let vector = Self::project_signal(&signal);

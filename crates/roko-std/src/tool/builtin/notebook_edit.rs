@@ -26,7 +26,35 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Notebook,
         ToolPermission::writes(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Relative path to the .ipynb notebook file."
+            },
+            "cell_index": {
+                "type": "integer",
+                "description": "0-based cell index to operate on."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["edit", "insert", "delete"],
+                "description": "Operation mode (default: 'edit')."
+            },
+            "source": {
+                "type": "string",
+                "description": "New cell source content (required for 'edit' and 'insert' modes)."
+            },
+            "cell_type": {
+                "type": "string",
+                "enum": ["code", "markdown"],
+                "description": "Cell type for 'insert' mode (default: 'code')."
+            }
+        },
+        "required": ["path", "cell_index"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(false)
     .with_timeout_ms(30_000)

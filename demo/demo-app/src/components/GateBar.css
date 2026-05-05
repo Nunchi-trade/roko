@@ -1,0 +1,51 @@
+.gate-bar {
+  display: flex;
+  gap: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--glass-border);
+  font-size: 0.92rem;
+  font-family: var(--mono);
+  letter-spacing: .04em;
+  align-items: center;
+}
+
+/* Connecting line between gates */
+.gate {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  text-transform: uppercase;
+  font-size: var(--text-lg);
+  position: relative;
+}
+
+/* connector dash after each gate (except the last) */
+.gate:not(:last-child)::after {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 1px;
+  background: var(--border-soft);
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+
+.gate-pass:not(:last-child)::after {
+  background: color-mix(in srgb, var(--success) 35%, transparent);
+}
+
+.gate-icon { font-weight: 700; font-size: var(--text-xl); }
+
+/* Pass gates glow green subtly */
+.gate-pass {
+  color: var(--success);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--success) 50%, transparent);
+}
+
+.gate-pass .gate-icon {
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--success) 60%, transparent));
+}
+
+.gate-fail { color: var(--rose-bright); }
+.gate-pending { color: var(--text-dim); }
+.gate-skip { color: var(--text-dim); }

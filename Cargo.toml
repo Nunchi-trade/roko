@@ -50,6 +50,8 @@ members = [
     "crates/roko-serve",
     # Per-agent HTTP server extracted from the legacy mirage dashboard surface.
     "crates/roko-agent-server",
+    # ACP server surface for editor integrations.
+    "crates/roko-acp",
 
     # Conductor — reactive intelligence layer: watchers, circuit breaker, interventions.
     "crates/roko-conductor",
@@ -75,6 +77,9 @@ members = [
 
     # Code intelligence — parsing, symbol graphs, PageRank, HDC fingerprints.
     "crates/roko-index",
+
+    # Graph execution engine — DAG-based cell orchestration with fan-out/fan-in.
+    "crates/roko-graph",
 ]
 default-members = [
     # Ordinary root builds target the main CLI plus the MCP servers we ship.
@@ -114,6 +119,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+indexmap = { version = "2", features = ["serde"] }
+notify = "6"
+
+# Graph
+petgraph = "0.7"
 
 # Error handling
 thiserror = "2.0"
@@ -153,7 +163,7 @@ hmac = "0.12"
 sha2 = "0.10"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 tower = { version = "0.5", features = ["limit", "load-shed"] }
-tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "limit", "trace"] }
 parking_lot = "0.12"
 dashmap = "6"
 clap = { version = "4", features = ["derive"] }
@@ -183,7 +193,73 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 unwrap_used = "deny"
-expect_used = "warn"
+# Pedantic style lints allowed workspace-wide (non-correctness):
+redundant_pub_crate = "allow"
+uninlined_format_args = "allow"
+needless_raw_string_hashes = "allow"
+option_if_let_else = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+redundant_closure_for_method_calls = "allow"
+doc_markdown = "allow"
+missing_panics_doc = "allow"
+clone_on_copy = "allow"
+items_after_statements = "allow"
+unused_async = "allow"
+needless_pass_by_value = "allow"
+return_self_not_must_use = "allow"
+# Nursery lints allowed (false positives or impractical to fix):
+future_not_send = "allow"
+large_futures = "allow"
+redundant_clone = "allow"
+significant_drop_tightening = "allow"
+or_fun_call = "allow"
+# Additional pedantic allows:
+unnecessary_wraps = "allow"
+match_wildcard_for_single_variants = "allow"
+single_match_else = "allow"
+cast_possible_wrap = "allow"
+if_not_else = "allow"
+wildcard_imports = "allow"
+option_option = "allow"
+used_underscore_binding = "allow"
+semicolon_if_nothing_returned = "allow"
+manual_let_else = "allow"
+match_same_arms = "allow"
+unnested_or_patterns = "allow"
+map_unwrap_or = "allow"
+unused_self = "allow"
+could_be_const = "allow"
+missing_const_for_fn = "allow"
+assigning_clones = "allow"
+cast_lossless = "allow"
+default_trait_access = "allow"
+large_stack_frames = "allow"
+print_literal = "allow"
+single_match = "allow"
+suboptimal_flops = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+useless_let_if_seq = "allow"
+branches_sharing_code = "allow"
+explicit_iter_loop = "allow"
+format_in_format_args = "allow"
+similar_names = "allow"
+expect_used = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+trivially_copy_pass_by_ref = "allow"
+bool_to_int_with_if = "allow"
+format_push_string = "allow"
+unnecessary_map_or = "allow"
+nonminimal_bool = "allow"
+option_as_ref_cloned = "allow"
+implicit_clone = "allow"
+sort_unstable = "allow"
+ignored_unit_patterns = "allow"
+significant_drop_in_scrutinee = "allow"
+manual_is_variant_and = "allow"
 
 [profile.release]
 lto = "thin"

@@ -1,3 +1,5 @@
+//! STATUS: WIRED -- corrections flow through event_subscriber into CascadeRouter.
+//!
 //! CalibrationPolicy — closes the predict-publish-correct loop (LEARN-09).
 //!
 //! The policy listens for prediction events, matches them to outcomes, and
@@ -28,7 +30,7 @@ pub struct CalibrationCorrection {
     pub sample_count: usize,
 }
 
-/// Policy that processes event streams to maintain calibration state.
+/// React that processes event streams to maintain calibration state.
 ///
 /// The policy accumulates prediction residuals from completed turns and
 /// triggers corrections when systematic bias is detected. It operates
@@ -127,7 +129,7 @@ impl CalibrationPolicy {
                 for (_task_id, pending) in entries {
                     let residual = pending.predicted_success_prob - actual;
                     let category = if pending.category.is_empty() {
-                        "unknown"
+                        ""
                     } else {
                         &pending.category
                     };
@@ -217,7 +219,7 @@ mod tests {
             policy.process_event(&turn_started(&task_id, "model-a"));
             policy.process_event(&turn_completed(false));
         }
-        assert!(policy.tracker().sample_count("model-a", "unknown") >= 5);
+        assert!(policy.tracker().sample_count("model-a", "") >= 5);
     }
 
     #[test]

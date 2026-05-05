@@ -1,0 +1,45 @@
+/* AsciiProgress ── terminal-style progress bar */
+
+.ascii-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.ascii-progress__label {
+  color: var(--text-dim);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+}
+
+.ascii-progress__bar {
+  display: inline-flex;
+  align-items: center;
+}
+
+.ascii-progress__bracket {
+  color: var(--text-ghost);
+}
+
+.ascii-progress__filled {
+  color: var(--rose);
+}
+
+.ascii-progress__empty {
+  color: var(--text-ghost);
+  opacity: 0.5;
+}
+
+.ascii-progress__percent {
+  color: var(--text-dim);
+  min-width: 3.5em;
+  text-align: right;
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+}

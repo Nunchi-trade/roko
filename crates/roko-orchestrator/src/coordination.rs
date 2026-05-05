@@ -435,7 +435,7 @@ pub struct PromotionConfig {
     pub pattern_to_wisdom_min_age_fraction: f64,
     /// Minimum confirmations for Wisdom -> Consensus promotion.
     pub wisdom_to_consensus_confirmations: u32,
-    /// Minimum confirmations for Consensus -> permanent Engram promotion.
+    /// Minimum confirmations for Consensus -> permanent Signal promotion.
     pub consensus_to_engram_confirmations: u32,
     /// Whether the caller should auto-promote or defer to explicit action.
     pub auto_promote: bool,
@@ -772,7 +772,7 @@ impl WisdomGate {
 // COORD-05: Scope promotion gates
 // ---------------------------------------------------------------------------
 
-/// Gate controlling pheromone scope promotion (e.g., Pattern -> Wisdom).
+/// Verify controlling pheromone scope promotion (e.g., Pattern -> Wisdom).
 ///
 /// Prevents gaming by requiring confirmations from a minimum number of
 /// distinct agents and optionally requiring that a gate pass accompanies

@@ -44,42 +44,105 @@ use crate::dispatcher::{HandlerResolver, ToolDispatcher};
 use crate::gemini::GeminiAdapter;
 use crate::mock::MockAgent;
 use crate::{Agent, ExecAgent};
+use indexmap::IndexMap;
 use roko_core::Temperament;
 use roko_core::agent::{ProviderKind, resolve_model};
+#[cfg(test)]
+use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::tool::ToolRegistry;
+use roko_core::defaults::{DEFAULT_MAX_TOOL_ITERATIONS, DEFAULT_REQUEST_TIMEOUT_MS};
+use roko_core::tool::{ToolDef, ToolRegistry};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub mod anthropic_api;
+pub mod cerebras;
 pub mod claude_cli;
 pub mod cursor_acp;
 pub mod openai_compat;
 pub mod openrouter_meta;
+pub mod pre_flight;
 
 pub use anthropic_api::AnthropicApiAdapter;
+pub use cerebras::CerebrasAdapter;
 pub use claude_cli::ClaudeCliAdapter;
 pub use cursor_acp::CursorAcpAdapter;
 pub use openai_compat::OpenAiCompatAdapter;
 pub use openrouter_meta::fetch_model_metadata;
+pub use pre_flight::{ProviderReadinessIssue, check_provider_readiness, report_readiness_issues};
 
 use crate::perplexity::{PerplexityAdapter, SearchOptions};
 
 static ANTHROPIC_API_ADAPTER: AnthropicApiAdapter = AnthropicApiAdapter;
+static CEREBRAS_ADAPTER: CerebrasAdapter = CerebrasAdapter;
 static CLAUDE_CLI_ADAPTER: ClaudeCliAdapter = ClaudeCliAdapter;
 static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
 static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
 static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
-const DEFAULT_PROVIDER_MAX_CONCURRENT: usize = 10;
+const DEFAULT_PROVIDER_MAX_CONCURRENT: usize = roko_core::defaults::DEFAULT_PROVIDER_MAX_CONCURRENT;
 pub const PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX: &str = "pplx.search_options=";
+
+/// Process-wide shared HTTP client with pooled connections.
+///
+/// A single `reqwest::Client` keeps TCP and TLS connections warm across all
+/// provider adapters, avoiding redundant handshakes when new backends are
+/// constructed for the same process.
+static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    match reqwest::Client::builder()
+        // Keep at most 10 idle connections per host so a burst of parallel
+        // agent requests does not accumulate unbounded sockets.
+        .pool_max_idle_per_host(10)
+        // Evict idle connections after 90 s to avoid holding sockets open
+        // against provider endpoints that enforce shorter server-side timeouts.
+        .pool_idle_timeout(Duration::from_secs(90))
+        // Send TCP keep-alive probes every 30 s so NAT/firewall state is
+        // refreshed between long streaming responses.
+        .tcp_keepalive(Duration::from_secs(30))
+        // Fail fast on unreachable hosts instead of blocking an agent task
+        // indefinitely while waiting for a three-way handshake.
+        .connect_timeout(Duration::from_secs(10))
+        // Identify outbound requests so provider logs and rate-limit headers
+        // can be correlated back to the roko-agent version in use.
+        .user_agent(concat!("roko-agent/", env!("CARGO_PKG_VERSION")))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!(
+                "failed to build shared HTTP client with pool settings: {e}; using default client"
+            );
+            reqwest::Client::new()
+        }
+    }
+});
+
+/// Return the process-wide shared HTTP client.
+///
+/// All production HTTP callers should use this client so requests can reuse
+/// pooled connections instead of paying a fresh TLS handshake per backend.
+///
+/// Pool settings (configured in [`SHARED_HTTP_CLIENT`]):
+///
+/// | Setting | Value | Rationale |
+/// |---|---|---|
+/// | `pool_max_idle_per_host` | 10 | Caps idle sockets per provider endpoint |
+/// | `pool_idle_timeout` | 90 s | Evicts before typical server-side timeouts |
+/// | `tcp_keepalive` | 30 s | Keeps NAT state alive during long streams |
+/// | `connect_timeout` | 10 s | Fails fast on unreachable hosts |
+/// | `user_agent` | `roko-agent/<version>` | Correlates provider logs to this build |
+#[must_use]
+pub fn shared_http_client() -> reqwest::Client {
+    SHARED_HTTP_CLIENT.clone()
+}
 
 thread_local! {
     static ACTIVE_SAFETY_LAYER: RefCell<Option<SafetyLayer>> = const { RefCell::new(None) };
@@ -96,6 +159,7 @@ pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
         ProviderKind::PerplexityApi => &PERPLEXITY_ADAPTER,
         ProviderKind::GeminiApi => &GEMINI_ADAPTER,
+        ProviderKind::CerebrasApi => &CEREBRAS_ADAPTER,
     }
 }
 
@@ -112,11 +176,8 @@ pub fn create_agent_for_model(
     if let Some(mock_agent) = mock_agent_from_env(&options)? {
         return Ok(mock_agent);
     }
-    let safety_layer = current_safety_layer().or_else(|| Some(SafetyLayer::from_config(config)));
-    let effective_temperament = safety_layer
-        .as_ref()
-        .map(|layer| config.agent.temperament_for_role(&layer.role))
-        .unwrap_or(config.agent.temperament);
+    let safety_layer = current_safety_layer().unwrap_or_else(|| SafetyLayer::from_config(config));
+    let effective_temperament = config.agent.temperament_for_role(&safety_layer.role);
     let resolved = resolve_model(config, model_key);
     let profile = resolved
         .profile
@@ -132,39 +193,29 @@ pub fn create_agent_for_model(
         .as_deref()
         .or(config.agent.command.as_deref());
 
-    // When the command is a known protocol CLI (claude, codex, etc.) but no
-    // explicit provider/model config exists, synthesize sensible defaults so
-    // `roko init` + `roko prd draft new` works out of the box.
     let (provider_config, profile) = match (provider_config, profile) {
         (Some(pc), Some(mp)) => (pc, mp),
-        (pc, mp) if legacy_command.is_some_and(is_known_protocol_command) => {
-            let cmd = legacy_command.unwrap(); // safe: is_some_and passed
-            let kind =
-                provider_kind_for_known_protocol_command(cmd).unwrap_or(resolved.provider_kind);
-            let pc = pc.unwrap_or_else(|| ProviderConfig {
-                kind,
-                command: Some(cmd.to_string()),
-                timeout_ms: options.timeout_ms.or(Some(120_000)),
-                base_url: None,
-                api_key_env: None,
-                args: None,
-                ttft_timeout_ms: None,
-                connect_timeout_ms: None,
-                extra_headers: None,
-                max_concurrent: None,
-            });
-            let mp = mp.unwrap_or_else(|| ModelProfile {
-                provider: format!("{kind}"),
-                slug: resolved.slug.clone(),
-                ..Default::default()
-            });
-            tracing::info!(
+        (None, Some(mp)) => {
+            tracing::warn!(
                 model_key = model_key,
-                slug = %resolved.slug,
-                command = cmd,
-                "no explicit provider config — using defaults for known CLI"
+                provider = %mp.provider,
+                "configured model references missing provider"
             );
-            (pc, mp)
+            return Err(AgentCreationError::MissingConfig(format!(
+                "model `{model_key}` references provider `{}` but that provider is not configured",
+                mp.provider
+            )));
+        }
+        _ if legacy_command.is_some_and(is_known_protocol_command) => {
+            let command = legacy_command.unwrap_or("unknown");
+            tracing::warn!(
+                model_key = model_key,
+                command = command,
+                "known protocol command requires explicit provider/model config"
+            );
+            return Err(AgentCreationError::MissingConfig(format!(
+                "explicit [providers] and [models] entries are required for protocol command `{command}` and model `{model_key}`"
+            )));
         }
         _ => {
             tracing::warn!(
@@ -173,10 +224,12 @@ pub fn create_agent_for_model(
                 "no provider found — falling back to ExecAgent (no tool support)"
             );
 
-            let mut agent =
-                ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
-                    .with_safety_layer(safety_layer)
-                    .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
+            let mut agent = ExecAgent::new(
+                legacy_command.unwrap_or("cat"),
+                options.extra_args.clone(),
+                safety_layer,
+            )
+            .with_timeout_ms(options.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS));
             if !options.name.is_empty() {
                 agent = agent.with_name(options.name.clone());
             }
@@ -202,7 +255,7 @@ pub fn create_agent_for_model(
 
     let adapter = adapter_for_kind(provider_config.kind);
     with_temperament(Some(effective_temperament), || {
-        with_safety_layer(safety_layer, || {
+        with_safety_layer(Some(safety_layer), || {
             adapter.create_agent(&provider_config, &profile, &options)
         })
     })
@@ -264,11 +317,8 @@ pub fn build_tool_dispatcher(
     registry: Arc<dyn ToolRegistry>,
     resolver: Arc<dyn HandlerResolver>,
 ) -> Arc<ToolDispatcher> {
-    let dispatcher = ToolDispatcher::new(registry, resolver);
-    match current_safety_layer() {
-        Some(layer) => Arc::new(dispatcher.with_safety(layer)),
-        None => Arc::new(dispatcher),
-    }
+    let layer = current_safety_layer().unwrap_or_else(SafetyLayer::with_defaults);
+    Arc::new(ToolDispatcher::new(registry, resolver).with_safety(layer))
 }
 
 /// Return the safety layer currently scoped to provider-backed construction, if any.
@@ -334,14 +384,38 @@ pub(crate) fn tool_limit_for_temperament(limit: usize) -> usize {
     adjusted.max(1)
 }
 
-#[must_use]
-pub(crate) fn tool_loop_max_iterations(default_limit: usize) -> usize {
+/// Apply the temperament adjustment to a base iteration cap.
+///
+/// - Balanced: no change
+/// - Conservative: +10
+/// - Aggressive: -15 (floor at 10)
+/// - Exploratory: +20
+fn apply_temperament_to_iteration_cap(base: usize) -> usize {
     match current_temperament().unwrap_or_default() {
-        Temperament::Conservative => default_limit.saturating_add(10),
-        Temperament::Balanced => default_limit,
-        Temperament::Aggressive => default_limit.saturating_sub(15).max(10),
-        Temperament::Exploratory => default_limit.saturating_add(20),
+        Temperament::Conservative => base.saturating_add(10),
+        Temperament::Balanced => base,
+        Temperament::Aggressive => base.saturating_sub(15).max(10),
+        Temperament::Exploratory => base.saturating_add(20),
     }
+}
+
+#[must_use]
+pub(crate) fn tool_loop_max_iterations() -> usize {
+    tool_loop_max_iterations_for_profile(None)
+}
+
+/// Per-model iteration cap with temperament adjustment.
+///
+/// When a `ModelProfile` is provided and has `max_tool_iterations` set,
+/// that value is used as the base before the temperament adjustment.
+/// Otherwise falls back to `DEFAULT_MAX_TOOL_ITERATIONS`.
+#[must_use]
+pub(crate) fn tool_loop_max_iterations_for_profile(profile: Option<&ModelProfile>) -> usize {
+    let base = profile
+        .and_then(|p| p.max_tool_iterations)
+        .map(|n| n as usize)
+        .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS);
+    apply_temperament_to_iteration_cap(base)
 }
 
 #[must_use]
@@ -364,6 +438,23 @@ fn provider_kind_for_known_protocol_command(command: &str) -> Option<ProviderKin
     }
 }
 
+/// Find the first configured provider matching a given kind.
+fn provider_for_kind(
+    providers: &IndexMap<String, ProviderConfig>,
+    kind: ProviderKind,
+) -> Option<(String, &ProviderConfig)> {
+    let exact_key = kind.label();
+    if let Some(provider) = providers.get(exact_key) {
+        if provider.kind == kind {
+            return Some((exact_key.to_string(), provider));
+        }
+    }
+    providers
+        .iter()
+        .find(|(_, p)| p.kind == kind)
+        .map(|(k, p)| (k.clone(), p))
+}
+
 /// Shared semaphores that cap in-flight requests per provider.
 #[derive(Debug)]
 pub struct ProviderSemaphores {
@@ -373,13 +464,12 @@ pub struct ProviderSemaphores {
 
 impl ProviderSemaphores {
     #[must_use]
-    pub fn new(configs: &HashMap<String, ProviderConfig>) -> Self {
+    pub fn new(configs: &IndexMap<String, ProviderConfig>) -> Self {
         let mut semaphores = HashMap::with_capacity(configs.len());
         for (id, config) in configs {
             let permits = config
                 .max_concurrent
-                .unwrap_or(DEFAULT_PROVIDER_MAX_CONCURRENT as u32)
-                .max(1) as usize;
+                .map_or(DEFAULT_PROVIDER_MAX_CONCURRENT, |n| n.max(1) as usize);
             semaphores.insert(id.clone(), Arc::new(Semaphore::new(permits)));
         }
 
@@ -389,14 +479,16 @@ impl ProviderSemaphores {
         }
     }
 
-    pub async fn acquire(&self, provider_id: &str) -> OwnedSemaphorePermit {
+    pub async fn acquire(&self, provider_id: &str) -> Result<OwnedSemaphorePermit, ProviderError> {
         let semaphore = self
             .semaphores
             .get(provider_id)
             .cloned()
             .unwrap_or_else(|| Arc::new(Semaphore::new(self.default_permits)));
 
-        semaphore.acquire_owned().await.expect("semaphore closed")
+        semaphore.acquire_owned().await.map_err(|_| {
+            ProviderError::Other(format!("provider semaphore for '{provider_id}' closed"))
+        })
     }
 }
 
@@ -434,8 +526,48 @@ pub struct AgentOptions {
     pub extra_args: Vec<String>,
     pub effort: Option<String>,
     pub bare_mode: bool,
+    /// Whether to skip Claude's permission system for this agent.
+    ///
+    /// Security audit inventory (PE_01):
+    /// - NEEDS FIX (hardcoded `true`):
+    ///   - crates/roko-agent/src/claude_cli_agent.rs:128
+    ///   - crates/roko-cli/src/runner/types.rs:1337
+    ///   - crates/roko-cli/src/runner/types.rs:1382
+    ///   - crates/roko-cli/src/agent_exec.rs:145
+    ///   - crates/roko-cli/src/serve_runtime.rs:547
+    ///   - crates/roko-cli/src/commands/plan.rs:394
+    ///   - crates/roko-serve/src/dispatch.rs:1824
+    ///   - crates/roko-acp/src/runner.rs:1763
+    /// - OK (hardcoded `false` / test-only):
+    ///   - crates/roko-agent/src/provider/claude_cli.rs:241
+    ///   - crates/roko-agent/src/claude_cli_agent.rs:1109
+    ///   - crates/roko-cli/src/agent_serve.rs:429
+    ///   - crates/roko-cli/src/commands/research.rs:66,264,377
+    ///   - crates/roko-cli/src/dispatch_v2.rs:1037
+    ///   - crates/roko-cli/src/orchestrate.rs:1712,15951,15979
+    ///   - crates/roko-cli/src/run.rs:2054,2096
+    ///   - crates/roko-cli/tests/smoke.rs:260
+    ///   - crates/roko-dreams/src/runner.rs:169
+    /// - DIVERGENCE:
+    ///   - crates/roko-cli/src/run.rs:2784 (unknown roles default `true`; includes `network`)
+    ///   - crates/roko-cli/src/orchestrate.rs:18822 (typed `AgentRole`; no `network` check)
+    /// - PROPAGATION:
+    ///   - crates/roko-agent/src/provider/claude_cli.rs:54
+    ///   - crates/roko-agent/src/claude_cli_agent.rs:328
+    ///   - crates/roko-cli/src/runner/agent_stream.rs:66,138
+    ///   - crates/roko-cli/src/runner/event_loop.rs:2043
+    ///   - crates/roko-cli/src/agent_spawn.rs:59
+    ///   - crates/roko-cli/src/dispatch_v2.rs:320
+    ///   - crates/roko-cli/src/dispatch_v2.rs:357
+    ///   - crates/roko-cli/src/dispatch_v2.rs:728
+    ///   - crates/roko-cli/src/orchestrate.rs:1601,1662,1762,15762
+    ///   - crates/roko-cli/src/run.rs:1923,2003
+    /// Default MUST be `false`. PE_02 will flip all NEEDS FIX sites.
     pub dangerously_skip_permissions: bool,
     pub name: String,
+    /// Pre-discovered MCP tools. When `Some`, the provider adapter skips MCP
+    /// discovery entirely and uses these tools instead of spawning MCP servers.
+    pub pre_discovered_mcp_tools: Option<Arc<Vec<ToolDef>>>,
 }
 
 impl AgentOptions {
@@ -449,12 +581,109 @@ impl AgentOptions {
     /// Append Perplexity search options as a structured `extra_args` payload.
     #[must_use]
     pub fn with_perplexity_search_options(mut self, search_options: SearchOptions) -> Self {
-        let encoded = serde_json::to_string(&search_options)
-            .expect("Perplexity search options must serialize");
-        self.extra_args
-            .push(format!("{PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX}{encoded}"));
+        match serde_json::to_string(&search_options) {
+            Ok(encoded) => {
+                self.extra_args
+                    .push(format!("{PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX}{encoded}"));
+            }
+            Err(e) => {
+                tracing::warn!("failed to serialize Perplexity search options: {e}; skipping");
+            }
+        }
         self
     }
+}
+
+// ─── Human-readable provider error mapping ──────────────────────────────
+
+/// Map a raw provider error string into a human-readable message with
+/// actionable instructions.
+///
+/// This function inspects the error text for known patterns using simple
+/// case-insensitive string matching. It does NOT depend on reqwest or std
+/// internal types.
+///
+/// # Arguments
+/// - `kind`: The provider kind (for context in the message).
+/// - `provider_name`: The config key for this provider (e.g. "anthropic").
+/// - `api_key_env`: The environment variable name for the API key, if any.
+/// - `base_url`: The provider base URL, if known.
+/// - `err`: The error to inspect (any displayable error).
+///
+/// # Returns
+/// A human-readable error message. If no known pattern is matched, returns
+/// a generic message wrapping the original error text.
+#[must_use]
+pub fn map_provider_error(
+    kind: ProviderKind,
+    provider_name: &str,
+    api_key_env: Option<&str>,
+    base_url: Option<&str>,
+    err: &dyn std::fmt::Display,
+) -> String {
+    let err_text = err.to_string();
+    let err_lower = err_text.to_lowercase();
+
+    let env_var = api_key_env.unwrap_or("(none)");
+    let url = base_url.unwrap_or("(unknown)");
+
+    if err_lower.contains("401")
+        || err_lower.contains("authentication_error")
+        || err_lower.contains("unauthorized")
+    {
+        return format!(
+            "API key invalid for provider '{}'. Check ${} or roko.toml [providers.{}].",
+            provider_name, env_var, provider_name
+        );
+    }
+
+    if err_lower.contains("429")
+        || err_lower.contains("rate_limit")
+        || err_lower.contains("too many requests")
+    {
+        return format!(
+            "Rate limited by provider '{}'. Wait and retry, or switch providers.",
+            provider_name
+        );
+    }
+
+    if err_lower.contains("404")
+        || err_lower.contains("model_not_found")
+        || err_lower.contains("model not found")
+    {
+        return format!(
+            "Model not found on provider '{}'. Verify the slug in roko.toml [models.*].",
+            provider_name
+        );
+    }
+
+    if err_lower.contains("connection refused")
+        || err_lower.contains("connecterror")
+        || err_lower.contains("tcp connect error")
+    {
+        return format!(
+            "Cannot reach provider '{}' at {}. Is the server running?",
+            provider_name, url
+        );
+    }
+
+    if err_lower.contains("no such file or directory")
+        || err_lower.contains("program not found")
+        || err_lower.contains("enoent")
+    {
+        return format!(
+            "Provider binary not found on PATH for '{}'. Install it or configure a different provider in roko.toml.",
+            provider_name
+        );
+    }
+
+    // No known pattern matched — return a generic wrapper.
+    format!(
+        "Provider '{}' ({}) error: {}",
+        provider_name,
+        kind.label(),
+        err_text
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -544,7 +773,7 @@ pub enum AgentCreationError {
 mod tests {
     use super::*;
     use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Kind, Signal};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -554,8 +783,8 @@ mod tests {
     use tempfile::tempdir;
     use tokio::time::timeout;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn write_script(path: &std::path::Path, body: &str) {
@@ -644,7 +873,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(1_500),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: None,
@@ -698,7 +927,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(300_000),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: None,
@@ -730,6 +959,7 @@ mod tests {
                 cost_cache_write_per_m: None,
                 thinking_level: None,
                 max_tools: None,
+                max_tool_iterations: None,
                 tokenizer_ratio: None,
                 supports_search: true,
                 supports_citations: true,
@@ -737,9 +967,81 @@ mod tests {
                 is_embedding_model: false,
                 search_context_size: Some("medium".to_string()),
                 cost_per_request: None,
+                use_max_completion_tokens: false,
+                tier: None,
             },
         );
         config
+    }
+
+    #[test]
+    fn tool_loop_iterations_derive_from_workspace_default() {
+        assert_eq!(tool_loop_max_iterations(), DEFAULT_MAX_TOOL_ITERATIONS);
+        assert_eq!(
+            with_temperament(Some(Temperament::Conservative), tool_loop_max_iterations),
+            DEFAULT_MAX_TOOL_ITERATIONS + 10
+        );
+        assert_eq!(
+            with_temperament(Some(Temperament::Aggressive), tool_loop_max_iterations),
+            DEFAULT_MAX_TOOL_ITERATIONS - 15
+        );
+        assert_eq!(
+            with_temperament(Some(Temperament::Exploratory), tool_loop_max_iterations),
+            DEFAULT_MAX_TOOL_ITERATIONS + 20
+        );
+    }
+
+    #[test]
+    fn tool_loop_iterations_respect_per_model_override() {
+        let profile = ModelProfile {
+            max_tool_iterations: Some(20),
+            ..Default::default()
+        };
+
+        // Balanced: base unchanged → 20
+        assert_eq!(
+            with_temperament(Some(Temperament::Balanced), || {
+                tool_loop_max_iterations_for_profile(Some(&profile))
+            }),
+            20
+        );
+        // Conservative: base + 10 → 30
+        assert_eq!(
+            with_temperament(Some(Temperament::Conservative), || {
+                tool_loop_max_iterations_for_profile(Some(&profile))
+            }),
+            30
+        );
+        // Aggressive: max(10, base - 15) → max(10, 5) = 10
+        assert_eq!(
+            with_temperament(Some(Temperament::Aggressive), || {
+                tool_loop_max_iterations_for_profile(Some(&profile))
+            }),
+            10
+        );
+        // Exploratory: base + 20 → 40
+        assert_eq!(
+            with_temperament(Some(Temperament::Exploratory), || {
+                tool_loop_max_iterations_for_profile(Some(&profile))
+            }),
+            40
+        );
+
+        // None profile falls back to DEFAULT_MAX_TOOL_ITERATIONS
+        assert_eq!(
+            tool_loop_max_iterations_for_profile(None),
+            DEFAULT_MAX_TOOL_ITERATIONS
+        );
+
+        // Profile without max_tool_iterations also falls back
+        let profile_none = ModelProfile {
+            max_tool_iterations: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            tool_loop_max_iterations_for_profile(Some(&profile_none)),
+            DEFAULT_MAX_TOOL_ITERATIONS
+        );
     }
 
     #[test]
@@ -768,6 +1070,10 @@ mod tests {
             adapter_for_kind(ProviderKind::GeminiApi).kind(),
             ProviderKind::GeminiApi
         );
+        assert_eq!(
+            adapter_for_kind(ProviderKind::CerebrasApi).kind(),
+            ProviderKind::CerebrasApi
+        );
     }
 
     #[test]
@@ -784,7 +1090,8 @@ mod tests {
             build_tool_dispatcher(registry, resolver)
         });
 
-        assert!(dispatcher.safety().is_some());
+        // Safety is always present; verify it was constructed.
+        let _ = dispatcher.safety();
     }
 
     #[test]
@@ -972,7 +1279,7 @@ mod tests {
 
         let agent = create_agent_for_model(
             &config,
-            "unknown-model",
+            "mystery-model",
             AgentOptions {
                 timeout_ms: Some(250),
                 name: "fallback-agent".to_string(),
@@ -995,7 +1302,7 @@ mod tests {
 
         let agent = create_agent_for_model(
             &config,
-            "unknown-model",
+            "mystery-model",
             AgentOptions {
                 timeout_ms: Some(250),
                 name: "fallback-agent".to_string(),
@@ -1027,7 +1334,7 @@ mod tests {
         let agent = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
             create_agent_for_model(
                 &config,
-                "unknown-model",
+                "mystery-model",
                 AgentOptions {
                     timeout_ms: Some(250),
                     name: "fallback-agent".to_string(),
@@ -1062,7 +1369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_agent_for_model_uses_command_kind_for_ambiguous_claude_model_key() {
+    async fn create_agent_for_model_uses_effective_claude_provider_for_configured_model() {
         let tmp = tempdir().expect("tempdir");
         let script = tmp.path().join("claude");
         let prompt_file = tmp.path().join("prompt.txt");
@@ -1073,18 +1380,48 @@ mod tests {
             response,
         );
         write_script(&script, &script_body);
+        let mut config = RokoConfig::default();
+        config.agent.command = Some(script.display().to_string());
+        // The protocol-command guard requires explicit provider+model config
+        // when the command binary is a known protocol (e.g. "claude").
+        config.providers.insert(
+            "test-claude".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::ClaudeCli,
+                base_url: None,
+                api_key_env: None,
+                command: Some(script.display().to_string()),
+                args: None,
+                timeout_ms: Some(5_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        config.models.insert(
+            "claude-sonnet-4-6".to_string(),
+            ModelProfile {
+                provider: "test-claude".to_string(),
+                slug: "claude-sonnet-4-6".to_string(),
+                context_window: 200_000,
+                max_output: Some(16_000),
+                supports_tools: true,
+                supports_thinking: true,
+                ..Default::default()
+            },
+        );
 
         let agent = create_agent_for_model(
-            &RokoConfig::default(),
-            "claude",
+            &config,
+            "claude-sonnet-4-6",
             AgentOptions {
-                command: Some(script.display().to_string()),
                 timeout_ms: Some(5_000),
                 name: "factory-claude".to_string(),
                 ..Default::default()
             },
         )
-        .expect("create synthesized claude agent");
+        .expect("create configured claude agent");
 
         assert_eq!(agent.name(), "factory-claude");
 
@@ -1100,9 +1437,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn create_agent_for_model_rejects_protocol_command_without_model_config() {
+        let result = create_agent_for_model(
+            &RokoConfig::default(),
+            "claude",
+            AgentOptions {
+                command: Some("claude".to_string()),
+                timeout_ms: Some(5_000),
+                name: "factory-claude".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let Err(error) = result else {
+            panic!("expected missing config error");
+        };
+        let AgentCreationError::MissingConfig(message) = error else {
+            panic!("expected missing config error, got {error}");
+        };
+        assert!(message.contains("explicit [providers] and [models]"));
+        assert!(message.contains("claude"));
+    }
+
+    #[test]
+    fn create_agent_for_model_rejects_model_profile_with_missing_provider() {
+        let mut config = RokoConfig::default();
+        config.providers.clear();
+        config.models.clear();
+        config.models.insert(
+            "custom-model".to_string(),
+            ModelProfile {
+                provider: "missing-provider".to_string(),
+                slug: "custom-slug".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let result = create_agent_for_model(&config, "custom-model", AgentOptions::default());
+
+        let Err(error) = result else {
+            panic!("expected missing provider config error");
+        };
+        let AgentCreationError::MissingConfig(message) = error else {
+            panic!("expected missing config error, got {error}");
+        };
+        assert!(message.contains("custom-model"));
+        assert!(message.contains("missing-provider"));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn provider_semaphore_blocks_fourth_request_when_limit_is_three() {
-        let mut configs = HashMap::new();
+        let mut configs = indexmap::IndexMap::new();
         configs.insert(
             "zai".to_string(),
             ProviderConfig {
@@ -1112,7 +1498,7 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(1_500),
-                ttft_timeout_ms: Some(15_000),
+                ttft_timeout_ms: Some(DEFAULT_TTFT_TIMEOUT_MS),
                 connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: Some(3),
@@ -1144,5 +1530,87 @@ mod tests {
         drop(permit_two);
         drop(permit_three);
         drop(permit_four);
+    }
+
+    // ─── map_provider_error tests ─────────────────────────────────────
+
+    #[test]
+    fn map_provider_error_401_produces_api_key_message() {
+        let msg = map_provider_error(
+            ProviderKind::AnthropicApi,
+            "anthropic",
+            Some("ANTHROPIC_API_KEY"),
+            Some("https://api.anthropic.com/v1"),
+            &"status 401: authentication_error",
+        );
+        assert!(msg.contains("API key invalid"), "got: {msg}");
+        assert!(msg.contains("anthropic"), "got: {msg}");
+        assert!(msg.contains("ANTHROPIC_API_KEY"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_429_produces_rate_limit_message() {
+        let msg = map_provider_error(
+            ProviderKind::OpenAiCompat,
+            "openai",
+            Some("OPENAI_API_KEY"),
+            Some("https://api.openai.com/v1"),
+            &"429 Too Many Requests",
+        );
+        assert!(msg.contains("Rate limited"), "got: {msg}");
+        assert!(msg.contains("openai"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_404_produces_model_not_found_message() {
+        let msg = map_provider_error(
+            ProviderKind::AnthropicApi,
+            "anthropic",
+            Some("ANTHROPIC_API_KEY"),
+            None,
+            &"404: model_not_found",
+        );
+        assert!(msg.contains("Model not found"), "got: {msg}");
+        assert!(msg.contains("anthropic"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_connection_refused_produces_server_message() {
+        let msg = map_provider_error(
+            ProviderKind::OpenAiCompat,
+            "local-llm",
+            None,
+            Some("http://localhost:8080"),
+            &"tcp connect error: connection refused",
+        );
+        assert!(msg.contains("Cannot reach"), "got: {msg}");
+        assert!(msg.contains("local-llm"), "got: {msg}");
+        assert!(msg.contains("http://localhost:8080"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_enoent_produces_binary_not_found_message() {
+        let msg = map_provider_error(
+            ProviderKind::ClaudeCli,
+            "claude",
+            None,
+            None,
+            &"No such file or directory (os error 2)",
+        );
+        assert!(msg.contains("binary not found"), "got: {msg}");
+        assert!(msg.contains("claude"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_provider_error_unknown_pattern_wraps_original() {
+        let msg = map_provider_error(
+            ProviderKind::GeminiApi,
+            "gemini",
+            Some("GEMINI_API_KEY"),
+            None,
+            &"some unknown error happened",
+        );
+        assert!(msg.contains("some unknown error happened"), "got: {msg}");
+        assert!(msg.contains("gemini"), "got: {msg}");
     }
 }

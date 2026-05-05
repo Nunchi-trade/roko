@@ -17,7 +17,7 @@
 
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, TestCount, Verdict};
+use roko_core::{Context, Signal, TestCount, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -30,10 +30,14 @@ use tokio::time::timeout;
 pub const COUNTEREXAMPLE_DIGEST_LIMIT: usize = 2048;
 
 /// Default per-test case count (matches proptest's built-in default).
-pub const DEFAULT_PROPTEST_CASES: u32 = 256;
+///
+/// Sourced from [`roko_core::defaults::DEFAULT_PROPTEST_CASES`].
+pub const DEFAULT_PROPTEST_CASES: u32 = roko_core::defaults::DEFAULT_PROPTEST_CASES;
 
 /// Default shrink iteration ceiling (matches proptest's built-in default).
-pub const DEFAULT_MAX_SHRINK_ITERS: u32 = 2048;
+///
+/// Sourced from [`roko_core::defaults::DEFAULT_MAX_SHRINK_ITERS`].
+pub const DEFAULT_MAX_SHRINK_ITERS: u32 = roko_core::defaults::DEFAULT_MAX_SHRINK_ITERS;
 
 /// Rung 4 gate: run property/invariant tests and capture counterexamples.
 ///
@@ -59,6 +63,16 @@ pub struct PropertyTestGate {
     name: String,
 }
 
+fn timeout_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+fn default_timeout_ms() -> u64 {
+    timeout_ms(roko_core::config::TimeoutConfig::default().gate_test())
+}
+
 impl PropertyTestGate {
     /// Construct a property-test gate for `build_system` matching tests
     /// whose name begins with `"prop_"`, running 256 cases per property
@@ -77,7 +91,7 @@ impl PropertyTestGate {
             seed: None,
             max_shrink_iters: DEFAULT_MAX_SHRINK_ITERS,
             persist_failures: false,
-            timeout_ms: 15 * 60 * 1000, // 15 minutes
+            timeout_ms: default_timeout_ms(),
             name: format!("property_test:{}", build_system.program()),
         }
     }
@@ -157,9 +171,21 @@ impl PropertyTestGate {
     }
 }
 
+impl roko_core::Cell for PropertyTestGate {
+    fn cell_id(&self) -> &str {
+        "property-test-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "PropertyTestGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
-impl Gate for PropertyTestGate {
-    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
+impl Verify for PropertyTestGate {
+    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {
             Ok(p) => p,
@@ -423,12 +449,12 @@ mod tests {
     use super::*;
     use roko_core::{Body, Kind};
 
-    fn empty_signal() -> Engram {
-        Engram::builder(Kind::Task).body(Body::empty()).build()
+    fn empty_signal() -> Signal {
+        Signal::builder(Kind::Task).body(Body::empty()).build()
     }
 
-    fn payload_signal(payload: &GatePayload) -> Engram {
-        Engram::builder(Kind::Task)
+    fn payload_signal(payload: &GatePayload) -> Signal {
+        Signal::builder(Kind::Task)
             .body(Body::from_json(payload).expect("json body"))
             .build()
     }

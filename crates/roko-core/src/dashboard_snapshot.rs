@@ -31,6 +31,8 @@ pub enum DashboardEvent {
     TaskStarted {
         plan_id: String,
         task_id: String,
+        #[serde(default)]
+        title: String,
         phase: String,
     },
     /// A task completed.
@@ -47,7 +49,12 @@ pub enum DashboardEvent {
         new_phase: String,
     },
     /// An agent was spawned.
-    AgentSpawned { agent_id: String, role: String },
+    AgentSpawned {
+        agent_id: String,
+        role: String,
+        #[serde(default)]
+        model: String,
+    },
     /// Incremental agent output.
     AgentOutput { agent_id: String, content: String },
     /// A gate check completed.
@@ -135,6 +142,11 @@ pub enum DashboardEvent {
         percent: u8,
         message: String,
     },
+    /// Efficiency trend buckets were refreshed from the learning store.
+    EfficiencyTrendUpdated {
+        /// Current rolling efficiency buckets for the Learning tab.
+        buckets: Vec<EfficiencyBucket>,
+    },
     /// An error occurred.
     Error { message: String },
 }
@@ -165,6 +177,9 @@ pub struct PlanState {
 pub struct TaskState {
     /// Task identifier.
     pub task_id: String,
+    /// Human-readable task title.
+    #[serde(default)]
+    pub title: String,
     /// Parent plan identifier.
     pub plan_id: String,
     /// Current phase name.
@@ -211,7 +226,7 @@ pub struct GateVerdict {
     pub plan_id: String,
     /// Task identifier.
     pub task_id: String,
-    /// Gate name.
+    /// Verify name.
     pub gate: String,
     /// Whether the gate passed.
     pub passed: bool,
@@ -638,7 +653,7 @@ pub struct FailureEntry {
     /// Task identifier when known.
     #[serde(default)]
     pub task_id: String,
-    /// Gate name.
+    /// Verify name.
     #[serde(default)]
     pub gate: String,
     /// Short failure summary or reason when available.
@@ -788,6 +803,26 @@ const GATE_TREND_BUCKET_COUNT: usize = 24;
 // ---------------------------------------------------------------------------
 
 impl DashboardSnapshot {
+    fn push_event_log(
+        &mut self,
+        timestamp_ms: u64,
+        event_type: String,
+        plan_id: String,
+        task_id: String,
+        message: String,
+    ) {
+        while self.event_log.len() >= MAX_EVENT_LOG {
+            self.event_log.pop_front();
+        }
+        self.event_log.push_back(DashboardEventLogEntry {
+            timestamp_ms,
+            event_type,
+            plan_id,
+            task_id,
+            message,
+        });
+    }
+
     /// Apply a single event, mutating the snapshot in place.
     ///
     /// This is called inside `watch::Sender::send_modify` so that all
@@ -830,6 +865,7 @@ impl DashboardSnapshot {
             DashboardEvent::TaskStarted {
                 plan_id,
                 task_id,
+                title,
                 phase,
             } => {
                 self.stats.tasks_active += 1;
@@ -838,6 +874,7 @@ impl DashboardSnapshot {
                     key,
                     TaskState {
                         task_id: task_id.clone(),
+                        title: title.clone(),
                         plan_id: plan_id.clone(),
                         phase: phase.clone(),
                         outcome: None,
@@ -846,9 +883,10 @@ impl DashboardSnapshot {
                 if let Some(plan) = self.plans.get_mut(plan_id) {
                     plan.tasks_total += 1;
                 }
-                // Set current_task / current_plan on the matching agent by role.
+                // Set current_task / current_plan on the matching agent by plan_id prefix.
+                // Agent IDs are formatted as "{plan_id}:{task}" in orchestrate.rs.
                 for agent in self.agents.values_mut() {
-                    if agent.active && agent.role == *phase {
+                    if agent.active && agent.agent_id.starts_with(&format!("{plan_id}:")) {
                         agent.current_task = task_id.clone();
                         agent.current_plan = plan_id.clone();
                     }
@@ -889,7 +927,21 @@ impl DashboardSnapshot {
                     task.phase = new_phase.clone();
                 }
             }
-            DashboardEvent::AgentSpawned { agent_id, role } => {
+            DashboardEvent::AgentSpawned {
+                agent_id,
+                role,
+                model,
+            } => {
+                if model.trim().is_empty() {
+                    self.push_event_log(
+                        ts,
+                        "validation_warning".to_string(),
+                        String::new(),
+                        String::new(),
+                        format!("AgentSpawned for '{agent_id}' had an empty model"),
+                    );
+                }
+
                 // Only increment the counter if this is a genuinely new agent,
                 // or if an existing agent is being re-activated after completion.
                 let entry = self.agents.entry(agent_id.clone());
@@ -903,6 +955,9 @@ impl DashboardSnapshot {
                         if !role.is_empty() {
                             agent.role.clone_from(role);
                         }
+                        if !model.is_empty() {
+                            agent.model.clone_from(model);
+                        }
                         // Preserve accumulated tokens/cost — don't reset.
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
@@ -912,7 +967,7 @@ impl DashboardSnapshot {
                             role: role.clone(),
                             active: true,
                             output_bytes: 0,
-                            model: String::new(),
+                            model: model.clone(),
                             input_tokens: 0,
                             output_tokens: 0,
                             cost_usd: 0.0,
@@ -1049,16 +1104,13 @@ impl DashboardSnapshot {
                 task_id,
                 message,
             } => {
-                while self.event_log.len() >= MAX_EVENT_LOG {
-                    self.event_log.pop_front();
-                }
-                self.event_log.push_back(DashboardEventLogEntry {
-                    timestamp_ms: *timestamp_ms,
-                    event_type: event_type.clone(),
-                    plan_id: plan_id.clone(),
-                    task_id: task_id.clone(),
-                    message: message.clone(),
-                });
+                self.push_event_log(
+                    *timestamp_ms,
+                    event_type.clone(),
+                    plan_id.clone(),
+                    task_id.clone(),
+                    message.clone(),
+                );
             }
             DashboardEvent::CascadeRouterUpdated { snapshot_json } => {
                 self.cascade_router_json = snapshot_json.clone();
@@ -1092,6 +1144,9 @@ impl DashboardSnapshot {
             DashboardEvent::KnowledgeEntriesUpdated { entries } => {
                 self.knowledge_entries = entries.clone();
             }
+            DashboardEvent::EfficiencyTrendUpdated { buckets } => {
+                self.efficiency_trend = buckets.clone();
+            }
             DashboardEvent::JobExecutionStarted { .. } | DashboardEvent::JobProgress { .. } => {}
         }
     }
@@ -1121,14 +1176,29 @@ impl DashboardSnapshot {
 
     pub fn load_from_workdir(workdir: &Path) -> Result<Self, io::Error> {
         let root = resolve_snapshot_root(workdir);
-        let roko_dir = root.join(".roko");
-        let state_dir = roko_dir.join("state");
-        let learn_dir = roko_dir.join("learn");
+
+        // Derive paths through Workspace accessors when the workspace is
+        // openable; fall back to raw path construction otherwise.
+        let (roko_dir, state_dir, learn_dir, engrams_path) =
+            if let Ok(ws) = crate::workspace::Workspace::open(&root) {
+                (
+                    ws.roko_dir(),
+                    ws.state_dir(),
+                    ws.learn_dir(),
+                    ws.engrams_path(),
+                )
+            } else {
+                let rd = root.join(".roko");
+                let sd = rd.join("state");
+                let ld = rd.join("learn");
+                let ep = rd.join("engrams.jsonl");
+                (rd, sd, ld, ep)
+            };
 
         let state =
             read_json_value(&state_dir.join("executor.json"))?.unwrap_or(serde_json::Value::Null);
         let task_trackers = read_task_trackers(&state_dir.join("task-trackers.json"))?;
-        let signal_gates = read_signal_gates(&roko_dir.join("engrams.jsonl"))?;
+        let signal_gates = read_signal_gates(&engrams_path)?;
         let event_entries = read_event_entries(&state_dir.join("events.json"))?;
         let experiment_winners = read_experiment_winners(&learn_dir.join("experiments.json"))?;
         let cfactor_trend = read_cfactor_trend(&learn_dir.join("c-factor.jsonl"))?;
@@ -1587,6 +1657,7 @@ fn bootstrap_plan_state(
             format!("{plan_id}/{task_id}"),
             TaskState {
                 task_id,
+                title: String::new(),
                 plan_id: plan_id.to_string(),
                 phase: String::from("completed"),
                 outcome: Some(String::from("success")),
@@ -1604,6 +1675,7 @@ fn bootstrap_plan_state(
             format!("{plan_id}/{task_id}"),
             TaskState {
                 task_id,
+                title: String::new(),
                 plan_id: plan_id.to_string(),
                 phase: String::from("completed"),
                 outcome: Some(String::from("failed")),
@@ -1619,6 +1691,7 @@ fn bootstrap_plan_state(
                     format!("{plan_id}/{task_id}"),
                     TaskState {
                         task_id: task_id.to_string(),
+                        title: String::new(),
                         plan_id: plan_id.to_string(),
                         phase: phase.clone(),
                         outcome: None,
@@ -1642,6 +1715,7 @@ fn bootstrap_plan_state(
                     format!("{plan_id}/{task_id}"),
                     TaskState {
                         task_id: task_id.to_string(),
+                        title: String::new(),
                         plan_id: plan_id.to_string(),
                         phase: String::from("completed"),
                         outcome: Some(if failed {
@@ -2358,17 +2432,31 @@ fn entry_timestamp_ms(entry: &serde_json::Value) -> Option<u64> {
         })
 }
 
-/// Bootstrap episodes from `.roko/episodes.jsonl` into the snapshot.
+/// Bootstrap episodes from known episode JSONL locations into the snapshot.
+///
+/// Reads canonical paths first (root episodes, learn dir), then falls back to
+/// legacy `.roko/memory/episodes.jsonl` only if canonical locations are empty.
 fn bootstrap_episodes(snapshot: &mut DashboardSnapshot, roko_dir: &Path) {
-    let episodes_path = roko_dir.join("episodes.jsonl");
-    let content = match std::fs::read_to_string(&episodes_path) {
-        Ok(text) => text,
-        Err(_) => {
-            // Also try the memory directory.
-            match std::fs::read_to_string(roko_dir.join("memory").join("episodes.jsonl")) {
-                Ok(text) => text,
-                Err(_) => return,
+    // Canonical: .roko/episodes.jsonl
+    let candidates = [
+        roko_dir.join("episodes.jsonl"),
+        roko_dir.join("learn").join("episodes.jsonl"),
+        // Legacy fallback — only tried if canonical paths have no data.
+        roko_dir.join("memory").join("episodes.jsonl"),
+    ];
+    let content = {
+        let mut found = None;
+        for path in &candidates {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if !text.trim().is_empty() {
+                    found = Some(text);
+                    break;
+                }
             }
+        }
+        match found {
+            Some(text) => text,
+            None => return,
         }
     };
 
@@ -2464,6 +2552,7 @@ mod tests {
         snap.apply(&DashboardEvent::TaskStarted {
             plan_id: "p1".into(),
             task_id: "t1".into(),
+            title: "Test task".into(),
             phase: "compose".into(),
         });
         assert_eq!(snap.stats.tasks_active, 1);
@@ -2588,12 +2677,31 @@ mod tests {
         snap.apply(&DashboardEvent::AgentSpawned {
             agent_id: "a1".into(),
             role: "coder".into(),
+            model: String::new(),
         });
         snap.apply(&DashboardEvent::AgentOutput {
             agent_id: "a1".into(),
             content: "hello world".into(),
         });
         assert_eq!(snap.agents["a1"].output_bytes, 11);
+    }
+
+    #[test]
+    fn agent_spawned_empty_model_records_validation_warning() {
+        let mut snap = DashboardSnapshot::default();
+        snap.apply_with_ts(
+            &DashboardEvent::AgentSpawned {
+                agent_id: "a1".into(),
+                role: "coder".into(),
+                model: String::new(),
+            },
+            42,
+        );
+
+        let warning = snap.event_log.back().expect("validation warning");
+        assert_eq!(warning.timestamp_ms, 42);
+        assert_eq!(warning.event_type, "validation_warning");
+        assert!(warning.message.contains("empty model"));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+//! STATUS: WIRED -- called from `roko-serve::start_demurrage_timer()`.
+//!
 //! Demurrage heartbeat consumer (LIFE-10).
 //!
 //! Runs periodic knowledge demurrage at configurable intervals within the

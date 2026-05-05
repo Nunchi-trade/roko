@@ -21,7 +21,7 @@ COPY contracts/lib ./lib
 RUN forge build --silent
 
 # --- Stage 2: build the roko-demo binary -----------------------------------
-FROM --platform=$BUILDPLATFORM rust:1.91-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.91-slim-bookworm AS builder
 WORKDIR /src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -30,7 +30,7 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN cargo build --release --bin roko-demo && \
+RUN cargo build --release -p roko-demo --bin roko-demo && \
     cp target/release/roko-demo /roko-demo
 
 # --- Stage 3: runtime ------------------------------------------------------
@@ -50,7 +50,8 @@ RUN apt-get update \
 COPY --from=builder /roko-demo /usr/local/bin/roko-demo
 COPY --from=contracts /contracts/out /app/contracts/out
 COPY contracts/foundry.toml /app/contracts/foundry.toml
-COPY demo /app/demo
+COPY demo/demo-old /app/demo
+RUN mkdir -p /app/demo/.runtime && chown -R roko:roko /app/demo/.runtime
 
 WORKDIR /app
 USER roko

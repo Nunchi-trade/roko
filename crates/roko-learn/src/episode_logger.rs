@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex as SyncMutex;
-use roko_core::{EmotionalTag, Engram};
+use roko_core::{EmotionalTag, Signal};
 use roko_primitives::hdc::{HdcVector, text_fingerprint};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -88,7 +88,7 @@ pub enum LoggerError {
 /// Verdict produced by a single gate run on behalf of an agent turn.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GateVerdict {
-    /// Gate identifier ("compile", "test", "lint", …).
+    /// Verify identifier ("compile", "test", "lint", …).
     #[serde(default)]
     pub gate: String,
     /// Whether the gate passed.
@@ -189,6 +189,10 @@ pub struct Episode {
     #[serde(default)]
     pub output_signal_hash: String,
     /// Stable identifier for the episode record.
+    ///
+    /// **Deprecated**: Use `id` instead. Both fields are set to the same
+    /// `derive_id()` value. This field is retained for backward compatibility
+    /// with older serialized episodes.
     #[serde(default)]
     pub episode_id: String,
     /// Template or role name used to dispatch the agent.
@@ -236,6 +240,9 @@ pub struct Episode {
     /// Optional short failure reason (hashed, never raw output).
     #[serde(default)]
     pub failure_reason: Option<String>,
+    /// Optional post-gate reflection text for retry and playbook learning.
+    #[serde(default)]
+    pub reflection: Option<String>,
     /// Optional short reasoning summary for auditing and debugging.
     #[serde(default)]
     pub reasoning_summary: Option<String>,
@@ -249,6 +256,12 @@ pub struct Episode {
     /// pruned by [`EpisodeLogger::compact`], regardless of age or count.
     #[serde(default)]
     pub headline: bool,
+    /// Snapshot of the prompt composition that produced the agent's system
+    /// prompt: which sections were included, their token counts, and
+    /// whether any were truncated or dropped due to budget pressure.
+    /// Populated at dispatch time from the `PromptSectionMeta` vector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_composition: Option<serde_json::Value>,
     /// Forward-compat extension bag. Must serialize to ≤
     /// [`MAX_EXTRA_BYTES`].
     #[serde(default)]
@@ -269,13 +282,13 @@ impl Episode {
         let id = derive_id(&agent_id, &task_id, completed_at.clone());
         Self {
             kind: String::new(),
-            id,
+            id: id.clone(),
             timestamp,
             agent_id,
             task_id,
             input_signal_hash: String::new(),
             output_signal_hash: String::new(),
-            episode_id: String::new(),
+            episode_id: id,
             agent_template: String::new(),
             model: String::new(),
             backend: String::new(),
@@ -291,10 +304,12 @@ impl Episode {
             tokens_used: 0,
             external_actions: Vec::new(),
             failure_reason: None,
+            reflection: None,
             reasoning_summary: None,
             hdc_fingerprint: None,
             emotional_tag: None,
             headline: false,
+            prompt_composition: None,
             extra: HashMap::new(),
         }
     }
@@ -547,22 +562,40 @@ pub struct ClusterEvolution {
     pub still_active: bool,
 }
 
-/// Derive a stable id by hashing `(agent_id, task_id, timestamp)` with
-/// Rust's default hasher. Not cryptographic — collisions are acceptable
-/// because ids are scoped to a single log file.
+/// Derive a stable episode id by hashing `(agent_id, task_id, timestamp)`.
+///
+/// Uses FNV-1a (64-bit) for cross-version stability (§16.2:
+/// `DefaultHasher` is not guaranteed stable across Rust versions).
+/// Not cryptographic — collisions are acceptable because ids are
+/// scoped to a single log file.
 fn derive_id(agent_id: &str, task_id: &str, timestamp: DateTime<Utc>) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    agent_id.hash(&mut hasher);
-    task_id.hash(&mut hasher);
-    timestamp
-        .timestamp_nanos_opt()
-        .unwrap_or(0)
-        .hash(&mut hasher);
-    format!("ep_{:016x}", hasher.finish())
+    let nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
+    let hash = fnv1a_64(
+        &[
+            agent_id.as_bytes(),
+            b"|",
+            task_id.as_bytes(),
+            b"|",
+            &nanos.to_le_bytes(),
+        ]
+        .concat(),
+    );
+    format!("ep_{hash:016x}")
 }
 
-fn suggest_template_from_episodes(episodes: &[Episode], signal: &Engram) -> Option<String> {
+/// FNV-1a 64-bit hash — deterministic across all Rust versions.
+fn fnv1a_64(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn suggest_template_from_episodes(episodes: &[Episode], signal: &Signal) -> Option<String> {
     let cutoff = Utc::now() - chrono::Duration::days(TEMPLATE_SUGGESTION_MAX_AGE_DAYS);
     let signal_fingerprint = text_fingerprint(&signal_fingerprint_text(signal));
 
@@ -623,10 +656,32 @@ pub fn importance_components(
     }
 }
 
+/// Maximum number of recent history episodes used for importance scoring.
+///
+/// Limits the O(N * M) cost of scoring N episodes against M history entries.
+/// Using only the most recent history is also more representative of current
+/// project state than ancient episodes.
+const IMPORTANCE_HISTORY_LIMIT: usize = 256;
+
+/// Cap history to the most recent [`IMPORTANCE_HISTORY_LIMIT`] entries.
+fn capped_history(history: &[Episode]) -> &[Episode] {
+    if history.len() > IMPORTANCE_HISTORY_LIMIT {
+        &history[history.len() - IMPORTANCE_HISTORY_LIMIT..]
+    } else {
+        history
+    }
+}
+
 /// Collapse the importance score into a replay tier.
 #[must_use]
 pub fn importance_tier(episode: &Episode, history: &[Episode]) -> EpisodePriorityTier {
-    match importance_score(episode, history) {
+    let recent = capped_history(history);
+    tracing::debug!(
+        history_len = history.len(),
+        capped_len = recent.len(),
+        "importance_tier: capped history"
+    );
+    match importance_score(episode, recent) {
         score if score >= 0.8 => EpisodePriorityTier::Critical,
         score if score >= 0.6 => EpisodePriorityTier::High,
         score if score >= 0.35 => EpisodePriorityTier::Normal,
@@ -635,14 +690,20 @@ pub fn importance_tier(episode: &Episode, history: &[Episode]) -> EpisodePriorit
 }
 
 /// Rank episodes by importance, highest score first.
+///
+/// History is capped to the most recent [`IMPORTANCE_HISTORY_LIMIT`] entries
+/// to avoid O(N^2) scoring against unbounded history.
 #[must_use]
 pub fn prioritize_by_importance<'a>(
     episodes: &'a [Episode],
     history: &[Episode],
 ) -> Vec<&'a Episode> {
+    // Use only the tail of history to bound the scoring cost.
+    let recent = capped_history(history);
+
     let mut ranked: Vec<(&Episode, f64)> = episodes
         .iter()
-        .map(|episode| (episode, importance_score(episode, history)))
+        .map(|episode| (episode, importance_score(episode, recent)))
         .collect();
     ranked.sort_by(|left, right| {
         right
@@ -669,7 +730,7 @@ fn normalized_template(template: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn signal_fingerprint_text(signal: &Engram) -> String {
+fn signal_fingerprint_text(signal: &Signal) -> String {
     let body_bytes = signal.body.canonical_bytes();
     let body = String::from_utf8_lossy(&body_bytes);
     let agent_template = signal
@@ -693,7 +754,7 @@ fn same_episode(lhs: &Episode, rhs: &Episode) -> bool {
 }
 
 fn episode_model_label(episode: &Episode) -> String {
-    normalized_template(&episode.model).unwrap_or_else(|| "unknown-model".to_string())
+    normalized_template(&episode.model).unwrap_or_default()
 }
 
 fn episode_template_label(episode: &Episode) -> String {
@@ -963,6 +1024,14 @@ impl EpisodeLogger {
         // Serialize writers within this process so concurrent appends
         // cannot interleave bytes across a single JSONL record.
         let gate = self.inner.write_gate.lock().await;
+        // Size-based rotation: once the live file is past the
+        // threshold, push it onto the rotation chain so the JSONL we
+        // open is fresh.
+        crate::jsonl_rotation::rotate_if_needed(
+            &self.inner.path,
+            crate::jsonl_rotation::DEFAULT_ROTATION_THRESHOLD_BYTES,
+        )
+        .await?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -1054,7 +1123,7 @@ impl EpisodeLogger {
     /// Returns a logger error if the episode log cannot be read.
     pub async fn suggest_template_from_recent_episodes(
         path: impl AsRef<Path>,
-        signal: &Engram,
+        signal: &Signal,
     ) -> Result<Option<String>, LoggerError> {
         let episodes = Self::read_all_lossy(path).await?;
         Ok(suggest_template_from_episodes(&episodes, signal))
@@ -1193,7 +1262,7 @@ mod tests {
     use crate::hdc_fingerprint::{
         decode as decode_hdc_fingerprint, encode as encode_hdc_fingerprint, fingerprint_episode,
     };
-    use roko_core::{Body, Engram, Kind};
+    use roko_core::{Body, Kind, Signal};
     use tempfile::TempDir;
 
     fn tmp_log() -> (TempDir, PathBuf) {
@@ -1210,11 +1279,11 @@ mod tests {
         ep
     }
 
-    fn suggestion_signal(kind: Kind, body: &str) -> Engram {
-        Engram::builder(kind).body(Body::text(body)).build()
+    fn suggestion_signal(kind: Kind, body: &str) -> Signal {
+        Signal::builder(kind).body(Body::text(body)).build()
     }
 
-    fn episode_for_signal(template: &str, signal: &Engram, completed_at: DateTime<Utc>) -> Episode {
+    fn episode_for_signal(template: &str, signal: &Signal, completed_at: DateTime<Utc>) -> Episode {
         let mut episode = Episode::new("agent-a", "task-a");
         episode.agent_template = template.to_string();
         episode.timestamp = completed_at;
@@ -2015,7 +2084,7 @@ mod tests {
     #[test]
     fn importance_score_rewards_novel_difficult_episodes() {
         let mut routine = Episode::new("agent-a", "task-a");
-        routine.model = "claude-haiku-3-5".to_string();
+        routine.model = "claude-haiku-4-5".to_string();
         routine.agent_template = "implementer".to_string();
         routine.success = true;
         routine.usage.input_tokens = 120;
@@ -2023,7 +2092,7 @@ mod tests {
         routine.duration_secs = 12.0;
 
         let mut novel = Episode::new("agent-b", "task-b");
-        novel.model = "claude-opus-4".to_string();
+        novel.model = "claude-opus-4-6".to_string();
         novel.agent_template = "architect".to_string();
         novel.success = false;
         novel.usage.input_tokens = 1_600;
@@ -2049,11 +2118,11 @@ mod tests {
     #[test]
     fn prioritize_by_importance_orders_high_signal_first() {
         let mut low = Episode::new("agent-a", "task-a");
-        low.model = "claude-haiku-3-5".to_string();
+        low.model = "claude-haiku-4-5".to_string();
         low.agent_template = "implementer".to_string();
 
         let mut high = Episode::new("agent-b", "task-b");
-        high.model = "claude-opus-4".to_string();
+        high.model = "claude-opus-4-6".to_string();
         high.agent_template = "architect".to_string();
         high.success = false;
         high.usage.input_tokens = 2_000;

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use roko_agent::Usage;
 use roko_core::config::schema::ModelProfile;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,15 @@ pub struct ModelPricing {
     pub tokenizer_ratio: f64,
 }
 
+/// Sonnet-rate fallback used when a model slug is unknown but tokens > 0.
+const SONNET_FALLBACK: ModelPricing = ModelPricing {
+    input_per_m: 3.00,
+    output_per_m: 15.00,
+    cache_read_per_m: 0.30,
+    cache_write_per_m: 3.75,
+    tokenizer_ratio: 1.0,
+};
+
 /// Per-model pricing table keyed by canonical model slug.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CostTable {
@@ -29,11 +39,40 @@ pub struct CostTable {
 }
 
 impl CostTable {
+    /// Look up pricing for a model slug.
+    ///
+    /// Tries exact match first, then finds any table key that is a prefix of the
+    /// slug separated by `-` or `.` (longest prefix wins).
+    #[must_use]
+    pub fn lookup(&self, slug: &str) -> Option<&ModelPricing> {
+        if let Some(pricing) = self.models.get(slug) {
+            return Some(pricing);
+        }
+        self.models
+            .iter()
+            .filter(|(key, _)| {
+                slug.len() > key.len()
+                    && slug.starts_with(key.as_str())
+                    && matches!(slug.as_bytes().get(key.len()), Some(b'-' | b'.'))
+            })
+            .max_by_key(|(key, _)| key.len())
+            .map(|(_, pricing)| pricing)
+    }
+
     /// Calculate request cost from raw token counts.
+    ///
+    /// Uses [`lookup`](Self::lookup) for prefix matching. Falls back to Sonnet
+    /// rates when the model is unknown but tokens > 0.
     #[must_use]
     pub fn calculate(&self, model_slug: &str, usage: &Usage) -> f64 {
-        let pricing = match self.models.get(model_slug) {
+        let total_tokens = usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_read_tokens
+            + usage.cache_create_tokens;
+
+        let pricing = match self.lookup(model_slug) {
             Some(pricing) => pricing,
+            None if total_tokens > 0 => &SONNET_FALLBACK,
             None => return 0.0,
         };
 
@@ -47,8 +86,7 @@ impl CostTable {
     #[must_use]
     pub fn normalize_tokens(&self, model_slug: &str, tokens: u64) -> u64 {
         let ratio = self
-            .models
-            .get(model_slug)
+            .lookup(model_slug)
             .map(|pricing| pricing.tokenizer_ratio)
             .unwrap_or(1.0);
 
@@ -61,7 +99,7 @@ impl CostTable {
     /// Artificial Analysis methodology described in the routing plan.
     #[must_use]
     pub fn blended_cost_per_m(&self, model_slug: &str) -> f64 {
-        let pricing = match self.models.get(model_slug) {
+        let pricing = match self.lookup(model_slug) {
             Some(pricing) => pricing,
             None => return 0.0,
         };
@@ -71,7 +109,7 @@ impl CostTable {
 
     /// Load pricing rows from config model profiles.
     #[must_use]
-    pub fn from_config(models: &HashMap<String, ModelProfile>) -> Self {
+    pub fn from_config(models: &IndexMap<String, ModelProfile>) -> Self {
         let mut table = HashMap::new();
 
         for profile in models.values() {
@@ -105,7 +143,8 @@ impl CostTable {
             ("glm-5", 1.00, 3.20, 0.50, 1.25, 1.05),
             ("kimi-k2.5", 0.60, 3.00, 0.10, 0.75, 0.98),
             ("gpt-5.2", 2.00, 8.00, 0.50, 2.50, 1.0),
-            ("gpt-5.4", 3.00, 12.00, 0.75, 3.75, 1.0),
+            ("gpt-5.4", 2.50, 10.00, 0.63, 3.13, 1.0),
+            ("gpt-5.4-mini", 0.40, 1.60, 0.10, 0.50, 1.0),
         ];
 
         for (slug, input, output, cache_r, cache_w, ratio) in defaults {
@@ -217,7 +256,7 @@ mod tests {
 
     #[test]
     fn from_config_loads_pricing_rows() {
-        let mut profiles = HashMap::new();
+        let mut profiles = indexmap::IndexMap::new();
         profiles.insert("glm-5.1".into(), glm_5_1_profile());
 
         let table = CostTable::from_config(&profiles);
@@ -246,7 +285,7 @@ mod tests {
 
         let table = CostTable { models }.with_defaults();
 
-        assert!(table.models.len() >= 8);
+        assert!(table.models.len() >= 9);
 
         let claude_opus = table
             .models
@@ -264,5 +303,52 @@ mod tests {
         assert!((custom.cache_read_per_m - 7.77).abs() < 1e-12);
         assert!((custom.cache_write_per_m - 6.66).abs() < 1e-12);
         assert!((custom.tokenizer_ratio - 1.23).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lookup_prefix_match_with_date_suffix() {
+        let table = CostTable {
+            models: HashMap::new(),
+        }
+        .with_defaults();
+        assert!(table.lookup("claude-sonnet-4-6").is_some());
+        let pricing = table
+            .lookup("claude-sonnet-4-6-20250514")
+            .expect("prefix match");
+        assert!((pricing.input_per_m - 3.00).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lookup_no_partial_word_match() {
+        let mut models = HashMap::new();
+        models.insert(
+            "glm".into(),
+            ModelPricing {
+                input_per_m: 1.0,
+                output_per_m: 1.0,
+                cache_read_per_m: 0.5,
+                cache_write_per_m: 0.5,
+                tokenizer_ratio: 1.0,
+            },
+        );
+        let table = CostTable { models };
+        assert!(table.lookup("glm-5.1").is_some());
+        assert!(table.lookup("glmx").is_none());
+    }
+
+    #[test]
+    fn calculate_sonnet_fallback_for_unknown_model() {
+        let table = CostTable {
+            models: HashMap::new(),
+        };
+        let zero = Usage::default();
+        assert!((table.calculate("unknown-model", &zero)).abs() < 1e-12);
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            ..Usage::default()
+        };
+        let cost = table.calculate("unknown-model", &usage);
+        assert!((cost - 3.00).abs() < 1e-12);
     }
 }

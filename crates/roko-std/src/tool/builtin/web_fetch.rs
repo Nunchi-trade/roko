@@ -9,9 +9,20 @@ use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolHandler,
     ToolPermission, ToolResult, ToolSchema,
 };
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use super::sandbox::require_string;
+
+/// Shared HTTP client — reused across all `web_fetch` invocations to
+/// amortize TLS session setup and connection pooling (§12.13).
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 /// Canonical `snake_case` name.
 pub const NAME: &str = "web_fetch";
@@ -35,7 +46,22 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Network,
         ToolPermission::networked(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "The URL to fetch (HTTP or HTTPS)."
+            },
+            "headers": {
+                "type": "object",
+                "description": "Optional HTTP headers to include.",
+                "additionalProperties": { "type": "string" }
+            }
+        },
+        "required": ["url"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Parallel)
     .with_idempotent(true)
     .with_timeout_ms(30_000)
@@ -172,18 +198,7 @@ async fn do_fetch(url: &str, call: &ToolCall) -> ToolResult {
         .unwrap_or("GET")
         .to_ascii_uppercase();
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return ToolResult::Err(ToolError::Other(format!(
-                "web_fetch: failed to build HTTP client: {e}"
-            )));
-        }
-    };
+    let client = &*HTTP_CLIENT;
 
     let request_builder = match method.as_str() {
         "GET" => client.get(url),

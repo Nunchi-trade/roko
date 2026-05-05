@@ -4,6 +4,7 @@
 //! Concurrency: [`ToolConcurrency::Serial`]. Idempotent: no.
 
 use async_trait::async_trait;
+use roko_core::defaults::DEFAULT_MAX_FILE_WRITE_BYTES;
 use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolHandler,
     ToolPermission, ToolResult, ToolSchema,
@@ -27,7 +28,21 @@ pub fn tool_def() -> ToolDef {
         ToolCategory::Write,
         ToolPermission::writes(),
     )
-    .with_parameters(ToolSchema::any_object())
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Relative path within the worktree to write."
+            },
+            "content": {
+                "type": "string",
+                "description": "The full file content to write."
+            }
+        },
+        "required": ["path", "content"],
+        "additionalProperties": false
+    })))
     .with_concurrency(ToolConcurrency::Serial)
     .with_idempotent(false)
     .with_timeout_ms(30_000)
@@ -52,6 +67,16 @@ impl ToolHandler for Handler {
             Ok(s) => s,
             Err(e) => return ToolResult::Err(e),
         };
+
+        // §12.7: Reject writes that exceed the configured size limit.
+        if content.len() > DEFAULT_MAX_FILE_WRITE_BYTES {
+            return ToolResult::Err(ToolError::Other(format!(
+                "write_file: content too large ({} bytes, max {})",
+                content.len(),
+                DEFAULT_MAX_FILE_WRITE_BYTES,
+            )));
+        }
+
         let absolute = match require_within_worktree(ctx.worktree(), &rel_path) {
             Ok(p) => p,
             Err(e) => return ToolResult::Err(e),
@@ -64,16 +89,29 @@ impl ToolHandler for Handler {
                 )));
             }
         }
-        match tokio::fs::write(&absolute, content.as_bytes()).await {
+
+        // §12.8: Atomic write via tmp+rename to prevent partial-write corruption.
+        let tmp_path = absolute.with_extension("roko-tmp");
+        if let Err(e) = tokio::fs::write(&tmp_path, content.as_bytes()).await {
+            return ToolResult::Err(ToolError::Other(format!(
+                "write_file: failed to write tmp {}: {e}",
+                tmp_path.display()
+            )));
+        }
+        match tokio::fs::rename(&tmp_path, &absolute).await {
             Ok(()) => ToolResult::text(format!(
                 "wrote {} bytes to {}",
                 content.len(),
                 absolute.display()
             )),
-            Err(e) => ToolResult::Err(ToolError::Other(format!(
-                "write_file failed ({}): {e}",
-                absolute.display()
-            ))),
+            Err(e) => {
+                // Clean up tmp file on rename failure.
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                ToolResult::Err(ToolError::Other(format!(
+                    "write_file: rename failed ({}): {e}",
+                    absolute.display()
+                )))
+            }
         }
     }
 }

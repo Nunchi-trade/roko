@@ -1,0 +1,245 @@
+/* ═══════════════════════════════════════════════════════════
+   KnowledgeFlowPanel — knowledge flow diagram + insight feed
+   ═══════════════════════════════════════════════════════════ */
+
+.knowledge-flow-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── Canvas diagram ── */
+.kf-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 220px;
+  overflow: hidden;
+}
+
+.kf-canvas-wrap canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* "Knowledge reused" label that appears on aha moments */
+.kf-aha-label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -60%);
+  font-family: var(--mono);
+  font-size: var(--text-lg);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--bone-bright);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--bone) 50%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease-out;
+}
+
+.kf-aha-label.visible {
+  opacity: 1;
+}
+
+/* ── Insight feed ── */
+.kf-feed {
+  border-top: 1px solid var(--border);
+  max-height: 200px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ── Feed row: staggered fadeSlideUp entrance ── */
+.kf-feed-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: var(--text-xl);
+  color: var(--text-primary);
+  animation: fadeInUp 0.4s var(--ease) both;
+  transition: background var(--duration-smooth) ease;
+}
+
+.kf-feed-row:hover {
+  background: color-mix(in srgb, var(--rose-dim) 4%, transparent);
+}
+
+/* ── New entry celebration flash ── */
+.kf-feed-row.kf-celebrate {
+  animation: kfCelebrate 0.8s var(--ease) both;
+}
+
+@keyframes kfCelebrate {
+  0% {
+    opacity: 0;
+    transform: translateY(12px);
+    background: color-mix(in srgb, var(--bone) 12%, transparent);
+    box-shadow: inset 0 0 20px color-mix(in srgb, var(--bone) 8%, transparent);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(0);
+    background: color-mix(in srgb, var(--bone) 8%, transparent);
+    box-shadow: inset 0 0 12px color-mix(in srgb, var(--bone) 5%, transparent);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    background: transparent;
+    box-shadow: none;
+  }
+}
+
+/* ── Kind badge with category colors ── */
+.kf-badge {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: var(--text-lg);
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transition: box-shadow var(--duration-smooth) ease;
+}
+
+.kf-badge.heuristic {
+  color: var(--dream-bright);
+  background: var(--dream-deep);
+  border: 1px solid color-mix(in srgb, var(--dream) 25%, transparent);
+}
+
+.kf-badge.strategy {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 25%, transparent);
+}
+
+.kf-badge.causal {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+}
+
+.kf-badge.warning {
+  color: var(--rose-bright);
+  background: var(--rose-deep);
+  border: 1px solid color-mix(in srgb, var(--rose) 30%, transparent);
+}
+
+/* Badge glow on celebrate */
+.kf-celebrate .kf-badge.heuristic {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--status-blocked) 30%, transparent);
+}
+.kf-celebrate .kf-badge.strategy {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 30%, transparent);
+}
+.kf-celebrate .kf-badge.causal {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--warning) 30%, transparent);
+}
+.kf-celebrate .kf-badge.warning {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 30%, transparent);
+}
+
+/* Agent dot */
+.kf-agent-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.kf-agent-name {
+  flex-shrink: 0;
+  color: var(--text-soft);
+  min-width: 50px;
+}
+
+/* Content */
+.kf-content {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: var(--text-lg);
+}
+
+/* ── Score arc gauge ── */
+.kf-score {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--text-sm);
+  font-family: var(--mono);
+  letter-spacing: 0.05em;
+}
+
+.kf-score.heuristic { color: var(--dream-bright); }
+.kf-score.strategy { color: var(--success); }
+.kf-score.causal { color: var(--warning); }
+.kf-score.warning { color: var(--rose-bright); }
+
+.kf-score svg {
+  flex-shrink: 0;
+}
+
+.kf-score-arc {
+  transition: stroke-dasharray 0.6s var(--ease);
+}
+
+.kf-score-value {
+  min-width: 20px;
+  text-align: right;
+}
+
+/* Tx hash */
+.kf-tx {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  opacity: 0.5;
+  font-size: var(--text-lg);
+}
+
+/* Empty state */
+.kf-empty {
+  padding: 24px 16px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: var(--text-lg);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* Aha border pulse on the pane */
+.kf-aha-border {
+  animation: kfAhaPulse 0.5s ease-out;
+}
+
+@keyframes kfAhaPulse {
+  0% {
+    border-color: var(--bone-bright);
+    box-shadow: 0 0 20px color-mix(in srgb, var(--bone) 20%, transparent);
+  }
+  100% {
+    border-color: var(--glass-border);
+    box-shadow: none;
+  }
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  .kf-feed-row,
+  .kf-feed-row.kf-celebrate {
+    animation: none;
+  }
+  .kf-score-arc {
+    transition: none;
+  }
+}

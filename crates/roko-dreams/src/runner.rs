@@ -17,7 +17,10 @@ use cron::Schedule;
 use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protocol_command};
 use roko_agent::{Agent, AgentResult};
 use roko_core::config::schema::RokoConfig;
-use roko_core::{Context as RokoContext, Engram};
+use roko_core::foundation::{
+    CachePolicy, ChatMessage, MessageRole, ModelCallRequest, ModelCaller, caller,
+};
+use roko_core::{Body, Context as RokoContext, Engram, Kind, Provenance};
 use roko_learn::{episode_logger::EpisodeLogger, playbook::PlaybookStore};
 use roko_neuro::{
     KnowledgeStore,
@@ -62,9 +65,9 @@ pub struct DreamAgentConfig {
 
 impl DreamAgentConfig {
     fn build_agent(&self, workdir: &Path) -> Result<DreamReviewAgent> {
-        let mut routing_config = roko_core::config::load_config(workdir)
+        // TODO(gateway): remove direct construction once all callers provide a ModelCaller.
+        let routing_config = roko_core::config::loader::load_config_unified(workdir)
             .with_context(|| format!("load routing config from {}", workdir.display()))?;
-        routing_config.apply_process_env();
         let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
         if has_routing {
@@ -82,12 +85,12 @@ impl DreamAgentConfig {
                 self.agent_options(workdir, self.args.clone(), format!("dream-review:{model}")),
             )
             .with_context(|| format!("create dream review agent for model {model}"))?;
-            Ok(DreamReviewAgent { inner: agent })
+            Ok(DreamReviewAgent::Agent { inner: agent })
         } else {
             let model = if self.command == "claude" {
                 self.model
                     .clone()
-                    .unwrap_or_else(|| "claude-opus-4-6".to_string())
+                    .unwrap_or_else(|| roko_core::defaults::MODEL_DEEP.to_string())
             } else {
                 self.model.clone().unwrap_or_else(|| self.command.clone())
             };
@@ -112,7 +115,38 @@ impl DreamAgentConfig {
                 self.agent_options(workdir, extra_args, format!("dream-review:{model}")),
             )
             .with_context(|| format!("create dream review subprocess agent for model {model}"))?;
-            Ok(DreamReviewAgent { inner: agent })
+            Ok(DreamReviewAgent::Agent { inner: agent })
+        }
+    }
+
+    fn build_agent_via_gateway(
+        &self,
+        workdir: &Path,
+        model_caller: Arc<dyn ModelCaller>,
+    ) -> Result<DreamReviewAgent> {
+        let model = self.gateway_model(workdir)?;
+        Ok(DreamReviewAgent::Gateway {
+            name: format!("dream-review:{model}"),
+            model,
+            model_caller,
+        })
+    }
+
+    fn gateway_model(&self, workdir: &Path) -> Result<String> {
+        if let Some(model) = self.model.clone().filter(|model| !model.trim().is_empty()) {
+            return Ok(model);
+        }
+
+        let routing_config = roko_core::config::loader::load_config_unified(workdir)
+            .with_context(|| format!("load routing config from {}", workdir.display()))?;
+        if !routing_config.agent.default_model.trim().is_empty() {
+            return Ok(routing_config.agent.default_model);
+        }
+
+        if self.command == "claude" {
+            Ok(roko_core::defaults::MODEL_DEEP.to_string())
+        } else {
+            Ok(self.command.clone())
         }
     }
 
@@ -132,6 +166,7 @@ impl DreamAgentConfig {
             bare_mode: self.bare_mode,
             dangerously_skip_permissions: false,
             name,
+            pre_discovered_mcp_tools: None,
         }
     }
 }
@@ -259,6 +294,46 @@ impl DreamTrigger {
             Self::BusPulse { .. } => "bus_pulse",
             Self::CoordinationPattern { .. } => "coordination_pattern",
         }
+    }
+}
+
+/// Policy for checking dream eligibility after a plan completes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanCompletionTriggerPolicy {
+    /// Minimum new episodes since the latest dream report.
+    pub min_episodes: usize,
+    /// Minimum elapsed time since the latest dream report, in seconds.
+    pub min_elapsed_secs: u64,
+    /// Whether callers should run consolidation synchronously.
+    pub synchronous: bool,
+}
+
+impl Default for PlanCompletionTriggerPolicy {
+    fn default() -> Self {
+        Self {
+            min_episodes: 5,
+            min_elapsed_secs: 900,
+            synchronous: false,
+        }
+    }
+}
+
+impl PlanCompletionTriggerPolicy {
+    /// Return a dream trigger when the observed plan-completion state is
+    /// eligible for consolidation.
+    #[must_use]
+    pub fn should_trigger(
+        &self,
+        episodes_since_last_dream: usize,
+        seconds_since_last_dream: u64,
+    ) -> Option<DreamTrigger> {
+        if self.min_episodes > 0 && episodes_since_last_dream >= self.min_episodes {
+            return Some(DreamTrigger::EpisodeCount);
+        }
+        if seconds_since_last_dream >= self.min_elapsed_secs && episodes_since_last_dream >= 2 {
+            return Some(DreamTrigger::Idle);
+        }
+        None
     }
 }
 
@@ -641,11 +716,23 @@ impl DreamRuntimeControls {
 }
 
 /// Public facade for dream replay, consolidation, and scheduling.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DreamRunner {
     workdir: PathBuf,
     config: DreamLoopConfig,
     controls: DreamRuntimeControls,
+    model_caller: Option<Arc<dyn ModelCaller>>,
+}
+
+impl std::fmt::Debug for DreamRunner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DreamRunner")
+            .field("workdir", &self.workdir)
+            .field("config", &self.config)
+            .field("controls", &self.controls)
+            .field("model_caller", &self.model_caller.is_some())
+            .finish()
+    }
 }
 
 impl DreamRunner {
@@ -656,6 +743,7 @@ impl DreamRunner {
             workdir: workdir.into(),
             config,
             controls: DreamRuntimeControls::default(),
+            model_caller: None,
         }
     }
 
@@ -670,7 +758,15 @@ impl DreamRunner {
             workdir: workdir.into(),
             config,
             controls,
+            model_caller: None,
         }
+    }
+
+    /// Construct a dream runner that dispatches review inference through the gateway.
+    #[must_use]
+    pub fn with_model_caller(mut self, model_caller: Arc<dyn ModelCaller>) -> Self {
+        self.model_caller = Some(model_caller);
+        self
     }
 
     /// Replay the supplied episodes into durable insights without mutating the
@@ -782,7 +878,11 @@ impl DreamRunner {
         let knowledge = Arc::new(KnowledgeStore::for_workdir(&self.workdir));
         let playbooks_root = self.workdir.join(".roko").join("learn").join("playbooks");
         let playbooks = Arc::new(PlaybookStore::new(playbooks_root));
-        let dispatcher = build_dream_review_dispatcher(&self.workdir, &self.config.agent)?;
+        let dispatcher = build_dream_review_dispatcher_with_model_caller(
+            &self.workdir,
+            &self.config.agent,
+            self.model_caller.clone(),
+        )?;
 
         // ── DREAM-06: Check episode backlog for intensive mode ──────
         let all_episodes = EpisodeLogger::read_all_lossy(&episodes_path)
@@ -1150,26 +1250,123 @@ pub fn build_dream_review_dispatcher(
     workdir: &Path,
     config: &DreamAgentConfig,
 ) -> Result<Arc<dyn AgentDispatcher>> {
-    Ok(Arc::new(config.build_agent(workdir)?))
+    build_dream_review_dispatcher_with_model_caller(workdir, config, None)
+}
+
+/// Build the dream review dispatcher, preferring gateway-backed inference when supplied.
+///
+/// # Errors
+///
+/// Returns an error if the routing config cannot be loaded, if a routed model
+/// cannot be determined, or if the agent backend cannot be constructed.
+pub fn build_dream_review_dispatcher_with_model_caller(
+    workdir: &Path,
+    config: &DreamAgentConfig,
+    model_caller: Option<Arc<dyn ModelCaller>>,
+) -> Result<Arc<dyn AgentDispatcher>> {
+    let agent = match model_caller {
+        Some(model_caller) => config.build_agent_via_gateway(workdir, model_caller)?,
+        None => config.build_agent(workdir)?,
+    };
+    Ok(Arc::new(agent))
 }
 
 /// Thin wrapper around the configured review agent used by dream consolidation.
-struct DreamReviewAgent {
-    inner: Box<dyn Agent>,
+enum DreamReviewAgent {
+    Agent {
+        inner: Box<dyn Agent>,
+    },
+    Gateway {
+        model: String,
+        model_caller: Arc<dyn ModelCaller>,
+        name: String,
+    },
 }
 
 #[async_trait]
 impl Agent for DreamReviewAgent {
     async fn run(&self, input: &Engram, ctx: &RokoContext) -> AgentResult {
-        self.inner.run(input, ctx).await
+        match self {
+            Self::Agent { inner } => inner.run(input, ctx).await,
+            Self::Gateway {
+                model,
+                model_caller,
+                name,
+            } => {
+                let prompt = match input.body.as_text() {
+                    Ok(prompt) => prompt.to_string(),
+                    Err(error) => {
+                        let output = input
+                            .derive(
+                                Kind::AgentOutput,
+                                Body::text(format!("dream review input was not text: {error}")),
+                            )
+                            .provenance(Provenance::agent(name))
+                            .build();
+                        return AgentResult::fail(output);
+                    }
+                };
+
+                let request = ModelCallRequest {
+                    model: model.clone(),
+                    system: None,
+                    messages: vec![ChatMessage {
+                        role: MessageRole::User,
+                        content: prompt,
+                    }],
+                    max_tokens: None,
+                    temperature: None,
+                    role: Some("dream-review".to_string()),
+                    caller: Some(caller::DREAMS.to_string()),
+                    run_id: None,
+                    prompt_section_ids: Vec::new(),
+                    knowledge_ids: Vec::new(),
+                    budget: None,
+                    budget_remaining: None,
+                    routing_hints: Vec::new(),
+                    cache_policy: CachePolicy::Default,
+                };
+
+                match model_caller.call(request).await {
+                    Ok(response) => {
+                        let output = input
+                            .derive(Kind::AgentOutput, Body::text(response.content))
+                            .provenance(Provenance::agent(name))
+                            .build();
+                        let usage = roko_agent::Usage {
+                            input_tokens: response.usage.input_tokens.min(u32::MAX as u64) as u32,
+                            output_tokens: response.usage.output_tokens.min(u32::MAX as u64) as u32,
+                            cache_read_tokens: 0,
+                            cache_create_tokens: 0,
+                            cost_usd: response.usage.cost_usd as f32,
+                            wall_ms: 0,
+                        };
+                        AgentResult::ok(output).with_usage(usage)
+                    }
+                    Err(error) => {
+                        let output = input
+                            .derive(Kind::AgentOutput, Body::text(error.to_string()))
+                            .provenance(Provenance::agent(name))
+                            .build();
+                        AgentResult::fail(output)
+                    }
+                }
+            }
+        }
     }
 
     fn name(&self) -> &str {
-        self.inner.name()
+        match self {
+            Self::Agent { inner } => inner.name(),
+            Self::Gateway { name, .. } => name,
+        }
     }
 
     fn supports_streaming(&self) -> bool {
-        self.inner.supports_streaming()
+        match self {
+            Self::Agent { inner } => inner.supports_streaming(),
+            Self::Gateway { .. } => false,
+        }
     }
 }
 

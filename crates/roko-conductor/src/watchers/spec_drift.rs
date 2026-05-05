@@ -5,7 +5,7 @@
 //! it actually changed. Fires when the drift exceeds
 //! [`MAX_SPEC_DRIFT_RATIO`].
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 use serde::Deserialize;
 
 /// Maximum acceptable spec drift ratio (0.0 to 1.0).
@@ -98,7 +98,7 @@ impl SpecDriftWatcher {
     }
 }
 
-impl Policy for SpecDriftWatcher {
+impl React for SpecDriftWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Find the most recent spec-drift metric.
         let latest = stream

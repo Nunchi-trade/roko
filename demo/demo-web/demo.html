@@ -1,0 +1,2496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>roko — demo</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --void: #060608;
+  --raised: #0C0A0E;
+  --mid: #080810;
+  --rose: #AA7088;
+  --rose-bright: #CC90A8;
+  --rose-dim: #7A5060;
+  --rose-deep: #3A2030;
+  --rose-ember: #482838;
+  --bone: #C8B890;
+  --sage: #70887A;
+  --fail: #C36E55;
+  --warn: #AA8855;
+  --eth-blue: #627EEA;
+  --eth-blue-dim: #3A4A8A;
+  --eth-blue-deep: #1A2040;
+  --glass-2-bg: rgba(255,255,255,0.04);
+  --glass-2-border: rgba(255,255,255,0.08);
+  --text: #B0A0B0;
+  --text-dim: #706070;
+  --text-ghost: #302830;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --bone-bloom: 0 0 12px rgba(200,184,144,0.4), 0 0 32px rgba(200,184,144,0.15);
+  --font-serif: 'Instrument Serif', Georgia, serif;
+  --font-sans: 'General Sans', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', 'SF Mono', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+*::-webkit-scrollbar { width: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--glass-2-border); border-radius: 2px; }
+
+html, body {
+  background: var(--void);
+  color: var(--text);
+  font-family: var(--font-mono);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* ── Atmospheric overlay ──────────────────────────── */
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px, transparent 1px,
+    rgba(0,0,0,0.06) 1px, rgba(0,0,0,0.06) 2px
+  );
+}
+body::after {
+  content: '';
+  position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+  opacity: 0.03;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ── Focus rings ──────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--rose);
+  outline-offset: 2px;
+}
+
+/* ── Top bar ──────────────────────────────────────── */
+.topbar {
+  display: flex;
+  align-items: center;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--glass-2-border);
+  background: var(--raised);
+  gap: 12px;
+  flex-shrink: 0;
+  height: 40px;
+}
+.topbar .logo {
+  color: var(--rose-bright);
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+}
+.topbar .tabs { display: flex; gap: 2px; margin-left: 16px; flex-wrap: wrap; }
+.topbar .tab {
+  background: transparent; border: 1px solid transparent; color: var(--text-dim);
+  padding: 5px 14px; border-radius: 6px; font-family: var(--font-sans); font-size: 0.68rem;
+  cursor: pointer; transition: all 200ms var(--ease); display: flex; align-items: center; gap: 6px;
+  white-space: nowrap; position: relative;
+}
+.topbar .tab:hover { color: var(--text); background: var(--glass-2-bg); }
+.topbar .tab.active { color: var(--rose-bright); background: var(--rose-deep); border-color: var(--rose-dim); }
+.topbar .tab.active::after {
+  content: ''; position: absolute; bottom: -1px; left: 20%; right: 20%;
+  height: 2px; background: var(--rose-bright); border-radius: 1px;
+  animation: tabLineIn 200ms var(--ease);
+}
+@keyframes tabLineIn { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.topbar .tab .tab-num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 4px; font-size: 0.55rem; font-weight: 700;
+  background: rgba(255,255,255,0.04); color: var(--text-dim); flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+.topbar .tab.active .tab-num { background: var(--rose-dim); color: var(--rose-bright); }
+.topbar .spacer { flex: 1; }
+.topbar .page-links { display: flex; gap: 6px; margin-right: 12px; }
+.topbar .page-links a {
+  font-size: 0.6rem; color: var(--text-dim); text-decoration: none; padding: 3px 8px;
+  border-radius: 4px; border: 1px solid transparent; transition: all 200ms;
+}
+.topbar .page-links a:hover { color: var(--text); border-color: var(--glass-2-border); }
+.topbar .controls { display: flex; gap: 6px; align-items: center; }
+.topbar .speed {
+  font-size: 0.62rem; color: var(--text-dim); padding: 3px 8px; border-radius: 4px;
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); cursor: pointer;
+  font-family: var(--font-mono);
+}
+.topbar .speed:hover { color: var(--text); }
+
+/* ── Intro band ───────────────────────────────────── */
+.intro-band {
+  padding: 14px 20px; border-bottom: 1px solid var(--glass-2-border);
+  background: var(--raised); flex-shrink: 0;
+  display: flex; align-items: baseline; gap: 14px;
+  transition: max-height 300ms var(--ease), padding 300ms var(--ease), opacity 200ms var(--ease);
+  max-height: 80px; overflow: hidden;
+}
+.intro-band.collapsed { max-height: 0; padding: 0 20px; opacity: 0; }
+.intro-title {
+  font-family: var(--font-serif);
+  font-size: 1.25rem;
+  color: var(--rose-bright);
+  font-weight: 400;
+}
+.intro-sub {
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* ── Main area ────────────────────────────────────── */
+.main { flex: 1; display: flex; overflow: hidden; position: relative; min-height: 0; }
+.terminal-zone {
+  flex: 55; display: flex; flex-direction: column; padding: 6px; gap: 4px;
+  overflow: hidden; min-height: 0;
+}
+.terminal-row { display: flex; flex: 1; gap: 4px; min-height: 0; }
+.pane {
+  flex: 1; display: flex; flex-direction: column; background: var(--raised);
+  border: 1px solid var(--glass-2-border); border-radius: 10px; overflow: hidden;
+  transition: opacity 200ms var(--ease), border-color 300ms var(--ease), box-shadow 300ms var(--ease);
+  min-height: 0;
+}
+.pane.active-cmd { border-color: var(--rose-dim); box-shadow: 0 0 20px rgba(170,112,136,0.12); }
+.pane-header {
+  padding: 5px 12px; display: flex; align-items: center; gap: 8px; font-size: 0.62rem;
+  border-bottom: 1px solid var(--glass-2-border); background: rgba(255,255,255,0.01); flex-shrink: 0;
+}
+.pane-header .pane-label { color: var(--rose); font-weight: 600; font-family: var(--font-sans); }
+.pane-header .pane-timer { color: var(--text-dim); margin-left: 4px; }
+.pane-header .pane-status { margin-left: auto; color: var(--text-dim); font-size: 0.58rem; }
+.pane-header .dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--fail);
+  transition: background 300ms var(--ease);
+}
+.pane-header .dot.connected { background: var(--sage); }
+.pane-term { flex: 1; padding: 2px; overflow: hidden; min-height: 0; }
+
+/* ── Panel zone (45%) ─────────────────────────────── */
+.panel-zone {
+  flex: 45; border-left: 1px solid var(--glass-2-border);
+  background: var(--raised); display: flex; flex-direction: column;
+  overflow: hidden; transition: flex 200ms var(--ease), opacity 200ms var(--ease);
+}
+.panel-zone.hidden { flex: 0; overflow: hidden; opacity: 0; min-width: 0; }
+
+.panel-canvas {
+  flex-shrink: 0; height: 180px; position: relative;
+  border-bottom: 1px solid var(--glass-2-border);
+  display: flex; align-items: center; justify-content: center;
+}
+.panel-canvas canvas { width: 100%; height: 100%; }
+.panel-canvas.hidden { display: none; height: 0; }
+
+.panel-stats {
+  padding: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  flex-shrink: 0; border-bottom: 1px solid var(--glass-2-border);
+}
+
+.stat-card {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); border-radius: 10px;
+  padding: 10px 12px; backdrop-filter: blur(20px);
+  border-top: 2px solid var(--rose-deep);
+  transition: transform 200ms var(--ease);
+}
+.stat-card:hover { transform: translateY(-1px); }
+.stat-card .stat-label {
+  font-family: var(--font-sans); font-size: 0.52rem; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 4px;
+}
+.stat-card .stat-value {
+  font-family: var(--font-mono); font-size: 0.9rem; font-weight: 600; color: var(--text);
+  transition: color 300ms var(--ease);
+}
+.stat-card.is-primary .stat-value {
+  color: var(--bone);
+  text-shadow: var(--bone-bloom);
+}
+.stat-card.is-primary { border-top-color: var(--bone); }
+
+.panel-timeline {
+  flex: 1; overflow-y: auto; padding: 10px 14px; min-height: 0;
+  border-bottom: 1px solid var(--glass-2-border);
+}
+.panel-section-title {
+  font-family: var(--font-sans); font-size: 0.58rem; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 8px;
+}
+
+/* Timeline stepper */
+.timeline-list { list-style: none; padding: 0; }
+.timeline-list li {
+  display: flex; align-items: flex-start; gap: 10px; padding: 6px 0;
+  position: relative; font-size: 0.68rem; color: var(--text-dim);
+  font-family: var(--font-sans);
+}
+.timeline-list li::before {
+  content: attr(data-num); flex-shrink: 0;
+  width: 20px; height: 20px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.52rem; font-weight: 700; font-family: var(--font-mono);
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  color: var(--text-dim); transition: all 300ms var(--ease);
+}
+.timeline-list li.completed::before {
+  background: var(--sage); border-color: var(--sage); color: #fff;
+  content: '\2713';
+}
+.timeline-list li.active::before {
+  background: var(--rose-deep); border-color: var(--rose-bright); color: var(--rose-bright);
+  animation: breathe 3.5s ease-in-out infinite;
+}
+.timeline-list li.active { color: var(--rose-bright); }
+.timeline-list li.completed { color: var(--sage); }
+.timeline-list li + li::after {
+  content: ''; position: absolute; left: 9px; top: -6px; width: 1px; height: 6px;
+  background: var(--glass-2-border);
+}
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(204,144,168,0); }
+  50% { box-shadow: 0 0 8px 3px rgba(204,144,168,0.3); }
+}
+
+.timeline-sublabel { font-size: 0.55rem; color: var(--text-dim); margin-top: 1px; }
+
+.panel-cmdlog {
+  flex: 1; overflow-y: auto; min-height: 0;
+  display: flex; flex-direction: column;
+}
+.panel-cmdlog-header {
+  padding: 8px 14px; display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
+}
+.panel-cmdlog-header h4 {
+  font-family: var(--font-sans); font-size: 0.58rem; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim);
+}
+.panel-cmdlog-header .copy-all-btn {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); color: var(--text-dim);
+  padding: 2px 8px; border-radius: 4px; font-family: var(--font-mono); font-size: 0.55rem;
+  cursor: pointer; transition: all 200ms var(--ease);
+}
+.panel-cmdlog-header .copy-all-btn:hover { color: var(--rose-bright); border-color: var(--rose-dim); }
+.panel-cmdlog-header .copy-all-btn.copied { color: var(--sage); border-color: var(--sage); }
+.cmd-log {
+  flex: 1; overflow-y: auto; padding: 6px 14px; display: flex; flex-direction: column; gap: 6px;
+}
+.cmd-log-empty {
+  color: var(--text-dim); font-size: 0.62rem; font-style: italic; padding: 8px 0;
+  font-family: var(--font-sans);
+}
+.cmd-entry {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); border-radius: 8px;
+  padding: 8px 10px; animation: cmdSlideIn 200ms var(--ease);
+  border-left: 2px solid var(--rose-dim);
+}
+.cmd-entry .cmd-text {
+  font-size: 0.65rem; color: var(--rose-bright); cursor: pointer;
+  padding: 2px 0; word-break: break-all; font-family: var(--font-mono);
+}
+.cmd-entry .cmd-text:hover { text-decoration: underline; }
+.cmd-entry .cmd-desc {
+  font-size: 0.58rem; color: var(--text-dim); margin-top: 3px; line-height: 1.5;
+  font-family: var(--font-sans);
+}
+@keyframes cmdSlideIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Playback bar ─────────────────────────────────── */
+.playback-bar {
+  display: flex; align-items: center; padding: 10px 20px; gap: 12px;
+  border-top: 1px solid var(--glass-2-border); background: var(--raised);
+  flex-shrink: 0; height: 48px;
+}
+.playback-controls { display: flex; gap: 4px; align-items: center; }
+.pb-btn {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); color: var(--text-dim);
+  width: 30px; height: 30px; border-radius: 8px; font-size: 0.8rem; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: all 200ms var(--ease);
+}
+.pb-btn:hover { color: var(--text); border-color: var(--rose-dim); }
+.pb-btn.primary { background: var(--rose-deep); border-color: var(--rose-dim); color: var(--rose-bright); }
+.pb-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.mode-toggle { display: flex; gap: 0; align-items: center; margin-left: 8px; }
+.mode-btn {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); color: var(--text-dim);
+  padding: 5px 12px; font-family: var(--font-sans); font-size: 0.62rem; cursor: pointer;
+  transition: all 200ms var(--ease);
+}
+.mode-btn:first-child { border-radius: 6px 0 0 6px; }
+.mode-btn:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.mode-btn.active { background: var(--rose-deep); border-color: var(--rose-dim); color: var(--rose-bright); }
+
+.pb-progress {
+  font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-dim);
+  margin-left: 12px; white-space: nowrap;
+}
+.pb-progress .step-count { color: var(--rose-bright); font-weight: 600; }
+
+.pb-cmd-preview {
+  flex: 1; font-family: var(--font-mono); font-size: 0.6rem; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 4px 10px; background: var(--glass-2-bg); border-radius: 4px;
+  border: 1px solid var(--glass-2-border);
+}
+
+/* ── Prompt bar (builder) ─────────────────────────── */
+.prompt-bar {
+  display: none; padding: 8px 20px; border-top: 1px solid var(--glass-2-border);
+  background: var(--raised); align-items: center; gap: 10px; flex-shrink: 0;
+}
+.prompt-bar.visible { display: flex; }
+.prompt-bar .chevron { color: var(--rose); font-weight: 700; font-family: var(--font-mono); }
+.prompt-bar input {
+  flex: 1; background: transparent; border: 1px solid var(--glass-2-border);
+  border-radius: 8px; padding: 7px 14px; color: var(--text); font-family: var(--font-mono);
+  font-size: 0.78rem; outline: none; transition: border-color 200ms var(--ease);
+}
+.prompt-bar input:focus { border-color: var(--rose-dim); }
+.prompt-bar input::placeholder { color: var(--text-dim); }
+.prompt-bar .build-btn {
+  background: var(--rose); color: var(--void); border: none; padding: 7px 18px;
+  border-radius: 8px; font-family: var(--font-sans); font-weight: 500; font-size: 0.72rem;
+  cursor: pointer; transition: opacity 200ms var(--ease);
+}
+.prompt-bar .build-btn:hover { opacity: 0.85; }
+.prompt-bar .build-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.preset-cards { display: flex; gap: 4px; }
+.preset-card {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); color: var(--text-dim);
+  padding: 4px 10px; border-radius: 6px; font-family: var(--font-sans); font-size: 0.62rem;
+  cursor: pointer; transition: all 200ms var(--ease);
+}
+.preset-card:hover { color: var(--rose-bright); border-color: var(--rose-dim); }
+
+/* ── Mirage bar ───────────────────────────────────── */
+.mirage-bar {
+  display: none; padding: 8px 20px; border-top: 1px solid var(--glass-2-border);
+  background: var(--raised); align-items: center; gap: 12px; flex-shrink: 0;
+}
+.mirage-bar.visible { display: flex; }
+.mirage-bar label { font-size: 0.65rem; color: var(--text-dim); font-family: var(--font-sans); }
+.mirage-bar select, .mirage-bar input[type="number"] {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); color: var(--text);
+  padding: 5px 10px; border-radius: 6px; font-family: var(--font-mono); font-size: 0.7rem;
+  outline: none; transition: border-color 200ms var(--ease);
+}
+.mirage-bar select:focus, .mirage-bar input[type="number"]:focus { border-color: var(--eth-blue-dim); }
+.mirage-bar select { cursor: pointer; min-width: 140px; }
+.mirage-bar input[type="number"] { width: 80px; }
+.mirage-bar .mirage-start-btn {
+  background: var(--eth-blue); color: #fff; border: none; padding: 5px 16px;
+  border-radius: 6px; font-family: var(--font-sans); font-weight: 500; font-size: 0.7rem;
+  cursor: pointer; transition: opacity 200ms var(--ease);
+}
+.mirage-bar .mirage-start-btn:hover { opacity: 0.85; }
+.mirage-bar .mirage-start-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.mirage-bar .mirage-stop-btn {
+  background: var(--fail); color: #fff; border: none; padding: 5px 12px;
+  border-radius: 6px; font-family: var(--font-sans); font-weight: 500; font-size: 0.7rem;
+  cursor: pointer; display: none;
+}
+
+/* ── Block stream panel ───────────────────────────── */
+.block-stream-panel {
+  display: flex; flex-direction: column; flex: 45; border-left: 1px solid var(--glass-2-border);
+  background: var(--raised); overflow: hidden;
+}
+.block-stream-panel.hidden { flex: 0; overflow: hidden; min-width: 0; }
+.block-stream-header {
+  padding: 10px 12px; border-bottom: 1px solid var(--glass-2-border); flex-shrink: 0;
+}
+.block-stream-header h3 {
+  font-size: 0.72rem; color: var(--eth-blue); font-weight: 700; display: flex;
+  align-items: center; gap: 6px; font-family: var(--font-sans);
+}
+.block-stream-header .stream-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--fail);
+  transition: background 300ms var(--ease);
+}
+.block-stream-header .stream-dot.live { background: var(--sage); animation: streamPulse 1.5s ease-in-out infinite; }
+@keyframes streamPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.block-stream-stats {
+  padding: 8px 12px; border-bottom: 1px solid var(--glass-2-border);
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px; flex-shrink: 0;
+}
+.block-stat { display: flex; flex-direction: column; gap: 1px; }
+.block-stat .bs-label { font-size: 0.52rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); font-family: var(--font-sans); }
+.block-stat .bs-value { font-size: 0.72rem; color: var(--text); font-weight: 600; }
+.block-stat .bs-value.number { color: var(--eth-blue); }
+.block-stat .bs-value.hash { color: var(--bone); font-size: 0.6rem; }
+.block-list { flex: 1; overflow-y: auto; padding: 6px; }
+.block-item {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 4px; border-left: 2px solid var(--eth-blue-dim);
+  animation: blockSlideIn 300ms var(--ease);
+}
+.block-item.latest { border-left-color: var(--eth-blue); background: rgba(98,126,234,0.04); }
+@keyframes blockSlideIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
+.block-item .bi-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; }
+.block-item .bi-number { font-size: 0.72rem; color: var(--eth-blue); font-weight: 700; }
+.block-item .bi-time { font-size: 0.55rem; color: var(--text-dim); }
+.block-item .bi-hash { font-size: 0.55rem; color: var(--bone); word-break: break-all; opacity: 0.8; }
+.block-item .bi-details { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; margin-top: 4px; font-size: 0.55rem; }
+.block-item .bi-detail { color: var(--text-dim); }
+.block-item .bi-detail span { color: var(--text); }
+
+/* ── Status bar ───────────────────────────────────── */
+.status-bar {
+  padding: 4px 20px; border-top: 1px solid var(--glass-2-border); background: var(--raised);
+  display: flex; gap: 16px; font-size: 0.58rem; color: var(--text-dim); flex-shrink: 0;
+  align-items: center; height: 26px;
+}
+.status-bar .cost { color: var(--bone); text-shadow: var(--bone-bloom); }
+.status-bar .scenario-state { color: var(--rose-dim); font-weight: 600; }
+.status-bar .scenario-state.running { color: var(--rose); }
+
+/* ── Connect screen ───────────────────────────────── */
+.connect-screen {
+  position: absolute; inset: 0; background: var(--void); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 16px; z-index: 100;
+  transition: opacity 300ms var(--ease);
+}
+.connect-screen.hidden { opacity: 0; pointer-events: none; }
+.connect-screen h2 { color: var(--rose-bright); font-family: var(--font-serif); font-size: 1.3rem; font-weight: 400; }
+.connect-screen p { color: var(--text-dim); font-size: 0.8rem; font-family: var(--font-sans); }
+.connect-screen code {
+  background: var(--raised); border: 1px solid var(--glass-2-border);
+  padding: 8px 16px; border-radius: 8px; color: var(--sage); font-size: 0.8rem;
+}
+.connect-screen .retry-btn {
+  background: var(--rose-deep); border: 1px solid var(--rose-dim); color: var(--rose-bright);
+  padding: 8px 20px; border-radius: 8px; font-family: var(--font-sans); cursor: pointer; margin-top: 8px;
+}
+
+/* ── Model selector ───────────────────────────────── */
+.model-selector { position: relative; display: inline-flex; align-items: center; }
+.model-btn {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); color: var(--text-dim);
+  padding: 3px 10px; border-radius: 6px; font-family: var(--font-mono); font-size: 0.62rem;
+  cursor: pointer; transition: all 200ms var(--ease); display: flex; align-items: center; gap: 4px;
+}
+.model-btn:hover { color: var(--text); border-color: var(--rose-dim); }
+.model-btn .arrow { font-size: 0.5rem; }
+.model-dropdown {
+  display: none; position: absolute; top: calc(100% + 4px); right: 0; z-index: 200;
+  background: var(--raised); border: 1px solid var(--glass-2-border); border-radius: 10px;
+  padding: 4px; min-width: 200px; backdrop-filter: blur(20px);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+.model-dropdown.open { display: block; }
+.model-dropdown .model-group { padding: 4px 8px 2px; font-size: 0.55rem; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim); font-family: var(--font-sans); }
+.model-dropdown .model-opt {
+  padding: 5px 10px; border-radius: 6px; font-size: 0.65rem; color: var(--text);
+  cursor: pointer; transition: background 100ms var(--ease); display: flex; justify-content: space-between;
+}
+.model-dropdown .model-opt:hover { background: var(--rose-deep); }
+.model-dropdown .model-opt.active { color: var(--rose-bright); }
+.model-dropdown .model-opt .provider-tag { color: var(--text-dim); font-size: 0.55rem; }
+
+/* ── Autocomplete ─────────────────────────────────── */
+.autocomplete-wrap { position: relative; flex: 1; }
+.autocomplete-wrap input { width: 100%; }
+.autocomplete-list {
+  display: none; position: absolute; bottom: calc(100% + 4px); left: 0; right: 0; z-index: 200;
+  background: var(--raised); border: 1px solid var(--glass-2-border); border-radius: 10px;
+  padding: 4px; backdrop-filter: blur(20px); box-shadow: 0 -8px 32px rgba(0,0,0,0.6);
+}
+.autocomplete-list.open { display: block; }
+.autocomplete-item {
+  padding: 6px 10px; border-radius: 6px; font-size: 0.7rem; color: var(--text);
+  cursor: pointer; transition: background 100ms var(--ease);
+}
+.autocomplete-item:hover, .autocomplete-item.selected { background: var(--rose-deep); color: var(--rose-bright); }
+.autocomplete-item .hint { color: var(--text-dim); font-size: 0.6rem; margin-left: 8px; }
+
+/* ── Pane spinner / overlay ───────────────────────── */
+.pane-spinner {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  position: absolute; inset: 0; background: rgba(6,6,8,0.85); z-index: 10;
+  font-size: 0.7rem; color: var(--text-dim); transition: opacity 300ms var(--ease);
+  font-family: var(--font-sans);
+}
+.pane-spinner.hidden { opacity: 0; pointer-events: none; }
+.pane-spinner .spinner-ring {
+  width: 16px; height: 16px; border: 2px solid var(--glass-2-border);
+  border-top-color: var(--rose); border-radius: 50%;
+  animation: spin 800ms linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.pane-overlay {
+  position: absolute; inset: 0; background: rgba(6,6,8,0.9); z-index: 10;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; transition: opacity 300ms var(--ease);
+}
+.pane-overlay.hidden { opacity: 0; pointer-events: none; }
+.pane-overlay .overlay-icon { font-size: 1.5rem; color: var(--warn); }
+.pane-overlay .overlay-title { font-size: 0.72rem; color: var(--text); font-weight: 600; font-family: var(--font-sans); }
+.pane-overlay .overlay-detail { font-size: 0.62rem; color: var(--text-dim); text-align: center; max-width: 200px; font-family: var(--font-sans); }
+
+/* ── Gate items ───────────────────────────────────── */
+.gate-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 0.68rem; }
+.gate-icon {
+  width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 0.6rem; transition: all 300ms var(--ease), transform 300ms var(--ease);
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); color: var(--text-dim);
+}
+.gate-row.pass .gate-icon { background: rgba(112,136,122,0.2); border-color: var(--sage); color: var(--sage); transform: scale(1.05); }
+.gate-row.fail .gate-icon { background: rgba(195,110,85,0.2); border-color: var(--fail); color: var(--fail); transform: scale(1.05); }
+.gate-row .gate-name { color: var(--text-dim); font-family: var(--font-sans); }
+.gate-row.pass .gate-name { color: var(--sage); }
+.gate-row.fail .gate-name { color: var(--fail); }
+
+/* ── Comparison metrics ───────────────────────────── */
+.compare-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 0.68rem; }
+.compare-row .compare-label { color: var(--text-dim); flex: 1; font-family: var(--font-sans); }
+.compare-row .compare-left { color: var(--warn); text-align: right; min-width: 60px; }
+.compare-row .compare-right { color: var(--sage); text-align: right; min-width: 60px; }
+.compare-header { display: flex; justify-content: space-between; font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 4px; padding: 0 0 2px; border-bottom: 1px solid var(--glass-2-border); font-family: var(--font-sans); }
+
+/* ── Chat tips ────────────────────────────────────── */
+.chat-demo-info { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.chat-demo-info .chat-tip {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); border-radius: 8px;
+  padding: 8px 10px; font-size: 0.62rem; color: var(--text-dim); line-height: 1.6;
+  border-left: 2px solid var(--rose-dim); font-family: var(--font-sans);
+}
+.chat-demo-info .chat-tip code {
+  background: rgba(255,255,255,0.04); padding: 1px 5px; border-radius: 3px;
+  color: var(--rose-bright); font-size: 0.6rem; font-family: var(--font-mono);
+}
+.chat-demo-info .chat-tip .tip-label {
+  color: var(--rose); font-weight: 600; text-transform: uppercase; font-size: 0.52rem;
+  letter-spacing: 0.06em; display: block; margin-bottom: 4px;
+}
+
+/* ── Fade transition ──────────────────────────────── */
+.fade-out { opacity: 0; transition: opacity 150ms var(--ease); }
+
+/* ── Reduced motion ───────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="logo">&#9670; roko</span>
+  <div class="tabs" id="tabs" role="tablist">
+    <button class="tab active" data-tab="selfhost" role="tab" aria-selected="true"><span class="tab-num">1</span> Self-Hosting</button>
+    <button class="tab" data-tab="builder" role="tab"><span class="tab-num">2</span> Build</button>
+    <button class="tab" data-tab="race" role="tab"><span class="tab-num">3</span> Cost Race</button>
+    <button class="tab" data-tab="providers" role="tab"><span class="tab-num">4</span> Providers</button>
+    <button class="tab" data-tab="explore" role="tab"><span class="tab-num">5</span> Explore</button>
+    <button class="tab" data-tab="chat" role="tab"><span class="tab-num">6</span> Chat</button>
+    <button class="tab" data-tab="mirage" role="tab"><span class="tab-num">7</span> Mirage</button>
+  </div>
+  <span class="spacer"></span>
+  <div class="page-links">
+    <a href="bench.html">Bench</a>
+    <a href="bench-live.html">Live</a>
+    <a href="explorer.html">Explorer</a>
+    <a href="builder.html">Builder</a>
+  </div>
+  <div class="controls">
+    <div class="model-selector">
+      <button class="model-btn" id="model-btn" title="Select model">
+        <span id="model-label">auto</span> <span class="arrow">&#9662;</span>
+      </button>
+      <div class="model-dropdown" id="model-dropdown"></div>
+    </div>
+    <span class="speed" id="speed-btn" title="Typing speed">1x</span>
+  </div>
+</div>
+
+<div class="intro-band" id="intro-band">
+  <span class="intro-title" id="intro-title">Self-Hosting</span>
+  <span class="intro-sub" id="intro-sub">Watch roko develop itself — from idea to running code.</span>
+</div>
+
+<div class="main" id="main-area">
+  <div class="terminal-zone" id="terminal-zone"></div>
+  <div class="panel-zone" id="panel-zone">
+    <div class="panel-canvas" id="panel-canvas" aria-hidden="true">
+      <canvas id="viz-canvas"></canvas>
+    </div>
+    <div class="panel-stats" id="panel-stats"></div>
+    <div class="panel-timeline" id="panel-timeline">
+      <div class="panel-section-title">Progress</div>
+      <ol class="timeline-list" id="timeline-list" role="list"></ol>
+    </div>
+    <div class="panel-cmdlog" id="panel-cmdlog">
+      <div class="panel-cmdlog-header">
+        <h4>Commands</h4>
+        <button class="copy-all-btn" id="copy-all-btn" onclick="copyAllCommands()" title="Copy all commands">copy</button>
+      </div>
+      <div class="cmd-log" id="cmd-log" role="log">
+        <div class="cmd-log-empty">commands will appear here as they run...</div>
+      </div>
+    </div>
+  </div>
+  <div class="block-stream-panel hidden" id="block-stream-panel">
+    <div class="block-stream-header">
+      <h3><div class="stream-dot" id="stream-dot"></div> Block Stream</h3>
+    </div>
+    <div class="block-stream-stats" id="block-stats">
+      <div class="block-stat"><span class="bs-label">Block</span><span class="bs-value number" id="bs-number">--</span></div>
+      <div class="block-stat"><span class="bs-label">Network</span><span class="bs-value" id="bs-network">--</span></div>
+      <div class="block-stat"><span class="bs-label">Hash</span><span class="bs-value hash" id="bs-hash">--</span></div>
+      <div class="block-stat"><span class="bs-label">Blocks/sec</span><span class="bs-value" id="bs-rate">--</span></div>
+    </div>
+    <div class="block-list" id="block-list"></div>
+  </div>
+  <div class="connect-screen hidden" id="connect-screen">
+    <h2>&#9670; roko serve not running</h2>
+    <p>Start the control plane to enable live terminals:</p>
+    <code>cargo run -p roko-cli -- serve</code>
+    <button class="retry-btn" onclick="checkServer()">Retry Connection</button>
+    <p style="font-size:0.65rem;margin-top:4px" id="retry-timer">auto-retry in 5s...</p>
+  </div>
+</div>
+
+<div class="prompt-bar" id="prompt-bar">
+  <span class="chevron">&#10095;</span>
+  <div class="autocomplete-wrap">
+    <input type="text" id="prompt-input" placeholder="What do you want to build?" autocomplete="off">
+    <div class="autocomplete-list" id="autocomplete-list"></div>
+  </div>
+  <div class="preset-cards">
+    <button class="preset-card" onclick="submitBuild('Build a CLI calculator in Rust')">calculator</button>
+    <button class="preset-card" onclick="submitBuild('Create a REST API with health check')">REST API</button>
+    <button class="preset-card" onclick="submitBuild('Write a markdown to HTML converter')">md&#8594;html</button>
+    <button class="preset-card" onclick="submitBuild('Build a file deduplication tool')">dedup</button>
+    <button class="preset-card" onclick="submitBuild('Create a git commit message generator')">commitgen</button>
+  </div>
+  <button class="build-btn" id="btn-build" onclick="submitBuild()">Build</button>
+</div>
+
+<div class="mirage-bar" id="mirage-bar">
+  <label>Network</label>
+  <select id="mirage-network">
+    <option value="mainnet">Ethereum Mainnet</option>
+    <option value="arbitrum">Arbitrum One</option>
+    <option value="optimism">Optimism</option>
+    <option value="base">Base</option>
+  </select>
+  <label>Block time (ms)</label>
+  <input type="number" id="mirage-blocktime" value="50" min="10" max="12000" step="10">
+  <button class="mirage-start-btn" id="mirage-start-btn" onclick="startMirage()">Start Mirage</button>
+  <button class="mirage-stop-btn" id="mirage-stop-btn" onclick="stopMirage()">Stop</button>
+</div>
+
+<div class="playback-bar" role="toolbar" aria-label="Playback controls">
+  <div class="playback-controls">
+    <button class="pb-btn primary" id="pb-play" title="Play (Space)">&#9654;</button>
+    <button class="pb-btn" id="pb-pause" title="Pause (Space)" style="display:none">&#10074;&#10074;</button>
+    <button class="pb-btn" id="pb-next" title="Next step (N)" disabled>&#9654;&#10073;</button>
+    <button class="pb-btn" id="pb-reset" title="Reset (R)">&#8634;</button>
+  </div>
+  <div class="mode-toggle">
+    <button class="mode-btn active" id="mode-auto">Auto</button>
+    <button class="mode-btn" id="mode-step">Step</button>
+  </div>
+  <div class="pb-progress" id="pb-progress">
+    <span class="step-count" id="pb-step-label">--</span>
+  </div>
+  <div class="pb-cmd-preview" id="pb-cmd-preview">press Play to begin</div>
+</div>
+
+<div class="status-bar">
+  <span class="scenario-state" id="sb-state">ready</span>
+  <span class="cost" id="sb-cost">$0.000</span>
+  <span id="sb-tokens">0 tokens</span>
+  <span id="sb-model">--</span>
+  <span id="sb-time">0.0s</span>
+  <span style="margin-left:auto" id="sb-server">connecting...</span>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script>
+// ── Config ────────────────────────────────────────────────
+const SERVE_URL = location.protocol === 'file:'
+  ? 'http://localhost:6677'
+  : (location.port === '6677' || location.pathname.startsWith('/demo'))
+    ? location.origin : 'http://localhost:6677';
+const WS_BASE = SERVE_URL.replace(/^http/, 'ws');
+
+const THEME = {
+  background: '#060608', foreground: '#B0A0B0', cursor: '#CC90A8', cursorAccent: '#060608',
+  selectionBackground: '#3A2030',
+  black: '#060608', red: '#C36E55', green: '#70887A', yellow: '#AA8855',
+  blue: '#7873a5', magenta: '#AA7088', cyan: '#6a9ea0', white: '#C8B890',
+  brightBlack: '#706070', brightRed: '#d48a6e', brightGreen: '#99c4ac', brightYellow: '#d9b870',
+  brightBlue: '#9d98c4', brightMagenta: '#CC90A8', brightCyan: '#8abcbe', brightWhite: '#ede0c8',
+};
+
+const PROMPT_RE = /[❯\$%>#]\s*$/;
+
+const MIRAGE_NETWORKS = {
+  mainnet:  { rpc: 'https://eth.llamarpc.com',          name: 'Ethereum', chainId: 1 },
+  arbitrum: { rpc: 'https://arb1.arbitrum.io/rpc',      name: 'Arbitrum', chainId: 42161 },
+  optimism: { rpc: 'https://mainnet.optimism.io',       name: 'Optimism', chainId: 10 },
+  base:     { rpc: 'https://mainnet.base.org',          name: 'Base',     chainId: 8453 },
+};
+
+// Command descriptions for the log panel
+const CMD_DESCRIPTIONS = {
+  'prd idea': 'Captures a raw work item idea into the PRD backlog. Stored as a one-liner that can be expanded into a full PRD later.',
+  'prd draft new': 'Dispatches an agent to expand an idea into a structured PRD document with sections for motivation, design, tasks, and success criteria.',
+  'prd plan': 'Generates a concrete implementation plan (tasks.toml) from a published PRD. The plan contains a DAG of tasks with dependencies.',
+  'status': 'Queries the signal store and reports counts across episodes, efficiency metrics, and workspace health.',
+  'init': 'Bootstraps a .roko/ directory with default config, signal store, and learning state. Required once per workspace.',
+  'run': 'Executes the universal loop: compose a system prompt, dispatch to an agent, run gate validation (compile/test/clippy), persist results.',
+  'doctor': 'Diagnoses workspace state: checks config, providers, dependencies, and reports any missing or misconfigured components.',
+  'learn all': 'Displays all learning state: cascade router weights, prompt experiments, gate thresholds, and efficiency metrics.',
+  'learn efficiency': 'Shows per-turn efficiency events: tokens used, cost, latency, and model selection decisions.',
+  'config providers list': 'Lists all configured LLM providers with their status, API key presence, and available models.',
+  'config models list': 'Shows the full model catalog across all providers, with routing tiers and capability tags.',
+  'knowledge stats': 'Reports durable knowledge store statistics: entry count, tiers, memory usage, and last distillation time.',
+  'knowledge query': 'Searches the neuro knowledge store by topic. Returns relevant entries ranked by relevance and recency.',
+  'agent list': 'Lists all registered agents with their status, domain, and last activity timestamp.',
+  'agent create': 'Creates a new agent from a manifest with a name, domain, and optional tool/model constraints.',
+  'bench demo': 'Runs a simulated benchmark comparing naive single-model execution against cascade-routed optimization.',
+  'prd list': 'Lists all PRDs in the workspace with their lifecycle stage (idea/draft/published/planned).',
+  'research topic': 'Dispatches a research agent to investigate a topic using web search and returns structured findings with citations.',
+  'research enhance-prd': 'Enriches an existing PRD with research findings, adding context, prior art, and implementation references.',
+  'research analyze': 'Analyzes execution data (episodes, efficiency events) and produces insights about agent performance patterns.',
+  'plan list': 'Lists all implementation plans in the workspace with their completion status and task counts.',
+  'plan run': 'Executes a plan — runs tasks in dependency order, dispatches agents, validates with gates, persists results. The main orchestration loop.',
+  'plan validate': 'Lints tasks.toml without executing. Checks DAG validity, dependency cycles, and missing fields.',
+  'dashboard': 'Opens the interactive ratatui TUI with F1-F7 tabs for monitoring agents, plans, episodes, and metrics.',
+  'prd status': 'Coverage report across all PRDs — shows how many have plans, how many tasks are completed.',
+  'prd consolidate': 'Scans PRDs for gaps and duplicates across the entire backlog.',
+  'learn tune gates': 'Adjusts adaptive gate thresholds based on recent pass/fail rates.',
+  'learn tune routing': 'Updates cascade router model weights based on cost/quality tradeoffs.',
+  'config validate': 'Validates roko.toml against the schema. Reports any invalid fields or missing required sections.',
+  'config set-secret': 'Securely stores an API key or secret, encrypted at rest.',
+  'replay': 'Walks the signal DAG from a given hash, showing the chain of transforms that produced it.',
+  'explain': 'Concept explainer with 3 depth levels (brief/standard/deep). Uses the knowledge store for context.',
+};
+
+// ── State ─────────────────────────────────────────────────
+let terminals = [];
+let currentScenario = 'selfhost';
+let paused = false;
+let running = false;
+let speedMultiplier = 1;
+let ROKO = 'roko';
+let rokoResolved = false;
+let serverUp = false;
+let startTime = 0;
+let timerInterval = null;
+let builderReady = false;
+let mirageWs = null;
+let mirageBlockCount = 0;
+let mirageLastBlockTime = 0;
+let commandLog = [];
+
+// ── PlaybackController ────────────────────────────────────
+const PlaybackController = {
+  mode: 'auto',
+  _stepResolve: null,
+  _currentStep: 0,
+  _totalSteps: 0,
+
+  waitForStep() {
+    if (this.mode === 'auto') return Promise.resolve();
+    return new Promise(resolve => {
+      this._stepResolve = resolve;
+      $('pb-next').disabled = false;
+      $('pb-next').classList.add('primary');
+    });
+  },
+
+  advanceStep() {
+    if (this._stepResolve) {
+      const r = this._stepResolve;
+      this._stepResolve = null;
+      $('pb-next').disabled = true;
+      $('pb-next').classList.remove('primary');
+      r();
+    }
+  },
+
+  setProgress(n, total, cmd) {
+    this._currentStep = n;
+    this._totalSteps = total;
+    $('pb-step-label').textContent = `Step ${n}/${total}`;
+    $('pb-cmd-preview').textContent = cmd || '';
+    $('pb-cmd-preview').title = cmd || '';
+  },
+
+  setMode(mode) {
+    this.mode = mode;
+    $('mode-auto').classList.toggle('active', mode === 'auto');
+    $('mode-step').classList.toggle('active', mode === 'step');
+    if (mode === 'auto' && this._stepResolve) this.advanceStep();
+  },
+
+  reset() {
+    this._stepResolve = null;
+    this._currentStep = 0;
+    this._totalSteps = 0;
+    $('pb-step-label').textContent = '--';
+    $('pb-cmd-preview').textContent = 'press Play to begin';
+    $('pb-next').disabled = true;
+    $('pb-next').classList.remove('primary');
+  }
+};
+
+// ── TimelineStepper ───────────────────────────────────────
+const TimelineStepper = {
+  _steps: [],
+
+  init(stepDefs) {
+    this._steps = stepDefs;
+    const list = $('timeline-list');
+    list.innerHTML = stepDefs.map((s, i) =>
+      `<li data-num="${i+1}" class="pending"><div><span>${escHtml(s.label)}</span>${s.sublabel ? `<div class="timeline-sublabel">${escHtml(s.sublabel)}</div>` : ''}</div></li>`
+    ).join('');
+  },
+
+  setActive(idx) {
+    const items = $('timeline-list').querySelectorAll('li');
+    items.forEach((li, i) => {
+      if (i < idx) { li.className = 'completed'; }
+      else if (i === idx) { li.className = 'active'; }
+      else { li.className = 'pending'; }
+    });
+  },
+
+  reset() {
+    const items = $('timeline-list').querySelectorAll('li');
+    items.forEach(li => li.className = 'pending');
+  }
+};
+
+// ── PanelSystem ───────────────────────────────────────────
+const PanelSystem = {
+  currentViz: null,
+
+  setupFor(scenarioKey) {
+    const panelStats = $('panel-stats');
+    const panelTimeline = $('panel-timeline');
+    const panelCanvas = $('panel-canvas');
+
+    switch (scenarioKey) {
+      case 'selfhost':
+        panelStats.innerHTML = `
+          <div class="stat-card is-primary"><div class="stat-label">Cost</div><div class="stat-value" id="m-cost">--</div></div>
+          <div class="stat-card"><div class="stat-label">Tokens</div><div class="stat-value" id="m-tokens">--</div></div>
+          <div class="stat-card"><div class="stat-label">Model</div><div class="stat-value" id="m-model">--</div></div>
+          <div class="stat-card"><div class="stat-label">Time</div><div class="stat-value" id="m-time">--</div></div>
+        `;
+        panelTimeline.style.display = '';
+        panelCanvas.classList.remove('hidden');
+        this.initViz('pipeline');
+        break;
+
+      case 'builder':
+        panelStats.innerHTML = `
+          <div class="stat-card is-primary"><div class="stat-label">Cost</div><div class="stat-value" id="m-cost">--</div></div>
+          <div class="stat-card"><div class="stat-label">Tokens</div><div class="stat-value" id="m-tokens">--</div></div>
+          <div class="stat-card"><div class="stat-label">Model</div><div class="stat-value" id="m-model">--</div></div>
+          <div class="stat-card"><div class="stat-label">Gates</div><div class="stat-value" id="m-gates">--</div></div>
+        `;
+        panelTimeline.style.display = '';
+        panelCanvas.classList.add('hidden');
+        break;
+
+      case 'race':
+        panelStats.innerHTML = `
+          <div class="stat-card" style="grid-column:1/-1">
+            <div class="stat-label">Comparison</div>
+            <div class="compare-header"><span>metric</span><span>naive</span><span>cascade</span></div>
+            <div class="compare-row"><span class="compare-label">cost</span><span class="compare-left" id="cmp-cost-l">--</span><span class="compare-right" id="cmp-cost-r">--</span></div>
+            <div class="compare-row"><span class="compare-label">tokens</span><span class="compare-left" id="cmp-tok-l">--</span><span class="compare-right" id="cmp-tok-r">--</span></div>
+            <div class="compare-row"><span class="compare-label">model</span><span class="compare-left" id="cmp-mod-l">--</span><span class="compare-right" id="cmp-mod-r">--</span></div>
+            <div class="compare-row"><span class="compare-label">time</span><span class="compare-left" id="cmp-time-l">--</span><span class="compare-right" id="cmp-time-r">--</span></div>
+          </div>
+        `;
+        panelTimeline.style.display = '';
+        panelCanvas.classList.remove('hidden');
+        this.initViz('bars');
+        break;
+
+      case 'providers':
+        panelStats.innerHTML = `
+          <div class="stat-card"><div class="stat-label">Zhipu</div><div class="stat-value" id="prov-zhipu">pending</div></div>
+          <div class="stat-card"><div class="stat-label">OpenAI</div><div class="stat-value" id="prov-openai">pending</div></div>
+          <div class="stat-card"><div class="stat-label">Anthropic</div><div class="stat-value" id="prov-anthropic">pending</div></div>
+          <div class="stat-card"><div class="stat-label">Moonshot</div><div class="stat-value" id="prov-moonshot">pending</div></div>
+        `;
+        panelTimeline.style.display = '';
+        panelCanvas.classList.remove('hidden');
+        this.initViz('network');
+        break;
+
+      case 'explore':
+        panelStats.innerHTML = `
+          <div class="stat-card"><div class="stat-label">Workspace</div><div class="stat-value" id="exp-workspace">0/3</div></div>
+          <div class="stat-card"><div class="stat-label">Learning</div><div class="stat-value" id="exp-learning">0/3</div></div>
+          <div class="stat-card"><div class="stat-label">Config</div><div class="stat-value" id="exp-config">0/3</div></div>
+          <div class="stat-card"><div class="stat-label">Knowledge</div><div class="stat-value" id="exp-knowledge">0/3</div></div>
+        `;
+        panelTimeline.style.display = '';
+        panelCanvas.classList.remove('hidden');
+        this.initViz('radial');
+        break;
+
+      case 'chat':
+        panelStats.innerHTML = `
+          <div class="stat-card"><div class="stat-label">Mode</div><div class="stat-value" id="m-model">chat TUI</div></div>
+          <div class="stat-card"><div class="stat-label">Auth</div><div class="stat-value" id="m-auth">auto-detect</div></div>
+          <div class="stat-card is-primary"><div class="stat-label">Cost</div><div class="stat-value" id="m-cost">$0.000</div></div>
+          <div class="stat-card"><div class="stat-label">Tokens</div><div class="stat-value" id="m-tokens">0</div></div>
+        `;
+        panelTimeline.style.display = '';
+        panelCanvas.classList.remove('hidden');
+        this.initViz('orbit');
+        break;
+
+      case 'mirage':
+        // Panel zone hidden for mirage
+        panelStats.innerHTML = '';
+        panelTimeline.style.display = 'none';
+        panelCanvas.classList.add('hidden');
+        break;
+    }
+  },
+
+  initViz(type) {
+    this.teardown();
+    const canvas = $('viz-canvas');
+    if (!canvas || !window.THREE) return;
+
+    const parent = $('panel-canvas');
+    const w = parent.clientWidth || 300;
+    const h = parent.clientHeight || 180;
+
+    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    renderer.setSize(w, h);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-w/2, w/2, h/2, -h/2, 0.1, 100);
+    camera.position.z = 10;
+
+    let animId = null;
+    const state = { nodes: [], edges: [], t: 0 };
+
+    switch (type) {
+      case 'pipeline': this._buildPipeline(scene, state, w, h); break;
+      case 'bars': this._buildBars(scene, state, w, h); break;
+      case 'network': this._buildNetwork(scene, state, w, h); break;
+      case 'radial': this._buildRadial(scene, state, w, h); break;
+      case 'orbit': this._buildOrbit(scene, state, w, h); break;
+    }
+
+    const animate = () => {
+      animId = requestAnimationFrame(animate);
+      state.t += 0.01;
+      this._updateViz(type, scene, state);
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    this.currentViz = { renderer, scene, camera, animId, state, type };
+  },
+
+  _buildPipeline(scene, state, w, h) {
+    const labels = ['idea', 'PRD', 'plan', 'execute', 'learn'];
+    const spacing = w / (labels.length + 1);
+    labels.forEach((label, i) => {
+      const geo = new THREE.CircleGeometry(12, 32);
+      const mat = new THREE.MeshBasicMaterial({ color: 0x3A2030 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(-w/2 + spacing * (i+1), 0, 0);
+      scene.add(mesh);
+      state.nodes.push({ mesh, mat, active: false });
+
+      // Edge to next
+      if (i < labels.length - 1) {
+        const points = [
+          new THREE.Vector3(-w/2 + spacing * (i+1) + 14, 0, 0),
+          new THREE.Vector3(-w/2 + spacing * (i+2) - 14, 0, 0)
+        ];
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+        const lineMat = new THREE.LineBasicMaterial({ color: 0x7A5060, transparent: true, opacity: 0.4 });
+        const line = new THREE.Line(lineGeo, lineMat);
+        scene.add(line);
+        state.edges.push(line);
+      }
+
+      // Label as sprite
+      const c = document.createElement('canvas');
+      c.width = 80; c.height = 24;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#B0A0B0'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(label, 40, 16);
+      const tex = new THREE.CanvasTexture(c);
+      const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+      const sprite = new THREE.Sprite(spriteMat);
+      sprite.scale.set(60, 18, 1);
+      sprite.position.set(-w/2 + spacing * (i+1), -24, 0);
+      scene.add(sprite);
+    });
+
+    // Traveling particle
+    const particleGeo = new THREE.CircleGeometry(4, 16);
+    const particleMat = new THREE.MeshBasicMaterial({ color: 0xCC90A8 });
+    const particle = new THREE.Mesh(particleGeo, particleMat);
+    particle.visible = false;
+    scene.add(particle);
+    state.particle = particle;
+    state.particleProgress = 0;
+    state.spacing = spacing;
+    state.w = w;
+  },
+
+  _buildBars(scene, state, w, h) {
+    // Two bars: naive (left) and cascade (right)
+    const barW = 40;
+    const maxH = h * 0.7;
+    const colors = [0x7A5060, 0xCC90A8];
+    const labels = ['naive', 'cascade'];
+
+    [-1, 1].forEach((side, i) => {
+      const geo = new THREE.PlaneGeometry(barW, 1);
+      const mat = new THREE.MeshBasicMaterial({ color: colors[i] });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(side * 50, -h/2 + 30, 0);
+      mesh.scale.y = 0;
+      scene.add(mesh);
+      state.nodes.push({ mesh, height: 0, maxH });
+
+      const c = document.createElement('canvas');
+      c.width = 80; c.height = 24;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#B0A0B0'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(labels[i], 40, 16);
+      const tex = new THREE.CanvasTexture(c);
+      const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+      const sprite = new THREE.Sprite(spriteMat);
+      sprite.scale.set(60, 18, 1);
+      sprite.position.set(side * 50, -h/2 + 12, 0);
+      scene.add(sprite);
+    });
+    state.barValues = [0, 0];
+  },
+
+  _buildNetwork(scene, state, w, h) {
+    // Center node + 4 radial nodes
+    const centerGeo = new THREE.CircleGeometry(16, 32);
+    const centerMat = new THREE.MeshBasicMaterial({ color: 0xAA7088 });
+    const center = new THREE.Mesh(centerGeo, centerMat);
+    scene.add(center);
+    state.nodes.push({ mesh: center, mat: centerMat });
+
+    const providers = ['zhipu', 'openai', 'anthropic', 'moonshot'];
+    const radius = Math.min(w, h) * 0.35;
+    providers.forEach((p, i) => {
+      const angle = (Math.PI * 2 * i / 4) - Math.PI / 2;
+      const x = Math.cos(angle) * radius;
+      const y = Math.sin(angle) * radius;
+
+      const geo = new THREE.CircleGeometry(10, 24);
+      const mat = new THREE.MeshBasicMaterial({ color: 0x3A2030 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(x, y, 0);
+      scene.add(mesh);
+      state.nodes.push({ mesh, mat, active: false });
+
+      // Edge
+      const points = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(x, y, 0)];
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+      const lineMat = new THREE.LineBasicMaterial({ color: 0x7A5060, transparent: true, opacity: 0.3 });
+      const line = new THREE.Line(lineGeo, lineMat);
+      scene.add(line);
+      state.edges.push({ line, mat: lineMat });
+    });
+  },
+
+  _buildRadial(scene, state, w, h) {
+    // Center node + 4 branches with 3 leaves each
+    const centerGeo = new THREE.CircleGeometry(12, 32);
+    const centerMat = new THREE.MeshBasicMaterial({ color: 0xAA7088 });
+    const center = new THREE.Mesh(centerGeo, centerMat);
+    scene.add(center);
+
+    const branchRadius = Math.min(w, h) * 0.25;
+    const leafRadius = Math.min(w, h) * 0.42;
+
+    for (let b = 0; b < 4; b++) {
+      const angle = (Math.PI * 2 * b / 4) - Math.PI / 2;
+      const bx = Math.cos(angle) * branchRadius;
+      const by = Math.sin(angle) * branchRadius;
+
+      const geo = new THREE.CircleGeometry(8, 24);
+      const mat = new THREE.MeshBasicMaterial({ color: 0x3A2030 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(bx, by, 0);
+      scene.add(mesh);
+
+      for (let l = 0; l < 3; l++) {
+        const leafAngle = angle + (l - 1) * 0.4;
+        const lx = Math.cos(leafAngle) * leafRadius;
+        const ly = Math.sin(leafAngle) * leafRadius;
+
+        const leafGeo = new THREE.CircleGeometry(5, 16);
+        const leafMat = new THREE.MeshBasicMaterial({ color: 0x302830 });
+        const leafMesh = new THREE.Mesh(leafGeo, leafMat);
+        leafMesh.position.set(lx, ly, 0);
+        scene.add(leafMesh);
+        state.nodes.push({ mesh: leafMesh, mat: leafMat, branch: b, leaf: l });
+
+        const points = [new THREE.Vector3(bx, by, 0), new THREE.Vector3(lx, ly, 0)];
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+        const lineMat = new THREE.LineBasicMaterial({ color: 0x7A5060, transparent: true, opacity: 0.2 });
+        scene.add(new THREE.Line(lineGeo, lineMat));
+      }
+    }
+  },
+
+  _buildOrbit(scene, state, w, h) {
+    // Center hex-ish circle + orbiting labels
+    const centerGeo = new THREE.CircleGeometry(18, 6);
+    const centerMat = new THREE.MeshBasicMaterial({ color: 0xAA7088 });
+    const center = new THREE.Mesh(centerGeo, centerMat);
+    scene.add(center);
+
+    const labels = ['chat', 'serve', 'gates', 'learn', 'dispatch'];
+    const radius = Math.min(w, h) * 0.35;
+    labels.forEach((label, i) => {
+      const geo = new THREE.CircleGeometry(6, 16);
+      const mat = new THREE.MeshBasicMaterial({ color: 0x7A5060 });
+      const mesh = new THREE.Mesh(geo, mat);
+      scene.add(mesh);
+      state.nodes.push({ mesh, angle: (Math.PI * 2 * i / labels.length), radius, speed: 0.2 + i * 0.05 });
+    });
+  },
+
+  _updateViz(type, scene, state) {
+    switch (type) {
+      case 'pipeline':
+        // Animate particle along active edge
+        if (state.particle && state.particle.visible) {
+          state.particleProgress += 0.008;
+          if (state.particleProgress > 1) { state.particleProgress = 0; state.particle.visible = false; }
+          const activeIdx = state.nodes.findIndex(n => n.active) || 0;
+          const startX = -state.w/2 + state.spacing * (activeIdx + 1);
+          const endX = -state.w/2 + state.spacing * (activeIdx + 2);
+          state.particle.position.x = startX + (endX - startX) * state.particleProgress;
+        }
+        break;
+      case 'bars':
+        state.nodes.forEach((n, i) => {
+          const target = state.barValues[i] * n.maxH;
+          const current = n.mesh.scale.y;
+          n.mesh.scale.y += (target - current) * 0.05;
+          n.mesh.position.y = -80 + n.mesh.scale.y / 2;
+        });
+        break;
+      case 'orbit':
+        state.nodes.forEach(n => {
+          const a = n.angle + state.t * n.speed;
+          n.mesh.position.x = Math.cos(a) * n.radius;
+          n.mesh.position.y = Math.sin(a) * n.radius;
+        });
+        break;
+    }
+  },
+
+  activateNode(idx) {
+    if (!this.currentViz) return;
+    const state = this.currentViz.state;
+    if (state.nodes[idx]) {
+      state.nodes[idx].active = true;
+      state.nodes[idx].mat.color.setHex(0xCC90A8);
+      // Trigger particle
+      if (state.particle && idx < state.nodes.length - 1) {
+        state.particle.visible = true;
+        state.particleProgress = 0;
+      }
+    }
+  },
+
+  setBarValue(idx, val) {
+    if (!this.currentViz || this.currentViz.type !== 'bars') return;
+    this.currentViz.state.barValues[idx] = Math.min(val, 1);
+  },
+
+  teardown() {
+    if (this.currentViz) {
+      cancelAnimationFrame(this.currentViz.animId);
+      this.currentViz.renderer.dispose();
+      this.currentViz.scene.clear();
+      this.currentViz = null;
+    }
+  },
+
+  resize() {
+    if (!this.currentViz) return;
+    const parent = $('panel-canvas');
+    const w = parent.clientWidth; const h = parent.clientHeight;
+    if (w > 0 && h > 0) {
+      this.currentViz.renderer.setSize(w, h);
+      this.currentViz.camera.left = -w/2; this.currentViz.camera.right = w/2;
+      this.currentViz.camera.top = h/2; this.currentViz.camera.bottom = -h/2;
+      this.currentViz.camera.updateProjectionMatrix();
+    }
+  }
+};
+
+// ── Helpers ───────────────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms / speedMultiplier)); }
+function rawSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function $(id) { return document.getElementById(id); }
+function stripAnsi(s) { return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, ''); }
+
+function setState(label, isRunning) {
+  const el = $('sb-state');
+  el.textContent = label;
+  el.classList.toggle('running', !!isRunning);
+}
+
+function setIntro(title, sub) {
+  $('intro-title').textContent = title;
+  $('intro-sub').textContent = sub;
+}
+
+// ── Command log ───────────────────────────────────────────
+function lookupCmdDesc(cmd) {
+  const stripped = cmd.replace(/^(\.\/target\/(release|debug)\/)?roko\s+/, '');
+  for (const [pattern, desc] of Object.entries(CMD_DESCRIPTIONS)) {
+    if (stripped.startsWith(pattern)) return desc;
+  }
+  return null;
+}
+
+function logCommand(cmd, customDesc) {
+  const desc = customDesc || lookupCmdDesc(cmd) || 'Executing command...';
+  commandLog.push({ cmd, desc });
+
+  const log = $('cmd-log');
+  const empty = log.querySelector('.cmd-log-empty');
+  if (empty) empty.remove();
+
+  const entry = document.createElement('div');
+  entry.className = 'cmd-entry';
+  entry.innerHTML = `
+    <div class="cmd-text" onclick="navigator.clipboard.writeText(this.textContent)" title="Click to copy">${escHtml(cmd)}</div>
+    <div class="cmd-desc">${escHtml(desc)}</div>
+  `;
+  log.appendChild(entry);
+  log.scrollTop = log.scrollHeight;
+}
+
+function clearCommandLog() {
+  commandLog = [];
+  const log = $('cmd-log');
+  log.innerHTML = '<div class="cmd-log-empty">commands will appear here as they run...</div>';
+}
+
+function copyAllCommands() {
+  if (commandLog.length === 0) return;
+  const text = commandLog.map(c => `# ${c.desc}\n${c.cmd}`).join('\n\n');
+  navigator.clipboard.writeText(text);
+  const btn = $('copy-all-btn');
+  btn.textContent = 'copied';
+  btn.classList.add('copied');
+  setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
+}
+
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Terminal management ───────────────────────────────────
+let fitDebounce = null;
+function debouncedFit(fitAddon) {
+  clearTimeout(fitDebounce);
+  fitDebounce = setTimeout(() => { try { fitAddon.fit(); } catch(e){} }, 80);
+}
+
+function createPane(label, containerId) {
+  const id = `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,5)}`;
+  const sessionId = `demo-${id}`;
+
+  const pane = document.createElement('div');
+  pane.className = 'pane';
+  pane.id = id;
+  pane.innerHTML = `
+    <div class="pane-header">
+      <div class="dot" id="dot-${id}"></div>
+      <span class="pane-label">${label}</span>
+      <span class="pane-timer" id="timer-${id}"></span>
+      <span class="pane-status" id="status-${id}">connecting...</span>
+    </div>
+    <div class="pane-term" id="term-${id}"></div>
+  `;
+  document.getElementById(containerId).appendChild(pane);
+
+  const term = new Terminal({
+    theme: THEME,
+    fontFamily: "'JetBrains Mono','Geist Mono','SF Mono','Menlo',monospace",
+    fontSize: 12, lineHeight: 1.3, cursorBlink: true, cursorStyle: 'bar',
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(document.getElementById(`term-${id}`));
+  setTimeout(() => { try { fitAddon.fit(); } catch(e){} }, 60);
+
+  const resizeObs = new ResizeObserver(() => debouncedFit(fitAddon));
+  resizeObs.observe(document.getElementById(`term-${id}`));
+
+  const entry = { id, sessionId, term, ws: null, fitAddon, resizeObs, pane, _outBuf: '', _cmdStart: 0 };
+
+  function connectWs() {
+    if (!serverUp) return;
+    const ws = new WebSocket(`${WS_BASE}/ws/terminal/${sessionId}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      entry.ws = ws;
+      const dot = document.getElementById(`dot-${id}`);
+      const st = document.getElementById(`status-${id}`);
+      if (dot) dot.classList.add('connected');
+      if (st) st.textContent = 'connected';
+      const dims = fitAddon.proposeDimensions();
+      if (dims) ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+    };
+    ws.onmessage = (e) => {
+      if (e.data instanceof ArrayBuffer) {
+        const text = new TextDecoder().decode(e.data);
+        term.write(new Uint8Array(e.data));
+        entry._outBuf += text;
+      } else {
+        term.write(e.data);
+        entry._outBuf += (typeof e.data === 'string') ? e.data : '';
+      }
+      if (entry._outBuf.length > 4096) entry._outBuf = entry._outBuf.slice(-2048);
+      detectFromOutput(entry);
+    };
+    ws.onclose = () => {
+      entry.ws = null;
+      const dot = document.getElementById(`dot-${id}`);
+      const st = document.getElementById(`status-${id}`);
+      if (dot) dot.classList.remove('connected');
+      if (st) st.textContent = 'disconnected';
+      if (entry.pane.parentNode) setTimeout(connectWs, 2000);
+    };
+    term.onData(data => { if (entry.ws && entry.ws.readyState === WebSocket.OPEN) entry.ws.send(data); });
+    term.onResize(({ cols, rows }) => {
+      if (entry.ws && entry.ws.readyState === WebSocket.OPEN)
+        entry.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    });
+  }
+  connectWs();
+
+  terminals.push(entry);
+  return entry;
+}
+
+function destroyAllTerminals() {
+  for (const entry of terminals) {
+    entry.pane.remove();
+    if (entry.ws) entry.ws.close();
+    entry.term.dispose();
+    entry.resizeObs.disconnect();
+    if (serverUp) fetch(`${SERVE_URL}/api/terminal/sessions/${entry.sessionId}`, { method: 'DELETE' }).catch(() => {});
+  }
+  terminals = [];
+}
+
+// ── Command execution ─────────────────────────────────────
+async function waitForOpen(entry, timeout = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    if (entry.ws && entry.ws.readyState === WebSocket.OPEN) return true;
+    await rawSleep(100);
+  }
+  return false;
+}
+
+async function waitForPrompt(entry, timeoutMs = 60000) {
+  const start = Date.now();
+  await rawSleep(500);
+  while (Date.now() - start < timeoutMs) {
+    if (paused) { await rawSleep(100); continue; }
+    const tail = stripAnsi(entry._outBuf || '').slice(-300);
+    if (PROMPT_RE.test(tail)) {
+      const snapshot = entry._outBuf.length;
+      await rawSleep(400);
+      if (entry._outBuf.length === snapshot) {
+        const recheck = stripAnsi(entry._outBuf || '').slice(-300);
+        if (PROMPT_RE.test(recheck)) return true;
+      }
+    }
+    await rawSleep(100);
+  }
+  return false;
+}
+
+async function waitForMarker(entry, marker, timeoutMs = 30000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if ((entry._outBuf || '').includes(marker)) return true;
+    await rawSleep(100);
+  }
+  return false;
+}
+
+function sendCmd(entry, cmd) {
+  if (!entry.ws || entry.ws.readyState !== WebSocket.OPEN) return;
+  entry.ws.send(cmd + '\r');
+}
+
+let execCmdSeq = 0;
+async function execCmd(entry, cmd, timeoutMs = 30000) {
+  const marker = `__RK${(++execCmdSeq).toString(36)}${Date.now().toString(36)}__`;
+  entry._outBuf = '';
+  sendCmd(entry, `${cmd}; echo ${marker}`);
+  return await waitForMarker(entry, marker, timeoutMs);
+}
+
+async function typeCmd(entry, cmd, charDelay = 12) {
+  if (!entry.ws || entry.ws.readyState !== WebSocket.OPEN) return;
+  for (const ch of cmd) {
+    while (paused) await rawSleep(100);
+    entry.ws.send(ch);
+    await sleep(charDelay + Math.random() * 6);
+  }
+  await sleep(40);
+  entry.ws.send('\r');
+}
+
+async function showCmd(entry, cmd, timeoutMs = 60000, customDesc) {
+  entry._outBuf = '';
+  entry._cmdStart = Date.now();
+  entry.pane.classList.add('active-cmd');
+  logCommand(cmd, customDesc);
+  await typeCmd(entry, cmd);
+  const ok = await waitForPrompt(entry, timeoutMs);
+  entry.pane.classList.remove('active-cmd');
+  const elapsed = ((Date.now() - entry._cmdStart) / 1000).toFixed(1);
+  const timerEl = document.getElementById(`timer-${entry.id}`);
+  if (timerEl) timerEl.textContent = `${elapsed}s`;
+  return ok;
+}
+
+// ── Resolve roko binary ───────────────────────────────────
+async function resolveRoko(entry) {
+  if (rokoResolved) return;
+  const marker = '__ROKO_DONE__';
+  entry._outBuf = '';
+  sendCmd(entry, 'command -v roko >/dev/null 2>&1 && echo __ROKO_PATH__ || { test -x ./target/release/roko && echo __ROKO_REL__ || { test -x ./target/debug/roko && echo __ROKO_DBG__ || echo __ROKO_NONE__; }; }; echo ' + marker);
+  await waitForMarker(entry, marker, 8000);
+  const buf = entry._outBuf || '';
+  if (buf.includes('__ROKO_PATH__')) ROKO = 'roko';
+  else if (buf.includes('__ROKO_REL__')) ROKO = './target/release/roko';
+  else if (buf.includes('__ROKO_DBG__')) ROKO = './target/debug/roko';
+  else ROKO = 'roko';
+  rokoResolved = true;
+}
+
+async function setupWorkspace(entry, dirName) {
+  const ok = await waitForOpen(entry);
+  if (!ok) { setState('ws timeout', false); return '/tmp/roko-fallback'; }
+  await waitForPrompt(entry, 10000);
+  await resolveRoko(entry);
+  const dir = `/tmp/${dirName}-${Date.now()}`;
+  await execCmd(entry, `mkdir -p ${dir} && cd ${dir}`, 5000);
+  await execCmd(entry, `${ROKO} init`, 30000);
+  await rawSleep(200);
+  entry.term.clear();
+  return dir;
+}
+
+async function joinWorkspace(entry, dir) {
+  const ok = await waitForOpen(entry);
+  if (!ok) return;
+  await waitForPrompt(entry, 10000);
+  await resolveRoko(entry);
+  await execCmd(entry, `cd ${dir}`, 3000);
+  entry.term.clear();
+}
+
+// ── Output detection ──────────────────────────────────────
+function detectFromOutput(entry) {
+  const text = entry._outBuf;
+  if (/compile.*[\u2714]|[\u2714].*compile/i.test(text)) setGate('compile', 'pass');
+  if (/compile.*[\u2716]|[\u2716].*compile/i.test(text)) setGate('compile', 'fail');
+  if (/\btest\b.*[\u2714]|[\u2714].*\btest\b/i.test(text)) setGate('test', 'pass');
+  if (/\btest\b.*[\u2716]|[\u2716].*\btest\b/i.test(text)) setGate('test', 'fail');
+  if (/clippy.*[\u2714]|[\u2714].*clippy/i.test(text)) setGate('clippy', 'pass');
+  if (/clippy.*[\u2716]|[\u2716].*clippy/i.test(text)) setGate('clippy', 'fail');
+  if (/compile.*\bpass\b|compile.*\bok\b/i.test(text)) setGate('compile', 'pass');
+  if (/\btest\b.*\bpass\b|\btest\b.*\bok\b/i.test(text)) setGate('test', 'pass');
+  if (/clippy.*\bpass\b|clippy.*\bok\b/i.test(text)) setGate('clippy', 'pass');
+  const costMatch = text.match(/\$(\d+\.\d+)/);
+  if (costMatch) { setMetric('m-cost', `$${costMatch[1]}`); $('sb-cost').textContent = `$${costMatch[1]}`; }
+  const tokenMatch = text.match(/(\d[\d,]*)\s*(?:tokens?|tok)/i);
+  if (tokenMatch) { setMetric('m-tokens', tokenMatch[1]); $('sb-tokens').textContent = `${tokenMatch[1]} tokens`; }
+}
+
+// ── Panel helpers ─────────────────────────────────────────
+function setMetric(id, value) { const el = $(id); if (el) el.textContent = value; }
+
+function setGate(name, state) {
+  let el = document.getElementById(`gate-${name}`);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = `gate-${name}`;
+    // Try to find a gates container in the panel stats area
+    const panelStats = $('panel-stats');
+    if (panelStats) {
+      let gatesCard = document.getElementById('gates-container');
+      if (!gatesCard) {
+        gatesCard = document.createElement('div');
+        gatesCard.id = 'gates-container';
+        gatesCard.className = 'stat-card';
+        gatesCard.style.gridColumn = '1/-1';
+        gatesCard.innerHTML = '<div class="stat-label">Gates</div>';
+        panelStats.appendChild(gatesCard);
+      }
+      gatesCard.appendChild(el);
+    }
+  }
+  el.className = `gate-row ${state}`;
+  const icon = state === 'pass' ? '\u2713' : state === 'fail' ? '\u2717' : '\u25CB';
+  el.innerHTML = `<span class="gate-icon">${icon}</span><span class="gate-name">${name}</span>`;
+}
+
+function resetPanel() {
+  clearCommandLog();
+  $('sb-cost').textContent = '$0.000'; $('sb-tokens').textContent = '0 tokens';
+  $('sb-model').textContent = '--'; $('sb-time').textContent = '0.0s';
+  TimelineStepper.reset();
+  PlaybackController.reset();
+}
+
+// ── Timer ─────────────────────────────────────────────────
+function startTimer() {
+  startTime = Date.now();
+  timerInterval = setInterval(() => {
+    if (!paused) {
+      const s = ((Date.now() - startTime) / 1000).toFixed(1);
+      setMetric('m-time', `${s}s`); $('sb-time').textContent = `${s}s`;
+    }
+  }, 100);
+}
+function stopTimer() { clearInterval(timerInterval); timerInterval = null; }
+
+// ── Mirage (block stream) ─────────────────────────────────
+let mirageRunning = false;
+
+async function startMirage() {
+  if (mirageRunning) return;
+  const networkKey = $('mirage-network').value;
+  const blockTime = parseInt($('mirage-blocktime').value) || 50;
+  const net = MIRAGE_NETWORKS[networkKey];
+  const blockTimeSec = blockTime / 1000;
+
+  mirageRunning = true;
+  mirageBlockCount = 0;
+  mirageLastBlockTime = Date.now();
+  $('mirage-start-btn').disabled = true;
+  $('mirage-stop-btn').style.display = '';
+  $('block-list').innerHTML = '';
+  $('bs-network').textContent = net.name;
+  $('bs-number').textContent = '--';
+  $('bs-hash').textContent = '--';
+  $('bs-rate').textContent = '--';
+
+  const e = terminals[0];
+  if (!e) return;
+
+  const cmd = `mirage --fork-url ${net.rpc} --block-time ${blockTimeSec}`;
+  logCommand(cmd, `Starts a local fork of ${net.name} (chain ${net.chainId}) with ${blockTime}ms block time. Mirage simulates a full EVM node, replaying state from the fork point.`);
+  e._outBuf = '';
+  sendCmd(e, cmd);
+  e.pane.classList.add('active-cmd');
+
+  const start = Date.now();
+  while (Date.now() - start < 30000) {
+    await rawSleep(200);
+    const buf = stripAnsi(e._outBuf || '');
+    if (/listening on|available on|http/i.test(buf)) break;
+  }
+  await rawSleep(500);
+
+  try {
+    mirageWs = new WebSocket('ws://127.0.0.1:8545');
+    mirageWs.onopen = () => {
+      $('stream-dot').classList.add('live');
+      mirageWs.send(JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'eth_subscribe', params: ['newHeads']
+      }));
+      logCommand(
+        'eth_subscribe("newHeads")',
+        'Subscribes to new block headers via WebSocket. Each time mirage mines a block, we receive the full header including number, hash, timestamp, gasUsed, and parent hash.'
+      );
+    };
+    mirageWs.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.method === 'eth_subscription' && msg.params && msg.params.result) {
+          handleNewBlock(msg.params.result, networkKey);
+        }
+      } catch(e) {}
+    };
+    mirageWs.onclose = () => {
+      $('stream-dot').classList.remove('live');
+    };
+  } catch(err) {
+    console.error('Mirage WS connect failed:', err);
+  }
+}
+
+function handleNewBlock(header, networkKey) {
+  mirageBlockCount++;
+  const now = Date.now();
+  const dt = (now - mirageLastBlockTime) / 1000;
+  mirageLastBlockTime = now;
+
+  const blockNum = parseInt(header.number, 16);
+  const hash = header.hash || '';
+  const gasUsed = parseInt(header.gasUsed || '0', 16);
+  const timestamp = parseInt(header.timestamp || '0', 16);
+  const parentHash = header.parentHash || '';
+  const shortHash = hash.slice(0, 10) + '...' + hash.slice(-6);
+  const shortParent = parentHash.slice(0, 10) + '...' + parentHash.slice(-6);
+
+  $('bs-number').textContent = blockNum.toLocaleString();
+  $('bs-hash').textContent = shortHash;
+  $('bs-rate').textContent = dt > 0 ? (1 / dt).toFixed(1) : '--';
+
+  const list = $('block-list');
+  const prev = list.querySelector('.block-item.latest');
+  if (prev) prev.classList.remove('latest');
+
+  const item = document.createElement('div');
+  item.className = 'block-item latest';
+  item.innerHTML = `
+    <div class="bi-top">
+      <span class="bi-number">#${blockNum.toLocaleString()}</span>
+      <span class="bi-time">${new Date(timestamp * 1000).toLocaleTimeString()}</span>
+    </div>
+    <div class="bi-hash">${hash}</div>
+    <div class="bi-details">
+      <div class="bi-detail">gas <span>${gasUsed.toLocaleString()}</span></div>
+      <div class="bi-detail">parent <span>${shortParent}</span></div>
+    </div>
+  `;
+  list.prepend(item);
+  while (list.children.length > 50) list.lastChild.remove();
+}
+
+function stopMirage() {
+  if (mirageWs) { mirageWs.close(); mirageWs = null; }
+  $('stream-dot').classList.remove('live');
+  const e = terminals[0];
+  if (e && e.ws && e.ws.readyState === WebSocket.OPEN) {
+    e.ws.send('\x03');
+    e.pane.classList.remove('active-cmd');
+  }
+  mirageRunning = false;
+  $('mirage-start-btn').disabled = false;
+  $('mirage-stop-btn').style.display = 'none';
+}
+
+// ── Scenario definitions ──────────────────────────────────
+const SCENARIOS = {
+  selfhost: {
+    title: 'Self-Hosting',
+    subtitle: 'Watch roko develop itself \u2014 from idea to running code.',
+    panes: 1, panel: true, promptBar: false, mirageBar: false,
+    labels: ['self-hosting'],
+    steps: [
+      { label: 'Capture idea', sublabel: 'prd idea' },
+      { label: 'Draft PRD', sublabel: 'prd draft new' },
+      { label: 'Generate plan', sublabel: 'prd plan' },
+      { label: 'Check status', sublabel: 'status' },
+      { label: 'Inspect learning', sublabel: 'learn all' },
+    ],
+    async run(entries) {
+      const e = entries[0];
+      setState('setting up...', true);
+      showPaneSpinner(e, 'bootstrapping workspace...');
+      await setupWorkspace(e, 'roko-demo');
+      hidePaneSpinner(e);
+      setMetric('m-model', 'haiku'); $('sb-model').textContent = 'haiku';
+      setState('Self-Hosting', true);
+
+      TimelineStepper.init(this.steps);
+
+      // Phase 1
+      await PlaybackController.waitForStep();
+      PlaybackController.setProgress(1, 5, `${ROKO} prd idea "..."`);
+      TimelineStepper.setActive(0);
+      PanelSystem.activateNode(0);
+      await showCmd(e, `${ROKO} prd idea "Wire SystemPromptBuilder into orchestrate.rs"`, 45000);
+      setMetric('m-cost', '$0.02'); $('sb-cost').textContent = '$0.02';
+      setMetric('m-tokens', '1.2k'); $('sb-tokens').textContent = '1.2k tokens';
+
+      // Phase 2
+      await PlaybackController.waitForStep();
+      PlaybackController.setProgress(2, 5, `${ROKO} prd draft new ...`);
+      TimelineStepper.setActive(1);
+      PanelSystem.activateNode(1);
+      await showCmd(e, `${ROKO} prd draft new system-prompt-wiring`, 60000);
+      setMetric('m-cost', '$0.08'); $('sb-cost').textContent = '$0.08';
+      setMetric('m-tokens', '3.8k'); $('sb-tokens').textContent = '3.8k tokens';
+
+      // Phase 3
+      await PlaybackController.waitForStep();
+      PlaybackController.setProgress(3, 5, `${ROKO} prd plan ...`);
+      TimelineStepper.setActive(2);
+      PanelSystem.activateNode(2);
+      await showCmd(e, `${ROKO} prd plan system-prompt-wiring`, 90000);
+      setMetric('m-cost', '$0.14'); $('sb-cost').textContent = '$0.14';
+      setMetric('m-tokens', '6.2k'); $('sb-tokens').textContent = '6.2k tokens';
+
+      // Phase 4
+      await PlaybackController.waitForStep();
+      PlaybackController.setProgress(4, 5, `${ROKO} status`);
+      TimelineStepper.setActive(3);
+      PanelSystem.activateNode(3);
+      await showCmd(e, `${ROKO} status`, 30000);
+      setMetric('m-cost', '$0.15'); $('sb-cost').textContent = '$0.15';
+      setMetric('m-tokens', '6.5k'); $('sb-tokens').textContent = '6.5k tokens';
+
+      // Phase 5
+      await PlaybackController.waitForStep();
+      PlaybackController.setProgress(5, 5, `${ROKO} learn all`);
+      TimelineStepper.setActive(4);
+      PanelSystem.activateNode(4);
+      await showCmd(e, `${ROKO} learn all`, 30000);
+      setMetric('m-cost', '$0.15'); $('sb-cost').textContent = '$0.15';
+
+      TimelineStepper.setActive(5); // all completed
+      setState('complete', false);
+    }
+  },
+
+  builder: {
+    title: 'Build',
+    subtitle: 'Type a prompt. Roko builds it, validates with gates, shows cost.',
+    panes: 1, panel: true, promptBar: true, mirageBar: false,
+    labels: ['builder'],
+    steps: [
+      { label: 'Submit prompt', sublabel: 'type or pick preset' },
+      { label: 'Agent builds', sublabel: 'roko run' },
+      { label: 'Gates validate', sublabel: 'compile + test + clippy' },
+    ],
+    async run(entries) {
+      const e = entries[0];
+      setState('setting up...', true);
+      showPaneSpinner(e, 'bootstrapping workspace...');
+      await setupWorkspace(e, 'roko-build');
+      hidePaneSpinner(e);
+      builderReady = true;
+      TimelineStepper.init(this.steps);
+      setState('ready \u2014 pick a preset or type', false);
+    }
+  },
+
+  race: {
+    title: 'Cost Race',
+    subtitle: 'Same task, two approaches. Left: naive single-model. Right: cascade-routed.',
+    panes: 2, panel: true, promptBar: false, mirageBar: false,
+    labels: ['naive (no replan)', 'cascade (full pipeline)'],
+    steps: [
+      { label: 'Naive run', sublabel: '--no-replan' },
+      { label: 'Cascade run', sublabel: 'full pipeline' },
+    ],
+    async run(entries) {
+      const [left, right] = entries;
+      setState('setting up...', true);
+      showPaneSpinner(left, 'creating workspace...');
+      showPaneSpinner(right, 'waiting...');
+      const dir = await setupWorkspace(left, 'roko-race');
+      hidePaneSpinner(left);
+      await joinWorkspace(right, dir);
+      hidePaneSpinner(right);
+
+      TimelineStepper.init(this.steps);
+      TimelineStepper.setActive(0);
+      setState('Cost Race', true);
+
+      const prompt = 'Build a CLI calculator in Rust';
+      const mf = getModelFlag();
+
+      PlaybackController.setProgress(1, 2, 'running both strategies...');
+
+      function trackLeft(entry) {
+        const cm = entry._outBuf.match(/\$(\d+\.\d+)/);
+        const tm = entry._outBuf.match(/(\d[\d,]*)\s*(?:tokens?|tok)/i);
+        if (cm) { const el = $('cmp-cost-l'); if (el) el.textContent = `$${cm[1]}`; PanelSystem.setBarValue(0, parseFloat(cm[1]) / 0.5); }
+        if (tm) { const el = $('cmp-tok-l'); if (el) el.textContent = tm[1]; }
+      }
+      function trackRight(entry) {
+        const cm = entry._outBuf.match(/\$(\d+\.\d+)/);
+        const tm = entry._outBuf.match(/(\d[\d,]*)\s*(?:tokens?|tok)/i);
+        if (cm) { const el = $('cmp-cost-r'); if (el) el.textContent = `$${cm[1]}`; PanelSystem.setBarValue(1, parseFloat(cm[1]) / 0.5); }
+        if (tm) { const el = $('cmp-tok-r'); if (el) el.textContent = tm[1]; }
+      }
+
+      const leftInterval = setInterval(() => trackLeft(left), 500);
+      const rightInterval = setInterval(() => trackRight(right), 500);
+
+      await Promise.all([
+        showCmd(left, `${ROKO} run "${prompt}" --no-replan${mf}`, 180000,
+          'Runs with --no-replan: uses a single model without cascade routing or gate-failure replanning. The baseline approach.'),
+        showCmd(right, `${ROKO} run "${prompt}"${mf}`, 180000,
+          'Runs with full pipeline: cascade router picks optimal models per-turn, gates validate, and failures trigger automatic replanning.'),
+      ]);
+
+      clearInterval(leftInterval);
+      clearInterval(rightInterval);
+      trackLeft(left);
+      trackRight(right);
+
+      TimelineStepper.setActive(2);
+      setState('complete', false);
+    }
+  },
+
+  providers: {
+    title: 'Providers',
+    subtitle: 'One prompt, four providers, simultaneously. Provider-agnostic by design.',
+    panes: 4, panel: true, promptBar: false, mirageBar: false,
+    labels: ['zhipu (glm-4)', 'openai (gpt-4o)', 'anthropic (haiku)', 'moonshot (v1)'],
+    steps: [
+      { label: 'Zhipu GLM-4', sublabel: 'dispatch' },
+      { label: 'OpenAI GPT-4o', sublabel: 'dispatch' },
+      { label: 'Anthropic Haiku', sublabel: 'dispatch' },
+      { label: 'Moonshot v1', sublabel: 'dispatch' },
+    ],
+    async run(entries) {
+      const providers = ['zhipu', 'openai', 'anthropic', 'moonshot'];
+      setState('setting up...', true);
+      entries.forEach((e, i) => showPaneSpinner(e, i === 0 ? 'creating workspace...' : 'waiting...'));
+      const dir = await setupWorkspace(entries[0], 'roko-providers');
+      hidePaneSpinner(entries[0]);
+      for (const e of entries.slice(1)) { await joinWorkspace(e, dir); hidePaneSpinner(e); }
+
+      TimelineStepper.init(this.steps);
+      setState('Providers', true);
+
+      const prompt = 'Build a hello-world web server';
+      const mf = getModelFlag();
+      PlaybackController.setProgress(1, 4, 'dispatching to all providers...');
+
+      await Promise.all(entries.map(async (e, i) => {
+        TimelineStepper.setActive(i);
+        PanelSystem.activateNode(i + 1); // +1 because 0 is center node
+        const ok = await showCmd(e, `${ROKO} run "${prompt}" --provider ${providers[i]}${mf}`, 180000,
+          `Dispatches the build to ${providers[i]} provider. Roko's provider-agnostic dispatch maps the same prompt and tool schema to any OpenAI-compatible or native API.`);
+        const buf = stripAnsi(e._outBuf || '');
+        if (/not configured|no.*api.*key|error.*provider|missing.*key/i.test(buf)) {
+          showPaneOverlay(e, '\u26A0', `${providers[i]} not configured`, `Set the API key env var to enable this provider.`);
+        }
+      }));
+      TimelineStepper.setActive(4);
+      setState('complete', false);
+    }
+  },
+
+  explore: {
+    title: 'Explore',
+    subtitle: '18 crates, 85 routes, 100+ commands. Four capability families at once.',
+    panes: 4, panel: true, promptBar: false, mirageBar: false,
+    labels: ['workspace', 'learning', 'config', 'knowledge'],
+    steps: [
+      { label: 'status', sublabel: 'workspace' },
+      { label: 'doctor', sublabel: 'workspace' },
+      { label: 'prd list', sublabel: 'workspace' },
+      { label: 'learn all', sublabel: 'learning' },
+      { label: 'learn efficiency', sublabel: 'learning' },
+      { label: 'learn tune gates', sublabel: 'learning' },
+      { label: 'config providers list', sublabel: 'config' },
+      { label: 'config models list', sublabel: 'config' },
+      { label: 'config validate', sublabel: 'config' },
+      { label: 'knowledge stats', sublabel: 'knowledge' },
+      { label: 'knowledge query', sublabel: 'knowledge' },
+      { label: 'explain', sublabel: 'knowledge' },
+    ],
+    async run(entries) {
+      setState('setting up...', true);
+      entries.forEach((e, i) => showPaneSpinner(e, i === 0 ? 'creating workspace...' : 'waiting...'));
+      const dir = await setupWorkspace(entries[0], 'roko-explore');
+      hidePaneSpinner(entries[0]);
+      for (const e of entries.slice(1)) { await joinWorkspace(e, dir); hidePaneSpinner(e); }
+
+      TimelineStepper.init(this.steps);
+      setState('Explore', true);
+
+      const families = [
+        [`${ROKO} status`, `${ROKO} doctor`, `${ROKO} prd list`],
+        [`${ROKO} learn all`, `${ROKO} learn efficiency`, `${ROKO} learn tune gates`],
+        [`${ROKO} config providers list`, `${ROKO} config models list`, `${ROKO} config validate`],
+        [`${ROKO} knowledge stats`, `${ROKO} knowledge query "routing"`, `${ROKO} explain "cascade routing"`],
+      ];
+
+      let stepIdx = 0;
+      await Promise.all(entries.map(async (e, i) => {
+        for (let j = 0; j < families[i].length; j++) {
+          while (paused) await rawSleep(100);
+          if (!running) return;
+          const globalStep = i * 3 + j;
+          TimelineStepper.setActive(globalStep);
+          PlaybackController.setProgress(globalStep + 1, 12, families[i][j]);
+          await showCmd(e, families[i][j], 45000);
+        }
+      }));
+      TimelineStepper.setActive(12);
+      setState('complete', false);
+    }
+  },
+
+  chat: {
+    title: 'Chat',
+    subtitle: 'The bare command is the product. Just type roko \u2014 auto-detect, auto-init, drop into chat.',
+    panes: 1, panel: true, promptBar: false, mirageBar: false,
+    labels: ['roko chat'],
+    steps: [
+      { label: 'Start TUI', sublabel: 'roko' },
+      { label: 'Send message', sublabel: 'explain cascade routing' },
+      { label: 'Slash commands', sublabel: '/status, /model' },
+    ],
+    async run(entries) {
+      const e = entries[0];
+      setState('setting up...', true);
+      showPaneSpinner(e, 'bootstrapping workspace...');
+      await setupWorkspace(e, 'roko-chat');
+      hidePaneSpinner(e);
+
+      // Show chat tips in panel
+      const panelTimeline = $('panel-timeline');
+      panelTimeline.innerHTML = `
+        <div class="panel-section-title">Tips</div>
+        <div class="chat-demo-info">
+          <div class="chat-tip">
+            <span class="tip-label">Unified command</span>
+            <code>roko</code> auto-detects auth (API keys &rarr; CLI), creates <code>.roko/</code> if missing, starts serve in-process, drops into chat.
+          </div>
+          <div class="chat-tip">
+            <span class="tip-label">Slash commands</span>
+            <code>/model</code> switch models &middot; <code>/status</code> workspace health &middot; <code>/agent</code> switch agents &middot; <code>/cost</code> session summary
+          </div>
+          <div class="chat-tip">
+            <span class="tip-label">Architecture</span>
+            Single process: chat TUI + agent dispatch + serve + gates + learning. No sidecars, no port hunting.
+          </div>
+        </div>
+      `;
+
+      TimelineStepper.init(this.steps);
+      setState('Chat', true);
+
+      // Phase 1: start roko
+      await PlaybackController.waitForStep();
+      PlaybackController.setProgress(1, 3, ROKO);
+      TimelineStepper.setActive(0);
+      logCommand(`${ROKO}`, 'Starts the unified chat TUI \u2014 auto-detects auth (API keys first, CLI fallback), auto-creates .roko/ if missing, starts serve in-process, drops into interactive chat.');
+
+      e._outBuf = '';
+      e._cmdStart = Date.now();
+      e.pane.classList.add('active-cmd');
+      await typeCmd(e, ROKO);
+
+      const start = Date.now();
+      while (Date.now() - start < 30000) {
+        await rawSleep(300);
+        const buf = stripAnsi(e._outBuf || '');
+        if (/❯|roko>|\/help|model|chat/i.test(buf)) break;
+      }
+      await rawSleep(800);
+
+      // Phase 2: send a message
+      await PlaybackController.waitForStep();
+      PlaybackController.setProgress(2, 3, 'explain what cascade routing does');
+      TimelineStepper.setActive(1);
+      logCommand('explain what cascade routing does', 'Sends a natural-language question to the active agent. The agent uses context from the knowledge store and responds inline with streaming markdown.');
+      e._outBuf = '';
+      await typeCmd(e, 'explain what cascade routing does', 20);
+
+      const rStart = Date.now();
+      while (Date.now() - rStart < 60000) {
+        await rawSleep(500);
+        const buf = stripAnsi(e._outBuf || '');
+        if (buf.length > 200 && /❯|roko>/i.test(buf.slice(-200))) break;
+      }
+      await rawSleep(500);
+
+      // Phase 3: slash commands
+      await PlaybackController.waitForStep();
+      PlaybackController.setProgress(3, 3, '/status');
+      TimelineStepper.setActive(2);
+      logCommand('/status', 'Runs workspace status inline from the chat TUI. Slash commands give quick access to all roko features without leaving the conversation.');
+      e._outBuf = '';
+      await typeCmd(e, '/status', 20);
+      await rawSleep(3000);
+
+      logCommand('/model', 'Shows or switches the active model. Supports all configured providers \u2014 Anthropic, OpenAI, Zhipu, Google, Moonshot, Ollama.');
+      e._outBuf = '';
+      await typeCmd(e, '/model', 20);
+      await rawSleep(2000);
+
+      e.pane.classList.remove('active-cmd');
+      const elapsed = ((Date.now() - e._cmdStart) / 1000).toFixed(1);
+      const timerEl = document.getElementById(`timer-${e.id}`);
+      if (timerEl) timerEl.textContent = `${elapsed}s`;
+      TimelineStepper.setActive(3);
+      setState('complete', false);
+    }
+  },
+
+  mirage: {
+    title: 'Mirage',
+    subtitle: 'Fork any EVM chain locally. Stream blocks in real-time with configurable block times.',
+    panes: 1, panel: false, miragePanel: true, promptBar: false, mirageBar: true,
+    labels: ['mirage'],
+    steps: [],
+    async run(entries) {
+      const e = entries[0];
+      setState('setting up...', true);
+      const ok = await waitForOpen(e);
+      if (!ok) { setState('ws timeout', false); return; }
+      await waitForPrompt(e, 10000);
+      e.term.clear();
+      setState('ready \u2014 configure and start mirage', false);
+    }
+  }
+};
+
+// ── Scenario switching ────────────────────────────────────
+async function switchScenario(name) {
+  if (running) stopScenario();
+  builderReady = false;
+  stopMirage();
+
+  const zone = $('terminal-zone');
+  zone.classList.add('fade-out');
+  await rawSleep(150);
+
+  currentScenario = name;
+  const sc = SCENARIOS[name];
+
+  document.querySelectorAll('.tab').forEach(t => {
+    const isActive = t.dataset.tab === name;
+    t.classList.toggle('active', isActive);
+    t.setAttribute('aria-selected', isActive);
+  });
+  setIntro(sc.title, sc.subtitle);
+  $('intro-band').classList.remove('collapsed');
+  $('prompt-bar').classList.toggle('visible', !!sc.promptBar);
+  $('mirage-bar').classList.toggle('visible', !!sc.mirageBar);
+
+  // Block stream panel — only visible on mirage tab
+  const bsp = $('block-stream-panel');
+  bsp.classList.toggle('hidden', name !== 'mirage');
+  if (name === 'mirage') $('block-list').innerHTML = '';
+
+  // Panel zone
+  const panelZone = $('panel-zone');
+  if (sc.panel) {
+    panelZone.classList.remove('hidden');
+    PanelSystem.setupFor(name);
+  } else {
+    panelZone.classList.add('hidden');
+    PanelSystem.teardown();
+  }
+
+  destroyAllTerminals();
+  zone.innerHTML = '';
+
+  if (sc.panes <= 2) {
+    const row = document.createElement('div');
+    row.className = 'terminal-row'; row.id = 'term-row-0';
+    zone.appendChild(row);
+    for (let i = 0; i < sc.panes; i++) createPane(sc.labels[i] || `pane ${i+1}`, 'term-row-0');
+  } else {
+    const r1 = document.createElement('div'); r1.className = 'terminal-row'; r1.id = 'term-row-0';
+    const r2 = document.createElement('div'); r2.className = 'terminal-row'; r2.id = 'term-row-1';
+    zone.appendChild(r1); zone.appendChild(r2);
+    for (let i = 0; i < 2; i++) createPane(sc.labels[i] || `pane ${i+1}`, 'term-row-0');
+    for (let i = 2; i < sc.panes; i++) createPane(sc.labels[i] || `pane ${i+1}`, 'term-row-1');
+  }
+
+  zone.classList.remove('fade-out');
+
+  paused = false;
+  resetPanel();
+  setState('ready', false);
+
+  setTimeout(() => {
+    terminals.forEach(t => { try { t.fitAddon.fit(); } catch(e){} });
+    PanelSystem.resize();
+  }, 120);
+}
+
+// ── Play / Pause / Reset ──────────────────────────────────
+async function playScenario() {
+  if (running) return;
+  if (!serverUp) { $('connect-screen').classList.remove('hidden'); return; }
+
+  running = true; paused = false;
+  $('pb-play').style.display = 'none';
+  $('pb-pause').style.display = '';
+  $('intro-band').classList.add('collapsed');
+  startTimer();
+
+  try {
+    await SCENARIOS[currentScenario].run(terminals);
+  } catch (err) {
+    console.error('Scenario error:', err);
+    setState('error', false);
+  }
+
+  running = false;
+  stopTimer();
+  $('pb-play').style.display = '';
+  $('pb-pause').style.display = 'none';
+}
+
+function pauseScenario() {
+  paused = !paused;
+  $('pb-pause').innerHTML = paused ? '&#9654;' : '&#10074;&#10074;';
+  setState(paused ? 'paused' : SCENARIOS[currentScenario].title, !paused);
+}
+
+function stopScenario() {
+  running = false; paused = false;
+  stopTimer();
+  $('pb-play').style.display = '';
+  $('pb-pause').style.display = 'none';
+  setState('stopped', false);
+}
+
+function resetScenario() {
+  stopScenario();
+  switchScenario(currentScenario);
+}
+
+// ── Builder submit ────────────────────────────────────────
+async function submitBuild(preset) {
+  const input = $('prompt-input');
+  const prompt = preset || input.value.trim();
+  if (!prompt) return;
+  input.value = '';
+
+  if (!builderReady || !terminals[0] || !terminals[0].ws) {
+    if (running) return;
+    $('btn-build').disabled = true;
+    running = true;
+    setState('initializing workspace...', true);
+    startTimer();
+    const e = terminals[0];
+    if (!e) { running = false; return; }
+    await setupWorkspace(e, 'roko-build');
+    builderReady = true;
+  }
+
+  if (!(running && builderReady)) {
+    running = true;
+    startTimer();
+  }
+
+  $('btn-build').disabled = true;
+  paused = false;
+  $('pb-play').style.display = 'none';
+  $('pb-pause').style.display = '';
+  $('intro-band').classList.add('collapsed');
+  resetPanel();
+
+  const e = terminals[0];
+  setMetric('m-model', 'auto'); $('sb-model').textContent = 'auto';
+  setState('Build', true);
+
+  TimelineStepper.setActive(1);
+  PlaybackController.setProgress(2, 3, `roko run "${prompt}"`);
+
+  const escaped = prompt.replace(/"/g, '\\"');
+  await showCmd(e, `${ROKO} run "${escaped}"${getModelFlag()}`, 180000);
+
+  TimelineStepper.setActive(3);
+  running = false;
+  stopTimer();
+  $('pb-play').style.display = '';
+  $('pb-pause').style.display = 'none';
+  $('btn-build').disabled = false;
+  setState('complete', false);
+}
+
+// ── Speed control ─────────────────────────────────────────
+const SPEEDS = [0.5, 1, 2, 4];
+let speedIdx = 1;
+function cycleSpeed() {
+  speedIdx = (speedIdx + 1) % SPEEDS.length;
+  speedMultiplier = SPEEDS[speedIdx];
+  $('speed-btn').textContent = `${SPEEDS[speedIdx]}x`;
+}
+
+// ── Model selector ────────────────────────────────────────
+const MODELS = [
+  { group: 'Anthropic', models: [
+    { id: 'claude-haiku-4-5', label: 'Haiku 4.5', tag: 'fast' },
+    { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', tag: 'balanced' },
+    { id: 'claude-opus-4-6', label: 'Opus 4.6', tag: 'best' },
+  ]},
+  { group: 'OpenAI', models: [
+    { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', tag: 'fast' },
+    { id: 'gpt-4.1', label: 'GPT-4.1', tag: 'balanced' },
+    { id: 'o4-mini', label: 'o4-mini', tag: 'reasoning' },
+  ]},
+  { group: 'Zhipu', models: [
+    { id: 'glm-4.5-flash', label: 'GLM-4.5 Flash', tag: 'fast' },
+    { id: 'glm-5.1', label: 'GLM-5.1', tag: 'balanced' },
+  ]},
+  { group: 'Google', models: [
+    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', tag: 'fast' },
+    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', tag: 'best' },
+  ]},
+  { group: 'Moonshot', models: [
+    { id: 'kimi-k2.6', label: 'Kimi K2.6', tag: 'balanced' },
+  ]},
+  { group: 'Perplexity', models: [
+    { id: 'sonar-pro', label: 'Sonar Pro', tag: 'search' },
+  ]},
+];
+
+let selectedModel = null;
+
+function buildModelDropdown() {
+  const dd = $('model-dropdown');
+  let html = '<div class="model-opt active" data-model="" onclick="selectModel(null, this)">auto <span class="provider-tag">cascade router</span></div>';
+  for (const group of MODELS) {
+    html += `<div class="model-group">${group.group}</div>`;
+    for (const m of group.models) {
+      html += `<div class="model-opt" data-model="${m.id}" onclick="selectModel('${m.id}', this)">${m.label} <span class="provider-tag">${m.tag}</span></div>`;
+    }
+  }
+  dd.innerHTML = html;
+}
+
+function selectModel(modelId, el) {
+  selectedModel = modelId;
+  $('model-label').textContent = modelId ? modelId.split('/').pop().replace(/-/g, ' ') : 'auto';
+  $('model-dropdown').classList.remove('open');
+  $('model-dropdown').querySelectorAll('.model-opt').forEach(o => o.classList.toggle('active', o.dataset.model === (modelId || '')));
+  if (modelId) { setMetric('m-model', modelId); $('sb-model').textContent = modelId; }
+  else { setMetric('m-model', 'auto'); $('sb-model').textContent = 'auto'; }
+}
+
+function getModelFlag() {
+  return selectedModel ? ` --model ${selectedModel}` : '';
+}
+
+$('model-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  $('model-dropdown').classList.toggle('open');
+});
+document.addEventListener('click', () => $('model-dropdown').classList.remove('open'));
+$('model-dropdown').addEventListener('click', (e) => e.stopPropagation());
+buildModelDropdown();
+
+// ── Autocomplete ──────────────────────────────────────────
+const SUGGESTIONS = [
+  { text: 'Build a CLI calculator in Rust', hint: 'arithmetic parser' },
+  { text: 'Create a REST API with health check', hint: 'axum + routes' },
+  { text: 'Write a markdown to HTML converter', hint: 'parser + renderer' },
+  { text: 'Build a file deduplication tool', hint: 'hash + walk' },
+  { text: 'Create a git commit message generator', hint: 'diff analysis' },
+  { text: 'Build a URL shortener service', hint: 'store + redirect' },
+  { text: 'Create a JSON schema validator', hint: 'recursive check' },
+  { text: 'Build a task queue with workers', hint: 'async + channels' },
+  { text: 'Write a log aggregator', hint: 'stream + filter' },
+  { text: 'Build a CLI password manager', hint: 'encrypt + store' },
+  { text: 'Create a rate limiter middleware', hint: 'token bucket' },
+  { text: 'Build a simple key-value store', hint: 'HashMap + persist' },
+  { text: 'Write a port scanner', hint: 'TCP connect' },
+  { text: 'Create a static site generator', hint: 'template + render' },
+  { text: 'Build a cron job scheduler', hint: 'parse + timer' },
+];
+
+let acIdx = -1;
+
+function updateAutocomplete() {
+  const input = $('prompt-input');
+  const list = $('autocomplete-list');
+  const q = input.value.trim().toLowerCase();
+  if (q.length < 2) { list.classList.remove('open'); acIdx = -1; return; }
+
+  const matches = SUGGESTIONS.filter(s => s.text.toLowerCase().includes(q)).slice(0, 6);
+  if (matches.length === 0) { list.classList.remove('open'); acIdx = -1; return; }
+
+  list.innerHTML = matches.map((s, i) =>
+    `<div class="autocomplete-item${i === acIdx ? ' selected' : ''}" data-idx="${i}" onmousedown="pickAutocomplete(${i})">${s.text}<span class="hint">${s.hint}</span></div>`
+  ).join('');
+  list.classList.add('open');
+  list._matches = matches;
+}
+
+function pickAutocomplete(idx) {
+  const list = $('autocomplete-list');
+  if (!list._matches || !list._matches[idx]) return;
+  $('prompt-input').value = list._matches[idx].text;
+  list.classList.remove('open');
+  acIdx = -1;
+}
+
+$('prompt-input').addEventListener('input', updateAutocomplete);
+$('prompt-input').addEventListener('focus', updateAutocomplete);
+$('prompt-input').addEventListener('blur', () => {
+  setTimeout(() => $('autocomplete-list').classList.remove('open'), 150);
+});
+$('prompt-input').addEventListener('keydown', (e) => {
+  const list = $('autocomplete-list');
+  const matches = list._matches || [];
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    acIdx = Math.min(acIdx + 1, matches.length - 1);
+    updateAutocomplete();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    acIdx = Math.max(acIdx - 1, -1);
+    updateAutocomplete();
+  } else if (e.key === 'Enter') {
+    if (acIdx >= 0 && matches[acIdx]) {
+      e.preventDefault();
+      pickAutocomplete(acIdx);
+    } else {
+      submitBuild();
+    }
+  } else if (e.key === 'Escape') {
+    list.classList.remove('open');
+    acIdx = -1;
+  } else {
+    acIdx = -1;
+  }
+});
+
+// ── Pane spinner / overlay helpers ─────────────────────────
+function showPaneSpinner(entry, text = 'initializing...') {
+  const existing = entry.pane.querySelector('.pane-spinner');
+  if (existing) { existing.querySelector('span:last-child').textContent = text; return; }
+  const el = document.createElement('div');
+  el.className = 'pane-spinner';
+  el.style.cssText = 'position:relative;';
+  el.innerHTML = `<div class="spinner-ring"></div><span>${escHtml(text)}</span>`;
+  entry.pane.style.position = 'relative';
+  el.style.position = 'absolute';
+  entry.pane.appendChild(el);
+}
+
+function hidePaneSpinner(entry) {
+  const el = entry.pane.querySelector('.pane-spinner');
+  if (el) { el.classList.add('hidden'); setTimeout(() => el.remove(), 300); }
+}
+
+function showPaneOverlay(entry, icon, title, detail) {
+  const el = document.createElement('div');
+  el.className = 'pane-overlay';
+  el.innerHTML = `<div class="overlay-icon">${icon}</div><div class="overlay-title">${escHtml(title)}</div><div class="overlay-detail">${escHtml(detail)}</div>`;
+  entry.pane.style.position = 'relative';
+  entry.pane.appendChild(el);
+}
+
+// ── Server check (with auto-retry) ───────────────────────
+let retryInterval = null;
+
+async function checkServer() {
+  try {
+    const r = await fetch(`${SERVE_URL}/health`, { signal: AbortSignal.timeout(3000) });
+    if (r.ok) {
+      serverUp = true;
+      $('connect-screen').classList.add('hidden');
+      $('sb-server').textContent = `server: ${SERVE_URL}`;
+      if (retryInterval) { clearInterval(retryInterval); retryInterval = null; }
+      return true;
+    }
+  } catch(e) {}
+  serverUp = false;
+  $('sb-server').textContent = 'not connected';
+  if (!retryInterval) {
+    let countdown = 5;
+    const timerEl = $('retry-timer');
+    retryInterval = setInterval(async () => {
+      countdown--;
+      if (timerEl) timerEl.textContent = `auto-retry in ${countdown}s...`;
+      if (countdown <= 0) {
+        countdown = 5;
+        if (timerEl) timerEl.textContent = 'retrying...';
+        const ok = await checkServer();
+        if (ok && !running) {
+          switchScenario(currentScenario);
+          // NO auto-play — user must click Play
+        }
+      }
+    }, 1000);
+  }
+  return false;
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.code === 'Space') { e.preventDefault(); if (running) pauseScenario(); else playScenario(); }
+  if (e.code === 'KeyN' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); PlaybackController.advanceStep(); }
+  if (e.code === 'KeyR' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); resetScenario(); }
+  const tabs = ['selfhost', 'builder', 'race', 'providers', 'explore', 'chat', 'mirage'];
+  const n = parseInt(e.key);
+  if (n >= 1 && n <= 7 && !e.metaKey && !e.ctrlKey && tabs[n-1]) { e.preventDefault(); switchScenario(tabs[n-1]); }
+});
+
+// ── Event listeners ───────────────────────────────────────
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => switchScenario(tab.dataset.tab));
+});
+$('pb-play').addEventListener('click', playScenario);
+$('pb-pause').addEventListener('click', pauseScenario);
+$('pb-next').addEventListener('click', () => PlaybackController.advanceStep());
+$('pb-reset').addEventListener('click', resetScenario);
+$('mode-auto').addEventListener('click', () => PlaybackController.setMode('auto'));
+$('mode-step').addEventListener('click', () => PlaybackController.setMode('step'));
+$('speed-btn').addEventListener('click', cycleSpeed);
+
+// Resize handler for Three.js
+window.addEventListener('resize', () => PanelSystem.resize());
+
+// ── Init ──────────────────────────────────────────────────
+(async () => {
+  const ok = await checkServer();
+  if (!ok) $('connect-screen').classList.remove('hidden');
+  switchScenario('selfhost');
+  // NO auto-play — user must click Play
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+/* OutputPreview — shared with BenchRunDetail.css */
+/* Note: output-preview-* classes are defined in BenchRunDetail.css for co-location with
+   the page that introduced them. This file is intentionally minimal. */
+
+/* GateBadge pill (animated visibility) — duplicated from BenchRunDetail.css for
+   component self-containment when used outside BenchRunDetail. */
+.gate-badge-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity var(--duration-smooth, 200ms) var(--ease, ease),
+              transform var(--duration-smooth, 200ms) var(--ease, ease);
+}
+.gate-badge-pill--hidden {
+  opacity: 0;
+  transform: scale(0.5);
+}
+.gate-badge-pill--visible {
+  opacity: 1;
+  transform: scale(1);
+}

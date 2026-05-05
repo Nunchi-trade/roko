@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>roko explorer</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&display=swap" rel="stylesheet">
+<style>
+/* ─── ROSEDUST Variables ─── */
+:root {
+  --void: #060608;
+  --raised: #0C0A0E;
+  --mid: #080810;
+  --rose: #AA7088;
+  --rose-bright: #CC90A8;
+  --rose-dim: #7A5060;
+  --rose-deep: #3A2030;
+  --rose-ember: #482838;
+  --bone: #C8B890;
+  --sage: #70887A;
+  --fail: #C36E55;
+  --warn: #AA8855;
+  --pass: #6A9870;
+  --glass-bg: rgba(255,255,255,0.03);
+  --glass-border: rgba(255,255,255,0.07);
+  --glass-2-bg: rgba(255,255,255,0.04);
+  --glass-2-border: rgba(255,255,255,0.08);
+  --text: #B0A0B0;
+  --text-dim: #706070;
+  --text-ghost: #302830;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --bone-bloom: 0 0 12px rgba(200,184,144,0.4), 0 0 32px rgba(200,184,144,0.15);
+  --font-serif: 'Instrument Serif', Georgia, serif;
+  --font-sans: 'General Sans', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', 'SF Mono', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--void);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ─── Atmospheric ─── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px, transparent 1px,
+    rgba(0,0,0,0.05) 1px, rgba(0,0,0,0.05) 2px
+  );
+}
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9998;
+  opacity: 0.03;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+}
+
+/* ─── Top Bar ─── */
+.topbar {
+  height: 44px;
+  background: var(--raised);
+  border-bottom: 1px solid var(--glass-border);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 24px;
+  flex-shrink: 0;
+}
+.logo {
+  font-family: var(--font-serif);
+  color: var(--rose-bright);
+  font-size: 1rem;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.logo:hover { opacity: 0.8; }
+.logo span { color: var(--text-dim); font-family: var(--font-sans); font-size: 0.72rem; margin-left: 8px; }
+.page-links {
+  display: flex; gap: 8px; font-size: 0.68rem;
+}
+.page-links a {
+  color: var(--text-dim); text-decoration: none; padding: 4px 10px; border-radius: 5px;
+  border: 1px solid transparent; transition: all 0.2s var(--ease);
+}
+.page-links a:hover { color: var(--text); border-color: var(--glass-2-border); }
+.page-links a.active { color: var(--rose-bright); border-color: var(--rose-dim); }
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+.tab {
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  transition: all 0.2s var(--ease);
+  position: relative;
+}
+.tab:hover { color: var(--text); background: var(--glass-bg); }
+.tab.active { color: var(--rose-bright); }
+.tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 16px;
+  right: 16px;
+  height: 2px;
+  background: var(--rose);
+  border-radius: 1px;
+}
+
+.refresh-btn {
+  background: none;
+  border: 1px solid var(--glass-2-border);
+  color: var(--text-dim);
+  padding: 5px 12px;
+  border-radius: 5px;
+  font-size: 0.7rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+}
+.refresh-btn:hover { border-color: var(--rose-dim); color: var(--text); }
+
+/* ─── Content Area ─── */
+.content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.view { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+.view.active { display: flex; }
+
+/* ─── Health View ─── */
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  padding: 24px;
+}
+.health-card {
+  background: var(--glass-2-bg);
+  border: 1px solid var(--glass-2-border);
+  border-radius: 10px;
+  padding: 20px;
+  transition: border-color 0.2s var(--ease);
+}
+.health-card:hover { border-color: var(--rose-dim); }
+.health-card.is-primary { border-top: 2px solid var(--rose); }
+.health-card .label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.health-card .value {
+  font-family: var(--font-mono);
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--rose-bright);
+}
+.health-card .value.bone {
+  color: var(--bone);
+  text-shadow: var(--bone-bloom);
+}
+.health-card .sub {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+.status-badge.ok { background: rgba(106,152,112,0.15); color: var(--pass); }
+.status-badge.degraded { background: rgba(170,136,85,0.15); color: var(--warn); }
+.status-badge.down { background: rgba(195,110,85,0.15); color: var(--fail); }
+.status-badge::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.providers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  padding: 0 24px 24px;
+}
+.provider-card {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  padding: 14px;
+}
+.provider-card .name {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.provider-card .provider-status {
+  font-size: 0.65rem;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.provider-card .dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+}
+.dot.healthy { background: var(--pass); }
+.dot.unhealthy { background: var(--fail); }
+
+.section-title {
+  font-family: var(--font-sans);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  padding: 16px 24px 8px;
+}
+
+/* ─── Status View ─── */
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 24px;
+  overflow-y: auto;
+}
+@media (max-width: 900px) { .status-grid { grid-template-columns: 1fr; } }
+
+.status-section {
+  background: var(--glass-2-bg);
+  border: 1px solid var(--glass-2-border);
+  border-radius: 10px;
+  padding: 20px;
+}
+.status-section h3 {
+  font-family: var(--font-sans);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--rose);
+  margin-bottom: 14px;
+  font-weight: 500;
+}
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.status-row:last-child { border-bottom: none; }
+.status-row .key {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.status-row .val {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text);
+}
+.status-row .val.highlight { color: var(--rose-bright); }
+
+/* ─── Episodes View ─── */
+.episodes-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.filter-input {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-2-border);
+  border-radius: 6px;
+  padding: 7px 12px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  width: 220px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.filter-input:focus { border-color: var(--rose-dim); }
+.filter-input::placeholder { color: var(--text-ghost); }
+
+.filter-select {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-2-border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  outline: none;
+  cursor: pointer;
+}
+.filter-select option { background: var(--raised); }
+
+.episode-count {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  margin-left: auto;
+}
+
+.episodes-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 24px;
+}
+
+.episode-item {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+}
+.episode-item:hover {
+  border-color: var(--rose-dim);
+  background: var(--glass-2-bg);
+}
+.episode-item.expanded {
+  border-color: var(--rose);
+  background: var(--glass-2-bg);
+}
+
+.episode-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.episode-kind {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.episode-kind.agent { background: rgba(170,112,136,0.15); color: var(--rose-bright); }
+.episode-kind.gate { background: rgba(106,152,112,0.15); color: var(--pass); }
+.episode-kind.tool { background: rgba(170,136,85,0.15); color: var(--warn); }
+.episode-kind.other { background: rgba(255,255,255,0.05); color: var(--text-dim); }
+
+.episode-id {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text);
+}
+.episode-time {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  margin-left: auto;
+}
+.episode-model {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--rose-dim);
+}
+
+.episode-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 8px;
+  padding-top: 8px;
+}
+.episode-meta-item {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+}
+.episode-meta-item .meta-label { color: var(--text-ghost); margin-right: 4px; }
+.episode-meta-item .meta-val { color: var(--text); }
+.episode-meta-item .meta-val.cost-val { color: var(--bone); }
+
+.episode-details {
+  display: none;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--glass-border);
+}
+.episode-item.expanded .episode-details { display: block; }
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 20px;
+}
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+.detail-row .dk {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+}
+.detail-row .dv {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text);
+  text-align: right;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gate-verdicts {
+  margin-top: 10px;
+}
+.gate-verdicts h4 {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+.verdict-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.verdict-chip {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  padding: 3px 8px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.verdict-chip.pass { background: rgba(106,152,112,0.12); color: var(--pass); }
+.verdict-chip.fail { background: rgba(195,110,85,0.12); color: var(--fail); }
+.verdict-chip.skip { background: rgba(255,255,255,0.04); color: var(--text-dim); }
+
+/* ─── Statehub Events ─── */
+.events-section {
+  padding: 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+.event-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.event-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+.event-type {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: rgba(170,112,136,0.12);
+  color: var(--rose);
+  white-space: nowrap;
+}
+.event-payload {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.event-time {
+  color: var(--text-ghost);
+  font-size: 0.6rem;
+  white-space: nowrap;
+}
+
+/* ─── Status Bar ─── */
+.statusbar {
+  height: 26px;
+  background: var(--raised);
+  border-top: 1px solid var(--glass-border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 20px;
+  flex-shrink: 0;
+}
+.statusbar .item {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--text-dim);
+}
+.statusbar .item .sv { color: var(--text); }
+
+/* ─── Empty state ─── */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 12px;
+  color: var(--text-dim);
+}
+.empty-state .icon {
+  font-size: 2rem;
+  opacity: 0.3;
+}
+.empty-state .msg {
+  font-size: 0.78rem;
+}
+.empty-state .hint {
+  font-size: 0.65rem;
+  color: var(--text-ghost);
+}
+
+/* ─── Loading ─── */
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+}
+.loading .spinner {
+  width: 14px; height: 14px;
+  border: 2px solid var(--glass-2-border);
+  border-top-color: var(--rose);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--glass-2-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--rose-dim); }
+
+/* ─── Reduced Motion ─── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a class="logo" href="demo.html">◆ roko <span>explorer</span></a>
+  <div class="page-links">
+    <a href="demo.html">Demo</a>
+    <a href="bench.html">Bench</a>
+    <a href="bench-live.html">Live Monitor</a>
+    <a href="explorer.html" class="active">Explorer</a>
+    <a href="builder.html">Builder</a>
+  </div>
+  <nav class="tabs" role="tablist">
+    <div class="tab active" role="tab" data-view="health" aria-selected="true">Health</div>
+    <div class="tab" role="tab" data-view="status" aria-selected="false">Status</div>
+    <div class="tab" role="tab" data-view="episodes" aria-selected="false">Episodes</div>
+    <div class="tab" role="tab" data-view="events" aria-selected="false">Events</div>
+  </nav>
+  <button class="refresh-btn" onclick="refreshAll()">↻ Refresh</button>
+</div>
+
+<div class="content">
+  <!-- ─── Health View ─── -->
+  <div class="view active" id="view-health">
+    <div class="health-grid" id="health-cards"></div>
+    <div class="section-title">Providers</div>
+    <div class="providers-grid" id="providers-grid"></div>
+  </div>
+
+  <!-- ─── Status View ─── -->
+  <div class="view" id="view-status">
+    <div class="status-grid" id="status-grid"></div>
+  </div>
+
+  <!-- ─── Episodes View ─── -->
+  <div class="view" id="view-episodes">
+    <div class="episodes-toolbar">
+      <input class="filter-input" id="episode-search" type="text" placeholder="Search by id, agent, task...">
+      <select class="filter-select" id="episode-kind-filter">
+        <option value="">All kinds</option>
+        <option value="agent_turn">Agent Turn</option>
+        <option value="gate_result">Gate Result</option>
+        <option value="tool_call">Tool Call</option>
+        <option value="plan_step">Plan Step</option>
+      </select>
+      <select class="filter-select" id="episode-sort">
+        <option value="newest">Newest first</option>
+        <option value="oldest">Oldest first</option>
+        <option value="cost">Highest cost</option>
+      </select>
+      <span class="episode-count" id="episode-count"></span>
+    </div>
+    <div class="episodes-list" id="episodes-list" role="list"></div>
+  </div>
+
+  <!-- ─── Events View ─── -->
+  <div class="view" id="view-events">
+    <div class="episodes-toolbar">
+      <select class="filter-select" id="event-type-filter">
+        <option value="">All events</option>
+        <option value="PlanStarted">PlanStarted</option>
+        <option value="PlanCompleted">PlanCompleted</option>
+        <option value="TaskStarted">TaskStarted</option>
+        <option value="TaskCompleted">TaskCompleted</option>
+        <option value="GateResult">GateResult</option>
+        <option value="EpisodeRecorded">EpisodeRecorded</option>
+        <option value="CascadeRouterUpdated">CascadeRouterUpdated</option>
+      </select>
+      <span class="episode-count" id="event-count"></span>
+    </div>
+    <div class="events-section">
+      <div class="event-stream" id="event-stream" role="log"></div>
+    </div>
+  </div>
+</div>
+
+<div class="statusbar">
+  <span class="item">server <span class="sv" id="sb-server">—</span></span>
+  <span class="item">uptime <span class="sv" id="sb-uptime">—</span></span>
+  <span class="item">version <span class="sv" id="sb-version">—</span></span>
+  <span class="item">episodes <span class="sv" id="sb-episodes">—</span></span>
+  <span class="item">last refresh <span class="sv" id="sb-refresh">—</span></span>
+</div>
+
+<script>
+// ─── State ───
+let healthData = null;
+let statusData = null;
+let episodesData = [];
+let eventsData = [];
+let currentView = 'health';
+
+const API = window.location.origin + '/api';
+
+// ─── Tab Navigation ───
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    tab.classList.add('active');
+    tab.setAttribute('aria-selected', 'true');
+    currentView = tab.dataset.view;
+    document.getElementById('view-' + currentView).classList.add('active');
+  });
+});
+
+// ─── Fetch Helpers ───
+async function fetchJSON(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+// ─── Health ───
+async function loadHealth() {
+  const container = document.getElementById('health-cards');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div>Loading health...</div>';
+
+  healthData = await fetchJSON(API + '/health');
+  if (!healthData) {
+    container.innerHTML = '<div class="empty-state"><div class="icon">⚡</div><div class="msg">Cannot reach server</div><div class="hint">Is roko serve running on this host?</div></div>';
+    return;
+  }
+
+  const statusClass = healthData.status === 'ok' ? 'ok' : healthData.status === 'degraded' ? 'degraded' : 'down';
+  const uptime = formatUptime(healthData.uptime_secs || 0);
+
+  container.innerHTML = `
+    <div class="health-card is-primary">
+      <div class="label">Status</div>
+      <div class="value"><span class="status-badge ${statusClass}">${healthData.status || 'unknown'}</span></div>
+      <div class="sub">uptime ${uptime}</div>
+    </div>
+    <div class="health-card">
+      <div class="label">Version</div>
+      <div class="value">${healthData.version || '—'}</div>
+    </div>
+    <div class="health-card">
+      <div class="label">Active Plans</div>
+      <div class="value">${healthData.active_plans ?? 0}</div>
+    </div>
+    <div class="health-card">
+      <div class="label">Active Agents</div>
+      <div class="value">${healthData.active_agents ?? 0}</div>
+    </div>
+    <div class="health-card">
+      <div class="label">Active Runs</div>
+      <div class="value">${healthData.active_runs ?? 0}</div>
+    </div>
+    <div class="health-card">
+      <div class="label">Providers</div>
+      <div class="value bone">${healthData.providers?.healthy ?? 0}<span style="color:var(--text-dim);font-size:0.7rem">/${healthData.providers?.total ?? 0}</span></div>
+      <div class="sub">${healthData.providers?.unhealthy ?? 0} unhealthy</div>
+    </div>
+  `;
+
+  // Update statusbar
+  document.getElementById('sb-server').textContent = healthData.status || '—';
+  document.getElementById('sb-uptime').textContent = uptime;
+  document.getElementById('sb-version').textContent = healthData.version || '—';
+
+  // Providers detail
+  renderProviders();
+}
+
+function renderProviders() {
+  const grid = document.getElementById('providers-grid');
+  if (!healthData?.providers?.details) {
+    grid.innerHTML = '';
+    return;
+  }
+  grid.innerHTML = healthData.providers.details.map(p => `
+    <div class="provider-card">
+      <div class="name">${p.name || p.id || 'unknown'}</div>
+      <div class="provider-status"><span class="dot ${p.healthy ? 'healthy' : 'unhealthy'}"></span>${p.healthy ? 'healthy' : 'unhealthy'}${p.latency_ms ? ' · ' + p.latency_ms + 'ms' : ''}</div>
+    </div>
+  `).join('');
+}
+
+// ─── Status ───
+async function loadStatus() {
+  const grid = document.getElementById('status-grid');
+  grid.innerHTML = '<div class="loading"><div class="spinner"></div>Loading status...</div>';
+
+  const [status, metrics, gates, snapshot] = await Promise.all([
+    fetchJSON(API + '/status'),
+    fetchJSON(API + '/metrics/summary'),
+    fetchJSON(API + '/gates/summary'),
+    fetchJSON(API + '/statehub/snapshot'),
+  ]);
+
+  statusData = { status, metrics, gates, snapshot };
+  let html = '';
+
+  // Workspace status
+  if (status) {
+    html += `<div class="status-section"><h3>Workspace</h3>`;
+    html += renderKV(status, ['workspace', 'workdir', 'config_path', 'initialized', 'signal_count', 'episode_count', 'plan_count', 'prd_count']);
+    html += `</div>`;
+    document.getElementById('sb-episodes').textContent = status.episode_count ?? '—';
+  }
+
+  // Metrics summary
+  if (metrics) {
+    html += `<div class="status-section"><h3>Metrics</h3>`;
+    html += renderKV(metrics);
+    html += `</div>`;
+  }
+
+  // Gates summary
+  if (gates) {
+    html += `<div class="status-section"><h3>Gates</h3>`;
+    if (Array.isArray(gates)) {
+      gates.forEach(g => {
+        html += `<div class="status-row"><span class="key">${g.name || g.gate || '?'}</span><span class="val ${g.pass_rate > 0.8 ? 'highlight' : ''}">${g.pass_rate != null ? (g.pass_rate * 100).toFixed(0) + '%' : g.status || '—'}</span></div>`;
+      });
+    } else {
+      html += renderKV(gates);
+    }
+    html += `</div>`;
+  }
+
+  // Statehub snapshot
+  if (snapshot) {
+    html += `<div class="status-section"><h3>StateHub</h3>`;
+    html += renderKV(snapshot, null, 2);
+    html += `</div>`;
+  }
+
+  if (!html) {
+    html = '<div class="empty-state" style="grid-column:1/-1"><div class="icon">◇</div><div class="msg">No status data available</div><div class="hint">Server may not be running or endpoints are not responding</div></div>';
+  }
+
+  grid.innerHTML = html;
+}
+
+function renderKV(obj, keys, maxDepth = 1, depth = 0) {
+  if (!obj || depth >= maxDepth) return '';
+  let html = '';
+  const entries = keys ? keys.filter(k => obj[k] !== undefined).map(k => [k, obj[k]]) : Object.entries(obj);
+  for (const [k, v] of entries) {
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'object' && !Array.isArray(v) && depth < maxDepth - 1) {
+      html += `<div class="status-row"><span class="key" style="font-weight:500;color:var(--rose-dim)">${k}</span><span class="val"></span></div>`;
+      html += renderKV(v, null, maxDepth, depth + 1);
+    } else {
+      const display = typeof v === 'object' ? JSON.stringify(v) : String(v);
+      html += `<div class="status-row"><span class="key">${k}</span><span class="val">${truncate(display, 60)}</span></div>`;
+    }
+  }
+  return html;
+}
+
+// ─── Episodes ───
+async function loadEpisodes() {
+  const list = document.getElementById('episodes-list');
+  list.innerHTML = '<div class="loading"><div class="spinner"></div>Loading episodes...</div>';
+
+  const data = await fetchJSON(API + '/episodes');
+  if (!data) {
+    list.innerHTML = '<div class="empty-state"><div class="icon">◇</div><div class="msg">No episodes found</div><div class="hint">Episodes appear after agent runs complete</div></div>';
+    episodesData = [];
+    updateEpisodeCount();
+    return;
+  }
+
+  episodesData = Array.isArray(data) ? data : (data.episodes || data.rows || []);
+  renderEpisodes();
+}
+
+function renderEpisodes() {
+  const list = document.getElementById('episodes-list');
+  const search = document.getElementById('episode-search').value.toLowerCase();
+  const kindFilter = document.getElementById('episode-kind-filter').value;
+  const sort = document.getElementById('episode-sort').value;
+
+  let filtered = episodesData.filter(ep => {
+    if (kindFilter && ep.kind !== kindFilter) return false;
+    if (search) {
+      const haystack = JSON.stringify(ep).toLowerCase();
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
+
+  // Sort
+  if (sort === 'newest') filtered.sort((a, b) => cmpTime(b, a));
+  else if (sort === 'oldest') filtered.sort((a, b) => cmpTime(a, b));
+  else if (sort === 'cost') filtered.sort((a, b) => (getCost(b) - getCost(a)));
+
+  updateEpisodeCount(filtered.length);
+
+  if (filtered.length === 0) {
+    list.innerHTML = '<div class="empty-state"><div class="icon">◇</div><div class="msg">No matching episodes</div><div class="hint">Try adjusting your filters</div></div>';
+    return;
+  }
+
+  list.innerHTML = filtered.slice(0, 200).map(ep => renderEpisodeItem(ep)).join('');
+
+  // Click to expand
+  list.querySelectorAll('.episode-item').forEach(el => {
+    el.addEventListener('click', () => el.classList.toggle('expanded'));
+  });
+}
+
+function renderEpisodeItem(ep) {
+  const kind = ep.kind || 'other';
+  const kindClass = kind.includes('agent') ? 'agent' : kind.includes('gate') ? 'gate' : kind.includes('tool') ? 'tool' : 'other';
+  const time = ep.timestamp ? formatTimestamp(ep.timestamp) : '—';
+  const id = truncate(ep.id || ep.episode_id || '—', 16);
+  const model = ep.model || '—';
+  const tokens = ep.usage?.total_tokens || ep.usage?.input_tokens ? `${(ep.usage.input_tokens || 0) + (ep.usage.output_tokens || 0)}` : '—';
+  const cost = getCost(ep);
+  const costStr = cost > 0 ? '$' + cost.toFixed(4) : '—';
+
+  let details = `<div class="detail-grid">`;
+  details += detailRow('Episode ID', ep.episode_id || ep.id || '—');
+  details += detailRow('Kind', ep.kind || '—');
+  details += detailRow('Agent', ep.agent_id || '—');
+  details += detailRow('Task', ep.task_id || '—');
+  details += detailRow('Model', ep.model || '—');
+  details += detailRow('Role', ep.role || '—');
+  details += detailRow('Input Signal', truncate(ep.input_signal_hash || '—', 20));
+  details += detailRow('Output Signal', truncate(ep.output_signal_hash || '—', 20));
+  if (ep.usage) {
+    details += detailRow('Input Tokens', ep.usage.input_tokens ?? '—');
+    details += detailRow('Output Tokens', ep.usage.output_tokens ?? '—');
+    details += detailRow('Cost', costStr);
+  }
+  if (ep.hdc_fingerprint) details += detailRow('HDC Fingerprint', truncate(ep.hdc_fingerprint, 24));
+  details += `</div>`;
+
+  // Gate verdicts
+  if (ep.gate_verdicts && ep.gate_verdicts.length > 0) {
+    details += `<div class="gate-verdicts"><h4>Gate Verdicts</h4><div class="verdict-list">`;
+    ep.gate_verdicts.forEach(v => {
+      const vClass = v.passed ? 'pass' : v.skipped ? 'skip' : 'fail';
+      const icon = v.passed ? '✓' : v.skipped ? '○' : '✗';
+      details += `<span class="verdict-chip ${vClass}">${icon} ${v.gate || v.name || '?'}</span>`;
+    });
+    details += `</div></div>`;
+  }
+
+  return `
+    <div class="episode-item" role="listitem">
+      <div class="episode-header">
+        <span class="episode-kind ${kindClass}">${kind.replace('_', ' ')}</span>
+        <span class="episode-id">${id}</span>
+        <span class="episode-model">${model}</span>
+        <span class="episode-time">${time}</span>
+      </div>
+      <div class="episode-meta">
+        <span class="episode-meta-item"><span class="meta-label">agent</span><span class="meta-val">${truncate(ep.agent_id || '—', 12)}</span></span>
+        <span class="episode-meta-item"><span class="meta-label">task</span><span class="meta-val">${truncate(ep.task_id || '—', 12)}</span></span>
+        <span class="episode-meta-item"><span class="meta-label">tokens</span><span class="meta-val">${tokens}</span></span>
+        <span class="episode-meta-item"><span class="meta-label">cost</span><span class="meta-val cost-val">${costStr}</span></span>
+      </div>
+      <div class="episode-details">${details}</div>
+    </div>
+  `;
+}
+
+function detailRow(key, val) {
+  return `<div class="detail-row"><span class="dk">${key}</span><span class="dv">${val}</span></div>`;
+}
+
+function updateEpisodeCount(count) {
+  const c = count !== undefined ? count : episodesData.length;
+  document.getElementById('episode-count').textContent = `${c} episode${c !== 1 ? 's' : ''}`;
+}
+
+// ─── Events ───
+async function loadEvents() {
+  const stream = document.getElementById('event-stream');
+  stream.innerHTML = '<div class="loading"><div class="spinner"></div>Loading events...</div>';
+
+  const data = await fetchJSON(API + '/statehub/events');
+  if (!data) {
+    stream.innerHTML = '<div class="empty-state"><div class="icon">◆</div><div class="msg">No events available</div><div class="hint">Events stream from StateHub during active plan runs</div></div>';
+    eventsData = [];
+    updateEventCount();
+    return;
+  }
+
+  eventsData = Array.isArray(data) ? data : (data.events || []);
+  renderEvents();
+}
+
+function renderEvents() {
+  const stream = document.getElementById('event-stream');
+  const typeFilter = document.getElementById('event-type-filter').value;
+
+  let filtered = eventsData;
+  if (typeFilter) {
+    filtered = eventsData.filter(e => {
+      const t = e.type || e.event_type || (typeof e === 'string' ? e : '');
+      return t.includes(typeFilter);
+    });
+  }
+
+  updateEventCount(filtered.length);
+
+  if (filtered.length === 0) {
+    stream.innerHTML = '<div class="empty-state"><div class="icon">◆</div><div class="msg">No matching events</div></div>';
+    return;
+  }
+
+  stream.innerHTML = filtered.slice(0, 500).map(ev => {
+    const type = ev.type || ev.event_type || 'unknown';
+    const time = ev.timestamp ? formatTimestamp(ev.timestamp) : '';
+    const payload = ev.payload ? (typeof ev.payload === 'string' ? ev.payload : JSON.stringify(ev.payload)) : JSON.stringify(ev);
+    return `
+      <div class="event-item">
+        <span class="event-type">${type}</span>
+        <span class="event-payload">${truncate(payload, 120)}</span>
+        <span class="event-time">${time}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function updateEventCount(count) {
+  const c = count !== undefined ? count : eventsData.length;
+  document.getElementById('event-count').textContent = `${c} event${c !== 1 ? 's' : ''}`;
+}
+
+// ─── Filter event listeners ───
+document.getElementById('episode-search').addEventListener('input', renderEpisodes);
+document.getElementById('episode-kind-filter').addEventListener('change', renderEpisodes);
+document.getElementById('episode-sort').addEventListener('change', renderEpisodes);
+document.getElementById('event-type-filter').addEventListener('change', renderEvents);
+
+// ─── Utilities ───
+function formatUptime(secs) {
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+function formatTimestamp(ts) {
+  try {
+    const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch { return String(ts); }
+}
+
+function truncate(s, max) {
+  if (!s) return '—';
+  s = String(s);
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
+function getCost(ep) {
+  if (ep.usage?.cost) return ep.usage.cost;
+  if (ep.cost) return ep.cost;
+  return 0;
+}
+
+function cmpTime(a, b) {
+  const ta = a.timestamp || 0;
+  const tb = b.timestamp || 0;
+  if (typeof ta === 'string' && typeof tb === 'string') return ta.localeCompare(tb);
+  return ta - tb;
+}
+
+// ─── Refresh ───
+async function refreshAll() {
+  document.getElementById('sb-refresh').textContent = 'now';
+  await Promise.all([loadHealth(), loadStatus(), loadEpisodes(), loadEvents()]);
+  document.getElementById('sb-refresh').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ─── Keyboard ───
+document.addEventListener('keydown', e => {
+  if (e.key === 'r' && !e.ctrlKey && !e.metaKey && document.activeElement.tagName !== 'INPUT') {
+    refreshAll();
+  }
+  if (e.key >= '1' && e.key <= '4' && document.activeElement.tagName !== 'INPUT') {
+    const tabs = document.querySelectorAll('.tab');
+    const idx = parseInt(e.key) - 1;
+    if (tabs[idx]) tabs[idx].click();
+  }
+});
+
+// ─── Init ───
+refreshAll();
+</script>
+</body>
+</html>

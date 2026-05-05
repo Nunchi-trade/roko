@@ -39,6 +39,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::call::ToolError;
 use super::format::ToolFormat;
 use crate::AgentRole;
 
@@ -209,6 +210,27 @@ impl FailureKind {
                 | Self::HallucinatedParam
                 | Self::SchemaInvalid
         )
+    }
+}
+
+// ─── classify_tool_error ──────────────────────────────────────────────────
+
+/// Map a [`ToolError`] variant to the corresponding [`FailureKind`].
+///
+/// This is the single authoritative mapping used by the dispatcher to emit
+/// [`FailureTrace`]s: call `classify_tool_error(&err)` to obtain the
+/// structured root cause without duplicating match logic.
+#[must_use]
+pub const fn classify_tool_error(error: &ToolError) -> FailureKind {
+    match error {
+        ToolError::SchemaInvalid(_) => FailureKind::SchemaInvalid,
+        ToolError::PermissionDenied(_)
+        | ToolError::CommandNotAllowed(_)
+        | ToolError::NetworkBlocked(_) => FailureKind::PermissionDenied,
+        ToolError::Timeout { .. } => FailureKind::Timeout,
+        ToolError::Cancelled => FailureKind::Cancelled,
+        ToolError::PathOutsideWorktree(_) => FailureKind::PathEscape,
+        ToolError::HandlerPanic(_) | ToolError::Other(_) => FailureKind::ToolHandlerError,
     }
 }
 
@@ -499,6 +521,103 @@ impl ToolTraceEvent {
             | Self::Custom { at_ms, .. } => *at_ms,
         }
     }
+
+    /// Return a scrubbed clone where string payloads have been passed through
+    /// [`LogScrubber::scrub`](crate::obs::scrub::LogScrubber::scrub).
+    #[must_use]
+    fn scrubbed(&self, scrubber: &crate::obs::scrub::LogScrubber) -> Self {
+        match self {
+            Self::PromptAssembled {
+                token_count,
+                tools_offered,
+                at_ms,
+            } => Self::PromptAssembled {
+                token_count: *token_count,
+                tools_offered: tools_offered.iter().map(|s| scrubber.scrub(s)).collect(),
+                at_ms: *at_ms,
+            },
+            Self::ToolCallParsed {
+                parser,
+                raw_bytes_len,
+                parse_ms,
+                calls_extracted,
+                at_ms,
+            } => Self::ToolCallParsed {
+                parser: scrubber.scrub(parser),
+                raw_bytes_len: *raw_bytes_len,
+                parse_ms: *parse_ms,
+                calls_extracted: *calls_extracted,
+                at_ms: *at_ms,
+            },
+            Self::ArgsValidated {
+                ok,
+                schema_errors,
+                validate_ms,
+                at_ms,
+            } => Self::ArgsValidated {
+                ok: *ok,
+                schema_errors: schema_errors.iter().map(|s| scrubber.scrub(s)).collect(),
+                validate_ms: *validate_ms,
+                at_ms: *at_ms,
+            },
+            Self::PermissionsChecked {
+                granted,
+                missing,
+                at_ms,
+            } => Self::PermissionsChecked {
+                granted: *granted,
+                missing: missing.iter().map(|s| scrubber.scrub(s)).collect(),
+                at_ms: *at_ms,
+            },
+            Self::HandlerStarted {
+                handler,
+                category,
+                concurrency,
+                at_ms,
+            } => Self::HandlerStarted {
+                handler: scrubber.scrub(handler),
+                category: *category,
+                concurrency: *concurrency,
+                at_ms: *at_ms,
+            },
+            Self::Demotion {
+                from,
+                to,
+                reason,
+                at_ms,
+            } => Self::Demotion {
+                from: from.clone(),
+                to: to.clone(),
+                reason: scrubber.scrub(reason),
+                at_ms: *at_ms,
+            },
+            Self::Serialization { reason, at_ms } => Self::Serialization {
+                reason: scrubber.scrub(reason),
+                at_ms: *at_ms,
+            },
+            Self::McpConnectionLost { server, at_ms } => Self::McpConnectionLost {
+                server: scrubber.scrub(server),
+                at_ms: *at_ms,
+            },
+            Self::Custom { name, data, at_ms } => {
+                // Scrub by re-serializing the JSON payload to a string,
+                // scrubbing it, then parsing it back. If the round-trip fails
+                // (shouldn't for valid JSON), keep the original.
+                let scrubbed_data = serde_json::to_string(data)
+                    .ok()
+                    .map(|s| scrubber.scrub(&s))
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_else(|| data.clone());
+                Self::Custom {
+                    name: scrubber.scrub(name),
+                    data: scrubbed_data,
+                    at_ms: *at_ms,
+                }
+            }
+            // Events with only numeric/copy fields — clone as-is.
+            other => other.clone(),
+        }
+    }
 }
 
 // ─── ToolTrace ────────────────────────────────────────────────────────────
@@ -542,6 +661,29 @@ impl ToolTrace {
     #[must_use]
     pub fn find_event_index(&self, pred: impl Fn(&ToolTraceEvent) -> bool) -> Option<usize> {
         self.events.iter().position(pred)
+    }
+
+    /// Return a clone of this trace with all event payloads scrubbed through
+    /// `scrubber`. String fields that could contain user secrets (tool names,
+    /// custom-event payloads, demotion reasons, parser names, schema errors,
+    /// etc.) are passed through [`LogScrubber::scrub`](crate::obs::scrub::LogScrubber::scrub).
+    ///
+    /// Callers should use this before persisting a trace to disk so that
+    /// secrets never land in `.roko/traces/`.
+    #[must_use]
+    pub fn scrubbed(&self, scrubber: &crate::obs::scrub::LogScrubber) -> Self {
+        let events = self.events.iter().map(|e| e.scrubbed(scrubber)).collect();
+        Self {
+            trace_id: self.trace_id,
+            call_id: scrubber.scrub(&self.call_id),
+            role: self.role,
+            model: scrubber.scrub(&self.model),
+            format_used: self.format_used.clone(),
+            started_at_ms: self.started_at_ms,
+            ended_at_ms: self.ended_at_ms,
+            events,
+            outcome: self.outcome.clone(),
+        }
     }
 }
 
@@ -997,5 +1139,170 @@ mod tests {
             ToolTraceEvent::StreamCoerced { at_ms: 1 },
         );
         // No panic, no state change.
+    }
+
+    // ─── classify_tool_error tests ───────────────────────────────────────
+
+    #[test]
+    fn classify_schema_invalid() {
+        let e = ToolError::SchemaInvalid("missing field".into());
+        assert_eq!(classify_tool_error(&e), FailureKind::SchemaInvalid);
+    }
+
+    #[test]
+    fn classify_permission_denied() {
+        let e = ToolError::PermissionDenied("needs write".into());
+        assert_eq!(classify_tool_error(&e), FailureKind::PermissionDenied);
+    }
+
+    #[test]
+    fn classify_timeout() {
+        let e = ToolError::Timeout { after_ms: 5_000 };
+        assert_eq!(classify_tool_error(&e), FailureKind::Timeout);
+    }
+
+    #[test]
+    fn classify_cancelled() {
+        assert_eq!(
+            classify_tool_error(&ToolError::Cancelled),
+            FailureKind::Cancelled
+        );
+    }
+
+    #[test]
+    fn classify_command_not_allowed() {
+        let e = ToolError::CommandNotAllowed("git push".into());
+        assert_eq!(classify_tool_error(&e), FailureKind::PermissionDenied);
+    }
+
+    #[test]
+    fn classify_network_blocked() {
+        let e = ToolError::NetworkBlocked("evil.example.com".into());
+        assert_eq!(classify_tool_error(&e), FailureKind::PermissionDenied);
+    }
+
+    #[test]
+    fn classify_path_outside_worktree() {
+        let e = ToolError::PathOutsideWorktree(std::path::PathBuf::from("/etc/passwd"));
+        assert_eq!(classify_tool_error(&e), FailureKind::PathEscape);
+    }
+
+    #[test]
+    fn classify_handler_panic() {
+        let e = ToolError::HandlerPanic("unwrap on None".into());
+        assert_eq!(classify_tool_error(&e), FailureKind::ToolHandlerError);
+    }
+
+    #[test]
+    fn classify_other() {
+        let e = ToolError::Other("boom".into());
+        assert_eq!(classify_tool_error(&e), FailureKind::ToolHandlerError);
+    }
+
+    #[test]
+    fn classify_all_variants_covered() {
+        // Exhaustive: every ToolError variant maps to a FailureKind.
+        let all_errors = [
+            ToolError::PermissionDenied("a".into()),
+            ToolError::SchemaInvalid("b".into()),
+            ToolError::HandlerPanic("c".into()),
+            ToolError::Timeout { after_ms: 1 },
+            ToolError::PathOutsideWorktree(std::path::PathBuf::from("/x")),
+            ToolError::CommandNotAllowed("d".into()),
+            ToolError::NetworkBlocked("e".into()),
+            ToolError::Cancelled,
+            ToolError::Other("f".into()),
+        ];
+        for err in &all_errors {
+            // Just assert it returns *something* without panicking.
+            let _kind = classify_tool_error(err);
+        }
+    }
+
+    // ─── scrubbed() tests ────────────────────────────────────────────────
+
+    #[test]
+    fn scrubbed_redacts_custom_event_payload() {
+        use crate::obs::scrub::LogScrubber;
+
+        let scrubber = LogScrubber::new();
+        let trace = ToolTrace {
+            trace_id: sample_trace_id(),
+            call_id: "call-1".into(),
+            role: AgentRole::Implementer,
+            model: "mock".into(),
+            format_used: ToolFormat::AnthropicBlocks,
+            started_at_ms: 0,
+            ended_at_ms: 10,
+            events: vec![ToolTraceEvent::Custom {
+                name: "leak".into(),
+                data: serde_json::json!({
+                    "key": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890"
+                }),
+                at_ms: 1,
+            }],
+            outcome: ToolOutcome::success(10, 0.0),
+        };
+        let scrubbed = trace.scrubbed(&scrubber);
+
+        // The secret should be gone from the custom event data.
+        let json = serde_json::to_string(&scrubbed.events[0]).unwrap();
+        assert!(!json.contains("sk-ant-api03"));
+        // `LogScrubber` replaces api-key matches with the labeled variant
+        // `[REDACTED:API_KEY]` — match on the common `[REDACTED:` prefix so
+        // adding more labeled patterns later doesn't break this test.
+        assert!(json.contains("[REDACTED:"));
+    }
+
+    #[test]
+    fn scrubbed_redacts_model_field() {
+        use crate::obs::scrub::LogScrubber;
+
+        let scrubber = LogScrubber::new();
+        let trace = ToolTrace {
+            trace_id: sample_trace_id(),
+            call_id: "c".into(),
+            role: AgentRole::Implementer,
+            // Unlikely but tests the path: model field contains a secret.
+            model: "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890".into(),
+            format_used: ToolFormat::ReActText,
+            started_at_ms: 0,
+            ended_at_ms: 10,
+            events: Vec::new(),
+            outcome: ToolOutcome::success(10, 0.0),
+        };
+        let scrubbed = trace.scrubbed(&scrubber);
+        assert!(!scrubbed.model.contains("sk-ant-api03"));
+        // Same labeling as `scrubbed_redacts_custom_event_payload`.
+        assert!(scrubbed.model.contains("[REDACTED:"));
+    }
+
+    #[test]
+    fn scrubbed_preserves_numeric_events() {
+        use crate::obs::scrub::LogScrubber;
+
+        let scrubber = LogScrubber::new();
+        let trace = ToolTrace {
+            trace_id: sample_trace_id(),
+            call_id: "c".into(),
+            role: AgentRole::Implementer,
+            model: "m".into(),
+            format_used: ToolFormat::ReActText,
+            started_at_ms: 0,
+            ended_at_ms: 10,
+            events: vec![
+                ToolTraceEvent::StreamCoerced { at_ms: 42 },
+                ToolTraceEvent::Truncation {
+                    kept: 100,
+                    total: 200,
+                    at_ms: 43,
+                },
+            ],
+            outcome: ToolOutcome::success(10, 0.0),
+        };
+        let scrubbed = trace.scrubbed(&scrubber);
+        assert_eq!(scrubbed.events.len(), 2);
+        assert_eq!(scrubbed.events[0].at_ms(), 42);
+        assert_eq!(scrubbed.events[1].at_ms(), 43);
     }
 }
