@@ -33,6 +33,7 @@ use crate::workspace_paths::{
 use anyhow::{Context as _, Result, anyhow};
 use indexmap::IndexMap;
 use roko_core::config::schema::RokoConfig;
+use roko_core::io::atomic_write_str;
 use roko_core::{Body, Engram, Kind, Provenance, Store};
 use roko_fs::FileSubstrate;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
@@ -490,41 +491,101 @@ pub struct PrdMeta {
 
 impl PrdMeta {
     /// Parse frontmatter from a PRD markdown file.
+    ///
+    /// Extracts the YAML block between `---` markers and parses it with
+    /// `serde_yaml_ng` so that values containing colons, quoted strings,
+    /// and YAML list syntax are handled correctly.
     pub fn parse(content: &str) -> Option<Self> {
         let content = content.trim();
         if !content.starts_with("---") {
             return None;
         }
         let end = content[3..].find("---")?;
-        let yaml = &content[3..3 + end];
-        let mut meta = Self::default();
-        for line in yaml.lines() {
-            let line = line.trim();
-            if let Some(val) = line.strip_prefix("id:") {
-                meta.id = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("title:") {
-                meta.title = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("status:") {
-                meta.status = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("version:") {
-                meta.version = val.trim().parse().unwrap_or(1);
-            } else if let Some(val) = line.strip_prefix("created:") {
-                meta.created = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("updated:") {
-                meta.updated = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("coverage:") {
-                meta.coverage = val.trim().parse().unwrap_or(0.0);
-            } else if let Some(val) = line
-                .strip_prefix("plan_template:")
-                .or_else(|| line.strip_prefix("plan_template ="))
-            {
-                let value = val.trim().trim_matches('"').trim_matches('\'');
-                if !value.is_empty() {
-                    meta.plan_template = Some(value.to_string());
+        let yaml_str = &content[3..3 + end];
+
+        // Also support legacy `plan_template = "strict"` TOML-ish syntax by
+        // normalizing it to valid YAML before parsing.
+        let normalized: String = yaml_str
+            .lines()
+            .map(|line| {
+                if let Some(rest) = line.strip_prefix("plan_template =") {
+                    format!("plan_template: {rest}")
+                } else if let Some(rest) = line.strip_prefix("plan_template=") {
+                    format!("plan_template: {rest}")
+                } else {
+                    line.to_string()
                 }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mapping: serde_yaml_ng::Mapping =
+            serde_yaml_ng::from_str(&normalized).unwrap_or_default();
+
+        if mapping.is_empty() {
+            // Parsing produced nothing useful — treat as no frontmatter.
+            return None;
+        }
+
+        let mut meta = Self::default();
+        meta.id = yaml_get_string(&mapping, "id").unwrap_or_default();
+        meta.title = yaml_get_string(&mapping, "title").unwrap_or_default();
+        meta.status = yaml_get_string(&mapping, "status").unwrap_or_default();
+        meta.version = yaml_get_string(&mapping, "version")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1);
+        meta.created = yaml_get_string(&mapping, "created").unwrap_or_default();
+        meta.updated = yaml_get_string(&mapping, "updated").unwrap_or_default();
+        meta.coverage = yaml_get_string(&mapping, "coverage")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        meta.depends_on = yaml_get_string_list(&mapping, "depends_on");
+        meta.crates = yaml_get_string_list(&mapping, "crates");
+        meta.plans_generated = yaml_get_string_list(&mapping, "plans_generated");
+        meta.tags = yaml_get_string_list(&mapping, "tags");
+        meta.plan_template = yaml_get_string(&mapping, "plan_template")
+            .map(|v| v.trim_matches('"').trim_matches('\'').to_string())
+            .filter(|v| !v.is_empty());
+        Some(meta)
+    }
+}
+
+/// Extract a scalar value from a YAML mapping as a `String`.
+fn yaml_get_string(mapping: &serde_yaml_ng::Mapping, key: &str) -> Option<String> {
+    let value = mapping.get(serde_yaml_ng::Value::String(key.to_string()))?;
+    match value {
+        serde_yaml_ng::Value::String(s) => Some(s.clone()),
+        serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+        serde_yaml_ng::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Extract a list of strings from a YAML mapping.
+///
+/// Supports both inline `[a, b]` and block list syntax.
+fn yaml_get_string_list(mapping: &serde_yaml_ng::Mapping, key: &str) -> Vec<String> {
+    let Some(value) = mapping.get(serde_yaml_ng::Value::String(key.to_string())) else {
+        return Vec::new();
+    };
+    match value {
+        serde_yaml_ng::Value::Sequence(seq) => seq
+            .iter()
+            .filter_map(|v| match v {
+                serde_yaml_ng::Value::String(s) => Some(s.clone()),
+                serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .collect(),
+        serde_yaml_ng::Value::String(s) => {
+            // Single scalar value — wrap in a vec.
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                vec![s.clone()]
             }
         }
-        Some(meta)
+        _ => Vec::new(),
     }
 }
 
@@ -758,7 +819,7 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
             .replace(&content, format!("updated: {today}"))
             .to_string();
     }
-    std::fs::write(&dst, &content)?;
+    atomic_write_str(&dst, &content)?;
     std::fs::remove_file(&src)?;
     println!("✅ Promoted: {}", dst.display());
     let published_at = chrono::Utc::now();
@@ -1201,7 +1262,7 @@ async fn generate_plan_from_prd_with_outcome(
             let plan_dir = plans_root.join(slug);
             std::fs::create_dir_all(&plan_dir)
                 .with_context(|| format!("create plan dir {}", plan_dir.display()))?;
-            std::fs::write(plan_dir.join("tasks.toml"), &validated_toml)
+            atomic_write_str(&plan_dir.join("tasks.toml"), &validated_toml)
                 .with_context(|| format!("write tasks.toml to {}", plan_dir.display()))?;
             println!(
                 "📋 Wrote tasks.toml ({} bytes) to {}",
@@ -1212,7 +1273,7 @@ async fn generate_plan_from_prd_with_outcome(
                 .or_else(|| extract_fenced_block(&output, "markdown"))
                 .or_else(|| extract_fenced_block(&output, "md"));
             if let Some(plan_md) = plan_md_content {
-                std::fs::write(plan_dir.join("plan.md"), plan_md)
+                atomic_write_str(&plan_dir.join("plan.md"), &plan_md)
                     .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
                 println!(
                     "📋 Wrote plan.md ({} bytes) to {}",
@@ -1224,7 +1285,7 @@ async fn generate_plan_from_prd_with_outcome(
                 let minimal_plan_md = format!(
                     "---\nplan: {slug}\ntitle: {slug}\n---\n\n# {slug}\n\nGenerated plan.\n"
                 );
-                std::fs::write(plan_dir.join("plan.md"), &minimal_plan_md)
+                atomic_write_str(&plan_dir.join("plan.md"), &minimal_plan_md)
                     .with_context(|| format!("write plan.md to {}", plan_dir.display()))?;
             }
 
@@ -1767,7 +1828,7 @@ fn update_prd_plans_generated(prd_path: &std::path::Path, plan_slug: &str) -> an
         return Ok(());
     };
 
-    std::fs::write(prd_path, updated)?;
+    atomic_write_str(prd_path, &updated)?;
     Ok(())
 }
 
@@ -2555,6 +2616,24 @@ mod tests {
         assert_eq!(meta.version, 2);
         assert!((meta.coverage - 0.5).abs() < f64::EPSILON);
         assert_eq!(meta.plan_template.as_deref(), Some("strict"));
+    }
+
+    #[test]
+    fn parse_frontmatter_colons_in_values() {
+        let content = "---\nid: prd-wire\ntitle: \"Wire: the thing\"\nstatus: draft\n---\n\n# Body\n";
+        let meta = PrdMeta::parse(content).unwrap();
+        assert_eq!(meta.id, "prd-wire");
+        assert_eq!(meta.title, "Wire: the thing");
+        assert_eq!(meta.status, "draft");
+    }
+
+    #[test]
+    fn parse_frontmatter_yaml_lists() {
+        let content =
+            "---\nid: prd-lists\ntitle: List Test\ntags: [\"infra\", \"prd\"]\ndepends_on:\n  - prd-alpha\n  - prd-beta\n---\n\n# Body\n";
+        let meta = PrdMeta::parse(content).unwrap();
+        assert_eq!(meta.tags, vec!["infra", "prd"]);
+        assert_eq!(meta.depends_on, vec!["prd-alpha", "prd-beta"]);
     }
 
     #[test]
