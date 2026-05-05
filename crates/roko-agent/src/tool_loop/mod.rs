@@ -184,6 +184,12 @@ pub struct ToolLoopOutput {
     pub checkpoint: Option<Checkpoint>,
     /// Per-turn trace metadata captured during the loop.
     pub turn_traces: Vec<ToolLoopTurnTrace>,
+    /// MCP errors accumulated during the session (non-blocking, informational).
+    ///
+    /// Populated when an [`McpErrorAccumulator`](crate::mcp::McpErrorAccumulator)
+    /// is attached to the MCP handler resolver. Empty if no MCP errors occurred
+    /// or no accumulator was configured.
+    pub mcp_errors: Vec<crate::mcp::McpErrorRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +256,9 @@ pub struct ToolLoop {
     /// Few-shot example messages inserted between system and user prompt.
     /// Dramatically improves tool-call reliability for small models.
     few_shot_messages: Vec<Value>,
+    /// Optional MCP error accumulator for IDE/ACP sessions.
+    /// When attached, MCP tool failures are recorded here non-blockingly.
+    mcp_error_accumulator: Option<crate::mcp::McpErrorAccumulator>,
 }
 
 impl ToolLoop {
@@ -273,6 +282,7 @@ impl ToolLoop {
             budget: None,
             on_turn: None,
             few_shot_messages: Vec::new(),
+            mcp_error_accumulator: None,
         }
     }
 
@@ -356,6 +366,26 @@ impl ToolLoop {
         self
     }
 
+    /// Attach an MCP error accumulator for IDE/ACP sessions.
+    ///
+    /// When set, MCP tool call failures during the session are recorded
+    /// non-blockingly. Accumulated errors are surfaced in the
+    /// [`ToolLoopOutput::mcp_errors`] field when the loop completes.
+    #[must_use]
+    pub fn with_mcp_error_accumulator(
+        mut self,
+        accumulator: crate::mcp::McpErrorAccumulator,
+    ) -> Self {
+        self.mcp_error_accumulator = Some(accumulator);
+        self
+    }
+
+    /// Borrow the attached MCP error accumulator, if any.
+    #[must_use]
+    pub fn mcp_error_accumulator(&self) -> Option<&crate::mcp::McpErrorAccumulator> {
+        self.mcp_error_accumulator.as_ref()
+    }
+
     /// Run a fresh tool loop from an initial system + user prompt.
     pub async fn run(
         &self,
@@ -384,6 +414,7 @@ impl ToolLoop {
                             )),
                             checkpoint: None,
                             turn_traces: Vec::new(),
+                            mcp_errors: Vec::new(),
                         };
                     }
                     // NotFound: no checkpoint yet, continue with fresh run
@@ -396,7 +427,7 @@ impl ToolLoop {
         } else {
             result_msg::initial_messages_with_few_shot(system, user, &self.few_shot_messages)
         };
-        self.run_inner(
+        self.run_inner_with_mcp_errors(
             messages,
             0,
             Vec::new(),
@@ -423,7 +454,7 @@ impl ToolLoop {
         } else {
             result_msg::initial_messages_with_few_shot(system, user, &self.few_shot_messages)
         };
-        self.run_inner(
+        self.run_inner_with_mcp_errors(
             messages,
             0,
             Vec::new(),
@@ -449,7 +480,7 @@ impl ToolLoop {
         ctx: &ToolContext,
         event_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> ToolLoopOutput {
-        self.run_inner(
+        self.run_inner_with_mcp_errors(
             messages,
             0,
             Vec::new(),
@@ -469,7 +500,7 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
-        self.run_inner(
+        self.run_inner_with_mcp_errors(
             cp.messages,
             cp.iterations,
             cp.tool_calls,
@@ -480,6 +511,41 @@ impl ToolLoop {
             cp.session,
         )
         .await
+    }
+
+    /// Wrapper around `run_inner` that drains the MCP error accumulator
+    /// into the output's `mcp_errors` field after the loop completes.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_inner_with_mcp_errors(
+        &self,
+        messages: Vec<serde_json::Value>,
+        iterations: usize,
+        all_calls: Vec<ToolCall>,
+        total_usage: Usage,
+        tools: &[ToolDef],
+        ctx: &ToolContext,
+        event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
+        session: SessionState,
+    ) -> ToolLoopOutput {
+        let mut output = self
+            .run_inner(
+                messages,
+                iterations,
+                all_calls,
+                total_usage,
+                tools,
+                ctx,
+                event_tx,
+                session,
+            )
+            .await;
+
+        // Drain accumulated MCP errors into the output for the caller to inspect.
+        if let Some(ref accumulator) = self.mcp_error_accumulator {
+            output.mcp_errors = accumulator.drain();
+        }
+
+        output
     }
 
     /// Core loop shared by [`run`](Self::run) and [`resume`](Self::resume).
@@ -514,6 +580,7 @@ impl ToolLoop {
                     stop_reason: StopReason::MaxIterations,
                     checkpoint: Some(cp),
                     turn_traces,
+                    mcp_errors: Vec::new(),
                 };
             }
 
@@ -529,6 +596,7 @@ impl ToolLoop {
                     stop_reason: StopReason::Cancelled,
                     checkpoint: Some(cp),
                     turn_traces,
+                    mcp_errors: Vec::new(),
                 };
             }
 
@@ -546,6 +614,7 @@ impl ToolLoop {
                         stop_reason: StopReason::BudgetExhausted,
                         checkpoint: Some(cp),
                         turn_traces,
+                        mcp_errors: Vec::new(),
                     };
                 }
             }
@@ -574,6 +643,7 @@ impl ToolLoop {
                         stop_reason: StopReason::BackendError(e.to_string()),
                         checkpoint: Some(cp),
                         turn_traces,
+                        mcp_errors: Vec::new(),
                     };
                 }
             };
@@ -632,6 +702,7 @@ impl ToolLoop {
                         stop_reason: StopReason::BackendError(format!("parse: {e}")),
                         checkpoint: Some(cp),
                         turn_traces,
+                        mcp_errors: Vec::new(),
                     };
                 }
             };
@@ -690,6 +761,7 @@ impl ToolLoop {
                     stop_reason,
                     checkpoint: None,
                     turn_traces,
+                    mcp_errors: Vec::new(),
                 };
             }
 
@@ -764,6 +836,7 @@ impl ToolLoop {
                                 )),
                                 checkpoint: Some(cp),
                                 turn_traces,
+                                mcp_errors: Vec::new(),
                             };
                         }
                     }
