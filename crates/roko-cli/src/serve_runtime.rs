@@ -570,6 +570,7 @@ fn build_runner_config(
         feed_registry: Some(feed_registry),
         feedback_facade: None,
         projection: None,
+        http_event_sink: None,
         stream_to_stderr: false,
         warm_cache: true,
     }

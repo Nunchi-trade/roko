@@ -50,6 +50,7 @@ pub mod event_bus;
 pub mod heartbeat;
 pub mod heartbeat_attention;
 pub mod heartbeat_probes;
+pub mod http_event_sink;
 pub mod jsonl_logger;
 pub mod lifecycle;
 pub mod metrics;
@@ -64,6 +65,7 @@ pub mod workflow_engine;
 
 pub use cancel::CancelToken;
 pub use effect_driver::{EffectDriver, EffectServices};
+pub use http_event_sink::HttpEventSink;
 // Foundation types re-exported from roko-core for backwards compatibility
 pub use jsonl_logger::JsonlLogger;
 pub use lifecycle::{
