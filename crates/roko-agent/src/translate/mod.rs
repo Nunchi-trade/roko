@@ -415,6 +415,15 @@ impl BackendResponse {
                         {
                             return Some("error".to_string());
                         }
+                        // Explicit stop_reason field (Claude CLI >= 1.0.16)
+                        // takes priority when present.
+                        if let Some(reason) = ev
+                            .get("stop_reason")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|s| !s.is_empty())
+                        {
+                            return Some(reason.to_string());
+                        }
                         // Detect tool use from content_block_start events or
                         // assistant message content blocks.
                         let has_tool = events.iter().any(|e| {

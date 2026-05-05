@@ -423,3 +423,7 @@ pub trait Trigger: crate::cell::Cell {
     /// Disarm the trigger, stopping all watches.
     fn disarm(&self) -> Result<()>;
 }
+
+/// Substrate — legacy alias for the `Store` trait, used by `CellContext`.
+pub trait Substrate: Store {}
+impl<T: Store + ?Sized> Substrate for T {}

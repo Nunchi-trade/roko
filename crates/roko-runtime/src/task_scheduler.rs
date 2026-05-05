@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! TaskScheduler -- pure DAG dependency resolver.
 //!
 //! Given a set of tasks with dependencies, determines which tasks are ready

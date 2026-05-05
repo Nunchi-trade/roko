@@ -28,9 +28,9 @@ roko-orchestrator = { path = "../roko-orchestrator" }
 roko-learn = { path = "../roko-learn" }
 roko-dreams = { path = "../roko-dreams" }
 roko-neuro = { path = "../roko-neuro" }
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 
 [package.metadata.roko]
 layer = 4

@@ -1773,7 +1773,28 @@ async fn run_openai_compat_cognitive_task(
         return Ok(());
     }
 
-    let caller = ModelCallService::new(model_key.to_string()).with_config(roko_config.clone());
+    let mut caller = ModelCallService::new(model_key.to_string()).with_config(roko_config.clone());
+
+    // For providers that don't support the OpenAI-compat tool loop (e.g.
+    // ClaudeCli), write session MCP servers to a temp config file so the
+    // subprocess can discover them natively via --mcp-config.
+    let _mcp_tempfile = if !mcp_servers.is_empty()
+        && !openai_compat_tool_loop_supported(resolved.provider_kind)
+    {
+        match write_mcp_servers_to_tempfile(mcp_servers) {
+            Ok(tmpfile) => {
+                caller = caller.with_mcp_config(tmpfile.path());
+                Some(tmpfile)
+            }
+            Err(err) => {
+                warn!(error = %err, "failed to write MCP config tempfile");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let request = model_call_request_from_acp_messages(model_key, messages);
     stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)
         .await
@@ -1818,6 +1839,46 @@ fn openai_compat_tool_loop_supported(provider_kind: ProviderKind) -> bool {
         provider_kind,
         ProviderKind::OpenAiCompat | ProviderKind::PerplexityApi | ProviderKind::CerebrasApi
     )
+}
+
+/// Write ACP session MCP servers to a temporary config file in the format
+/// expected by the agent-side MCP loader (`.mcp.json` schema).
+///
+/// The tempfile lives as long as the returned `NamedTempFile` handle; dropping
+/// it removes the file. Callers must hold it until the model call completes.
+fn write_mcp_servers_to_tempfile(
+    servers: &[crate::types::McpServerConfig],
+) -> std::io::Result<tempfile::NamedTempFile> {
+    use crate::types::McpTransport;
+    use std::io::Write;
+
+    let entries: Vec<serde_json::Value> = servers
+        .iter()
+        .map(|server| {
+            let mut entry = serde_json::json!({ "name": server.name });
+            match &server.transport {
+                McpTransport::Stdio { command, args } => {
+                    entry["transport"] = serde_json::json!("stdio");
+                    entry["command"] = serde_json::json!(command);
+                    entry["args"] = serde_json::json!(args);
+                }
+                McpTransport::Http { url } => {
+                    entry["transport"] = serde_json::json!("http");
+                    entry["endpoint"] = serde_json::json!(url);
+                }
+            }
+            entry
+        })
+        .collect();
+
+    let config = serde_json::json!({ "servers": entries });
+    let mut tmpfile = tempfile::Builder::new()
+        .prefix("roko-acp-mcp-")
+        .suffix(".json")
+        .tempfile()?;
+    tmpfile.write_all(config.to_string().as_bytes())?;
+    tmpfile.flush()?;
+    Ok(tmpfile)
 }
 
 #[allow(clippy::too_many_arguments)]
