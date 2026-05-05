@@ -834,7 +834,18 @@ pub trait ChainAdapter: Send + Sync {
     async fn read_state(&self, address: &ChainAddress) -> Phase2Result<RawState>;
 }
 
-/// Stylus-backed HDC precompile storage stub.
+/// Length in bytes of a packed 10,240-bit HDC vector. Matches the
+/// daeji `0xA0C` precompile and `roko_primitives::HdcVector` (`[u64; 160]`).
+pub const HDC_VECTOR_BYTES: usize = 1_280;
+
+/// Total bit width.
+pub const HDC_BITS: usize = HDC_VECTOR_BYTES * 8;
+
+/// HDC precompile storage. In-process implementation of the same algorithm
+/// the daeji `0xA0C` precompile runs (see `~/daeji/crates/precompiles/src/hdc.rs`,
+/// lifted from mirage-rs in daeji D-PR1). Bytes inputs/outputs are 1,280-byte
+/// packed HDC vectors. Similarity is returned scaled by 1e6 to match the
+/// precompile's ABI.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HdcPrecompile {
     /// Indexed vectors by hash.
@@ -844,19 +855,193 @@ pub struct HdcPrecompile {
 }
 
 impl HdcPrecompile {
-    /// Compute normalized Hamming similarity between two vectors.
-    pub fn similarity(&self, _a: Bytes, _b: Bytes) -> Phase2Result<u256> {
-        todo!("Phase 2+: compute HDC similarity via Korai precompile or Stylus")
+    /// Compute normalized Hamming similarity between two vectors, scaled
+    /// to `[0, 1_000_000]`. `1_000_000` ⇒ identical, `500_000` ⇒ random,
+    /// `0` ⇒ exact opposite. Matches mirage-rs's `0xA0C.similarity` ABI.
+    pub fn similarity(&self, a: Bytes, b: Bytes) -> Phase2Result<u256> {
+        if a.len() != HDC_VECTOR_BYTES || b.len() != HDC_VECTOR_BYTES {
+            return Err(crate::ChainError::Unsupported(format!(
+                "hdc similarity: vector len must be {HDC_VECTOR_BYTES}, got ({}, {})",
+                a.len(),
+                b.len()
+            )));
+        }
+        let mut differing: u32 = 0;
+        for (x, y) in a.iter().zip(b.iter()) {
+            differing += (x ^ y).count_ones();
+        }
+        let total = HDC_BITS as u32;
+        let matching = total - differing;
+        let sim_e6: u128 = (matching as u128 * 1_000_000) / total as u128;
+        Ok(sim_e6 as u256)
     }
 
-    /// XOR-bind two vectors.
-    pub fn bind(&self, _a: Bytes, _b: Bytes) -> Phase2Result<Bytes> {
-        todo!("Phase 2+: bind HDC vectors using XOR")
+    /// XOR-bind two vectors. Element-wise XOR over the byte buffers.
+    pub fn bind(&self, a: Bytes, b: Bytes) -> Phase2Result<Bytes> {
+        if a.len() != HDC_VECTOR_BYTES || b.len() != HDC_VECTOR_BYTES {
+            return Err(crate::ChainError::Unsupported(format!(
+                "hdc bind: vector len must be {HDC_VECTOR_BYTES}, got ({}, {})",
+                a.len(),
+                b.len()
+            )));
+        }
+        let out: Bytes = a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect();
+        Ok(out)
     }
 
-    /// Majority-vote bundle of multiple vectors.
-    pub fn bundle(&self, _vectors: Vec<Bytes>) -> Phase2Result<Bytes> {
-        todo!("Phase 2+: bundle HDC vectors via majority vote")
+    /// Majority-vote bundle of multiple vectors. Each output bit is the
+    /// majority of that bit position across all input vectors. Ties resolve
+    /// to 0 (matches mirage-rs `HdcVector::bundle` semantics).
+    pub fn bundle(&self, vectors: Vec<Bytes>) -> Phase2Result<Bytes> {
+        if vectors.is_empty() {
+            return Err(crate::ChainError::Unsupported(
+                "hdc bundle: empty input".to_string(),
+            ));
+        }
+        for v in &vectors {
+            if v.len() != HDC_VECTOR_BYTES {
+                return Err(crate::ChainError::Unsupported(format!(
+                    "hdc bundle: each vector must be {HDC_VECTOR_BYTES} bytes, got {}",
+                    v.len()
+                )));
+            }
+        }
+        // Vote tally per bit: +1 for set, -1 for unset. Strict-positive
+        // threshold breaks ties symmetrically (a vector and its negation
+        // both bundle to 0 at the tie position, avoiding positive bias).
+        let mut votes = vec![0i32; HDC_BITS];
+        for v in &vectors {
+            for (byte_idx, byte) in v.iter().enumerate() {
+                for bit in 0..8 {
+                    let bit_set = (byte >> bit) & 1 == 1;
+                    let bit_pos = byte_idx * 8 + bit;
+                    votes[bit_pos] += if bit_set { 1 } else { -1 };
+                }
+            }
+        }
+        let mut out = vec![0u8; HDC_VECTOR_BYTES];
+        for (bit_pos, vote) in votes.iter().enumerate() {
+            if *vote > 0 {
+                out[bit_pos / 8] |= 1 << (bit_pos % 8);
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod hdc_tests {
+    use super::*;
+
+    fn vec_of(byte: u8) -> Bytes {
+        vec![byte; HDC_VECTOR_BYTES]
+    }
+
+    #[test]
+    fn similarity_identical_is_full_scale() {
+        let p = HdcPrecompile::default();
+        let v = vec_of(0xAB);
+        let sim = p.similarity(v.clone(), v).unwrap();
+        assert_eq!(sim, 1_000_000_u128);
+    }
+
+    #[test]
+    fn similarity_opposite_is_zero() {
+        let p = HdcPrecompile::default();
+        let a = vec_of(0xFF);
+        let b = vec_of(0x00);
+        let sim = p.similarity(a, b).unwrap();
+        assert_eq!(sim, 0_u128);
+    }
+
+    #[test]
+    fn similarity_half_match_is_half_scale() {
+        let p = HdcPrecompile::default();
+        // 0xF0 vs 0x00: differing bits = 4 per byte, half the bits flipped.
+        let a = vec_of(0xF0);
+        let b = vec_of(0x00);
+        let sim = p.similarity(a, b).unwrap();
+        assert_eq!(sim, 500_000_u128);
+    }
+
+    #[test]
+    fn similarity_rejects_wrong_length() {
+        let p = HdcPrecompile::default();
+        let a = vec![0u8; 100];
+        let b = vec![0u8; 100];
+        assert!(p.similarity(a, b).is_err());
+    }
+
+    #[test]
+    fn bind_is_xor() {
+        let p = HdcPrecompile::default();
+        let a = vec_of(0xAA);
+        let b = vec_of(0x55);
+        let out = p.bind(a, b).unwrap();
+        assert!(out.iter().all(|&byte| byte == 0xFF));
+    }
+
+    #[test]
+    fn bind_self_zeroes() {
+        let p = HdcPrecompile::default();
+        let a = vec_of(0x42);
+        let out = p.bind(a.clone(), a).unwrap();
+        assert!(out.iter().all(|&byte| byte == 0x00));
+    }
+
+    #[test]
+    fn bind_rejects_wrong_length() {
+        let p = HdcPrecompile::default();
+        let a = vec![0u8; 100];
+        let b = vec![0u8; 100];
+        assert!(p.bind(a, b).is_err());
+    }
+
+    #[test]
+    fn bundle_three_identical_returns_same_vector() {
+        let p = HdcPrecompile::default();
+        let v = vec_of(0xCC);
+        let out = p
+            .bundle(vec![v.clone(), v.clone(), v.clone()])
+            .unwrap();
+        assert_eq!(out, v);
+    }
+
+    #[test]
+    fn bundle_majority_wins() {
+        let p = HdcPrecompile::default();
+        // 2 of 3 vectors have bit set ⇒ majority ⇒ output bit set
+        let mut a = vec_of(0xFF);
+        let b = vec_of(0xFF);
+        let c = vec_of(0x00);
+        // a = b = 0xFF; c = 0x00; output should match 0xFF
+        let _ = a.len();
+        a = vec_of(0xFF);
+        let out = p.bundle(vec![a, b, c]).unwrap();
+        assert_eq!(out, vec_of(0xFF));
+    }
+
+    #[test]
+    fn bundle_tie_resolves_to_zero() {
+        let p = HdcPrecompile::default();
+        // 1 vector with bit set, 1 with bit unset ⇒ vote = 0 ⇒ output = 0
+        let a = vec_of(0xFF);
+        let b = vec_of(0x00);
+        let out = p.bundle(vec![a, b]).unwrap();
+        assert_eq!(out, vec_of(0x00));
+    }
+
+    #[test]
+    fn bundle_rejects_empty_input() {
+        let p = HdcPrecompile::default();
+        assert!(p.bundle(vec![]).is_err());
+    }
+
+    #[test]
+    fn bundle_rejects_wrong_length() {
+        let p = HdcPrecompile::default();
+        let bad = vec![0u8; 100];
+        assert!(p.bundle(vec![bad]).is_err());
     }
 }
 
