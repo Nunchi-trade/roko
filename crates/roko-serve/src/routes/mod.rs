@@ -19,6 +19,7 @@ mod feeds;
 mod gateway;
 mod heartbeats;
 mod integrations;
+mod isfr;
 mod jobs;
 mod learning;
 mod middleware;
@@ -170,6 +171,7 @@ pub fn build_router(
         .merge(chain::routes())
         .merge(connectors::routes())
         .merge(feeds::routes())
+        .merge(isfr::routes())
         .merge(auth::routes())
         .merge(secrets::routes())
         .merge(vision_loop::routes())

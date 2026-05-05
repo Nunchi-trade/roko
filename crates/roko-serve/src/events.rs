@@ -571,6 +571,33 @@ pub enum ServerEvent {
         total: u32,
         pass_rate: f64,
     },
+
+    /// A new ISFR composite rate was computed by the keeper.
+    ///
+    /// All rate fields are in basis points (1 bps = 0.01%).
+    /// `confidence_bps` is in the range 0–10000 (not a float).
+    IsfrRateComputed {
+        composite_bps: u64,
+        lending_bps: u64,
+        structured_bps: u64,
+        funding_bps: u64,
+        staking_bps: u64,
+        /// Confidence level scaled to 0–10000 (10000 = 100%).
+        confidence_bps: u64,
+        source_count: usize,
+        timestamp_ms: i64,
+    },
+
+    /// An ISFR data source changed health status.
+    IsfrSourceHealthChanged {
+        source_id: String,
+        /// New health label: "live", "stale", or "offline".
+        health: String,
+        last_rate_bps: Option<u64>,
+    },
+
+    /// The ISFR keeper started or stopped.
+    IsfrKeeperStateChanged { running: bool },
 }
 
 #[cfg(test)]
