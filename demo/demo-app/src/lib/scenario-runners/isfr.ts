@@ -4,31 +4,31 @@ import { showCmd, roko } from '../terminal-session';
 
 export const ISFR_COMMANDS: CommandDef[] = [
   {
-    id: 'lending-scout',
-    command: 'roko do "Lending Scout: estimate USDC lending rate from Aave and Compound"',
-    description: 'Lending scout gathers DeFi rates',
+    id: 'isfr-keeper',
+    command: 'roko isfr start',
+    description: 'ISFRKeeper polls mock rate sources and publishes composite rates',
     timeout: 180000,
     target: { pane: 0 },
   },
   {
-    id: 'staking-scout',
-    command: 'roko do "Staking Scout: estimate ETH staking yield"',
-    description: 'Staking scout gathers yield data',
-    timeout: 180000,
+    id: 'lending-scout',
+    command: 'roko do "Analyze current USDC lending rates across Aave V3 and Compound. Compare APYs, utilization rates, and recommend the best lending strategy."',
+    description: 'Lending Scout analyzes lending rates across protocols',
+    timeout: 120000,
     target: { pane: 1 },
   },
   {
-    id: 'aggregator',
-    command: 'roko do "ISFR Aggregator: combine lending and staking observations"',
-    description: 'Aggregator computes composite ISFR',
-    timeout: 180000,
+    id: 'staking-scout',
+    command: 'roko do "Research ETH staking yields across major liquid staking protocols. Compare validator APR, slashing risk, and withdrawal times."',
+    description: 'Staking Scout analyzes liquid staking yields',
+    timeout: 120000,
     target: { pane: 2 },
   },
   {
-    id: 'validator',
-    command: 'roko do "ISFR Validator: verify rate bounds and publish recommendation"',
-    description: 'Validator checks and signs off',
-    timeout: 180000,
+    id: 'isfr-oracle',
+    command: 'roko do "As the ISFR Oracle, read the latest rate observations from the knowledge store and publish a final composite risk-free rate recommendation with confidence intervals."',
+    description: 'ISFR Oracle synthesizes rate data into a final recommendation',
+    timeout: 120000,
     target: { pane: 3 },
   },
 ];
@@ -38,20 +38,20 @@ export const isfrScenario: ClickableScenario = {
   title: 'ISFR',
   subtitle: 'Four specialized agents compute a DeFi risk-free rate.',
   panes: 4,
-  labels: ['Lending Scout', 'Staking Scout', 'Aggregator', 'Validator'],
+  labels: ['ISFRKeeper', 'Lending Scout', 'Staking Scout', 'ISFR Oracle'],
   panel: true,
   promptBar: false,
   mirageBar: true,
   category: 'chain',
-  features: ['Agent swarm', 'Rate aggregation', 'Validation'],
-  durationHint: '<2 min',
+  features: ['Agent swarm', 'Rate aggregation', 'Oracle synthesis'],
+  durationHint: '<3 min',
   accent: 'amber',
   icon: 'chain',
   steps: [
+    { label: 'Poll', sublabel: 'rate sources' },
     { label: 'Scout', sublabel: 'lending and staking' },
-    { label: 'Aggregate', sublabel: 'composite rate' },
-    { label: 'Validate', sublabel: 'bounds and freshness' },
-    { label: 'Publish', sublabel: 'final ISFR' },
+    { label: 'Monitor', sublabel: 'composite rate' },
+    { label: 'Synthesize', sublabel: 'final ISFR' },
   ],
   commands: ISFR_COMMANDS,
 
@@ -65,15 +65,21 @@ export const isfrScenario: ClickableScenario = {
     const entry = ctx.entries[target.pane];
     if (!entry) return { ok: false, error: 'Terminal pane is not connected' };
 
-    const result = await showCmd(entry, roko(ctx, command.command.replace(/^roko /, '')), {
+    // The keeper uses a raw command (not a roko subcommand wrapper), while
+    // the scout and oracle agents use roko do.
+    const cmd = commandId === 'isfr-keeper'
+      ? roko(ctx, 'isfr start')
+      : roko(ctx, command.command.replace(/^roko /, ''));
+
+    const result = await showCmd(entry, cmd, {
       timeout: command.timeout,
       customDesc: command.description,
       workspaceDir: ctx.workspaceDir,
       signal: ctx.signal,
     });
 
-    if (result.cost) ctx.setMetric('cost', result.cost);
-    if (result.tokens) ctx.setMetric('tokens', result.tokens);
+    if (result.cost) ctx.setMetric(`cost-${commandId}`, result.cost);
+    if (result.tokens) ctx.setMetric(`tokens-${commandId}`, result.tokens);
 
     return { ok: result.ok, error: result.error };
   },
