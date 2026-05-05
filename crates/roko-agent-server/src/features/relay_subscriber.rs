@@ -58,43 +58,38 @@ impl TopicHandler for ChannelTopicHandler {
 
 /// High-level pub/sub wrapper around [`RelayHandle`].
 ///
-/// Create via [`RelaySubscriber::new`], subscribe to topics with
-/// [`RelaySubscriber::subscribe`], and receive messages via the
-/// [`mpsc::UnboundedReceiver`] returned by [`RelaySubscriber::new`].
+/// Use [`RelaySubscriber::make_handler`] to create a `(handler, receiver)` pair
+/// before calling `relay_client::connect`.  Pass the handler to `connect`; keep
+/// the receiver to consume incoming messages.  Then wrap the returned
+/// `RelayHandle` with [`RelaySubscriber::from_handle`] for ergonomic
+/// subscribe/publish calls.
 ///
 /// # Example
 ///
 /// ```no_run
+/// use std::sync::Arc;
 /// use roko_agent_server::features::relay_subscriber::RelaySubscriber;
 /// // (relay_handle obtained from relay_client::connect)
-/// let (subscriber, mut rx) = RelaySubscriber::new(relay_handle);
+/// # async fn example(relay_handle: roko_agent_server::features::relay_client::RelayHandle) -> anyhow::Result<()> {
+/// let (handler, mut rx) = RelaySubscriber::make_handler();
+/// // pass handler to relay_client::connect(…, Some(handler))
+/// let subscriber = RelaySubscriber::from_handle(relay_handle);
 /// subscriber.subscribe("isfr:rates")?;
 /// while let Some(msg) = rx.recv().await {
-///     println!("got {:?}", msg);
+///     println!("topic={} seq={}", msg.topic, msg.seq);
 /// }
-/// # Ok::<(), anyhow::Error>(())
+/// # Ok(())
+/// # }
 /// ```
 pub struct RelaySubscriber {
     handle: RelayHandle,
 }
 
 impl RelaySubscriber {
-    /// Wrap a [`RelayHandle`] for pub/sub use.
+    /// Create a `(TopicHandler, receiver)` pair for channel-based message delivery.
     ///
-    /// Returns a `(RelaySubscriber, receiver)` pair.  All topic messages
-    /// delivered to the relay client will be forwarded to the receiver.
-    ///
-    /// To use the channel-based handler, build the relay connection with
-    /// [`relay_client::connect`] passing the [`Arc<dyn TopicHandler>`]
-    /// produced by [`RelaySubscriber::make_handler`]:
-    ///
-    /// ```no_run
-    /// use roko_agent_server::features::relay_subscriber::RelaySubscriber;
-    /// let (handler, rx) = RelaySubscriber::make_handler();
-    /// // pass handler to relay_client::connect(…, Some(handler))
-    /// // then wrap the returned handle:
-    /// // let subscriber = RelaySubscriber::from_handle(handle);
-    /// ```
+    /// Pass the returned `handler` to `relay_client::connect` as `topic_handler`.
+    /// All incoming topic messages will be forwarded to the returned `receiver`.
     #[must_use]
     pub fn make_handler() -> (Arc<dyn TopicHandler>, mpsc::UnboundedReceiver<TopicMessage>) {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -102,11 +97,10 @@ impl RelaySubscriber {
         (handler, rx)
     }
 
-    /// Wrap an existing [`RelayHandle`] without a dedicated receiver channel.
+    /// Wrap an existing [`RelayHandle`] for ergonomic pub/sub calls.
     ///
-    /// Use this when you only need to publish/subscribe without consuming
-    /// messages through this wrapper (e.g. the handler was supplied separately
-    /// via [`RelaySubscriber::make_handler`]).
+    /// Use this after calling `relay_client::connect` to get a handle that
+    /// provides named `subscribe`/`unsubscribe`/`publish` methods.
     #[must_use]
     pub fn from_handle(handle: RelayHandle) -> Self {
         Self { handle }

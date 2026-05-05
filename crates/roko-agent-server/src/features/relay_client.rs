@@ -471,4 +471,19 @@ mod tests {
             Some("hello from string".to_string())
         );
     }
+
+    #[test]
+    fn relay_handle_subscribe_returns_error_on_closed_channel() {
+        // Create a sender whose receiver has been dropped, simulating a dead relay.
+        let (tx, rx) = mpsc::unbounded_channel::<AgentInboundFrame>();
+        drop(rx);
+        let handle = RelayHandle { outbound_tx: tx };
+        assert!(handle.subscribe("topic").is_err());
+        assert!(handle.unsubscribe("topic").is_err());
+        assert!(
+            handle
+                .publish("topic", "rate_update", serde_json::json!({}))
+                .is_err()
+        );
+    }
 }
