@@ -57,6 +57,27 @@ export interface InferenceRecord {
   durationMs: number;
 }
 
+// ── ISFR types ──────────────────────────────────────────────────
+
+export interface IsfrRate {
+  compositeBps: number;
+  lendingBps: number;
+  structuredBps: number;
+  fundingBps: number;
+  stakingBps: number;
+  confidenceBps: number;
+  sourceCount: number;
+  timestampMs: number;
+}
+
+export interface IsfrSource {
+  id: string;
+  health: 'healthy' | 'degraded' | 'down';
+  lastRateBps: number | null;
+}
+
+export type IsfrKeeperStatus = 'unknown' | 'running' | 'stopped';
+
 // ── Store interface ─────────────────────────────────────────────
 
 export interface DataHub {
@@ -94,6 +115,12 @@ export interface DataHub {
   benchSuites: BenchSuite[];
   benchModels: BenchModel[];
 
+  // -- ISFR slice -------------------------------------------------
+  isfrCurrentRate: IsfrRate | null;
+  isfrHistory: IsfrRate[];       // ring buffer, max 256
+  isfrSources: IsfrSource[];
+  isfrKeeperStatus: IsfrKeeperStatus;
+
   // -- Actions: event handling -------------------------------------
   handleServerEvent: (event: ServerEvent) => void;
   setServerStatus: (status: ServerStatus) => void;
@@ -113,12 +140,19 @@ export interface DataHub {
     opts?: { gitInit?: boolean },
   ) => Promise<WorkspaceInfo>;
   destroyWorkspace: (id: string) => Promise<void>;
+
+  // -- Actions: ISFR REST fetches ---------------------------------
+  fetchIsfrStatus: () => Promise<void>;
+  fetchIsfrCurrent: () => Promise<void>;
+  fetchIsfrHistory: (limit?: number) => Promise<void>;
+  fetchIsfrSources: () => Promise<void>;
 }
 
 // ── Ring-buffer limits ──────────────────────────────────────────
 
 const MAX_EPISODES = 500;
 const MAX_INFERENCES = 200;
+const MAX_ISFR_HISTORY = 256;
 
 // ── Store implementation ────────────────────────────────────────
 
@@ -144,6 +178,10 @@ export const useDataHub = create<DataHub>()((set, get) => ({
   benchRuns: [],
   benchSuites: [],
   benchModels: [],
+  isfrCurrentRate: null,
+  isfrHistory: [],
+  isfrSources: [],
+  isfrKeeperStatus: 'unknown',
 
   // -- Event handling -----------------------------------------------
 
@@ -233,6 +271,53 @@ export const useDataHub = create<DataHub>()((set, get) => ({
 
       case 'BenchRunCompleted':
         get().fetchBenchRuns();
+        break;
+
+      case 'isfr_rate_computed':
+        set((s) => ({
+          isfrCurrentRate: {
+            compositeBps: event.compositeBps,
+            lendingBps: event.lendingBps,
+            structuredBps: event.structuredBps,
+            fundingBps: event.fundingBps,
+            stakingBps: event.stakingBps,
+            confidenceBps: event.confidenceBps,
+            sourceCount: event.sourceCount,
+            timestampMs: event.timestampMs,
+          },
+          isfrHistory: [
+            ...s.isfrHistory.slice(-(MAX_ISFR_HISTORY - 1)),
+            {
+              compositeBps: event.compositeBps,
+              lendingBps: event.lendingBps,
+              structuredBps: event.structuredBps,
+              fundingBps: event.fundingBps,
+              stakingBps: event.stakingBps,
+              confidenceBps: event.confidenceBps,
+              sourceCount: event.sourceCount,
+              timestampMs: event.timestampMs,
+            },
+          ],
+        }));
+        break;
+
+      case 'isfr_source_health_changed':
+        set((s) => ({
+          isfrSources: s.isfrSources.some((src) => src.id === event.sourceId)
+            ? s.isfrSources.map((src) =>
+                src.id === event.sourceId
+                  ? { ...src, health: event.health, lastRateBps: event.lastRateBps }
+                  : src,
+              )
+            : [
+                ...s.isfrSources,
+                { id: event.sourceId, health: event.health, lastRateBps: event.lastRateBps },
+              ],
+        }));
+        break;
+
+      case 'isfr_keeper_state_changed':
+        set({ isfrKeeperStatus: event.running ? 'running' : 'stopped' });
         break;
 
       case 'server_shutdown':
@@ -346,5 +431,77 @@ export const useDataHub = create<DataHub>()((set, get) => ({
         workspaceCache: next,
       };
     });
+  },
+
+  // -- ISFR fetch actions -----------------------------------------
+
+  fetchIsfrStatus: async () => {
+    const res = await api.get<{ keeper_running: boolean; sources_count: number;
+      current_rate_bps: number | null }>('/api/isfr/status');
+    if (res.ok) {
+      set({
+        isfrKeeperStatus: res.data.keeper_running ? 'running' : 'stopped',
+      });
+    }
+  },
+
+  fetchIsfrCurrent: async () => {
+    const res = await api.get<{
+      composite_bps: number; lending_bps: number; structured_bps: number;
+      funding_bps: number; staking_bps: number; confidence_bps: number;
+      source_count: number; timestamp_ms: number;
+    }>('/api/isfr/current');
+    if (res.ok) {
+      set({
+        isfrCurrentRate: {
+          compositeBps: res.data.composite_bps,
+          lendingBps: res.data.lending_bps,
+          structuredBps: res.data.structured_bps,
+          fundingBps: res.data.funding_bps,
+          stakingBps: res.data.staking_bps,
+          confidenceBps: res.data.confidence_bps,
+          sourceCount: res.data.source_count,
+          timestampMs: res.data.timestamp_ms,
+        },
+      });
+    }
+  },
+
+  fetchIsfrHistory: async (limit = 50) => {
+    const res = await api.get<Array<{
+      composite_bps: number; lending_bps: number; structured_bps: number;
+      funding_bps: number; staking_bps: number; confidence_bps: number;
+      source_count: number; timestamp_ms: number;
+    }>>(`/api/isfr/history?limit=${limit}`);
+    if (res.ok) {
+      set({
+        isfrHistory: res.data.map((r) => ({
+          compositeBps: r.composite_bps,
+          lendingBps: r.lending_bps,
+          structuredBps: r.structured_bps,
+          fundingBps: r.funding_bps,
+          stakingBps: r.staking_bps,
+          confidenceBps: r.confidence_bps,
+          sourceCount: r.source_count,
+          timestampMs: r.timestamp_ms,
+        })),
+      });
+    }
+  },
+
+  fetchIsfrSources: async () => {
+    const res = await api.get<Array<{
+      id: string; health: 'healthy' | 'degraded' | 'down';
+      last_rate_bps: number | null;
+    }>>('/api/isfr/sources');
+    if (res.ok) {
+      set({
+        isfrSources: res.data.map((s) => ({
+          id: s.id,
+          health: s.health,
+          lastRateBps: s.last_rate_bps,
+        })),
+      });
+    }
   },
 }));

@@ -151,6 +151,13 @@ export type ServerEvent =
        resolved: boolean; durationMs: number }
   | { type: 'SweRunCompleted'; runId: string; resolved: number;
        total: number; passRate: number }
+  // ISFR (interest-free secured rate)
+  | { type: 'isfr_rate_computed'; compositeBps: number; lendingBps: number;
+       structuredBps: number; fundingBps: number; stakingBps: number;
+       confidenceBps: number; sourceCount: number; timestampMs: number }
+  | { type: 'isfr_source_health_changed'; sourceId: string;
+       health: 'healthy' | 'degraded' | 'down'; lastRateBps: number | null }
+  | { type: 'isfr_keeper_state_changed'; running: boolean }
   // System
   | { type: 'server_shutdown' }
   | { type: 'error'; message: string };

@@ -22,6 +22,9 @@ const KNOWN_SSE_EVENT_TYPES = [
   'run_completed',
   'knowledge_ingested',
   'knowledge_consumed',
+  'isfr_rate_computed',
+  'isfr_source_health_changed',
+  'isfr_keeper_state_changed',
 ] as const;
 
 export interface SseAdapterConfig {
