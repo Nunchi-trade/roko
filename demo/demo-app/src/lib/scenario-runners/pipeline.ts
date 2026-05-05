@@ -3,11 +3,12 @@ import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenario
 import { showCmd, roko } from '../terminal-session';
 
 const PIPELINE_TASK = 'Build a Rust CLI that converts temperatures between Celsius and Fahrenheit';
+export const PIPELINE_COMMAND = 'roko do "Build a Rust CLI that converts temperatures between Celsius and Fahrenheit"';
 
 export const PIPELINE_COMMANDS: CommandDef[] = [
   {
     id: 'run',
-    command: `roko do "${PIPELINE_TASK}"`,
+    command: PIPELINE_COMMAND,
     description: 'Run idea-to-code pipeline',
     timeout: 300000,
     target: { pane: 0 },

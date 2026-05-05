@@ -10,6 +10,7 @@ import {
 import type { Scenario, ClickableScenario, ScenarioContext } from '../../lib/scenarios';
 import { isClickableScenario } from '../../lib/scenarios';
 import { CommandList } from '../../components/CommandList';
+import PipelineStagesPanel from '../../components/PipelineStagesPanel';
 import { useCommandList } from '../../hooks/useCommandList';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../../lib/playback-controller';
 import { enterWorkspace, resetRokoResolution } from '../../lib/terminal-session';
@@ -1040,6 +1041,11 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                   onRetry={handleClickableRun}
                 />
               </div>
+              {scenario.id === 'pipeline' && (
+                <div className="demo-clickable-context demo-clickable-context--pipeline">
+                  <PipelineStagesPanel isRunning={isRunning} />
+                </div>
+              )}
             </div>
           </div>
         ) : (
