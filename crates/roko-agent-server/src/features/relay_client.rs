@@ -192,7 +192,7 @@ async fn run(
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         let outbound: RelayOutboundFrame = serde_json::from_str(text.as_str())?;
-                        handle_outbound_frame(&mut socket, &state, &topic_handler, outbound).await?;
+                        handle_outbound_frame(&mut socket, &state, topic_handler.as_ref(), outbound).await?;
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         socket.send(Message::Pong(payload)).await?;
@@ -223,7 +223,7 @@ async fn run(
 async fn handle_outbound_frame(
     socket: &mut RelaySocket,
     state: &Arc<AgentState>,
-    topic_handler: &Option<Arc<dyn TopicHandler>>,
+    topic_handler: Option<&Arc<dyn TopicHandler>>,
     frame: RelayOutboundFrame,
 ) -> Result<()> {
     match frame {

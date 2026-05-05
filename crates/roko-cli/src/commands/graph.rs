@@ -1,6 +1,6 @@
 //! `roko graph` subcommand handlers: run, validate, and show graph definitions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
@@ -54,7 +54,7 @@ pub async fn cmd_graph(cmd: GraphCmd) -> Result<i32> {
 
 /// Execute a graph: load the TOML, build the engine with the default registry,
 /// run all nodes sequentially, and print the results.
-async fn cmd_graph_run(path: &PathBuf) -> Result<i32> {
+async fn cmd_graph_run(path: &Path) -> Result<i32> {
     let graph = loader::load_from_file(path)
         .map_err(|e| anyhow!("failed to load graph '{}': {}", path.display(), e))?;
 
@@ -88,7 +88,7 @@ async fn cmd_graph_run(path: &PathBuf) -> Result<i32> {
 }
 
 /// Validate a graph definition without executing it.
-fn cmd_graph_validate(path: &PathBuf) -> Result<i32> {
+fn cmd_graph_validate(path: &Path) -> Result<i32> {
     let graph = loader::load_from_file(path)
         .map_err(|e| anyhow!("failed to load graph '{}': {}", path.display(), e))?;
 
@@ -109,7 +109,7 @@ fn cmd_graph_validate(path: &PathBuf) -> Result<i32> {
 }
 
 /// Show a summary of nodes and edges in a graph.
-fn cmd_graph_show(path: &PathBuf) -> Result<i32> {
+fn cmd_graph_show(path: &Path) -> Result<i32> {
     let graph = loader::load_from_file(path)
         .map_err(|e| anyhow!("failed to load graph '{}': {}", path.display(), e))?;
 
