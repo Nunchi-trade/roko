@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 
 use roko_agent::process::{kill_tree, set_process_group};
+use roko_core::defaults::DEFAULT_AGENT_TURN_LIMIT;
 
 use crate::dispatch_v2::{CliDispatchProvider, CliDispatchRequest, CliProviderConfig};
 
@@ -63,7 +64,7 @@ impl AgentSpawnConfig {
             system_prompt,
             model,
             workdir: config.workdir.clone(),
-            max_turns: 50,
+            max_turns: DEFAULT_AGENT_TURN_LIMIT,
             effort: None,
             program: config.claude_program.clone(),
             dangerously_skip_permissions: config.dangerously_skip_permissions,

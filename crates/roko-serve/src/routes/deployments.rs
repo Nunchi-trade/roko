@@ -15,6 +15,10 @@ use serde_json::{Value, json};
 use tracing::{error, info};
 use validator::Validate;
 
+use roko_core::defaults::{
+    DEFAULT_DEPLOYMENT_STATUS_POLL_INITIAL_MS, DEFAULT_DEPLOYMENT_STATUS_POLL_MAX_MS,
+};
+
 use crate::deploy::{DeploySpec, DeploymentStatus};
 use crate::error::ApiError;
 use crate::events::ServerEvent;
@@ -196,8 +200,8 @@ async fn create_deployment(
     let poll_id = dep_id.clone();
 
     tokio::spawn(async move {
-        let mut interval_ms: u64 = 5_000;
-        let max_interval_ms: u64 = 60_000;
+        let mut interval_ms: u64 = DEFAULT_DEPLOYMENT_STATUS_POLL_INITIAL_MS;
+        let max_interval_ms: u64 = DEFAULT_DEPLOYMENT_STATUS_POLL_MAX_MS;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
@@ -478,11 +482,23 @@ async fn persist_deployments(state: &Arc<AppState>) {
     let deps = state.deployments.read().await;
     let entries: Vec<_> = deps.values().collect();
     let path = state.workdir.join(".roko").join("deployments.json");
-    let _ = tokio::fs::create_dir_all(path.parent().unwrap_or(&state.workdir)).await;
-    if let Ok(json) = serde_json::to_string_pretty(&entries) {
-        let tmp = path.with_extension("json.tmp");
-        if tokio::fs::write(&tmp, &json).await.is_ok() {
-            let _ = tokio::fs::rename(&tmp, &path).await;
+    if let Err(err) = tokio::fs::create_dir_all(path.parent().unwrap_or(&state.workdir)).await {
+        tracing::warn!(path = %path.display(), error = %err, "failed to create deployments directory");
+        return;
+    }
+    match serde_json::to_string_pretty(&entries) {
+        Ok(json) => {
+            let tmp = path.with_extension("json.tmp");
+            if let Err(err) = tokio::fs::write(&tmp, &json).await {
+                tracing::warn!(path = %tmp.display(), error = %err, "failed to write deployments temp file");
+                return;
+            }
+            if let Err(err) = tokio::fs::rename(&tmp, &path).await {
+                tracing::warn!(path = %path.display(), error = %err, "failed to rename deployments temp file");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize deployments for persistence");
         }
     }
 }

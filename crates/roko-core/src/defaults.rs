@@ -304,6 +304,53 @@ pub const DEFAULT_DEEP_RESEARCH_MAX_POLL_ATTEMPTS: u32 = 120;
 /// Default provider requests-per-minute limit.
 pub const DEFAULT_PROVIDER_RPM: u32 = 60;
 
+// ── Runner workflow ────────────────────────────────────────────────────
+
+/// Maximum agent turns before the runner gives up on a single task.
+pub const DEFAULT_AGENT_TURN_LIMIT: u32 = 50;
+
+/// Maximum concurrent plans the runner DAG allows in-flight at once.
+pub const DEFAULT_RUNNER_MAX_CONCURRENT_PLANS: usize = 4;
+
+/// Maximum concurrent tasks the runner allows in-flight at once.
+pub const DEFAULT_RUNNER_MAX_CONCURRENT_TASKS: usize = 4;
+
+/// Default gate concurrency (matches task concurrency).
+pub const DEFAULT_RUNNER_GATE_CONCURRENCY: usize = 4;
+
+/// Default max retries for runner task config.
+pub const DEFAULT_RUNNER_CONFIG_MAX_RETRIES: u32 = 2;
+
+/// After this many attempts, the runner pivots retry strategy.
+pub const DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT: u32 = 3;
+
+/// Minimum gate retries (adaptive lower bound).
+pub const DEFAULT_GATE_RETRY_MIN: u32 = 1;
+
+/// Maximum gate retries (adaptive upper bound).
+pub const DEFAULT_GATE_RETRY_MAX: u32 = 5;
+
+/// Cold-start gate retry count before observations accumulate.
+pub const DEFAULT_GATE_RETRY_COLD_START: u32 = 3;
+
+/// Minimum observations before adaptive gate thresholds activate.
+pub const DEFAULT_GATE_RETRY_MIN_OBSERVATIONS: u64 = 5;
+
+/// Maximum retry backoff shift cap (prevents exponential overflow).
+pub const DEFAULT_RUNNER_RETRY_BACKOFF_SHIFT_CAP: u32 = 5;
+
+/// Fallback multiplier for retry backoff when no history available.
+pub const DEFAULT_RUNNER_RETRY_BACKOFF_MULTIPLIER_FALLBACK: u64 = 32;
+
+/// Maximum seconds for retry backoff delay.
+pub const DEFAULT_RUNNER_RETRY_BACKOFF_MAX_SECS: u64 = 45;
+
+/// Initial poll interval for deployment status checks (ms).
+pub const DEFAULT_DEPLOYMENT_STATUS_POLL_INITIAL_MS: u64 = 5_000;
+
+/// Maximum poll interval for deployment status checks (ms).
+pub const DEFAULT_DEPLOYMENT_STATUS_POLL_MAX_MS: u64 = 60_000;
+
 // ── Model slugs ────────────────────────────────────────────────────────
 
 /// Default model for the "deep" / architectural tier.
@@ -367,6 +414,15 @@ mod tests {
     fn max_output_tokens_nonzero() {
         assert!(DEFAULT_MAX_OUTPUT_TOKENS > 0);
         assert!(DEFAULT_FALLBACK_MAX_OUTPUT_TOKENS > 0);
+    }
+
+    #[test]
+    fn runner_limits_are_sane() {
+        assert!(DEFAULT_RUNNER_MAX_CONCURRENT_TASKS >= 1);
+        assert!(DEFAULT_GATE_RETRY_MIN <= DEFAULT_GATE_RETRY_MAX);
+        assert!(DEFAULT_GATE_RETRY_COLD_START >= DEFAULT_GATE_RETRY_MIN);
+        assert!(DEFAULT_GATE_RETRY_COLD_START <= DEFAULT_GATE_RETRY_MAX);
+        assert!(DEFAULT_RUNNER_RETRY_BACKOFF_MAX_SECS > 0);
     }
 
     #[test]

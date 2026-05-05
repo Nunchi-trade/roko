@@ -5,6 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use std::time::Instant;
 
+use roko_core::defaults::{
+    DEFAULT_RUNNER_RETRY_BACKOFF_MAX_SECS, DEFAULT_RUNNER_RETRY_BACKOFF_MULTIPLIER_FALLBACK,
+    DEFAULT_RUNNER_RETRY_BACKOFF_SHIFT_CAP,
+};
 use roko_learn::model_router::RoutingContext;
 
 use super::types::{
@@ -516,8 +520,13 @@ impl RunState {
             self.retry_backoff_until.remove(plan_id);
             return;
         }
-        let multiplier = 1u64.checked_shl(attempt.min(5)).unwrap_or(32);
-        let delay = Duration::from_secs(base.saturating_mul(multiplier).min(45));
+        let multiplier = 1u64
+            .checked_shl(attempt.min(DEFAULT_RUNNER_RETRY_BACKOFF_SHIFT_CAP))
+            .unwrap_or(DEFAULT_RUNNER_RETRY_BACKOFF_MULTIPLIER_FALLBACK);
+        let delay = Duration::from_secs(
+            base.saturating_mul(multiplier)
+                .min(DEFAULT_RUNNER_RETRY_BACKOFF_MAX_SECS),
+        );
         self.retry_backoff_until
             .insert(plan_id.to_string(), Instant::now() + delay);
     }

@@ -8,6 +8,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use roko_core::defaults::{
+    DEFAULT_GATE_RETRY_COLD_START, DEFAULT_GATE_RETRY_MAX, DEFAULT_GATE_RETRY_MIN,
+    DEFAULT_GATE_RETRY_MIN_OBSERVATIONS,
+};
 use roko_fs::RokoLayout;
 use roko_orchestrator::{ExecutorSnapshot, OrchestratorSnapshot};
 use serde::{Deserialize, Serialize};
@@ -43,6 +47,8 @@ pub struct PersistPaths {
     pub events_json: PathBuf,
     /// `.roko/events.jsonl` — append-only runner event log consumed by TUI/server.
     pub events_jsonl: PathBuf,
+    /// `.roko/state/run-ledger.jsonl` — typed run ledger (task starts, completions, gate outcomes).
+    pub run_ledger_jsonl: PathBuf,
 }
 
 impl PersistPaths {
@@ -68,6 +74,7 @@ impl PersistPaths {
             agent_pids_json: layout.agent_pids_path(),
             events_json: layout.event_log_snapshot(),
             events_jsonl: layout.events_jsonl_path(),
+            run_ledger_jsonl: layout.run_ledger_path(),
         })
     }
 }
@@ -200,23 +207,20 @@ impl GateThresholds {
     }
 
     pub(crate) fn suggested_max_retries(&self, rung: u32) -> u32 {
-        const MIN_RETRIES: u32 = 1;
-        const MAX_RETRIES: u32 = 5;
-
         let Some(stats) = self.rungs.get(&rung) else {
-            return 3;
+            return DEFAULT_GATE_RETRY_COLD_START;
         };
 
-        if stats.total_count < 5 {
-            return 3;
+        if stats.total_count < DEFAULT_GATE_RETRY_MIN_OBSERVATIONS {
+            return DEFAULT_GATE_RETRY_COLD_START;
         }
 
-        let max_f = f64::from(MAX_RETRIES);
-        let range_f = f64::from(MAX_RETRIES - MIN_RETRIES);
+        let max_f = f64::from(DEFAULT_GATE_RETRY_MAX);
+        let range_f = f64::from(DEFAULT_GATE_RETRY_MAX - DEFAULT_GATE_RETRY_MIN);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let retries = stats.ema_pass_rate.mul_add(-range_f, max_f).round() as u32;
 
-        retries.clamp(MIN_RETRIES, MAX_RETRIES)
+        retries.clamp(DEFAULT_GATE_RETRY_MIN, DEFAULT_GATE_RETRY_MAX)
     }
 
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
@@ -579,6 +583,13 @@ pub fn verify_checkpoint(state_dir: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Path to the section outcomes JSONL store within the learn directory.
+pub fn section_outcomes_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("section-outcomes.jsonl")
+}
+
 /// Read previously-saved agent PIDs and kill any that are still alive.
 pub fn cleanup_orphaned_agents(paths: &PersistPaths) {
     let Ok(content) = fs::read_to_string(&paths.agent_pids_json) else {
@@ -680,5 +691,13 @@ mod tests {
 
         let snapshot = load_run_state(&paths).unwrap().unwrap();
         assert!(snapshot.cascade_router_json.is_none());
+    }
+
+    #[test]
+    fn section_outcomes_path_lives_in_learn_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = section_outcomes_path(tmp.path());
+        assert!(path.ends_with("learn/section-outcomes.jsonl"));
+        assert!(path.starts_with(tmp.path()));
     }
 }

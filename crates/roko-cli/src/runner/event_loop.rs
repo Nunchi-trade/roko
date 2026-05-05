@@ -37,12 +37,15 @@ use tracing::{debug, error, info, warn};
 use crate::dispatch::model_routing::tier_to_complexity;
 use crate::dispatch::{
     AgentDispatchRequest, DispatchContext, GateFeedback as DispatchGateFeedback, PromptCache,
-    ResolvedAgentRuntime, SharedAgentFactory,
+    PromptDiagnostics, ResolvedAgentRuntime, SharedAgentFactory,
 };
 use crate::inline::DiffEntry;
 use crate::knowledge_helpers::{build_knowledge_routing_advice, neuro_prompt_task_category};
 use crate::task_parser::TaskDef;
 use roko_learn::post_gate_reflection::{PostGateReflectionStore, ReflectionGateOutcome};
+use roko_learn::section_outcome::{
+    SectionOutcomeRecord, SectionOutcomeStatus, SectionOutcomeStore, SECTION_OUTCOME_SCHEMA_VERSION,
+};
 use roko_neuro::KnowledgeStore;
 
 use super::agent_events::{AgentStreamBuffer, handle_agent_event};

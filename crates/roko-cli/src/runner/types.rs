@@ -9,7 +9,10 @@ use std::sync::{Arc, Mutex};
 
 use roko_core::config::TimeoutConfig;
 use roko_core::config::schema::RokoConfig;
-use roko_core::defaults::{DEFAULT_MAX_AUTO_FIX_ITERATIONS, DEFAULT_PLAN_TIMEOUT_SECS};
+use roko_core::defaults::{
+    DEFAULT_MAX_AUTO_FIX_ITERATIONS, DEFAULT_PLAN_TIMEOUT_SECS, DEFAULT_RUNNER_CONFIG_MAX_RETRIES,
+    DEFAULT_RUNNER_GATE_CONCURRENCY, DEFAULT_RUNNER_MAX_CONCURRENT_TASKS,
+};
 use roko_fs::RokoLayout;
 
 // ─── Agent Events ───────────────────────────────────────────────────────
@@ -1368,7 +1371,11 @@ impl RunConfig {
         let connector_registry =
             Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
         let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
-        let max_concurrent_tasks = roko_config.runner.max_concurrent_tasks.unwrap_or(4).max(1);
+        let max_concurrent_tasks = roko_config
+            .runner
+            .max_concurrent_tasks
+            .unwrap_or(DEFAULT_RUNNER_MAX_CONCURRENT_TASKS)
+            .max(1);
         let timeout_secs = roko_config.timeouts.agent_dispatch().as_secs().max(1);
         let plan_timeout_secs = roko_config.timeouts.plan_total().as_secs().max(1);
         let daimon_state = Self::daimon_state_for_workdir(&workdir);
@@ -1381,7 +1388,7 @@ impl RunConfig {
             cli_model_override: None,
             timeout_secs,
             plan_timeout_secs,
-            max_retries: 2,
+            max_retries: DEFAULT_RUNNER_CONFIG_MAX_RETRIES,
             max_concurrent_tasks,
             gate_concurrency: max_concurrent_tasks,
             approval: false,
@@ -1436,8 +1443,8 @@ impl Default for RunConfig {
             timeout_secs: timeouts.agent_dispatch().as_secs(),
             plan_timeout_secs: timeouts.plan_total().as_secs(),
             max_retries: DEFAULT_MAX_AUTO_FIX_ITERATIONS,
-            max_concurrent_tasks: 4,
-            gate_concurrency: 4,
+            max_concurrent_tasks: DEFAULT_RUNNER_MAX_CONCURRENT_TASKS,
+            gate_concurrency: DEFAULT_RUNNER_GATE_CONCURRENCY,
             approval: false,
             dangerously_skip_permissions: true,
             force_resume: false,
