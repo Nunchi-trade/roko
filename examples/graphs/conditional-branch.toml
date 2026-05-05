@@ -1,0 +1,154 @@
+# conditional-branch.toml — Conditional routing based on gate output.
+#
+# This graph demonstrates:
+# - Conditional edges: route to different paths based on gate score
+# - OnSuccess / OnFailure branching
+# - When expressions with numeric comparison
+
+name = "conditional-branch"
+description = "Route execution based on quality gate score"
+
+# ─── Nodes ───────────────────────────────────────────────────────────────────
+
+[[nodes]]
+id = "compose_prompt"
+name = "Build Review Prompt"
+cell_type = "compose"
+
+[nodes.config]
+template = """
+Review the implementation of {{feature_name}}.
+Evaluate code quality on a scale of 0-100.
+Return your score in a JSON field called "score".
+"""
+
+[nodes.config.variables]
+feature_name = "user authentication"
+
+[[nodes]]
+id = "agent_review"
+name = "LLM Code Review"
+cell_type = "agent"
+
+[nodes.config]
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+system_prompt = "You are a senior code reviewer. Always return a JSON object with a 'score' field (0-100)."
+max_response_tokens = 2048
+
+[[nodes]]
+id = "high_quality_path"
+name = "Auto-Approve"
+cell_type = "compose"
+
+[nodes.config]
+template = "Code quality score >= 80. Auto-approving merge request."
+
+[[nodes]]
+id = "medium_quality_path"
+name = "Request Minor Fixes"
+cell_type = "agent"
+
+[nodes.config]
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+system_prompt = "Generate a list of minor fixes needed for code that scored between 50-79."
+max_response_tokens = 1024
+
+[[nodes]]
+id = "low_quality_path"
+name = "Request Rewrite"
+cell_type = "agent"
+
+[nodes.config]
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+system_prompt = "The code scored below 50. Draft a rewrite plan with specific file-by-file guidance."
+max_response_tokens = 4096
+
+[[nodes]]
+id = "notify"
+name = "Send Notification"
+cell_type = "compose"
+
+[nodes.config]
+template = "Review complete. Action taken: {{inputs}}"
+
+# ─── Edges ──────────────────���───────────────────��────────────────────────────
+
+# Linear: compose -> agent review.
+[[edges]]
+from = "compose_prompt"
+to = "agent_review"
+
+[edges.condition]
+type = "on_success"
+
+# Conditional branches based on score.
+[[edges]]
+from = "agent_review"
+to = "high_quality_path"
+
+[edges.condition]
+type = "when"
+field = "score"
+op = "Gte"
+
+[edges.condition.value]
+# Score >= 80 routes to auto-approve.
+# Note: TOML integer in condition value.
+Integer = 80
+
+[[edges]]
+from = "agent_review"
+to = "medium_quality_path"
+
+[edges.condition]
+type = "when"
+field = "score"
+op = "Lt"
+
+[edges.condition.value]
+Integer = 80
+
+[[edges]]
+from = "agent_review"
+to = "low_quality_path"
+
+[edges.condition]
+type = "when"
+field = "score"
+op = "Lt"
+
+[edges.condition.value]
+Integer = 50
+
+# All paths lead to notification.
+[[edges]]
+from = "high_quality_path"
+to = "notify"
+
+[edges.condition]
+type = "always"
+
+[[edges]]
+from = "medium_quality_path"
+to = "notify"
+
+[edges.condition]
+type = "always"
+
+[[edges]]
+from = "low_quality_path"
+to = "notify"
+
+[edges.condition]
+type = "always"
+
+# ─── Configuration ────────��──────────────────────────────────────────────────
+
+[config]
+max_tokens = 20000
+max_cost_usd = 2.0
+deadline = 600
+max_parallelism = 2

@@ -1,0 +1,124 @@
+# parallel-gates.toml — Fan-out to multiple validation gates, fan-in to merge.
+#
+# This graph demonstrates:
+# - Fan-out: one compose node feeds three parallel gate checks
+# - Fan-in: all gate results merge into a single aggregator
+# - Budget enforcement: 10K token limit, $0.50 cost cap, 5-minute deadline
+
+name = "parallel-gates"
+description = "Run multiple validation gates in parallel after prompt assembly"
+
+# ─── Nodes ───────────────────────────────────────────────────────────────────
+
+[[nodes]]
+id = "compose"
+name = "Prompt Assembly"
+cell_type = "compose"
+
+[nodes.config]
+template = """
+You are reviewing the following code change:
+
+{{diff}}
+
+Check for: correctness, style, and security issues.
+"""
+
+[nodes.config.variables]
+diff = "fn main() { println!(\"hello\"); }"
+
+[[nodes]]
+id = "compile_gate"
+name = "Compile Check"
+cell_type = "gate"
+
+[nodes.config]
+gate_type = "compile"
+command = "cargo check"
+
+[[nodes]]
+id = "clippy_gate"
+name = "Clippy Lint"
+cell_type = "gate"
+
+[nodes.config]
+gate_type = "clippy"
+command = "cargo clippy -- -D warnings"
+
+[[nodes]]
+id = "test_gate"
+name = "Test Suite"
+cell_type = "gate"
+
+[nodes.config]
+gate_type = "test"
+command = "cargo test"
+
+[[nodes]]
+id = "merge"
+name = "Result Aggregator"
+cell_type = "compose"
+
+[nodes.config]
+template = """
+Gate results:
+- Compile: {{compile_gate}}
+- Clippy: {{clippy_gate}}
+- Tests: {{test_gate}}
+
+Overall: all gates must pass for approval.
+"""
+
+# ─── Edges ────────────────────────────────���───────────────────────���──────────
+
+# Fan-out: compose feeds all three gates.
+[[edges]]
+from = "compose"
+to = "compile_gate"
+
+[edges.condition]
+type = "always"
+
+[[edges]]
+from = "compose"
+to = "clippy_gate"
+
+[edges.condition]
+type = "always"
+
+[[edges]]
+from = "compose"
+to = "test_gate"
+
+[edges.condition]
+type = "always"
+
+# Fan-in: all gates feed into merge.
+[[edges]]
+from = "compile_gate"
+to = "merge"
+
+[edges.condition]
+type = "always"
+
+[[edges]]
+from = "clippy_gate"
+to = "merge"
+
+[edges.condition]
+type = "always"
+
+[[edges]]
+from = "test_gate"
+to = "merge"
+
+[edges.condition]
+type = "always"
+
+# ─── Configuration ──────────────────────────────��────────────────────────────
+
+[config]
+max_tokens = 10000
+max_cost_usd = 0.50
+deadline = 300
+max_parallelism = 4
