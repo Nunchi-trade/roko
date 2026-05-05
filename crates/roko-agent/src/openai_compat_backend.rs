@@ -10,12 +10,14 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::provider::map_provider_error;
 use crate::rate_limit::ProviderRateLimiter;
 use crate::streaming::{StreamAccumulator, StreamChunk, parse_sse_line};
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::FinishReason;
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
 use crate::usage::Usage;
+use roko_core::agent::ProviderKind;
 use roko_core::defaults::{DEFAULT_PROVIDER_RPM, DEFAULT_REQUEST_TIMEOUT_MS};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -78,6 +80,10 @@ pub struct OpenAiCompatLlmBackend {
     /// When true, emit `max_completion_tokens` instead of `max_tokens` in
     /// request bodies. Required for newer OpenAI models (o1, o3, gpt-5.x).
     use_max_completion_tokens: bool,
+    /// Provider kind used for error mapping to user-friendly messages.
+    provider_kind: ProviderKind,
+    /// Environment variable name holding the API key (for error messages).
+    api_key_env: Option<String>,
 }
 
 impl OpenAiCompatLlmBackend {
@@ -104,6 +110,8 @@ impl OpenAiCompatLlmBackend {
             normalize_tool_call_content: false,
             ttft_timeout_ms: None,
             use_max_completion_tokens: false,
+            provider_kind: ProviderKind::OpenAiCompat,
+            api_key_env: None,
         }
     }
 
@@ -216,6 +224,31 @@ impl OpenAiCompatLlmBackend {
     pub const fn with_use_max_completion_tokens(mut self, use_it: bool) -> Self {
         self.use_max_completion_tokens = use_it;
         self
+    }
+
+    /// Set the provider kind for user-facing error messages.
+    #[must_use]
+    pub const fn with_provider_kind(mut self, kind: ProviderKind) -> Self {
+        self.provider_kind = kind;
+        self
+    }
+
+    /// Set the env var name for the API key (used in error messages).
+    #[must_use]
+    pub fn with_api_key_env(mut self, env_var: impl Into<String>) -> Self {
+        self.api_key_env = Some(env_var.into());
+        self
+    }
+
+    /// Map a raw error into a user-friendly message using provider context.
+    fn decorate_error(&self, raw_err: &dyn std::fmt::Display) -> String {
+        map_provider_error(
+            self.provider_kind,
+            &self.provider_id,
+            self.api_key_env.as_deref(),
+            Some(&self.base_url),
+            raw_err,
+        )
     }
 
     fn endpoint(&self) -> String {
@@ -411,7 +444,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
                 self.timeout_ms,
             )
             .await
-            .map_err(|e| LlmError::Network(e.to_string()))?;
+            .map_err(|e| LlmError::Network(self.decorate_error(&e)))?;
 
         let json: Value = serde_json::from_str(&raw)
             .map_err(|e| LlmError::Backend(format!("parse response: {e}")))?;
@@ -439,7 +472,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         let response = match req.body(body_bytes).send().await {
             Ok(response) => response,
             Err(e) => {
-                let message = format!("request failed: {e}");
+                let message = self.decorate_error(&e);
                 let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
                 return Err(LlmError::Network(message));
             }
@@ -450,12 +483,13 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             let text = match response.text().await {
                 Ok(text) => text,
                 Err(e) => {
-                    let message = format!("read body failed: {e}");
+                    let message = self.decorate_error(&e);
                     let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
                     return Err(LlmError::Network(message));
                 }
             };
-            let message = crate::http::HttpPostError::http(status.as_u16(), text).to_string();
+            let raw_err = crate::http::HttpPostError::http(status.as_u16(), text);
+            let message = self.decorate_error(&raw_err);
             let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
             return Err(LlmError::Network(message));
         }

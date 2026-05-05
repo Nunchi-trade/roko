@@ -10,6 +10,15 @@ use serde_json::{Value, json};
 use crate::error::ApiError;
 use crate::projection_contract::{ProjectionQuery, RuntimeProjectionSet};
 use crate::state::AppState;
+use roko_learn::provider_health::HealthState;
+
+// ─── Degradation thresholds ─────────────────────────────────────────────────
+
+/// Error rate above which a provider is classified as degraded.
+const DEGRADED_ERROR_RATE_THRESHOLD: f64 = 0.1;
+
+/// Latency p95 (milliseconds) above which a provider is classified as degraded.
+const DEGRADED_LATENCY_P95_MS: f64 = 30_000.0;
 
 /// `GET /api/health` — liveness check with live telemetry.
 pub async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, Json<Value>) {
@@ -26,33 +35,63 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCo
     let active_agents = supervised.max(discovered);
     let active_runs = state.active_runs.try_read().map(|r| r.len()).unwrap_or(0);
 
-    // Build a compact provider health summary from the tracker.
+    // Build a compact provider health summary from the tracker, using HealthState
+    // for proper classification including degradation detection.
     let provider_snapshot = state.provider_health.snapshot();
     let providers_total = provider_snapshot.len();
-    let providers_healthy = provider_snapshot
-        .iter()
-        .filter(|ps| ps.consecutive_failures == 0)
-        .count();
-    let providers_unhealthy = providers_total.saturating_sub(providers_healthy);
+
+    let mut providers_healthy = 0usize;
+    let mut providers_degraded = 0usize;
+    let mut providers_unhealthy = 0usize;
+
+    for ps in &provider_snapshot {
+        match ps.state {
+            HealthState::Healthy => {
+                // Even if the circuit breaker says healthy, check error rate and
+                // latency p95 for degradation signals.
+                let latency_stats = state.latency_registry.get_all_for_provider(&ps.provider);
+                let error_rate = ps.error_rate();
+                let p95 = latency_stats.p95_ms();
+
+                if error_rate > DEGRADED_ERROR_RATE_THRESHOLD
+                    || (latency_stats.observations >= 10 && p95 > DEGRADED_LATENCY_P95_MS)
+                {
+                    providers_degraded += 1;
+                } else {
+                    providers_healthy += 1;
+                }
+            }
+            HealthState::Unhealthy { .. } => {
+                providers_unhealthy += 1;
+            }
+            HealthState::Probing => {
+                // Probing is a transitional state — classify as degraded since
+                // the provider just came out of an unhealthy period.
+                providers_degraded += 1;
+            }
+        }
+    }
+
     let provider_summary = json!({
         "total": providers_total,
         "healthy": providers_healthy,
+        "degraded": providers_degraded,
         "unhealthy": providers_unhealthy,
     });
 
-    // Determine status: "ok" / "degraded" / "down"
-    let status = if providers_total > 0 && providers_healthy == 0 {
-        "down"
-    } else if providers_unhealthy > 0 {
+    // Determine overall system status: "ok" / "degraded" / "unhealthy"
+    let status = if providers_total > 0 && providers_healthy == 0 && providers_degraded == 0 {
+        "unhealthy"
+    } else if providers_unhealthy > 0 || providers_degraded > 0 {
         "degraded"
     } else {
         "ok"
     };
 
     // Map health status to appropriate HTTP status codes so load balancers
-    // and liveness probes can detect degraded/down states.
+    // and liveness probes can detect degraded/unhealthy states.
     let http_status = match status {
-        "down" => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "unhealthy" => axum::http::StatusCode::SERVICE_UNAVAILABLE,
         _ => axum::http::StatusCode::OK,
     };
     tracing::debug!(status, ?http_status, "health check response");

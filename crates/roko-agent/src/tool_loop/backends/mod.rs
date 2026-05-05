@@ -51,7 +51,7 @@ pub fn create_openai_compat_backend(
     match provider.kind {
         ProviderKind::OpenAiCompat => {
             let api_key = resolve_api_key(provider)?;
-            let backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
+            let mut backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
                 .with_provider_id(model.provider.clone())
                 .with_base_url(base_url_for_tool_loop(provider))
                 .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
@@ -61,7 +61,11 @@ pub fn create_openai_compat_backend(
                 .with_skip_session_fields(true)
                 .with_use_max_completion_tokens(model.use_max_completion_tokens)
                 .with_ttft_timeout_ms(provider.ttft_timeout_ms)
-                .with_poster(Box::new(SharedHttpPoster { inner: poster }));
+                .with_poster(Box::new(SharedHttpPoster { inner: poster }))
+                .with_provider_kind(provider.kind);
+            if let Some(ref env_var) = provider.api_key_env {
+                backend = backend.with_api_key_env(env_var.clone());
+            }
             Ok(Arc::new(backend))
         }
         ProviderKind::AnthropicApi => {
@@ -84,18 +88,21 @@ pub fn create_openai_compat_backend(
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.perplexity.ai".to_string());
-            Ok(Arc::new(
-                OpenAiCompatBackend::new(api_key, model.slug.clone())
-                    .with_provider_id(model.provider.clone())
-                    .with_base_url(base_url)
-                    .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
-                    .with_max_tokens(max_tokens_for_model(model))
-                    .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
-                    .with_skip_session_fields(true)
-                    .with_use_max_completion_tokens(model.use_max_completion_tokens)
-                    .with_ttft_timeout_ms(provider.ttft_timeout_ms)
-                    .with_poster(Box::new(SharedHttpPoster { inner: poster })),
-            ))
+            let mut backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
+                .with_provider_id(model.provider.clone())
+                .with_base_url(base_url)
+                .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
+                .with_max_tokens(max_tokens_for_model(model))
+                .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
+                .with_skip_session_fields(true)
+                .with_use_max_completion_tokens(model.use_max_completion_tokens)
+                .with_ttft_timeout_ms(provider.ttft_timeout_ms)
+                .with_poster(Box::new(SharedHttpPoster { inner: poster }))
+                .with_provider_kind(ProviderKind::PerplexityApi);
+            if let Some(ref env_var) = provider.api_key_env {
+                backend = backend.with_api_key_env(env_var.clone());
+            }
+            Ok(Arc::new(backend))
         }
         ProviderKind::CerebrasApi => {
             // Cerebras exposes an OpenAI-compatible chat completions surface.
@@ -110,21 +117,24 @@ pub fn create_openai_compat_backend(
             extra
                 .entry("temperature")
                 .or_insert(serde_json::Value::from(0));
-            Ok(Arc::new(
-                OpenAiCompatBackend::new(api_key, model.slug.clone())
-                    .with_provider_id(model.provider.clone())
-                    .with_base_url(base_url)
-                    .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
-                    .with_max_tokens(max_tokens_for_model(model))
-                    .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
-                    .with_extra_body_params(extra)
-                    .with_skip_session_fields(true)
-                    .with_disable_parallel_tool_calls(true)
-                    .with_normalize_tool_call_content(true)
-                    .with_use_max_completion_tokens(model.use_max_completion_tokens)
-                    .with_ttft_timeout_ms(provider.ttft_timeout_ms)
-                    .with_poster(Box::new(SharedHttpPoster { inner: poster })),
-            ))
+            let mut backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
+                .with_provider_id(model.provider.clone())
+                .with_base_url(base_url)
+                .with_timeout_ms(provider.timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
+                .with_max_tokens(max_tokens_for_model(model))
+                .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
+                .with_extra_body_params(extra)
+                .with_skip_session_fields(true)
+                .with_disable_parallel_tool_calls(true)
+                .with_normalize_tool_call_content(true)
+                .with_use_max_completion_tokens(model.use_max_completion_tokens)
+                .with_ttft_timeout_ms(provider.ttft_timeout_ms)
+                .with_poster(Box::new(SharedHttpPoster { inner: poster }))
+                .with_provider_kind(ProviderKind::CerebrasApi);
+            if let Some(ref env_var) = provider.api_key_env {
+                backend = backend.with_api_key_env(env_var.clone());
+            }
+            Ok(Arc::new(backend))
         }
         ProviderKind::GeminiApi => Err(AgentCreationError::MissingConfig(
             "Gemini tool-loop backend is not implemented yet".into(),

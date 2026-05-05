@@ -11,12 +11,13 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::openai_compat::tool_registry_for_options;
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderSemaphores, build_tool_dispatcher,
-    tool_loop_max_iterations_for_profile,
+    map_provider_error, tool_loop_max_iterations_for_profile,
 };
 use crate::tool_loop::{LlmBackend, LlmError, ToolLoop, ToolLoopAgent};
 use crate::translate::{
     BackendResponse, RenderedResults, RenderedTools, SessionState, Translator, TranslatorError,
 };
+use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS};
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
@@ -115,6 +116,9 @@ fn create_tool_loop_backend_with_api_key(
         .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
         .with_poster(poster);
 
+    if let Some(ref env_var) = provider.api_key_env {
+        backend = backend.with_api_key_env(env_var.clone());
+    }
     if let Some(provider_semaphores) = options.provider_semaphores.clone() {
         backend = backend.with_provider_semaphores(provider_semaphores);
     }
@@ -230,6 +234,8 @@ struct AnthropicMessagesBackend {
     extra_headers: Vec<(String, String)>,
     provider_semaphores: Option<Arc<ProviderSemaphores>>,
     poster: Box<dyn HttpPoster>,
+    /// Environment variable name for the API key (used in error messages).
+    api_key_env: Option<String>,
 }
 
 impl AnthropicMessagesBackend {
@@ -245,7 +251,13 @@ impl AnthropicMessagesBackend {
             extra_headers: Vec::new(),
             provider_semaphores: None,
             poster: Box::new(ReqwestPoster::new()),
+            api_key_env: None,
         }
+    }
+
+    fn with_api_key_env(mut self, env_var: impl Into<String>) -> Self {
+        self.api_key_env = Some(env_var.into());
+        self
     }
 
     fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
@@ -393,7 +405,16 @@ impl LlmBackend for AnthropicMessagesBackend {
                 self.timeout_ms,
             )
             .await
-            .map_err(|err| LlmError::Network(err.to_string()))?;
+            .map_err(|err| {
+                let decorated = map_provider_error(
+                    ProviderKind::AnthropicApi,
+                    &self.provider_id,
+                    self.api_key_env.as_deref(),
+                    Some(&self.base_url),
+                    &err,
+                );
+                LlmError::Network(decorated)
+            })?;
 
         let json: Value = serde_json::from_str(&raw)
             .map_err(|err| LlmError::Backend(format!("parse response: {err}")))?;
