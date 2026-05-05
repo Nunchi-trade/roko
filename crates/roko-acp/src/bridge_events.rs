@@ -65,11 +65,11 @@ use crate::{
     session::{AcpSession, CancelToken},
     transport::{StdioTransport, TransportError, TransportResult},
     types::{
-        ContentBlock, CostInfo, INTERNAL_ERROR, JsonRpcMessage, PermissionAction,
-        PermissionDecision, PermissionOptionKind, PermissionOutcome, PermissionResponse,
-        PermissionToolCall, PlanEntry, RequestPermissionParams, SESSION_BUSY, SessionCancelParams,
-        SessionPromptParams, SessionPromptResult, SessionUpdate, StopReason, ToolCallKind,
-        ToolCallStatus, UsageInfo,
+        ContentBlock, CostInfo, INTERNAL_ERROR, JsonRpcMessage, McpInitStatus, McpServerStatus,
+        PermissionAction, PermissionDecision, PermissionOptionKind, PermissionOutcome,
+        PermissionResponse, PermissionToolCall, PlanEntry, RequestPermissionParams, SESSION_BUSY,
+        SessionCancelParams, SessionPromptParams, SessionPromptResult, SessionUpdate, StopReason,
+        ToolCallKind, ToolCallStatus, UsageInfo,
     },
 };
 
@@ -225,6 +225,8 @@ pub enum CognitiveEvent {
     },
     /// A plan update with structured entries (shown as progress in editor).
     PlanUpdate { entries: Vec<PlanEntry> },
+    /// MCP server discovery results.
+    McpStatus { statuses: Vec<McpServerStatus> },
     /// Prompt execution completed normally.
     Complete {
         stop_reason: StopReason,
@@ -385,10 +387,6 @@ async fn append_acp_episode(
         "session_id".to_string(),
         serde_json::json!(session.session_id.clone()),
     );
-    episode.extra.insert(
-        "routing_mode".to_string(),
-        serde_json::json!(session.config_state.routing_mode.clone()),
-    );
     episode
         .extra
         .insert("workflow".to_string(), serde_json::json!(workflow_config));
@@ -431,7 +429,7 @@ async fn append_acp_episode(
     }
 }
 
-fn acp_routing_context(mode: &str, prompt: &str) -> RoutingContext {
+fn acp_routing_context(mode: &str, prompt: &str, effort: &str) -> RoutingContext {
     let _prompt_len = prompt.len();
     let task_category = if mode == "research" {
         TaskCategory::Research
@@ -457,7 +455,7 @@ fn acp_routing_context(mode: &str, prompt: &str) -> RoutingContext {
         ready_queue_depth: 0,
         max_queue_wait_hours: 0.0,
         daimon_policy: DaimonPolicy::default(),
-        thinking_level: None,
+        thinking_level: Some(effort.to_owned()).filter(|value| !value.trim().is_empty()),
         temperament: None,
         previous_model: None,
         plan_context_tokens: None,
@@ -1079,6 +1077,7 @@ where
     let max_iterations = session.config_state.max_iterations;
     let review_strictness = session.config_state.review_strictness.clone();
     let session_mcp_servers = session.mcp_servers.clone();
+    let session_effort = session.config_state.effort.clone();
 
     let shared_run = session.shared_run.clone();
     // SP-1: build a restrictive layer per dispatch; missing contracts fall closed.
@@ -1253,6 +1252,7 @@ where
                     &model_key,
                     &resolved.slug,
                     &roko_config,
+                    &session_effort,
                     cancel_token,
                     event_sender,
                 )
@@ -1268,6 +1268,7 @@ where
                     &roko_config,
                     &workdir,
                     &session_mcp_servers,
+                    &session_effort,
                     cancel_token,
                     event_sender,
                 )
@@ -1394,8 +1395,11 @@ where
         );
         let model_slugs =
             cascade_router_model_slugs(&roko_config_for_logging, &resolved_for_logging.slug);
-        let routing_ctx =
-            acp_routing_context(&session.config_state.agent_mode, &prompt_text_for_logging);
+        let routing_ctx = acp_routing_context(
+            &session.config_state.agent_mode,
+            &prompt_text_for_logging,
+            &session.config_state.effort,
+        );
         let output_tokens =
             stream_result_ref.and_then(|sr| sr.usage.as_ref().map(|usage| usage.output_tokens));
         record_cascade_observation(
@@ -1455,10 +1459,15 @@ async fn run_anthropic_cognitive_task(
     model_key: &str,
     slug: &str,
     roko_config: &RokoConfig,
+    effort: &str,
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
-    let Some(model_call_config) = anthropic_model_call_config(roko_config, model_key, slug) else {
+    let Some(model_call_config) = anthropic_model_call_config(
+        &config_with_session_effort(roko_config, effort),
+        model_key,
+        slug,
+    ) else {
         emit_dispatch_failure(
             &event_sender,
             "Error: Anthropic provider is not configured for ACP dispatch.".to_string(),
@@ -1724,10 +1733,12 @@ async fn run_openai_compat_cognitive_task(
     roko_config: &RokoConfig,
     workdir: &Path,
     mcp_servers: &[crate::types::McpServerConfig],
+    effort: &str,
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
-    let resolved = resolve_model(roko_config, model_key);
+    let roko_config = config_with_session_effort(roko_config, effort);
+    let resolved = resolve_model(&roko_config, model_key);
 
     info!(
         session_id,
@@ -1762,6 +1773,15 @@ async fn run_openai_compat_cognitive_task(
     let request = model_call_request_from_acp_messages(model_key, messages);
     stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)
         .await
+}
+
+fn config_with_session_effort(roko_config: &RokoConfig, effort: &str) -> RokoConfig {
+    let mut config = roko_config.clone();
+    let effort = effort.trim();
+    if !effort.is_empty() {
+        config.agent.default_effort = effort.to_owned();
+    }
+    config
 }
 
 fn openai_compat_tool_loop_supported(provider_kind: ProviderKind) -> bool {
@@ -1812,7 +1832,17 @@ async fn run_openai_compat_mcp_tool_loop(
         .into());
     };
 
-    let mcp_state = setup_session_mcp_tools(session_id, mcp_servers, event_sender.clone()).await;
+    let (mcp_state, mcp_statuses) =
+        setup_session_mcp_tools(session_id, mcp_servers, event_sender.clone()).await;
+    if !mcp_statuses.is_empty() {
+        send_cognitive_event(
+            &event_sender,
+            CognitiveEvent::McpStatus {
+                statuses: mcp_statuses,
+            },
+        )
+        .await;
+    }
     if mcp_state.tools.is_empty() {
         send_cognitive_event(
             &event_sender,
@@ -1976,13 +2006,17 @@ async fn setup_session_mcp_tools(
     session_id: &str,
     mcp_servers: &[crate::types::McpServerConfig],
     event_sender: mpsc::Sender<CognitiveEvent>,
-) -> SessionMcpRuntime {
+) -> (SessionMcpRuntime, Vec<McpServerStatus>) {
     let mut tools = Vec::new();
     let mut handlers: HashMap<String, Arc<dyn ToolHandler>> = HashMap::new();
     let mut used_names = HashSet::new();
-    let discovery_timeout = Duration::from_secs(DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS);
+    let mut statuses = Vec::new();
 
     for server in mcp_servers {
+        let discovery_timeout = server
+            .discovery_timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_secs(DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS));
         let (command, args) = match &server.transport {
             crate::types::McpTransport::Stdio { command, args } => (command, args),
             crate::types::McpTransport::Http { url } => {
@@ -1992,6 +2026,11 @@ async fn setup_session_mcp_tools(
                     url = %url,
                     "skipping session MCP server with unsupported HTTP transport"
                 );
+                statuses.push(McpServerStatus::failed(
+                    server.name.clone(),
+                    McpInitStatus::TransportUnsupported,
+                    format!("HTTP transport is not supported for session MCP ({url})"),
+                ));
                 continue;
             }
         };
@@ -2005,6 +2044,11 @@ async fn setup_session_mcp_tools(
                     error = %error,
                     "failed to spawn session MCP server"
                 );
+                statuses.push(McpServerStatus::failed(
+                    server.name.clone(),
+                    McpInitStatus::SpawnFailed,
+                    error.to_string(),
+                ));
                 continue;
             }
         };
@@ -2019,15 +2063,28 @@ async fn setup_session_mcp_tools(
                     error = %error,
                     "session MCP initialize failed"
                 );
+                statuses.push(McpServerStatus::failed(
+                    server.name.clone(),
+                    McpInitStatus::InitializeFailed,
+                    error.to_string(),
+                ));
                 continue;
             }
             Err(_) => {
                 warn!(
                     session_id,
                     server = %server.name,
-                    timeout_secs = DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS,
+                    timeout_ms = discovery_timeout.as_millis(),
                     "session MCP initialize timed out"
                 );
+                statuses.push(McpServerStatus::failed(
+                    server.name.clone(),
+                    McpInitStatus::InitializeTimeout,
+                    format!(
+                        "initialize timed out after {}ms",
+                        discovery_timeout.as_millis()
+                    ),
+                ));
                 continue;
             }
         }
@@ -2041,15 +2098,28 @@ async fn setup_session_mcp_tools(
                     error = %error,
                     "session MCP tools/list failed"
                 );
+                statuses.push(McpServerStatus::failed(
+                    server.name.clone(),
+                    McpInitStatus::ToolsListFailed,
+                    error.to_string(),
+                ));
                 continue;
             }
             Err(_) => {
                 warn!(
                     session_id,
                     server = %server.name,
-                    timeout_secs = DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS,
+                    timeout_ms = discovery_timeout.as_millis(),
                     "session MCP tools/list timed out"
                 );
+                statuses.push(McpServerStatus::failed(
+                    server.name.clone(),
+                    McpInitStatus::ToolsListTimeout,
+                    format!(
+                        "tools/list timed out after {}ms",
+                        discovery_timeout.as_millis()
+                    ),
+                ));
                 continue;
             }
         };
@@ -2060,6 +2130,7 @@ async fn setup_session_mcp_tools(
             tool_count = listed.len(),
             "discovered session MCP tools"
         );
+        statuses.push(McpServerStatus::ready(server.name.clone(), listed.len()));
 
         for tool in listed {
             let base_name = format!(
@@ -2087,7 +2158,7 @@ async fn setup_session_mcp_tools(
         }
     }
 
-    SessionMcpRuntime { tools, handlers }
+    (SessionMcpRuntime { tools, handlers }, statuses)
 }
 
 fn sanitize_tool_segment(input: &str) -> String {
@@ -3351,6 +3422,7 @@ fn map_event_to_update(event: CognitiveEvent) -> SessionUpdate {
             locations: None,
         },
         CognitiveEvent::PlanUpdate { entries } => SessionUpdate::Plan { entries },
+        CognitiveEvent::McpStatus { statuses } => SessionUpdate::McpStatusUpdate { statuses },
         CognitiveEvent::Complete { .. }
         | CognitiveEvent::Failure { .. }
         | CognitiveEvent::MaxTokens => {
@@ -3692,6 +3764,9 @@ mod tests {
         let mut session = AcpSession::new(SessionNewParams {
             session_name: None,
             client_capabilities: None,
+            model: None,
+            provider: None,
+            effort: None,
             mcp_servers: Vec::new(),
         });
         session.config_state.model = model.to_string();
@@ -4113,6 +4188,9 @@ mod tests {
         let mut session = AcpSession::new(SessionNewParams {
             session_name: None,
             client_capabilities: None,
+            model: None,
+            provider: None,
+            effort: None,
             mcp_servers: Vec::new(),
         });
         let session_id = session.session_id.clone();
@@ -4150,6 +4228,9 @@ mod tests {
         let mut session = AcpSession::new(SessionNewParams {
             session_name: Some("perm-test".to_string()),
             client_capabilities: None,
+            model: None,
+            provider: None,
+            effort: None,
             mcp_servers: Vec::new(),
         });
         let action = crate::types::PermissionAction::FileEdit;
@@ -4175,6 +4256,9 @@ mod tests {
         let mut session = AcpSession::new(SessionNewParams {
             session_name: Some("perm-test".to_string()),
             client_capabilities: None,
+            model: None,
+            provider: None,
+            effort: None,
             mcp_servers: Vec::new(),
         });
         let action = crate::types::PermissionAction::FileEdit;
@@ -4209,6 +4293,9 @@ mod tests {
         let mut session = AcpSession::new(SessionNewParams {
             session_name: Some("perm-test".to_string()),
             client_capabilities: None,
+            model: None,
+            provider: None,
+            effort: None,
             mcp_servers: Vec::new(),
         });
         let action = crate::types::PermissionAction::FileEdit;
@@ -4288,10 +4375,7 @@ mod tests {
             episode.extra.get("session_id"),
             Some(&json!(episode.task_id.clone()))
         );
-        assert_eq!(
-            episode.extra.get("routing_mode"),
-            Some(&json!("auto_override"))
-        );
+        assert!(episode.extra.get("routing_mode").is_none());
         assert!(episode.usage.wall_ms > 0);
         assert_eq!(episode.tokens_used, 12);
         assert_eq!(episode.usage.input_tokens, 5);
@@ -4351,15 +4435,16 @@ mod tests {
 
     #[test]
     fn acp_routing_context_maps_modes_to_roles() {
-        let plan = acp_routing_context("plan", "wire router feedback");
+        let plan = acp_routing_context("plan", "wire router feedback", "high");
         assert_eq!(plan.task_category, TaskCategory::Implementation);
         assert_eq!(plan.role, AgentRole::Strategist);
+        assert_eq!(plan.thinking_level.as_deref(), Some("high"));
 
-        let research = acp_routing_context("research", "find the source of truth");
+        let research = acp_routing_context("research", "find the source of truth", "medium");
         assert_eq!(research.task_category, TaskCategory::Research);
         assert_eq!(research.role, AgentRole::Researcher);
 
-        let code = acp_routing_context("code", "edit file");
+        let code = acp_routing_context("code", "edit file", "low");
         assert_eq!(code.task_category, TaskCategory::Implementation);
         assert_eq!(code.role, AgentRole::Implementer);
     }

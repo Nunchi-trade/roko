@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
+use indexmap::IndexMap;
 use roko_core::AgentRole;
 use roko_core::config::schema::ModelProfile;
 use roko_gate::AcceptanceContract;
@@ -99,7 +100,7 @@ impl TaskSnapshot {
 
 pub fn validate_plans_dir(
     dir: &Path,
-    models: Option<&HashMap<String, ModelProfile>>,
+    models: Option<&IndexMap<String, ModelProfile>>,
 ) -> Result<ValidationReport> {
     validate_plans_dir_impl(dir, models, None)
 }
@@ -111,7 +112,7 @@ pub fn validate_plans_dir(
 /// workspace filesystem.
 pub fn validate_plans_dir_with_workdir(
     dir: &Path,
-    models: Option<&HashMap<String, ModelProfile>>,
+    models: Option<&IndexMap<String, ModelProfile>>,
     workdir: Option<&Path>,
 ) -> Result<ValidationReport> {
     validate_plans_dir_impl(dir, models, workdir)
@@ -119,7 +120,7 @@ pub fn validate_plans_dir_with_workdir(
 
 fn validate_plans_dir_impl(
     dir: &Path,
-    models: Option<&HashMap<String, ModelProfile>>,
+    models: Option<&IndexMap<String, ModelProfile>>,
     workdir: Option<&Path>,
 ) -> Result<ValidationReport> {
     let tasks_files = collect_tasks_files(dir)?;
@@ -266,7 +267,7 @@ fn collect_tasks_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(
 
 fn validate_tasks_file(
     tasks_path: &Path,
-    models: Option<&HashMap<String, ModelProfile>>,
+    models: Option<&IndexMap<String, ModelProfile>>,
 ) -> Result<PlanDiagnostics> {
     let content = std::fs::read_to_string(tasks_path)
         .with_context(|| format!("read {}", tasks_path.display()))?;
@@ -951,7 +952,7 @@ fn parse_task_role(role: &str) -> Option<AgentRole> {
     })
 }
 
-fn model_is_known(model: &str, known_models: &HashMap<String, ModelProfile>) -> bool {
+fn model_is_known(model: &str, known_models: &IndexMap<String, ModelProfile>) -> bool {
     known_models.contains_key(model) || known_models.values().any(|profile| profile.slug == model)
 }
 

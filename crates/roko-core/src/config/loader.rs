@@ -255,6 +255,18 @@ fn collect_diagnostics(config: &RokoConfig) -> Vec<ConfigDiagnostic> {
                 ),
             });
         }
+
+        if let Some(max_output) = profile.max_output
+            && max_output < 1_000
+        {
+            diagnostics.push(ConfigDiagnostic {
+                key: format!("models.{key}.max_output"),
+                message: format!(
+                    "model '{}' sets max_output={} which is unusually low for IDE usage",
+                    key, max_output
+                ),
+            });
+        }
     }
 
     // Check for duplicate slugs.

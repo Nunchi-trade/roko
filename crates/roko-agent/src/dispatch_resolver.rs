@@ -4,8 +4,7 @@
 //! config/model lookup behavior and records the validation gaps that still need
 //! dedicated migration packets.
 
-use std::collections::HashMap;
-
+use indexmap::IndexMap;
 use roko_core::agent::{ProviderKind, ResolvedModel, resolve_model};
 #[cfg(test)]
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
@@ -153,7 +152,7 @@ fn find_model_for_provider(config: &RokoConfig, provider: &str) -> Option<String
 fn select_provider<'a>(
     selected_model: &str,
     resolved: &ResolvedModel,
-    providers: &'a HashMap<String, ProviderConfig>,
+    providers: &'a IndexMap<String, ProviderConfig>,
 ) -> Result<(String, &'a ProviderConfig), DispatchResolverError> {
     if let Some(profile) = resolved.profile.as_ref() {
         let provider_id = normalized(Some(profile.provider.as_str())).ok_or_else(|| {

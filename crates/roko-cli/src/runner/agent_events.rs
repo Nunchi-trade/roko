@@ -66,7 +66,7 @@ impl AgentStreamBuffer {
 /// When streaming output is enabled, structural events are rendered through
 /// the inline terminal. `stream_buf` accumulates `MessageDelta` text and is
 /// flushed on tool calls / turn completion.
-pub fn handle_agent_event(
+pub(crate) fn handle_agent_event(
     event: &AgentEvent,
     state: &mut RunState,
     tui: &TuiBridge,

@@ -31,6 +31,7 @@ use crate::workspace_paths::{
     drafts_dir, ideas_path, plans_dir as workspace_plans_dir, prd_dir, published_dir,
 };
 use anyhow::{Context as _, Result, anyhow};
+use indexmap::IndexMap;
 use roko_core::config::schema::RokoConfig;
 use roko_core::{Body, Engram, Kind, Provenance, Store};
 use roko_fs::FileSubstrate;
@@ -1932,7 +1933,7 @@ fn strsim_distance(a: &str, b: &str) -> usize {
 /// Check whether a model identifier is present in the config model table.
 fn model_in_config(
     model: &str,
-    models: &std::collections::HashMap<String, roko_core::config::schema::ModelProfile>,
+    models: &IndexMap<String, roko_core::config::schema::ModelProfile>,
 ) -> bool {
     models.contains_key(model) || models.values().any(|p| p.slug == model)
 }
@@ -1951,7 +1952,7 @@ fn model_in_config(
 fn validate_and_fix_generated_plan(
     toml_str: &str,
     slug: &str,
-    models: &std::collections::HashMap<String, roko_core::config::schema::ModelProfile>,
+    models: &IndexMap<String, roko_core::config::schema::ModelProfile>,
     default_model: Option<&str>,
 ) -> Result<String> {
     // 0. Deterministic repair before parsing
@@ -3055,13 +3056,11 @@ mod tests {
 
     // ---- validate_and_fix_generated_plan tests -------------------------------
 
-    fn empty_models() -> std::collections::HashMap<String, roko_core::config::schema::ModelProfile>
-    {
-        std::collections::HashMap::new()
+    fn empty_models() -> IndexMap<String, roko_core::config::schema::ModelProfile> {
+        IndexMap::new()
     }
 
-    fn sample_models() -> std::collections::HashMap<String, roko_core::config::schema::ModelProfile>
-    {
+    fn sample_models() -> IndexMap<String, roko_core::config::schema::ModelProfile> {
         // Build from TOML to avoid enumerating every ModelProfile field.
         let toml_str = r#"
 [models.claude-sonnet-4-6]

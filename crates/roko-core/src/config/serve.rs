@@ -42,6 +42,12 @@ pub struct ServeConfig {
     /// Required when binding to a non-loopback address with `auth.enabled = false`.
     #[serde(default)]
     pub acknowledge_public_risk: bool,
+    /// Additional remote IPs or CIDR ranges allowed to POST RuntimeEvent ingest without API auth.
+    ///
+    /// Loopback callers are always allowed. Public callers should normally use
+    /// `serve.auth.enabled = true` instead of this allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_ingest_allowlist: Vec<String>,
 }
 
 impl Default for ServeConfig {
@@ -55,6 +61,7 @@ impl Default for ServeConfig {
             deploy: ServeDeployConfig::default(),
             auto_start: false,
             acknowledge_public_risk: false,
+            event_ingest_allowlist: Vec::new(),
         }
     }
 }

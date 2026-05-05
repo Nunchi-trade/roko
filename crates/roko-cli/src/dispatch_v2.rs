@@ -112,8 +112,10 @@ pub async fn dispatch_via_model_call_service(prompt: &str) -> AnyhowResult<Dispa
         Some(router) => Arc::new(feedback_service.with_cascade_router(Arc::clone(router))),
         None => Arc::new(feedback_service),
     };
+    let cost_table = roko_agent::CostTable::from_config_with_defaults(&model_config.models);
     let mut service = ModelCallService::new(model.clone())
         .with_config(model_config.clone())
+        .with_cost_table(cost_table)
         .with_feedback_sink(feedback_sink)
         .with_inference_observer(Arc::new(
             crate::inference_observer::RuntimeEventInferenceObserver::new(),

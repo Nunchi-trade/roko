@@ -25,6 +25,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt", "macros"]
 chrono = { workspace = true }
 tracing = { workspace = true }
 globset = { workspace = true }
+indexmap = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 toml = { workspace = true }

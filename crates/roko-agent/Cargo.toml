@@ -25,6 +25,7 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+indexmap = { workspace = true }
 governor = { version = "0.10", default-features = false, features = ["std"] }
 url = "2"
 regex = "1"

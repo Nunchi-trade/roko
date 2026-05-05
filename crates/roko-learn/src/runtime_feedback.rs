@@ -1537,7 +1537,7 @@ impl LearningRuntime {
     /// of substring heuristics.
     pub fn set_model_tiers(
         &mut self,
-        models: &std::collections::HashMap<String, roko_core::config::ModelProfile>,
+        models: &indexmap::IndexMap<String, roko_core::config::ModelProfile>,
     ) {
         self.cascade_router.set_model_tiers(models);
     }

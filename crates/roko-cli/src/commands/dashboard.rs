@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
+use roko_fs::RokoLayout;
 
 pub(crate) async fn cmd_dashboard(
     cli: &Cli,

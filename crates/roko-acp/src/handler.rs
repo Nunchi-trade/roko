@@ -12,14 +12,16 @@ use tracing_subscriber::EnvFilter;
 use crate::{
     bridge_events::handle_session_prompt,
     config::AcpConfig,
+    config_watch::ConfigWatcher,
     session::SessionManager,
     transport::{StdioTransport, TransportError},
     types::{
         ACP_PROTOCOL_VERSION, ACP_SPEC_VERSION, AgentCapabilities, AgentInfo, ConfigUpdateParams,
-        ConfigUpdateResult, InitializeParams, InitializeResult, JsonRpcId, JsonRpcMessage,
-        JsonRpcNotification, JsonRpcRequest, METHOD_NOT_FOUND, McpCapabilities, PARSE_ERROR,
-        PromptCapabilities, SESSION_NOT_FOUND, SessionCancelParams, SessionCloseParams,
-        SessionLoadParams, SessionNewParams, SessionPromptParams, SessionSetModeParams,
+        ConfigUpdateResult, INVALID_PARAMS, InitializeParams, InitializeResult, JsonRpcId,
+        JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, METHOD_NOT_FOUND, McpCapabilities,
+        PARSE_ERROR, PromptCapabilities, SESSION_NOT_FOUND, SessionCancelParams,
+        SessionCloseParams, SessionLoadParams, SessionNewParams, SessionPromptParams,
+        SessionSetModeParams,
     },
 };
 
@@ -80,12 +82,20 @@ where
     W: AsyncWrite + Unpin,
 {
     let roko_config = config.load_roko_config();
+    if !config.workdir.join("roko.toml").is_file() {
+        warn!(
+            workdir = %config.workdir.display(),
+            "no roko.toml found in ACP workdir; using defaults and inherited config"
+        );
+    }
     info!(
         providers = roko_config.providers.len(),
         models = roko_config.models.len(),
         "loaded roko.toml configuration"
     );
     let mut sessions = SessionManager::new(config.workdir.clone(), roko_config);
+    sessions.config_sources = config.config_sources();
+    let mut config_watcher = ConfigWatcher::start(&config);
 
     // GC old persisted sessions at startup (7 days).
     sessions.gc_old_sessions(chrono::Duration::days(7));
@@ -114,6 +124,15 @@ where
 
         match message {
             JsonRpcMessage::Request(request) => {
+                if config_watcher.changed() {
+                    let refreshed = config.load_roko_config();
+                    info!(
+                        providers = refreshed.providers.len(),
+                        models = refreshed.models.len(),
+                        "ACP config changed; reloaded roko.toml"
+                    );
+                    sessions.replace_roko_config(refreshed);
+                }
                 handle_request(transport, &mut sessions, request).await?;
             }
             JsonRpcMessage::Response(response) => {
@@ -162,6 +181,7 @@ async fn handle_request(
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                     title: Some("Roko".to_owned()),
                 }),
+                config_sources: sessions.config_sources.clone(),
             };
             send_success(transport, id, result).await
         }
@@ -172,8 +192,9 @@ async fn handle_request(
             };
             let result = sessions.create_session(params);
             let session_id = result.session_id.clone();
+            let bare_mode = sessions.roko_config.agent.bare_mode;
             send_success(transport, id, result).await?;
-            send_slash_commands_notification(transport, &session_id).await
+            send_slash_commands_notification(transport, &session_id, bare_mode).await
         }
         "session/list" => {
             let result = sessions.list_sessions_with_persisted();
@@ -241,7 +262,12 @@ async fn handle_request(
                 new_value = %params.new_value,
                 "received config update request"
             );
-            session.update_config(&params.option_id, &params.new_value, &roko_config);
+            if let Err(message) =
+                session.update_config(&params.option_id, &params.new_value, &roko_config)
+            {
+                return send_error_response(transport, id, json_rpc_error(INVALID_PARAMS, message))
+                    .await;
+            }
             let result = ConfigUpdateResult {
                 config_options: session.config_options(),
             };
@@ -272,8 +298,9 @@ async fn handle_request(
                 }
             };
             let session_id = params.session_id.clone();
+            let bare_mode = sessions.roko_config.agent.bare_mode;
             send_success(transport, id, result).await?;
-            send_slash_commands_notification(transport, &session_id).await?;
+            send_slash_commands_notification(transport, &session_id, bare_mode).await?;
             if let Some(session) = sessions.get_session(&session_id) {
                 let options = serde_json::to_value(session.config_options())
                     .unwrap_or_else(|_| serde_json::json!([]));
@@ -363,8 +390,9 @@ where
 async fn send_slash_commands_notification(
     transport: &mut StdioTransport<impl AsyncRead + Unpin, impl AsyncWrite + Unpin>,
     session_id: &str,
+    bare_mode: bool,
 ) -> Result<()> {
-    let commands = crate::session::build_slash_commands();
+    let commands = crate::session::build_slash_commands(bare_mode);
     let update = serde_json::json!({
         "sessionId": session_id,
         "update": {

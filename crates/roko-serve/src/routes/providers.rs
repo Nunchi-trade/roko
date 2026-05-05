@@ -7,6 +7,7 @@ use std::time::Instant;
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -568,7 +569,7 @@ fn default_complexity_for_role(role: AgentRole) -> TaskComplexityBand {
 }
 
 fn build_model_catalog(
-    models: &HashMap<String, ModelProfile>,
+    models: &IndexMap<String, ModelProfile>,
 ) -> HashMap<String, ModelCatalogEntry> {
     let mut catalog = HashMap::new();
     for (model_key, profile) in models {

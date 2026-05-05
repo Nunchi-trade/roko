@@ -50,7 +50,7 @@ use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::{ContentHash, Context, DaimonPolicy, Kind, Query, Store};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_dreams::{DreamAgentConfig, DreamEngine, DreamLoopConfig, DreamRunner};
-use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
+use roko_fs::{FileSubstrate, FsObservabilitySinks};
 use roko_learn::cascade_router::{CascadeRouteExplanation, CascadeRouter};
 use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
 use roko_learn::cost_table::CostTable;
@@ -104,6 +104,29 @@ pub enum Effort {
     High,
     /// Maximum reasoning — slowest, most expensive.
     Max,
+}
+
+/// Complexity override for `roko do`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DoComplexity {
+    /// Direct single-agent workflow.
+    Simple,
+    /// Planned workflow.
+    #[value(alias = "standard")]
+    Medium,
+    /// Full architectural workflow.
+    #[value(alias = "architectural")]
+    Complex,
+}
+
+impl DoComplexity {
+    fn into_plan_complexity(self) -> roko_gate::PlanComplexity {
+        match self {
+            Self::Simple => roko_gate::PlanComplexity::Simple,
+            Self::Medium => roko_gate::PlanComplexity::Standard,
+            Self::Complex => roko_gate::PlanComplexity::Complex,
+        }
+    }
 }
 
 /// Log output format for tracing subscriber initialization.
@@ -321,17 +344,29 @@ Examples:
     /// Do a task from a natural-language prompt.
     #[command(after_help = "\
 Examples:
-  roko do \"Fix the login bug\"       Classify scope and execute
-  roko do --plan \"Add auth flow\"    Force planned workflow
-  roko do --ghost \"Refactor API\"    Preview scope and workflow only")]
+  roko do \"Fix the login bug\"                         Classify scope and execute
+  roko do \"Add auth flow\" --complexity medium         Force planned workflow
+  roko do \"Refactor API\" --dry-run                    Preview scope and workflow only")]
     Do {
         /// Force a planned workflow instead of the lightest classified scope.
         #[arg(long)]
         plan: bool,
+        /// Force a complexity level instead of auto-detecting.
+        #[arg(long, value_enum)]
+        complexity: Option<DoComplexity>,
+        /// Preview classification, workflow, and gates without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Working directory (default: cwd or --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Override the provider for this run.
+        #[arg(long)]
+        provider: Option<String>,
         /// Skip approval prompts when the selected workflow would ask.
         #[arg(long)]
         yes: bool,
-        /// Preview classification, workflow, and gates without executing.
+        /// Alias for --dry-run retained for existing scripts.
         #[arg(long)]
         ghost: bool,
         /// Compare cascade and non-cascade routing as a dry preview.
@@ -560,6 +595,9 @@ Examples:
         /// Path to roko.toml config file.
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Path to a global roko.toml merged with the workspace/editor config.
+        #[arg(long)]
+        global_config: Option<PathBuf>,
         /// Log file path (stdout is the protocol channel).
         #[arg(long, default_value = ".roko/acp.log")]
         log_file: PathBuf,
@@ -1851,6 +1889,7 @@ fn main() {
         ref workdir,
         ref profile,
         ref config,
+        ref global_config,
         ref log_file,
     }) = cli.command
     {
@@ -1858,6 +1897,7 @@ fn main() {
             workdir: workdir.clone(),
             profile: profile.clone(),
             config_path: config.clone(),
+            global_config_path: global_config.clone(),
             log_file: log_file.clone(),
         };
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -2169,6 +2209,8 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                     workdir,
                     vec![prompt],
                     false,
+                    None,
+                    false,
                     false,
                     false,
                     false,
@@ -2182,6 +2224,10 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         }
         Command::Do {
             plan,
+            complexity,
+            dry_run,
+            workdir,
+            provider,
             yes,
             ghost,
             compare,
@@ -2190,7 +2236,18 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             prompt,
         } => {
             commands::util::cmd_do(
-                cli, None, prompt, plan, yes, ghost, compare, r#continue, no_cascade, None,
+                cli,
+                workdir,
+                prompt,
+                plan,
+                complexity.map(DoComplexity::into_plan_complexity),
+                dry_run,
+                yes,
+                ghost,
+                compare,
+                r#continue,
+                no_cascade,
+                provider,
             )
             .await
         }
@@ -2353,12 +2410,14 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             workdir,
             profile,
             config,
+            global_config,
             log_file,
         } => {
             let acp_config = roko_acp::AcpConfig {
                 workdir,
                 profile,
                 config_path: config,
+                global_config_path: global_config,
                 log_file,
             };
             roko_acp::run_acp_server(acp_config).await?;
@@ -2847,11 +2906,7 @@ fn bootstrap_observability_dirs(workdir: &Path) -> std::io::Result<()> {
     if !workdir.join("roko.toml").exists() && !workdir.join(".roko").exists() {
         return Ok(());
     }
-    let layout = RokoLayout::for_project(workdir);
-    std::fs::create_dir_all(layout.root())?;
-    for dir in layout.top_level_dirs() {
-        std::fs::create_dir_all(dir)?;
-    }
+    roko_core::Workspace::create(workdir).map_err(std::io::Error::other)?;
     let sinks = FsObservabilitySinks::for_workdir(workdir);
     std::fs::create_dir_all(sinks.trace_sink.root())?;
     if let Some(parent) = sinks.metrics_sink.path().parent() {
@@ -3169,6 +3224,13 @@ mod tests {
             "roko",
             "do",
             "--plan",
+            "--complexity",
+            "medium",
+            "--dry-run",
+            "--workdir",
+            "/tmp/do-workdir",
+            "--provider",
+            "openai",
             "--yes",
             "--ghost",
             "--compare",
@@ -3180,6 +3242,10 @@ mod tests {
         match cli.command {
             Some(Command::Do {
                 plan,
+                complexity: Some(complexity),
+                dry_run,
+                workdir: Some(workdir),
+                provider: Some(provider),
                 yes,
                 ghost,
                 compare,
@@ -3188,6 +3254,10 @@ mod tests {
                 ..
             }) => {
                 assert!(plan);
+                assert_eq!(complexity, DoComplexity::Medium);
+                assert!(dry_run);
+                assert_eq!(workdir, PathBuf::from("/tmp/do-workdir"));
+                assert_eq!(provider, "openai");
                 assert!(yes);
                 assert!(ghost);
                 assert!(compare);
@@ -3284,6 +3354,8 @@ mod tests {
             "editor",
             "--config",
             "/tmp/project/roko.toml",
+            "--global-config",
+            "/tmp/global-roko.toml",
             "--log-file",
             ".roko/editor-acp.log",
         ])
@@ -3294,10 +3366,12 @@ mod tests {
                 workdir,
                 profile,
                 config: Some(config),
+                global_config: Some(global_config),
                 log_file,
             }) if workdir == PathBuf::from("/tmp/project")
                 && profile == "editor"
                 && config == PathBuf::from("/tmp/project/roko.toml")
+                && global_config == PathBuf::from("/tmp/global-roko.toml")
                 && log_file == PathBuf::from(".roko/editor-acp.log")
         ));
     }

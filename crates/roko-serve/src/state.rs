@@ -364,6 +364,8 @@ pub struct AppState {
     pub state_hub: roko_core::SharedStateHub,
     /// RuntimeEvent SSE adapter for workflow event streaming.
     pub sse_adapter: Arc<crate::adapters::SseAdapter>,
+    /// Durable RuntimeEvent logger for externally ingested events.
+    pub runtime_event_logger: Arc<roko_runtime::JsonlLogger>,
     /// Event subscriptions loaded at startup.
     pub subscriptions: SubscriptionRegistry,
     /// Runtime bridge to CLI operations (run_once, status, dashboard).
@@ -597,6 +599,9 @@ impl AppState {
         let terminal_sessions = crate::terminal::SessionManager::new(terminal_workdir);
         terminal_sessions.configure_server_env_from_config(&roko_config);
 
+        let runtime_event_logger =
+            Arc::new(roko_runtime::JsonlLogger::from_roko_dir(layout.root()));
+
         Ok(Self {
             workdir,
             layout,
@@ -609,6 +614,7 @@ impl AppState {
             event_bus: EventBus::new(16_384),
             state_hub,
             sse_adapter: Arc::new(crate::adapters::SseAdapter::new(256)),
+            runtime_event_logger,
             subscriptions,
             runtime,
             model_call_service,

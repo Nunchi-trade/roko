@@ -44,6 +44,7 @@ use crate::dispatcher::{HandlerResolver, ToolDispatcher};
 use crate::gemini::GeminiAdapter;
 use crate::mock::MockAgent;
 use crate::{Agent, ExecAgent};
+use indexmap::IndexMap;
 use roko_core::Temperament;
 use roko_core::agent::{ProviderKind, resolve_model};
 #[cfg(test)]
@@ -406,7 +407,7 @@ fn provider_kind_for_known_protocol_command(command: &str) -> Option<ProviderKin
 
 /// Find the first configured provider matching a given kind.
 fn provider_for_kind(
-    providers: &HashMap<String, ProviderConfig>,
+    providers: &IndexMap<String, ProviderConfig>,
     kind: ProviderKind,
 ) -> Option<(String, &ProviderConfig)> {
     let exact_key = kind.label();
@@ -430,7 +431,7 @@ pub struct ProviderSemaphores {
 
 impl ProviderSemaphores {
     #[must_use]
-    pub fn new(configs: &HashMap<String, ProviderConfig>) -> Self {
+    pub fn new(configs: &IndexMap<String, ProviderConfig>) -> Self {
         let mut semaphores = HashMap::with_capacity(configs.len());
         for (id, config) in configs {
             let permits = config

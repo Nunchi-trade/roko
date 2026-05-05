@@ -3,6 +3,7 @@
 
 use crate::*;
 use roko_core::config::schema::RokoConfig;
+use roko_fs::RokoLayout;
 use roko_gate::PlanComplexity;
 
 /// Returns `true` on success, `false` when the topic is not recognised.
@@ -117,8 +118,8 @@ pub(crate) async fn cmd_init(
         .await
         .with_context(|| format!("create {}", roko_dir.display()))?;
 
-    // Create all top-level layout directories and VERSION file via RokoLayout.
-    // This ensures doctor checks pass and all subsystems have their dirs.
+    // Create versioned filesystem layout directories for subsystems that
+    // still read roko-fs layout metadata directly.
     let layout = RokoLayout::for_project(&target);
     layout
         .ensure_dirs()
@@ -224,6 +225,8 @@ pub(crate) async fn cmd_do(
     workdir: Option<PathBuf>,
     prompt_args: Vec<String>,
     plan: bool,
+    complexity_override: Option<PlanComplexity>,
+    dry_run: bool,
     yes: bool,
     ghost: bool,
     compare: bool,
@@ -246,19 +249,24 @@ pub(crate) async fn cmd_do(
         .map(|resolved| resolved.config)
         .unwrap_or_default();
     let scope_config = scope_model_config_from_cli_config(&preview_config);
-    let resolved_complexity =
-        roko_cli::scope_resolver::ScopeResolver::resolve(&prompt, &scope_config).await;
+    let classified_complexity = match complexity_override {
+        Some(complexity) => complexity,
+        None => roko_cli::scope_resolver::ScopeResolver::resolve(&prompt, &scope_config).await,
+    };
     let complexity = if plan {
-        promote_to_planned_complexity(resolved_complexity)
+        promote_to_planned_complexity(classified_complexity)
     } else {
-        resolved_complexity
+        classified_complexity
     };
     let workflow_template = workflow_template_for_complexity(complexity);
+    let forced = complexity_override.is_some();
+    let dry_preview = dry_run || ghost;
 
-    if ghost || compare {
+    if dry_preview || compare {
         print_do_preview(
             &prompt,
             complexity,
+            forced,
             workflow_template,
             yes,
             no_cascade,
@@ -327,10 +335,15 @@ pub(crate) async fn cmd_do(
 }
 
 async fn cmd_do_continue(workdir: &Path, work_id: Option<String>) -> Result<i32> {
-    let layout = roko_fs::RokoLayout::for_project(workdir);
     let snapshot = match work_id {
-        Some(id) => layout.state_dir().join(format!("{id}.json")),
-        None => layout.executor_snapshot(),
+        Some(id) => match roko_core::Workspace::open(workdir) {
+            Ok(workspace) => workspace.state_dir().join(format!("{id}.json")),
+            Err(_) => workdir
+                .join(".roko")
+                .join("state")
+                .join(format!("{id}.json")),
+        },
+        None => executor_snapshot_path(workdir),
     };
 
     if snapshot.exists() {
@@ -346,7 +359,7 @@ async fn cmd_do_continue(workdir: &Path, work_id: Option<String>) -> Result<i32>
 }
 
 fn cmd_do_resume_hint(workdir: &Path) -> Result<i32> {
-    let snapshot = roko_fs::RokoLayout::for_project(workdir).executor_snapshot();
+    let snapshot = executor_snapshot_path(workdir);
     if snapshot.exists() {
         eprintln!("interrupted work found at {}", snapshot.display());
         eprintln!("resume with: roko do --continue");
@@ -358,9 +371,16 @@ fn cmd_do_resume_hint(workdir: &Path) -> Result<i32> {
     }
 }
 
+fn executor_snapshot_path(workdir: &Path) -> PathBuf {
+    roko_core::Workspace::open(workdir)
+        .map(|workspace| workspace.executor_snapshot_path())
+        .unwrap_or_else(|_| workdir.join(".roko").join("state").join("executor.json"))
+}
+
 fn print_do_preview(
     prompt: &str,
     complexity: PlanComplexity,
+    forced: bool,
     workflow_template: &str,
     yes: bool,
     no_cascade: bool,
@@ -369,7 +389,11 @@ fn print_do_preview(
     let gate_count = roko_cli::run::workflow_enabled_gate_names(&config.gates).len();
     println!("roko do");
     println!("prompt      : {}", truncate_for_preview(prompt, 80));
-    println!("complexity  : {}", complexity_label(complexity));
+    println!(
+        "complexity  : {} ({})",
+        complexity_label(complexity),
+        if forced { "forced" } else { "auto-detected" }
+    );
     println!("workflow    : {workflow_template}");
     println!("cost        : {}", estimated_cost_range(complexity));
     println!("gates       : {gate_count}");

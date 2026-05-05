@@ -180,6 +180,9 @@ pub struct InitializeResult {
     /// Agent identity metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_info: Option<AgentInfo>,
+    /// Config files active for this ACP process, in effective load order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_sources: Vec<String>,
 }
 
 /// Capabilities reported by the ACP agent.
@@ -247,6 +250,15 @@ pub struct SessionNewParams {
     /// Optional client capabilities for the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_capabilities: Option<ClientCapabilities>,
+    /// Requested model key from `[models.*]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Requested provider key from `[providers.*]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Requested reasoning effort: low, medium, high, or max.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// MCP servers attached to this session.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -260,6 +272,72 @@ pub struct McpServerConfig {
     pub name: String,
     /// Transport configuration for the MCP server.
     pub transport: McpTransport,
+    /// Optional discovery timeout for initialize/tools-list, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_timeout_ms: Option<u64>,
+}
+
+/// Status of one MCP server initialization attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    /// MCP server name.
+    pub name: String,
+    /// Initialization result.
+    pub status: McpInitStatus,
+    /// Number of tools discovered when ready.
+    pub tool_count: usize,
+    /// Optional human-readable failure detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl McpServerStatus {
+    /// Construct a ready status.
+    #[must_use]
+    pub fn ready(name: impl Into<String>, tool_count: usize) -> Self {
+        Self {
+            name: name.into(),
+            status: McpInitStatus::Ready,
+            tool_count,
+            message: None,
+        }
+    }
+
+    /// Construct a failed status.
+    #[must_use]
+    pub fn failed(
+        name: impl Into<String>,
+        status: McpInitStatus,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status,
+            tool_count: 0,
+            message: Some(message.into()),
+        }
+    }
+}
+
+/// MCP server initialization status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpInitStatus {
+    /// Server initialized and tools were listed.
+    Ready,
+    /// Transport type is not supported for session-scoped MCP.
+    TransportUnsupported,
+    /// Server process could not be spawned.
+    SpawnFailed,
+    /// Initialize handshake failed.
+    InitializeFailed,
+    /// Initialize handshake timed out.
+    InitializeTimeout,
+    /// Tools/list failed.
+    ToolsListFailed,
+    /// Tools/list timed out.
+    ToolsListTimeout,
 }
 
 /// Supported MCP transport configurations.
@@ -292,6 +370,9 @@ pub struct SessionNewResult {
     /// Session configuration options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_options: Option<Vec<ConfigOption>>,
+    /// Non-fatal warnings produced while creating or loading the session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Metadata about the available session modes.
@@ -459,6 +540,11 @@ pub enum SessionUpdate {
         /// Available config options.
         config_options: Vec<ConfigOption>,
     },
+    /// MCP discovery status update.
+    McpStatusUpdate {
+        /// Per-server MCP initialization results.
+        statuses: Vec<McpServerStatus>,
+    },
     /// Token and cost usage update.
     UsageUpdate {
         /// Used tokens/units.
@@ -573,6 +659,10 @@ pub struct ConfigOption {
     pub options: Option<Vec<ConfigOptionValue>>,
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// Config option control type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -594,6 +684,9 @@ pub struct ConfigOptionValue {
     /// Optional value description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Whether this option can be used right now.
+    #[serde(default = "default_true")]
+    pub ready: bool,
 }
 
 /// One entry in an ACP plan update.
@@ -640,6 +733,9 @@ pub struct SlashCommand {
     pub name: String,
     /// Slash command description.
     pub description: String,
+    /// Command category for client grouping and bare-mode filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     /// Optional command input metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<CommandInput>,

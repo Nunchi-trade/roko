@@ -1,4 +1,4 @@
-//! `.roko/` directory layout definition and path helpers.
+//! Low-level `.roko/` directory layout definition and path helpers.
 //!
 //! The canonical layout under a project root is:
 //!
@@ -15,9 +15,10 @@
 //!   cache/          # cargo-target, context-pack-cache
 //! ```
 //!
-//! [`RokoLayout`] exposes typed path helpers so call-sites never hard-code
-//! the directory structure. [`LayoutVersion`] tracks on-disk format
-//! migrations.
+//! [`RokoLayout`] exposes typed path helpers for filesystem-internal code.
+//! Runtime and CLI code should prefer `roko_core::Workspace` as the
+//! workspace boundary, with this module retained as a path catalog for
+//! crates that need direct layout versioning or migration helpers.
 
 use std::path::{Path, PathBuf};
 

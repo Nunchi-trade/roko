@@ -21,6 +21,7 @@
 //! [`parking_lot::Mutex`] for confidence-stage statistics.
 
 use chrono::Utc;
+use indexmap::IndexMap;
 use parking_lot::Mutex;
 use roko_agent::AgentResult;
 use roko_core::DaimonPolicy;
@@ -176,7 +177,7 @@ impl CascadeRouter {
     #[must_use]
     pub fn with_model_tiers(
         mut self,
-        models: &HashMap<String, roko_core::config::ModelProfile>,
+        models: &IndexMap<String, roko_core::config::ModelProfile>,
     ) -> Self {
         self.tier_map = models
             .values()
@@ -189,7 +190,7 @@ impl CascadeRouter {
     ///
     /// Use this when the router is already constructed (e.g. after
     /// `LearningRuntime::open`) and you want to inject config tiers.
-    pub fn set_model_tiers(&mut self, models: &HashMap<String, roko_core::config::ModelProfile>) {
+    pub fn set_model_tiers(&mut self, models: &IndexMap<String, roko_core::config::ModelProfile>) {
         self.tier_map = models
             .values()
             .filter_map(|p| p.tier.map(|t| (p.slug.clone(), t)))

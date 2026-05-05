@@ -19,6 +19,8 @@ import EfficiencyBar from './EfficiencyBar';
 import ChainIntelPanel from './ChainIntelPanel';
 import ISFRPanel from './ISFRPanel';
 import RevealWhen from './RevealWhen';
+import InferenceTracePanel from './InferenceTracePanel';
+import type { InferenceCall, InferenceTraceTotals } from '../hooks/useInferenceTrace';
 import { ConfidenceMeter, ModelSlot, CrystallizeTransition } from './inference';
 import { AgentHandoff } from './agent';
 
@@ -76,6 +78,11 @@ export interface SidebarRendererProps {
   ciLeftAgent: AgentInfo;
   ciRightAgent: AgentInfo;
   chainConnected: boolean;
+
+  // Inference trace
+  traceCalls?: InferenceCall[];
+  traceTotals?: InferenceTraceTotals;
+  traceCostSeries?: number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +124,9 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
     ciLeftAgent,
     ciRightAgent,
     chainConnected,
+    traceCalls = [],
+    traceTotals = { cost: 0, tokens: 0, calls: 0, avgLatencyMs: 0 },
+    traceCostSeries = [],
   } = props;
 
   if (scenarioId === 'prd-pipeline') {
@@ -338,6 +348,12 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           <CommandLog entries={logEntries} maxHeight="240px" />
         </Pane>
       </RevealWhen>
+
+      <InferenceTracePanel
+        calls={traceCalls}
+        totals={traceTotals}
+        costSeries={traceCostSeries}
+      />
     </>
   );
 }

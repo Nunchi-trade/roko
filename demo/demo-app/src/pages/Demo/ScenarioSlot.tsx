@@ -39,6 +39,8 @@ import {
 import { ConfettiBurst, SuccessRing } from '../../components/Celebration';
 import ScenarioPreview from '../../components/ScenarioPreview';
 import SidebarRenderer from '../../components/SidebarRenderer';
+import InferenceTracePanel from '../../components/InferenceTracePanel';
+import { useInferenceTrace } from '../../hooks/useInferenceTrace';
 import DemoStatusBar from '../../components/DemoStatusBar';
 import type { ToastOptions } from '../../components/Toast';
 // DemoCompletionOverlay removed — too intrusive for demo flow
@@ -286,6 +288,9 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     [ciInsights],
   );
 
+  // ── Inference trace (SSE-driven, all scenarios) ─────────────
+  const inferenceTrace = useInferenceTrace();
+
   // ── Refs ────────────────────────────────────────────────────
   const pausedRef = useRef(false);
   const runningRef = useRef(false);
@@ -482,7 +487,8 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     setKfLeftAgent(INITIAL_KF_LEFT);
     setKfRightAgent(INITIAL_KF_RIGHT);
     setKfMetrics(initialKfMetrics());
-  }, [scenario.id, selectedPipelineExample]);
+    inferenceTrace.reset();
+  }, [scenario.id, selectedPipelineExample, inferenceTrace]);
 
   // ── Build scenario context ─────────────────────────────────
   const patchPipeline = useCallback((patch: Partial<PipelineDemoState>) => {
@@ -1046,6 +1052,11 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                   <PipelineStagesPanel isRunning={isRunning} />
                 </div>
               )}
+              <InferenceTracePanel
+                calls={inferenceTrace.calls}
+                totals={inferenceTrace.totals}
+                costSeries={inferenceTrace.costSeries}
+              />
             </div>
           </div>
         ) : (
@@ -1142,6 +1153,9 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                   ciLeftAgent={ciLeftAgent}
                   ciRightAgent={ciRightAgent}
                   chainConnected={chainWs.connected}
+                  traceCalls={inferenceTrace.calls}
+                  traceTotals={inferenceTrace.totals}
+                  traceCostSeries={inferenceTrace.costSeries}
                 />
               </div>
             )}

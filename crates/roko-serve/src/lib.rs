@@ -109,6 +109,7 @@ pub mod truth_map;
 pub use crate::routes::reload_config_from_disk;
 pub use crate::sanitize::sanitize_agent_content;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -415,10 +416,13 @@ impl ServerBuilder {
 
         let serve_state = Arc::clone(&state);
         let handle = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(shutdown_on_cancel(serve_state))
-                .await
-                .context("axum server error")?;
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_on_cancel(serve_state))
+            .await
+            .context("axum server error")?;
             info!("server stopped");
             Ok(())
         });
@@ -739,10 +743,13 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
     info!("roko server listening on http://{addr}");
     info!("workdir: {}", state.workdir.display());
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_on_cancel(Arc::clone(&state)))
-        .await
-        .context("axum server error")?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_on_cancel(Arc::clone(&state)))
+    .await
+    .context("axum server error")?;
 
     info!("server stopped");
     Ok(())

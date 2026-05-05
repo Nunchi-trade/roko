@@ -760,7 +760,7 @@
   border-left: 1px solid var(--glass-border);
   background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .demo-clickable-commands {

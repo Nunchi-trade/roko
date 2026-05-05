@@ -339,6 +339,8 @@ impl ModelCallService {
             mcp_config: self.mcp_config.clone(),
             name: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
             env: self.env.clone(),
+            effort: Some(self.config.agent.default_effort.clone())
+                .filter(|effort| !effort.trim().is_empty()),
             ..AgentOptions::default()
         };
         options.mcp_config = self

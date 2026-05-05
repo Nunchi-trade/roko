@@ -1,24 +1,20 @@
-//! Deprecated workspace layout abstraction.
+//! Canonical workspace layout abstraction.
 //!
-//! Provides a [`Workspace`] struct that validates and provides typed access to
-//! the `.roko/` directory hierarchy. New code should use
-//! `roko_fs::RokoLayout`, which is the canonical path abstraction.
+//! Provides a [`Workspace`] struct that validates a project root and exposes
+//! typed access to the `.roko/` directory hierarchy. Use this as the public
+//! boundary for workspace-local paths; lower-level filesystem crates may keep
+//! narrower path catalogs for their own internals.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 
-/// Represents a validated Roko workspace rooted at a directory containing `.roko/`.
-#[deprecated(
-    since = "0.1.0",
-    note = "use roko_fs::RokoLayout; Workspace remains for source compatibility"
-)]
+/// Represents a validated Roko workspace rooted at a project directory.
 #[derive(Clone, Debug)]
 pub struct Workspace {
     root: PathBuf,
 }
 
-#[allow(deprecated)]
 impl Workspace {
     /// Open an existing workspace by validating that `.roko/` exists under `root`.
     ///
@@ -47,6 +43,10 @@ impl Workspace {
             &roko_dir.join("state"),
             &roko_dir.join("plans"),
             &roko_dir.join("runtime"),
+            &roko_dir.join("memory"),
+            &roko_dir.join("runs"),
+            &roko_dir.join("config"),
+            &roko_dir.join("cache"),
             &roko_dir.join("learn"),
             &roko_dir.join("prd"),
             &roko_dir.join("research"),
@@ -100,6 +100,30 @@ impl Workspace {
     #[must_use]
     pub fn runtime_dir(&self) -> PathBuf {
         self.root.join(".roko/runtime")
+    }
+
+    /// `.roko/memory/` — legacy memory artifacts retained for migration.
+    #[must_use]
+    pub fn memory_dir(&self) -> PathBuf {
+        self.root.join(".roko/memory")
+    }
+
+    /// `.roko/runs/` — per-run metrics, traces, snapshots.
+    #[must_use]
+    pub fn runs_dir(&self) -> PathBuf {
+        self.root.join(".roko/runs")
+    }
+
+    /// `.roko/config/` — workspace-local config presets and overlays.
+    #[must_use]
+    pub fn config_dir(&self) -> PathBuf {
+        self.root.join(".roko/config")
+    }
+
+    /// `.roko/cache/` — local runtime/cache artifacts.
+    #[must_use]
+    pub fn cache_dir(&self) -> PathBuf {
+        self.root.join(".roko/cache")
     }
 
     /// `.roko/learn/` — learning artifacts (router, experiments, thresholds).
@@ -190,6 +214,10 @@ mod tests {
         assert!(ws.state_dir().is_dir());
         assert!(ws.plans_dir().is_dir());
         assert!(ws.runtime_dir().is_dir());
+        assert!(ws.memory_dir().is_dir());
+        assert!(ws.runs_dir().is_dir());
+        assert!(ws.config_dir().is_dir());
+        assert!(ws.cache_dir().is_dir());
         assert!(ws.learn_dir().is_dir());
         assert!(ws.prd_dir().is_dir());
         assert!(ws.research_dir().is_dir());

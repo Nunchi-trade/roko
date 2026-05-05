@@ -7,6 +7,7 @@ mod plan_validation {
     #[cfg(test)]
     mod plan_validation_checks {
         use super::*;
+        use indexmap::IndexMap;
         use roko_core::config::schema::ModelProfile;
         use std::collections::{HashMap, HashSet};
         use std::fs;
@@ -46,14 +47,14 @@ mod plan_validation {
             root: &Path,
             plan_id: &str,
             tasks_toml: &str,
-            models: Option<&HashMap<String, ModelProfile>>,
+            models: Option<&IndexMap<String, ModelProfile>>,
         ) -> ValidationReport {
             write_tasks_file(root, plan_id, tasks_toml);
             validate_plans_dir(&root.join("plans"), models).unwrap()
         }
 
-        fn known_models() -> HashMap<String, ModelProfile> {
-            let mut models = HashMap::new();
+        fn known_models() -> IndexMap<String, ModelProfile> {
+            let mut models = IndexMap::new();
             for slug in ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"] {
                 models.insert(
                     slug.to_string(),

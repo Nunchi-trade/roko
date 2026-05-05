@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use serde::Deserialize;
 
 use super::schema::{
@@ -105,8 +106,8 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         webhooks: WebhooksConfig {
             github: GithubWebhookConfig::default(),
         },
-        providers: HashMap::new(),
-        models: HashMap::new(),
+        providers: IndexMap::new(),
+        models: IndexMap::new(),
         subscriptions: Vec::new(),
         server: ServerConfig::default(),
         deploy: DeployConfig::default(),

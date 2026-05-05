@@ -6,6 +6,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::ProviderKind;
+use crate::defaults::DEFAULT_MAX_OUTPUT_TOKENS;
 
 use super::agent::{default_context_window, default_tool_format, default_true};
 use super::provenance::ConfigProvenance;
@@ -458,6 +459,18 @@ pub struct ModelProfile {
     /// Required for newer OpenAI models (o1, o3, gpt-4o, gpt-5.x, etc.).
     #[serde(default)]
     pub use_max_completion_tokens: bool,
+}
+
+impl ModelProfile {
+    /// Resolved output-token ceiling for this model.
+    ///
+    /// `None` in config means "use the runtime default", which currently
+    /// matches the agent dispatch fallback.
+    #[must_use]
+    pub fn effective_max_output(&self) -> u64 {
+        self.max_output
+            .unwrap_or(u64::from(DEFAULT_MAX_OUTPUT_TOKENS))
+    }
 }
 
 // ---- Gemini config -------------------------------------------------------

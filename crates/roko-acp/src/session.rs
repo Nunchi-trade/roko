@@ -138,10 +138,6 @@ pub struct SessionConfigState {
     pub model: String,
     /// Effort level: low, medium, high, max.
     pub effort: String,
-    /// Temperament: cautious, balanced, aggressive.
-    pub temperament: String,
-    /// Routing mode: auto_override, manual, cascade.
-    pub routing_mode: String,
     /// Whether clippy gate is enabled.
     pub clippy_enabled: bool,
     /// Whether test gate is enabled.
@@ -161,8 +157,6 @@ impl Default for SessionConfigState {
             provider: String::new(),
             model: String::new(),
             effort: "medium".to_owned(),
-            temperament: "balanced".to_owned(),
-            routing_mode: "auto_override".to_owned(),
             clippy_enabled: true,
             tests_enabled: true,
             workflow: "none".to_owned(),
@@ -175,32 +169,85 @@ impl Default for SessionConfigState {
 impl SessionConfigState {
     /// Create config state from roko.toml values.
     pub fn from_roko_config(config: &roko_core::config::schema::RokoConfig) -> Self {
+        Self::from_roko_config_with_warnings(config).0
+    }
+
+    /// Create config state and return non-fatal fallback warnings.
+    pub fn from_roko_config_with_warnings(
+        config: &roko_core::config::schema::RokoConfig,
+    ) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
         let configured_default = config.agent.default_model.trim();
-        let default_model =
-            if !configured_default.is_empty() && config.models.contains_key(configured_default) {
-                Some(configured_default)
-            } else {
-                config.models.keys().next().map(String::as_str)
-            };
-        // Derive the default provider from the default model's profile.
-        let default_provider = default_model
-            .and_then(|model| config.models.get(model))
-            .map(|profile| profile.provider.clone())
+        let configured_model = (!configured_default.is_empty())
+            .then(|| {
+                config
+                    .models
+                    .get(configured_default)
+                    .map(|profile| (configured_default, profile))
+                    .or_else(|| {
+                        let message = format!(
+                            "agent.default_model '{}' is not declared in [models], using the first ready model",
+                            configured_default
+                        );
+                        tracing::warn!("{message}");
+                        warnings.push(message);
+                        None
+                    })
+            })
+            .flatten();
+
+        let ready_configured = configured_model.and_then(|(key, profile)| {
+            config
+                .providers
+                .get(&profile.provider)
+                .filter(|provider| config.is_provider_available(provider))
+                .map(|_| (key, profile))
+                .or_else(|| {
+                    let message = format!(
+                        "agent.default_model '{}' uses provider '{}' which is not ready, using the first ready model",
+                        key, profile.provider
+                    );
+                    tracing::warn!("{message}");
+                    warnings.push(message);
+                    None
+                })
+        });
+
+        let selected_model = ready_configured
+            .or_else(|| {
+                config.models.iter().find_map(|(key, profile)| {
+                    config
+                        .providers
+                        .get(&profile.provider)
+                        .filter(|provider| config.is_provider_available(provider))
+                        .map(|_| (key.as_str(), profile))
+                })
+            })
+            .or_else(|| {
+                config
+                    .models
+                    .iter()
+                    .next()
+                    .map(|(key, profile)| (key.as_str(), profile))
+            });
+
+        let default_model = selected_model.map(|(key, _)| key).unwrap_or_default();
+        let default_provider = selected_model
+            .map(|(_, profile)| profile.provider.clone())
             .or_else(|| config.providers.keys().next().cloned())
             .unwrap_or_default();
-        Self {
+        let state = Self {
             agent_mode: "code".to_owned(),
             provider: default_provider,
-            model: default_model.unwrap_or_default().to_owned(),
+            model: default_model.to_owned(),
             effort: config.agent.default_effort.clone(),
-            temperament: config.agent.temperament.label().to_owned(),
-            routing_mode: config.routing.mode.clone(),
             clippy_enabled: config.gates.clippy_enabled,
             tests_enabled: !config.gates.skip_tests,
             workflow: "none".to_owned(),
             review_strictness: "none".to_owned(),
             max_iterations: 2,
-        }
+        };
+        (state, warnings)
     }
 }
 
@@ -229,6 +276,9 @@ pub struct AcpSession {
     /// Current ACP configuration options.
     #[serde(default)]
     pub config_options: Vec<ConfigOption>,
+    /// Non-fatal warnings from session creation or config fallback.
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// Multi-turn conversation history for context.
     #[serde(default)]
     pub conversation_history: Vec<ConversationTurn>,
@@ -264,6 +314,7 @@ impl AcpSession {
             busy: new_atomic_flag(),
             mcp_servers: params.mcp_servers,
             config_options,
+            warnings: Vec::new(),
             conversation_history: Vec::new(),
             active_run: None,
             shared_run: new_shared_run(),
@@ -278,18 +329,36 @@ impl AcpSession {
         params: SessionNewParams,
         roko_config: &roko_core::config::schema::RokoConfig,
     ) -> Self {
-        let config_state = SessionConfigState::from_roko_config(roko_config);
+        let SessionNewParams {
+            session_name,
+            client_capabilities,
+            model,
+            provider,
+            effort,
+            mcp_servers,
+        } = params;
+        let (mut config_state, mut warnings) =
+            SessionConfigState::from_roko_config_with_warnings(roko_config);
+        apply_session_new_overrides(
+            &mut config_state,
+            &mut warnings,
+            roko_config,
+            model.as_deref(),
+            provider.as_deref(),
+            effort.as_deref(),
+        );
         let config_options = build_config_options(&config_state, roko_config);
         Self {
             session_id: format!("sess_{}", Uuid::new_v4()),
-            session_name: params.session_name,
+            session_name,
             created_at: Utc::now(),
             config_state,
-            client_capabilities: params.client_capabilities.unwrap_or_default(),
+            client_capabilities: client_capabilities.unwrap_or_default(),
             cancel_token: CancelToken::new(),
             busy: new_atomic_flag(),
-            mcp_servers: params.mcp_servers,
+            mcp_servers,
             config_options,
+            warnings,
             conversation_history: Vec::new(),
             active_run: None,
             shared_run: new_shared_run(),
@@ -368,6 +437,7 @@ impl AcpSession {
             session_id: self.session_id.clone(),
             modes: Some(default_modes(&self.config_state.agent_mode)),
             config_options: options,
+            warnings: self.warnings.clone(),
         }
     }
 
@@ -551,17 +621,13 @@ impl AcpSession {
         option_id: &str,
         new_value: &serde_json::Value,
         roko_config: &roko_core::config::schema::RokoConfig,
-    ) {
+    ) -> Result<(), String> {
         match option_id {
             "provider" => {
                 if let Some(s) = new_value.as_str() {
                     if !roko_config.providers.contains_key(s) {
-                        tracing::warn!(
-                            provider = %s,
-                            "ignoring ACP provider selection that is not in current config"
-                        );
                         self.config_options = build_config_options(&self.config_state, roko_config);
-                        return;
+                        return Err(format!("unknown provider '{s}'"));
                     }
                     self.config_state.provider = s.to_owned();
                     // If the current model doesn't belong to the new provider,
@@ -571,13 +637,8 @@ impl AcpSession {
                         .get(&self.config_state.model)
                         .is_some_and(|p| p.provider == s);
                     if !model_belongs {
-                        self.config_state.model = roko_config
-                            .models
-                            .iter()
-                            .filter(|(_, p)| p.provider == s)
-                            .map(|(k, _)| k.clone())
-                            .min()
-                            .unwrap_or_default();
+                        self.config_state.model =
+                            first_model_for_provider(roko_config, s).unwrap_or_default();
                     }
                 }
             }
@@ -588,30 +649,22 @@ impl AcpSession {
                         .get(s)
                         .is_some_and(|profile| profile.provider == self.config_state.provider);
                     if !model_valid {
-                        tracing::warn!(
-                            model = %s,
-                            provider = %self.config_state.provider,
-                            "ignoring ACP model selection that is not valid for selected provider"
-                        );
                         self.config_options = build_config_options(&self.config_state, roko_config);
-                        return;
+                        return Err(format!(
+                            "model '{}' is not declared for provider '{}'",
+                            s, self.config_state.provider
+                        ));
                     }
                     self.config_state.model = s.to_owned();
                 }
             }
             "effort" => {
                 if let Some(s) = new_value.as_str() {
+                    if !matches!(s, "low" | "medium" | "high" | "max") {
+                        self.config_options = build_config_options(&self.config_state, roko_config);
+                        return Err(format!("invalid effort '{s}'"));
+                    }
                     self.config_state.effort = s.to_owned();
-                }
-            }
-            "temperament" => {
-                if let Some(s) = new_value.as_str() {
-                    self.config_state.temperament = s.to_owned();
-                }
-            }
-            "routing_mode" => {
-                if let Some(s) = new_value.as_str() {
-                    self.config_state.routing_mode = s.to_owned();
                 }
             }
             "clippy" => {
@@ -630,6 +683,10 @@ impl AcpSession {
             }
             "workflow" => {
                 if let Some(s) = new_value.as_str() {
+                    if !matches!(s, "none" | "express" | "standard" | "full" | "auto") {
+                        self.config_options = build_config_options(&self.config_state, roko_config);
+                        return Err(format!("invalid workflow '{s}'"));
+                    }
                     self.config_state.workflow = s.to_owned();
                 }
             }
@@ -647,9 +704,13 @@ impl AcpSession {
                     self.config_state.max_iterations = (n as u32).clamp(1, 3);
                 }
             }
-            _ => {}
+            _ => {
+                self.config_options = build_config_options(&self.config_state, roko_config);
+                return Err(format!("unknown config option '{option_id}'"));
+            }
         }
         self.config_options = build_config_options(&self.config_state, roko_config);
+        Ok(())
     }
 
     /// Reconcile persisted provider/model selections with the current config.
@@ -682,13 +743,9 @@ impl AcpSession {
             .get(&self.config_state.model)
             .is_some_and(|profile| profile.provider == self.config_state.provider);
         if !model_valid {
-            let replacement_model = roko_config
-                .models
-                .iter()
-                .filter(|(_, profile)| profile.provider == self.config_state.provider)
-                .map(|(key, _)| key.clone())
-                .min()
-                .unwrap_or_default();
+            let replacement_model =
+                first_model_for_provider(roko_config, &self.config_state.provider)
+                    .unwrap_or_default();
             if self.config_state.model != replacement_model {
                 tracing::info!(
                     provider = %self.config_state.provider,
@@ -702,6 +759,81 @@ impl AcpSession {
 
         self.config_options = build_config_options(&self.config_state, roko_config);
     }
+}
+
+fn apply_session_new_overrides(
+    state: &mut SessionConfigState,
+    warnings: &mut Vec<String>,
+    roko_config: &roko_core::config::schema::RokoConfig,
+    model: Option<&str>,
+    provider: Option<&str>,
+    effort: Option<&str>,
+) {
+    if let Some(model_key) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        match roko_config.models.get(model_key) {
+            Some(profile) => {
+                state.model = model_key.to_owned();
+                state.provider = profile.provider.clone();
+            }
+            None => warnings.push(format!(
+                "requested model '{}' is not declared in [models], using '{}'",
+                model_key, state.model
+            )),
+        }
+    }
+
+    if let Some(provider_key) = provider.map(str::trim).filter(|value| !value.is_empty()) {
+        if roko_config.providers.contains_key(provider_key) {
+            state.provider = provider_key.to_owned();
+            let model_belongs = roko_config
+                .models
+                .get(&state.model)
+                .is_some_and(|profile| profile.provider == provider_key);
+            if !model_belongs {
+                if let Some(model_key) = first_model_for_provider(roko_config, provider_key) {
+                    if !state.model.is_empty() {
+                        warnings.push(format!(
+                            "requested provider '{}' does not serve model '{}', using '{}'",
+                            provider_key, state.model, model_key
+                        ));
+                    }
+                    state.model = model_key;
+                } else {
+                    warnings.push(format!(
+                        "requested provider '{}' has no declared models",
+                        provider_key
+                    ));
+                    state.model.clear();
+                }
+            }
+        } else {
+            warnings.push(format!(
+                "requested provider '{}' is not declared in [providers], using '{}'",
+                provider_key, state.provider
+            ));
+        }
+    }
+
+    if let Some(effort) = effort.map(str::trim).filter(|value| !value.is_empty()) {
+        match effort {
+            "low" | "medium" | "high" | "max" => state.effort = effort.to_owned(),
+            _ => warnings.push(format!(
+                "requested effort '{}' is invalid, using '{}'",
+                effort, state.effort
+            )),
+        }
+    }
+}
+
+fn first_model_for_provider(
+    roko_config: &roko_core::config::schema::RokoConfig,
+    provider_key: &str,
+) -> Option<String> {
+    roko_config
+        .models
+        .iter()
+        .find(|(_, profile)| profile.provider == provider_key)
+        .map(|(key, _)| key.clone())
 }
 
 /// Errors produced by [`SessionManager`].
@@ -736,6 +868,8 @@ pub struct SessionManager {
     pub workdir: PathBuf,
     /// Loaded roko.toml configuration.
     pub roko_config: roko_core::config::schema::RokoConfig,
+    /// Config source paths surfaced in the initialize response.
+    pub config_sources: Vec<String>,
 }
 
 impl SessionManager {
@@ -746,6 +880,15 @@ impl SessionManager {
             sessions: HashMap::new(),
             workdir,
             roko_config,
+            config_sources: Vec::new(),
+        }
+    }
+
+    /// Replace the loaded config used for new sessions and prompt dispatch.
+    pub fn replace_roko_config(&mut self, roko_config: roko_core::config::schema::RokoConfig) {
+        self.roko_config = roko_config;
+        for session in self.sessions.values_mut() {
+            session.revalidate_config_state(&self.roko_config);
         }
     }
 
@@ -953,6 +1096,7 @@ fn build_config_options(
             value: key.clone(),
             name: capitalize_model_key(key),
             description: provider_option_description(roko_config, provider),
+            ready: roko_config.is_provider_available(provider),
         })
         .collect();
     provider_options.sort_by(|a, b| a.value.cmp(&b.value));
@@ -965,7 +1109,15 @@ fn build_config_options(
         .map(|(key, profile)| ConfigOptionValue {
             value: key.clone(),
             name: capitalize_model_key(key),
-            description: Some(profile.slug.clone()),
+            description: Some(format!(
+                "{} (max output: {})",
+                profile.slug,
+                profile.effective_max_output()
+            )),
+            ready: roko_config
+                .providers
+                .get(&profile.provider)
+                .is_some_and(|provider| roko_config.is_provider_available(provider)),
         })
         .collect();
     model_options.sort_by(|a, b| a.value.cmp(&b.value));
@@ -1004,21 +1156,25 @@ fn build_config_options(
                     value: "low".to_owned(),
                     name: "Quick".to_owned(),
                     description: Some("Minimal reasoning".to_owned()),
+                    ready: true,
                 },
                 ConfigOptionValue {
                     value: "medium".to_owned(),
                     name: "Standard".to_owned(),
                     description: Some("Balanced reasoning".to_owned()),
+                    ready: true,
                 },
                 ConfigOptionValue {
                     value: "high".to_owned(),
                     name: "Deep".to_owned(),
                     description: Some("Extended reasoning".to_owned()),
+                    ready: true,
                 },
                 ConfigOptionValue {
                     value: "max".to_owned(),
                     name: "Max".to_owned(),
                     description: Some("Full reasoning depth".to_owned()),
+                    ready: true,
                 },
             ]),
         },
@@ -1035,16 +1191,19 @@ fn build_config_options(
                     value: "none".to_owned(),
                     name: "None".to_owned(),
                     description: Some("Single agent, no pipeline".to_owned()),
+                    ready: true,
                 },
                 ConfigOptionValue {
                     value: "express".to_owned(),
                     name: "Express".to_owned(),
                     description: Some("Implement → gate → commit (fastest)".to_owned()),
+                    ready: true,
                 },
                 ConfigOptionValue {
                     value: "standard".to_owned(),
                     name: "Standard".to_owned(),
                     description: Some("Implement → gate → review → commit".to_owned()),
+                    ready: true,
                 },
                 ConfigOptionValue {
                     value: "full".to_owned(),
@@ -1052,11 +1211,13 @@ fn build_config_options(
                     description: Some(
                         "Strategy → implement → gate → multi-review → commit".to_owned(),
                     ),
+                    ready: true,
                 },
                 ConfigOptionValue {
                     value: "auto".to_owned(),
                     name: "Auto".to_owned(),
                     description: Some("Select pipeline based on complexity".to_owned()),
+                    ready: true,
                 },
             ]),
         },
@@ -1075,11 +1236,13 @@ fn build_config_options(
                     value: "on".to_owned(),
                     name: "On".to_owned(),
                     description: Some("Clippy validation enabled".to_owned()),
+                    ready: true,
                 },
                 ConfigOptionValue {
                     value: "off".to_owned(),
                     name: "Off".to_owned(),
                     description: Some("Skip clippy".to_owned()),
+                    ready: true,
                 },
             ]),
         },
@@ -1098,332 +1261,327 @@ fn build_config_options(
                     value: "on".to_owned(),
                     name: "On".to_owned(),
                     description: Some("Test validation enabled".to_owned()),
+                    ready: true,
                 },
                 ConfigOptionValue {
                     value: "off".to_owned(),
                     name: "Off".to_owned(),
                     description: Some("Skip tests".to_owned()),
+                    ready: true,
                 },
             ]),
         },
     ]
 }
 
+fn slash_command(
+    name: &str,
+    description: &str,
+    category: &str,
+    hint: Option<&str>,
+) -> SlashCommand {
+    SlashCommand {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        category: Some(category.to_owned()),
+        input: hint.map(|hint| CommandInput {
+            hint: Some(hint.to_owned()),
+        }),
+    }
+}
+
+fn bare_mode_allows_category(category: &str) -> bool {
+    matches!(
+        category,
+        "system" | "research" | "implementation" | "verification" | "workflow" | "help"
+    )
+}
+
 /// Build the list of available slash commands.
 ///
-/// Organized by Will's core loop (Research → Synthesize → Specify → Implement → Verify → Feedback)
-/// plus system/diagnostic/knowledge categories from the workflow-v1 PRDs and UX refresh specs.
-pub fn build_slash_commands() -> Vec<SlashCommand> {
-    vec![
-        // ── Status & Diagnostics ────────────────────────────────────
-        SlashCommand {
-            name: "status".to_owned(),
-            description: "Workspace status: signals, agents, runs, knowledge".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "doctor".to_owned(),
-            description: "Diagnose workspace bootstrap state".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "config".to_owned(),
-            description: "Show roko.toml configuration".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "learn".to_owned(),
-            description: "Learning state: episodes, routing, experiments, efficiency".to_owned(),
-            input: None,
-        },
-        // ── Research (foraging phase) ────────────────────────────────
-        SlashCommand {
-            name: "research".to_owned(),
-            description: "Deep research a topic with citations (Perplexity)".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("topic to research".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "search".to_owned(),
-            description: "Quick web search".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("search query".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "enhance-prd".to_owned(),
-            description: "Enrich a PRD with web research".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("PRD slug".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "analyze".to_owned(),
-            description: "Analyze execution data".to_owned(),
-            input: None,
-        },
-        // ── Specification (PRD lifecycle) ────────────────────────────
-        SlashCommand {
-            name: "prd-idea".to_owned(),
-            description: "Capture a new work item idea".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("idea description".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "prd-draft".to_owned(),
-            description: "Draft a new PRD from an idea".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("slug for the new PRD".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "prd-list".to_owned(),
-            description: "List all PRDs and their status".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "prd-status".to_owned(),
-            description: "PRD pipeline coverage report".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "prd-plan".to_owned(),
-            description: "Generate implementation plan from a published PRD".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("PRD slug".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "prd-consolidate".to_owned(),
-            description: "Scan PRDs for gaps and duplicates".to_owned(),
-            input: None,
-        },
-        // ── Planning ─────────────────────────────────────────────────
-        SlashCommand {
-            name: "plan-list".to_owned(),
-            description: "List all plans in the workspace".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "plan-show".to_owned(),
-            description: "Show a specific plan".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("plan name".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "plan-generate".to_owned(),
-            description: "Generate a plan from a prompt".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("describe what to build...".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "plan-validate".to_owned(),
-            description: "Lint tasks.toml without executing".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("path to plan dir".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "plan-run".to_owned(),
-            description: "Execute a plan (orchestrate agents, gates, persistence)".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("path to plan dir".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "plan-resume".to_owned(),
-            description: "Resume an interrupted plan run".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("path to executor state".to_owned()),
-            }),
-        },
-        // ── Implementation & Execution ───────────────────────────────
-        SlashCommand {
-            name: "run".to_owned(),
-            description: "Single prompt → universal loop (compose→agent→gate→persist)".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("prompt text".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "agents".to_owned(),
-            description: "List agents and their status".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "agent-chat".to_owned(),
-            description: "Interactive chat REPL with a specific agent".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("agent name".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "agent-start".to_owned(),
-            description: "Start a named agent".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("agent name".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "agent-stop".to_owned(),
-            description: "Stop a running agent".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("agent name".to_owned()),
-            }),
-        },
-        // ── Verification & Gates ─────────────────────────────────────
-        SlashCommand {
-            name: "review".to_owned(),
-            description: "Review recent changes (git diff)".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("focus area or 'all'".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "build".to_owned(),
-            description: "cargo build --workspace".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "test".to_owned(),
-            description: "cargo test --workspace".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "clippy".to_owned(),
-            description: "cargo clippy --workspace --no-deps -- -D warnings".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "fmt".to_owned(),
-            description: "cargo +nightly fmt --all --check".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "gate".to_owned(),
-            description: "Run full gate pipeline (compile + test + clippy + diff)".to_owned(),
-            input: None,
-        },
-        // ── Knowledge & Dreams ───────────────────────────────────────
-        SlashCommand {
-            name: "knowledge".to_owned(),
-            description: "Query the durable knowledge store".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("topic to search".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "knowledge-stats".to_owned(),
-            description: "Knowledge store statistics and health".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "knowledge-gc".to_owned(),
-            description: "Garbage collect knowledge store".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "knowledge-backup".to_owned(),
-            description: "Backup knowledge store".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "dream".to_owned(),
-            description: "Run dream consolidation cycle (NREM → REM → integration)".to_owned(),
-            input: None,
-        },
-        // ── Code Intelligence ────────────────────────────────────────
-        SlashCommand {
-            name: "index".to_owned(),
-            description: "Build or search code intelligence index".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("build | search <query> | stats".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "explain".to_owned(),
-            description: "Explain a codebase concept at 3 depth levels".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("topic".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "replay".to_owned(),
-            description: "Walk signal DAG by hash (episode replay)".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("signal hash".to_owned()),
-            }),
-        },
-        // ── Feedback & Learning ──────────────────────────────────────
-        SlashCommand {
-            name: "learn-router".to_owned(),
-            description: "Inspect cascade router state and model routing".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "learn-episodes".to_owned(),
-            description: "Recent episode log (agent turns + gate results)".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "learn-tune".to_owned(),
-            description: "Tune adaptive thresholds (gates, routing, budget)".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("gates | routing | budget".to_owned()),
-            }),
-        },
-        // ── System ────────────────────────────────────────────────────
-        SlashCommand {
-            name: "audit".to_owned(),
-            description: "Plugin security audit".to_owned(),
-            input: None,
-        },
-        // ── Workflow ──────────────────────────────────────────────────
-        SlashCommand {
-            name: "workflow".to_owned(),
-            description: "Workflow management: list/status/cancel/resume".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("list | status | cancel | resume".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "express".to_owned(),
-            description: "Run express pipeline: implement → gate → commit".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("prompt text".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "full".to_owned(),
-            description: "Run full pipeline: strategy → implement → gate → multi-review → commit"
-                .to_owned(),
-            input: Some(CommandInput {
-                hint: Some("prompt text".to_owned()),
-            }),
-        },
-        SlashCommand {
-            name: "review-this".to_owned(),
-            description: "Run review pipeline on current uncommitted changes".to_owned(),
-            input: None,
-        },
-        SlashCommand {
-            name: "pipeline".to_owned(),
-            description: "Run a named workflow pipeline".to_owned(),
-            input: Some(CommandInput {
-                hint: Some("pipeline name".to_owned()),
-            }),
-        },
-        // ── Help ─────────────────────────────────────────────────────
-        SlashCommand {
-            name: "help".to_owned(),
-            description: "List all available commands".to_owned(),
-            input: None,
-        },
-    ]
+/// In bare mode, commands that depend on Roko workspace state such as PRDs,
+/// plans, knowledge, dreams, and learning stores are hidden from IDE clients.
+pub fn build_slash_commands(bare_mode: bool) -> Vec<SlashCommand> {
+    let commands = vec![
+        slash_command(
+            "status",
+            "Workspace status: signals, agents, runs, knowledge",
+            "system",
+            None,
+        ),
+        slash_command(
+            "doctor",
+            "Diagnose workspace bootstrap state",
+            "system",
+            None,
+        ),
+        slash_command("config", "Show roko.toml configuration", "system", None),
+        slash_command(
+            "learn",
+            "Learning state: episodes, routing, experiments, efficiency",
+            "learning",
+            None,
+        ),
+        slash_command(
+            "research",
+            "Deep research a topic with citations (Perplexity)",
+            "research",
+            Some("topic to research"),
+        ),
+        slash_command(
+            "search",
+            "Quick web search",
+            "research",
+            Some("search query"),
+        ),
+        slash_command(
+            "enhance-prd",
+            "Enrich a PRD with web research",
+            "specification",
+            Some("PRD slug"),
+        ),
+        slash_command("analyze", "Analyze execution data", "research", None),
+        slash_command(
+            "prd-idea",
+            "Capture a new work item idea",
+            "specification",
+            Some("idea description"),
+        ),
+        slash_command(
+            "prd-draft",
+            "Draft a new PRD from an idea",
+            "specification",
+            Some("slug for the new PRD"),
+        ),
+        slash_command(
+            "prd-list",
+            "List all PRDs and their status",
+            "specification",
+            None,
+        ),
+        slash_command(
+            "prd-status",
+            "PRD pipeline coverage report",
+            "specification",
+            None,
+        ),
+        slash_command(
+            "prd-plan",
+            "Generate implementation plan from a published PRD",
+            "specification",
+            Some("PRD slug"),
+        ),
+        slash_command(
+            "prd-consolidate",
+            "Scan PRDs for gaps and duplicates",
+            "specification",
+            None,
+        ),
+        slash_command(
+            "plan-list",
+            "List all plans in the workspace",
+            "planning",
+            None,
+        ),
+        slash_command(
+            "plan-show",
+            "Show a specific plan",
+            "planning",
+            Some("plan name"),
+        ),
+        slash_command(
+            "plan-generate",
+            "Generate a plan from a prompt",
+            "planning",
+            Some("describe what to build..."),
+        ),
+        slash_command(
+            "plan-validate",
+            "Lint tasks.toml without executing",
+            "planning",
+            Some("path to plan dir"),
+        ),
+        slash_command(
+            "plan-run",
+            "Execute a plan (orchestrate agents, gates, persistence)",
+            "planning",
+            Some("path to plan dir"),
+        ),
+        slash_command(
+            "plan-resume",
+            "Resume an interrupted plan run",
+            "planning",
+            Some("path to executor state"),
+        ),
+        slash_command(
+            "run",
+            "Single prompt -> universal loop (compose->agent->gate->persist)",
+            "implementation",
+            Some("prompt text"),
+        ),
+        slash_command(
+            "agents",
+            "List agents and their status",
+            "implementation",
+            None,
+        ),
+        slash_command(
+            "agent-chat",
+            "Interactive chat REPL with a specific agent",
+            "implementation",
+            Some("agent name"),
+        ),
+        slash_command(
+            "agent-start",
+            "Start a named agent",
+            "implementation",
+            Some("agent name"),
+        ),
+        slash_command(
+            "agent-stop",
+            "Stop a running agent",
+            "implementation",
+            Some("agent name"),
+        ),
+        slash_command(
+            "review",
+            "Review recent changes (git diff)",
+            "verification",
+            Some("focus area or 'all'"),
+        ),
+        slash_command("build", "cargo build --workspace", "verification", None),
+        slash_command("test", "cargo test --workspace", "verification", None),
+        slash_command(
+            "clippy",
+            "cargo clippy --workspace --no-deps -- -D warnings",
+            "verification",
+            None,
+        ),
+        slash_command(
+            "fmt",
+            "cargo +nightly fmt --all --check",
+            "verification",
+            None,
+        ),
+        slash_command(
+            "gate",
+            "Run full gate pipeline (compile + test + clippy + diff)",
+            "verification",
+            None,
+        ),
+        slash_command(
+            "knowledge",
+            "Query the durable knowledge store",
+            "knowledge",
+            Some("topic to search"),
+        ),
+        slash_command(
+            "knowledge-stats",
+            "Knowledge store statistics and health",
+            "knowledge",
+            None,
+        ),
+        slash_command(
+            "knowledge-gc",
+            "Garbage collect knowledge store",
+            "knowledge",
+            None,
+        ),
+        slash_command(
+            "knowledge-backup",
+            "Backup knowledge store",
+            "knowledge",
+            None,
+        ),
+        slash_command(
+            "dream",
+            "Run dream consolidation cycle (NREM -> REM -> integration)",
+            "knowledge",
+            None,
+        ),
+        slash_command(
+            "index",
+            "Build or search code intelligence index",
+            "implementation",
+            Some("build | search <query> | stats"),
+        ),
+        slash_command(
+            "explain",
+            "Explain a codebase concept at 3 depth levels",
+            "research",
+            Some("topic"),
+        ),
+        slash_command(
+            "replay",
+            "Walk signal DAG by hash (episode replay)",
+            "knowledge",
+            Some("signal hash"),
+        ),
+        slash_command(
+            "learn-router",
+            "Inspect cascade router state and model routing",
+            "learning",
+            None,
+        ),
+        slash_command(
+            "learn-episodes",
+            "Recent episode log (agent turns + gate results)",
+            "learning",
+            None,
+        ),
+        slash_command(
+            "learn-tune",
+            "Tune adaptive thresholds (gates, routing, budget)",
+            "learning",
+            Some("gates | routing | budget"),
+        ),
+        slash_command("audit", "Plugin security audit", "system", None),
+        slash_command(
+            "workflow",
+            "Workflow management: list/status/cancel/resume",
+            "workflow",
+            Some("list | status | cancel | resume"),
+        ),
+        slash_command(
+            "express",
+            "Run express pipeline: implement -> gate -> commit",
+            "workflow",
+            Some("prompt text"),
+        ),
+        slash_command(
+            "full",
+            "Run full pipeline: strategy -> implement -> gate -> multi-review -> commit",
+            "workflow",
+            Some("prompt text"),
+        ),
+        slash_command(
+            "review-this",
+            "Run review pipeline on current uncommitted changes",
+            "workflow",
+            None,
+        ),
+        slash_command(
+            "pipeline",
+            "Run a named workflow pipeline",
+            "workflow",
+            Some("pipeline name"),
+        ),
+        slash_command("help", "List all available commands", "help", None),
+    ];
+
+    if bare_mode {
+        commands
+            .into_iter()
+            .filter(|command| {
+                command
+                    .category
+                    .as_deref()
+                    .is_some_and(bare_mode_allows_category)
+            })
+            .collect()
+    } else {
+        commands
+    }
 }
 
 fn default_modes(current_mode_id: &str) -> ModesInfo {
@@ -1457,6 +1615,9 @@ mod tests {
         SessionNewParams {
             session_name: Some(name.to_owned()),
             client_capabilities: None,
+            model: None,
+            provider: None,
+            effort: None,
             mcp_servers: Vec::new(),
         }
     }
@@ -1625,37 +1786,46 @@ context_window = 8192
     }
 
     #[test]
-    fn update_config_ignores_unknown_provider_selection() {
+    fn update_config_rejects_unknown_provider_selection() {
         let config = config_with_two_providers();
         let mut session = AcpSession::new_with_config(session_params("provider-update"), &config);
 
-        session.update_config(
-            "provider",
-            &serde_json::Value::String("missing-provider".to_owned()),
-            &config,
-        );
+        let err = session
+            .update_config(
+                "provider",
+                &serde_json::Value::String("missing-provider".to_owned()),
+                &config,
+            )
+            .unwrap_err();
 
+        assert!(err.contains("unknown provider"));
         assert_eq!(session.config_state.provider, "provider-a");
         assert_eq!(session.config_state.model, "model-a");
     }
 
     #[test]
-    fn update_config_ignores_unknown_or_cross_provider_model_selection() {
+    fn update_config_rejects_unknown_or_cross_provider_model_selection() {
         let config = config_with_two_providers();
         let mut session = AcpSession::new_with_config(session_params("model-update"), &config);
 
-        session.update_config(
-            "model",
-            &serde_json::Value::String("missing-model".to_owned()),
-            &config,
-        );
+        let err = session
+            .update_config(
+                "model",
+                &serde_json::Value::String("missing-model".to_owned()),
+                &config,
+            )
+            .unwrap_err();
+        assert!(err.contains("model 'missing-model'"));
         assert_eq!(session.config_state.model, "model-a");
 
-        session.update_config(
-            "model",
-            &serde_json::Value::String("model-b".to_owned()),
-            &config,
-        );
+        let err = session
+            .update_config(
+                "model",
+                &serde_json::Value::String("model-b".to_owned()),
+                &config,
+            )
+            .unwrap_err();
+        assert!(err.contains("provider 'provider-a'"));
         assert_eq!(session.config_state.provider, "provider-a");
         assert_eq!(session.config_state.model, "model-a");
     }
@@ -1998,7 +2168,7 @@ context_window = 8192
 
     #[test]
     fn slash_commands_include_new_commands() {
-        let commands = build_slash_commands();
+        let commands = build_slash_commands(false);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         for expected in [
             "plan-show",

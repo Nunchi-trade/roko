@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
+use indexmap::IndexMap;
 use roko_core::agent::resolve_model;
 use roko_core::config::schema::{ProviderConfig, RokoConfig};
 use roko_learn::cascade_router::CascadeRouter;
@@ -336,7 +336,7 @@ fn select_provider<'a>(
     source: SelectionSource,
     model: &str,
     resolved: &roko_core::agent::ResolvedModel,
-    providers: &'a HashMap<String, ProviderConfig>,
+    providers: &'a IndexMap<String, ProviderConfig>,
 ) -> Result<(String, &'a ProviderConfig), Error> {
     if let Some(profile) = resolved.profile.as_ref() {
         let provider_key = profile.provider.trim();

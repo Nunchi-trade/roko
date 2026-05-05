@@ -1412,7 +1412,7 @@ fn format_pre_validation_context(
     tasks_path: &std::path::Path,
     validate_fn: &dyn Fn(
         &std::path::Path,
-        Option<&std::collections::HashMap<String, roko_core::config::ModelProfile>>,
+        Option<&indexmap::IndexMap<String, roko_core::config::ModelProfile>>,
     ) -> anyhow::Result<crate::plan_validate::ValidationReport>,
 ) -> String {
     let parent = tasks_path.parent().unwrap_or(tasks_path);

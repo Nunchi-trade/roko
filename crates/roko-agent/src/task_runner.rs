@@ -5,6 +5,8 @@
 //! and cost accounting across task iterations.
 
 use crate::{Agent, Usage, chat_types::FinishReason};
+use indexmap::IndexMap;
+use roko_core::config::schema::ModelProfile;
 use roko_core::{Context, Engram};
 use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
@@ -413,17 +415,86 @@ pub struct CostTable {
     pub models: HashMap<String, ModelPricing>,
 }
 
+/// Sonnet-rate fallback used when a model slug is unknown but tokens > 0.
+const SONNET_FALLBACK: ModelPricing = ModelPricing {
+    input_per_m: 3.00,
+    output_per_m: 15.00,
+    cache_read_per_m: 0.30,
+    cache_write_per_m: 3.75,
+};
+
+/// Hardcoded pricing for well-known models: (slug, input, output, cache_read, cache_write).
+const KNOWN_MODEL_PRICING: &[(&str, f64, f64, f64, f64)] = &[
+    ("claude-opus-4-6", 15.00, 75.00, 3.75, 18.75),
+    ("claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75),
+    ("claude-haiku-4-5", 0.80, 4.00, 0.08, 1.00),
+    ("glm-5.1", 1.40, 4.40, 0.26, 1.75),
+    ("glm-5", 1.00, 3.20, 0.50, 1.25),
+    ("kimi-k2.5", 0.60, 3.00, 0.10, 0.75),
+    ("gpt-5.2", 2.00, 8.00, 0.50, 2.50),
+    ("gpt-5.4", 2.50, 10.00, 0.63, 3.13),
+    ("gpt-5.4-mini", 0.40, 1.60, 0.10, 0.50),
+];
+
 impl CostTable {
     /// Insert or replace pricing for a model.
     pub fn insert(&mut self, model_slug: impl Into<String>, pricing: ModelPricing) {
         self.models.insert(model_slug.into(), pricing);
     }
 
+    /// Build a cost table from config model profiles, then merge hardcoded defaults
+    /// for known models (without overriding config-supplied pricing).
+    #[must_use]
+    pub fn from_config_with_defaults(models: &IndexMap<String, ModelProfile>) -> Self {
+        let mut table = Self::default();
+
+        // Populate from config profiles.
+        for profile in models.values() {
+            if let (Some(input), Some(output)) =
+                (profile.cost_input_per_m, profile.cost_output_per_m)
+            {
+                table.insert(
+                    profile.slug.clone(),
+                    ModelPricing {
+                        input_per_m: input,
+                        output_per_m: output,
+                        cache_read_per_m: profile.cost_cache_read_per_m.unwrap_or(input * 0.5),
+                        cache_write_per_m: profile.cost_cache_write_per_m.unwrap_or(input * 1.25),
+                    },
+                );
+            }
+        }
+
+        // Merge hardcoded defaults for known models (won't override config).
+        for &(slug, input, output, cache_r, cache_w) in KNOWN_MODEL_PRICING {
+            table
+                .models
+                .entry(slug.to_string())
+                .or_insert(ModelPricing {
+                    input_per_m: input,
+                    output_per_m: output,
+                    cache_read_per_m: cache_r,
+                    cache_write_per_m: cache_w,
+                });
+        }
+
+        table
+    }
+
     /// Calculate request cost from raw token counts.
+    ///
+    /// Falls back to Sonnet rates when the model is unknown but tokens > 0.
     #[must_use]
     pub fn calculate(&self, model_slug: &str, usage: &Usage) -> f64 {
-        let Some(pricing) = self.models.get(model_slug) else {
-            return 0.0;
+        let total_tokens = usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_read_tokens
+            + usage.cache_create_tokens;
+
+        let pricing = match self.models.get(model_slug) {
+            Some(p) => p,
+            None if total_tokens > 0 => &SONNET_FALLBACK,
+            None => return 0.0,
         };
 
         (usage.input_tokens as f64 * pricing.input_per_m / 1_000_000.0)

@@ -2,6 +2,8 @@
 #![allow(unused_imports)]
 
 use crate::*;
+use indexmap::IndexMap;
+use roko_fs::RokoLayout;
 use serde::Serialize;
 
 pub(crate) const fn edit_target(global: bool, project: bool) -> EditTarget {
@@ -1038,9 +1040,7 @@ pub(crate) async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
     }
 }
 
-pub(crate) fn configured_providers(
-    config: &RokoConfig,
-) -> std::collections::HashMap<String, ProviderConfig> {
+pub(crate) fn configured_providers(config: &RokoConfig) -> IndexMap<String, ProviderConfig> {
     if !config.providers.is_empty() {
         return config.providers.clone();
     }
@@ -1057,12 +1057,10 @@ pub(crate) fn configured_providers(
         return config.effective_providers();
     }
 
-    std::collections::HashMap::new()
+    IndexMap::new()
 }
 
-pub(crate) fn configured_models(
-    config: &RokoConfig,
-) -> std::collections::HashMap<String, ModelProfile> {
+pub(crate) fn configured_models(config: &RokoConfig) -> IndexMap<String, ModelProfile> {
     config.effective_models()
 }
 
@@ -2024,7 +2022,7 @@ pub(crate) fn normalize_route_token(input: &str) -> String {
 
 pub(crate) fn resolve_requested_model_slug(
     requested_model: &str,
-    models: &HashMap<String, ModelProfile>,
+    models: &IndexMap<String, ModelProfile>,
 ) -> Option<String> {
     if let Some(profile) = models.get(requested_model) {
         return Some(profile.slug.clone());
@@ -2046,7 +2044,7 @@ pub(crate) fn resolve_requested_model_slug(
 }
 
 pub(crate) fn model_aliases_by_slug(
-    models: &HashMap<String, ModelProfile>,
+    models: &IndexMap<String, ModelProfile>,
 ) -> HashMap<String, String> {
     let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
     for (model_key, profile) in models {
@@ -2077,7 +2075,7 @@ pub(crate) fn display_model_name(aliases: &HashMap<String, String>, slug: &str) 
 }
 
 pub(crate) fn model_provider_map(
-    models: &HashMap<String, ModelProfile>,
+    models: &IndexMap<String, ModelProfile>,
     model_slugs: &[String],
 ) -> HashMap<String, String> {
     let mut entries = models.iter().collect::<Vec<_>>();

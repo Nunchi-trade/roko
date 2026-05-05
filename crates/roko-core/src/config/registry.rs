@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use crate::agent::ModelTier;
 use crate::config::schema::{ModelProfile, RokoConfig};
 
@@ -18,7 +19,7 @@ use crate::config::schema::{ModelProfile, RokoConfig};
 #[derive(Debug, Clone)]
 pub struct ModelRegistry {
     /// Config key → full profile.
-    profiles: HashMap<String, ModelProfile>,
+    profiles: IndexMap<String, ModelProfile>,
     /// API slug → config key (for slug-based lookups).
     slug_to_key: HashMap<String, String>,
     /// Ordered list of (config_key, tier) for upgrade/downgrade navigation.

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use roko_agent::Usage;
 use roko_core::config::schema::ModelProfile;
 use serde::{Deserialize, Serialize};
@@ -108,7 +109,7 @@ impl CostTable {
 
     /// Load pricing rows from config model profiles.
     #[must_use]
-    pub fn from_config(models: &HashMap<String, ModelProfile>) -> Self {
+    pub fn from_config(models: &IndexMap<String, ModelProfile>) -> Self {
         let mut table = HashMap::new();
 
         for profile in models.values() {

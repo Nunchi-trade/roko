@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use crate::agent::{AgentBackend, ProviderKind};
 use crate::defaults::DEFAULT_PLAN_TIMEOUT_SECS;
 use crate::tool::{ToolFormat, profile_for_model};
+use indexmap::IndexMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -83,9 +84,9 @@ pub struct RokoConfig {
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
-    pub providers: HashMap<String, ProviderConfig>,
+    pub providers: IndexMap<String, ProviderConfig>,
     #[serde(default)]
-    pub models: HashMap<String, ModelProfile>,
+    pub models: IndexMap<String, ModelProfile>,
     #[serde(default)]
     pub gates: GatesConfig,
     #[serde(default)]
@@ -147,8 +148,8 @@ impl Default for RokoConfig {
             project: ProjectConfig::default(),
             prd: PrdConfig::default(),
             agent: AgentConfig::default(),
-            providers: HashMap::new(),
-            models: HashMap::new(),
+            providers: IndexMap::new(),
+            models: IndexMap::new(),
             gates: GatesConfig::default(),
             routing: RoutingConfig::default(),
             pipeline: PipelineConfig::default(),
@@ -239,7 +240,7 @@ impl RokoConfig {
     /// legacy command-backed behavior must materialize a transient provider at
     /// their boundary before dispatch.
     #[must_use]
-    pub fn effective_providers(&self) -> HashMap<String, ProviderConfig> {
+    pub fn effective_providers(&self) -> IndexMap<String, ProviderConfig> {
         if !self.providers.is_empty() {
             let mut providers = self.providers.clone();
             // Ensure ClaudeCli providers always have a command — the adapter
@@ -257,7 +258,7 @@ impl RokoConfig {
             return providers;
         }
 
-        HashMap::new()
+        IndexMap::new()
     }
 
     /// Return the explicit model registry that should be used at runtime.
@@ -267,7 +268,7 @@ impl RokoConfig {
     /// profiles declared under `[models.*]` or profiles made explicit by a
     /// boundary adapter/migration step.
     #[must_use]
-    pub fn effective_models(&self) -> HashMap<String, ModelProfile> {
+    pub fn effective_models(&self) -> IndexMap<String, ModelProfile> {
         self.models.clone()
     }
 
@@ -577,7 +578,7 @@ impl RokoConfig {
     /// arbitrary config fields risks unintended side effects (e.g., a model
     /// slug containing `${...}` should be literal, not interpolated).
     fn interpolate_env_vars_with(
-        providers: &mut HashMap<String, ProviderConfig>,
+        providers: &mut IndexMap<String, ProviderConfig>,
         env_fn: &dyn Fn(&str) -> Option<String>,
     ) {
         for provider in providers.values_mut() {

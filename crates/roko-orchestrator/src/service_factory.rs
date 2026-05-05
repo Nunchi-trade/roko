@@ -161,11 +161,13 @@ impl ServiceFactory {
                 })
                 .collect()
         });
+        let cost_table = roko_agent::CostTable::from_config_with_defaults(&workspace_config.models);
         let routing_config = workspace_config.clone();
         let prompt_model_router = cascade_router.clone();
         let prompt_routing_config = workspace_config.clone();
         let mut model_call_service = ModelCallService::new(model.clone())
             .with_config(workspace_config)
+            .with_cost_table(cost_table)
             .with_feedback_sink(Arc::clone(&feedback_sink))
             .with_gateway_event_writer(Arc::new(GatewayEventWriter::for_workdir(&config.workdir)))
             .with_event_consumer(Arc::new(JsonlLogger::from_roko_dir(&config.roko_dir)))

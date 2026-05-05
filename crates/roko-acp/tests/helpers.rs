@@ -337,6 +337,9 @@ fn build_session(roko_config: &RokoConfig, mode: &str, model: &str, workflow: &s
         SessionNewParams {
             session_name: Some("telemetry-test".to_string()),
             client_capabilities: None,
+            model: None,
+            provider: None,
+            effort: None,
             mcp_servers: Vec::new(),
         },
         roko_config,

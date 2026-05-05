@@ -90,6 +90,12 @@ impl AcpEventForwarder {
                     summary,
                 })
             }
+            CognitiveEvent::McpStatus { statuses } => Some(RuntimeEvent::FeedbackRecorded {
+                run_id: self.run_id.clone(),
+                kind: "acp_mcp_status".to_owned(),
+                summary: serde_json::to_string(statuses)
+                    .unwrap_or_else(|_| format!("{} MCP server status updates", statuses.len())),
+            }),
             CognitiveEvent::Complete { stop_reason, usage } => {
                 Some(self.completion_event(stop_reason, usage.as_ref()))
             }

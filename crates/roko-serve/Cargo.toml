@@ -44,6 +44,7 @@ chrono = { workspace = true }
 futures = { workspace = true }
 governor = { version = "0.10", default-features = false, features = ["std"] }
 hmac = { workspace = true }
+indexmap = { workspace = true }
 regex = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }

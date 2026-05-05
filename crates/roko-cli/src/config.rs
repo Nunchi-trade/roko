@@ -5,6 +5,7 @@
 //! on the agent's output.
 
 use anyhow::{Context, Result, anyhow, bail};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -61,11 +62,11 @@ pub struct Config {
     #[serde(default)]
     pub budget: BudgetConfig,
     /// Provider registry keyed by provider name.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub providers: HashMap<String, ProviderConfig>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub providers: IndexMap<String, ProviderConfig>,
     /// Model registry keyed by model name.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub models: HashMap<String, ModelProfile>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub models: IndexMap<String, ModelProfile>,
     /// Learning / feedback-loop settings.
     #[serde(default)]
     pub learning: LearningLayer,
@@ -98,8 +99,8 @@ impl Default for Config {
             runner: RunnerConfig::default(),
             runtime: RuntimeControlConfig::default(),
             budget: BudgetConfig::default(),
-            providers: HashMap::new(),
-            models: HashMap::new(),
+            providers: IndexMap::new(),
+            models: IndexMap::new(),
             learning: LearningLayer::default(),
             serve: ServeConfig::default(),
             log_format: None,
@@ -988,10 +989,10 @@ pub struct ConfigLayer {
     pub runtime: Option<RuntimeControlLayer>,
     /// Provider registry overrides keyed by provider name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub providers: Option<HashMap<String, ProviderLayer>>,
+    pub providers: Option<IndexMap<String, ProviderLayer>>,
     /// Model registry overrides keyed by model name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub models: Option<HashMap<String, ModelProfileLayer>>,
+    pub models: Option<IndexMap<String, ModelProfileLayer>>,
     /// API serving options overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serve: Option<ServeLayer>,
@@ -1263,8 +1264,8 @@ impl ConfigLayer {
                         .with_context(|| format!("resolve providers.{name}"))?;
                     Ok((name, provider))
                 })
-                .collect::<Result<HashMap<_, _>>>()?,
-            None => HashMap::new(),
+                .collect::<Result<IndexMap<_, _>>>()?,
+            None => IndexMap::new(),
         };
         let models = match self.models {
             Some(models) => models
@@ -1275,8 +1276,8 @@ impl ConfigLayer {
                         .with_context(|| format!("resolve models.{name}"))?;
                     Ok((name, profile))
                 })
-                .collect::<Result<HashMap<_, _>>>()?,
-            None => HashMap::new(),
+                .collect::<Result<IndexMap<_, _>>>()?,
+            None => IndexMap::new(),
         };
         let serve = match self.serve {
             Some(s) => {
@@ -1305,6 +1306,7 @@ impl ConfigLayer {
                         Some(auto_start) => auto_start,
                         None => defaults.auto_start,
                     },
+                    event_ingest_allowlist: defaults.event_ingest_allowlist,
                 }
             }
             None => ServeConfig::default(),
@@ -2204,7 +2206,7 @@ where
 fn provider_layer_mut<'a>(layer: &'a mut ConfigLayer, name: &str) -> &'a mut ProviderLayer {
     layer
         .providers
-        .get_or_insert_with(HashMap::new)
+        .get_or_insert_with(IndexMap::new)
         .entry(name.to_string())
         .or_default()
 }
@@ -2212,7 +2214,7 @@ fn provider_layer_mut<'a>(layer: &'a mut ConfigLayer, name: &str) -> &'a mut Pro
 fn model_layer_mut<'a>(layer: &'a mut ConfigLayer, name: &str) -> &'a mut ModelProfileLayer {
     layer
         .models
-        .get_or_insert_with(HashMap::new)
+        .get_or_insert_with(IndexMap::new)
         .entry(name.to_string())
         .or_default()
 }
