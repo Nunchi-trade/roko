@@ -121,7 +121,6 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, warn};
 
@@ -180,13 +179,15 @@ impl ServerBuildConfig {
         self
     }
 
-    fn effective_bind(&self) -> &str {
+    /// Resolve the effective bind address from CLI override or config.
+    pub fn effective_bind(&self) -> &str {
         self.bind
             .as_deref()
             .unwrap_or(&self.roko_config.server.bind)
     }
 
-    fn effective_port(&self) -> u16 {
+    /// Resolve the effective port from CLI override or config.
+    pub fn effective_port(&self) -> u16 {
         self.port.unwrap_or_else(|| {
             // Prefer [serve].port when [server].port is still the default.
             if self.roko_config.server.port == 6677 {
@@ -200,7 +201,8 @@ impl ServerBuildConfig {
         })
     }
 
-    fn effective_addr(&self) -> String {
+    /// Resolve the effective address string (`bind:port`).
+    pub fn effective_addr(&self) -> String {
         format!("{}:{}", self.effective_bind(), self.effective_port())
     }
 }
@@ -781,21 +783,6 @@ fn build_server_router(
         .with_state(state);
 
     api_router.merge(fallback_router)
-}
-
-fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
-    if cors_origins.is_empty() {
-        CorsLayer::permissive()
-    } else {
-        let allowed: Vec<axum::http::HeaderValue> = cors_origins
-            .iter()
-            .filter_map(|origin| origin.parse().ok())
-            .collect();
-        CorsLayer::new()
-            .allow_origin(allowed)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    }
 }
 
 fn api_or_ws_path_requires_json_404(path: &str) -> bool {
@@ -1604,15 +1591,24 @@ fn start_state_snapshot_saver(state: Arc<AppState>) -> JoinHandle<()> {
 
 /// Periodic garbage collection of ephemeral workspaces.
 ///
-/// Runs every 5 minutes. Each tick removes entries from
+/// Runs at the interval configured in `[server].workspace_gc_interval_secs`
+/// (default 300s / 5 minutes). Each tick removes entries from
 /// `AppState.ephemeral_workspaces` whose `created_at` is older than 1 hour,
-/// deleting the corresponding filesystem directories.
+/// deleting the corresponding filesystem directories and persisting the
+/// updated registry.
 fn start_workspace_gc(state: Arc<AppState>) -> JoinHandle<()> {
-    const INTERVAL_SECS: u64 = roko_core::defaults::DEFAULT_WORKSPACE_GC_INTERVAL_SECS;
     const MAX_AGE_SECS: u64 = 3600;
 
+    // Read the configured interval, clamping zero to 1 second to prevent busy-loop.
+    let interval_secs = {
+        let config = state.load_roko_config();
+        let raw = config.server.workspace_gc_interval_secs;
+        if raw == 0 { 1 } else { raw }
+    };
+
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(INTERVAL_SECS));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         // Skip the first immediate tick — let the server warm up.
         interval.tick().await;
 
@@ -1657,6 +1653,16 @@ fn start_workspace_gc(state: Arc<AppState>) -> JoinHandle<()> {
                     if map.remove(&ws.id).is_some() {
                         removed += 1;
                     }
+                }
+            }
+
+            // Persist the updated registry after GC removals.
+            if removed > 0 {
+                if let Err(err) = state.persist_workspace_registry().await {
+                    warn!(
+                        error = %err,
+                        "failed to persist workspace registry after GC"
+                    );
                 }
             }
 

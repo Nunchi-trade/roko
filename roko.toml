@@ -1001,6 +1001,12 @@ secret = ""
 [server]
 bind = "127.0.0.1"
 port = 6677
+# CORS origins allowed for cross-origin browser requests.
+# Empty = local origins only (localhost/127.0.0.1). Non-local origins are rejected.
+# For production, list explicit origins:
+#   cors_origins = ["https://app.example.com", "https://dashboard.example.com"]
+# To allow ALL origins (dangerous, exposes API to any site):
+#   unsafe_public_cors = true
 cors_origins = []
 unsafe_public_cors = false
 

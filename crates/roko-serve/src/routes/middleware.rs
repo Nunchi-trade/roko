@@ -1316,4 +1316,109 @@ mod tests {
             "x-totally-fake leaked into allow-headers: {allow_headers:?}"
         );
     }
+
+    // --- T55: default local-only and unsafe_public_cors tests ---
+
+    /// Build a router using the default cors_layer (empty origins, not unsafe).
+    /// This should only allow local origins.
+    fn cors_default_local_app() -> axum::Router {
+        let cors = cors_layer(&[], false);
+        axum::Router::new()
+            .route("/api/ping", axum::routing::get(|| async { "pong" }))
+            .layer(cors)
+    }
+
+    /// Build a router using unsafe_public_cors = true (wildcard CORS).
+    fn cors_unsafe_public_app() -> axum::Router {
+        let cors = cors_layer(&[], true);
+        axum::Router::new()
+            .route("/api/ping", axum::routing::get(|| async { "pong" }))
+            .layer(cors)
+    }
+
+    #[tokio::test]
+    async fn cors_default_allows_local_origin() {
+        let app = cors_default_local_app();
+        let resp = preflight(&app, "http://localhost:5173", "GET", None).await;
+
+        // Local origin should be reflected back in access-control-allow-origin.
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            allow_origin, "http://localhost:5173",
+            "local origin should be allowed by default"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_default_allows_127_0_0_1_origin() {
+        let app = cors_default_local_app();
+        let resp = preflight(&app, "http://127.0.0.1:3000", "POST", None).await;
+
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            allow_origin, "http://127.0.0.1:3000",
+            "127.0.0.1 origin should be allowed by default"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_default_rejects_non_local_origin() {
+        let app = cors_default_local_app();
+        let resp = preflight(&app, "https://evil.com", "GET", None).await;
+
+        // Non-local origin should NOT get an access-control-allow-origin header.
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            allow_origin.is_empty() || allow_origin == "null",
+            "non-local origin should be rejected, got: {allow_origin:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_unsafe_public_allows_any_origin() {
+        let app = cors_unsafe_public_app();
+        let resp = preflight(&app, "https://anything.evil.com", "POST", None).await;
+
+        // Wildcard CORS should respond with `*` or the request origin.
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            allow_origin == "*" || allow_origin == "https://anything.evil.com",
+            "unsafe_public_cors should allow any origin, got: {allow_origin:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_exact_origin_rejects_unlisted_origin() {
+        let app = cors_test_app("https://app.example.com");
+        let resp = preflight(&app, "https://not-allowed.com", "GET", None).await;
+
+        // An origin not in the allow-list should not get reflected.
+        let allow_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            allow_origin.is_empty()
+                || allow_origin == "null"
+                || !allow_origin.contains("not-allowed"),
+            "unlisted origin should be rejected, got: {allow_origin:?}"
+        );
+    }
 }

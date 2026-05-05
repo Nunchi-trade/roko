@@ -40,7 +40,9 @@ RUN cargo build --release -p roko-cli --bin roko \
     && cp target/release/mirage-rs /tmp/mirage-rs \
     && cp target/release/agent-relay /tmp/agent-relay
 
-# ---- Runtime ---------------------------------------------------------------
+# ---- Runtime (NO toolchain) -----------------------------------------------
+# Only compiled binaries plus scripts and minimal runtime dependencies.
+# The Rust toolchain (rustc, cargo, rustup) is NOT copied into this stage.
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
@@ -49,29 +51,11 @@ RUN apt-get update \
         ca-certificates \
         coreutils \
         curl \
-        gcc \
         git \
         gosu \
-        libc6-dev \
-        libssl-dev \
         libssl3 \
-        pkg-config \
+        tini \
     && rm -rf /var/lib/apt/lists/*
-
-# Rust toolchain: some server-launched coding/demo tasks need cargo, clippy, and
-# rustfmt at runtime.
-COPY --from=builder /usr/local/cargo /usr/local/cargo
-COPY --from=builder /usr/local/rustup /usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV PATH="/usr/local/cargo/bin:$PATH"
-
-# Foundry cast is used by chain/demo helpers. Keep this explicit so failures
-# happen at image build time, not during a Railway deployment.
-RUN curl -L https://foundry.paradigm.xyz | bash \
-    && /root/.foundry/bin/foundryup \
-    && cp /root/.foundry/bin/cast /usr/local/bin/cast \
-    && rm -rf /root/.foundry
 
 COPY --from=builder /tmp/roko /usr/local/bin/roko
 COPY --from=builder /tmp/mirage-rs /usr/local/bin/mirage-rs
@@ -114,4 +98,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     && curl -fsS "http://127.0.0.1:${MIRAGE_PORT:-8545}/health" >/dev/null \
     && curl -fsS "http://${ROKO_AGENT_RELAY_BIND:-127.0.0.1:9011}/relay/health" >/dev/null
 
-ENTRYPOINT ["/usr/local/bin/start-railway"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/start-railway"]
