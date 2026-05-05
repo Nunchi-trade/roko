@@ -26,15 +26,16 @@ export type ServerEvent =
        description: string }
   | { type: 'task_completed'; planId: string; taskId: string;
        success: boolean }
-  | { type: 'task_failed'; planId: string; taskId: string; error: string }
+  | { type: 'task_failed'; planId: string; taskId: string; error: string;
+       gateFailure: boolean }
   // Agent lifecycle
   | { type: 'agent_spawned'; agentId: string; role: string; model: string }
   | { type: 'agent_output'; agentId: string; runId?: string;
        content: string; done: boolean;
        metadata?: Record<string, unknown> }
   | { type: 'agent_trace'; agentId: string; runId?: string;
-       content: string; toolCalls?: unknown[]; reasoning?: string;
-       usage?: Record<string, unknown>; done: boolean }
+       turn?: number; content?: string; toolCalls?: unknown[];
+       reasoning?: string; usage?: Record<string, unknown>; done?: boolean }
   | { type: 'agent_started'; agentId: string }
   | { type: 'agent_stopped'; agentId: string; reason: string }
   // Gate results
@@ -49,8 +50,15 @@ export type ServerEvent =
   | { type: 'inference_failed'; requestId: string; model: string;
        agentId: string; error: string }
   // One-shot runs
-  | { type: 'run_started'; runId: string; prompt: string }
-  | { type: 'run_completed'; runId: string; success: boolean }
+  | { type: 'run_started'; runId: string; prompt: string;
+       complexity: string }
+  | { type: 'run_completed'; runId: string; success: boolean;
+       costUsd: number; durationMs: number }
+  // Knowledge
+  | { type: 'knowledge_ingested'; entryId: string; topic: string;
+       sourceAgent: string }
+  | { type: 'knowledge_consumed'; entryId: string; topic: string;
+       consumingAgent: string }
   // Generic operations
   | { type: 'operation_started'; opId: string; kind: string }
   | { type: 'operation_completed'; opId: string; kind: string;
