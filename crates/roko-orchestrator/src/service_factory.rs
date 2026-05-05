@@ -40,6 +40,8 @@ pub struct ServiceConfig {
     pub feedback_enabled: bool,
     /// Whether affect modulation should be backed by Daimon state.
     pub affect_enabled: bool,
+    /// Whether cascade routing and cascade learning should be active.
+    pub cascade_enabled: bool,
     /// Stable run id used by service-level event and feedback records.
     pub run_id: Option<String>,
 }
@@ -57,6 +59,7 @@ impl ServiceConfig {
             mcp_config: None,
             feedback_enabled: true,
             affect_enabled: true,
+            cascade_enabled: true,
             run_id: None,
         }
     }
@@ -119,18 +122,23 @@ impl ServiceFactory {
         workspace_config.agent.default_model = model.clone();
         let prompt_token_budget = workspace_config.budget.prompt_token_budget;
         let tool_instructions = tool_instructions_for_config(&workspace_config.tools);
-        let cascade_model_slugs = model_slugs_for_config(&workspace_config, &model);
-        let cascade_router = Arc::new(CascadeRouter::load_or_new(
-            &config.roko_dir.join("learn").join("cascade-router.json"),
-            cascade_model_slugs,
-        ));
+        let cascade_router = if config.cascade_enabled {
+            let cascade_model_slugs = model_slugs_for_config(&workspace_config, &model);
+            Some(Arc::new(CascadeRouter::load_or_new(
+                &config.roko_dir.join("learn").join("cascade-router.json"),
+                cascade_model_slugs,
+            )))
+        } else {
+            None
+        };
         let knowledge_store = Arc::new(KnowledgeStore::for_roko_dir(&config.roko_dir));
 
         let feedback_sink: Arc<dyn FeedbackSink> = if config.feedback_enabled {
-            Arc::new(
-                FeedbackService::from_roko_dir_with_episodes(&config.roko_dir)
-                    .with_cascade_router(Arc::clone(&cascade_router)),
-            )
+            let feedback_service = FeedbackService::from_roko_dir_with_episodes(&config.roko_dir);
+            match &cascade_router {
+                Some(router) => Arc::new(feedback_service.with_cascade_router(Arc::clone(router))),
+                None => Arc::new(feedback_service),
+            }
         } else {
             Arc::new(MemoryFeedbackSink::default())
         };
@@ -148,7 +156,6 @@ impl ServiceFactory {
                 })
                 .collect()
         });
-        let model_router = Arc::clone(&cascade_router);
         let routing_config = workspace_config.clone();
         let mut model_call_service = ModelCallService::new(model.clone())
             .with_config(workspace_config)
@@ -156,21 +163,25 @@ impl ServiceFactory {
             .with_gateway_event_writer(Arc::new(GatewayEventWriter::for_workdir(&config.workdir)))
             .with_event_consumer(Arc::new(JsonlLogger::from_roko_dir(&config.roko_dir)))
             .with_knowledge_store(gateway_knowledge_query)
-            .with_cascade_router(Arc::clone(&cascade_router))
-            .with_model_router(move |role| {
-                let ctx = RoutingContext {
-                    role: agent_role_from_label(role.unwrap_or("implementer")),
-                    ..Default::default()
-                };
-                let mut candidates = routing_config.available_model_slugs_for_cascade();
-                if candidates.is_empty() {
-                    candidates = routing_config.model_slugs_for_cascade();
-                }
-                model_router
-                    .explain_routing(&ctx, &candidates)
-                    .selected_model
-            })
             .with_run_id(config.run_id.unwrap_or_else(default_run_id));
+        if let Some(cascade_router) = cascade_router {
+            let model_router = Arc::clone(&cascade_router);
+            model_call_service = model_call_service
+                .with_cascade_router(cascade_router)
+                .with_model_router(move |role| {
+                    let ctx = RoutingContext {
+                        role: agent_role_from_label(role.unwrap_or("implementer")),
+                        ..Default::default()
+                    };
+                    let mut candidates = routing_config.available_model_slugs_for_cascade();
+                    if candidates.is_empty() {
+                        candidates = routing_config.model_slugs_for_cascade();
+                    }
+                    model_router
+                        .explain_routing(&ctx, &candidates)
+                        .selected_model
+                });
+        }
         if let Some(mcp_config) = config.mcp_config {
             model_call_service = model_call_service.with_mcp_config(mcp_config);
         }

@@ -372,15 +372,17 @@ pub struct CliOverrides {
     pub model: Option<String>,
     pub role: Option<String>,
     pub provider: Option<String>,
+    pub cascade_enabled: Option<bool>,
 }
 
 fn resolve_workflow_model_selection(
     workdir: &std::path::Path,
     overrides: &CliOverrides,
 ) -> anyhow::Result<(Config, RokoConfig, EffectiveModelSelection)> {
-    let mut config = crate::config::load_layered(workdir)
-        .map(|resolved| resolved.config)
-        .unwrap_or_default();
+    let resolved = crate::config::load_layered(workdir)
+        .with_context(|| format!("load config for workflow engine in {}", workdir.display()))?;
+    let mut config = resolved.config;
+    ensure_workflow_agent_configured(&config, resolved.sources.agent_command, overrides)?;
 
     if let Some(ref model) = overrides.model {
         config.agent.model = Some(model.clone());
@@ -422,11 +424,31 @@ fn resolve_workflow_model_selection(
     Ok((config, model_config, selection))
 }
 
+fn ensure_workflow_agent_configured(
+    config: &Config,
+    agent_command_source: crate::config::Source,
+    overrides: &CliOverrides,
+) -> anyhow::Result<()> {
+    let has_model_override = config.agent.model.is_some()
+        || overrides.model.is_some()
+        || overrides.provider.is_some();
+    if agent_command_source == crate::config::Source::Default
+        && config.agent.command == "cat"
+        && !has_model_override
+    {
+        return Err(anyhow!(
+            "WorkflowEngine refused to run with the default `cat` agent. Run `roko init`, configure a provider in roko.toml, or pass a model/provider override."
+        ));
+    }
+    Ok(())
+}
+
 fn build_workflow_effect_services(
     workdir: &std::path::Path,
     config: &Config,
     mut model_config: RokoConfig,
     selection: &EffectiveModelSelection,
+    cascade_enabled: bool,
 ) -> anyhow::Result<EffectServices> {
     model_config.agent.default_model = selection.effective_model_key.clone();
 
@@ -438,6 +460,7 @@ fn build_workflow_effect_services(
         mcp_config: config.agent.mcp_config.clone(),
         feedback_enabled: true,
         affect_enabled: true,
+        cascade_enabled,
         run_id: Some(format!("cli_workflow_{}", Utc::now().timestamp_millis())),
     })
     .map_err(|error| anyhow!("build workflow services: {error}"))?;
@@ -536,7 +559,13 @@ pub async fn run_with_workflow_engine_with_hub(
     selection.print_stderr();
 
     let pipeline_config = model_config.pipeline.clone();
-    let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
+    let services = build_workflow_effect_services(
+        workdir,
+        &config,
+        model_config,
+        &selection,
+        overrides.cascade_enabled.unwrap_or(true),
+    )?;
 
     // Use the pipeline bands declared in roko.toml for the interactive run path.
     let workflow = match workflow_template {
@@ -581,12 +610,28 @@ pub async fn run_workflow_engine_report_with_hub(
 ) -> anyhow::Result<WorkflowRunReport> {
     let (config, model_config, selection) = resolve_workflow_model_selection(workdir, overrides)?;
     selection.print_stderr();
-    let services = build_workflow_effect_services(workdir, &config, model_config, &selection)?;
+    let pipeline_config = model_config.pipeline.clone();
+    let services = build_workflow_effect_services(
+        workdir,
+        &config,
+        model_config,
+        &selection,
+        overrides.cascade_enabled.unwrap_or(true),
+    )?;
+
+    let workflow = match workflow_template {
+        "express" | "mechanical" => workflow_config_from_band(&pipeline_config.mechanical),
+        "focused" => workflow_config_from_band(&pipeline_config.focused),
+        "integrative" => workflow_config_from_band(&pipeline_config.integrative),
+        "full" | "architectural" => workflow_config_from_band(&pipeline_config.architectural),
+        "standard" => workflow_config_from_band(&pipeline_config.mechanical),
+        _ => workflow_config_for_template(workflow_template),
+    };
 
     run_workflow_engine_with_services(
         prompt,
         workdir,
-        workflow_config_for_template(workflow_template),
+        workflow,
         enabled_gates,
         shell_gates,
         external_hub,

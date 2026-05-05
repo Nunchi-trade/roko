@@ -203,7 +203,7 @@ fn long_version() -> &'static str {
     about = "Minimal CLI for the Roko universal loop",
     after_long_help = "\
 COMMAND GROUPS:
-  Core workflow:     init, run, status, doctor
+  Core workflow:     init, do, run, status, doctor
   Planning:          plan, prd
   Agents:            agent (create, start, stop, chat, serve)
   Research:          research
@@ -327,6 +327,35 @@ Examples:
         /// Seed realistic demo data after initialization.
         #[arg(long)]
         demo: bool,
+    },
+    /// Do a task from a natural-language prompt.
+    #[command(after_help = "\
+Examples:
+  roko do \"Fix the login bug\"       Classify scope and execute
+  roko do --plan \"Add auth flow\"    Force planned workflow
+  roko do --ghost \"Refactor API\"    Preview scope and workflow only")]
+    Do {
+        /// Force a planned workflow instead of the lightest classified scope.
+        #[arg(long)]
+        plan: bool,
+        /// Skip approval prompts when the selected workflow would ask.
+        #[arg(long)]
+        yes: bool,
+        /// Preview classification, workflow, and gates without executing.
+        #[arg(long)]
+        ghost: bool,
+        /// Compare cascade and non-cascade routing as a dry preview.
+        #[arg(long)]
+        compare: bool,
+        /// Continue interrupted work. Optionally pass a work/run id.
+        #[arg(long = "continue", value_name = "WORK_ID", num_args = 0..=1)]
+        r#continue: Option<Option<String>>,
+        /// Disable cascade routing for this run.
+        #[arg(long)]
+        no_cascade: bool,
+        /// Prompt words. Quoted prompts are recommended.
+        #[arg(value_name = "PROMPT")]
+        prompt: Vec<String>,
     },
     /// Seed a prompt and run the universal loop (compose -> agent -> gate -> persist).
     #[command(after_help = "\
@@ -2071,6 +2100,21 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             provider,
             max_retries,
         } => {
+            if engine == EngineVariant::V2 && !serve && !share && max_retries.is_none() {
+                return commands::util::cmd_do(
+                    cli,
+                    workdir,
+                    vec![prompt],
+                    false,
+                    false,
+                    false,
+                    false,
+                    None,
+                    false,
+                    provider,
+                )
+                .await;
+            }
             commands::util::cmd_run(
                 cli,
                 workdir,
@@ -2080,6 +2124,29 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 engine,
                 provider,
                 max_retries,
+            )
+            .await
+        }
+        Command::Do {
+            plan,
+            yes,
+            ghost,
+            compare,
+            r#continue,
+            no_cascade,
+            prompt,
+        } => {
+            commands::util::cmd_do(
+                cli,
+                None,
+                prompt,
+                plan,
+                yes,
+                ghost,
+                compare,
+                r#continue,
+                no_cascade,
+                None,
             )
             .await
         }
@@ -3033,6 +3100,53 @@ mod tests {
     fn cli_parses_run_subcommand() {
         let cli = Cli::try_parse_from(["roko", "run", "do something"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Run { .. })));
+    }
+
+    #[test]
+    fn cli_parses_do_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "do",
+            "--plan",
+            "--yes",
+            "--ghost",
+            "--compare",
+            "--no-cascade",
+            "do",
+            "something",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Do {
+                plan,
+                yes,
+                ghost,
+                compare,
+                no_cascade,
+                prompt,
+                ..
+            }) => {
+                assert!(plan);
+                assert!(yes);
+                assert!(ghost);
+                assert!(compare);
+                assert!(no_cascade);
+                assert_eq!(prompt, vec!["do".to_string(), "something".to_string()]);
+            }
+            other => panic!("expected do command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_do_continue_optional_value() {
+        let cli = Cli::try_parse_from(["roko", "do", "--continue", "work-123"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Do {
+                r#continue: Some(Some(ref id)),
+                ..
+            }) if id == "work-123"
+        ));
     }
 
     #[test]
