@@ -348,6 +348,19 @@ impl RelayState {
         }
         expired
     }
+
+    /// Send a frame to a connected agent by ID.
+    ///
+    /// Returns `true` if the agent was found and the send succeeded,
+    /// `false` if the agent is unknown or has disconnected.
+    pub fn send_to_agent(&self, agent_id: &str, frame: RelayOutboundFrame) -> bool {
+        let inner = self.inner.read();
+        if let Some(handle) = inner.agents.get(agent_id) {
+            handle.tx.send(frame).is_ok()
+        } else {
+            false
+        }
+    }
 }
 
 /// Live registration metadata returned after an agent hello succeeds.
