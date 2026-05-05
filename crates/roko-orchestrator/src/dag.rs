@@ -694,7 +694,12 @@ impl UnifiedTaskDag {
 
                 // Rewire: dependents of the chain tail must now depend on the
                 // chain head instead of the removed tail node.
-                let tail = chain.last().unwrap();
+                // Safety: chain.len() >= 2 is verified above, so last() is
+                // guaranteed Some. Use let-else to avoid panicking if this
+                // invariant is ever accidentally broken.
+                let Some(tail) = chain.last() else {
+                    continue;
+                };
                 let tail_dependents: Vec<_> = self.dependents_of(tail).iter().cloned().collect();
                 for dep_id in tail_dependents {
                     if let Some(dep_task) = self.tasks.get_mut(&dep_id) {

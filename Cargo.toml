@@ -75,6 +75,9 @@ members = [
 
     # Code intelligence — parsing, symbol graphs, PageRank, HDC fingerprints.
     "crates/roko-index",
+
+    # Graph execution engine — DAG types, TOML loader, CellRegistry, topo sort.
+    "crates/roko-graph",
 ]
 default-members = [
     # Ordinary root builds target the main CLI plus the MCP servers we ship.
@@ -114,6 +117,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+indexmap = { version = "2", features = ["serde"] }
+
+# Graph
+petgraph = "0.7"
 
 # Error handling
 thiserror = "2.0"

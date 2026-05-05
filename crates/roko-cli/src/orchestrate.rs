@@ -101,13 +101,12 @@ use roko_learn::conductor::{
 };
 use roko_learn::costs_db::{CostRecord, CostsDb};
 use roko_learn::costs_log::CostsLog;
-use roko_learn::event_subscriber::run_learning_subscriber;
-use roko_learn::provider_health::ProviderHealthRegistry;
 use roko_learn::curriculum::{CurriculumMode, CurriculumScheduler};
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
 };
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
+use roko_learn::event_subscriber::run_learning_subscriber;
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::hdc_fingerprint::{encode as encode_hdc_fingerprint, fingerprint_episode};
 use roko_learn::latency::LatencyRegistry;
@@ -115,6 +114,7 @@ use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore, QueryContext};
 use roko_learn::prediction::CalibrationTracker;
 use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
+use roko_learn::provider_health::{ErrorClass, ProviderHealthRegistry};
 use roko_learn::routing_log::{
     RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
 };
@@ -13423,6 +13423,15 @@ impl PlanRunner {
                 }
                 Err(e) => {
                     last_error = e.to_string();
+                    // Publish provider error to learning event bus so the
+                    // subscriber can track circuit-breaker state.
+                    let error_class = classify_provider_error_class(&e);
+                    let err_provider_id = self.provider_id_for_model(&self.effective_model());
+                    self.learning_event_bus.publish(AgentEvent::ProviderError {
+                        provider_id: err_provider_id,
+                        error_class,
+                        status: 0,
+                    });
                     if attempt == max_retries {
                         tracing::error!(
                             "[orchestrate] agent failed for {plan_id} after {max_retries} retries: {e}"
@@ -14917,11 +14926,8 @@ impl PlanRunner {
                 };
             let registry =
                 Arc::new(VecToolRegistry::from_tools(tools.clone())) as Arc<dyn ToolRegistry>;
-            let resolver: Arc<dyn HandlerResolver> = if self.chain_client.is_some() {
-                let chain_map = chain_handler_map(
-                    Arc::clone(self.chain_client.as_ref().unwrap()),
-                    self.chain_wallet.clone(),
-                );
+            let resolver: Arc<dyn HandlerResolver> = if let Some(client) = &self.chain_client {
+                let chain_map = chain_handler_map(Arc::clone(client), self.chain_wallet.clone());
                 Arc::new(chain_aware_resolver(chain_map))
             } else {
                 Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
@@ -17931,6 +17937,29 @@ fn now_unix_ms_u64() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Classify an agent dispatch error into a provider health error class.
+///
+/// Used by the learning event bus to feed the subscriber's
+/// [`ProviderHealthRegistry`] circuit-breaker logic.
+fn classify_provider_error_class(error: &anyhow::Error) -> ErrorClass {
+    let msg = error.to_string().to_lowercase();
+    if msg.contains("rate limit") || msg.contains("429") || msg.contains("too many requests") {
+        ErrorClass::RateLimit
+    } else if msg.contains("timeout") || msg.contains("timed out") || msg.contains("deadline") {
+        ErrorClass::Timeout
+    } else if msg.contains("auth") || msg.contains("401") || msg.contains("403") {
+        ErrorClass::AuthFailure
+    } else if msg.contains("content") && msg.contains("filter") {
+        ErrorClass::ContentPolicy
+    } else if msg.contains("context") && (msg.contains("window") || msg.contains("overflow")) {
+        ErrorClass::ContextOverflow
+    } else if msg.contains("500") || msg.contains("502") || msg.contains("503") {
+        ErrorClass::ServerError
+    } else {
+        ErrorClass::Unknown
+    }
 }
 
 /// Extract a summary triple `(event_type, task_id, message)` from an execution event.
@@ -21677,5 +21706,77 @@ command = "cargo check -p roko-cli"
         assert_eq!(merged.tasks[2].id, "N3");
         assert_eq!(merged.tasks[2].depends_on, vec!["N2"]);
         assert!(merged.tasks.iter().all(|task| task.id != "N1"));
+    }
+
+    // ── Symbol inference tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_task_description_has_symbols() {
+        // Positive cases
+        assert!(task_description_has_symbols(Some(
+            "Implement `pub struct RateLimiter`"
+        )));
+        assert!(task_description_has_symbols(Some(
+            "Add fn check_rate() to the module"
+        )));
+        assert!(task_description_has_symbols(Some(
+            "Create trait Verifiable for the gate"
+        )));
+        assert!(task_description_has_symbols(Some(
+            "Define enum Status with variants"
+        )));
+        assert!(task_description_has_symbols(Some(
+            "Wire `struct Foo` into runtime"
+        )));
+        // Negative cases
+        assert!(!task_description_has_symbols(Some(
+            "Fix the compilation error in module bar"
+        )));
+        assert!(!task_description_has_symbols(Some(
+            "Update the configuration file"
+        )));
+        assert!(!task_description_has_symbols(None));
+    }
+
+    #[test]
+    fn test_infer_symbols_from_description() {
+        let desc = "Implement `pub struct RateLimiter` and `fn check_rate`";
+        let symbols = infer_symbols_from_description(desc);
+        assert_eq!(symbols.len(), 2);
+        assert!(symbols.iter().any(|s| s.name == "RateLimiter"
+            && s.kind == SymbolKind::Struct
+            && s.visibility == Visibility::Pub));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "check_rate" && s.kind == SymbolKind::Function)
+        );
+    }
+
+    #[test]
+    fn test_infer_symbols_deduplicates() {
+        let desc = "Wire `struct Foo` then test `struct Foo` works";
+        let symbols = infer_symbols_from_description(desc);
+        assert_eq!(
+            symbols.iter().filter(|s| s.name == "Foo").count(),
+            1,
+            "should deduplicate by name"
+        );
+    }
+
+    #[test]
+    fn test_infer_symbols_handles_pub_crate() {
+        let desc = "Add `pub(crate) trait Validator` to the module";
+        let symbols = infer_symbols_from_description(desc);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "Validator");
+        assert_eq!(symbols[0].kind, SymbolKind::Trait);
+        assert_eq!(symbols[0].visibility, Visibility::PubCrate);
+    }
+
+    #[test]
+    fn test_infer_symbols_empty_description() {
+        let symbols = infer_symbols_from_description("nothing here");
+        assert!(symbols.is_empty());
     }
 }
