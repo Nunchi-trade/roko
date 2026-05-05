@@ -173,7 +173,9 @@ pub use review_verdict::{
     ParsedReviewVerdict, ReviewParseSource, ReviewVerdict, ReviewVerdictContext,
     parse_structured_review_verdict,
 };
-pub use rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_canonical_rung, run_rung};
+pub use rung_dispatch::{
+    GatePipelineBuilder, RungExecutionConfig, RungExecutionInputs, run_canonical_rung, run_rung,
+};
 pub use rung_selector::{PlanComplexity, Rung, RungCaps, is_selected, select_rungs};
 pub use shell::ShellGate;
 pub use spc::{
