@@ -78,6 +78,9 @@ members = [
 
     # Graph execution engine — DAG types, TOML loader, CellRegistry, topo sort.
     "crates/roko-graph",
+
+    # ACP (Agent Communication Protocol) — IDE/editor session bridge.
+    "crates/roko-acp",
 ]
 default-members = [
     # Ordinary root builds target the main CLI plus the MCP servers we ship.
