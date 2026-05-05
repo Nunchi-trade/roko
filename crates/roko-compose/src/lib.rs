@@ -53,7 +53,7 @@ pub use auction::{
     SectionCostStats, SubsystemId, VcgAllocation, VcgBid, detect_bid_correlation,
     is_pareto_optimal, vcg_allocate,
 };
-pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
+pub use budget::{AdjustedBudget, Complexity, adjusted_adaptive_budget_for, adjusted_budget_for};
 pub use budget_predictor::{BudgetPredictor, SectionInfluence, TaskFeatures};
 pub use cognitive_workspace::{
     CognitiveWorkspaceInput, build_cognitive_workspace, task_contract_from_prompt_context,

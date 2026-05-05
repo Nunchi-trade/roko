@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use crate::conventions::detect_conventions;
 use crate::role_prompts::role_identity_for;
 use crate::system_prompt_builder::SystemPromptBuilder;
+use crate::templates::common::{AdaptiveBudget, REFERENCE_CONTEXT_WINDOW_TOKENS};
 use crate::token_counter::TokenCounter;
 
 const SOURCE_SAMPLE_LIMIT: usize = 12;
@@ -24,6 +25,8 @@ const WORKSPACE_MAP_LINE_LIMIT: usize = 200;
 const SOURCE_SCAN_MAX_DEPTH: usize = 5;
 /// Maximum files to enumerate before cutting off (§17.1).
 const SOURCE_SCAN_MAX_FILES: usize = 500;
+
+type ModelContextWindowResolver = dyn Fn(AgentRole) -> usize + Send + Sync;
 
 // TODO(converge): roko_neuro::NeuroStore currently has a `Sized` supertrait,
 // so it cannot be stored directly as `dyn NeuroStore`. Keep this object-safe
@@ -69,6 +72,10 @@ pub struct PromptAssemblyService {
     tool_instructions: Option<String>,
     /// Optional token cap passed through to the system prompt builder.
     token_budget: Option<usize>,
+    /// Default context window for model-aware prompt budgets.
+    model_context_window_tokens: Option<usize>,
+    /// Role-aware context window resolver, usually backed by CascadeRouter.
+    model_context_window_resolver: Option<Arc<ModelContextWindowResolver>>,
     /// Per-section effectiveness scores used to skip low-value sections and scale budget.
     section_effectiveness: Option<HashMap<String, f64>>,
 }
@@ -87,6 +94,8 @@ impl PromptAssemblyService {
             playbook_store: None,
             tool_instructions: None,
             token_budget: None,
+            model_context_window_tokens: None,
+            model_context_window_resolver: None,
             section_effectiveness: None,
         }
     }
@@ -171,6 +180,23 @@ impl PromptAssemblyService {
         self
     }
 
+    /// Set the selected model context window for adaptive prompt budgets.
+    #[must_use]
+    pub const fn with_model_context_window(mut self, context_window_tokens: usize) -> Self {
+        self.model_context_window_tokens = Some(context_window_tokens);
+        self
+    }
+
+    /// Set a role-aware model context resolver for adaptive prompt budgets.
+    #[must_use]
+    pub fn with_model_context_window_resolver<F>(mut self, resolver: F) -> Self
+    where
+        F: Fn(AgentRole) -> usize + Send + Sync + 'static,
+    {
+        self.model_context_window_resolver = Some(Arc::new(resolver));
+        self
+    }
+
     /// Set per-section effectiveness scores.
     ///
     /// Keys are section names matching the 9 builder layers:
@@ -218,6 +244,14 @@ impl PromptAssemblyService {
             })
             .sum();
         (included, total)
+    }
+
+    fn context_window_tokens_for_role(&self, role: AgentRole) -> usize {
+        self.model_context_window_resolver
+            .as_ref()
+            .map(|resolver| resolver(role))
+            .or(self.model_context_window_tokens)
+            .unwrap_or(REFERENCE_CONTEXT_WINDOW_TOKENS)
     }
 
     /// Query knowledge store for relevant technique insights.
@@ -326,9 +360,11 @@ impl PromptAssembler for PromptAssemblyService {
 
         let role = resolve_role(spec.role.as_deref());
         let identity = role_identity_for(role);
+        let context_window_tokens = self.context_window_tokens_for_role(role);
 
-        let mut builder = SystemPromptBuilder::new(identity);
-        builder = builder.with_cache_markers();
+        let mut builder = SystemPromptBuilder::new(identity)
+            .with_adaptive_budget_profile(role, context_window_tokens)
+            .with_cache_markers();
         self.record_prompt_section_id("role_identity");
         // SystemPromptBuilder's current API is no-arg; this is equivalent to with_cache_markers(true).
 
@@ -474,6 +510,7 @@ impl PromptAssembler for PromptAssemblyService {
 
         if let Some(base_budget) = self.token_budget {
             let (included_weight, total) = self.effective_budget_ratio();
+            let base_budget = scale_token_budget_for_context(base_budget, context_window_tokens);
             let scaled = ((base_budget as f64) * (included_weight / total)).ceil() as usize;
             builder = builder.with_token_budget(scaled.max(256));
             let counter = TokenCounter::Heuristic {
@@ -493,6 +530,20 @@ impl PromptAssembler for PromptAssemblyService {
     fn last_knowledge_ids(&self) -> Vec<String> {
         Self::last_knowledge_ids(self)
     }
+}
+
+fn scale_token_budget_for_context(base_budget: usize, context_window_tokens: usize) -> usize {
+    if base_budget == 0 {
+        return 0;
+    }
+
+    let reference_chars = REFERENCE_CONTEXT_WINDOW_TOKENS as f64 * 4.0;
+    let budget_chars = base_budget.saturating_mul(4);
+    let min_chars = (base_budget / 4).max(1).saturating_mul(4);
+    let max_chars = base_budget.saturating_mul(2).saturating_mul(4);
+    AdaptiveBudget::new(budget_chars as f64 / reference_chars, min_chars, max_chars)
+        .compute(context_window_tokens)
+        .div_ceil(4)
 }
 
 fn resolve_role(role: Option<&str>) -> AgentRole {
@@ -762,6 +813,39 @@ mod tests {
             .unwrap();
 
         assert!(!prompt.is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_context_window_scales_section_caps() {
+        let task = "x".repeat(60_000);
+        let small_prompt = PromptAssemblyService::new()
+            .with_model_context_window(50_000)
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some(task.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let large_prompt = PromptAssemblyService::new()
+            .with_model_context_window(REFERENCE_CONTEXT_WINDOW_TOKENS)
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some(task),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(small_prompt.len() < large_prompt.len());
+    }
+
+    #[test]
+    fn token_budget_scales_with_context_window() {
+        assert!(
+            scale_token_budget_for_context(8_000, 50_000)
+                < scale_token_budget_for_context(8_000, REFERENCE_CONTEXT_WINDOW_TOKENS)
+        );
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@
 //!
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via parameters.
 
-use crate::templates::common::{PromptBudget, budget_for};
+use crate::templates::common::{PromptBudget, adaptive_budget_for, budget_for};
 use roko_core::AgentRole;
 
 /// Which complexity band the current plan/task falls into.
@@ -64,7 +64,24 @@ pub struct AdjustedBudget {
 /// 3. Compute cache break hints based on section stability tiers.
 #[must_use]
 pub fn adjusted_budget_for(role: AgentRole, complexity: Complexity) -> AdjustedBudget {
-    let mut budget = budget_for(role);
+    adjusted_budget_from_base(role, budget_for(role), complexity)
+}
+
+/// Compute a context-window-aware, complexity-adjusted budget for a role.
+#[must_use]
+pub fn adjusted_adaptive_budget_for(
+    role: AgentRole,
+    complexity: Complexity,
+    context_window_tokens: usize,
+) -> AdjustedBudget {
+    adjusted_budget_from_base(role, adaptive_budget_for(role, context_window_tokens), complexity)
+}
+
+fn adjusted_budget_from_base(
+    role: AgentRole,
+    mut budget: PromptBudget,
+    complexity: Complexity,
+) -> AdjustedBudget {
     let mut dropped = Vec::new();
 
     match complexity {

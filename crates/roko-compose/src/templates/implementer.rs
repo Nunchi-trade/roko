@@ -2,7 +2,7 @@
 //!
 //! Roko-owned implementer prompt template with typed, I/O-free inputs.
 
-use super::common::{self, budget_for};
+use super::common::{self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -84,7 +84,15 @@ impl RolePromptTemplate for ImplementerTemplate {
     type Input = ImplementerInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
-        let budget = budget_for(AgentRole::Implementer);
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let budget = adaptive_budget_for(AgentRole::Implementer, context_window_tokens);
         let mut sections = Vec::with_capacity(10);
 
         // 1. agents_instructions — System / Critical / Start
@@ -272,6 +280,24 @@ mod tests {
         assert_eq!(sections[4].hard_cap, Some(20_000)); // workspace_map
         assert_eq!(sections[5].hard_cap, Some(5_000)); // preflight
         assert_eq!(sections[6].hard_cap, Some(8_000)); // registry
+    }
+
+    #[test]
+    fn context_window_scales_hard_caps() {
+        let template = ImplementerTemplate;
+        let input = full_input();
+        let small = template.sections_with_context_window(&input, 50_000);
+        let large = template.sections_with_context_window(&input, REFERENCE_CONTEXT_WINDOW_TOKENS);
+        let cap = |sections: &[PromptSection], name: &str| {
+            sections
+                .iter()
+                .find(|section| section.name == name)
+                .and_then(|section| section.hard_cap)
+                .unwrap()
+        };
+
+        assert!(cap(&small, "plan_spec") < cap(&large, "plan_spec"));
+        assert!(cap(&small, "workspace_map") < cap(&large, "workspace_map"));
     }
 
     #[test]

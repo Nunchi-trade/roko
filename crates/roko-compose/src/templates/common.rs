@@ -36,6 +36,13 @@ pub struct PromptBudget {
     pub skills: usize,
 }
 
+/// Reference model context window used by the built-in static budget table.
+///
+/// `budget_for()` values were tuned around 200k-token Claude-class models.
+/// Adaptive callers should pass the actual model context window to
+/// [`adaptive_budget_for`] instead of relying on this reference size.
+pub const REFERENCE_CONTEXT_WINDOW_TOKENS: usize = 200_000;
+
 /// Return the per-section character budget for a given agent role.
 ///
 /// Budget values are Roko's built-in cold-start defaults. Model-specific
@@ -171,7 +178,7 @@ pub fn adaptive_budget_for(role: AgentRole, model_context_tokens: usize) -> Prom
 
     // Scale each field proportionally based on model context size.
     // Reference model: 200k tokens (800k chars). Budgets are designed for that baseline.
-    let reference_chars: f64 = 800_000.0;
+    let reference_chars: f64 = REFERENCE_CONTEXT_WINDOW_TOKENS as f64 * 4.0;
     let model_chars = model_context_tokens as f64 * 4.0;
     let scale = (model_chars / reference_chars).clamp(0.25, 2.0);
 

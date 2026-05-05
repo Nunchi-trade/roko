@@ -8,7 +8,7 @@
 use crate::ContextChunk;
 use crate::GateFeedback;
 use crate::PadState;
-use crate::budget::{Complexity, adjusted_budget_for};
+use crate::budget::{Complexity, adjusted_adaptive_budget_for};
 use crate::prompt::estimate_tokens;
 use crate::prompt::{
     COMPOSITION_MANIFEST_TAG, CompositionManifest, ContextStrategy, PromptBuild, PromptComposer,
@@ -17,7 +17,9 @@ use crate::prompt::{
 use crate::scorer::{GoalDirectedHeuristicScorer, SectionScorer};
 use crate::system_prompt_builder::SystemPromptBuilder;
 use crate::templates::RolePromptTemplate;
-use crate::templates::common::{CONTEXT_LAYOUT_STANZA, MCP_TOOLS_STANZA};
+use crate::templates::common::{
+    CONTEXT_LAYOUT_STANZA, MCP_TOOLS_STANZA, REFERENCE_CONTEXT_WINDOW_TOKENS,
+};
 use crate::templates::conductor::ConductorTemplate;
 use crate::templates::implementer::ImplementerTemplate;
 use crate::templates::integration::IntegrationTemplate;
@@ -250,6 +252,8 @@ pub struct RoleSystemPromptSpec {
     pub gate_feedback: Vec<GateFeedback>,
     /// Complexity band used for static per-layer budget shaping.
     pub complexity: Complexity,
+    /// Context window for the selected model, in tokens.
+    pub context_window_tokens: usize,
     /// Whether to include cache markers between stability tiers.
     pub cache_markers: bool,
 }
@@ -271,6 +275,7 @@ impl RoleSystemPromptSpec {
             affect_state: None,
             gate_feedback: Vec::new(),
             complexity: Complexity::Standard,
+            context_window_tokens: REFERENCE_CONTEXT_WINDOW_TOKENS,
             cache_markers: false,
         }
     }
@@ -354,6 +359,13 @@ impl RoleSystemPromptSpec {
         self
     }
 
+    /// Apply the selected model's context window to prompt section caps.
+    #[must_use]
+    pub const fn with_context_window(mut self, context_window_tokens: usize) -> Self {
+        self.context_window_tokens = context_window_tokens;
+        self
+    }
+
     /// Enable cache-marker emission in the underlying builder.
     #[must_use]
     pub const fn with_cache_markers(mut self) -> Self {
@@ -396,10 +408,10 @@ impl RoleSystemPromptSpec {
             .with_anti_patterns(self.anti_patterns())
             .with_affect_state(self.affect_state);
 
-        if self.complexity != Complexity::Standard {
-            builder =
-                builder.with_budget_profile(adjusted_budget_for(self.role, self.complexity).budget);
-        }
+        builder = builder.with_budget_profile(
+            adjusted_adaptive_budget_for(self.role, self.complexity, self.context_window_tokens)
+                .budget,
+        );
 
         if let Some(registry) = section_effectiveness {
             builder = builder.with_section_effectiveness(format!("{:?}", self.role), registry);
@@ -556,7 +568,8 @@ impl RoleSystemPromptSpec {
         context_window_tokens: usize,
         section_effectiveness: Option<&SectionEffectivenessRegistry>,
     ) -> Result<String> {
-        let prompt = self
+        let spec = self.clone().with_context_window(context_window_tokens);
+        let prompt = spec
             .builder_with_section_effectiveness(section_effectiveness)
             .build();
         let prompt_tokens = estimate_tokens(&prompt);
@@ -583,13 +596,13 @@ impl RoleSystemPromptSpec {
             );
 
             let sections = if let Some(registry) = section_effectiveness {
-                self.build_sections_with_section_effectiveness(registry)
+                spec.build_sections_with_section_effectiveness(registry)
             } else {
-                self.build_sections()
+                spec.build_sections()
             };
-            let scorer = self.composition_scorer();
-            let ctx = self.composition_context();
-            let prompt = self.compose_sections_with_budget_and_scorer(
+            let scorer = spec.composition_scorer();
+            let ctx = spec.composition_context();
+            let prompt = spec.compose_sections_with_budget_and_scorer(
                 sections,
                 soft_limit,
                 scorer.as_ref(),

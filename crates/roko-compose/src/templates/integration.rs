@@ -5,7 +5,7 @@
 //! The integration tester runs workspace-wide tests after batch merges and
 //! reports failures without fixing them.
 
-use super::common::{self, budget_for};
+use super::common::{self, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -55,7 +55,15 @@ impl RolePromptTemplate for IntegrationTemplate {
     type Input = IntegrationInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
-        let budget = budget_for(AgentRole::IntegrationTester);
+        self.sections_with_context_window(input, REFERENCE_CONTEXT_WINDOW_TOKENS)
+    }
+
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let budget = adaptive_budget_for(AgentRole::IntegrationTester, context_window_tokens);
         let manifest_cap = budget.context.min(2_000);
         let mut sections = Vec::with_capacity(6);
 

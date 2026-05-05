@@ -133,6 +133,7 @@ pub(crate) fn build_system_prompt_with_context_validated(
         PromptBuildOptions {
             affect_state,
             complexity: Some(prompt_budget_complexity(task_def)),
+            context_window_tokens: Some(context_window_tokens),
             extra_conventions: task_dispatch_conventions(task_def),
             extra_anti_patterns,
             relevant_skills: relevant_skills.to_vec(),
@@ -158,7 +159,30 @@ pub(crate) fn prompt_budget_complexity(
 }
 
 pub(crate) fn effective_context_window_tokens(config: &Config) -> usize {
-    config.prompt.token_budget
+    config
+        .agent
+        .model
+        .as_deref()
+        .or(config.agent.fallback_model.as_deref())
+        .and_then(|model| context_window_tokens_for_model(config, model))
+        .unwrap_or(128_000)
+}
+
+fn context_window_tokens_for_model(config: &Config, model_key: &str) -> Option<usize> {
+    let model_key = model_key.trim();
+    if model_key.is_empty() {
+        return None;
+    }
+    config
+        .models
+        .get(model_key)
+        .or_else(|| {
+            config
+                .models
+                .values()
+                .find(|profile| profile.slug == model_key)
+        })
+        .and_then(|profile| usize::try_from(profile.context_window).ok())
 }
 
 // ── Relevant context layer ────────────────────────────────────────────

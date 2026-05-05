@@ -21,7 +21,7 @@ pub mod strategist;
 pub mod task_impl;
 
 pub use assembly::PromptAssembler;
-pub use common::{PromptBudget, budget_for};
+pub use common::{PromptBudget, REFERENCE_CONTEXT_WINDOW_TOKENS, budget_for};
 pub use conductor::ConductorTemplate;
 pub use implementer::{ImplementerInput, ImplementerTemplate};
 pub use integration::{IntegrationInput, IntegrationTemplate};
@@ -88,6 +88,20 @@ pub trait RolePromptTemplate {
     /// The caller hands these to [`PromptComposer`](crate::PromptComposer)
     /// along with a budget.
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection>;
+
+    /// Produce prompt sections using the selected model's context window.
+    ///
+    /// Templates that apply per-section caps should override this method and
+    /// call `adaptive_budget_for(role, context_window_tokens)`. The default
+    /// keeps simple templates that have no budgeted context unchanged.
+    fn sections_with_context_window(
+        &self,
+        input: &Self::Input,
+        context_window_tokens: usize,
+    ) -> Vec<PromptSection> {
+        let _ = context_window_tokens;
+        self.sections(input)
+    }
 
     /// The role identity opening text (layer 1 of the system prompt).
     fn role_identity(&self) -> &'static str;
