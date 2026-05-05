@@ -1000,7 +1000,7 @@ share_ttl_days = 7
 terminal_enabled = true
 auto_orchestrate = true
 auto_start = false
-acknowledge_public_risk = false
+acknowledge_public_risk = true
 
 [serve.auth]
 enabled = false
