@@ -22,6 +22,7 @@ pub mod agent_stream;
 pub mod event_loop;
 pub mod extension_loader;
 pub mod gate_dispatch;
+pub mod inline_output;
 pub mod merge;
 pub mod output_sink;
 pub mod persist;

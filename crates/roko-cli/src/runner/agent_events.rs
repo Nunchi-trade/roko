@@ -1,12 +1,13 @@
 //! Agent event handler — updates `RunState` and `TuiBridge` in response
 //! to `AgentEvent`s from the stream parser.
 //!
-//! When `stream_to_stderr` is true, key events are printed to stderr in
-//! real time so the operator sees what the agent is doing instead of a
-//! static spinner.
+//! When streaming output is enabled, key events are rendered through the
+//! runner's inline terminal so the operator sees what the agent is doing
+//! instead of a static spinner.
 
 use tracing::{debug, info};
 
+use super::inline_output::RunnerInlineTerminal;
 use super::state::RunState;
 use super::tui_bridge::TuiBridge;
 use super::types::AgentEvent;
@@ -16,7 +17,7 @@ use super::types::AgentEvent;
 /// context and diagnostics need.
 const MAX_AGENT_OUTPUT: usize = 32_768;
 
-/// Buffered stderr streamer for agent text output.
+/// Buffered inline streamer for agent text output.
 ///
 /// Accumulates `MessageDelta` text and flushes the last few lines when a
 /// structural event (tool call, turn completion) arrives. This avoids
@@ -36,28 +37,22 @@ impl AgentStreamBuffer {
         self.buf.push_str(text);
     }
 
-    /// Flush the buffer, printing the last N non-empty lines to stderr.
-    /// Each line is truncated to `max_chars` and prefixed with `prefix`.
-    pub fn flush(&mut self, max_lines: usize, max_chars: usize) {
+    /// Drain the last N non-empty lines, truncating each to `max_chars`.
+    pub fn drain_lines(&mut self, max_lines: usize, max_chars: usize) -> Vec<String> {
         if self.buf.trim().is_empty() {
             self.buf.clear();
-            return;
+            return Vec::new();
         }
 
         let lines: Vec<&str> = self.buf.lines().filter(|l| !l.trim().is_empty()).collect();
         let start = lines.len().saturating_sub(max_lines);
-        for line in &lines[start..] {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if trimmed.len() > max_chars {
-                eprintln!("     \u{2502} {}...", &trimmed[..max_chars]);
-            } else {
-                eprintln!("     \u{2502} {trimmed}");
-            }
-        }
+        let drained = lines[start..]
+            .iter()
+            .map(|line| truncate_chars(line.trim(), max_chars))
+            .filter(|line| !line.is_empty())
+            .collect();
         self.buf.clear();
+        drained
     }
 
     /// Discard accumulated text without printing.
@@ -68,14 +63,14 @@ impl AgentStreamBuffer {
 
 /// Process a single agent event, updating state and publishing to TUI.
 ///
-/// When `stream_to_stderr` is true, structural events are printed to
-/// stderr for real-time operator feedback. `stream_buf` accumulates
-/// `MessageDelta` text and is flushed on tool calls / turn completion.
+/// When streaming output is enabled, structural events are rendered through
+/// the inline terminal. `stream_buf` accumulates `MessageDelta` text and is
+/// flushed on tool calls / turn completion.
 pub fn handle_agent_event(
     event: &AgentEvent,
     state: &mut RunState,
     tui: &TuiBridge,
-    stream_to_stderr: bool,
+    inline: &mut RunnerInlineTerminal,
     stream_buf: &mut AgentStreamBuffer,
 ) {
     match event {
@@ -89,6 +84,7 @@ pub fn handle_agent_event(
             state.agent_model = model.clone();
             state.agent_provider = provider.clone();
             state.agent_pid = *pid;
+            inline.agent_started(provider, model, *pid);
         }
 
         AgentEvent::SystemInit { session_id, model } => {
@@ -116,23 +112,20 @@ pub fn handle_agent_event(
             let agent_id = agent_id_for_state(state);
             tui.agent_output(&agent_id, text);
 
-            if stream_to_stderr {
+            if inline.is_enabled() {
                 stream_buf.push(text);
             }
         }
 
-        AgentEvent::ToolCall { id: _, name } => {
+        AgentEvent::ToolCall { id, name } => {
             let marker = format!("\n[tool: {name}]\n");
             state.agent_output.push_str(&marker);
 
-            if stream_to_stderr {
-                // Flush buffered text before showing tool call.
-                stream_buf.flush(3, 120);
-                eprintln!("     \u{2502} \u{1f527} {name}");
-            }
+            inline.agent_text(stream_buf.drain_lines(3, 120));
+            inline.tool_call_started(id, name);
         }
 
-        AgentEvent::ToolOutput { id: _, output } => {
+        AgentEvent::ToolOutput { id, output } => {
             // Truncate tool output in the accumulated buffer.
             let limit = roko_core::defaults::DEFAULT_TOOL_OUTPUT_TRUNCATE_AT;
             let truncated = if output.len() > limit {
@@ -143,17 +136,7 @@ pub fn handle_agent_event(
             state.agent_output.push_str(truncated);
             state.agent_output.push('\n');
 
-            if stream_to_stderr {
-                // Show abbreviated tool output — first line, up to 80 chars.
-                let first_line = output.lines().next().unwrap_or("").trim();
-                if !first_line.is_empty() {
-                    if first_line.len() > 80 {
-                        eprintln!("     \u{2502}   {}...", &first_line[..80]);
-                    } else {
-                        eprintln!("     \u{2502}   {first_line}");
-                    }
-                }
-            }
+            inline.tool_output(id, output);
         }
 
         AgentEvent::TokenUsage {
@@ -169,10 +152,13 @@ pub fn handle_agent_event(
             // Token counts are accumulated here; authoritative cost comes from
             // TurnCompleted.total_cost_usd which overwrites state.cost_usd.
 
-            if stream_to_stderr {
-                let total = input_tokens + output_tokens;
-                eprintln!("     \u{2502} tokens: {total} (in:{input_tokens} out:{output_tokens})");
-            }
+            inline.token_usage(
+                *input_tokens,
+                *output_tokens,
+                *cache_read_tokens,
+                *cache_write_tokens,
+                &state.agent_model,
+            );
         }
 
         AgentEvent::TurnCompleted {
@@ -209,18 +195,14 @@ pub fn handle_agent_event(
                 "agent turn completed"
             );
 
-            if stream_to_stderr {
-                // Flush any remaining buffered text.
-                stream_buf.flush(3, 120);
-                if *is_error {
-                    eprintln!("     \u{2717} Agent turn completed with error");
-                } else {
-                    let cost_str = total_cost_usd
-                        .map(|c| format!(", ${c:.2}"))
-                        .unwrap_or_default();
-                    eprintln!("     \u{2713} Agent turn complete{cost_str}");
-                }
-            }
+            inline.agent_text(stream_buf.drain_lines(3, 120));
+            inline.agent_turn_completed(
+                *total_cost_usd,
+                *is_error,
+                &state.agent_model,
+                state.tokens_in,
+                state.tokens_out,
+            );
         }
 
         AgentEvent::Error { message } => {
@@ -229,15 +211,8 @@ pub fn handle_agent_event(
                 .push_str(&format!("\n[error: {message}]\n"));
             tui.error(message);
 
-            if stream_to_stderr {
-                stream_buf.flush(3, 120);
-                let msg = if message.len() > 120 {
-                    format!("{}...", &message[..120])
-                } else {
-                    message.clone()
-                };
-                eprintln!("     \u{2717} Error: {msg}");
-            }
+            inline.agent_text(stream_buf.drain_lines(3, 120));
+            inline.agent_error(message);
         }
 
         AgentEvent::Exited { exit_code } => {
@@ -245,9 +220,7 @@ pub fn handle_agent_event(
             state.agent_pid = None;
             debug!(exit_code = ?exit_code, task = %state.current_task, "agent process exited");
 
-            if stream_to_stderr {
-                stream_buf.clear();
-            }
+            stream_buf.clear();
         }
     }
 }
@@ -255,4 +228,12 @@ pub fn handle_agent_event(
 /// Derive an agent identifier from the current state.
 fn agent_id_for_state(state: &RunState) -> String {
     format!("{}/{}", state.plan_id, state.current_task)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut out: String = value.chars().take(max_chars).collect();
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }
