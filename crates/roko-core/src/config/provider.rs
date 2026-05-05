@@ -327,7 +327,31 @@ impl ProviderConfig {
     pub fn resolve_api_key(&self) -> Option<String> {
         self.api_key_env
             .as_ref()
-            .and_then(|env_name| std::env::var(env_name).ok())
+            .and_then(|env_name| resolve_api_key_env(env_name))
+    }
+}
+
+fn resolve_api_key_env(env_name: &str) -> Option<String> {
+    read_nonempty_env(env_name).or_else(|| {
+        api_key_env_aliases(env_name)
+            .iter()
+            .find_map(|alias| read_nonempty_env(alias))
+    })
+}
+
+fn read_nonempty_env(env_name: &str) -> Option<String> {
+    std::env::var(env_name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn api_key_env_aliases(env_name: &str) -> &'static [&'static str] {
+    match env_name {
+        // Older local launchers and dashboards have used `OPENROUTER`
+        // while the canonical config uses `OPENROUTER_API_KEY`.
+        "OPENROUTER_API_KEY" => &["OPENROUTER"],
+        _ => &[],
     }
 }
 

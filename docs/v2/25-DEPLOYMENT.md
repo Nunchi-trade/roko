@@ -983,7 +983,7 @@ For cloud deployment, secrets are set as environment variables in the deployment
 | Anthropic | `ANTHROPIC_API_KEY` | Primary LLM backend |
 | Perplexity | `PERPLEXITY_API_KEY` | Research Agent |
 | Gemini | `GEMINI_API_KEY` | Gemini backend |
-| OpenRouter | `OPENROUTER_API_KEY` | OpenRouter multi-model |
+| OpenRouter | `OPENROUTER_API_KEY` | OpenRouter multi-model. `OPENROUTER` is accepted as a compatibility alias for older local launchers and environment files. |
 | GitHub | `GITHUB_TOKEN` | GitHub MCP integration |
 | Fly.io | `FLY_API_TOKEN` | Isolated Agent execution |
 
@@ -1043,11 +1043,35 @@ internalPort = 6677
 | `PERPLEXITY_API_KEY` | -- | No | Research agent |
 | `GEMINI_API_KEY` | -- | No | Gemini backend |
 | `OPENROUTER_API_KEY` | -- | No | OpenRouter backend |
+| `OPENROUTER` | -- | No | Compatibility alias for Roko processes configured to use OpenRouter. `OPENROUTER_API_KEY` is canonical. |
 | `GITHUB_TOKEN` | -- | No | GitHub MCP integration |
 | `FLY_API_TOKEN` | -- | No | Enables isolated Agent execution |
 | `RELAY_URL` | `wss://relay.nunchi.dev` | No | Relay for multi-instance |
 | `PORT` | `6677` | No | HTTP port |
 | `RUST_LOG` | `info` | No | Log level |
+
+Provider API keys belong to the Roko process that runs inference. For a local desktop Roko agent, set `OPENROUTER_API_KEY` locally or through the IDE's Roko agent settings. For a user-owned cloud Roko agent, set provider keys in the deployment platform that hosts the agent. The IDE connect flow should only request an OpenRouter key when it is launching or configuring a user-owned agent process; this is provider configuration, not a local API endpoint.
+
+### 7.3.1 Agent E2E Smoke Test
+
+After deploy or env-var changes, restart the Railway service and verify the API path, not the web app shell:
+
+```bash
+BASE=https://<railway-service>.up.railway.app
+
+curl -fsS "$BASE/api/health"
+
+curl -fsS "$BASE/api/managed-agents"
+
+AGENT_ID=$(curl -fsS "$BASE/api/managed-agents" | jq -r '.[0].id // empty')
+test -n "$AGENT_ID"
+
+curl -fsS "$BASE/api/agents/$AGENT_ID/message" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Return only JSON: {\"ok\":true}"}'
+```
+
+Expected result: `/api/managed-agents` returns at least one agent and the message endpoint returns JSON with a model response. If `/api/agents/{id}/message` returns HTML or an empty agent list, the IDE cannot run app-level workflows such as AI Hedge Fund end to end.
 
 ### 7.4 Scaling on Railway
 

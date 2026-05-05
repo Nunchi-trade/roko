@@ -164,7 +164,7 @@ roko serve &
 curl http://localhost:6677/api/health
 
 # discover agents
-curl http://localhost:6677/api/agents
+curl http://localhost:6677/api/managed-agents
 
 # fetch dashboard payload
 curl http://localhost:6677/api/dashboard | jq .
@@ -172,11 +172,17 @@ curl http://localhost:6677/api/dashboard | jq .
 # subscribe to SSE
 curl -N http://localhost:6677/api/events
 
-# POST a prompt through the universal loop
-curl -X POST http://localhost:6677/api/run \
+# POST a prompt to a managed agent
+AGENT_ID=$(curl -s http://localhost:6677/api/managed-agents | jq -r '.[0].id // empty')
+test -n "$AGENT_ID"
+curl -X POST "http://localhost:6677/api/agents/$AGENT_ID/message" \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "hello", "agent": "nunchi-intelligence"}'
+  -d '{"message": "Return only JSON: {\"ok\":true}"}'
 ```
+
+If a Roko process uses OpenRouter as its inference provider, export
+`OPENROUTER_API_KEY` where that process runs. Roko also accepts `OPENROUTER`
+as a compatibility alias for older local launchers and environment files.
 
 ## Architecture notes
 
