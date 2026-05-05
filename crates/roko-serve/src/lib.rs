@@ -360,6 +360,10 @@ impl ServerBuilder {
             Arc::clone(&state.relay_health),
         );
 
+        // Wire the ISFRFeed relay bridge: receives relay TopicMessages and
+        // republishes them as Pulses on the local bus.
+        let _isfr_relay_bridge = start_isfr_relay_bridge(Arc::clone(&state));
+
         let router = build_server_router(
             Arc::clone(&state),
             &roko_config.server.cors_origins,
@@ -2079,6 +2083,107 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
             .event_bus
             .publish(ServerEvent::IsfrKeeperStateChanged { running: false });
     })
+}
+
+/// Start the ISFRFeed relay bridge when a relay URL is configured.
+///
+/// Creates a [`BroadcastBus`], wraps it in an [`ISFRFeed`], and connects to the
+/// relay using an [`ISFRTopicAdapter`] as the [`TopicHandler`].  After the
+/// connection is established, subscribes to the standard ISFR relay topics so
+/// that keeper-published rate data is republished as Pulses on the local bus.
+///
+/// Returns `None` when no relay URL is configured, so the caller can store the
+/// `JoinHandle` the same way as the workspace-registration task.
+///
+/// Any connection failure is logged at `warn` level and swallowed — the bridge
+/// is best-effort.  Agents that consume the bus will simply see no ISFR pulses
+/// until the relay becomes reachable.
+fn start_isfr_relay_bridge(state: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
+    use roko_agent_server::features::relay_client::{RelayClientConfig, connect};
+    use roko_agent_server::features::relay_subscriber::ISFRTopicAdapter;
+    use roko_agent_server::registration::{AgentCard, AgentCardEndpoints};
+    use roko_agent_server::state::AgentState;
+    use roko_core_crate::bus_backends::BroadcastBus;
+    use roko_core_crate::isfr_feed::ISFRFeed;
+
+    let roko_config = state.load_roko_config();
+    let relay_url = roko_config.relay.url.clone()?;
+
+    let chain_id = roko_config
+        .chain
+        .chain_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "31337".to_string());
+
+    info!(relay_url = %relay_url, chain_id = %chain_id, "starting ISFRFeed relay bridge");
+
+    Some(tokio::spawn(async move {
+        // Build a dedicated bus for ISFR pulses.
+        let bus = Arc::new(BroadcastBus::new());
+        let feed = Arc::new(ISFRFeed::new(bus));
+
+        // Wrap in the TopicHandler adapter.
+        let handler = ISFRTopicAdapter::make_handler(Arc::clone(&feed));
+
+        // Build a minimal AgentState for the relay handshake (no LLM backend).
+        let agent_state = Arc::new(AgentState::new(
+            "roko-serve-isfr".to_string(),
+            None,
+            env!("CARGO_PKG_VERSION").to_string(),
+            vec!["isfr_subscriber".to_string()],
+            None,
+            None,
+            None,
+        ));
+
+        // Build a minimal AgentCard (no public endpoints needed).
+        let card = AgentCard {
+            name: "roko-serve-isfr".to_string(),
+            capabilities: vec!["isfr_subscriber".to_string()],
+            endpoints: AgentCardEndpoints {
+                rest: None,
+                websocket: None,
+                a2a: None,
+                mcp: None,
+            },
+            domain_tags: vec!["roko".to_string(), "isfr".to_string()],
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        let relay_config = RelayClientConfig::new(relay_url.clone());
+
+        let handle = match connect(relay_config, agent_state, card, Some(handler)).await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(error = %e, relay_url = %relay_url, "ISFRFeed relay bridge: connect failed");
+                return;
+            }
+        };
+
+        // Subscribe to the standard ISFR relay topics.
+        let topics = ISFRFeed::relay_topics(&chain_id);
+        for topic in &topics {
+            if let Err(e) = handle.subscribe(topic) {
+                warn!(
+                    error = %e,
+                    topic = %topic,
+                    "ISFRFeed relay bridge: subscribe failed"
+                );
+            }
+        }
+
+        info!(
+            topics = ?topics,
+            "ISFRFeed relay bridge: subscribed to relay topics"
+        );
+
+        // Keep the relay handle alive until the server shuts down.
+        // The relay client runs its own WebSocket loop in a spawned task;
+        // dropping the handle closes the outbound sender channel, which causes
+        // the loop to exit.
+        state.cancel.cancelled().await;
+        drop(handle);
+    }))
 }
 
 fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {

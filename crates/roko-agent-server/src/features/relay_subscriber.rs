@@ -4,11 +4,16 @@
 //! subscribe/unsubscribe/publish methods on [`RelayHandle`].  Callers can
 //! bundle a handle + their topic subscriptions into a single value that is
 //! easy to pass around without exposing the full relay-client API.
+//!
+//! Also provides [`ISFRTopicAdapter`], which adapts the relay [`TopicHandler`]
+//! interface to [`roko_core::isfr_feed::ISFRFeed`] so ISFR relay messages are
+//! automatically republished as Pulses on the local bus.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use roko_core::isfr_feed::ISFRFeed;
 use tokio::sync::mpsc;
 
 use super::relay_client::{RelayHandle, TopicHandler};
@@ -142,5 +147,56 @@ impl RelaySubscriber {
     #[must_use]
     pub fn handle(&self) -> &RelayHandle {
         &self.handle
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ISFRTopicAdapter
+// ---------------------------------------------------------------------------
+
+/// Adapts the relay [`TopicHandler`] interface to [`ISFRFeed`].
+///
+/// When the relay delivers a [`TopicMessage`] on an ISFR topic, this adapter
+/// calls [`ISFRFeed::handle_message`] which republishes the data as a
+/// [`roko_core::pulse::Pulse`] on the local bus.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// use std::sync::Arc;
+/// use roko_core::bus_backends::BroadcastBus;
+/// use roko_core::isfr_feed::ISFRFeed;
+/// use roko_agent_server::features::relay_subscriber::ISFRTopicAdapter;
+///
+/// let bus = Arc::new(BroadcastBus::new());
+/// let feed = Arc::new(ISFRFeed::new(bus));
+/// let handler = ISFRTopicAdapter::make_handler(feed);
+/// // pass `Some(handler)` to relay_client::connect(...)
+/// ```
+pub struct ISFRTopicAdapter {
+    feed: Arc<ISFRFeed>,
+}
+
+impl ISFRTopicAdapter {
+    /// Wrap an [`ISFRFeed`] in an [`Arc`] and return it as a boxed
+    /// [`TopicHandler`] ready to pass to `relay_client::connect`.
+    #[must_use]
+    pub fn make_handler(feed: Arc<ISFRFeed>) -> Arc<dyn TopicHandler> {
+        Arc::new(Self { feed })
+    }
+}
+
+#[async_trait]
+impl TopicHandler for ISFRTopicAdapter {
+    async fn on_topic_message(
+        &self,
+        topic: &str,
+        msg_type: &str,
+        payload: serde_json::Value,
+        publisher_id: Option<&str>,
+        seq: u64,
+    ) {
+        self.feed
+            .handle_message(topic, msg_type, payload, publisher_id, seq);
     }
 }
