@@ -351,6 +351,12 @@ pub const DEFAULT_DEPLOYMENT_STATUS_POLL_INITIAL_MS: u64 = 5_000;
 /// Maximum poll interval for deployment status checks (ms).
 pub const DEFAULT_DEPLOYMENT_STATUS_POLL_MAX_MS: u64 = 60_000;
 
+// ── Learning WAL ──────────────────────────────────────────────────────
+
+/// Maximum WAL entries before an automatic compaction (snapshot + truncate).
+/// Each entry is ~100-400 bytes; at 10,000 entries the WAL is at most ~4 MB.
+pub const DEFAULT_LEARN_WAL_MAX_ENTRIES: usize = 10_000;
+
 // ── Model slugs ────────────────────────────────────────────────────────
 
 /// Default model for the "deep" / architectural tier.

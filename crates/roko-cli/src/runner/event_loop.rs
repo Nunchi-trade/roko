@@ -206,6 +206,7 @@ struct RunContext<'a> {
     fatal_tx: mpsc::Sender<AgentEvent>,
     paths: &'a PersistPaths,
     merge_queue: &'a MergeQueue,
+    gate_thresholds: &'a GateThresholds,
     snapshot_writer: &'a SnapshotWriter,
     prompt_cache: &'a Arc<PromptCache>,
     factory: &'a SharedAgentFactory,
@@ -227,8 +228,33 @@ pub async fn run(
     state_hub: &StateHub,
     cancel: CancellationToken,
 ) -> Result<RunReport> {
+    // ── Ensure effective RokoConfig is available ─────────────────────────
+    //
+    // The CLI bootstrap path (`commands/plan.rs`) already loads config via
+    // `RokoBootstrap` / `load_config_unified` and passes it through
+    // `RunConfig.roko_config`. This fallback covers secondary callers
+    // (tests, integration shims) that construct `RunConfig` without a
+    // pre-loaded config: we call the canonical core loader which performs
+    // ancestor walk, global merge, and env var overrides — no ad-hoc
+    // project-root resolution in the runner.
+    let mut config = config.clone();
+    if config.roko_config.is_none() {
+        let loaded =
+            roko_core::config::loader::load_config_unified(&config.workdir).with_context(|| {
+                format!(
+                    "load roko config for runner workdir {}",
+                    config.workdir.display()
+                )
+            })?;
+        config.roko_config = Some(Arc::new(loaded));
+    }
+
+    if config.http_event_sink.is_none() {
+        config.http_event_sink = HttpEventSink::from_env();
+    }
+
     let max_concurrent_tasks = config.max_concurrent_tasks.max(1);
-    let task_timeout_secs = duration_secs(agent_dispatch_timeout(config));
+    let task_timeout_secs = duration_secs(agent_dispatch_timeout(&config));
 
     let exec_config = ExecutorConfig {
         max_concurrent_plans: DEFAULT_RUNNER_MAX_CONCURRENT_PLANS,
@@ -237,11 +263,6 @@ pub async fn run(
         task_timeout_secs,
         ..Default::default()
     };
-
-    let mut config = config.clone();
-    if config.http_event_sink.is_none() {
-        config.http_event_sink = HttpEventSink::from_env();
-    }
     let paths = PersistPaths::from_workdir(&config.workdir)?;
     let snapshot_writer = SnapshotWriter::new(4);
     persist::cleanup_orphaned_agents(&paths);
@@ -269,17 +290,75 @@ pub async fn run(
     // returns Err. We surface the failure and abort the run so the
     // operator can either edit the plan back into a known state or
     // discard the snapshot.
-    let prior_snapshot = match persist::load_run_state(&paths) {
-        Ok(Some(snapshot)) => Some(snapshot),
-        Ok(None) => None,
+    // Try the unified state snapshot first; fall back to legacy run-state.json.
+    let (prior_snapshot, loaded_gate_thresholds) = match persist::load_state_snapshot(&paths) {
+        Ok(Some(unified)) => {
+            info!(
+                timestamp_ms = unified.timestamp_ms,
+                "loaded state snapshot -- checksum valid"
+            );
+            let run_state: Option<persist::RunStateSnapshot> =
+                match serde_json::from_str(&unified.run_state_json) {
+                    Ok(rs) => Some(rs),
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            "failed to parse run_state_json from unified snapshot; ignoring"
+                        );
+                        None
+                    }
+                };
+            let loaded_gt: Option<GateThresholds> =
+                match serde_json::from_str(&unified.gate_thresholds_json) {
+                    Ok(gt) => Some(gt),
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            "failed to parse gate_thresholds_json from unified snapshot; using file"
+                        );
+                        None
+                    }
+                };
+            (run_state, loaded_gt)
+        }
+        Ok(None) => {
+            // No unified snapshot -- try legacy run-state.json.
+            match persist::load_run_state(&paths) {
+                Ok(Some(snapshot)) => {
+                    warn!("no state-snapshot.json found; falling back to legacy run-state.json");
+                    (Some(snapshot), None)
+                }
+                Ok(None) => (None, None),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "failed to read prior run-state.json; continuing without seeded resume state"
+                    );
+                    (None, None)
+                }
+            }
+        }
         Err(err) => {
             warn!(
                 error = %err,
-                "failed to read prior run-state.json; continuing without seeded resume state"
+                "failed to load state snapshot; falling back to legacy run-state.json"
             );
-            None
+            match persist::load_run_state(&paths) {
+                Ok(snap) => (snap, None),
+                Err(err2) => {
+                    warn!(
+                        error = %err2,
+                        "failed to read legacy run-state.json; continuing without seeded resume state"
+                    );
+                    (None, None)
+                }
+            }
         }
     };
+    // Override gate thresholds if we loaded them from the unified snapshot.
+    if let Some(gt) = loaded_gate_thresholds {
+        gate_thresholds = gt;
+    }
     let resume_report = {
         let mut plan_map: HashMap<String, Vec<TaskDef>> = HashMap::new();
         for plan in &plans {
@@ -536,6 +615,13 @@ pub async fn run(
     // diagnostics so the gate terminal handler can call record_outcome.
     let mut task_playbook_ids: HashMap<String, Vec<String>> = HashMap::new();
 
+    // skip_enrichment is a plan-level DAG phase control: when true, the plan
+    // transitions directly from "started" to "implementing", bypassing the
+    // "enriching" executor phase. This is NOT an LLM pre-processing pipeline
+    // -- the legacy orchestrate.rs enrichment pipeline (multi-step LLM
+    // pre-dispatch enrichment) was not ported to v2 because the v2 prompt
+    // builder already handles context assembly via PromptContext sections
+    // (workspace_context, cfactor_context, knowledge, playbooks, etc.).
     let skip_enrichment: HashMap<String, bool> = plans
         .iter()
         .map(|p| (p.id.clone(), p.tasks.meta.skip_enrichment))
@@ -694,6 +780,28 @@ pub async fn run(
                 handle_agent_event(&event, &mut state, &tui, sink);
                 append_agent_event(&paths, &event, &state);
 
+                // ── Forward progress-relevant agent events to RuntimeEvent ──
+                if let Some(http_sink) = config.http_event_sink.as_ref() {
+                    match &event {
+                        AgentEvent::ToolCall { name, .. } => {
+                            http_sink.emit(RuntimeEvent::ToolCallStarted {
+                                run_id: run_id.clone(),
+                                agent_id: format!("{}/{}", state.plan_id, state.current_task),
+                                tool: name.clone(),
+                                iteration: 0,
+                            });
+                        }
+                        AgentEvent::MessageDelta { text } => {
+                            http_sink.emit(RuntimeEvent::AgentOutput {
+                                run_id: run_id.clone(),
+                                agent_id: format!("{}/{}", state.plan_id, state.current_task),
+                                chunk: text.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
                 // Per-turn budget enforcement.
                 if is_turn_done {
                     let max_turn = config.max_turn_usd;
@@ -785,7 +893,7 @@ pub async fn run(
                         } else {
                             apply_agent_completion(&mut executor, &plan_id, &tui);
                         }
-                        save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
+                        save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &gate_thresholds, &snapshot_writer);
                     }
                 }
 
@@ -853,7 +961,7 @@ pub async fn run(
                         }
                     }
 
-                    save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
+                    save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &gate_thresholds, &snapshot_writer);
                 }
             }
 
@@ -880,6 +988,22 @@ pub async fn run(
                         &v.gate_name,
                         v.passed,
                     );
+
+                    // Emit gate verdict metric.
+                    if let Some(ref metrics) = config.metrics {
+                        let verdict_str = if v.passed { "pass" } else { "fail" };
+                        let labels = roko_core::obs::metrics::LabelSet::from_pairs(&[
+                            (roko_core::obs::schema::LABEL_GATE, &v.gate_name),
+                            (roko_core::obs::schema::LABEL_VERDICT, verdict_str),
+                        ]);
+                        metrics
+                            .register_counter(
+                                roko_core::obs::schema::ROKO_GATE_VERDICTS_TOTAL,
+                                "Verify verdicts, by gate and verdict",
+                                labels,
+                            )
+                            .inc();
+                    }
                 }
 
                 // Render gate verdicts through the output sink.
@@ -972,7 +1096,6 @@ pub async fn run(
 
                 update_gate_thresholds(
                     &mut gate_thresholds,
-                    &paths.gate_thresholds_json,
                     completion.rung,
                     completion.passed,
                 );
@@ -1028,6 +1151,7 @@ pub async fn run(
                         gate_timeout(&config, 0),
                         &tui,
                         config,
+                        &gate_thresholds,
                         &snapshot_writer,
                     );
                     continue;
@@ -1042,6 +1166,7 @@ pub async fn run(
                         &merge_queue,
                         &tui,
                         config,
+                        &gate_thresholds,
                         &snapshot_writer,
                     );
                     continue;
@@ -1474,7 +1599,7 @@ pub async fn run(
                     }
                 }
 
-                save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
+                save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &gate_thresholds, &snapshot_writer);
             }
 
             // ─── Branch 3: Executor tick ────────────────────────────
@@ -1513,6 +1638,7 @@ pub async fn run(
                         fatal_tx: agent_tx.clone(),
                         paths: &paths,
                         merge_queue: &merge_queue,
+                        gate_thresholds: &gate_thresholds,
                         snapshot_writer: &snapshot_writer,
                         prompt_cache: &prompt_cache,
                         factory: &factory,
@@ -1558,7 +1684,7 @@ pub async fn run(
 
             // ─── Branch 4: Periodic flush ───────────────────────────
             _ = flush_interval.tick() => {
-                save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
+                save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &gate_thresholds, &snapshot_writer);
                 {
                     let pids: Vec<u32> = agent_handles.values().map(|h| h.pid).collect();
                     if !pids.is_empty() {
@@ -1578,6 +1704,7 @@ pub async fn run(
                     &merge_queue,
                     &tui,
                     config,
+                    &gate_thresholds,
                     &snapshot_writer,
                 )
                 .await?;
@@ -1588,7 +1715,7 @@ pub async fn run(
             _ = cancel.cancelled() => {
                 warn!("cancellation requested — shutting down");
                 stop_all_agents(&mut agent_handles, &mut state, Duration::from_secs(3)).await;
-                save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &snapshot_writer);
+                save_snapshot(config, &executor, &paths, &mut state, &merge_queue, &gate_thresholds, &snapshot_writer);
                 snapshot_writer.flush();
                 shutdown_subsystems(config, &tui).await;
                 let event =
@@ -1608,6 +1735,7 @@ pub async fn run(
                 &merge_queue,
                 &tui,
                 config,
+                &gate_thresholds,
                 &snapshot_writer,
             )
             .await?;
@@ -1621,6 +1749,7 @@ pub async fn run(
                 &paths,
                 &mut state,
                 &merge_queue,
+                &gate_thresholds,
                 &snapshot_writer,
             );
             let final_report = build_report(&executor, &plans, &state);
@@ -1737,6 +1866,7 @@ fn handle_plan_verify_completion(
     merge_queue: &MergeQueue,
     tui: &TuiBridge,
     config: &RunConfig,
+    gate_thresholds: &GateThresholds,
     writer: &SnapshotWriter,
 ) {
     if completion.passed {
@@ -1807,7 +1937,7 @@ fn handle_plan_verify_completion(
         }
     }
 
-    save_snapshot(config, executor, paths, state, merge_queue, writer);
+    save_snapshot(config, executor, paths, state, merge_queue, gate_thresholds, writer);
 }
 
 fn merge_branch_from_task_id(task_id: &str) -> Option<String> {
@@ -1847,6 +1977,7 @@ fn handle_merge_completion(
     regression_timeout: Duration,
     tui: &TuiBridge,
     config: &RunConfig,
+    gate_thresholds: &GateThresholds,
     writer: &SnapshotWriter,
 ) {
     let run_id = state.run_id().to_string();
@@ -1918,7 +2049,7 @@ fn handle_merge_completion(
     {
         info!(plan_id = %next_plan_id, "started next queued merge");
     }
-    save_snapshot(config, executor, paths, state, merge_queue, writer);
+    save_snapshot(config, executor, paths, state, merge_queue, gate_thresholds, writer);
 }
 
 fn append_agent_event(paths: &PersistPaths, event: &AgentEvent, state: &RunState) {
@@ -2233,6 +2364,56 @@ fn runner_event_to_runtime_event(event: &RunnerEvent) -> RuntimeEvent {
             output: output.clone(),
             duration_ms: *duration_ms,
         },
+        // ── Progress variants ────────────────────────────────────────────
+        RunnerEvent::TaskAttemptStarted {
+            run_id,
+            attempt,
+            title,
+            ..
+        } => RuntimeEvent::TaskStarted {
+            run_id: run_id.clone(),
+            plan_id: attempt.plan_id.clone(),
+            task_id: attempt.task_id.clone(),
+            task_title: title.clone(),
+            role: String::new(),
+        },
+        RunnerEvent::TaskAttemptCompleted {
+            run_id,
+            attempt,
+            outcome,
+            duration_ms,
+            ..
+        } => RuntimeEvent::TaskCompleted {
+            run_id: run_id.clone(),
+            plan_id: attempt.plan_id.clone(),
+            task_id: attempt.task_id.clone(),
+            passed: matches!(outcome, TaskAttemptOutcome::Passed),
+            duration_ms: *duration_ms,
+        },
+        RunnerEvent::PlanStarted {
+            run_id, plan_id, ..
+        } => RuntimeEvent::PipelinePhase {
+            run_id: run_id.clone(),
+            phase: plan_id.clone(),
+            status: "started".to_string(),
+        },
+        RunnerEvent::PlanCompleted {
+            run_id,
+            plan_id,
+            outcome,
+            ..
+        } => {
+            let status = match outcome {
+                PlanOutcome::Succeeded => "complete",
+                PlanOutcome::Failed => "failed",
+                PlanOutcome::Skipped => "skipped",
+            };
+            RuntimeEvent::PipelinePhase {
+                run_id: run_id.clone(),
+                phase: plan_id.clone(),
+                status: status.to_string(),
+            }
+        }
         _ => RuntimeEvent::FeedbackRecorded {
             run_id: runner_event_run_id(event).to_string(),
             kind: event.event_type().to_string(),
@@ -2608,15 +2789,18 @@ fn build_run_completed_event(
 
 // ─── Snapshot Helper ────────────────────────────────────────────────────
 
-/// Build a [`SnapshotPayload`] from current state and enqueue it on the
-/// async writer. Serialisation (<1ms) happens on the caller's thread;
-/// the actual disk I/O runs on the dedicated writer thread.
+/// Build a unified [`StateSnapshot`] from all four state groups (executor,
+/// orchestrator, run counters, gate thresholds) with a SHA-256 checksum,
+/// then enqueue the serialized blob on the async writer. Serialisation
+/// (<1ms) happens on the caller's thread; the single atomic disk write
+/// runs on the dedicated writer thread.
 fn save_snapshot(
     config: &RunConfig,
     executor: &ParallelExecutor,
     paths: &PersistPaths,
     state: &mut RunState,
     merge_queue: &MergeQueue,
+    gate_thresholds: &GateThresholds,
     writer: &SnapshotWriter,
 ) {
     let timestamp_ms = chrono::Utc::now().timestamp_millis() as u64;
@@ -2625,7 +2809,7 @@ fn save_snapshot(
         .with_merge_queue(merge_queue.snapshot());
 
     let orchestrator_json = match orchestrator_snapshot.to_json() {
-        Ok(json) => json.into_bytes(),
+        Ok(json) => json,
         Err(e) => {
             error!(error = %e, "failed to serialize orchestrator snapshot");
             state.snapshot_failed();
@@ -2633,7 +2817,7 @@ fn save_snapshot(
         }
     };
     let executor_json = match serde_json::to_string_pretty(&snapshot) {
-        Ok(json) => json.into_bytes(),
+        Ok(json) => json,
         Err(e) => {
             error!(error = %e, "failed to serialize executor snapshot");
             state.snapshot_failed();
@@ -2663,21 +2847,42 @@ fn save_snapshot(
             .map(|router| router.snapshot_json()),
     };
     let run_state_json = match serde_json::to_string_pretty(&run_state) {
-        Ok(json) => json.into_bytes(),
+        Ok(json) => json,
         Err(e) => {
             error!(error = %e, "failed to serialize run-state snapshot");
             state.snapshot_failed();
             return;
         }
     };
+    let gate_thresholds_json = match serde_json::to_string_pretty(gate_thresholds) {
+        Ok(json) => json,
+        Err(e) => {
+            error!(error = %e, "failed to serialize gate thresholds");
+            state.snapshot_failed();
+            return;
+        }
+    };
+
+    let unified = roko_runtime::StateSnapshot::new(
+        timestamp_ms,
+        executor_json,
+        orchestrator_json,
+        run_state_json,
+        gate_thresholds_json,
+    );
+
+    let snapshot_json = match serde_json::to_vec_pretty(&unified) {
+        Ok(json) => json,
+        Err(e) => {
+            error!(error = %e, "failed to serialize unified state snapshot");
+            state.snapshot_failed();
+            return;
+        }
+    };
 
     writer.write(SnapshotPayload {
-        orchestrator_json,
-        orchestrator_path: paths.orchestrator_json.clone(),
-        executor_json,
-        executor_path: paths.executor_json.clone(),
-        run_state_json,
-        run_state_path: paths.run_state_json.clone(),
+        snapshot_json,
+        snapshot_path: paths.state_snapshot_json.clone(),
     });
 }
 
@@ -3780,6 +3985,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.paths,
                 ctx.state,
                 ctx.merge_queue,
+                ctx.gate_thresholds,
                 ctx.snapshot_writer,
             );
         }
@@ -3838,6 +4044,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         ctx.paths,
                         ctx.state,
                         ctx.merge_queue,
+                        ctx.gate_thresholds,
                         ctx.snapshot_writer,
                     );
                 }
@@ -3853,6 +4060,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         ctx.paths,
                         ctx.state,
                         ctx.merge_queue,
+                        ctx.gate_thresholds,
                         ctx.snapshot_writer,
                     );
                 }
@@ -3868,20 +4076,13 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
 // ─── Adaptive gate thresholds ────────────────────────────────────────────
 
 /// Update EMA-based adaptive gate thresholds for a given rung.
-fn update_gate_thresholds(thresholds: &mut GateThresholds, path: &Path, rung: u32, passed: bool) {
+fn update_gate_thresholds(thresholds: &mut GateThresholds, rung: u32, passed: bool) {
     thresholds.observe(rung, passed);
-    if let Err(err) = thresholds.save(path) {
-        warn!(
-            error = %err,
-            path = %path.display(),
-            rung,
-            passed,
-            "failed to persist adaptive gate thresholds"
-        );
-    }
+    // Gate thresholds are now persisted as part of the unified StateSnapshot
+    // in save_snapshot(), not via a separate disk write.
 }
 
-/// Emit gate thresholds into the TUI push pipeline after persisting to disk.
+/// Emit gate thresholds into the TUI push pipeline after updating in memory.
 fn emit_gate_thresholds_event(thresholds: &GateThresholds, tui: &TuiBridge) {
     if let Ok(json) = serde_json::to_string(thresholds) {
         tui.gate_thresholds_updated(&json);
@@ -4254,6 +4455,7 @@ async fn handle_plan_timeout(
     merge_queue: &MergeQueue,
     tui: &TuiBridge,
     config: &RunConfig,
+    gate_thresholds: &GateThresholds,
     writer: &SnapshotWriter,
 ) -> Result<()> {
     let in_flight = collect_in_flight_attempts(state);
@@ -4267,7 +4469,7 @@ async fn handle_plan_timeout(
         "plan execution exceeded wall-clock timeout"
     );
     stop_all_agents(agent_handles, state, Duration::from_secs(3)).await;
-    save_snapshot(config, executor, paths, state, merge_queue, writer);
+    save_snapshot(config, executor, paths, state, merge_queue, gate_thresholds, writer);
     writer.flush();
     shutdown_subsystems(config, tui).await;
     let event = build_run_completed_event(executor, plans, state, RunOutcome::Failed);

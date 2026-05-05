@@ -94,7 +94,7 @@ export default function Builder() {
   const workspaceRef = useRef<string | null>(null);
   const setupDoneRef = useRef(false);
 
-  const { attach, status, handle } = useTerminal('builder-pty');
+  const { attach, status, handle, shellWarning } = useTerminal('builder-pty');
 
   // Flash the terminal border on key events
   const flashTerminal = useCallback((type: 'event-flash' | 'event-flash-pass' | 'event-flash-fail') => {
@@ -322,6 +322,9 @@ export default function Builder() {
         </div>
         <div className="builder-divider" />
         <div className={`builder-terminal${terminalFlash ? ` ${terminalFlash}` : ''}`}>
+          {shellWarning && (
+            <div className="terminal-shell-warning">{shellWarning}</div>
+          )}
           <div className="builder-terminal-inner" ref={attach} />
         </div>
       </div>

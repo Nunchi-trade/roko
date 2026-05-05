@@ -23,6 +23,7 @@ pub use super::agent::*;
 pub use super::budget::*;
 pub use super::chain::*;
 pub use super::gates::*;
+pub use super::graduation::*;
 pub use super::learning::*;
 pub use super::project::*;
 pub use super::provider::*;
@@ -89,6 +90,9 @@ pub struct RokoConfig {
     pub models: IndexMap<String, ModelProfile>,
     #[serde(default)]
     pub gates: GatesConfig,
+    /// Graduation policies: which Bus topics get promoted to the Store.
+    #[serde(default)]
+    pub graduation: GraduationConfig,
     #[serde(default)]
     pub routing: RoutingConfig,
     #[serde(default)]
@@ -169,6 +173,7 @@ impl Default for RokoConfig {
             providers: IndexMap::new(),
             models: IndexMap::new(),
             gates: GatesConfig::default(),
+            graduation: GraduationConfig::default(),
             routing: RoutingConfig::default(),
             pipeline: PipelineConfig::default(),
             budget: BudgetConfig::default(),
@@ -1122,6 +1127,13 @@ pub struct ConductorConfig {
     pub max_auto_fix_attempts: u32,
     #[serde(default = "default_auto_fix_model")]
     pub auto_fix_model: String,
+    /// Whether the context window pressure watcher is active.
+    ///
+    /// Default `false`. The watcher emits `conductor.intervention` signals
+    /// but nothing in the runner event loop subscribes to them yet. Enable
+    /// only after wiring a subscriber in orchestrate.rs.
+    #[serde(default)]
+    pub context_pressure_enabled: bool,
     /// Per-watcher threshold overrides for the conductor anomaly ensemble.
     #[serde(default)]
     pub watchers: WatcherThresholds,
@@ -1148,6 +1160,7 @@ impl Default for ConductorConfig {
             express_mode: false,
             max_auto_fix_attempts: default_max_auto_fix(),
             auto_fix_model: default_auto_fix_model(),
+            context_pressure_enabled: false,
             watchers: WatcherThresholds::default(),
         }
     }

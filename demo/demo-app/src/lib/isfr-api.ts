@@ -16,8 +16,7 @@ export interface IsfrStatusResponse {
   keeper_running: boolean;
   sources_count: number;
   current_rate_bps: number | null;
-  current_confidence_bps: number | null;
-  current_epoch: number | null;
+  current_confidence: number | null;
   poll_interval_secs: number;
   epoch_duration_secs: number;
 }
@@ -40,10 +39,24 @@ export interface IsfrSourceResponse {
   name: string;
   class: string;
   weight: number;
-  health: 'healthy' | 'degraded' | 'stale' | 'failed';
+  health: 'live' | 'stale' | 'offline';
   last_rate_bps: number | null;
   last_poll_ms: number | null;
-  last_updated_ms: number | null;
+}
+
+/** Individual source reading within a CompositeRate response. */
+export interface SourceReading {
+  source_id: string;
+  source_name: string;
+  rate_bps: number;
+  weight: number;
+  class: string;
+  metadata: Record<string, unknown> | null;
+}
+
+/** Extended composite rate with per-source readings (from /api/isfr/current). */
+export interface IsfrRateWithReadings extends IsfrRateResponse {
+  readings?: SourceReading[];
 }
 
 // ── Canonical aliases (used by IsfrDashboard) ────────────────────

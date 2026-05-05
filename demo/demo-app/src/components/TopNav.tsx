@@ -9,6 +9,7 @@ import './TopNav.css';
 
 const NAV_LINKS = [
   { to: '/demo', label: 'DEMO', full: 'Interactive Demo Scenarios' },
+  { to: '/isfr', label: 'ISFR', full: 'Interest Swap Feed Rate' },
   { to: '/dashboard', label: 'DASH', full: 'System Dashboard' },
   { to: '/bench', label: 'BENCH', full: 'Benchmark Lab' },
   { to: '/explorer', label: 'EXPLORE', full: 'Crate & Route Explorer' },

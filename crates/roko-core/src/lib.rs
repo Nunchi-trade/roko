@@ -207,7 +207,8 @@ pub use dispatch_plan::{
 pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
-pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry};
+pub use config::graduation::{GraduationConfig, GraduationPolicy};
+pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry, FeedRuntimeStatus};
 pub use forensic::{
     ForensicReplay, ForensicReplayLogger, GateVerdictRecord, PolicyDecisionRecord, PolicyOutcome,
     ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,

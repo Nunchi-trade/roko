@@ -52,27 +52,17 @@
     clippy::unwrap_or_default,
     clippy::io_other_error
 )]
-#![allow(hidden_glob_reexports)]
+// Re-export StateHub types from their canonical home in roko-runtime.
+// These were previously path-included from roko-core via a fake
+// `extern crate self as roko_core` alias. Task 104 moved them to
+// roko-runtime where they can legally depend on EventBus.
+pub use roko_runtime::{SharedStateHub, StateHub, StateHubSender};
 
-extern crate roko_core as roko_core_crate;
-extern crate self as roko_core;
-
-pub use roko_core_crate::*;
-
-// TODO(converge): remove this compatibility layer once roko-core re-exports
-// StateHub and SharedStateHub from its crate root again.
-pub mod dashboard_snapshot {
-    pub use crate::roko_core_crate::dashboard_snapshot::*;
-}
-
-#[path = "../../roko-core/src/state_hub.rs"]
-pub mod state_hub_compat;
-
+/// Compatibility re-export so `roko_serve::state_hub::*` still resolves
+/// for downstream crates that haven't migrated their imports yet.
 pub mod state_hub {
-    pub use crate::state_hub_compat::*;
+    pub use roko_runtime::state_hub::*;
 }
-
-pub use state_hub_compat::{SharedStateHub, StateHub};
 
 pub mod adapters;
 pub mod bench;
@@ -116,7 +106,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as AnyhowContext, Result};
 use axum::response::IntoResponse;
-use roko_core_crate::config::ServeConfig;
+use roko_core::config::ServeConfig;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -317,6 +307,18 @@ impl ServerBuilder {
         );
         let roko_config = state.load_roko_config();
         validate_bind_safety(&addr, &roko_config.serve)?;
+
+        // Conditionally initialize OTLP tracing export when the feature is
+        // enabled and an endpoint is configured.
+        #[cfg(feature = "otlp")]
+        if let Some(endpoint) = &roko_config.serve.tracing.otlp_endpoint {
+            init_otlp_tracing(
+                endpoint,
+                &roko_config.serve.tracing.service_name,
+                roko_config.serve.tracing.sample_rate,
+            );
+        }
+
         if let Err(err) = state.restore_snapshot().await {
             warn!(error = %err, "failed to restore server state snapshot; starting fresh");
         }
@@ -338,7 +340,42 @@ impl ServerBuilder {
         let _workspace_gc = start_workspace_gc(Arc::clone(&state));
         let _handle_gc = start_handle_gc(Arc::clone(&state));
         let _demurrage = start_demurrage_timer(Arc::clone(&state));
+        // Auto-deploy ISFR contracts if configured.
+        {
+            let chain_cfg = &roko_config.chain;
+            if chain_cfg.auto_deploy_contracts {
+                let rpc = chain_cfg
+                    .rpc_url
+                    .as_deref()
+                    .unwrap_or("http://127.0.0.1:8545");
+                let key = chain_cfg
+                    .wallet_key
+                    .as_deref()
+                    .unwrap_or("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
+                let contracts_dir = chain_cfg
+                    .contracts_dir
+                    .as_deref()
+                    .unwrap_or("contracts");
+                let contracts_path = state.workdir.join(contracts_dir);
+
+                match roko_chain::isfr_bootstrap::bootstrap_isfr(rpc, key, &contracts_path).await {
+                    Ok(addrs) => {
+                        tracing::info!(
+                            oracle = ?addrs.isfr_oracle,
+                            bounty_pool = ?addrs.bounty_pool,
+                            "ISFR contracts deployed"
+                        );
+                        *state.isfr.contract_addresses.write().await = Some(addrs);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ISFR contract auto-deploy failed (continuing without on-chain)");
+                    }
+                }
+            }
+        }
+
         let _isfr_keeper = start_isfr_keeper(Arc::clone(&state));
+        let _block_watcher = start_block_watcher(Arc::clone(&state));
 
         // Load persisted deployments from disk.
         routes::load_persisted_deployments(&state).await;
@@ -481,7 +518,7 @@ pub async fn run_server(
     bind: Option<String>,
     port: Option<u16>,
 ) -> Result<()> {
-    let roko_config = roko_core_crate::config::loader::load_config_unified(&workdir)
+    let roko_config = roko_core::config::loader::load_config_unified(&workdir)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
     ServerBuilder::new(config).run().await
@@ -501,7 +538,7 @@ pub async fn start_server_background(
     bind: Option<String>,
     port: Option<u16>,
 ) -> Result<(Arc<AppState>, JoinHandle<Result<()>>)> {
-    let roko_config = roko_core_crate::config::loader::load_config_unified(&workdir)
+    let roko_config = roko_core::config::loader::load_config_unified(&workdir)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
     ServerBuilder::new(config).start_background().await
@@ -1373,6 +1410,37 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             metric: "cost_usd".to_string(),
             value: *cost_so_far,
         }),
+        ServerEvent::IsfrRateComputed {
+            composite_bps,
+            lending_bps,
+            structured_bps,
+            funding_bps,
+            staking_bps,
+            confidence_bps,
+            source_count,
+            timestamp_ms,
+        } => Some(DashboardEvent::IsfrRateComputed {
+            composite_bps: *composite_bps,
+            lending_bps: *lending_bps,
+            structured_bps: *structured_bps,
+            funding_bps: *funding_bps,
+            staking_bps: *staking_bps,
+            confidence_bps: *confidence_bps,
+            source_count: *source_count,
+            timestamp_ms: *timestamp_ms,
+        }),
+        ServerEvent::IsfrSourceHealthChanged {
+            source_id,
+            health,
+            last_rate_bps,
+        } => Some(DashboardEvent::IsfrSourceHealthChanged {
+            source_id: source_id.clone(),
+            health: health.clone(),
+            last_rate_bps: *last_rate_bps,
+        }),
+        ServerEvent::IsfrKeeperStateChanged { running } => {
+            Some(DashboardEvent::IsfrKeeperStateChanged { running: *running })
+        }
         _ => None,
     }
 }
@@ -1386,11 +1454,22 @@ fn dashboard_model_label(model: &str, fallback: &str) -> String {
     }
 }
 
-/// Bridge orchestrator events (`StateHub` → `EventBus`) so SSE/WS clients
+/// Bridge orchestrator events (`StateHub` -> `EventBus`) so SSE/WS clients
 /// see gate results, task completions, and other events from `roko plan run`.
 ///
 /// This is the reverse direction of [`start_state_hub_bridge`] which pushes
 /// REST-triggered `ServerEvent`s into the `StateHub` for the TUI.
+///
+/// # Bridge-loop risk
+///
+/// This bridge is intentionally **not** started from `run_server_with_state`
+/// to avoid a feedback loop: REST handler publishes `ServerEvent` ->
+/// `start_state_hub_bridge` converts it to `DashboardEvent` on `StateHub` ->
+/// this bridge converts it back to `ServerEvent` on `EventBus` -> infinite
+/// loop. It is only safe to start when the server knows that StateHub events
+/// originate exclusively from orchestrator/CLI callers (not from REST
+/// handlers that already publish to the EventBus).
+#[doc(hidden)]
 pub fn start_orchestrator_event_bridge(state: Arc<AppState>) -> JoinHandle<()> {
     let mut rx = state.state_hub.subscribe_events();
     let bus = state.event_bus.clone();
@@ -1982,6 +2061,13 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
                 let state_async = Arc::clone(&state_cb);
                 let metas = keeper_cb.source_metas();
 
+                // Update epoch counter from keeper.
+                let epoch = keeper_cb.current_epoch();
+                state_cb
+                    .isfr
+                    .current_epoch
+                    .store(epoch, std::sync::atomic::Ordering::Relaxed);
+
                 // Build source snapshots synchronously from metas (no async needed).
                 let source_snapshots: Vec<ISFRSourceSnapshot> = metas
                     .iter()
@@ -2085,6 +2171,96 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
     })
 }
 
+/// Start the block watcher background task.
+///
+/// Polls the chain for new blocks, transactions, and contract events, then
+/// publishes them to the event bus and updates `state.chain` ring buffers.
+/// Returns a no-op handle if no chain client is configured.
+fn start_block_watcher(state: Arc<AppState>) -> JoinHandle<()> {
+    use roko_chain::block_watcher::{BlockWatcher, BlockInfo, TxInfo, ContractEventInfo};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let Some(client) = state.chain_client.as_ref() else {
+        return tokio::spawn(async {});
+    };
+
+    let provider = client.provider();
+    let watcher = BlockWatcher::new(provider, Duration::from_secs(2));
+
+    // Bridge roko's CancelToken into a tokio-util CancellationToken.
+    let cancel = CancellationToken::new();
+    let bridge_cancel = cancel.clone();
+    let state_bridge = Arc::clone(&state);
+    tokio::spawn(async move {
+        state_bridge.cancel.cancelled().await;
+        bridge_cancel.cancel();
+    });
+
+    let state_publish = Arc::clone(&state);
+    state.chain.watcher_running.store(true, Ordering::Relaxed);
+
+    let publish_fn: roko_chain::block_watcher::PublishFn = Arc::new(move |topic: &str, payload: serde_json::Value| {
+        let state = Arc::clone(&state_publish);
+        match topic {
+            "chain:block" => {
+                if let Ok(block) = serde_json::from_value::<BlockInfo>(payload) {
+                    state.event_bus.publish(ServerEvent::ChainBlock {
+                        number: block.number,
+                        hash: block.hash.clone(),
+                        parent_hash: block.parent_hash.clone(),
+                        timestamp: block.timestamp,
+                        gas_used: block.gas_used,
+                        gas_limit: block.gas_limit,
+                        tx_count: block.tx_count,
+                        base_fee_per_gas: block.base_fee_per_gas,
+                    });
+                    // Spawn async update of ring buffer.
+                    let chain_state = Arc::clone(&state.chain);
+                    tokio::spawn(async move { chain_state.push_block(block).await });
+                }
+            }
+            "chain:tx" => {
+                if let Ok(tx) = serde_json::from_value::<TxInfo>(payload) {
+                    state.event_bus.publish(ServerEvent::ChainTx {
+                        block_number: tx.block_number,
+                        tx_hash: tx.tx_hash.clone(),
+                        from: tx.from.clone(),
+                        to: tx.to.clone(),
+                        value_wei: tx.value_wei.clone(),
+                        gas_used: tx.gas_used,
+                        method_sig: tx.method_sig.clone(),
+                        success: tx.success,
+                    });
+                    let chain_state = Arc::clone(&state.chain);
+                    tokio::spawn(async move { chain_state.push_tx(tx).await });
+                }
+            }
+            "chain:event" => {
+                if let Ok(evt) = serde_json::from_value::<ContractEventInfo>(payload) {
+                    state.event_bus.publish(ServerEvent::ChainContractEvent {
+                        block_number: evt.block_number,
+                        tx_hash: evt.tx_hash.clone(),
+                        log_index: evt.log_index,
+                        contract: evt.contract.clone(),
+                        event_name: evt.event_name.clone(),
+                        decoded: evt.decoded.clone(),
+                    });
+                    let chain_state = Arc::clone(&state.chain);
+                    tokio::spawn(async move { chain_state.push_event(evt).await });
+                }
+            }
+            _ => {}
+        }
+    });
+
+    let state_outer = Arc::clone(&state);
+    tokio::spawn(async move {
+        watcher.run(publish_fn, cancel).await;
+        state_outer.chain.watcher_running.store(false, Ordering::Relaxed);
+    })
+}
+
 /// Start the ISFRFeed relay bridge when a relay URL is configured.
 ///
 /// Creates a [`BroadcastBus`], wraps it in an [`ISFRFeed`], and connects to the
@@ -2103,8 +2279,8 @@ fn start_isfr_relay_bridge(state: Arc<AppState>) -> Option<tokio::task::JoinHand
     use roko_agent_server::features::relay_subscriber::ISFRTopicAdapter;
     use roko_agent_server::registration::{AgentCard, AgentCardEndpoints};
     use roko_agent_server::state::AgentState;
-    use roko_core_crate::bus_backends::BroadcastBus;
-    use roko_core_crate::isfr_feed::ISFRFeed;
+    use roko_core::bus_backends::BroadcastBus;
+    use roko_core::isfr_feed::ISFRFeed;
 
     let roko_config = state.load_roko_config();
     let relay_url = roko_config.relay.url.clone()?;
@@ -2292,6 +2468,42 @@ async fn shutdown_signal(state: Arc<AppState>) {
     state.shutdown().await;
 }
 
+// ── Optional OTLP tracing export ──────────────────────────────────────────
+
+/// Initialize OTLP tracing export when the `otlp` feature is enabled and
+/// `[serve.tracing].otlp_endpoint` is configured.
+///
+/// Called from [`ServerBuilder::start_background`] after loading the config.
+/// Because the global tracing subscriber is already installed by the CLI
+/// bootstrap code before `roko serve` runs, this function logs a warning and
+/// returns without modifying the subscriber. A full OTLP integration would
+/// require the tracing bootstrap to accept an optional OTLP layer at init
+/// time -- that is deferred to a follow-up task.
+#[cfg(feature = "otlp")]
+fn init_otlp_tracing(
+    endpoint: &str,
+    service_name: &str,
+    _sample_rate: f64,
+) {
+    // The tracing subscriber is typically already installed by the CLI entry
+    // point before ServerBuilder::start_background is called. Attempting to
+    // set a new global default here would panic. Instead, log that the config
+    // was detected so operators know the config block is being read.
+    //
+    // A full implementation would:
+    // 1. Accept an OTLP layer from the CLI bootstrap
+    // 2. Compose it with the existing env-filter + fmt layers
+    // 3. Set the composed subscriber as the global default
+    //
+    // For now, we validate the config is parsed and log the intent.
+    tracing::info!(
+        endpoint,
+        service_name,
+        "OTLP tracing export configured (layer installation deferred; \
+         global subscriber already set by CLI bootstrap)"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{build_app_state, resolve_bind_with_port_env, serve_api_or_spa_fallback};
@@ -2364,7 +2576,7 @@ mod tests {
         assert!(content_type.starts_with("text/html"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn build_app_state_loads_persisted_learning_state_and_falls_back_cleanly() {
         let persisted_dir = tempdir().expect("tempdir");
         let persisted_workdir = persisted_dir.path().to_path_buf();
@@ -2415,7 +2627,7 @@ mod tests {
         assert_eq!(fresh_router.total_observations(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn shutdown_persists_cascade_router_state() {
         let dir = tempdir().expect("tempdir");
         let workdir = dir.path().to_path_buf();

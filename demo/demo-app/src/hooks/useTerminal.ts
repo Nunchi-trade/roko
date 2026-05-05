@@ -7,7 +7,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import { ImageAddon } from '@xterm/addon-image';
 import { rosedustTheme } from '../lib/rosedust-theme';
-import { WS_BASE } from '../lib/serve-url';
+import { WS_BASE, RECONNECT_BACKOFF } from '../lib/serve-url';
 import { stripAnsi } from '../lib/strip-ansi';
 
 // STATUS: WIRED — active diagnostic for demo terminal readiness detection.
@@ -16,9 +16,15 @@ import { stripAnsi } from '../lib/strip-ansi';
 // terminal hook waits up to 8s for a prompt to appear after the WebSocket opens.
 // If the prompt is not detected (common when .zshrc is slow or the shell uses a
 // non-standard prompt char), a console.warn fires and the hook proceeds anyway.
-// This warning is NOT dead code — it is a legitimate fallback path that:
-//   1. Surfaces PTY readiness issues in browser DevTools during demos.
-//   2. Prevents the demo from hanging indefinitely on slow shell startup.
+//
+// The `shellWarning` state (returned from the hook) surfaces this warning as a
+// visible amber banner in all terminal pane consumers. The warning auto-clears
+// when a prompt is later detected or the connection is re-established.
+//
+// This is NOT dead code — it is a legitimate fallback path that:
+//   1. Surfaces PTY readiness issues visibly in the UI.
+//   2. Also logs to console.warn for browser DevTools during demos.
+//   3. Prevents the demo from hanging indefinitely on slow shell startup.
 // The regex covers: $ % # > and common powerline/starship chars.
 
 // Match common shell prompts. The key chars are: $ % # > ❯ → ➜ ➤ ›
@@ -55,6 +61,9 @@ export interface TerminalHandle {
   clearTerminal(): void;
   /** Send raw text to PTY */
   sendRaw(data: string): void;
+  /** Reset reconnect counter and trigger an immediate reconnect attempt.
+   *  Use from a "Server unreachable — click to retry" button. */
+  retryNow(): void;
 }
 
 let execSeq = 0;
@@ -78,6 +87,7 @@ export function useTerminal(sessionId?: string) {
   const handleRef = useRef<TerminalHandle | null>(null);
   const mountedRef = useRef(true);
   const [status, setStatus] = useState<TerminalHandle['status']>('connecting');
+  const [shellWarning, setShellWarning] = useState<string | null>(null);
 
   const attach = useCallback((el: HTMLDivElement | null) => {
     containerRef.current = el;
@@ -334,11 +344,34 @@ export function useTerminal(sessionId?: string) {
       return handle.waitForPrompt(timeout);
     };
 
-    handleRef.current = handle;
-
-    // --- WebSocket connection with auto-reconnect ---
+    // --- WebSocket connection with exponential backoff reconnect ---
 
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempts = 0;
+
+    handle.retryNow = () => {
+      reconnectAttempts = 0;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      connectWs();
+    };
+
+    handleRef.current = handle;
+
+    function scheduleReconnect() {
+      if (reconnectAttempts >= RECONNECT_BACKOFF.maxAttempts) {
+        console.debug(`[useTerminal:${id}] giving up after ${reconnectAttempts} failed attempts`);
+        handle.status = 'disconnected';
+        if (!disposed) setStatus('disconnected');
+        return;
+      }
+      const delay = Math.min(
+        RECONNECT_BACKOFF.baseMs * RECONNECT_BACKOFF.factor ** reconnectAttempts,
+        RECONNECT_BACKOFF.maxMs,
+      );
+      reconnectAttempts++;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connectWs, delay + Math.random() * 200);
+    }
 
     // Register terminal I/O handlers once — they read from the handle's
     // current `ws` so they survive reconnects without stacking.
@@ -363,7 +396,15 @@ export function useTerminal(sessionId?: string) {
 
       ws.onopen = () => {
         if (disposed) { ws.close(); return; }
+        const wasReconnect = reconnectAttempts > 0;
+        reconnectAttempts = 0;
         handle.ws = ws;
+        // Show a brief status line when reattaching to an existing session
+        if (wasReconnect && sessionId) {
+          term.write('\r\n\x1b[38;5;132m[roko] Reconnected \u2014 replaying scrollback...\x1b[0m\r\n');
+        }
+        // Clear any previous shell warning on new connection.
+        if (!disposed) setShellWarning(null);
         // Mark as 'connecting' until we detect a shell prompt — 'connected'
         // means the PTY shell is actually ready, not just that the WS is open.
         handle.status = 'connecting';
@@ -385,6 +426,9 @@ export function useTerminal(sessionId?: string) {
           const shellReady = await handle.waitForPrompt(8000);
           if (disposed) return;
           if (shellReady) {
+            // Prompt detected -- clear any warning that may have been
+            // set during a previous attempt or timeout.
+            if (!disposed) setShellWarning(null);
             handle.status = 'connected';
             if (!disposed) setStatus('connected');
             console.log(`[useTerminal:${id}] shell ready (prompt detected)`);
@@ -393,44 +437,68 @@ export function useTerminal(sessionId?: string) {
             // so scenarios can attempt to proceed (they have their own checks).
             handle.status = 'connected';
             if (!disposed) setStatus('connected');
+            if (!disposed) setShellWarning('Shell prompt not detected. The terminal may still be starting, or the shell may have exited.');
             console.warn(`[useTerminal:${id}] shell prompt not detected within 8s, proceeding anyway. Buffer tail: ${JSON.stringify(stripAnsi(outBuf).slice(-200))}`);
           }
         })();
       };
 
+      // Strip OSC 7777 marker leakage that appears as visible text when the
+      // shell echoes the printf wrapper before executing it.
+      const OSC_7777_RE = /\x1b\]7777;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
+      const PRINTF_WRAPPER_RE = /printf\s+'\\033\]7777[^']*'[^;\r\n]*/g;
+      const RK_WRAPPER_RE = /; __rk_ec=\$\?; printf[^;]*; \(exit \$__rk_ec\)/g;
+
+      function stripTerminalNoise(text: string): string {
+        return text
+          .replace(OSC_7777_RE, '')
+          .replace(PRINTF_WRAPPER_RE, '')
+          .replace(RK_WRAPPER_RE, '');
+      }
+
       ws.onmessage = (e: MessageEvent) => {
         if (disposed) return;
         if (e.data instanceof ArrayBuffer) {
-          const bytes = new Uint8Array(e.data);
+          const text = new TextDecoder().decode(e.data);
+          const cleaned = stripTerminalNoise(text);
           if (!ready) {
-            pendingMessages.push(bytes);
+            pendingMessages.push(new TextEncoder().encode(cleaned));
             return;
           }
-          term.write(bytes);
-          appendOutput(new TextDecoder().decode(e.data));
+          if (cleaned.length > 0) {
+            term.write(cleaned);
+            appendOutput(cleaned);
+          }
         } else if (typeof e.data === 'string') {
+          const cleaned = stripTerminalNoise(e.data);
           if (!ready) {
-            pendingMessages.push(new TextEncoder().encode(e.data));
+            pendingMessages.push(new TextEncoder().encode(cleaned));
             return;
           }
-          term.write(e.data);
-          appendOutput(e.data);
+          if (cleaned.length > 0) {
+            term.write(cleaned);
+            appendOutput(cleaned);
+          }
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (ev) => {
         handle.ws = null;
         handle.status = 'disconnected';
         if (!disposed) setStatus('disconnected');
+        if (!disposed) setShellWarning(null);
+        // Stop reconnecting on 403 (terminal disabled).
+        if (ev.code === 4030 || ev.code === 403) {
+          return;
+        }
         if (!disposed && mountedRef.current) {
-          if (reconnectTimer) clearTimeout(reconnectTimer);
-          reconnectTimer = setTimeout(connectWs, 500);
+          scheduleReconnect();
         }
       };
 
       ws.onerror = () => {
-        handle.status = 'disconnected';
-        if (!disposed) setStatus('disconnected');
+        // Suppress — onclose handles reconnect logic. Browser DevTools
+        // already surfaces WS errors natively; no need to double-log.
       };
     }
 
@@ -469,5 +537,5 @@ export function useTerminal(sessionId?: string) {
     };
   }, [sessionId]);
 
-  return { attach, status, handle: handleRef };
+  return { attach, status, handle: handleRef, shellWarning };
 }

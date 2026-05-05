@@ -46,6 +46,9 @@
 pub mod agent_registry;
 #[cfg(feature = "alloy-backend")]
 pub mod alloy_impl;
+/// Poll-based block watcher for streaming chain data via event bus.
+#[cfg(feature = "alloy-backend")]
+pub mod block_watcher;
 pub mod chain_profile;
 pub mod client;
 /// Collusion ring detection via assignment graph clique analysis (P2-11).
@@ -60,6 +63,8 @@ pub mod isfr;
 pub mod isfr_bootstrap;
 /// ISFR Keeper orchestrator — polls rate sources, computes composite, publishes.
 pub mod isfr_keeper;
+/// On-chain rate submission to ISFROracle contract.
+pub mod isfr_oracle_submit;
 /// Pluggable rate source trait + MockSource for ISFR keeper.
 pub mod isfr_sources;
 /// KORAI token with lazy demurrage (CHAIN-01).

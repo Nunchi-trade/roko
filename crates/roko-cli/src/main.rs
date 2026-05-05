@@ -409,6 +409,9 @@ Examples:
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Print a compact 3-line health summary (provider, learning state, workspace).
+        #[arg(long, conflicts_with = "cfactor", conflicts_with = "surfaces")]
+        quick: bool,
         /// Compute and persist the latest C-Factor snapshot.
         #[arg(long)]
         cfactor: bool,
@@ -427,11 +430,18 @@ Examples:
   roko show learning                Routing, experiments, gates, and C-Factor
   roko show history                 Recent chronological state events
   roko show auth-redesign           Detail for a work item or plan id
-  roko show --live                  Open the dashboard/TUI")]
+  roko show --live                  Open the dashboard/TUI
+  roko show --follow                Stream live events from roko serve")]
     Show {
         /// Delegate to the existing dashboard/TUI.
         #[arg(long)]
         live: bool,
+        /// Stream live events from a running roko serve instance via SSE.
+        #[arg(long, short = 'f')]
+        follow: bool,
+        /// URL of the roko serve instance for --follow (default: http://localhost:6677).
+        #[arg(long, default_value = "http://localhost:6677")]
+        serve_url: String,
         /// Override the working directory (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -557,6 +567,13 @@ Examples:
     Isfr {
         #[command(subcommand)]
         cmd: commands::isfr::IsfrCmd,
+    },
+
+    // ── Feeds ────────────────────────────────────────────────────────
+    /// Inspect runtime data feeds (list, status).
+    Feed {
+        #[command(subcommand)]
+        cmd: commands::feed::FeedCmd,
     },
 
     // ── Server & deployment ─────────────────────────────────────────
@@ -1213,6 +1230,24 @@ enum CompletionShell {
 
 // (CustodyCmd, DreamCmd, DreamsCmd moved into KnowledgeCmd above)
 
+/// Execution engine for `roko plan run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PlanEngine {
+    /// Graph Engine (default). Converts plans to graphs and executes via the Engine.
+    #[value(name = "graph")]
+    Graph,
+    /// Runner v2 (legacy). Uses the streaming event-loop plan executor.
+    #[cfg(feature = "legacy-runner-v2")]
+    #[value(name = "runner-v2")]
+    RunnerV2,
+}
+
+impl Default for PlanEngine {
+    fn default() -> Self {
+        Self::Graph
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum PlanCmd {
     /// List all plans in the workspace.
@@ -1258,7 +1293,7 @@ enum PlanCmd {
     /// Run a plan directory through the orchestration loop.
     #[command(after_help = "\
 Examples:
-  roko plan run plans/              Run all plans in the plans/ directory
+  roko plan run plans/              Run all plans (Graph Engine, default)
   roko plan run plans/my-plan       Run a specific plan
   roko plan run plans/ --approval   Run with interactive TUI approval
   roko plan run plans/ --dry-run    Preview without executing
@@ -1267,6 +1302,9 @@ Examples:
     Run {
         /// Path to the plans directory.
         plans_dir: PathBuf,
+        /// Execution engine to use for plan execution.
+        #[arg(long, default_value = "graph", value_enum)]
+        engine: PlanEngine,
         /// Working directory (repo root). Defaults to current directory.
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -1649,6 +1687,9 @@ enum ConfigCmd {
         /// Directory to resolve project config from (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Show the fully-resolved config after global merge and env var overrides.
+        #[arg(long)]
+        effective: bool,
     },
     /// Print the resolved global + project + env config paths.
     Path {
@@ -2282,17 +2323,20 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         }
         Command::Status {
             workdir,
+            quick,
             cfactor,
             surfaces,
         } => {
-            commands::status::cmd_status(cli, workdir, cfactor, surfaces).await?;
-            Ok(EXIT_SUCCESS)
+            let code = commands::status::cmd_status(cli, workdir, quick, cfactor, surfaces).await?;
+            Ok(code)
         }
         Command::Show {
             live,
+            follow,
+            serve_url,
             workdir,
             subject,
-        } => commands::show::cmd_show(cli, workdir, live, subject).await,
+        } => commands::show::cmd_show(cli, workdir, live, follow, serve_url, subject).await,
         Command::Doctor { workdir, serve_url } => {
             commands::util::cmd_doctor(cli, workdir, serve_url).await
         }
@@ -2368,6 +2412,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Index { cmd } => commands::util::cmd_index(cli, cmd),
         Command::Graph { cmd } => commands::graph::cmd_graph(cmd).await,
         Command::Isfr { cmd } => commands::isfr::cmd_isfr(cli, cmd).await,
+        Command::Feed { cmd } => commands::feed::cmd_feed(cli, cmd).await,
         Command::Dev { no_frontend } => commands::dev::cmd_dev(cli, no_frontend).await,
         Command::Up { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
@@ -2564,6 +2609,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             }
             let plan_cmd = PlanCmd::Run {
                 plans_dir: plan_dir,
+                engine: PlanEngine::Graph,
                 resume_plan: Some(snapshot),
                 workdir: Some(workdir),
                 approval: false,
@@ -3356,6 +3402,27 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_status_quick_flag() {
+        let cli = Cli::try_parse_from(["roko", "status", "--quick"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Status { quick: true, .. })
+        ));
+    }
+
+    #[test]
+    fn cli_rejects_status_quick_with_surfaces() {
+        let result = Cli::try_parse_from(["roko", "status", "--quick", "--surfaces"]);
+        assert!(result.is_err(), "--quick and --surfaces should conflict");
+    }
+
+    #[test]
+    fn cli_rejects_status_quick_with_cfactor() {
+        let result = Cli::try_parse_from(["roko", "status", "--quick", "--cfactor"]);
+        assert!(result.is_err(), "--quick and --cfactor should conflict");
+    }
+
+    #[test]
     fn cli_parses_doctor_subcommand() {
         let cli = Cli::try_parse_from([
             "roko",
@@ -3742,7 +3809,24 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Config {
-                cmd: ConfigCmd::Show { .. }
+                cmd: ConfigCmd::Show {
+                    effective: false,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_config_show_effective() {
+        let cli = Cli::try_parse_from(["roko", "config", "show", "--effective"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::Show {
+                    effective: true,
+                    ..
+                }
             })
         ));
     }
@@ -4859,5 +4943,28 @@ mod tests {
 
         let default_directive = tracing_log_directive_from(None, None);
         assert_eq!(default_directive, "roko=info");
+    }
+
+    #[test]
+    fn cli_parses_feed_list() {
+        let cli = Cli::try_parse_from(["roko", "feed", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Feed {
+                cmd: commands::feed::FeedCmd::List,
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_feed_status() {
+        let cli =
+            Cli::try_parse_from(["roko", "feed", "status", "file-watch-roko-dir"]).unwrap();
+        match cli.command {
+            Some(Command::Feed {
+                cmd: commands::feed::FeedCmd::Status { id },
+            }) => assert_eq!(id, "file-watch-roko-dir"),
+            other => panic!("unexpected command variant: {other:?}"),
+        }
     }
 }

@@ -352,6 +352,21 @@ pub fn default_registry() -> CellRegistry {
         Box::new(NoopCell::with_id_and_name("act", "ActCell"))
     });
 
+    // Task executor cell for plan-to-graph converted tasks (task 101).
+    registry.register("task-executor", |_config| {
+        Box::new(crate::cells::task_executor::TaskExecutorCell::default())
+    });
+
+    // Cognitive loop stub cells (task 103).
+    // These are passthrough stubs registered so cognitive loop TOML graphs
+    // validate without error. Real implementations are future tasks.
+    for name in crate::cells::stubs::COGNITIVE_LOOP_STUBS {
+        let cell_name = (*name).to_string();
+        registry.register(name, move |_config| {
+            Box::new(crate::cells::stubs::PassthroughCell::new(cell_name.clone()))
+        });
+    }
+
     registry
 }
 

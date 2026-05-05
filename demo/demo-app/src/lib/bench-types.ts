@@ -1,7 +1,7 @@
 /** Bench system types — mirrors Rust types in roko-serve. */
 
 export type BenchRunKind = 'single' | 'suite' | 'comparison' | 'regression';
-export type AgentStrategy = 'minimal' | 'context_enriched' | 'neuro_augmented' | 'full_cascade';
+export type AgentStrategy = 'minimal' | 'context_enriched' | 'neuro_augmented' | 'full_cascade' | 'demo';
 export type TaskStatus = 'pending' | 'running' | 'pass' | 'fail' | 'skipped';
 
 export interface BenchGateConfig {

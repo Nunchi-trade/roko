@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::NodeOutput;
 
 /// Comparison operators for `When` conditions.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompareOp {
     /// Field equals value.
     Eq,
@@ -28,10 +28,11 @@ pub enum CompareOp {
 }
 
 /// Condition that must be satisfied for an edge to be traversed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum EdgeCondition {
+pub enum Condition {
     /// Always traverse this edge (default).
+    #[default]
     Always,
     /// Only traverse if the source node succeeded.
     OnSuccess,
@@ -48,7 +49,7 @@ pub enum EdgeCondition {
     },
 }
 
-impl EdgeCondition {
+impl Condition {
     /// Create a default `Always` condition.
     #[must_use]
     pub fn always() -> Self {
@@ -78,21 +79,15 @@ impl EdgeCondition {
     }
 }
 
-impl Default for EdgeCondition {
-    fn default() -> Self {
-        Self::Always
-    }
-}
-
 /// Evaluate a condition against a node's output.
 ///
 /// Returns `true` if the edge should be traversed, `false` otherwise.
-pub fn evaluate(condition: &EdgeCondition, node_output: &NodeOutput) -> bool {
+pub fn evaluate(condition: &Condition, node_output: &NodeOutput) -> bool {
     match condition {
-        EdgeCondition::Always => true,
-        EdgeCondition::OnSuccess => node_output.status.is_success(),
-        EdgeCondition::OnFailure => node_output.status.is_failed(),
-        EdgeCondition::When { field, op, value } => evaluate_when(field, op, value, node_output),
+        Condition::Always => true,
+        Condition::OnSuccess => node_output.status.is_success(),
+        Condition::OnFailure => node_output.status.is_failed(),
+        Condition::When { field, op, value } => evaluate_when(field, op, value, node_output),
     }
 }
 
@@ -186,51 +181,51 @@ mod tests {
     #[test]
     fn always_evaluates_true() {
         let output = NodeOutput::success("n1", json!({}));
-        assert!(evaluate(&EdgeCondition::Always, &output));
+        assert!(evaluate(&Condition::Always, &output));
     }
 
     #[test]
     fn on_success_with_success() {
         let output = NodeOutput::success("n1", json!({"result": "ok"}));
-        assert!(evaluate(&EdgeCondition::OnSuccess, &output));
+        assert!(evaluate(&Condition::OnSuccess, &output));
     }
 
     #[test]
     fn on_success_with_failure() {
         let output = NodeOutput::failed("n1", "boom");
-        assert!(!evaluate(&EdgeCondition::OnSuccess, &output));
+        assert!(!evaluate(&Condition::OnSuccess, &output));
     }
 
     #[test]
     fn on_failure_with_failure() {
         let output = NodeOutput::failed("n1", "boom");
-        assert!(evaluate(&EdgeCondition::OnFailure, &output));
+        assert!(evaluate(&Condition::OnFailure, &output));
     }
 
     #[test]
     fn on_failure_with_success() {
         let output = NodeOutput::success("n1", json!({}));
-        assert!(!evaluate(&EdgeCondition::OnFailure, &output));
+        assert!(!evaluate(&Condition::OnFailure, &output));
     }
 
     #[test]
     fn when_eq_string() {
         let output = NodeOutput::success("n1", json!({"status": "pass"}));
-        let cond = EdgeCondition::when("status", CompareOp::Eq, toml::Value::String("pass".into()));
+        let cond = Condition::when("status", CompareOp::Eq, toml::Value::String("pass".into()));
         assert!(evaluate(&cond, &output));
     }
 
     #[test]
     fn when_gt_numeric() {
         let output = NodeOutput::success("n1", json!({"score": 85}));
-        let cond = EdgeCondition::when("score", CompareOp::Gt, toml::Value::Integer(70.into()));
+        let cond = Condition::when("score", CompareOp::Gt, toml::Value::Integer(70.into()));
         assert!(evaluate(&cond, &output));
     }
 
     #[test]
     fn when_nested_field() {
         let output = NodeOutput::success("n1", json!({"result": {"status": "complete"}}));
-        let cond = EdgeCondition::when(
+        let cond = Condition::when(
             "result.status",
             CompareOp::Eq,
             toml::Value::String("complete".into()),
@@ -241,7 +236,7 @@ mod tests {
     #[test]
     fn when_contains_string() {
         let output = NodeOutput::success("n1", json!({"message": "all tests passed"}));
-        let cond = EdgeCondition::when(
+        let cond = Condition::when(
             "message",
             CompareOp::Contains,
             toml::Value::String("tests passed".into()),
@@ -252,22 +247,22 @@ mod tests {
     #[test]
     fn when_missing_field_returns_false() {
         let output = NodeOutput::success("n1", json!({"other": 42}));
-        let cond = EdgeCondition::when("missing", CompareOp::Eq, toml::Value::Integer(42.into()));
+        let cond = Condition::when("missing", CompareOp::Eq, toml::Value::Integer(42.into()));
         assert!(!evaluate(&cond, &output));
     }
 
     #[test]
     fn skipped_node_is_neither_success_nor_failure() {
         let output = NodeOutput::skipped("n1", "budget exceeded");
-        assert!(!evaluate(&EdgeCondition::OnSuccess, &output));
-        assert!(!evaluate(&EdgeCondition::OnFailure, &output));
+        assert!(!evaluate(&Condition::OnSuccess, &output));
+        assert!(!evaluate(&Condition::OnFailure, &output));
     }
 
     #[test]
     fn condition_serde_roundtrip() {
-        let cond = EdgeCondition::when("score", CompareOp::Gte, toml::Value::Integer(90.into()));
+        let cond = Condition::when("score", CompareOp::Gte, toml::Value::Integer(90.into()));
         let json = serde_json::to_string(&cond).unwrap();
-        let parsed: EdgeCondition = serde_json::from_str(&json).unwrap();
+        let parsed: Condition = serde_json::from_str(&json).unwrap();
         assert_eq!(cond, parsed);
     }
 }

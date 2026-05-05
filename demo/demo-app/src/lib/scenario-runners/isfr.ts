@@ -81,6 +81,10 @@ export const isfrScenario: ClickableScenario = {
     if (result.cost) ctx.setMetric(`cost-${commandId}`, result.cost);
     if (result.tokens) ctx.setMetric(`tokens-${commandId}`, result.tokens);
 
+    // Also feed sidebar stats
+    if (result.cost) ctx.setMetric('cost', result.cost);
+    if (result.tokens) ctx.setMetric('tokens', result.tokens);
+
     return { ok: result.ok, error: result.error };
   },
 };

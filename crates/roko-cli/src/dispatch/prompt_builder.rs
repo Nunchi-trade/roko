@@ -37,6 +37,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +84,13 @@ pub struct PromptContext {
     /// Output files from completed dependency tasks.
     /// Each entry is `(task_id, files)`.
     pub dependency_outputs: Vec<(String, Vec<String>)>,
+    /// Workspace context: git branch, modified files, crate names/descriptions.
+    /// Ported from the legacy `workspace_context()` in orchestrate.rs; includes
+    /// git state (best-effort, bounded) and crate scan from `crates/*/Cargo.toml`.
+    pub workspace_context: String,
+    /// C-Factor collective-intelligence policy text.
+    /// Loaded from `.roko/learn/c-factor.jsonl` when history exists.
+    pub cfactor_context: String,
 }
 
 impl PromptContext {
@@ -92,11 +100,15 @@ impl PromptContext {
         let workspace_map = generate_workspace_map(&ctx.workdir);
         let tasks_toml = load_tasks_toml(&ctx.workdir, &ctx.plan_id);
         let prd_excerpt = load_prd_excerpt(&ctx.workdir, &ctx.plan_id);
+        let workspace_context = generate_workspace_context(&ctx.workdir);
+        let cfactor_context = generate_cfactor_context(&ctx.workdir);
         tracing::debug!(
             plan_id = %ctx.plan_id,
             workspace_map_bytes = workspace_map.len(),
             tasks_toml_bytes = tasks_toml.len(),
             prd_excerpt_bytes = prd_excerpt.len(),
+            workspace_context_bytes = workspace_context.len(),
+            cfactor_context_bytes = cfactor_context.len(),
             "PromptContext enrichment sizes"
         );
         Self {
@@ -116,6 +128,8 @@ impl PromptContext {
             tasks_toml,
             prd_excerpt,
             dependency_outputs: ctx.dependency_outputs.clone(),
+            workspace_context,
+            cfactor_context,
         }
     }
 }
@@ -269,6 +283,265 @@ fn load_prd_excerpt(workdir: &Path, plan_id: &str) -> String {
         }
     }
     String::new()
+}
+
+// ─── Workspace context (ported from legacy orchestrate.rs) ─────────────
+
+const WORKSPACE_CONTEXT_LIMIT: usize = 4_000;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const GIT_STATUS_LINE_LIMIT: usize = 40;
+
+/// Build a bounded workspace context string with git state and crate descriptions.
+///
+/// Combines:
+/// - Current git branch (`git branch --show-current`)
+/// - Modified files (`git status --short`), capped at [`GIT_STATUS_LINE_LIMIT`] lines
+/// - Crate names and descriptions from `crates/*/Cargo.toml`
+///
+/// All git calls are best-effort with a [`GIT_COMMAND_TIMEOUT`] to avoid hanging
+/// on non-git workdirs or slow NFS mounts.
+fn generate_workspace_context(workdir: &Path) -> String {
+    let mut out = String::from("# Workspace context\n");
+
+    // ── Git branch ──────────────────────────────────────────────────────
+    if let Some(branch) = git_command(workdir, &["branch", "--show-current"]) {
+        let branch = branch.trim();
+        if !branch.is_empty() {
+            out.push_str(&format!("Branch: `{branch}`\n"));
+        }
+    }
+
+    // ── Git modified files ──────────────────────────────────────────────
+    if let Some(status) = git_command(workdir, &["status", "--short"]) {
+        let lines: Vec<&str> = status.lines().filter(|l| !l.trim().is_empty()).collect();
+        if !lines.is_empty() {
+            out.push_str(&format!("Modified files ({}):\n", lines.len()));
+            for line in lines.iter().take(GIT_STATUS_LINE_LIMIT) {
+                out.push_str(&format!("  {line}\n"));
+            }
+            if lines.len() > GIT_STATUS_LINE_LIMIT {
+                out.push_str(&format!(
+                    "  ... and {} more\n",
+                    lines.len() - GIT_STATUS_LINE_LIMIT
+                ));
+            }
+        }
+    }
+
+    // ── Crate descriptions ──────────────────────────────────────────────
+    let crate_descriptions = scan_crate_descriptions(workdir);
+    if !crate_descriptions.is_empty() {
+        out.push_str("\n## Workspace crates\n");
+        for (name, desc) in &crate_descriptions {
+            if desc.is_empty() {
+                out.push_str(&format!("- {name}\n"));
+            } else {
+                out.push_str(&format!("- {name}: {desc}\n"));
+            }
+            if out.len() >= WORKSPACE_CONTEXT_LIMIT {
+                out.truncate(WORKSPACE_CONTEXT_LIMIT);
+                out.push_str("\n[truncated]");
+                return out;
+            }
+        }
+    }
+
+    // If we only have the header and nothing else, return empty.
+    if out.trim() == "# Workspace context" {
+        return String::new();
+    }
+
+    if out.len() > WORKSPACE_CONTEXT_LIMIT {
+        out.truncate(WORKSPACE_CONTEXT_LIMIT);
+        out.push_str("\n[truncated]");
+    }
+    out
+}
+
+/// Run a git command with a bounded timeout. Returns `None` on any failure.
+fn git_command(workdir: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", &workdir.to_string_lossy()])
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    // Use wait_with_output with a background thread to enforce a timeout.
+    let handle = std::thread::spawn(move || output.wait_with_output());
+    match handle.join() {
+        Ok(Ok(output)) if output.status.success() => {
+            String::from_utf8(output.stdout).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Scan `crates/*/Cargo.toml` for package names and descriptions.
+///
+/// Ported from legacy `workspace_context()` in orchestrate.rs.
+fn scan_crate_descriptions(workdir: &Path) -> Vec<(String, String)> {
+    let crates_dir = workdir.join("crates");
+    let entries = match std::fs::read_dir(&crates_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut crates: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let cargo_path = entry.path().join("Cargo.toml");
+        let Ok(content) = std::fs::read_to_string(&cargo_path) else {
+            continue;
+        };
+        let Ok(parsed) = content.parse::<toml::Value>() else {
+            continue;
+        };
+        let name = parsed
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let desc = parsed
+            .get("package")
+            .and_then(|p| p.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !name.is_empty() {
+            crates.push((name, desc));
+        }
+    }
+    crates.sort_by(|a, b| a.0.cmp(&b.0));
+    crates
+}
+
+// ─── C-Factor context (ported from legacy orchestrate.rs) ──────────────
+
+/// Load C-Factor history and generate policy context for the system prompt.
+///
+/// Reads `.roko/learn/c-factor.jsonl`, computes a summary, and runs the
+/// [`roko_core::CFactorPolicy`] to produce coordination guidance text.
+/// Returns an empty string when no history exists or the episode count
+/// is below the minimum threshold.
+fn generate_cfactor_context(workdir: &Path) -> String {
+    use roko_core::{Body, CFactorPolicy, CFactorSource, Context, React};
+    use roko_learn::cfactor::CFactor;
+    use std::sync::Arc;
+
+    let cfactor_path = roko_fs::RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("c-factor.jsonl");
+
+    let contents = match std::fs::read_to_string(&cfactor_path) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    let mut history: Vec<CFactor> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    history.sort_by(|left, right| left.computed_at.cmp(&right.computed_at));
+
+    let Some(current) = history.last().cloned() else {
+        return String::new();
+    };
+
+    let historical_average = if history.len() > 1 {
+        history[..history.len() - 1]
+            .iter()
+            .map(|snapshot| snapshot.overall)
+            .sum::<f64>()
+            / (history.len() - 1) as f64
+    } else {
+        current.overall
+    };
+    let trend = current.overall - historical_average;
+    let regression = roko_learn::cfactor::detect_cfactor_regression(
+        &history,
+        Duration::from_secs(7 * 24 * 60 * 60),
+        0.08,
+    );
+
+    // Collect top contributors.
+    let mut positive: Vec<_> = current
+        .agent_contributions
+        .iter()
+        .filter(|c| c.contribution_score > 0.0)
+        .cloned()
+        .collect();
+    positive.sort_by(|a, b| {
+        b.contribution_score
+            .total_cmp(&a.contribution_score)
+            .then(a.agent_id.cmp(&b.agent_id))
+    });
+    let mut negative: Vec<_> = current
+        .agent_contributions
+        .iter()
+        .filter(|c| c.contribution_score < 0.0)
+        .cloned()
+        .collect();
+    negative.sort_by(|a, b| {
+        a.contribution_score
+            .total_cmp(&b.contribution_score)
+            .then(a.agent_id.cmp(&b.agent_id))
+    });
+
+    let top_positive: Vec<String> = positive.iter().take(3).map(|c| c.agent_id.clone()).collect();
+    let top_negative: Vec<String> = negative.iter().take(3).map(|c| c.agent_id.clone()).collect();
+
+    let summary = roko_core::CFactorSummary {
+        overall: current.overall,
+        trend,
+        regression_drop: regression.map_or(0.0, |entry| entry.drop_fraction),
+        gate_pass_rate: current.components.gate_pass_rate,
+        turn_taking_equality: current.components.turn_taking_equality,
+        social_perceptiveness: current.components.social_perceptiveness,
+        citation_reciprocity: current.components.knowledge_integration_rate,
+        delivery_rate: current.components.information_flow_rate,
+        hdc_diversity: current.components.hdc_diversity,
+        episode_count: current.episode_count,
+        top_positive_contributors: top_positive,
+        top_negative_contributors: top_negative,
+    };
+
+    // Use CFactorPolicy to generate engrams, then extract their text bodies.
+    #[derive(Clone)]
+    struct StaticSource(Option<roko_core::CFactorSummary>);
+    impl CFactorSource for StaticSource {
+        fn summary(&self) -> Option<roko_core::CFactorSummary> {
+            self.0.clone()
+        }
+    }
+
+    let source: Arc<dyn CFactorSource> = Arc::new(StaticSource(Some(summary)));
+    let policy = CFactorPolicy::new(source).with_min_episode_count(6);
+    let engrams = policy.decide(&[], &Context::now());
+
+    if engrams.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("# Collective calibration\n");
+    for engram in &engrams {
+        if let Ok(text) = engram.body.as_text() {
+            let text = text.trim();
+            if !text.is_empty() {
+                out.push_str(text);
+                out.push('\n');
+            }
+        }
+    }
+
+    if out.trim() == "# Collective calibration" {
+        return String::new();
+    }
+
+    out
 }
 
 /// Structured gate feedback injected into retry prompts.
@@ -625,6 +898,22 @@ impl PromptAssembler {
             sections.push(PromptSection::new("tasks_toml", body, 9));
         }
 
+        if !ctx.workspace_context.is_empty() {
+            sections.push(PromptSection::new(
+                "workspace_context",
+                ctx.workspace_context.clone(),
+                10,
+            ));
+        }
+
+        if !ctx.cfactor_context.is_empty() {
+            sections.push(PromptSection::new(
+                "cfactor_context",
+                ctx.cfactor_context.clone(),
+                11,
+            ));
+        }
+
         let mut diagnostics = PromptDiagnostics::default();
         for source in &self.sources {
             sections.extend(source.collect(task, ctx));
@@ -750,6 +1039,8 @@ impl PromptAssembler {
             "prd_excerpt",
             "workspace_map",
             "tasks_toml",
+            "workspace_context",
+            "cfactor_context",
             "knowledge",
             "episode_knowledge",
             "playbooks",
@@ -1487,5 +1778,52 @@ mod tests {
         assert!(!p.system_prompt.contains("# Verify"));
         assert!(!p.system_prompt.contains("# Allowed tools"));
         assert_eq!(p.tool_allowlist, None);
+    }
+
+    #[test]
+    fn workspace_context_included_when_present() {
+        let assembler = PromptAssembler::minimal();
+        let mut pctx = PromptContext::from_task(&task(), &ctx());
+        pctx.workspace_context = "# Workspace context\nBranch: `main`\n- roko-core: Core types\n".to_string();
+        let p = assembler.assemble(&task(), &pctx).unwrap();
+        assert!(p.system_prompt.contains("# Workspace context"));
+        assert!(p.system_prompt.contains("Branch: `main`"));
+        assert!(p.diagnostics.included_sections.contains(&"workspace_context".to_string()));
+    }
+
+    #[test]
+    fn workspace_context_empty_when_no_git() {
+        // /tmp has no crates/ or .git — workspace_context should be empty.
+        let ws_ctx = generate_workspace_context(Path::new("/tmp"));
+        assert!(ws_ctx.is_empty());
+    }
+
+    #[test]
+    fn cfactor_context_included_when_present() {
+        let assembler = PromptAssembler::minimal();
+        let mut pctx = PromptContext::from_task(&task(), &ctx());
+        pctx.cfactor_context = "# Collective calibration\nC-Factor 0.72\n".to_string();
+        let p = assembler.assemble(&task(), &pctx).unwrap();
+        assert!(p.system_prompt.contains("# Collective calibration"));
+        assert!(p.diagnostics.included_sections.contains(&"cfactor_context".to_string()));
+    }
+
+    #[test]
+    fn cfactor_context_empty_when_no_history() {
+        // /tmp has no .roko/learn/c-factor.jsonl — cfactor_context should be empty.
+        let ctx = generate_cfactor_context(Path::new("/tmp"));
+        assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn scan_crate_descriptions_empty_for_missing_dir() {
+        let crates = scan_crate_descriptions(Path::new("/nonexistent"));
+        assert!(crates.is_empty());
+    }
+
+    #[test]
+    fn git_command_returns_none_on_bad_workdir() {
+        let result = git_command(Path::new("/nonexistent"), &["status"]);
+        assert!(result.is_none());
     }
 }

@@ -682,6 +682,19 @@
   100% { opacity: 0; }
 }
 
+/* Shell prompt detection warning (amber banner) */
+
+.demo-term-shell-warning {
+  padding: 3px 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg-mid));
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 20%, transparent);
+  flex-shrink: 0;
+}
+
 /* Terminal body */
 
 .demo-term-body {

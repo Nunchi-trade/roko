@@ -247,6 +247,11 @@ pub async fn prometheus_metrics(
         episode_count
     );
 
+    // Append dynamic MetricRegistry families (LLM calls, errors, tokens,
+    // cost, TTFT, request duration, context utilization, throughput, gate
+    // verdicts, and any other metrics registered at runtime).
+    out.push_str(&state.metrics.render_prometheus());
+
     (
         axum::http::StatusCode::OK,
         [(

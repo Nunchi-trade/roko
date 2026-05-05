@@ -1,6 +1,8 @@
-//! Core graph types: `Graph`, `Node`, `Edge`, `NodeId`, `EdgeCondition`, `GraphMetadata`.
+//! Core graph types: `Graph`, `Node`, `Edge`, `NodeId`, `EdgeCondition`, `GraphMetadata`,
+//! `NodeOutput`, `NodeOutputStatus`, `GraphConfig`.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use indexmap::IndexMap;
 use petgraph::graph::DiGraph;
@@ -156,7 +158,7 @@ impl Graph {
     }
 }
 
-/// Errors specific to graph construction and manipulation.
+/// Errors specific to graph construction, validation, and execution.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GraphError {
     /// A node with this ID already exists.
@@ -174,6 +176,171 @@ pub enum GraphError {
     /// Cell type not found in registry.
     #[error("unknown cell type: `{0}`")]
     UnknownCellType(String),
+    /// A node failed during execution.
+    #[error("node '{node_id}' failed: {reason}")]
+    NodeFailed {
+        /// The node that failed.
+        node_id: String,
+        /// Description of the failure.
+        reason: String,
+    },
+    /// An edge references a non-existent source or target.
+    #[error("edge references unknown node '{node_id}'")]
+    InvalidEdge {
+        /// The referenced node ID.
+        node_id: String,
+    },
+    /// Budget exceeded (tokens, cost, or deadline).
+    #[error("budget exceeded: {reason}")]
+    BudgetExceeded {
+        /// Description of which limit was breached.
+        reason: String,
+    },
+    /// A condition expression failed to evaluate.
+    #[error("condition evaluation failed for edge {from} -> {to}: {reason}")]
+    ConditionError {
+        /// Source node.
+        from: String,
+        /// Target node.
+        to: String,
+        /// What went wrong.
+        reason: String,
+    },
+    /// The graph definition is invalid.
+    #[error("invalid graph definition: {reason}")]
+    InvalidGraph {
+        /// What is wrong with the graph.
+        reason: String,
+    },
+}
+
+// ─── Node output types (used by condition evaluation & cell modules) ─────────
+
+/// Status of a node's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeOutputStatus {
+    /// Node completed successfully.
+    Success,
+    /// Node failed during execution.
+    Failed,
+    /// Node was skipped (e.g., budget exceeded, upstream failure).
+    Skipped,
+}
+
+impl NodeOutputStatus {
+    /// Returns `true` if this status represents success.
+    #[must_use]
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Success)
+    }
+
+    /// Returns `true` if this status represents failure.
+    #[must_use]
+    pub fn is_failed(self) -> bool {
+        matches!(self, Self::Failed)
+    }
+
+    /// Returns `true` if this status represents a skipped node.
+    #[must_use]
+    pub fn is_skipped(self) -> bool {
+        matches!(self, Self::Skipped)
+    }
+}
+
+/// Output produced by a single node execution, used for condition evaluation
+/// and inter-cell communication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeOutput {
+    /// The node that produced this output.
+    pub node_id: NodeId,
+    /// Execution status.
+    pub status: NodeOutputStatus,
+    /// Structured output data (JSON).
+    pub data: serde_json::Value,
+    /// Error message if status is `Failed` or `Skipped`.
+    pub error: Option<String>,
+    /// Tokens consumed during execution.
+    #[serde(default)]
+    pub tokens_used: u64,
+    /// Estimated cost in USD.
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Wall-clock duration of execution.
+    #[serde(default, with = "duration_millis")]
+    pub duration: Duration,
+}
+
+impl NodeOutput {
+    /// Create a successful output with the given data.
+    pub fn success(node_id: impl Into<String>, data: serde_json::Value) -> Self {
+        Self {
+            node_id: node_id.into(),
+            status: NodeOutputStatus::Success,
+            data,
+            error: None,
+            tokens_used: 0,
+            cost_usd: 0.0,
+            duration: Duration::ZERO,
+        }
+    }
+
+    /// Create a failed output with the given error message.
+    pub fn failed(node_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            node_id: node_id.into(),
+            status: NodeOutputStatus::Failed,
+            data: serde_json::Value::Null,
+            error: Some(error.into()),
+            tokens_used: 0,
+            cost_usd: 0.0,
+            duration: Duration::ZERO,
+        }
+    }
+
+    /// Create a skipped output with the given reason.
+    pub fn skipped(node_id: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            node_id: node_id.into(),
+            status: NodeOutputStatus::Skipped,
+            data: serde_json::Value::Null,
+            error: Some(reason.into()),
+            tokens_used: 0,
+            cost_usd: 0.0,
+            duration: Duration::ZERO,
+        }
+    }
+}
+
+/// Serde helper: serialize/deserialize `Duration` as milliseconds (u64).
+mod duration_millis {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(d: &Duration, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_u64(d.as_millis() as u64)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Duration, D::Error> {
+        let ms = u64::deserialize(de)?;
+        Ok(Duration::from_millis(ms))
+    }
+}
+
+// ─── Graph-level configuration (used by budget tracker) ─────────────────────
+
+/// Graph-level configuration for resource limits and execution policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GraphConfig {
+    /// Maximum total tokens allowed.
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+    /// Maximum total cost in USD.
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
+    /// Maximum wall-clock time.
+    #[serde(default)]
+    pub deadline: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -278,5 +445,31 @@ mod tests {
         let serialized = toml::to_string(&cond).unwrap();
         let deserialized: EdgeCondition = toml::from_str(&serialized).unwrap();
         assert_eq!(cond, deserialized);
+    }
+
+    #[test]
+    fn node_output_success() {
+        let output = NodeOutput::success("n1", serde_json::json!({"result": "ok"}));
+        assert!(output.status.is_success());
+        assert!(!output.status.is_failed());
+        assert!(!output.status.is_skipped());
+        assert_eq!(output.node_id, "n1");
+        assert!(output.error.is_none());
+    }
+
+    #[test]
+    fn node_output_failed() {
+        let output = NodeOutput::failed("n1", "boom");
+        assert!(output.status.is_failed());
+        assert!(!output.status.is_success());
+        assert_eq!(output.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn node_output_skipped() {
+        let output = NodeOutput::skipped("n1", "budget exceeded");
+        assert!(output.status.is_skipped());
+        assert!(!output.status.is_success());
+        assert!(!output.status.is_failed());
     }
 }

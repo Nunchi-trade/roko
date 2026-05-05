@@ -37,7 +37,7 @@ function TerminalPaneReal({
   isFocused: boolean;
   onFocus: () => void;
 }) {
-  const { attach, status, handle } = useTerminal(sessionId);
+  const { attach, status, handle, shellWarning } = useTerminal(sessionId);
   const [prevStatus, setPrevStatus] = useState<string>(status);
   const [showConnFlash, setShowConnFlash] = useState(false);
   const paneRef = useRef<HTMLDivElement>(null);
@@ -106,6 +106,9 @@ function TerminalPaneReal({
           </button>
         )}
       </div>
+      {shellWarning && (
+        <div className="terminal-shell-warning">{shellWarning}</div>
+      )}
       <div className="term-pane-body" ref={attach} />
     </div>
   );

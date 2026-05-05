@@ -6,13 +6,16 @@
 **Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [06-websocket-streaming.md](./06-websocket-streaming.md), [13-web-portal.md](./13-web-portal.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)  
 **Key sources**: `tmp/refinements/26-statehub-rearchitecture.md`, `tmp/refinements/30-rich-ux-primitives.md`
 
-> **Implementation status - 2026-05-05**: `StateHub` currently works through transitional
-> compatibility wiring, not a clean `roko-core` module. The source file is still located at
-> `crates/roko-core/src/state_hub.rs`, but it is not exported by `roko-core/src/lib.rs` because
-> it depends on runtime-side types. `roko-serve` path-includes it behind compatibility
-> re-exports. Task 104 in `tmp/taskrunner/tasks/` tracks moving StateHub to a real crate
-> boundary. This chapter describes the target evolution; do not read the named projection
-> catalog below as fully implemented today.
+> **Implementation status - 2026-05-05**: `StateHub` lives in `roko-runtime`
+> (`crates/roko-runtime/src/state_hub.rs`), exported as `roko_runtime::StateHub`,
+> `roko_runtime::SharedStateHub`, and `roko_runtime::StateHubSender`. The move was
+> completed by Task 104 which eliminated the previous `#[path]`-include hack in
+> `roko-serve` and the fake `extern crate self as roko_core` alias. `roko-serve` and
+> `roko-cli` both re-export the types from `roko-runtime` for downstream convenience.
+> The `EventBus` used by `roko-serve` is a thin wrapper around
+> `roko_runtime::event_bus::EventBus` (consolidated from a formerly separate
+> implementation). This chapter describes the target evolution toward named
+> projections; do not read the full projection catalog below as implemented today.
 
 ---
 

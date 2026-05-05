@@ -264,7 +264,7 @@ export default function KnowledgeEntries() {
   // SSE-triggered refetch
   const debouncedRefetch = useDebouncedRefetch(fetchEntries, 2000);
   useContextEventSubscription(
-    ['knowledge_updated', 'knowledge_created', 'knowledge_deleted'],
+    ['knowledge_ingested', 'knowledge_consumed'],
     debouncedRefetch,
   );
 

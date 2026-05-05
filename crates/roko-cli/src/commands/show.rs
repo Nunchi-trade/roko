@@ -80,10 +80,32 @@ pub(crate) async fn cmd_show(
     cli: &Cli,
     workdir: Option<PathBuf>,
     live: bool,
+    follow: bool,
+    serve_url: String,
     subject: Option<String>,
 ) -> Result<i32> {
     if live {
         return super::dashboard::cmd_dashboard(cli, workdir, None, false, false, None).await;
+    }
+
+    // --follow: stream live SSE events from a running roko serve instance.
+    if follow {
+        let color = cli.color.should_color();
+        let client = roko_cli::runner::SseStreamClient::new(&serve_url, color);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_for_signal = cancel.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            cancel_for_signal.cancel();
+        });
+        eprintln!("Streaming events from {serve_url}/api/events (Ctrl+C to stop)...");
+        return match client.stream(cancel).await {
+            Ok(()) => Ok(EXIT_SUCCESS),
+            Err(err) => {
+                eprintln!("SSE stream error: {err}");
+                Ok(1)
+            }
+        };
     }
 
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));

@@ -112,14 +112,17 @@ pub(crate) async fn cmd_isfr(cli: &Cli, cmd: IsfrCmd) -> Result<i32> {
                 println!("Relay: {relay_url} (WebSocket relay transport is Phase 2)");
             }
 
-            let publish_fn: roko_chain::isfr_keeper::PublishFn =
-                std::sync::Arc::new(move |topic: &str, msg_type: &str, payload: serde_json::Value| {
-                    if let Some(composite_bps) = payload.get("composite_bps").and_then(|v| v.as_u64()) {
+            let publish_fn: roko_chain::isfr_keeper::PublishFn = std::sync::Arc::new(
+                move |topic: &str, msg_type: &str, payload: serde_json::Value| {
+                    if let Some(composite_bps) =
+                        payload.get("composite_bps").and_then(|v| v.as_u64())
+                    {
                         let pct = composite_bps as f64 / 100.0;
                         println!("ISFR rate: {pct:.2}% (composite) -> topic={topic}");
                     }
                     tracing::info!(topic, msg_type, %payload, "isfr: rate published");
-                });
+                },
+            );
             keeper.set_publish_fn(publish_fn);
 
             println!(
@@ -162,22 +165,43 @@ pub(crate) async fn cmd_isfr(cli: &Cli, cmd: IsfrCmd) -> Result<i32> {
                     let body: serde_json::Value = resp.json().await.unwrap_or_default();
 
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&body).unwrap_or_default()
+                        );
                         return Ok(EXIT_SUCCESS);
                     }
 
                     // Human-readable live status from serve.
-                    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let running = body.get("keeper_running").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let sources_count = body.get("sources_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let poll_secs = body.get("poll_interval_secs").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let epoch_secs = body.get("epoch_duration_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let enabled = body
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let running = body
+                        .get("keeper_running")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let sources_count = body
+                        .get("sources_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let poll_secs = body
+                        .get("poll_interval_secs")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let epoch_secs = body
+                        .get("epoch_duration_secs")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     let rate_bps = body.get("current_rate_bps").and_then(|v| v.as_u64());
                     let confidence = body.get("current_confidence").and_then(|v| v.as_f64());
 
                     println!("ISFR status (live from roko serve)");
                     println!("  enabled:    {enabled}");
-                    println!("  keeper:     {}", if running { "running" } else { "stopped" });
+                    println!(
+                        "  keeper:     {}",
+                        if running { "running" } else { "stopped" }
+                    );
                     println!("  sources:    {sources_count}");
                     println!("  poll:       {poll_secs}s");
                     println!("  epoch:      {epoch_secs}s");
@@ -269,7 +293,10 @@ pub(crate) async fn cmd_isfr(cli: &Cli, cmd: IsfrCmd) -> Result<i32> {
                     let body: serde_json::Value = resp.json().await.unwrap_or_default();
 
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&body).unwrap_or_default()
+                        );
                         return Ok(EXIT_SUCCESS);
                     }
 
@@ -285,8 +312,10 @@ pub(crate) async fn cmd_isfr(cli: &Cli, cmd: IsfrCmd) -> Result<i32> {
                             );
                             for src in sources {
                                 let name = src.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                                let status = src.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                                let weight = src.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let status =
+                                    src.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                                let weight =
+                                    src.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                 let failures = src
                                     .get("consecutive_failures")
                                     .and_then(|v| v.as_u64())

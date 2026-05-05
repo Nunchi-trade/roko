@@ -44,6 +44,12 @@ interface FeedItem {
   cost?: number;
 }
 
+export interface ProviderStatus {
+  has_providers: boolean;
+  has_api_keys: boolean;
+  demo_available: boolean;
+}
+
 export type ConnectionState = 'connecting' | 'connected' | 'offline';
 
 const DEFAULT_CONFIG: BenchConfig = {
@@ -85,6 +91,9 @@ export function useBench() {
   const [currentAgentId, setCurrentAgentId] = useState<string | null>(null);
   const [gateVerdicts, setGateVerdicts] = useState<{ taskId: string; gate: string; passed: boolean; message?: string; durationMs: number }[]>([]);
   const [tokenVelocity, setTokenVelocity] = useState<{ taskId: string; tokensPerSecond: number }[]>([]);
+
+  // Provider status
+  const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
 
   // Comparison
   const [compareIds, setCompareIds] = useState<string[]>([]);
@@ -141,6 +150,23 @@ export function useBench() {
         setModels([]);
       } finally {
         setModelsLoading(false);
+      }
+    })();
+  }, [get]);
+
+  // Fetch provider status on mount — auto-select demo if no API keys.
+  useEffect(() => {
+    (async () => {
+      try {
+        const status = await get<ProviderStatus>('/api/bench/provider-status');
+        setProviderStatus(status);
+        if (status && !status.has_api_keys && status.demo_available) {
+          setConfig((prev) => ({ ...prev, strategy: 'demo' }));
+        }
+      } catch {
+        // Server unavailable — default to demo.
+        setProviderStatus({ has_providers: false, has_api_keys: false, demo_available: true });
+        setConfig((prev) => ({ ...prev, strategy: 'demo' }));
       }
     })();
   }, [get]);
@@ -537,5 +563,8 @@ export function useBench() {
     // Pareto
     pareto,
     fetchPareto,
+
+    // Provider
+    providerStatus,
   };
 }

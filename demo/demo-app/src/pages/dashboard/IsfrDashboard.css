@@ -1,4 +1,284 @@
-/* ISFR Dashboard page styles */
+/* ISFR Dashboard — Bloomberg terminal-grade layout */
+
+/* ── Ticker bar ─────────────────────────────────────────────── */
+
+.isfr-ticker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  padding: 0 12px;
+  background: var(--bg-deeper);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: border-color 0.6s ease, box-shadow 0.6s ease;
+}
+
+.isfr-ticker--flash {
+  border-color: var(--success);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 30%, transparent);
+}
+
+.isfr-ticker__left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+}
+
+.isfr-ticker__live {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--success);
+  font-weight: 600;
+}
+
+.isfr-ticker__live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.isfr-ticker__center {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.isfr-ticker__rate {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--rose-bright);
+  letter-spacing: 0.02em;
+}
+
+.isfr-ticker__trend {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.isfr-ticker__trend--up { color: var(--success); }
+.isfr-ticker__trend--down { color: var(--rose-bright); }
+.isfr-ticker__trend--flat { color: var(--text-ghost); }
+
+.isfr-ticker__right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-ghost);
+}
+
+.isfr-ticker__freshness {
+  color: var(--text-dim);
+}
+
+.isfr-ticker__epoch {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--bone-bright);
+}
+
+/* ── Rate mosaic overrides ──────────────────────────────────── */
+
+.isfr-mosaic-wrap {
+  margin-top: 4px;
+}
+
+/* ── Confidence gauge (SVG radial) ──────────────────────────── */
+
+.isfr-gauge-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 0;
+}
+
+.isfr-gauge-svg {
+  display: block;
+}
+
+.isfr-gauge-bg {
+  fill: none;
+  stroke: var(--glass-border);
+  stroke-width: 5;
+}
+
+.isfr-gauge-fill {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.8s var(--ease), stroke 0.4s ease;
+  transform: rotate(-90deg);
+  transform-origin: center;
+}
+
+.isfr-gauge-label {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  fill: var(--text-primary);
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.isfr-gauge-sub {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  margin-top: 2px;
+  text-align: center;
+}
+
+/* ── Visual meters bar ──────────────────────────────────────── */
+
+.isfr-meters {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.isfr-meters__left {
+  flex: 65;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 8px 12px;
+  background: var(--bg-deeper);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+}
+
+.isfr-meters__right {
+  flex: 35;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  background: var(--bg-deeper);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+}
+
+/* Contribution stacked bar */
+.isfr-contrib-bar {
+  display: flex;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--glass-bg);
+}
+
+.isfr-contrib-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bg-void);
+  transition: flex-basis 0.8s var(--ease);
+  overflow: hidden;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.isfr-contrib-labels {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+}
+
+.isfr-contrib-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.isfr-contrib-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Epoch ring */
+.isfr-epoch-ring {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.isfr-epoch-svg {
+  display: block;
+}
+
+.isfr-epoch-bg {
+  fill: none;
+  stroke: var(--glass-border);
+  stroke-width: 3;
+}
+
+.isfr-epoch-fill {
+  fill: none;
+  stroke: var(--bone-bright);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transition: stroke-dashoffset 1s linear;
+}
+
+.isfr-epoch-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  fill: var(--text-primary);
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.isfr-poll-countdown {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.isfr-poll-track {
+  width: 100%;
+  height: 2px;
+  background: var(--glass-border);
+  border-radius: 1px;
+  overflow: hidden;
+  margin-top: 2px;
+}
+
+.isfr-poll-fill {
+  height: 100%;
+  background: var(--bone-bright);
+  border-radius: 1px;
+  transition: width 1s linear;
+}
 
 /* ── Tab bar ─────────────────────────────────────────────── */
 
@@ -12,19 +292,19 @@
   padding: var(--sp-1) var(--sp-3);
   border-radius: var(--radius-md);
   border: 1px solid transparent;
-  font-family: var(--mono, var(--font-mono));
+  font-family: var(--mono);
   font-size: var(--text-sm);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   cursor: pointer;
-  color: var(--text-muted);
+  color: var(--text-dim);
   background: transparent;
   transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
 }
 
 .isfr-tab-btn:hover {
   color: var(--text-primary);
-  background: var(--glass-1);
+  background: var(--glass-bg);
 }
 
 .isfr-tab-btn--active {
@@ -34,174 +314,448 @@
   box-shadow: var(--glow-rose-soft);
 }
 
-/* ── Confidence meter ────────────────────────────────────── */
+/* ── Source cards ────────────────────────────────────────────── */
 
-.isfr-confidence-meter {
-  padding: var(--sp-2) 0;
+.isfr-source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 8px;
 }
 
-.isfr-confidence-track {
-  height: 8px;
-  background: var(--glass-1);
-  border-radius: var(--radius-full);
+.isfr-source-card {
+  background: var(--glass-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
+}
+
+.isfr-source-card:hover {
+  border-color: var(--border);
+  box-shadow: var(--glow-ambient);
+  transform: translateY(-1px);
+}
+
+.isfr-source-card--flash {
+  border-color: var(--success);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 25%, transparent);
+}
+
+.isfr-source-card__row1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.isfr-source-card__icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--bg-void);
+  flex-shrink: 0;
+}
+
+.isfr-source-card__name {
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-strong);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.isfr-source-card__class {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+.isfr-source-card__weight {
+  width: 48px;
+  height: 3px;
+  background: var(--glass-border);
+  border-radius: 2px;
   overflow: hidden;
 }
 
-.isfr-confidence-fill {
+.isfr-source-card__weight-fill {
   height: 100%;
-  border-radius: var(--radius-full);
-  transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1), background 0.4s ease;
-  box-shadow: 0 0 12px color-mix(in srgb, currentColor 40%, transparent);
+  border-radius: 2px;
+  transition: width 0.6s var(--ease);
 }
 
-.isfr-confidence-labels {
-  display: flex;
-  justify-content: space-between;
-  margin-top: var(--sp-1);
-  font-family: var(--mono, var(--font-mono));
-  font-size: var(--text-xs);
-  color: var(--text-ghost);
+.isfr-source-card__health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 
-.isfr-confidence-sub {
+.isfr-source-card__row2 {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-2);
-  border-top: 1px solid var(--glass-1);
+  gap: 8px;
+  margin-top: 6px;
 }
 
-.isfr-meta-value {
-  font-family: var(--mono, var(--font-mono));
-  font-size: var(--text-sm);
-  color: var(--bone-bright);
-}
-
-/* ── Source health table ─────────────────────────────────── */
-
-.isfr-source-table {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  font-size: var(--text-sm);
-}
-
-.isfr-source-header {
-  display: grid;
-  grid-template-columns: 2fr 1fr 0.7fr 1fr 1.2fr;
-  gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-2);
-  font-family: var(--mono, var(--font-mono));
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-ghost);
-  border-bottom: 1px solid var(--glass-2-border);
-}
-
-.isfr-source-row {
-  display: grid;
-  grid-template-columns: 2fr 1fr 0.7fr 1fr 1.2fr;
-  gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-2);
-  align-items: center;
-  border-bottom: 1px solid var(--glass-1);
-  transition: background 0.15s ease;
-}
-
-.isfr-source-row:hover {
-  background: var(--glass-1);
-}
-
-.isfr-source-row:last-child {
-  border-bottom: none;
-}
-
-.isfr-source-name {
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.isfr-source-class {
-  color: var(--text-soft);
-  font-family: var(--mono, var(--font-mono));
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-}
-
-.isfr-source-weight {
-  color: var(--bone-bright);
-  font-family: var(--mono, var(--font-mono));
-}
-
-.isfr-source-rate {
+.isfr-source-card__bps {
+  font-family: var(--mono);
+  font-size: var(--text-lg);
+  font-weight: 600;
   color: var(--rose-bright);
 }
 
-.isfr-source-health {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.isfr-source-card__delta {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.isfr-source-card__freshness {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  margin-left: auto;
+}
+
+.isfr-source-card__spark {
+  width: 80px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+/* Expand section */
+.isfr-source-card__expand {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.4s var(--ease);
+}
+
+.isfr-source-card__expand--open {
+  max-height: 400px;
+}
+
+.isfr-source-card__detail {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--glass-border);
+}
+
+.isfr-source-card__meta-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 12px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+
+.isfr-source-card__meta-key {
+  color: var(--text-ghost);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.isfr-source-card__meta-val {
   color: var(--text-soft);
-  font-family: var(--mono, var(--font-mono));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.isfr-source-card__stats {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+  font-family: var(--mono);
   font-size: var(--text-xs);
+  color: var(--text-dim);
 }
 
-.isfr-source-empty {
-  padding: var(--sp-4);
-  text-align: center;
-  color: var(--text-ghost);
-  font-style: italic;
+.isfr-source-card__stats span {
+  color: var(--bone-bright);
 }
 
-/* ── Relay message log ───────────────────────────────────── */
-
-.isfr-relay-info {
-  margin-bottom: var(--sp-2);
-  font-size: var(--text-xs);
-  color: var(--text-ghost);
+.isfr-source-card__chart {
+  margin-top: 6px;
+  height: 40px;
 }
 
-.isfr-relay-log {
-  max-height: 65vh;
-  overflow-y: auto;
+/* ── History tab ────────────────────────────────────────────── */
+
+.isfr-history-wrap {
   display: flex;
   flex-direction: column;
+  gap: 8px;
+}
+
+.isfr-history-chart {
+  position: relative;
+  height: 360px;
+  background: var(--bg-deeper);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.isfr-history-chart canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.isfr-history-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.isfr-history-range {
+  display: flex;
   gap: 4px;
 }
 
-.isfr-relay-empty {
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-  font-style: italic;
-  margin: 0;
-}
-
-.isfr-relay-row {
-  padding: var(--sp-1) var(--sp-2);
+.isfr-history-range-btn {
+  padding: 3px 10px;
   border-radius: var(--radius-sm);
-  background: var(--bg-deeper);
-  border: 1px solid var(--glass-2-border);
-  font-family: var(--mono, var(--font-mono));
+  border: 1px solid var(--glass-border);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--mono);
   font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all 0.15s ease;
 }
 
-.isfr-relay-row-header {
-  display: flex;
-  justify-content: space-between;
-  color: var(--text-muted);
+.isfr-history-range-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border);
 }
 
-.isfr-relay-topic {
+.isfr-history-range-btn--active {
   color: var(--rose-bright);
+  background: var(--rose-deep);
+  border-color: var(--rose-dim);
 }
 
-.isfr-relay-meta {
+.isfr-history-summary {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.isfr-history-legend {
+  display: flex;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+}
+
+.isfr-history-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.isfr-history-legend-dot {
+  width: 8px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+/* Chart tooltip (positioned via JS) */
+.isfr-chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  padding: 6px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  line-height: 1.5;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  z-index: 10;
+  white-space: nowrap;
+  transition: opacity 0.15s ease;
+}
+
+/* ── Events tab ─────────────────────────────────────────────── */
+
+.isfr-events-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.isfr-events-filter {
+  display: flex;
+  gap: 4px;
+}
+
+.isfr-events-filter-btn {
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-border);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  transition: all 0.15s ease;
+}
+
+.isfr-events-filter-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+
+.isfr-events-filter-btn--active {
+  color: var(--rose-bright);
+  background: var(--rose-deep);
+  border-color: var(--rose-dim);
+}
+
+.isfr-events-log {
+  max-height: 55vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--bg-deeper);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 4px;
+  position: relative;
+}
+
+.isfr-events-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  border-radius: 2px;
+  animation: fadeIn 0.2s ease;
+}
+
+.isfr-events-row:hover {
+  background: var(--glass-bg);
+}
+
+.isfr-events-ts {
   color: var(--text-ghost);
+  flex-shrink: 0;
+  width: 80px;
 }
 
-.isfr-relay-body {
-  color: var(--text-secondary, var(--text-soft));
-  margin-top: 2px;
+.isfr-events-type {
+  font-weight: 700;
+  flex-shrink: 0;
+  width: 64px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.isfr-events-type--rate { color: var(--success); }
+.isfr-events-type--source { color: var(--dream-bright); }
+.isfr-events-type--keeper { color: var(--warning); }
+
+.isfr-events-msg {
+  color: var(--text-soft);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.isfr-events-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-ghost);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.isfr-events-jump {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-border);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  z-index: 5;
+  transition: all 0.15s ease;
+}
+
+.isfr-events-jump:hover {
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+
+/* ── On-chain tab ───────────────────────────────────────────── */
+
+.isfr-onchain-wrap {
+  padding: 16px;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.isfr-onchain-addr {
+  font-size: var(--text-md);
+  color: var(--bone-bright);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.isfr-onchain-addr:hover {
+  color: var(--text-strong);
+}
+
+.isfr-onchain-placeholder {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-ghost);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+/* ── Phosphor flash ─────────────────────────────────────────── */
+
+.phosphor-flash {
+  animation: phosphor-glow 0.8s ease;
+}
+
+@keyframes phosphor-glow {
+  0%   { text-shadow: 0 0 12px currentColor; }
+  100% { text-shadow: none; }
 }

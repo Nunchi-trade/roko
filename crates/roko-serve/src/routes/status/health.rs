@@ -265,6 +265,9 @@ fn dashboard_event_type(event: &roko_core::dashboard_snapshot::DashboardEvent) -
         DashboardEvent::JobExecutionStarted { .. } => "job_execution_started",
         DashboardEvent::JobProgress { .. } => "job_progress",
         DashboardEvent::Error { .. } => "error",
+        DashboardEvent::IsfrRateComputed { .. } => "isfr_rate_computed",
+        DashboardEvent::IsfrSourceHealthChanged { .. } => "isfr_source_health_changed",
+        DashboardEvent::IsfrKeeperStateChanged { .. } => "isfr_keeper_state_changed",
     }
 }
 

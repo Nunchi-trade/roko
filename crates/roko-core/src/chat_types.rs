@@ -208,6 +208,9 @@ pub struct ResponseMetadata {
     pub web_search: Option<serde_json::Value>,
     pub extra: Option<serde_json::Value>,
     pub provider_latency_ms: Option<u64>,
+    /// Time-to-first-token in milliseconds, measured from request start
+    /// to the first content delta arriving from the provider.
+    pub provider_ttft_ms: Option<u64>,
     pub raw_finish_reason: Option<String>,
 }
 

@@ -202,6 +202,55 @@ pub enum RuntimeEvent {
         topic: String,
         consuming_agent: String,
     },
+
+    // Progress tracking
+    /// First token received from an inference call — carries TTFT for latency dashboards.
+    InferenceFirstToken {
+        run_id: String,
+        request_id: String,
+        model: String,
+        agent_id: String,
+        /// Time-to-first-token in milliseconds.
+        ttft_ms: u64,
+    },
+    /// A tool call has started executing.
+    ToolCallStarted {
+        run_id: String,
+        agent_id: String,
+        tool: String,
+        iteration: u32,
+    },
+    /// A tool call has finished executing.
+    ToolCallCompleted {
+        run_id: String,
+        agent_id: String,
+        tool: String,
+        duration_ms: u64,
+        success: bool,
+    },
+    /// A plan task has started executing.
+    TaskStarted {
+        run_id: String,
+        plan_id: String,
+        task_id: String,
+        task_title: String,
+        role: String,
+    },
+    /// A plan task has finished executing.
+    TaskCompleted {
+        run_id: String,
+        plan_id: String,
+        task_id: String,
+        passed: bool,
+        duration_ms: u64,
+    },
+    /// The overall pipeline entered a new phase.
+    PipelinePhase {
+        run_id: String,
+        phase: String,
+        /// "started", "complete", or "failed".
+        status: String,
+    },
 }
 
 impl RuntimeEvent {
@@ -227,7 +276,13 @@ impl RuntimeEvent {
             | Self::RunStarted { run_id, .. }
             | Self::RunCompleted { run_id, .. }
             | Self::KnowledgeIngested { run_id, .. }
-            | Self::KnowledgeConsumed { run_id, .. } => run_id,
+            | Self::KnowledgeConsumed { run_id, .. }
+            | Self::InferenceFirstToken { run_id, .. }
+            | Self::ToolCallStarted { run_id, .. }
+            | Self::ToolCallCompleted { run_id, .. }
+            | Self::TaskStarted { run_id, .. }
+            | Self::TaskCompleted { run_id, .. }
+            | Self::PipelinePhase { run_id, .. } => run_id,
             Self::TaskFailed { plan_id, .. } => plan_id,
         }
     }
@@ -256,6 +311,12 @@ impl RuntimeEvent {
             Self::RunCompleted { .. } => "run_completed",
             Self::KnowledgeIngested { .. } => "knowledge_ingested",
             Self::KnowledgeConsumed { .. } => "knowledge_consumed",
+            Self::InferenceFirstToken { .. } => "inference_first_token",
+            Self::ToolCallStarted { .. } => "tool_call_started",
+            Self::ToolCallCompleted { .. } => "tool_call_completed",
+            Self::TaskStarted { .. } => "task_started",
+            Self::TaskCompleted { .. } => "task_completed",
+            Self::PipelinePhase { .. } => "pipeline_phase",
         }
     }
 }
@@ -402,6 +463,63 @@ mod tests {
                     consuming_agent: "agent-2".into(),
                 },
                 "knowledge_consumed",
+            ),
+            (
+                RuntimeEvent::InferenceFirstToken {
+                    run_id: "run-1".into(),
+                    request_id: "req-ft".into(),
+                    model: "claude-sonnet".into(),
+                    agent_id: "agent-1".into(),
+                    ttft_ms: 1823,
+                },
+                "inference_first_token",
+            ),
+            (
+                RuntimeEvent::ToolCallStarted {
+                    run_id: "run-1".into(),
+                    agent_id: "agent-1".into(),
+                    tool: "read_file".into(),
+                    iteration: 3,
+                },
+                "tool_call_started",
+            ),
+            (
+                RuntimeEvent::ToolCallCompleted {
+                    run_id: "run-1".into(),
+                    agent_id: "agent-1".into(),
+                    tool: "read_file".into(),
+                    duration_ms: 12,
+                    success: true,
+                },
+                "tool_call_completed",
+            ),
+            (
+                RuntimeEvent::TaskStarted {
+                    run_id: "run-1".into(),
+                    plan_id: "plan-1".into(),
+                    task_id: "task-1".into(),
+                    task_title: "Implement progress events".into(),
+                    role: "implementer".into(),
+                },
+                "task_started",
+            ),
+            (
+                RuntimeEvent::TaskCompleted {
+                    run_id: "run-1".into(),
+                    plan_id: "plan-1".into(),
+                    task_id: "task-1".into(),
+                    passed: true,
+                    duration_ms: 47200,
+                },
+                "task_completed",
+            ),
+            (
+                RuntimeEvent::PipelinePhase {
+                    run_id: "run-1".into(),
+                    phase: "execute".into(),
+                    status: "started".into(),
+                },
+                "pipeline_phase",
             ),
         ];
 

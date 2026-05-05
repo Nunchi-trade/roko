@@ -23,6 +23,8 @@ services:
       - ./.roko:/workspace/.roko
       # Use project roko.toml (Railway overrides via ROKO_* env vars)
       - ./roko.toml:/workspace/roko.toml:ro
+      # ISFR contracts for auto-deploy
+      - ./contracts:/workspace/contracts:ro
     ports:
       - "6677:6677"
     environment:
@@ -30,6 +32,7 @@ services:
       - ZHIPU_BASE_URL
       - OPENAI_API_KEY
       - ANTHROPIC_API_KEY
+      - ETH_RPC_URL
       - RUST_LOG=info
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6677/health"]

@@ -1,12 +1,17 @@
-import { useEventStreamContext } from '../contexts/EventStreamContext';
-import { useInferenceCosts } from '../hooks/useOperationEvents';
 import './CostComparisonPanel.css';
 
+export interface RunMetrics {
+  cost: number;
+  tokens: number;
+  calls: number;
+  elapsed: number;
+}
+
+export const EMPTY_RUN_METRICS: RunMetrics = { cost: 0, tokens: 0, calls: 0, elapsed: 0 };
+
 interface CostComparisonPanelProps {
-  /** Operation ID for the naive (--no-cascade) run */
-  naiveOpId?: string | null;
-  /** Operation ID for the cascade-routed run */
-  cascadeOpId?: string | null;
+  naive: RunMetrics;
+  cascade: RunMetrics;
   isRunning?: boolean;
 }
 
@@ -23,71 +28,68 @@ function fmtTokens(n: number): string {
 }
 
 export default function CostComparisonPanel({
-  naiveOpId = null,
-  cascadeOpId = null,
+  naive,
+  cascade,
   isRunning = false,
 }: CostComparisonPanelProps) {
-  const { connected } = useEventStreamContext();
-  const naiveCosts = useInferenceCosts(naiveOpId);
-  const cascadeCosts = useInferenceCosts(cascadeOpId);
-
-  const hasBothCosts = naiveCosts.totalCost > 0 && cascadeCosts.totalCost > 0;
+  const hasBothCosts = naive.cost > 0 && cascade.cost > 0;
   const delta = hasBothCosts
-    ? ((naiveCosts.totalCost - cascadeCosts.totalCost) / naiveCosts.totalCost) * 100
+    ? ((naive.cost - cascade.cost) / naive.cost) * 100
     : null;
 
-  const panelState = isRunning ? 'running' : naiveCosts.calls > 0 || cascadeCosts.calls > 0 ? 'data' : 'pending';
+  const hasData = naive.calls > 0 || cascade.calls > 0;
+  const panelState = isRunning ? 'running' : hasData ? 'data' : 'pending';
 
   return (
     <section className="cost-panel" aria-label="Cost comparison">
       <div className="cost-panel-header">
         <span className="cost-panel-title">Cost Comparison</span>
-        <span className={`cost-panel-live ${connected ? 'connected' : ''}`}>
-          {panelState === 'pending' ? (connected ? 'armed' : 'offline') : 'live'}
+        <span className={`cost-panel-live${hasData ? ' connected' : ''}`}>
+          {panelState === 'pending' ? 'ready' : 'live'}
         </span>
       </div>
 
       <div className="cost-panel-columns">
-        <div className={`cost-panel-column cost-panel-column--naive${isRunning && !cascadeOpId ? ' cost-panel-column--active' : ''}`}>
+        <div className={`cost-panel-column cost-panel-column--naive${isRunning && cascade.calls === 0 ? ' cost-panel-column--active' : ''}`}>
           <div className="cost-panel-column-label">Naive (no cascade)</div>
           <div className="cost-panel-metric">
             <span className="cost-panel-metric-label">Cost</span>
-            <span className={`cost-panel-metric-value${naiveCosts.totalCost <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
-              {fmtCost(naiveCosts.totalCost)}
+            <span className={`cost-panel-metric-value${naive.cost <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
+              {fmtCost(naive.cost)}
             </span>
           </div>
           <div className="cost-panel-metric">
             <span className="cost-panel-metric-label">Tokens</span>
-            <span className={`cost-panel-metric-value${naiveCosts.totalTokens <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
-              {fmtTokens(naiveCosts.totalTokens)}
+            <span className={`cost-panel-metric-value${naive.tokens <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
+              {fmtTokens(naive.tokens)}
             </span>
           </div>
           <div className="cost-panel-metric">
             <span className="cost-panel-metric-label">Calls</span>
-            <span className={`cost-panel-metric-value${naiveCosts.calls <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
-              {naiveCosts.calls > 0 ? String(naiveCosts.calls) : '--'}
+            <span className={`cost-panel-metric-value${naive.calls <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
+              {naive.calls > 0 ? String(naive.calls) : '--'}
             </span>
           </div>
         </div>
 
-        <div className={`cost-panel-column cost-panel-column--cascade${isRunning && cascadeOpId ? ' cost-panel-column--active' : ''}`}>
+        <div className={`cost-panel-column cost-panel-column--cascade${isRunning && cascade.calls > 0 ? ' cost-panel-column--active' : ''}`}>
           <div className="cost-panel-column-label">Cascade</div>
           <div className="cost-panel-metric">
             <span className="cost-panel-metric-label">Cost</span>
-            <span className={`cost-panel-metric-value${cascadeCosts.totalCost <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
-              {fmtCost(cascadeCosts.totalCost)}
+            <span className={`cost-panel-metric-value${cascade.cost <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
+              {fmtCost(cascade.cost)}
             </span>
           </div>
           <div className="cost-panel-metric">
             <span className="cost-panel-metric-label">Tokens</span>
-            <span className={`cost-panel-metric-value${cascadeCosts.totalTokens <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
-              {fmtTokens(cascadeCosts.totalTokens)}
+            <span className={`cost-panel-metric-value${cascade.tokens <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
+              {fmtTokens(cascade.tokens)}
             </span>
           </div>
           <div className="cost-panel-metric">
             <span className="cost-panel-metric-label">Calls</span>
-            <span className={`cost-panel-metric-value${cascadeCosts.calls <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
-              {cascadeCosts.calls > 0 ? String(cascadeCosts.calls) : '--'}
+            <span className={`cost-panel-metric-value${cascade.calls <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
+              {cascade.calls > 0 ? String(cascade.calls) : '--'}
             </span>
           </div>
         </div>
@@ -110,7 +112,7 @@ export default function CostComparisonPanel({
       <div className="cost-panel-calls">
         <div className="cost-panel-calls-title">Inference Calls</div>
         <div className="cost-panel-calls-count">
-          {naiveCosts.calls + cascadeCosts.calls} total ({naiveCosts.calls} naive, {cascadeCosts.calls} cascade)
+          {naive.calls + cascade.calls} total ({naive.calls} naive, {cascade.calls} cascade)
         </div>
       </div>
     </section>

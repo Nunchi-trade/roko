@@ -28,6 +28,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/plans/{id}/pause", post(pause_plan))
         .route("/plans/{id}/resume", post(resume_plan))
         .route("/plans/{id}/gates", get(plan_gates))
+        .route("/plans/{id}/costs", get(plan_costs))
         .route("/plans/{id}/reviews", get(list_reviews))
         .route("/plans/{id}/tasks/{task_id}/review", post(submit_review))
         .route("/plans/{id}/tasks/{task_id}/diff", get(task_diff))
@@ -455,6 +456,97 @@ async fn plan_gates(
         "passed": gates.iter().filter(|g| g["passed"] == true).count(),
         "failed": gates.iter().filter(|g| g["passed"] == false).count(),
         "gates": gates,
+    })))
+}
+
+/// `GET /api/plans/{id}/costs` -- cost breakdown from efficiency events.
+///
+/// Reads `.roko/learn/efficiency.jsonl`, filters by plan_id, and returns
+/// per-task cost breakdown plus totals.
+async fn plan_costs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    validate_path_segment(&id, "plan id")?;
+
+    // Verify the plan exists on disk.
+    let _plan = find_plan(&state.workdir, &id).await?;
+
+    // Read efficiency events from the learning log.
+    let efficiency_path = state
+        .workdir
+        .join(".roko")
+        .join("learn")
+        .join("efficiency.jsonl");
+    let content = tokio::fs::read_to_string(&efficiency_path).await.unwrap_or_default();
+
+    #[derive(serde::Deserialize)]
+    struct EffRow {
+        #[serde(default)]
+        plan_id: String,
+        #[serde(default)]
+        task_id: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        cost_usd: f64,
+        #[serde(default)]
+        input_tokens: u64,
+        #[serde(default)]
+        output_tokens: u64,
+    }
+
+    let mut task_costs: std::collections::HashMap<String, (f64, u64, u64, String)> =
+        std::collections::HashMap::new();
+    let mut total_cost = 0.0_f64;
+    let mut total_input = 0_u64;
+    let mut total_output = 0_u64;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let row: EffRow = match serde_json::from_str(trimmed) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if row.plan_id != id {
+            continue;
+        }
+        total_cost += row.cost_usd;
+        total_input += row.input_tokens;
+        total_output += row.output_tokens;
+        let entry = task_costs.entry(row.task_id.clone()).or_insert((0.0, 0, 0, String::new()));
+        entry.0 += row.cost_usd;
+        entry.1 += row.input_tokens;
+        entry.2 += row.output_tokens;
+        if entry.3.is_empty() {
+            entry.3 = row.model;
+        }
+    }
+
+    let mut tasks: Vec<Value> = task_costs
+        .into_iter()
+        .map(|(task_id, (cost, input, output, model))| {
+            json!({
+                "task_id": task_id,
+                "cost_usd": cost,
+                "input_tokens": input,
+                "output_tokens": output,
+                "model": model,
+            })
+        })
+        .collect();
+    tasks.sort_by(|a, b| a["task_id"].as_str().cmp(&b["task_id"].as_str()));
+
+    Ok(Json(json!({
+        "plan_id": id,
+        "total_cost_usd": total_cost,
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+        "task_count": tasks.len(),
+        "tasks": tasks,
     })))
 }
 

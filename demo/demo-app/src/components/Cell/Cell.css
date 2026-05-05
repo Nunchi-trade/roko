@@ -83,3 +83,9 @@
   border-color: var(--rose-bright);
   box-shadow: 0 0 0 1px var(--rose-bright), var(--glow-rose);
 }
+
+/* ── Flash on change ── */
+
+.cell--flash {
+  animation: value-flash 400ms ease-out;
+}

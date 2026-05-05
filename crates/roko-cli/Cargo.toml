@@ -18,6 +18,10 @@ legacy-orchestrate = ["legacy-direct-dispatch"]
 ## tools / system prompt / MCP). Deprecated; will be removed once T5-36
 ## migrates the remaining callers to `ModelCallService`.
 legacy-direct-dispatch = []
+## Enable the legacy Runner v2 plan executor path behind `--engine runner-v2`.
+## Without this feature, only the Graph Engine path is available for
+## `roko plan run`. The Runner v2 code is still compiled for non-plan callers.
+legacy-runner-v2 = []
 
 [[bin]]
 name = "roko"

@@ -147,6 +147,25 @@ pub enum DashboardEvent {
         /// Current rolling efficiency buckets for the Learning tab.
         buckets: Vec<EfficiencyBucket>,
     },
+    /// ISFR composite rate was computed.
+    IsfrRateComputed {
+        composite_bps: u64,
+        lending_bps: u64,
+        structured_bps: u64,
+        funding_bps: u64,
+        staking_bps: u64,
+        confidence_bps: u64,
+        source_count: usize,
+        timestamp_ms: i64,
+    },
+    /// ISFR source health changed.
+    IsfrSourceHealthChanged {
+        source_id: String,
+        health: String,
+        last_rate_bps: Option<u64>,
+    },
+    /// ISFR keeper started or stopped.
+    IsfrKeeperStateChanged { running: bool },
     /// An error occurred.
     Error { message: String },
 }
@@ -1148,6 +1167,9 @@ impl DashboardSnapshot {
                 self.efficiency_trend = buckets.clone();
             }
             DashboardEvent::JobExecutionStarted { .. } | DashboardEvent::JobProgress { .. } => {}
+            DashboardEvent::IsfrRateComputed { .. }
+            | DashboardEvent::IsfrSourceHealthChanged { .. }
+            | DashboardEvent::IsfrKeeperStateChanged { .. } => {}
         }
     }
 

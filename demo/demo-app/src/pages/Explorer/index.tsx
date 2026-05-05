@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { useContextEventSubscription } from '../../contexts/EventStreamContext';
+import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import { fmtUptime } from '../../lib/format';
 import { getCssVar } from '../../lib/color';
 import FlatIcon from '../../components/FlatIcon';
@@ -84,6 +86,13 @@ export default function Explorer() {
     pollRef.current = setInterval(refresh, 10_000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [refresh]);
+
+  // SSE-triggered refetch
+  const debouncedRefetch = useDebouncedRefetch(refresh, 2000);
+  useContextEventSubscription(
+    ['episode', 'task_completed', 'gate_result', 'agent_spawned'],
+    debouncedRefetch,
+  );
 
   /* ── derived data ── */
   const providers = getProviders(health);

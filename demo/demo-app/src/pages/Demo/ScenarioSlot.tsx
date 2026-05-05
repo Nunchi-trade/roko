@@ -10,8 +10,8 @@ import {
 import type { Scenario, ClickableScenario, ScenarioContext } from '../../lib/scenarios';
 import { isClickableScenario } from '../../lib/scenarios';
 import { CommandList } from '../../components/CommandList';
-import PipelineStagesPanel from '../../components/PipelineStagesPanel';
-import CostComparisonPanel from '../../components/CostComparisonPanel';
+import PipelineStagesPanel, { EMPTY_PIPELINE_METRICS, type PipelineMetrics } from '../../components/PipelineStagesPanel';
+import CostComparisonPanel, { EMPTY_RUN_METRICS, type RunMetrics } from '../../components/CostComparisonPanel';
 import MemoryTransferPanel from '../../components/MemoryTransferPanel';
 import ISFRPanel from '../../components/ISFRPanel';
 import OracleFlowPanel from '../../components/OracleFlowPanel';
@@ -222,6 +222,16 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
   const [pipeline, setPipeline] = useState<PipelineDemoState>(
     () => initialPipeline(scenario.id, selectedPipelineExample),
   );
+
+  // ── Panel metric state (fed by scenario runners via setMetric) ──
+  const [naiveCost, setNaiveCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [cascadeCost, setCascadeCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [coldCost, setColdCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [warmCost, setWarmCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [dataCost, setDataCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [strategyCost, setStrategyCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [oracleChainChecked, setOracleChainChecked] = useState(false);
+  const [pipelineMetrics, setPipelineMetrics] = useState<PipelineMetrics>(EMPTY_PIPELINE_METRICS);
 
   // Knowledge Transfer panel state
   const [kfInsights, setKfInsights] = useState<InsightEvent[]>([]);
@@ -569,11 +579,55 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       signal: abortRef.current!.signal,
       pipeline: pipelineCtx,
       setMetric: (key: string, value: string) => {
+        // Route to sidebar stats (model/cost/tokens/time)
         setStats((prev) => {
           const k = key.replace('m-', '') as keyof typeof prev;
           if (k in prev) return { ...prev, [k]: value };
           return prev;
         });
+
+        // Route to panel-specific metric state
+        const num = parseFloat(value) || 0;
+        const updateMetric = (setter: React.Dispatch<React.SetStateAction<RunMetrics>>, field: keyof RunMetrics) => {
+          setter((prev) => ({ ...prev, [field]: field === 'calls' ? prev.calls + 1 : num }));
+        };
+
+        switch (key) {
+          // Cost scenario
+          case 'naive-cost': updateMetric(setNaiveCost, 'cost'); break;
+          case 'naive-tokens': updateMetric(setNaiveCost, 'tokens'); break;
+          case 'naive-elapsed': updateMetric(setNaiveCost, 'elapsed'); break;
+          case 'naive-calls': setNaiveCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'cascade-cost': updateMetric(setCascadeCost, 'cost'); break;
+          case 'cascade-tokens': updateMetric(setCascadeCost, 'tokens'); break;
+          case 'cascade-elapsed': updateMetric(setCascadeCost, 'elapsed'); break;
+          case 'cascade-calls': setCascadeCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          // Memory scenario
+          case 'cold-cost': updateMetric(setColdCost, 'cost'); break;
+          case 'cold-tokens': updateMetric(setColdCost, 'tokens'); break;
+          case 'cold-elapsed': updateMetric(setColdCost, 'elapsed'); break;
+          case 'cold-calls': setColdCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'warm-cost': updateMetric(setWarmCost, 'cost'); break;
+          case 'warm-tokens': updateMetric(setWarmCost, 'tokens'); break;
+          case 'warm-elapsed': updateMetric(setWarmCost, 'elapsed'); break;
+          case 'warm-calls': setWarmCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          // Oracle scenario
+          case 'data-cost': updateMetric(setDataCost, 'cost'); break;
+          case 'data-tokens': updateMetric(setDataCost, 'tokens'); break;
+          case 'data-elapsed': updateMetric(setDataCost, 'elapsed'); break;
+          case 'data-calls': setDataCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'strategy-cost': updateMetric(setStrategyCost, 'cost'); break;
+          case 'strategy-tokens': updateMetric(setStrategyCost, 'tokens'); break;
+          case 'strategy-elapsed': updateMetric(setStrategyCost, 'elapsed'); break;
+          case 'strategy-calls': setStrategyCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'chain-checked': setOracleChainChecked(true); break;
+          // Pipeline scenario
+          case 'pipeline-cost': setPipelineMetrics((prev) => ({ ...prev, cost: num })); break;
+          case 'pipeline-tokens': setPipelineMetrics((prev) => ({ ...prev, tokens: num })); break;
+          case 'pipeline-elapsed': setPipelineMetrics((prev) => ({ ...prev, elapsed: num })); break;
+          case 'pipeline-calls': setPipelineMetrics((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'pipeline-model': setPipelineMetrics((prev) => ({ ...prev, model: value })); break;
+        }
       },
       setGate: (name: string, status: 'pass' | 'fail' | 'pending') => {
         if (status === 'pass') {
@@ -1054,17 +1108,17 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
               </div>
               {scenario.id === 'pipeline' && (
                 <div className="demo-clickable-context demo-clickable-context--pipeline">
-                  <PipelineStagesPanel isRunning={isRunning} />
+                  <PipelineStagesPanel metrics={pipelineMetrics} isRunning={isRunning} />
                 </div>
               )}
               {scenario.id === 'cost' && (
                 <div className="demo-clickable-context">
-                  <CostComparisonPanel isRunning={isRunning} />
+                  <CostComparisonPanel naive={naiveCost} cascade={cascadeCost} isRunning={isRunning} />
                 </div>
               )}
               {scenario.id === 'memory' && (
                 <div className="demo-clickable-context">
-                  <MemoryTransferPanel isRunning={isRunning} />
+                  <MemoryTransferPanel cold={coldCost} warm={warmCost} isRunning={isRunning} />
                 </div>
               )}
               {scenario.id === 'isfr' && (
@@ -1077,7 +1131,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
               )}
               {scenario.id === 'oracle' && (
                 <div className="demo-clickable-context">
-                  <OracleFlowPanel isRunning={isRunning} />
+                  <OracleFlowPanel data={dataCost} strategy={strategyCost} chainChecked={oracleChainChecked} isRunning={isRunning} />
                 </div>
               )}
               <InferenceTracePanel
@@ -1184,6 +1238,14 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                   traceCalls={inferenceTrace.calls}
                   traceTotals={inferenceTrace.totals}
                   traceCostSeries={inferenceTrace.costSeries}
+                  naiveCost={naiveCost}
+                  cascadeCost={cascadeCost}
+                  coldCost={coldCost}
+                  warmCost={warmCost}
+                  dataCost={dataCost}
+                  strategyCost={strategyCost}
+                  oracleChainChecked={oracleChainChecked}
+                  pipelineMetrics={pipelineMetrics}
                 />
               </div>
             )}

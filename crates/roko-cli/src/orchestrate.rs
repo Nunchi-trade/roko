@@ -21682,9 +21682,8 @@ depends_on = []
             )
             .expect("AppState::new"),
         );
-        // state.state_hub is roko_serve::StateHub (via #[path] include), but
-        // set_state_hub expects roko_cli::state_hub::StateHubSender. Both are the
-        // same source file but distinct types. Create a local hub for the test.
+        // Both AppState::state_hub and the orchestrator use the same
+        // roko_runtime::StateHub type (Task 104 unified the boundary).
         let local_hub = crate::state_hub::shared_state_hub();
         runner.set_state_hub(local_hub.sender());
 

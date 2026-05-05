@@ -55,7 +55,7 @@ export default function TerminalPaneWithHandle({
   scenarioCategory,
   isRunning,
 }: TerminalPaneWithHandleProps) {
-  const { attach, status, handle } = useTerminal(sessionId);
+  const { attach, status, handle, shellWarning } = useTerminal(sessionId);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [hasOutput, setHasOutput] = useState(false);
   const [cmdEcho, setCmdEcho] = useState<string | null>(null);
@@ -162,6 +162,9 @@ export default function TerminalPaneWithHandle({
       </div>
       {cmdEcho && (
         <div className="demo-term-cmd-echo">{cmdEcho}</div>
+      )}
+      {shellWarning && (
+        <div className="demo-term-shell-warning">{shellWarning}</div>
       )}
       <div className="demo-term-body" ref={bodyCallbackRef} />
       <div className="demo-term-vignette" />

@@ -13,7 +13,7 @@ export default function BottomTerminalPane({
   handleRef,
   workspaceDir,
 }: BottomTerminalPaneProps) {
-  const { attach, status, handle } = useTerminal(sessionId);
+  const { attach, status, handle, shellWarning } = useTerminal(sessionId);
   const bodyRef = useRef<HTMLDivElement>(null);
   const cdSent = useRef(false);
 
@@ -45,6 +45,9 @@ export default function BottomTerminalPane({
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <SpinnerIcon size={16} />
         </div>
+      )}
+      {shellWarning && (
+        <div className="demo-term-shell-warning">{shellWarning}</div>
       )}
     </div>
   );

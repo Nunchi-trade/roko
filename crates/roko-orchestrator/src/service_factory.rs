@@ -46,6 +46,8 @@ pub struct ServiceConfig {
     pub run_id: Option<String>,
     /// Optional inference observer for RuntimeEvent emission around model calls.
     pub inference_observer: Option<Arc<dyn InferenceObserver>>,
+    /// Optional metric registry for emitting LLM call/error/token/cost metrics.
+    pub metrics: Option<Arc<roko_core::obs::metrics::MetricRegistry>>,
 }
 
 impl ServiceConfig {
@@ -64,6 +66,7 @@ impl ServiceConfig {
             cascade_enabled: true,
             run_id: None,
             inference_observer: None,
+            metrics: None,
         }
     }
 }
@@ -190,6 +193,9 @@ impl ServiceFactory {
         }
         if let Some(mcp_config) = config.mcp_config {
             model_call_service = model_call_service.with_mcp_config(mcp_config);
+        }
+        if let Some(metrics) = config.metrics {
+            model_call_service = model_call_service.with_metrics(metrics);
         }
         let model_call_service = Arc::new(model_call_service);
 

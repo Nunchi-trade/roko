@@ -59,8 +59,15 @@ export const costScenario: ClickableScenario = {
       signal: ctx.signal,
     });
 
-    if (result.cost) ctx.setMetric(commandId === 'naive' ? 'cost-left' : 'cost-right', result.cost);
-    if (result.tokens) ctx.setMetric(commandId === 'naive' ? 'tokens-left' : 'tokens-right', result.tokens);
+    const prefix = commandId === 'naive' ? 'naive' : 'cascade';
+    if (result.cost) ctx.setMetric(`${prefix}-cost`, result.cost);
+    if (result.tokens) ctx.setMetric(`${prefix}-tokens`, result.tokens);
+    ctx.setMetric(`${prefix}-elapsed`, String(result.elapsed ?? 0));
+    ctx.setMetric(`${prefix}-calls`, '1');
+
+    // Also feed sidebar stats
+    if (result.cost) ctx.setMetric('cost', result.cost);
+    if (result.tokens) ctx.setMetric('tokens', result.tokens);
 
     return { ok: result.ok, error: result.error };
   },

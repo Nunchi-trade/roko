@@ -87,25 +87,60 @@ pub use prune::DEFAULT_CONTEXT_TOKEN_LIMIT;
 
 /// Raw LLM conversation interface for the tool loop.
 ///
-/// Sends a conversation turn (messages + tool specs) and returns the
-/// backend's response.  The [`ToolLoop`] calls this once per iteration
-/// and inspects the response for tool calls via the [`Translator`].
+/// The **primary** method is [`stream_turn`](Self::stream_turn), which
+/// returns a stream of [`StreamEvent`] values as the backend processes
+/// the turn. [`send_turn`](Self::send_turn) is the blocking convenience
+/// wrapper that collects the stream into a [`BackendResponse`].
+///
+/// Backends that support native streaming should override `stream_turn`.
+/// Backends that do not can implement only `send_turn`; the default
+/// `stream_turn` wraps it in a synthetic event stream.
 ///
 /// This is intentionally lower-level than [`Agent`](crate::agent::Agent):
 /// it models a single request-response round, not a full agent run.
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
-    /// Send the current conversation state to the backend.
+    /// Send the current conversation state to the backend (blocking).
     ///
     /// `messages` is the accumulated message history (system, user,
     /// assistant, tool-result messages).  `tools` is the pre-rendered
     /// tool spec from [`Translator::render_tools`].
+    ///
+    /// The default implementation drives [`stream_turn`](Self::stream_turn)
+    /// and collects the events via [`collect_stream_to_response`].
     async fn send_turn(
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
         session: &SessionState,
     ) -> Result<BackendResponse, LlmError>;
+
+    /// PRIMARY: Return a stream of events for one LLM turn.
+    ///
+    /// The stream MUST emit at minimum one `TextDelta` (even if empty)
+    /// before `Done`. The FIRST `TextDelta` event is used to measure
+    /// TTFT -- emit it as soon as the first bytes arrive from the
+    /// provider, before accumulating a complete message.
+    ///
+    /// The stream MUST emit `Done` as the final event. After `Done`,
+    /// the stream ends.
+    ///
+    /// The default implementation calls [`send_turn`](Self::send_turn)
+    /// and wraps the result in a synthetic stream via
+    /// [`response_to_synthetic_stream`].
+    ///
+    /// Backends that support native streaming should override this
+    /// method and return a real incremental stream.
+    async fn stream_turn(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+        session: &SessionState,
+        _config: &TurnConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent, LlmError>>, LlmError> {
+        let response = self.send_turn(messages, tools, session).await?;
+        Ok(response_to_synthetic_stream(response))
+    }
 
     /// Extract provider-issued session or conversation identifiers from a turn response.
     fn extract_session(&self, response: &BackendResponse) -> SessionState {
@@ -120,7 +155,14 @@ pub trait LlmBackend: Send + Sync {
 
     /// Send the current conversation state to the backend in streaming mode.
     ///
-    /// Backends that do not implement streaming fall back to [`send_turn`](Self::send_turn).
+    /// **Deprecated**: prefer [`stream_turn`](Self::stream_turn) for new code.
+    /// This method exists for backward compatibility with callers that use
+    /// the channel-based `StreamChunk` API. The default calls `send_turn`.
+    ///
+    /// Backends with native streaming (e.g. `OpenAiCompatLlmBackend`)
+    /// override this to emit `StreamChunk` values into the channel
+    /// as they arrive.
+    // TODO(082): migrate callers to stream_turn, then remove this method.
     async fn send_turn_streaming(
         &self,
         messages: &[serde_json::Value],
@@ -148,6 +190,300 @@ pub enum LlmError {
     /// Retry budget was exhausted before a successful backend response arrived.
     #[error("retries exhausted")]
     RetriesExhausted,
+    /// The backend timed out (TTFT or total request).
+    #[error("timeout: {0}")]
+    Timeout(String),
+}
+
+// ─── Streaming-first types (task 082) ─────────────────────────────────
+
+/// A single event emitted by a streaming LLM backend during one turn.
+///
+/// Events arrive in order. The sequence for a normal turn is:
+/// `TextDelta*` -> `ToolCallStart?` -> `ToolCallDelta*` -> `ToolCallEnd?` -> `Usage` -> `Done`
+///
+/// A turn may have multiple interleaved `ToolCall*` sequences for parallel tool calls.
+#[derive(Debug, Clone)]
+pub struct StreamEvent {
+    /// The kind of streaming event.
+    pub kind: StreamEventKind,
+    /// Monotonic timestamp -- used to measure TTFT from first `TextDelta`.
+    pub timestamp: std::time::Instant,
+}
+
+impl StreamEvent {
+    /// Convenience constructor: wrap a kind with the current instant.
+    #[must_use]
+    pub fn now(kind: StreamEventKind) -> Self {
+        Self {
+            kind,
+            timestamp: std::time::Instant::now(),
+        }
+    }
+}
+
+/// The kind of a [`StreamEvent`].
+#[derive(Debug, Clone)]
+pub enum StreamEventKind {
+    /// Incremental assistant-visible content text.
+    ///
+    /// Always emitted even if the text delta is empty, so callers can
+    /// measure TTFT independently of text content.
+    TextDelta(String),
+
+    /// Incremental reasoning/thinking text from the model.
+    ReasoningDelta(String),
+
+    /// A tool call is starting. Emitted before `ToolCallDelta` events.
+    ToolCallStart {
+        /// Provider-assigned tool call identifier.
+        id: String,
+        /// Tool/function name.
+        name: String,
+    },
+
+    /// Partial JSON arguments for an in-progress tool call.
+    ToolCallDelta {
+        /// Provider-assigned tool call identifier.
+        id: String,
+        /// Incremental JSON argument text.
+        json_fragment: String,
+    },
+
+    /// A tool call is complete with fully assembled arguments.
+    ToolCallEnd {
+        /// Provider-assigned tool call identifier.
+        id: String,
+        /// Tool/function name.
+        name: String,
+        /// Fully assembled JSON arguments.
+        args: serde_json::Value,
+    },
+
+    /// Final usage statistics for this turn.
+    Usage(Usage),
+
+    /// The turn is complete. No more events will follow.
+    Done {
+        /// Provider finish reason string.
+        finish_reason: String,
+    },
+}
+
+/// Convert a [`StreamChunk`] into a [`StreamEvent`] with the current timestamp.
+impl From<StreamChunk> for StreamEvent {
+    fn from(chunk: StreamChunk) -> Self {
+        let kind = match chunk {
+            StreamChunk::ContentDelta(text) => StreamEventKind::TextDelta(text),
+            StreamChunk::ReasoningDelta(text) => StreamEventKind::ReasoningDelta(text),
+            StreamChunk::ToolCallDelta {
+                index: _,
+                id_delta,
+                name_delta,
+                arguments_delta,
+            } => {
+                // When both id and name are present, this is a start + delta.
+                // When only arguments are present, it's a delta.
+                if id_delta.is_some() || name_delta.is_some() {
+                    // For the combined start case, we emit a ToolCallStart.
+                    // Callers who need the delta portion should use the raw
+                    // streaming path; this conversion is for compatibility.
+                    StreamEventKind::ToolCallStart {
+                        id: id_delta.unwrap_or_default(),
+                        name: name_delta.unwrap_or_default(),
+                    }
+                } else {
+                    StreamEventKind::ToolCallDelta {
+                        id: String::new(),
+                        json_fragment: arguments_delta,
+                    }
+                }
+            }
+            StreamChunk::Usage(usage) => StreamEventKind::Usage(usage),
+            StreamChunk::Done(finish_reason) => StreamEventKind::Done {
+                finish_reason: format!("{finish_reason:?}"),
+            },
+            StreamChunk::Error(msg) => StreamEventKind::Done {
+                finish_reason: format!("error: {msg}"),
+            },
+        };
+        StreamEvent {
+            kind,
+            timestamp: std::time::Instant::now(),
+        }
+    }
+}
+
+/// Per-turn configuration that replaces scattered parameters.
+///
+/// Previously these were passed as individual arguments or threaded through
+/// session state. `TurnConfig` consolidates them into one struct so backends
+/// can be called with a consistent interface.
+#[derive(Debug, Clone)]
+pub struct TurnConfig {
+    /// Maximum output tokens. Taken from model profile or `DEFAULT_MAX_OUTPUT_TOKENS`.
+    pub max_tokens: u32,
+    /// Optional sampling temperature. `None` = provider default.
+    pub temperature: Option<f32>,
+    /// Timeout for the first token to arrive. After this, the backend
+    /// should return `LlmError::Timeout` rather than waiting indefinitely.
+    pub ttft_timeout: Duration,
+    /// Total request timeout including all streaming. The backend must
+    /// complete the stream within this duration or return `LlmError::Timeout`.
+    pub request_timeout: Duration,
+    /// Stop sequences. Provider-specific; pass through verbatim.
+    pub stop_sequences: Vec<String>,
+}
+
+impl Default for TurnConfig {
+    fn default() -> Self {
+        use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS};
+        Self {
+            max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            temperature: None,
+            ttft_timeout: Duration::from_millis(DEFAULT_TTFT_TIMEOUT_MS),
+            request_timeout: Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS),
+            stop_sequences: vec![],
+        }
+    }
+}
+
+/// Collect a `StreamEvent` stream into a [`BackendResponse`] and capture TTFT.
+///
+/// This is the default implementation used by [`LlmBackend::send_turn`]'s
+/// default impl. It reassembles text deltas, tool calls, and usage from
+/// the stream into a single JSON response.
+pub async fn collect_stream_to_response(
+    mut stream: futures::stream::BoxStream<'static, Result<StreamEvent, LlmError>>,
+    request_start: std::time::Instant,
+) -> Result<BackendResponse, LlmError> {
+    use futures::StreamExt;
+
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls: Vec<roko_core::tool::ToolCall> = vec![];
+    let mut usage = Usage::default();
+    let mut finish_reason = "stop".to_string();
+    let mut ttft_ms: Option<u64> = None;
+    // Track in-progress tool calls: id -> (name, accumulated_args)
+    let mut in_progress_calls: std::collections::HashMap<String, (String, String)> =
+        Default::default();
+
+    while let Some(event) = stream.next().await {
+        let event = event?;
+        match event.kind {
+            StreamEventKind::TextDelta(delta) => {
+                if ttft_ms.is_none() {
+                    ttft_ms = Some(request_start.elapsed().as_millis() as u64);
+                }
+                text.push_str(&delta);
+            }
+            StreamEventKind::ReasoningDelta(delta) => {
+                reasoning.push_str(&delta);
+            }
+            StreamEventKind::ToolCallStart { id, name } => {
+                in_progress_calls.insert(id, (name, String::new()));
+            }
+            StreamEventKind::ToolCallDelta { id, json_fragment } => {
+                if let Some((_name, args)) = in_progress_calls.get_mut(&id) {
+                    args.push_str(&json_fragment);
+                }
+            }
+            StreamEventKind::ToolCallEnd { id, name, args } => {
+                in_progress_calls.remove(&id);
+                tool_calls.push(roko_core::tool::ToolCall::new(id, name, args));
+            }
+            StreamEventKind::Usage(u) => usage = u,
+            StreamEventKind::Done { finish_reason: fr } => {
+                finish_reason = fr;
+            }
+        }
+    }
+
+    // Flush any in-progress calls that got deltas but no ToolCallEnd event.
+    // This handles the common case where providers send start+delta but
+    // the stream ends before a formal end event.
+    for (id, (name, args_str)) in in_progress_calls {
+        let args = if args_str.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&args_str)
+                .unwrap_or_else(|_| serde_json::Value::String(args_str))
+        };
+        tool_calls.push(roko_core::tool::ToolCall::new(id, name, args));
+    }
+
+    // Build an OpenAI-shaped JSON response so existing translators work.
+    let tool_calls_json: Vec<serde_json::Value> = tool_calls
+        .iter()
+        .map(|tc| {
+            serde_json::json!({
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments.to_string(),
+                }
+            })
+        })
+        .collect();
+
+    let mut message = serde_json::json!({
+        "role": "assistant",
+        "content": text,
+    });
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = serde_json::Value::String(reasoning);
+    }
+    if !tool_calls_json.is_empty() {
+        message["tool_calls"] = serde_json::Value::Array(tool_calls_json);
+    }
+
+    let mut json = serde_json::json!({
+        "choices": [{
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+        "usage": {
+            "prompt_tokens": usage.input_tokens,
+            "completion_tokens": usage.output_tokens,
+            "total_tokens": usage.input_tokens + usage.output_tokens,
+            "prompt_tokens_details": {
+                "cached_tokens": usage.cache_read_tokens,
+            },
+        },
+    });
+
+    // Stash TTFT in metadata for downstream consumers.
+    if let Some(ttft) = ttft_ms {
+        json["metadata"] = serde_json::json!({ "provider_ttft_ms": ttft });
+    }
+
+    Ok(BackendResponse::Json(json))
+}
+
+/// Convert a `BackendResponse` into a synthetic single-event stream.
+///
+/// Used by backends that do not implement native streaming: wraps the
+/// complete response as a sequence of `TextDelta` + `Done` events.
+pub fn response_to_synthetic_stream(
+    response: BackendResponse,
+) -> futures::stream::BoxStream<'static, Result<StreamEvent, LlmError>> {
+    use futures::stream;
+
+    let text = response.extract_text();
+    let usage = response.extract_usage();
+    let finish_reason = response
+        .extract_finish_reason_raw()
+        .unwrap_or_else(|| "stop".to_string());
+
+    let events = vec![
+        Ok(StreamEvent::now(StreamEventKind::TextDelta(text))),
+        Ok(StreamEvent::now(StreamEventKind::Usage(usage))),
+        Ok(StreamEvent::now(StreamEventKind::Done { finish_reason })),
+    ];
+
+    Box::pin(stream::iter(events))
 }
 
 // ─── StopReason + Output ─────────────────────────────────────────────
@@ -384,6 +720,30 @@ impl ToolLoop {
     #[must_use]
     pub fn mcp_error_accumulator(&self) -> Option<&crate::mcp::McpErrorAccumulator> {
         self.mcp_error_accumulator.as_ref()
+    }
+
+    /// Build a [`TurnConfig`] from the current model profile and defaults.
+    ///
+    /// This consolidates the scattered parameters that previously had to be
+    /// threaded individually. Backends receive this via `stream_turn`.
+    #[must_use]
+    pub fn turn_config(&self) -> TurnConfig {
+        use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS};
+
+        let max_tokens = self
+            .model_profile
+            .as_ref()
+            .and_then(|p| p.max_output)
+            .map(|v| v as u32)
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+
+        TurnConfig {
+            max_tokens,
+            temperature: None,
+            ttft_timeout: Duration::from_millis(DEFAULT_TTFT_TIMEOUT_MS),
+            request_timeout: Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS),
+            stop_sequences: vec![],
+        }
     }
 
     /// Run a fresh tool loop from an initial system + user prompt.
@@ -2102,5 +2462,292 @@ mod tests {
         let s = format!("{tl:?}");
         assert!(s.contains("ToolLoop"));
         assert!(s.contains("max_iterations"));
+    }
+
+    // ─── StreamEvent / collect_stream_to_response tests ──────────────
+
+    #[tokio::test]
+    async fn collect_stream_text_deltas_concatenate() {
+        use futures::stream;
+        let events = vec![
+            Ok(StreamEvent::now(StreamEventKind::TextDelta("Hello".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::TextDelta(", world!".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::Done {
+                finish_reason: "stop".to_string(),
+            })),
+        ];
+        let stream = Box::pin(stream::iter(events));
+        let start = std::time::Instant::now();
+        let response = collect_stream_to_response(stream, start).await.unwrap();
+        let text = response.extract_text();
+        assert_eq!(text, "Hello, world!");
+    }
+
+    #[tokio::test]
+    async fn collect_stream_tool_calls_assemble() {
+        use futures::stream;
+        let events = vec![
+            Ok(StreamEvent::now(StreamEventKind::ToolCallStart {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+            })),
+            Ok(StreamEvent::now(StreamEventKind::ToolCallDelta {
+                id: "call-1".to_string(),
+                json_fragment: r#"{"path":"#.to_string(),
+            })),
+            Ok(StreamEvent::now(StreamEventKind::ToolCallDelta {
+                id: "call-1".to_string(),
+                json_fragment: r#""foo.txt"}"#.to_string(),
+            })),
+            Ok(StreamEvent::now(StreamEventKind::ToolCallEnd {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"path": "foo.txt"}),
+            })),
+            Ok(StreamEvent::now(StreamEventKind::Done {
+                finish_reason: "tool_calls".to_string(),
+            })),
+        ];
+        let stream = Box::pin(stream::iter(events));
+        let start = std::time::Instant::now();
+        let response = collect_stream_to_response(stream, start).await.unwrap();
+
+        // The ToolCallEnd provides the final assembled args; the response
+        // should contain one tool call with the right arguments.
+        let BackendResponse::Json(ref json) = response else {
+            panic!("expected Json response");
+        };
+        let tool_calls = json
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(|tc| tc.as_array())
+            .expect("expected tool_calls array");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].pointer("/function/name").and_then(|n| n.as_str()),
+            Some("read_file")
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_stream_usage_is_preserved() {
+        use futures::stream;
+        let usage = crate::usage::Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 10,
+            ..Default::default()
+        };
+        let events = vec![
+            Ok(StreamEvent::now(StreamEventKind::TextDelta("ok".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::Usage(usage))),
+            Ok(StreamEvent::now(StreamEventKind::Done {
+                finish_reason: "stop".to_string(),
+            })),
+        ];
+        let stream = Box::pin(stream::iter(events));
+        let start = std::time::Instant::now();
+        let response = collect_stream_to_response(stream, start).await.unwrap();
+        let BackendResponse::Json(ref json) = response else {
+            panic!("expected Json response");
+        };
+        assert_eq!(
+            json.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64()),
+            Some(100)
+        );
+        assert_eq!(
+            json.pointer("/usage/completion_tokens").and_then(|v| v.as_u64()),
+            Some(50)
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_stream_ttft_is_measured() {
+        use futures::stream;
+        let events = vec![
+            Ok(StreamEvent::now(StreamEventKind::TextDelta("hi".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::Done {
+                finish_reason: "stop".to_string(),
+            })),
+        ];
+        let stream = Box::pin(stream::iter(events));
+        let start = std::time::Instant::now();
+        let response = collect_stream_to_response(stream, start).await.unwrap();
+        let BackendResponse::Json(ref json) = response else {
+            panic!("expected Json response");
+        };
+        // TTFT should be present in metadata.
+        let ttft = json.pointer("/metadata/provider_ttft_ms");
+        assert!(ttft.is_some(), "expected provider_ttft_ms in metadata");
+        // The TTFT value should be a non-negative number.
+        let ttft_val = ttft.and_then(|v| v.as_u64()).unwrap_or(0);
+        assert!(ttft_val < 5_000, "TTFT should be small in test: {ttft_val}ms");
+    }
+
+    #[tokio::test]
+    async fn collect_stream_error_propagates() {
+        use futures::stream;
+        let events = vec![
+            Ok(StreamEvent::now(StreamEventKind::TextDelta("partial".to_string()))),
+            Err(LlmError::Network("connection reset".to_string())),
+        ];
+        let stream = Box::pin(stream::iter(events));
+        let start = std::time::Instant::now();
+        let result = collect_stream_to_response(stream, start).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("connection reset"));
+    }
+
+    #[tokio::test]
+    async fn response_to_synthetic_stream_roundtrips() {
+        use futures::StreamExt;
+
+        let original = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "hello"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }));
+        let text_before = original.extract_text();
+
+        let stream = response_to_synthetic_stream(original);
+        let events: Vec<_> = stream.collect().await;
+
+        // Should have 3 events: TextDelta, Usage, Done
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[0].as_ref().unwrap().kind,
+            StreamEventKind::TextDelta(text) if text == &text_before
+        ));
+        assert!(matches!(
+            &events[1].as_ref().unwrap().kind,
+            StreamEventKind::Usage(_)
+        ));
+        assert!(matches!(
+            &events[2].as_ref().unwrap().kind,
+            StreamEventKind::Done { .. }
+        ));
+    }
+
+    #[test]
+    fn turn_config_default_uses_roko_defaults() {
+        let config = TurnConfig::default();
+        assert_eq!(config.max_tokens, roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS);
+        assert!(config.temperature.is_none());
+        assert_eq!(
+            config.ttft_timeout.as_millis() as u64,
+            roko_core::defaults::DEFAULT_TTFT_TIMEOUT_MS
+        );
+        assert_eq!(
+            config.request_timeout.as_millis() as u64,
+            roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS
+        );
+        assert!(config.stop_sequences.is_empty());
+    }
+
+    #[test]
+    fn stream_event_from_stream_chunk_content_delta() {
+        let chunk = StreamChunk::ContentDelta("hello".to_string());
+        let event: StreamEvent = chunk.into();
+        assert!(matches!(event.kind, StreamEventKind::TextDelta(ref text) if text == "hello"));
+    }
+
+    #[test]
+    fn stream_event_from_stream_chunk_reasoning_delta() {
+        let chunk = StreamChunk::ReasoningDelta("thinking".to_string());
+        let event: StreamEvent = chunk.into();
+        assert!(matches!(
+            event.kind,
+            StreamEventKind::ReasoningDelta(ref text) if text == "thinking"
+        ));
+    }
+
+    #[test]
+    fn stream_event_from_stream_chunk_done() {
+        let chunk = StreamChunk::Done(crate::translate::FinishReason::ToolCalls);
+        let event: StreamEvent = chunk.into();
+        assert!(matches!(event.kind, StreamEventKind::Done { ref finish_reason } if finish_reason.contains("ToolCalls")));
+    }
+
+    #[tokio::test]
+    async fn stream_turn_default_wraps_send_turn() {
+        let backend = FinalAnswerBackend {
+            text: "from send_turn".to_string(),
+        };
+        let config = TurnConfig::default();
+        let stream = backend
+            .stream_turn(
+                &[serde_json::json!({"role": "user", "content": "hi"})],
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+                &config,
+            )
+            .await
+            .expect("stream_turn should succeed");
+
+        use futures::StreamExt;
+        let events: Vec<_> = stream.collect::<Vec<_>>().await;
+        assert!(!events.is_empty());
+        // First event should contain the text
+        let first = events[0].as_ref().unwrap();
+        assert!(matches!(
+            &first.kind,
+            StreamEventKind::TextDelta(text) if text.contains("from send_turn")
+        ));
+    }
+
+    #[tokio::test]
+    async fn collect_stream_reasoning_delta_captured() {
+        use futures::stream;
+        let events = vec![
+            Ok(StreamEvent::now(StreamEventKind::ReasoningDelta("step 1".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::ReasoningDelta(" step 2".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::TextDelta("answer".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::Done {
+                finish_reason: "stop".to_string(),
+            })),
+        ];
+        let stream = Box::pin(stream::iter(events));
+        let start = std::time::Instant::now();
+        let response = collect_stream_to_response(stream, start).await.unwrap();
+        let BackendResponse::Json(ref json) = response else {
+            panic!("expected Json response");
+        };
+        // Reasoning should be in the message
+        let reasoning = json
+            .pointer("/choices/0/message/reasoning_content")
+            .and_then(|v| v.as_str());
+        assert_eq!(reasoning, Some("step 1 step 2"));
+    }
+
+    #[test]
+    fn tool_loop_turn_config_uses_model_profile() {
+        let profile = ModelProfile {
+            provider: "test".to_string(),
+            slug: "test-model".to_string(),
+            context_window: 128_000,
+            max_output: Some(8192),
+            ..Default::default()
+        };
+
+        let registry: Arc<dyn roko_core::tool::ToolRegistry> =
+            Arc::new(VecToolRegistry::from_tools(test_tools()));
+        let resolver: Arc<dyn crate::dispatcher::HandlerResolver> =
+            Arc::new(|name: &str| -> Option<Arc<dyn roko_core::tool::ToolHandler>> {
+                if name == "echo" {
+                    Some(Arc::new(EchoHandler) as Arc<dyn roko_core::tool::ToolHandler>)
+                } else {
+                    None
+                }
+            });
+        let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
+        let translator: Arc<dyn Translator> = Arc::new(MockTranslator);
+        let backend: Arc<dyn LlmBackend> = Arc::new(FinalAnswerBackend { text: "x".into() });
+
+        let tl = ToolLoop::new(translator, dispatcher, backend)
+            .with_model_profile(profile);
+
+        let config = tl.turn_config();
+        assert_eq!(config.max_tokens, 8192);
     }
 }

@@ -11,6 +11,8 @@ import BarChart from '../../components/Charts/BarChart';
 import { ThresholdGaugeRow } from '../../components/ThresholdGauge';
 import type { AdaptiveThresholdsResponse } from '../../components/ThresholdGauge';
 import { useCountUp } from '../../hooks/useCountUp';
+import CognitiveLoop from '../../components/canvas/CognitiveLoop';
+import { useDataHub } from '../../app/DataHub';
 import './dashboard.css';
 import './CostDashboard.css';
 
@@ -120,6 +122,7 @@ export default function CostDashboard() {
   const [providerHealth, setProviderHealth] = useState<ProviderHealthResponse | null>(null);
   const [thresholds, setThresholds] = useState<AdaptiveThresholdsResponse | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
+  const activePhase = useDataHub((s) => s.activePhase);
 
   const fetchAll = useCallback(async () => {
     const [h, e, c, t, r, ph, th] = await Promise.all([
@@ -355,6 +358,7 @@ export default function CostDashboard() {
         {/* Right: Activity mini stats */}
         <div className="dash-flex-1 dash-stagger" style={{ '--stagger-i': 4 } as React.CSSProperties}>
           <Pane title="ACTIVITY" badge={<span className="dash-badge">realtime</span>}>
+            <CognitiveLoop activePhase={activePhase ?? undefined} height={140} />
             <div className="dash-grid-activity">
               <ActivityBlock
                 label="Active Plans"

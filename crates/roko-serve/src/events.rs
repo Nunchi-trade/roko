@@ -520,6 +520,14 @@ pub enum ServerEvent {
         summary: serde_json::Value,
     },
 
+    /// A bench regression report was produced after a run completed.
+    #[serde(rename = "BenchRegressionReport")]
+    BenchRegressionReport {
+        bench_id: String,
+        has_regressions: bool,
+        report: serde_json::Value,
+    },
+
     /// A matrix (multi-lane) bench run was started.
     #[serde(rename = "MatrixRunStarted")]
     MatrixRunStarted {
@@ -606,6 +614,40 @@ pub enum ServerEvent {
         resolved: u32,
         total: u32,
         pass_rate: f64,
+    },
+
+    /// New block observed on the connected chain.
+    ChainBlock {
+        number: u64,
+        hash: String,
+        parent_hash: String,
+        timestamp: u64,
+        gas_used: u64,
+        gas_limit: u64,
+        tx_count: u32,
+        base_fee_per_gas: Option<u64>,
+    },
+
+    /// Transaction included in a block.
+    ChainTx {
+        block_number: u64,
+        tx_hash: String,
+        from: String,
+        to: Option<String>,
+        value_wei: String,
+        gas_used: u64,
+        method_sig: Option<String>,
+        success: bool,
+    },
+
+    /// Decoded contract event log.
+    ChainContractEvent {
+        block_number: u64,
+        tx_hash: String,
+        log_index: u32,
+        contract: String,
+        event_name: String,
+        decoded: serde_json::Value,
     },
 
 }

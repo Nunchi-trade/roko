@@ -36,6 +36,13 @@ pub struct ChainConfig {
     /// Deployer / funder address.
     #[serde(default)]
     pub deployer: Option<String>,
+    /// Auto-deploy ISFR contracts on startup (dev chains only, default: false).
+    #[serde(default)]
+    pub auto_deploy_contracts: bool,
+    /// Path to foundry contracts directory (relative to workspace root).
+    /// Default: "contracts".
+    #[serde(default)]
+    pub contracts_dir: Option<String>,
 }
 
 /// Relay registration and workspace discovery settings.
@@ -103,6 +110,13 @@ pub struct ISFRSection {
     pub outlier_sigma: f64,
     /// Rate source definitions.
     pub sources: Vec<ISFRSourceConfig>,
+    /// Auto-deploy ISFR contracts on startup (dev chains only, default: false).
+    #[serde(default)]
+    pub auto_deploy_contracts: bool,
+    /// Path to foundry contracts directory (contains `out/` with forge artifacts).
+    /// Relative to workspace root. Default: "contracts".
+    #[serde(default)]
+    pub contracts_dir: Option<String>,
 }
 
 impl Default for ISFRSection {
@@ -114,6 +128,8 @@ impl Default for ISFRSection {
             min_submissions: 2,
             outlier_sigma: 3.0,
             sources: Vec::new(),
+            auto_deploy_contracts: false,
+            contracts_dir: None,
         }
     }
 }

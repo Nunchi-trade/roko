@@ -15,6 +15,7 @@ pub mod budget;
 pub mod cache;
 pub mod chain;
 pub mod compat;
+pub mod graduation;
 pub mod gates;
 pub mod hot_reload;
 pub mod learning;
@@ -56,13 +57,14 @@ pub use schema::{
     AgentBudget, AgentConfig, AgentDefinition, AgentMode, AgentThresholds, ApiKeyEntry,
     BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig, CompileFailRepeatConfig, ConductorConfig,
     ContextWindowPressureConfig, CoreRunnerConfig, CostOverrunConfig, DataLlmConfig, DeployConfig,
-    GateRungConfig, GatesConfig, GeminiConfig, GhostTurnConfig, GithubWebhookConfig, ISFRSection,
+    GateRungConfig, GatesConfig, GeminiConfig, GhostTurnConfig, GithubWebhookConfig,
+    GraduationConfig, GraduationPolicy, ISFRSection,
     ISFRSourceConfig, IterationLoopConfig, LearningConfig, ModelProfile, PerplexityConfig,
     PipelineBandConfig, PipelineConfig, PipelineReviewerMode, PrdConfig, ProjectConfig,
     ProviderConfig, ProviderRouting, RelayConfig, ReviewLoopConfig, RewardWeights, RokoConfig,
     RoleOverride, RoutingAlgorithm, RoutingConfig, RoutingOverrides, RoutingRewardWeightsConfig,
     SafetySetting, SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig,
-    ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig, SpecDriftConfig, StuckPatternConfig,
+    ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig, SpecDriftConfig, StuckPatternConfig, TracingConfig,
     SubscriptionConfig, SubscriptionFilterConfig, SubscriptionTrigger, TestFailureBudgetConfig,
     TimeOverrunConfig, ToolProfileConfig, ToolsConfig, TuiConfig, ValidationConfig, WatcherConfig,
     WatcherPathConfig, WatcherThresholds, WebhooksConfig,

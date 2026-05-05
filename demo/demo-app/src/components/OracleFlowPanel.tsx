@@ -1,43 +1,11 @@
-import { useState } from 'react';
-import { useEventStreamContext, useContextEventSubscription } from '../contexts/EventStreamContext';
-import { useInferenceCosts } from '../hooks/useOperationEvents';
+import type { RunMetrics } from './CostComparisonPanel';
 import './OracleFlowPanel.css';
 
 interface OracleFlowPanelProps {
-  /** Operation ID for the data-agent run */
-  dataOpId?: string | null;
-  /** Operation ID for the strategy-agent run */
-  strategyOpId?: string | null;
-  /** Whether the chain check has been performed */
+  data: RunMetrics;
+  strategy: RunMetrics;
   chainChecked?: boolean;
   isRunning?: boolean;
-}
-
-interface KnowledgeEvent {
-  id: string;
-  type: 'ingested' | 'consumed';
-  topic?: string;
-  timestamp: number;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
-}
-
-function readStr(obj: Record<string, unknown>, keys: string[]): string {
-  for (const k of keys) {
-    const v = obj[k];
-    if (typeof v === 'string' && v.length > 0) return v;
-  }
-  for (const nest of ['data', 'event'] as const) {
-    const sub = obj[nest];
-    if (!isRecord(sub)) continue;
-    for (const k of keys) {
-      const v = sub[k];
-      if (typeof v === 'string' && v.length > 0) return v;
-    }
-  }
-  return '';
 }
 
 function fmtCost(n: number): string {
@@ -62,62 +30,35 @@ const FLOW_STEPS: { id: FlowStep; label: string; desc: string; icon: string }[] 
 ];
 
 export default function OracleFlowPanel({
-  dataOpId = null,
-  strategyOpId = null,
+  data,
+  strategy,
   chainChecked = false,
   isRunning = false,
 }: OracleFlowPanelProps) {
-  const { connected } = useEventStreamContext();
-  const dataCosts = useInferenceCosts(dataOpId);
-  const strategyCosts = useInferenceCosts(strategyOpId);
-  const [knowledgeEvents, setKnowledgeEvents] = useState<KnowledgeEvent[]>([]);
-
-  useContextEventSubscription(
-    ['knowledge_ingested', 'knowledge_consumed'],
-    (event: unknown) => {
-      if (!isRecord(event)) return;
-      const type = typeof event.type === 'string' ? event.type : '';
-      const mapped: 'ingested' | 'consumed' =
-        type === 'knowledge_consumed' ? 'consumed' : 'ingested';
-      const topic = readStr(event, ['topic', 'key', 'title', 'path']);
-
-      setKnowledgeEvents((prev) => [
-        ...prev.slice(-19),
-        {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          type: mapped,
-          topic: topic || undefined,
-          timestamp: Date.now(),
-        },
-      ]);
-    },
-  );
-
-  // Determine current flow step
   let currentStep: FlowStep = 'connect';
-  if (strategyCosts.calls > 0) currentStep = 'recommend';
-  else if (knowledgeEvents.some((e) => e.type === 'ingested')) currentStep = 'write';
-  else if (dataCosts.calls > 0) currentStep = 'scan';
+  if (strategy.calls > 0) currentStep = 'recommend';
+  else if (data.cost > 0) currentStep = 'write';
+  else if (data.calls > 0) currentStep = 'scan';
   else if (chainChecked) currentStep = 'connect';
 
   const stepOrder: FlowStep[] = ['connect', 'scan', 'write', 'recommend'];
   const currentIdx = stepOrder.indexOf(currentStep);
-  const hasAnyData = chainChecked || dataCosts.calls > 0 || strategyCosts.calls > 0;
+  const hasAnyData = chainChecked || data.calls > 0 || strategy.calls > 0;
 
   const panelState = isRunning
     ? 'running'
     : hasAnyData ? 'data' : 'pending';
 
-  const totalCost = dataCosts.totalCost + strategyCosts.totalCost;
-  const totalTokens = dataCosts.totalTokens + strategyCosts.totalTokens;
-  const totalCalls = dataCosts.calls + strategyCosts.calls;
+  const totalCost = data.cost + strategy.cost;
+  const totalTokens = data.tokens + strategy.tokens;
+  const totalCalls = data.calls + strategy.calls;
 
   return (
     <section className="oracle-panel" aria-label="Oracle flow">
       <div className="oracle-panel-header">
         <span className="oracle-panel-title">Oracle Flow</span>
-        <span className={`oracle-panel-live ${connected ? 'connected' : ''}`}>
-          {panelState === 'pending' ? (connected ? 'armed' : 'offline') : 'live'}
+        <span className={`oracle-panel-live${hasAnyData ? ' connected' : ''}`}>
+          {panelState === 'pending' ? 'ready' : 'live'}
         </span>
       </div>
 
@@ -158,8 +99,8 @@ export default function OracleFlowPanel({
         </div>
         <div className="oracle-panel-metric">
           <div className="oracle-panel-metric-label">Data Calls</div>
-          <div className={`oracle-panel-metric-value${dataCosts.calls <= 0 ? ' oracle-panel-metric-value--empty' : ''}`}>
-            {dataCosts.calls > 0 ? String(dataCosts.calls) : '--'}
+          <div className={`oracle-panel-metric-value${data.calls <= 0 ? ' oracle-panel-metric-value--empty' : ''}`}>
+            {data.calls > 0 ? String(data.calls) : '--'}
           </div>
         </div>
         <div className="oracle-panel-metric">
@@ -169,24 +110,6 @@ export default function OracleFlowPanel({
           </div>
         </div>
       </div>
-
-      {knowledgeEvents.length > 0 && (
-        <div className="oracle-panel-knowledge">
-          <div className="oracle-panel-knowledge-title">
-            Knowledge Flow
-          </div>
-          {knowledgeEvents.slice(-5).reverse().map((ev) => (
-            <div key={ev.id} className="oracle-panel-knowledge-row">
-              <span className={`oracle-panel-knowledge-type oracle-panel-knowledge-type--${ev.type}`}>
-                {ev.type}
-              </span>
-              <span className="oracle-panel-knowledge-content">
-                {ev.topic || 'knowledge entry'}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
     </section>
   );
 }

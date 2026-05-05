@@ -153,6 +153,13 @@ fn apply_event(summary: &mut RunSummary, event: &RuntimeEvent) {
         | RuntimeEvent::RunCompleted { .. }
         | RuntimeEvent::KnowledgeIngested { .. }
         | RuntimeEvent::KnowledgeConsumed { .. } => {}
+        // Progress tracking events -- informational, no aggregate summary fields yet.
+        RuntimeEvent::InferenceFirstToken { .. }
+        | RuntimeEvent::ToolCallStarted { .. }
+        | RuntimeEvent::ToolCallCompleted { .. }
+        | RuntimeEvent::TaskStarted { .. }
+        | RuntimeEvent::TaskCompleted { .. }
+        | RuntimeEvent::PipelinePhase { .. } => {}
     }
 }
 

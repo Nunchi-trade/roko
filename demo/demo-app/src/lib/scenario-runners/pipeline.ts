@@ -49,6 +49,12 @@ export const pipelineScenario: ClickableScenario = {
       signal: ctx.signal,
     });
 
+    if (result.cost) ctx.setMetric('pipeline-cost', result.cost);
+    if (result.tokens) ctx.setMetric('pipeline-tokens', result.tokens);
+    ctx.setMetric('pipeline-elapsed', String(result.elapsed ?? 0));
+    ctx.setMetric('pipeline-calls', '1');
+
+    // Also feed sidebar stats
     if (result.cost) ctx.setMetric('cost', result.cost);
     if (result.tokens) ctx.setMetric('tokens', result.tokens);
 

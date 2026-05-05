@@ -158,6 +158,16 @@ export type ServerEvent =
   | { type: 'isfr_source_health_changed'; sourceId: string;
        health: 'live' | 'stale' | 'offline'; lastRateBps: number | null }
   | { type: 'isfr_keeper_state_changed'; running: boolean }
+  // Chain (block watcher)
+  | { type: 'chain_block'; number: number; hash: string; parentHash: string;
+       timestamp: number; gasUsed: number; gasLimit: number; txCount: number;
+       baseFeePerGas: number | null }
+  | { type: 'chain_tx'; blockNumber: number; txHash: string; from: string;
+       to: string | null; valueWei: string; gasUsed: number;
+       methodSig: string | null; success: boolean }
+  | { type: 'chain_contract_event'; blockNumber: number; txHash: string;
+       logIndex: number; contract: string; eventName: string;
+       decoded: Record<string, unknown> }
   // System
   | { type: 'server_shutdown' }
   | { type: 'error'; message: string };

@@ -121,6 +121,7 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         timeouts: super::timeouts::TimeoutConfig::default(),
         agents: Vec::new(),
         validation: ValidationConfig::default(),
+        graduation: crate::config::graduation::GraduationConfig::default(),
     }
 }
 
@@ -224,6 +225,7 @@ fn convert_conductor(m: &MoriConfig) -> ConductorConfig {
         max_auto_fix_attempts: m.max_auto_fix_attempts.unwrap_or(d.max_auto_fix_attempts),
         auto_fix_model: m.auto_fix_model.clone().unwrap_or(d.auto_fix_model),
         watchers: d.watchers,
+        context_pressure_enabled: d.context_pressure_enabled,
     }
 }
 

@@ -166,7 +166,7 @@ impl TestSession {
             .model_index_for_slug(&self.model)
             .context("mock pipeline model missing from cascade router")?;
         let context = RoutingContext::default().to_features();
-        let cost_table = CostTable::from_config(&std::collections::HashMap::new()).with_defaults();
+        let cost_table = CostTable::from_config(&indexmap::IndexMap::new()).with_defaults();
 
         let mut assistant_text = String::new();
         let mut total_input_tokens = 0u64;
@@ -319,6 +319,7 @@ fn build_mock_config(base_url: &str, timeout_ms: u64) -> RokoConfig {
             thinking_level: None,
             use_max_completion_tokens: false,
             max_tools: Some(64),
+            max_tool_iterations: None,
             tokenizer_ratio: Some(1.0),
             supports_search: false,
             supports_citations: false,

@@ -67,6 +67,7 @@ export const oracleScenario: ClickableScenario = {
         workspaceDir: ctx.workspaceDir,
         signal: ctx.signal,
       });
+      if (result.ok) ctx.setMetric('chain-checked', '1');
       return { ok: result.ok, error: result.error };
     }
 
@@ -77,8 +78,15 @@ export const oracleScenario: ClickableScenario = {
       signal: ctx.signal,
     });
 
-    if (result.cost) ctx.setMetric(commandId === 'data-agent' ? 'data-cost' : 'strategy-cost', result.cost);
-    if (result.tokens) ctx.setMetric(commandId === 'data-agent' ? 'data-tokens' : 'strategy-tokens', result.tokens);
+    const prefix = commandId === 'data-agent' ? 'data' : 'strategy';
+    if (result.cost) ctx.setMetric(`${prefix}-cost`, result.cost);
+    if (result.tokens) ctx.setMetric(`${prefix}-tokens`, result.tokens);
+    ctx.setMetric(`${prefix}-elapsed`, String(result.elapsed ?? 0));
+    ctx.setMetric(`${prefix}-calls`, '1');
+
+    // Also feed sidebar stats
+    if (result.cost) ctx.setMetric('cost', result.cost);
+    if (result.tokens) ctx.setMetric('tokens', result.tokens);
 
     return { ok: result.ok, error: result.error };
   },

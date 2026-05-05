@@ -1,524 +1,299 @@
-//! Integration tests for fan-out/fan-in parallelism and conditional edges.
+//! Integration tests for condition evaluation, budget tracking, and TOML loading.
+//!
+//! These tests exercise the wired modules: `condition`, `budget`, `types`
+//! (NodeOutput, GraphConfig), and the existing `engine`/`loader` integration.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use roko_graph::budget::{BudgetLimits, BudgetTracker};
-use roko_graph::condition::{CompareOp, EdgeCondition};
-use roko_graph::engine::{CellExecutor, GraphEngine};
-use roko_graph::types::*;
+use roko_graph::condition::{CompareOp, Condition, evaluate};
+use roko_graph::types::{GraphConfig, NodeOutput};
 use serde_json::json;
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// ─── Condition evaluation tests ─────────────────────────────────────────────
 
-fn passthrough_executor() -> CellExecutor {
-    Arc::new(|node: Node, _inputs: Vec<NodeOutput>| {
-        Box::pin(async move { NodeOutput::success(&node.id, json!({"cell_type": node.cell_type})) })
-    })
+#[test]
+fn condition_always_returns_true() {
+    let output = NodeOutput::success("n1", json!({}));
+    assert!(evaluate(&Condition::Always, &output));
 }
 
-fn timed_executor(delay_ms: u64) -> CellExecutor {
-    Arc::new(move |node: Node, _inputs: Vec<NodeOutput>| {
-        Box::pin(async move {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            NodeOutput::success(&node.id, json!({}))
-        })
-    })
+#[test]
+fn condition_on_success_with_success() {
+    let output = NodeOutput::success("n1", json!({"result": "ok"}));
+    assert!(evaluate(&Condition::OnSuccess, &output));
 }
 
-fn node(id: &str, cell_type: &str) -> Node {
-    Node {
-        id: id.into(),
-        name: id.into(),
-        cell_type: cell_type.into(),
-        config: HashMap::new(),
-    }
+#[test]
+fn condition_on_success_with_failure() {
+    let output = NodeOutput::failed("n1", "boom");
+    assert!(!evaluate(&Condition::OnSuccess, &output));
 }
 
-fn edge(from: &str, to: &str) -> Edge {
-    Edge {
-        from: from.into(),
-        to: to.into(),
-        condition: EdgeCondition::Always,
-    }
+#[test]
+fn condition_on_failure_with_failure() {
+    let output = NodeOutput::failed("n1", "boom");
+    assert!(evaluate(&Condition::OnFailure, &output));
 }
 
-fn conditional_edge(from: &str, to: &str, condition: EdgeCondition) -> Edge {
-    Edge {
-        from: from.into(),
-        to: to.into(),
-        condition,
-    }
+#[test]
+fn condition_on_failure_with_success() {
+    let output = NodeOutput::success("n1", json!({}));
+    assert!(!evaluate(&Condition::OnFailure, &output));
 }
 
-// ─── Fan-Out Tests ──────────────────────────────────────────────────────────
+#[test]
+fn condition_when_eq_string() {
+    let output = NodeOutput::success("n1", json!({"status": "pass"}));
+    let cond = Condition::when("status", CompareOp::Eq, toml::Value::String("pass".into()));
+    assert!(evaluate(&cond, &output));
+}
 
-#[tokio::test]
-async fn fan_out_three_branches_execute_in_parallel() {
-    // Source -> (A, B, C) all independent.
-    let graph = GraphDef {
-        name: "fan-out-3".into(),
-        description: "".into(),
-        nodes: vec![
-            node("source", "test"),
-            node("branch_a", "test"),
-            node("branch_b", "test"),
-            node("branch_c", "test"),
-        ],
-        edges: vec![
-            edge("source", "branch_a"),
-            edge("source", "branch_b"),
-            edge("source", "branch_c"),
-        ],
-        config: GraphConfig::default(),
-    };
+#[test]
+fn condition_when_gte_numeric() {
+    let output = NodeOutput::success("n1", json!({"score": 90}));
+    let cond = Condition::when("score", CompareOp::Gte, toml::Value::Integer(80));
+    assert!(evaluate(&cond, &output));
+}
 
-    let start = Instant::now();
-    // Each branch takes 50ms. If parallel, total should be ~100ms (source + branches).
-    let engine = GraphEngine::new(graph, timed_executor(50));
-    let result = engine.execute().await.unwrap();
-    let elapsed = start.elapsed();
+#[test]
+fn condition_when_lt_numeric_false() {
+    let output = NodeOutput::success("n1", json!({"score": 90}));
+    let cond = Condition::when("score", CompareOp::Lt, toml::Value::Integer(80));
+    assert!(!evaluate(&cond, &output));
+}
 
-    assert_eq!(result.status, GraphStatus::Success);
-    assert_eq!(result.node_outputs.len(), 4);
-    // Should complete in roughly 100ms (2 levels of 50ms), not 200ms (serial).
-    assert!(
-        elapsed < Duration::from_millis(250),
-        "elapsed {elapsed:?} suggests branches ran serially"
+#[test]
+fn condition_when_nested_field() {
+    let output = NodeOutput::success("n1", json!({"result": {"status": "complete"}}));
+    let cond = Condition::when(
+        "result.status",
+        CompareOp::Eq,
+        toml::Value::String("complete".into()),
     );
+    assert!(evaluate(&cond, &output));
 }
 
-#[tokio::test]
-async fn fan_in_waits_for_all_branches() {
-    // A, B, C -> Merge (fan-in from 3 sources).
-    let graph = GraphDef {
-        name: "fan-in-3".into(),
-        description: "".into(),
-        nodes: vec![
-            node("a", "test"),
-            node("b", "test"),
-            node("c", "test"),
-            node("merge", "test"),
-        ],
-        edges: vec![edge("a", "merge"), edge("b", "merge"), edge("c", "merge")],
-        config: GraphConfig::default(),
-    };
+#[test]
+fn condition_when_contains_string() {
+    let output = NodeOutput::success("n1", json!({"message": "all tests passed"}));
+    let cond = Condition::when(
+        "message",
+        CompareOp::Contains,
+        toml::Value::String("tests passed".into()),
+    );
+    assert!(evaluate(&cond, &output));
+}
 
-    // Executor that records input count for merge node.
-    let executor: CellExecutor = Arc::new(|node: Node, inputs: Vec<NodeOutput>| {
-        Box::pin(async move { NodeOutput::success(&node.id, json!({"input_count": inputs.len()})) })
+#[test]
+fn condition_when_missing_field_returns_false() {
+    let output = NodeOutput::success("n1", json!({"other": 42}));
+    let cond = Condition::when("missing", CompareOp::Eq, toml::Value::Integer(42));
+    assert!(!evaluate(&cond, &output));
+}
+
+#[test]
+fn skipped_node_is_neither_success_nor_failure() {
+    let output = NodeOutput::skipped("n1", "budget exceeded");
+    assert!(!evaluate(&Condition::OnSuccess, &output));
+    assert!(!evaluate(&Condition::OnFailure, &output));
+}
+
+#[test]
+fn condition_serde_roundtrip() {
+    let cond = Condition::when("score", CompareOp::Gte, toml::Value::Integer(90));
+    let serialized = serde_json::to_string(&cond).unwrap();
+    let parsed: Condition = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(cond, parsed);
+}
+
+// ─── Budget tracker tests ───────────────────────────────────────────────────
+
+#[test]
+fn budget_tracker_starts_empty() {
+    let tracker = BudgetTracker::with_limits(BudgetLimits {
+        max_tokens: Some(1000),
+        max_cost_usd: Some(1.0),
+        deadline: None,
     });
-
-    let engine = GraphEngine::new(graph, executor);
-    let result = engine.execute().await.unwrap();
-
-    let merge_out = result
-        .node_outputs
-        .iter()
-        .find(|o| o.node_id == "merge")
-        .unwrap();
-    assert_eq!(merge_out.data["input_count"], 3);
+    assert_eq!(tracker.tokens_used(), 0);
+    assert!((tracker.cost_usd()).abs() < f64::EPSILON);
+    assert!(tracker.check().is_ok());
 }
 
-#[tokio::test]
-async fn diamond_dag_fan_out_then_fan_in() {
-    // Classic diamond: A -> (B, C) -> D
-    let graph = GraphDef {
-        name: "diamond".into(),
-        description: "".into(),
-        nodes: vec![
-            node("a", "source"),
-            node("b", "branch"),
-            node("c", "branch"),
-            node("d", "sink"),
-        ],
-        edges: vec![
-            edge("a", "b"),
-            edge("a", "c"),
-            edge("b", "d"),
-            edge("c", "d"),
-        ],
-        config: GraphConfig::default(),
-    };
-
-    let counter = Arc::new(AtomicUsize::new(0));
-    let ctr = counter.clone();
-    let executor: CellExecutor = Arc::new(move |node: Node, inputs: Vec<NodeOutput>| {
-        let ctr = ctr.clone();
-        Box::pin(async move {
-            let order = ctr.fetch_add(1, Ordering::SeqCst);
-            NodeOutput::success(
-                &node.id,
-                json!({"order": order, "input_count": inputs.len()}),
-            )
-        })
-    });
-
-    let engine = GraphEngine::new(graph, executor);
-    let result = engine.execute().await.unwrap();
-
-    assert_eq!(result.status, GraphStatus::Success);
-    assert_eq!(result.node_outputs.len(), 4);
-
-    // D must execute last and receive 2 inputs.
-    let d_out = result
-        .node_outputs
-        .iter()
-        .find(|o| o.node_id == "d")
-        .unwrap();
-    assert_eq!(d_out.data["input_count"], 2);
-
-    // A must execute first.
-    let a_out = result
-        .node_outputs
-        .iter()
-        .find(|o| o.node_id == "a")
-        .unwrap();
-    assert_eq!(a_out.data["order"], 0);
-}
-
-// ─── Conditional Edge Tests ─────────────────────────────────────────────────
-
-#[tokio::test]
-async fn conditional_on_success_prunes_failure_branch() {
-    let graph = GraphDef {
-        name: "conditional-branch".into(),
-        description: "".into(),
-        nodes: vec![
-            node("check", "gate"),
-            node("success_path", "handler"),
-            node("failure_path", "handler"),
-        ],
-        edges: vec![
-            conditional_edge("check", "success_path", EdgeCondition::OnSuccess),
-            conditional_edge("check", "failure_path", EdgeCondition::OnFailure),
-        ],
-        config: GraphConfig::default(),
-    };
-
-    // Check node succeeds.
-    let engine = GraphEngine::new(graph, passthrough_executor());
-    let result = engine.execute().await.unwrap();
-
-    let executed_ids: Vec<&str> = result
-        .node_outputs
-        .iter()
-        .map(|o| o.node_id.as_str())
-        .collect();
-
-    assert!(executed_ids.contains(&"check"));
-    assert!(executed_ids.contains(&"success_path"));
-    assert!(!executed_ids.contains(&"failure_path"));
-}
-
-#[tokio::test]
-async fn conditional_on_failure_runs_failure_branch() {
-    let graph = GraphDef {
-        name: "failure-branch".into(),
-        description: "".into(),
-        nodes: vec![
-            node("check", "gate"),
-            node("success_path", "handler"),
-            node("failure_path", "handler"),
-        ],
-        edges: vec![
-            conditional_edge("check", "success_path", EdgeCondition::OnSuccess),
-            conditional_edge("check", "failure_path", EdgeCondition::OnFailure),
-        ],
-        config: GraphConfig::default(),
-    };
-
-    // Executor where "check" fails.
-    let executor: CellExecutor = Arc::new(|node: Node, _inputs: Vec<NodeOutput>| {
-        Box::pin(async move {
-            if node.id == "check" {
-                NodeOutput::failed(&node.id, "gate check failed")
-            } else {
-                NodeOutput::success(&node.id, json!({}))
-            }
-        })
-    });
-
-    let engine = GraphEngine::new(graph, executor);
-    let result = engine.execute().await.unwrap();
-
-    let executed_ids: Vec<&str> = result
-        .node_outputs
-        .iter()
-        .map(|o| o.node_id.as_str())
-        .collect();
-
-    assert!(executed_ids.contains(&"check"));
-    assert!(!executed_ids.contains(&"success_path"));
-    assert!(executed_ids.contains(&"failure_path"));
-}
-
-#[tokio::test]
-async fn conditional_when_expression_routes_by_score() {
-    let graph = GraphDef {
-        name: "score-routing".into(),
-        description: "".into(),
-        nodes: vec![
-            node("eval", "scorer"),
-            node("high_quality", "handler"),
-            node("low_quality", "handler"),
-        ],
-        edges: vec![
-            conditional_edge(
-                "eval",
-                "high_quality",
-                EdgeCondition::when("score", CompareOp::Gte, toml::Value::Integer(80.into())),
-            ),
-            conditional_edge(
-                "eval",
-                "low_quality",
-                EdgeCondition::when("score", CompareOp::Lt, toml::Value::Integer(80.into())),
-            ),
-        ],
-        config: GraphConfig::default(),
-    };
-
-    // Eval produces score=90 (high quality).
-    let executor: CellExecutor = Arc::new(|node: Node, _inputs: Vec<NodeOutput>| {
-        Box::pin(async move {
-            if node.id == "eval" {
-                NodeOutput::success(&node.id, json!({"score": 90}))
-            } else {
-                NodeOutput::success(&node.id, json!({}))
-            }
-        })
-    });
-
-    let engine = GraphEngine::new(graph, executor);
-    let result = engine.execute().await.unwrap();
-
-    let executed_ids: Vec<&str> = result
-        .node_outputs
-        .iter()
-        .map(|o| o.node_id.as_str())
-        .collect();
-
-    assert!(executed_ids.contains(&"eval"));
-    assert!(executed_ids.contains(&"high_quality"));
-    assert!(!executed_ids.contains(&"low_quality"));
-}
-
-// ─── Budget Enforcement Tests ───────────────────────────────────────────────
-
-#[tokio::test]
-async fn budget_token_limit_stops_execution() {
-    let graph = GraphDef {
-        name: "budget-test".into(),
-        description: "".into(),
-        nodes: vec![node("a", "test"), node("b", "test"), node("c", "test")],
-        edges: vec![edge("a", "b"), edge("b", "c")],
-        config: GraphConfig::default(),
-    };
-
-    let budget = BudgetTracker::with_limits(BudgetLimits {
-        max_tokens: Some(50),
+#[test]
+fn budget_token_limit_exceeded() {
+    let tracker = BudgetTracker::with_limits(BudgetLimits {
+        max_tokens: Some(100),
         max_cost_usd: None,
         deadline: None,
     });
+    tracker.record("n1", 80, 0.01, Duration::from_millis(100));
+    assert!(tracker.check().is_ok());
 
-    // Each node uses 30 tokens.
-    let executor: CellExecutor = Arc::new(|node: Node, _inputs: Vec<NodeOutput>| {
-        Box::pin(async move {
-            let mut out = NodeOutput::success(&node.id, json!({}));
-            out.tokens_used = 30;
-            out
-        })
-    });
-
-    let engine = GraphEngine::with_budget(graph, executor, budget);
-    let result = engine.execute().await.unwrap();
-
-    assert!(matches!(result.status, GraphStatus::BudgetExceeded { .. }));
-
-    // First node (30 tokens) succeeds; remaining exceed 50-token limit.
-    let a_out = result
-        .node_outputs
-        .iter()
-        .find(|o| o.node_id == "a")
-        .unwrap();
-    assert!(a_out.status.is_success());
-
-    // At least one subsequent node should be skipped.
-    let has_skipped = result
-        .node_outputs
-        .iter()
-        .any(|o| matches!(o.status, NodeStatus::Skipped { .. }));
-    assert!(has_skipped);
+    tracker.record("n2", 30, 0.01, Duration::from_millis(50));
+    assert!(tracker.check().is_err());
 }
-
-#[tokio::test]
-async fn budget_cost_limit_stops_execution() {
-    let graph = GraphDef {
-        name: "cost-budget".into(),
-        description: "".into(),
-        nodes: vec![node("a", "test"), node("b", "test")],
-        edges: vec![edge("a", "b")],
-        config: GraphConfig::default(),
-    };
-
-    let budget = BudgetTracker::with_limits(BudgetLimits {
-        max_tokens: None,
-        max_cost_usd: Some(0.01),
-        deadline: None,
-    });
-
-    let executor: CellExecutor = Arc::new(|node: Node, _inputs: Vec<NodeOutput>| {
-        Box::pin(async move {
-            let mut out = NodeOutput::success(&node.id, json!({}));
-            out.cost_usd = 0.02; // Exceeds limit after first node.
-            out
-        })
-    });
-
-    let engine = GraphEngine::with_budget(graph, executor, budget);
-    let result = engine.execute().await.unwrap();
-
-    assert!(matches!(result.status, GraphStatus::BudgetExceeded { .. }));
-}
-
-// ─── TOML Parsing Test ──────────────────────────────────────────────────────
 
 #[test]
-fn parse_graph_toml_basic() {
-    let toml_str = r#"
-name = "test-pipeline"
-description = "A simple pipeline"
+fn budget_cost_limit_exceeded() {
+    let tracker = BudgetTracker::with_limits(BudgetLimits {
+        max_tokens: None,
+        max_cost_usd: Some(0.50),
+        deadline: None,
+    });
+    tracker.record("n1", 100, 0.30, Duration::from_millis(100));
+    assert!(tracker.check().is_ok());
 
-[[nodes]]
-id = "compose"
-name = "Prompt Assembly"
-cell_type = "compose"
-
-[nodes.config]
-template = "Do the thing"
-
-[[nodes]]
-id = "agent"
-name = "LLM Agent"
-cell_type = "agent"
-
-[nodes.config]
-model = "claude-sonnet-4-20250514"
-provider = "anthropic"
-
-[[edges]]
-from = "compose"
-to = "agent"
-
-[edges.condition]
-type = "always"
-
-[config]
-max_tokens = 10000
-max_cost_usd = 1.0
-deadline = 300
-max_parallelism = 4
-"#;
-
-    let graph = roko_graph::engine::parse_graph_toml(toml_str).unwrap();
-    assert_eq!(graph.name, "test-pipeline");
-    assert_eq!(graph.nodes.len(), 2);
-    assert_eq!(graph.edges.len(), 1);
-    assert_eq!(graph.config.max_tokens, Some(10000));
-    assert_eq!(graph.config.max_parallelism, 4);
+    tracker.record("n2", 100, 0.25, Duration::from_millis(50));
+    assert!(tracker.check().is_err());
 }
 
-// ─── Complex DAG Test ───────────────────────────────────────────────────────
+#[test]
+fn budget_no_limits_never_exceeded() {
+    let tracker = BudgetTracker::with_limits(BudgetLimits {
+        max_tokens: None,
+        max_cost_usd: None,
+        deadline: None,
+    });
+    tracker.record("n1", 999_999, 999.0, Duration::from_secs(9999));
+    assert!(tracker.check().is_ok());
+}
+
+#[test]
+fn budget_remaining_cost_computed_correctly() {
+    let tracker = BudgetTracker::with_limits(BudgetLimits {
+        max_tokens: None,
+        max_cost_usd: Some(1.0),
+        deadline: None,
+    });
+    tracker.record("n1", 0, 0.35, Duration::ZERO);
+    let remaining = tracker.remaining_cost_usd().unwrap();
+    assert!((remaining - 0.65).abs() < 0.001);
+}
+
+#[test]
+fn budget_breakdown_records_all_nodes() {
+    let tracker = BudgetTracker::with_limits(BudgetLimits {
+        max_tokens: None,
+        max_cost_usd: None,
+        deadline: None,
+    });
+    tracker.record("n1", 50, 0.01, Duration::from_millis(10));
+    tracker.record("n2", 75, 0.02, Duration::from_millis(20));
+    let bd = tracker.breakdown();
+    assert_eq!(bd.len(), 2);
+    assert_eq!(bd[0].node_id, "n1");
+    assert_eq!(bd[1].node_id, "n2");
+}
+
+// ─── GraphConfig and NodeOutput tests ───────────────────────────────────────
+
+#[test]
+fn graph_config_defaults_are_none() {
+    let config = GraphConfig::default();
+    assert!(config.max_tokens.is_none());
+    assert!(config.max_cost_usd.is_none());
+    assert!(config.deadline.is_none());
+}
+
+#[test]
+fn budget_tracker_from_config() {
+    let config = GraphConfig {
+        max_tokens: Some(500),
+        max_cost_usd: Some(0.10),
+        deadline: Some(Duration::from_secs(30)),
+    };
+    let tracker = BudgetTracker::from_config(&config);
+    assert!(tracker.check().is_ok());
+    assert_eq!(tracker.tokens_used(), 0);
+}
+
+#[test]
+fn node_output_success_properties() {
+    let output = NodeOutput::success("n1", json!({"result": "ok"}));
+    assert!(output.status.is_success());
+    assert!(!output.status.is_failed());
+    assert!(!output.status.is_skipped());
+    assert_eq!(output.node_id, "n1");
+    assert!(output.error.is_none());
+    assert_eq!(output.data["result"], "ok");
+}
+
+#[test]
+fn node_output_failed_properties() {
+    let output = NodeOutput::failed("n1", "boom");
+    assert!(output.status.is_failed());
+    assert!(!output.status.is_success());
+    assert_eq!(output.error.as_deref(), Some("boom"));
+}
+
+#[test]
+fn node_output_skipped_properties() {
+    let output = NodeOutput::skipped("n1", "budget exceeded");
+    assert!(output.status.is_skipped());
+    assert!(!output.status.is_success());
+    assert!(!output.status.is_failed());
+    assert_eq!(output.error.as_deref(), Some("budget exceeded"));
+}
+
+// ─── Engine integration with live API ───────────────────────────────────────
 
 #[tokio::test]
-async fn wide_parallel_dag_all_independent() {
-    // 8 nodes, no edges = all at level 0, all parallel.
-    let nodes: Vec<Node> = (0..8).map(|i| node(&format!("n{i}"), "test")).collect();
-    let graph = GraphDef {
-        name: "wide".into(),
-        description: "".into(),
-        nodes,
-        edges: vec![],
-        config: GraphConfig {
-            max_parallelism: 4,
-            ..Default::default()
-        },
-    };
+async fn engine_runs_linear_graph() {
+    use roko_graph::cell::CellContext;
+    use roko_graph::engine::{GraphEngine, NodeStatus, default_registry};
+    use roko_graph::loader;
 
-    let start = Instant::now();
-    let engine = GraphEngine::new(graph, timed_executor(50));
-    let result = engine.execute().await.unwrap();
-    let elapsed = start.elapsed();
+    let toml_str = r#"
+[graph]
+name = "linear"
 
-    assert_eq!(result.node_outputs.len(), 8);
-    assert_eq!(result.status, GraphStatus::Success);
-    // With max_parallelism=4, 8 nodes at 50ms each should take ~100ms (2 chunks).
+[[nodes]]
+id = "a"
+cell_type = "noop"
+
+[[nodes]]
+id = "b"
+cell_type = "noop"
+
+[[edges]]
+from = "a"
+to = "b"
+"#;
+    let graph = loader::load_from_str(toml_str).unwrap();
+    let engine = GraphEngine::new(graph, default_registry());
+    let ctx = CellContext::new();
+    let output = engine.execute(&ctx).await.unwrap();
+
+    assert!(output.success);
+    assert_eq!(output.node_results.len(), 2);
     assert!(
-        elapsed < Duration::from_millis(250),
-        "elapsed {elapsed:?} — expected ~100ms for 2 chunks of 4"
+        output
+            .node_results
+            .iter()
+            .all(|r| r.status == NodeStatus::Complete)
     );
 }
 
 #[tokio::test]
-async fn multi_level_dag_with_mixed_conditions() {
-    // Level 0: source
-    // Level 1: gate (on_success from source)
-    // Level 2: fast_path (when score >= 70 from gate), slow_path (when score < 70)
-    // Level 3: merge (from fast_path OR slow_path)
-    let graph = GraphDef {
-        name: "multi-level".into(),
-        description: "".into(),
-        nodes: vec![
-            node("source", "data"),
-            node("gate", "gate"),
-            node("fast_path", "handler"),
-            node("slow_path", "handler"),
-            node("merge", "aggregator"),
-        ],
-        edges: vec![
-            conditional_edge("source", "gate", EdgeCondition::OnSuccess),
-            conditional_edge(
-                "gate",
-                "fast_path",
-                EdgeCondition::when("score", CompareOp::Gte, toml::Value::Integer(70.into())),
-            ),
-            conditional_edge(
-                "gate",
-                "slow_path",
-                EdgeCondition::when("score", CompareOp::Lt, toml::Value::Integer(70.into())),
-            ),
-            edge("fast_path", "merge"),
-            edge("slow_path", "merge"),
-        ],
-        config: GraphConfig::default(),
-    };
+async fn engine_unknown_cell_type_reported() {
+    use roko_graph::cell::CellContext;
+    use roko_graph::engine::GraphEngine;
+    use roko_graph::loader;
+    use roko_graph::registry::CellRegistry;
 
-    // gate produces score=85, so fast_path runs.
-    let executor: CellExecutor = Arc::new(|node: Node, inputs: Vec<NodeOutput>| {
-        Box::pin(async move {
-            match node.id.as_str() {
-                "gate" => NodeOutput::success(&node.id, json!({"score": 85})),
-                "merge" => NodeOutput::success(&node.id, json!({"input_count": inputs.len()})),
-                _ => NodeOutput::success(&node.id, json!({})),
-            }
-        })
-    });
+    let toml_str = r#"
+[graph]
+name = "bad"
 
-    let engine = GraphEngine::new(graph, executor);
-    let result = engine.execute().await.unwrap();
-
-    let executed_ids: Vec<&str> = result
-        .node_outputs
-        .iter()
-        .map(|o| o.node_id.as_str())
-        .collect();
-
-    assert!(executed_ids.contains(&"source"));
-    assert!(executed_ids.contains(&"gate"));
-    assert!(executed_ids.contains(&"fast_path"));
-    assert!(!executed_ids.contains(&"slow_path"));
-    // merge gets input from fast_path only.
-    assert!(executed_ids.contains(&"merge"));
+[[nodes]]
+id = "a"
+cell_type = "nonexistent"
+"#;
+    let graph = loader::load_from_str(toml_str).unwrap();
+    let engine = GraphEngine::new(graph, CellRegistry::new());
+    let issues = engine.validate();
+    assert!(!issues.is_empty());
+    assert!(issues[0].contains("nonexistent"));
 }

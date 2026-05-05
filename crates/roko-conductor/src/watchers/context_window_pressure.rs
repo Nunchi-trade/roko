@@ -1,12 +1,15 @@
 //! Context window pressure watcher: fires when token usage exceeds threshold.
 //!
-//! # STATUS: WIRED (via Conductor)
+//! # STATUS: GATED
 //!
-//! This watcher IS active at runtime. It is instantiated by `Conductor::new()`
-//! (see `conductor.rs` line ~102) and executed on every conductor check cycle
-//! from `orchestrate.rs::run_conductor_check()`. It fires when token usage
-//! exceeds 80% of the model's context window, producing a
-//! `conductor.intervention` signal that triggers restart/fail decisions.
+//! Only active when `conductor.context_pressure_enabled = true` in `roko.toml`.
+//! Extended in 2026-05 to read `context_window` from `ModelProfile` config for
+//! non-Anthropic models (via a precomputed map passed at construction time).
+//! Uses a lookback window (`PRESSURE_LOOKBACK = 3`) over recent `TokenUsage`
+//! signals instead of checking only the most recent signal.
+//!
+//! Emits `conductor.intervention` signals; `orchestrate.rs` must subscribe to
+//! react. Enable only after wiring a subscriber in the runner event loop.
 //!
 //! The watcher requires `Kind::TokenUsage` signals in the conductor's signal
 //! stream. These are emitted by the orchestrator after each agent dispatch
@@ -15,6 +18,8 @@
 //!
 //! Monitors `TokenUsage` signals derived from agent efficiency events and
 //! fires when usage exceeds [`MAX_CONTEXT_USAGE_RATIO`].
+
+use std::collections::HashMap;
 
 use roko_core::{Body, Context, Engram, Kind, React};
 use roko_learn::efficiency::AgentEfficiencyEvent;
@@ -35,21 +40,33 @@ pub const MODEL_TAG: &str = "model";
 const SMALL_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const OPUS_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
 
+/// Number of recent `TokenUsage` signals to consider when deciding whether
+/// to fire. Using the maximum utilization over this window prevents noisy
+/// alternating high/low utilization from triggering repeatedly.
+pub const PRESSURE_LOOKBACK: usize = 3;
+
 /// Fires when context window usage exceeds [`MAX_CONTEXT_USAGE_RATIO`].
 ///
-/// Examines the most recent `TokenUsage` signal for
-/// `tokens_used` / `tokens_total` ratio. If the ratio exceeds the
-/// threshold, fires a warning.
+/// Examines the last [`PRESSURE_LOOKBACK`] `TokenUsage` signals and takes
+/// the maximum utilization ratio. If it exceeds the threshold, fires a warning.
+///
+/// Optionally carries a precomputed map of model slug to context window size
+/// (populated from `ModelProfile.context_window` at construction time) so that
+/// non-Anthropic models can also be monitored.
 #[derive(Debug, Clone)]
 pub struct ContextWindowPressureWatcher {
     /// Maximum ratio before firing.
     max_ratio: f64,
+    /// Precomputed map: model slug (lowercased) -> context window tokens.
+    /// Built from `RokoConfig.models` at conductor construction time.
+    configured_windows: HashMap<String, u64>,
 }
 
 impl Default for ContextWindowPressureWatcher {
     fn default() -> Self {
         Self {
             max_ratio: MAX_CONTEXT_USAGE_RATIO,
+            configured_windows: HashMap::new(),
         }
     }
 }
@@ -57,40 +74,77 @@ impl Default for ContextWindowPressureWatcher {
 impl ContextWindowPressureWatcher {
     /// Create with a custom threshold.
     #[must_use]
-    pub const fn new(max_ratio: f64) -> Self {
-        Self { max_ratio }
+    pub fn new(max_ratio: f64) -> Self {
+        Self {
+            max_ratio,
+            configured_windows: HashMap::new(),
+        }
+    }
+
+    /// Create with a custom threshold and precomputed context window map.
+    ///
+    /// The map keys should be lowercased model slugs; values are context
+    /// window sizes in tokens. Build this from `RokoConfig.models` when
+    /// constructing the conductor.
+    #[must_use]
+    pub fn with_context_windows(max_ratio: f64, windows: HashMap<String, u64>) -> Self {
+        Self {
+            max_ratio,
+            configured_windows: windows,
+        }
     }
 }
 
 impl React for ContextWindowPressureWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
-        // Find the most recent TokenUsage signal.
-        let latest = stream.iter().rev().find(|s| s.kind == Kind::TokenUsage);
+        // Collect the last PRESSURE_LOOKBACK TokenUsage signals and compute
+        // the maximum utilization ratio across them. This prevents alternating
+        // high/low usage from firing repeatedly -- any recent high-pressure
+        // state triggers once.
+        let recent: Vec<&Engram> = stream
+            .iter()
+            .rev()
+            .filter(|s| s.kind == Kind::TokenUsage)
+            .take(PRESSURE_LOOKBACK)
+            .collect();
 
-        let Some(signal) = latest else {
-            return Vec::new();
-        };
-
-        let Some((used, total)) = extract_usage(signal) else {
-            return Vec::new();
-        };
-
-        if total <= 0.0 {
+        if recent.is_empty() {
             return Vec::new();
         }
 
-        let ratio = used / total;
+        let mut max_ratio: f64 = 0.0;
+        let mut max_used: f64 = 0.0;
+        let mut max_total: f64 = 0.0;
 
-        if ratio > self.max_ratio {
+        for signal in &recent {
+            let Some((used, total)) = self.extract_usage(signal) else {
+                continue;
+            };
+            if total <= 0.0 {
+                continue;
+            }
+            let ratio = used / total;
+            if ratio > max_ratio {
+                max_ratio = ratio;
+                max_used = used;
+                max_total = total;
+            }
+        }
+
+        if max_total <= 0.0 {
+            return Vec::new();
+        }
+
+        if max_ratio > self.max_ratio {
             vec![
                 Engram::builder(Kind::Custom("conductor.intervention".into()))
                     .body(Body::text(format!(
-                        "context window {:.0}% full ({used:.0}/{total:.0} tokens)",
-                        ratio * 100.0
+                        "context window {:.0}% full ({max_used:.0}/{max_total:.0} tokens)",
+                        max_ratio * 100.0
                     )))
                     .tag("watcher", WATCHER_NAME)
                     .tag("severity", "warning")
-                    .tag("ratio", format!("{ratio:.3}"))
+                    .tag("ratio", format!("{max_ratio:.3}"))
                     .build(),
             ]
         } else {
@@ -103,37 +157,51 @@ impl React for ContextWindowPressureWatcher {
     }
 }
 
-fn extract_usage(signal: &Engram) -> Option<(f64, f64)> {
-    if let Ok(event) = signal.body.as_json::<AgentEfficiencyEvent>() {
-        if let Some(total) = context_window_tokens(&event.model) {
-            return Some((event.total_prompt_tokens as f64, total as f64));
+impl ContextWindowPressureWatcher {
+    fn extract_usage(&self, signal: &Engram) -> Option<(f64, f64)> {
+        if let Ok(event) = signal.body.as_json::<AgentEfficiencyEvent>() {
+            if let Some(total) = self.context_window_tokens(&event.model) {
+                return Some((event.total_prompt_tokens as f64, total as f64));
+            }
         }
+
+        let used = signal.tag(TOKENS_USED_TAG)?.parse().ok()?;
+        if let Some(total) = signal
+            .tag(TOKENS_TOTAL_TAG)
+            .and_then(|v| v.parse::<f64>().ok())
+        {
+            return Some((used, total));
+        }
+
+        let total = signal
+            .tag(MODEL_TAG)
+            .and_then(|m| self.context_window_tokens(m))
+            .map(|total| total as f64)?;
+
+        Some((used, total))
     }
 
-    let used = signal.tag(TOKENS_USED_TAG)?.parse().ok()?;
-    if let Some(total) = signal
-        .tag(TOKENS_TOTAL_TAG)
-        .and_then(|v| v.parse::<f64>().ok())
-    {
-        return Some((used, total));
-    }
+    /// Look up context window size for a model slug.
+    ///
+    /// Resolution order:
+    /// 1. Precomputed map from `ModelProfile.context_window` config entries.
+    /// 2. Hardcoded fallback for Anthropic models (opus, sonnet, haiku).
+    fn context_window_tokens(&self, model: &str) -> Option<u64> {
+        let model_lower = model.to_ascii_lowercase();
 
-    let total = signal
-        .tag(MODEL_TAG)
-        .and_then(context_window_tokens)
-        .map(|total| total as f64)?;
+        // First: check configured model profiles (precomputed at construction).
+        if let Some(&ctx) = self.configured_windows.get(&model_lower) {
+            return Some(ctx);
+        }
 
-    Some((used, total))
-}
-
-fn context_window_tokens(model: &str) -> Option<u64> {
-    let model = model.to_ascii_lowercase();
-    if model.contains("opus") {
-        Some(OPUS_CONTEXT_WINDOW_TOKENS)
-    } else if model.contains("haiku") || model.contains("sonnet") {
-        Some(SMALL_CONTEXT_WINDOW_TOKENS)
-    } else {
-        None
+        // Fallback: hardcoded Anthropic models.
+        if model_lower.contains("opus") {
+            Some(OPUS_CONTEXT_WINDOW_TOKENS)
+        } else if model_lower.contains("haiku") || model_lower.contains("sonnet") {
+            Some(SMALL_CONTEXT_WINDOW_TOKENS)
+        } else {
+            None
+        }
     }
 }
 
@@ -142,6 +210,7 @@ mod tests {
     use super::*;
     use roko_core::OperatingFrequency;
     use roko_learn::efficiency::AgentEfficiencyEvent;
+    use std::collections::HashMap;
 
     fn efficiency_event_signal(model: &str, prompt_tokens: u64) -> Engram {
         let event = AgentEfficiencyEvent {
@@ -214,12 +283,44 @@ mod tests {
     }
 
     #[test]
-    fn uses_most_recent_signal() {
+    fn lookback_window_max_over_recent() {
+        // With PRESSURE_LOOKBACK = 3, the watcher takes the max utilization
+        // over the last 3 signals. Even if the most recent is low, a high
+        // signal within the window still fires.
         let w = ContextWindowPressureWatcher::default();
         let stream = vec![
-            efficiency_event_signal("claude-opus-4-6", 900_000), // 90% — old
+            efficiency_event_signal("claude-opus-4-6", 900_000), // 90% — within lookback
             efficiency_event_signal("claude-sonnet-4-6", 50_000), // 25% — most recent
         ];
+        // The 90% opus signal is within the lookback window, so it fires.
+        let out = w.decide(&stream, &Context::at(0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tag("watcher"), Some(WATCHER_NAME));
+    }
+
+    #[test]
+    fn all_low_no_fire() {
+        // All signals in the lookback window are below threshold.
+        let w = ContextWindowPressureWatcher::default();
+        let stream = vec![
+            efficiency_event_signal("claude-sonnet-4-6", 100_000), // 50%
+            efficiency_event_signal("claude-sonnet-4-6", 120_000), // 60%
+            efficiency_event_signal("claude-sonnet-4-6", 140_000), // 70%
+        ];
+        assert!(w.decide(&stream, &Context::at(0)).is_empty());
+    }
+
+    #[test]
+    fn old_signal_outside_lookback_ignored() {
+        // The high signal is outside the lookback window (4th from end).
+        let w = ContextWindowPressureWatcher::default();
+        let stream = vec![
+            efficiency_event_signal("claude-opus-4-6", 900_000), // 90% — outside lookback
+            efficiency_event_signal("claude-sonnet-4-6", 50_000), // 25%
+            efficiency_event_signal("claude-sonnet-4-6", 50_000), // 25%
+            efficiency_event_signal("claude-sonnet-4-6", 50_000), // 25%
+        ];
+        // Only the last 3 are examined; the 90% opus signal is outside.
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
@@ -242,5 +343,39 @@ mod tests {
         let stream = vec![efficiency_event_signal("claude-sonnet-4-6", 120_000)]; // 60% > 50%
         let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn configured_windows_overrides_hardcoded() {
+        // A model not in the hardcoded list but with a configured window.
+        let mut windows = HashMap::new();
+        windows.insert("gemini-2.5-flash".to_string(), 100_000);
+        let w = ContextWindowPressureWatcher::with_context_windows(0.80, windows);
+
+        // 85% of 100k = 85_000 used -- above threshold
+        let stream = vec![
+            Engram::builder(Kind::TokenUsage)
+                .body(Body::text("usage"))
+                .tag(TOKENS_USED_TAG, "85000")
+                .tag(MODEL_TAG, "gemini-2.5-flash")
+                .build(),
+        ];
+        let out = w.decide(&stream, &Context::at(0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tag("watcher"), Some(WATCHER_NAME));
+    }
+
+    #[test]
+    fn unknown_model_no_configured_window_no_fire() {
+        // A model not in hardcoded or configured list returns None for total.
+        let w = ContextWindowPressureWatcher::default();
+        let stream = vec![
+            Engram::builder(Kind::TokenUsage)
+                .body(Body::text("usage"))
+                .tag(TOKENS_USED_TAG, "50000")
+                .tag(MODEL_TAG, "mystery-model-v99")
+                .build(),
+        ];
+        assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 }

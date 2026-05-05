@@ -574,7 +574,7 @@ pub enum MetricValue {
 
 // ─── Standard metric catalog (§40.2) ─────────────────────────────────
 
-/// The seven standard metrics every Roko binary registers (§40.2).
+/// Standard metrics every Roko binary registers (§40.2 + task 096 additions).
 ///
 /// This list is sourced from the canonical schema so core registration and
 /// sidecar emission cannot drift on names, help text, or kinds.
@@ -586,6 +586,12 @@ pub const STANDARD_METRICS: &[schema::MetricDescriptor] = &[
     schema::ROKO_AGENT_DURATION_SECONDS_DESCRIPTOR,
     schema::ROKO_LLM_TOKENS_TOTAL_DESCRIPTOR,
     schema::ROKO_LLM_COST_USD_TOTAL_DESCRIPTOR,
+    schema::ROKO_LLM_CALLS_TOTAL_DESCRIPTOR,
+    schema::ROKO_LLM_ERRORS_TOTAL_DESCRIPTOR,
+    schema::ROKO_LLM_TTFT_SECONDS_DESCRIPTOR,
+    schema::ROKO_LLM_REQUEST_DURATION_SECONDS_DESCRIPTOR,
+    schema::ROKO_CONTEXT_UTILIZATION_DESCRIPTOR,
+    schema::ROKO_TOKEN_THROUGHPUT_PER_SECOND_DESCRIPTOR,
 ];
 
 /// Pre-register every metric in [`STANDARD_METRICS`] with zero labels.
@@ -798,7 +804,7 @@ mod tests {
                 descriptor.name
             );
         }
-        assert_eq!(STANDARD_METRICS.len(), 7);
+        assert_eq!(STANDARD_METRICS.len(), 13);
     }
 
     #[test]
@@ -855,5 +861,31 @@ mod tests {
             .get_counter("x_total", &LabelSet::from_pairs(&[("status", "ok")]))
             .expect("counter registered by threads");
         assert_eq!(c.get(), 10);
+    }
+
+    #[test]
+    fn render_prometheus_appends_registered_metrics() {
+        let reg = MetricRegistry::new();
+        let labels = LabelSet::from_pairs(&[("gate", "compile"), ("verdict", "pass")]);
+        let counter = reg.register_counter("roko_gate_verdicts_total", labels);
+        counter.inc_by(3);
+
+        let output = reg.render_prometheus();
+        assert!(
+            output.contains("roko_gate_verdicts_total"),
+            "rendered output should contain the registered metric: {output}"
+        );
+        assert!(
+            output.contains("gate=\"compile\""),
+            "rendered output should contain gate label: {output}"
+        );
+        assert!(
+            output.contains("verdict=\"pass\""),
+            "rendered output should contain verdict label: {output}"
+        );
+        assert!(
+            output.contains(" 3"),
+            "counter value should be 3: {output}"
+        );
     }
 }

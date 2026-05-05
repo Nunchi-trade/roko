@@ -373,6 +373,10 @@ pub struct ISFRState {
     pub sources: tokio::sync::RwLock<Vec<ISFRSourceSnapshot>>,
     /// Whether the keeper background task is currently running.
     pub keeper_running: std::sync::atomic::AtomicBool,
+    /// Current keeper epoch (updated each tick from keeper's epoch counter).
+    pub current_epoch: std::sync::atomic::AtomicU64,
+    /// Contract addresses from ISFR bootstrap (populated on auto-deploy).
+    pub contract_addresses: tokio::sync::RwLock<Option<roko_chain::chain_profile::ContractAddresses>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +395,9 @@ pub struct AppState {
     pub cancel: CancelToken,
     /// Monotonic timestamp when the server state was created.
     pub started_at: Instant,
-    /// Prometheus-style metric registry.
+    /// Prometheus-compatible metric registry. Populated by task 096 emission call sites
+    /// in provider dispatch, gate pipeline, and tool dispatch. Call
+    /// `state.metrics.get_counter(name, labels)` from any handler or middleware.
     pub metrics: Arc<MetricRegistry>,
     /// Process lifecycle manager.
     pub supervisor: Arc<ProcessSupervisor>,
@@ -400,7 +406,7 @@ pub struct AppState {
     /// Event bus for streaming server events to clients.
     pub event_bus: EventBus<ServerEvent>,
     /// Unified state hub for dashboard snapshot + event streaming.
-    pub state_hub: roko_core::SharedStateHub,
+    pub state_hub: roko_runtime::SharedStateHub,
     /// RuntimeEvent SSE adapter for workflow event streaming.
     pub sse_adapter: Arc<crate::adapters::SseAdapter>,
     /// Durable RuntimeEvent logger for externally ingested events.
@@ -494,6 +500,104 @@ pub struct AppState {
 
     /// Shared ISFR keeper state exposed via REST and SSE.
     pub isfr: Arc<ISFRState>,
+
+    /// Shared chain watcher state exposed via REST and SSE.
+    pub chain: Arc<roko_chain::block_watcher::ChainState>,
+
+    /// Runtime feed instances started at serve-time and queryable via
+    /// `GET /api/feeds/runtime` and `GET /api/feeds/runtime/{id}`.
+    pub runtime_feeds: ServeFeeds,
+}
+
+// ── Runtime feeds ────────────────────────────────────────────────
+
+/// Active runtime feeds registered with the serve layer.
+///
+/// Each entry is a named feed with static metadata. The feeds do not yet
+/// run background polling (that requires the Bus + CellContext from task 097);
+/// instead they expose queryable status snapshots reflecting serve-layer
+/// information (workspace dir for file-watch, provider health tracker for
+/// provider-health).
+pub struct ServeFeeds {
+    entries: Vec<ServeFeedEntry>,
+}
+
+/// A single runtime feed entry with its static metadata.
+struct ServeFeedEntry {
+    /// Stable feed identifier used for lookup by `ServeFeeds::get`.
+    id: String,
+    /// Dynamic status snapshot callback.
+    status_fn: Box<dyn Fn() -> roko_core::FeedRuntimeStatus + Send + Sync>,
+}
+
+impl std::fmt::Debug for ServeFeeds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServeFeeds")
+            .field("count", &self.entries.len())
+            .finish()
+    }
+}
+
+impl ServeFeeds {
+    /// Create the default set of runtime feeds.
+    pub fn new(workdir: &Path, provider_health: &ProviderHealthTracker) -> Self {
+        let roko_dir = workdir.join(".roko");
+        let roko_dir_exists = roko_dir.is_dir();
+        let provider_count = provider_health.snapshot().len();
+
+        // file-watch-roko-dir: reports whether the .roko/ directory exists.
+        let file_watch_connected = roko_dir_exists;
+        let file_watch_entry = ServeFeedEntry {
+            id: "file-watch-roko-dir".to_string(),
+            status_fn: Box::new(move || roko_core::FeedRuntimeStatus {
+                id: "file-watch-roko-dir".to_string(),
+                topic: "fs.changed".to_string(),
+                kind: "Raw".to_string(),
+                connected: file_watch_connected,
+                rate_hz: 0.0,
+                pulses_produced: 0,
+                last_update_ms: None,
+                error: if file_watch_connected {
+                    None
+                } else {
+                    Some(".roko/ directory not found".to_string())
+                },
+            }),
+        };
+
+        // provider-health-feed: reports provider health summary.
+        let prov_connected = provider_count > 0;
+        let provider_health_entry = ServeFeedEntry {
+            id: "provider-health-feed".to_string(),
+            status_fn: Box::new(move || roko_core::FeedRuntimeStatus {
+                id: "provider-health-feed".to_string(),
+                topic: "provider.health".to_string(),
+                kind: "Meta".to_string(),
+                connected: prov_connected,
+                rate_hz: 0.0,
+                pulses_produced: 0,
+                last_update_ms: None,
+                error: None,
+            }),
+        };
+
+        Self {
+            entries: vec![file_watch_entry, provider_health_entry],
+        }
+    }
+
+    /// List all runtime feed statuses.
+    pub fn list(&self) -> Vec<roko_core::FeedRuntimeStatus> {
+        self.entries.iter().map(|e| (e.status_fn)()).collect()
+    }
+
+    /// Get status for a specific feed by id.
+    pub fn get(&self, id: &str) -> Option<roko_core::FeedRuntimeStatus> {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| (e.status_fn)())
+    }
 }
 
 /// A tracked bench run with its background task handle.
@@ -595,13 +699,70 @@ pub fn load_workspace_registry(workdir: &Path) -> HashMap<String, WorkspaceInfo>
     map
 }
 
+/// Register the additional observability metric families that task 096 will
+/// emit into. Registered at `AppState` construction so they appear in
+/// `GET /metrics` output even before any observations are recorded.
+fn register_observability_foundation_metrics(registry: &MetricRegistry) {
+    use roko_core::obs::histograms::LLM_LATENCY_BUCKETS;
+    use roko_core::obs::metrics::LabelSet;
+
+    // HTTP request metrics
+    registry.register_counter(
+        "roko_requests_total",
+        "Total HTTP requests by route and method",
+        LabelSet::new(),
+    );
+    registry.register_histogram(
+        "roko_request_duration_seconds",
+        "HTTP request latency in seconds",
+        LabelSet::new(),
+        LLM_LATENCY_BUCKETS.to_vec(),
+    );
+
+    // Agent metrics
+    registry.register_gauge(
+        "roko_active_agents",
+        "Number of currently active agents",
+        LabelSet::new(),
+    );
+
+    // Gate metrics (separate from the standard roko_gate_verdicts_total which
+    // is already registered by register_standard_metrics)
+    // -- no additional gate counter needed; the standard one covers it.
+
+    // LLM provider metrics
+    registry.register_counter(
+        "roko_llm_calls_total",
+        "LLM calls by provider and model",
+        LabelSet::new(),
+    );
+    registry.register_histogram(
+        "roko_llm_ttft_seconds",
+        "Time to first token in seconds by provider and model",
+        LabelSet::new(),
+        LLM_LATENCY_BUCKETS.to_vec(),
+    );
+    registry.register_counter(
+        "roko_llm_errors_total",
+        "LLM errors by provider, model, and error_type",
+        LabelSet::new(),
+    );
+
+    // Context utilization gauge
+    registry.register_gauge(
+        "roko_context_utilization",
+        "Context window fraction used by model",
+        LabelSet::new(),
+    );
+}
+
 impl AppState {
     /// Build the shared hub used by AppState and in-process CLI runtimes.
     #[must_use]
-    pub fn state_hub_for_workdir(workdir: &Path) -> roko_core::SharedStateHub {
+    pub fn state_hub_for_workdir(workdir: &Path) -> roko_runtime::SharedStateHub {
         let layout = RokoLayout::for_project(workdir);
         let event_log_path = layout.root().join("events.jsonl");
-        roko_core::SharedStateHub::new(roko_core::StateHub::with_event_log(1024, &event_log_path))
+        roko_runtime::SharedStateHub::new(roko_runtime::StateHub::with_event_log(1024, &event_log_path))
     }
 
     /// Construct a new `AppState` from the working directory and loaded configs.
@@ -636,7 +797,7 @@ impl AppState {
         runtime: Arc<dyn CliRuntime>,
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
-        state_hub: roko_core::SharedStateHub,
+        state_hub: roko_runtime::SharedStateHub,
     ) -> anyhow::Result<Self> {
         Self::new_with_daimon_strategy_and_state_hub(
             workdir,
@@ -683,7 +844,7 @@ impl AppState {
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
         strategy_space: StrategySpaceDefinition,
-        state_hub: Option<roko_core::SharedStateHub>,
+        state_hub: Option<roko_runtime::SharedStateHub>,
     ) -> anyhow::Result<Self> {
         let layout = RokoLayout::for_project(&workdir);
         let layout_root = layout.root().to_path_buf();
@@ -703,11 +864,12 @@ impl AppState {
         // Initialize chain client + wallet from [chain] config section.
         let (chain_client, chain_wallet) = Self::init_chain(&roko_config);
         let http_client = reqwest::Client::new();
-        let service_bundle = ServiceFactory::build(ServiceConfig::production(
-            workdir.clone(),
-            roko_config.clone(),
-        ))
-        .map_err(|e| anyhow::anyhow!("build shared service bundle: {e}"))?;
+        let metrics = Arc::new(MetricRegistry::new());
+        roko_core::obs::metrics::register_standard_metrics(&metrics);
+        let mut service_config = ServiceConfig::production(workdir.clone(), roko_config.clone());
+        service_config.metrics = Some(Arc::clone(&metrics));
+        let service_bundle = ServiceFactory::build(service_config)
+            .map_err(|e| anyhow::anyhow!("build shared service bundle: {e}"))?;
         let model_call_service = service_bundle.model_call_service;
         let terminal_workdir = workdir.clone();
         let terminal_sessions = crate::terminal::SessionManager::new(terminal_workdir);
@@ -718,13 +880,19 @@ impl AppState {
 
         let ephemeral_workspaces = RwLock::new(load_workspace_registry(&workdir));
 
+        let provider_health = ProviderHealthTracker::new();
+        let runtime_feeds = ServeFeeds::new(&workdir, &provider_health);
+
         Ok(Self {
             workdir,
             layout,
             signal_store: SignalStore::new(signal_root),
             cancel,
             started_at: Instant::now(),
-            metrics: Arc::new(MetricRegistry::new()),
+            metrics: {
+                register_observability_foundation_metrics(&metrics);
+                metrics
+            },
             supervisor,
             affect_engine: Mutex::new(affect_engine),
             event_bus: EventBus::new(16_384),
@@ -735,7 +903,7 @@ impl AppState {
             runtime,
             model_call_service,
             roko_config: ArcSwap::from_pointee(roko_config.clone()),
-            provider_health: ProviderHealthTracker::new(),
+            provider_health,
             latency_registry: LatencyRegistry::new(),
             active_runs: RwLock::new(HashMap::new()),
             active_plans: RwLock::new(HashMap::new()),
@@ -775,6 +943,8 @@ impl AppState {
                 .ok()
                 .filter(|s| !s.is_empty()),
             isfr: Arc::new(ISFRState::default()),
+            chain: Arc::new(roko_chain::block_watcher::ChainState::default()),
+            runtime_feeds,
         })
     }
 
@@ -819,6 +989,13 @@ impl AppState {
             });
 
         (client, wallet)
+    }
+
+    /// Return a cloneable `Arc<MetricRegistry>` for passing into dispatch helpers
+    /// that do not hold a full `AppState` reference.
+    #[must_use]
+    pub fn metrics_sink(&self) -> Arc<MetricRegistry> {
+        Arc::clone(&self.metrics)
     }
 
     /// Load the current config snapshot.

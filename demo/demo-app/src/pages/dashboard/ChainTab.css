@@ -1,0 +1,248 @@
+/* ChainTab — 4-panel dense terminal layout */
+
+.chain-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 8px;
+  min-height: 420px;
+  margin-top: 8px;
+}
+
+.chain-panel {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(12px) saturate(180%);
+  border-radius: 2px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chain-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  flex-shrink: 0;
+}
+
+.chain-panel__header span:first-child {
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.chain-panel__body {
+  flex: 1;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* Block feed */
+.chain-block-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  animation: value-flash 0.6s ease-out;
+}
+
+.chain-block-row__num {
+  color: var(--rose-bright);
+  min-width: 48px;
+}
+
+.chain-block-row__hash {
+  color: var(--text-ghost);
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 90px;
+  animation: hash-rain 2s ease-out;
+}
+
+.chain-block-row__ago {
+  color: var(--text-ghost);
+  font-size: 10px;
+  min-width: 40px;
+}
+
+.chain-block-row__gas-bar {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.chain-block-row__gas-fill {
+  height: 100%;
+  background: var(--dream-bright);
+  border-radius: 1px;
+  transition: width 0.3s ease;
+}
+
+.chain-block-row__txcount {
+  color: var(--bone-bright);
+  font-size: 10px;
+  min-width: 20px;
+  text-align: right;
+}
+
+/* Transaction log */
+.chain-tx-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  animation: value-flash 0.6s ease-out;
+}
+
+.chain-tx-row--fail {
+  opacity: 0.5;
+}
+
+.chain-tx-row--create {
+  color: var(--success);
+}
+
+.chain-tx-row__block {
+  color: var(--text-ghost);
+  min-width: 36px;
+  font-size: 10px;
+}
+
+.chain-tx-row__addrs {
+  color: var(--bone-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.chain-tx-row__value {
+  color: var(--dream-bright);
+  min-width: 50px;
+  text-align: right;
+  font-size: 10px;
+}
+
+.chain-tx-row__gas {
+  color: var(--text-ghost);
+  min-width: 40px;
+  text-align: right;
+  font-size: 10px;
+}
+
+.chain-tx-row__method {
+  color: var(--rose-bright);
+  min-width: 48px;
+  text-align: right;
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+/* Contract events */
+.chain-event-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  animation: value-flash 0.6s ease-out;
+}
+
+.chain-event-row__name {
+  font-weight: 600;
+  min-width: 100px;
+}
+
+.chain-event--rate .chain-event-row__name {
+  color: var(--success);
+}
+
+.chain-event--reward .chain-event-row__name {
+  color: var(--dream-bright);
+}
+
+.chain-event--role .chain-event-row__name {
+  color: var(--bone-bright);
+}
+
+.chain-event--unknown .chain-event-row__name {
+  color: var(--text-ghost);
+  opacity: 0.6;
+}
+
+.chain-event-row__params {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-size: 10px;
+}
+
+.chain-event-row__block {
+  color: var(--text-ghost);
+  font-size: 10px;
+  min-width: 36px;
+  text-align: right;
+}
+
+/* Gas chart wrapper */
+.chain-gas-chart {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Empty state */
+.chain-empty {
+  color: var(--text-ghost);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  text-align: center;
+  padding: 24px 12px;
+  opacity: 0.6;
+}
+
+/* Animations */
+@keyframes hash-rain {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 0.7;
+    transform: translateY(0);
+  }
+}
+
+/* Watcher status dot */
+.chain-watcher-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.chain-watcher-dot--active {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.chain-watcher-dot--inactive {
+  background: var(--text-ghost);
+}

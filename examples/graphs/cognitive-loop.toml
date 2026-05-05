@@ -1,0 +1,108 @@
+# examples/graphs/cognitive-loop.toml
+#
+# Roko Agent Cognitive Loop
+# ─────────────────────────
+# This graph defines the canonical agent execution cycle:
+#
+#   Sense -> Assess -> Compose -> Act -> Verify -> Persist -> React
+#
+# It is a Hot Graph: it loops indefinitely until cancelled.
+# Each tick = one agent turn.
+#
+# Usage:
+#   roko graph validate examples/graphs/cognitive-loop.toml
+#   roko graph show examples/graphs/cognitive-loop.toml
+
+[graph]
+name = "cognitive-loop"
+version = "0.1.0"
+description = "Roko agent cognitive loop: Sense, Assess, Compose, Act, Verify, Persist, React"
+
+[graph.labels]
+category = "agent"
+kind = "cognitive-loop"
+
+# ── Nodes ──────────────────────────────────────────────────────────────────
+
+[[nodes]]
+id = "sense"
+cell_type = "signal-reader"
+[nodes.config]
+# Read pending signals from the store (tasks, events, user messages).
+sources = ["task-queue", "event-bus"]
+
+[[nodes]]
+id = "assess"
+cell_type = "relevance-scorer"
+[nodes.config]
+# Score sensed signals for relevance. High-relevance signals trigger action.
+threshold = 0.5
+
+[[nodes]]
+id = "compose"
+cell_type = "system-prompt-builder"
+[nodes.config]
+role = "implementer"
+
+[[nodes]]
+id = "act"
+cell_type = "claude-agent"
+[nodes.config]
+# Backend and model are resolved from roko.toml at runtime.
+backend = "auto"
+
+[[nodes]]
+id = "verify"
+cell_type = "gate-pipeline"
+[nodes.config]
+# Run all gates configured for the agent's domain.
+rungs = ["compile", "test", "clippy"]
+
+[[nodes]]
+id = "persist"
+cell_type = "store-writer"
+[nodes.config]
+# Write verified outputs to the signal store.
+target = "signal-store"
+
+[[nodes]]
+id = "react"
+cell_type = "event-publisher"
+[nodes.config]
+# Publish completion events to the bus so watchers and the TUI update.
+topics = ["agent.turn.completed", "agent.state.updated"]
+
+# ── Edges ──────────────────────────────────────────────────────────────────
+
+[[edges]]
+from = "sense"
+to = "assess"
+
+[[edges]]
+from = "assess"
+to = "compose"
+# Only proceed to compose if sense found signals above the relevance threshold.
+# Note: condition evaluation is not yet implemented; treated as always-true.
+
+[[edges]]
+from = "compose"
+to = "act"
+
+[[edges]]
+from = "act"
+to = "verify"
+
+[[edges]]
+from = "verify"
+to = "persist"
+# Only persist if verification passed.
+# Note: condition evaluation is not yet implemented; treated as always-true.
+
+[[edges]]
+from = "verify"
+to = "react"
+# React to failures too -- publish error events.
+
+[[edges]]
+from = "persist"
+to = "react"

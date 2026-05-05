@@ -1,9 +1,14 @@
 //! Feed management routes.
 //!
-//! - `GET    /api/feeds`        — list feeds (with optional `?kind=` and `?agent_id=` filters)
-//! - `POST   /api/feeds`        — register a feed
-//! - `GET    /api/feeds/{id}`   — get feed detail
-//! - `DELETE /api/feeds/{id}`   — unregister a feed
+//! Descriptor CRUD (static feed registry):
+//! - `GET    /api/feeds`                — list feeds (with optional `?kind=` and `?agent_id=` filters)
+//! - `POST   /api/feeds`               — register a feed
+//! - `GET    /api/feeds/{id}`          — get feed detail
+//! - `DELETE /api/feeds/{id}`          — unregister a feed
+//!
+//! Runtime feeds (live status from the serve layer):
+//! - `GET    /api/feeds/runtime`       — list all runtime feeds with status
+//! - `GET    /api/feeds/runtime/{id}`  — get detailed runtime status for a feed
 
 use std::sync::Arc;
 
@@ -22,6 +27,10 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/feeds", get(list_feeds).post(create_feed))
+        // Runtime feed routes must be registered before the wildcard `/feeds/{id}`
+        // so that "/feeds/runtime" is not captured as id="runtime".
+        .route("/feeds/runtime", get(list_runtime_feeds))
+        .route("/feeds/runtime/{id}", get(get_runtime_feed_status))
         .route("/feeds/{id}", get(get_feed).delete(delete_feed))
 }
 
@@ -152,6 +161,27 @@ async fn delete_feed(
         return Err(ApiError::not_found(format!("feed '{id}' not found")));
     }
     Ok(Json(DeleteFeedResponse { id, deleted }))
+}
+
+// ── Runtime feed handlers ────────────────────────────────────────
+
+/// `GET /api/feeds/runtime` -- list all runtime feeds with their current status.
+async fn list_runtime_feeds(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<roko_core::FeedRuntimeStatus>> {
+    Json(state.runtime_feeds.list())
+}
+
+/// `GET /api/feeds/runtime/{id}` -- get detailed status for a single runtime feed.
+async fn get_runtime_feed_status(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<roko_core::FeedRuntimeStatus>, StatusCode> {
+    state
+        .runtime_feeds
+        .get(&id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 #[cfg(test)]
@@ -447,6 +477,90 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/feeds/feed-999")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Runtime feed tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_runtime_feeds_returns_two_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".roko")).expect("create .roko");
+        let state = test_state(dir.path().to_path_buf());
+
+        let response = routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/feeds/runtime")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let feeds: Vec<roko_core::FeedRuntimeStatus> =
+            serde_json::from_slice(&body).expect("parse");
+        assert_eq!(feeds.len(), 2);
+        assert_eq!(feeds[0].id, "file-watch-roko-dir");
+        assert_eq!(feeds[0].topic, "fs.changed");
+        assert_eq!(feeds[1].id, "provider-health-feed");
+        assert_eq!(feeds[1].topic, "provider.health");
+    }
+
+    #[tokio::test]
+    async fn get_runtime_feed_status_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".roko")).expect("create .roko");
+        let state = test_state(dir.path().to_path_buf());
+
+        let response = routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/feeds/runtime/file-watch-roko-dir")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let status: roko_core::FeedRuntimeStatus =
+            serde_json::from_slice(&body).expect("parse");
+        assert_eq!(status.id, "file-watch-roko-dir");
+        assert_eq!(status.kind, "Raw");
+        // .roko/ dir was created above so it should be connected.
+        assert!(status.connected);
+    }
+
+    #[tokio::test]
+    async fn get_runtime_feed_status_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".roko")).expect("create .roko");
+        let state = test_state(dir.path().to_path_buf());
+
+        let response = routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/feeds/runtime/nonexistent")
                     .body(Body::empty())
                     .expect("request"),
             )

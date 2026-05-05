@@ -102,8 +102,8 @@ createRoot(document.getElementById('root')!).render(
                 <Route path="entries" element={<KnowledgeEntries />} />
                 <Route path="routing" element={<CascadeRouter />} />
                 <Route path="dreams" element={<DreamsView />} />
-                <Route path="isfr" element={<IsfrDashboard />} />
               </Route>
+              <Route path="isfr" element={<IsfrDashboard />} />
               <Route path="demo" element={null} />
               <Route path="terminal" element={<Terminal />} />
               <Route path="builder" element={<Builder />} />

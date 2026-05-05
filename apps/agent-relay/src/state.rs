@@ -348,7 +348,6 @@ impl RelayState {
         }
         expired
     }
-
 }
 
 /// Live registration metadata returned after an agent hello succeeds.

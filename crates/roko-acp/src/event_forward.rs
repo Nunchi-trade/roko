@@ -179,3 +179,393 @@ fn summarize_content_block(block: &ContentBlock) -> String {
             .unwrap_or_else(|| format!("diff: {path}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge_events::CognitiveEvent;
+    use crate::types::{
+        ContentBlock, McpInitStatus, McpServerStatus, PlanEntry, PlanStatus, Priority,
+        StopReason, ToolCallKind, ToolCallStatus, UsageInfo,
+    };
+    use roko_core::runtime_event::{RuntimeEvent, WorkflowOutcome};
+
+    /// Build a forwarder with a dummy sink for testing map_event.
+    fn test_forwarder() -> AcpEventForwarder {
+        // HttpEventSink::new spawns a background task, but we never call
+        // emit() in mapping tests so the endpoint being unreachable is fine.
+        let sink = HttpEventSink::new("http://127.0.0.1:1", None);
+        AcpEventForwarder::new(sink, "test-run".into(), "acp:test".into())
+    }
+
+    #[tokio::test]
+    async fn token_chunk_maps_to_agent_output() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::TokenChunk("hello".into());
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::AgentOutput {
+                run_id,
+                agent_id,
+                chunk,
+            } => {
+                assert_eq!(run_id, "test-run");
+                assert_eq!(agent_id, "acp:test");
+                assert_eq!(chunk, "hello");
+            }
+            other => panic!("expected AgentOutput, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_chunk_maps_to_feedback_recorded() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::ThinkingChunk("reasoning...".into());
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::FeedbackRecorded {
+                run_id,
+                kind,
+                summary,
+            } => {
+                assert_eq!(run_id, "test-run");
+                assert_eq!(kind, "acp_thinking");
+                assert_eq!(summary, "reasoning...");
+            }
+            other => panic!("expected FeedbackRecorded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_start_maps_to_gate_started() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::ToolCallStart {
+            tool_call_id: "tc_1".into(),
+            title: "Read file".into(),
+            kind: ToolCallKind::Read,
+            locations: None,
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::GateStarted {
+                run_id,
+                gate_name,
+                rung,
+            } => {
+                assert_eq!(run_id, "test-run");
+                assert_eq!(gate_name, "Read file");
+                assert_eq!(rung, 0);
+            }
+            other => panic!("expected GateStarted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_completed_maps_to_gate_passed() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::ToolCallComplete {
+            tool_call_id: "tc_2".into(),
+            status: ToolCallStatus::Completed,
+            content: vec![],
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::GatePassed {
+                run_id,
+                gate_name,
+                duration_ms,
+            } => {
+                assert_eq!(run_id, "test-run");
+                assert_eq!(gate_name, "tc_2");
+                assert_eq!(duration_ms, 0);
+            }
+            other => panic!("expected GatePassed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_failed_maps_to_gate_failed_with_content() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::ToolCallComplete {
+            tool_call_id: "tc_3".into(),
+            status: ToolCallStatus::Failed,
+            content: vec![ContentBlock::Text {
+                text: "permission denied".into(),
+            }],
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::GateFailed {
+                run_id,
+                gate_name,
+                output,
+                ..
+            } => {
+                assert_eq!(run_id, "test-run");
+                assert_eq!(gate_name, "tc_3");
+                assert!(
+                    output.contains("permission denied"),
+                    "output should contain error text: {output}"
+                );
+            }
+            other => panic!("expected GateFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_pending_maps_to_none() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::ToolCallComplete {
+            tool_call_id: "tc_4".into(),
+            status: ToolCallStatus::Pending,
+            content: vec![],
+        };
+        assert!(
+            fwd.map_event(&event).is_none(),
+            "Pending tool calls should not emit a RuntimeEvent"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_in_progress_maps_to_none() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::ToolCallComplete {
+            tool_call_id: "tc_5".into(),
+            status: ToolCallStatus::InProgress,
+            content: vec![],
+        };
+        assert!(
+            fwd.map_event(&event).is_none(),
+            "InProgress tool calls should not emit a RuntimeEvent"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_update_maps_to_feedback_recorded() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::PlanUpdate {
+            entries: vec![
+                PlanEntry {
+                    content: "step one".into(),
+                    priority: Priority::High,
+                    status: PlanStatus::Completed,
+                },
+                PlanEntry {
+                    content: "step two".into(),
+                    priority: Priority::Medium,
+                    status: PlanStatus::InProgress,
+                },
+            ],
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::FeedbackRecorded {
+                kind, summary, ..
+            } => {
+                assert_eq!(kind, "acp_plan_update");
+                assert!(summary.contains("step one"), "summary should contain entry text");
+                assert!(summary.contains("step two"), "summary should contain both entries");
+            }
+            other => panic!("expected FeedbackRecorded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_status_maps_to_feedback_recorded() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::McpStatus {
+            statuses: vec![McpServerStatus {
+                name: "code-index".into(),
+                status: McpInitStatus::Ready,
+                tool_count: 5,
+                message: None,
+            }],
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::FeedbackRecorded { kind, summary, .. } => {
+                assert_eq!(kind, "acp_mcp_status");
+                assert!(
+                    summary.contains("code-index"),
+                    "summary should mention server name: {summary}"
+                );
+            }
+            other => panic!("expected FeedbackRecorded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_end_turn_maps_to_agent_completed() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::Complete {
+            stop_reason: StopReason::EndTurn,
+            usage: Some(UsageInfo {
+                total_tokens: 1500,
+                input_tokens: 1000,
+                output_tokens: 500,
+                thought_tokens: None,
+                cached_read_tokens: None,
+                cached_write_tokens: None,
+            }),
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::AgentCompleted {
+                run_id,
+                agent_id,
+                tokens_used,
+                ..
+            } => {
+                assert_eq!(run_id, "test-run");
+                assert_eq!(agent_id, "acp:test");
+                assert_eq!(tokens_used, 1500);
+            }
+            other => panic!("expected AgentCompleted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_cancelled_maps_to_workflow_cancelled() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::Complete {
+            stop_reason: StopReason::Cancelled,
+            usage: None,
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::WorkflowCompleted { outcome, .. } => {
+                assert!(
+                    matches!(outcome, WorkflowOutcome::Cancelled),
+                    "expected Cancelled outcome"
+                );
+            }
+            other => panic!("expected WorkflowCompleted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_max_tokens_maps_to_workflow_halted() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::Complete {
+            stop_reason: StopReason::MaxTokens,
+            usage: None,
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::WorkflowCompleted { outcome, .. } => match outcome {
+                WorkflowOutcome::Halted { reason } => {
+                    assert!(
+                        reason.contains("max tokens"),
+                        "reason should mention max tokens: {reason}"
+                    );
+                }
+                other => panic!("expected Halted, got {other:?}"),
+            },
+            other => panic!("expected WorkflowCompleted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_refusal_maps_to_workflow_halted() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::Complete {
+            stop_reason: StopReason::Refusal,
+            usage: None,
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::WorkflowCompleted { outcome, .. } => match outcome {
+                WorkflowOutcome::Halted { reason } => {
+                    assert!(
+                        reason.contains("refusal"),
+                        "reason should mention refusal: {reason}"
+                    );
+                }
+                other => panic!("expected Halted, got {other:?}"),
+            },
+            other => panic!("expected WorkflowCompleted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_maps_to_agent_failed() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::Failure {
+            message: "connection reset".into(),
+        };
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::AgentFailed {
+                run_id,
+                agent_id,
+                error,
+            } => {
+                assert_eq!(run_id, "test-run");
+                assert_eq!(agent_id, "acp:test");
+                assert_eq!(error, "connection reset");
+            }
+            other => panic!("expected AgentFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn max_tokens_event_maps_to_workflow_halted() {
+        let fwd = test_forwarder();
+        let event = CognitiveEvent::MaxTokens;
+        let mapped = fwd.map_event(&event).expect("should map");
+        match mapped {
+            RuntimeEvent::WorkflowCompleted { outcome, .. } => match outcome {
+                WorkflowOutcome::Halted { reason } => {
+                    assert!(
+                        reason.contains("max tokens"),
+                        "reason should mention max tokens: {reason}"
+                    );
+                }
+                other => panic!("expected Halted, got {other:?}"),
+            },
+            other => panic!("expected WorkflowCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn summarize_content_text_block() {
+        let blocks = vec![ContentBlock::Text {
+            text: "hello world".into(),
+        }];
+        assert_eq!(summarize_content(&blocks), "hello world");
+    }
+
+    #[test]
+    fn summarize_content_diff_block() {
+        let blocks = vec![ContentBlock::Diff {
+            path: "src/main.rs".into(),
+            diff: Some("- old\n+ new".into()),
+            old_text: None,
+            new_text: None,
+        }];
+        assert_eq!(summarize_content(&blocks), "- old\n+ new");
+    }
+
+    #[test]
+    fn summarize_content_diff_falls_back_to_path() {
+        let blocks = vec![ContentBlock::Diff {
+            path: "src/main.rs".into(),
+            diff: None,
+            old_text: None,
+            new_text: None,
+        }];
+        assert_eq!(summarize_content(&blocks), "diff: src/main.rs");
+    }
+
+    #[test]
+    fn stop_reason_label_covers_all_variants() {
+        assert_eq!(stop_reason_label(&StopReason::EndTurn), "end turn");
+        assert_eq!(stop_reason_label(&StopReason::MaxTokens), "max tokens reached");
+        assert_eq!(
+            stop_reason_label(&StopReason::MaxTurnRequests),
+            "max turn requests reached"
+        );
+        assert_eq!(stop_reason_label(&StopReason::Refusal), "refusal");
+        assert_eq!(stop_reason_label(&StopReason::Cancelled), "cancelled");
+    }
+}

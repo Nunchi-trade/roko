@@ -8,7 +8,8 @@
 //!    store as current rate → invoke publish callback if set.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,10 @@ pub struct ISFRKeeper {
     config: ISFRKeeperConfig,
     /// Optional relay publish callback.
     publish_fn: RwLock<Option<PublishFn>>,
+    /// Start time for epoch calculation.
+    start_time: Instant,
+    /// Current epoch number (updated each tick).
+    current_epoch: AtomicU64,
 }
 
 impl ISFRKeeper {
@@ -147,6 +152,8 @@ impl ISFRKeeper {
             source_metas: RwLock::new(metas),
             config,
             publish_fn: RwLock::new(None),
+            start_time: Instant::now(),
+            current_epoch: AtomicU64::new(0),
         }
     }
 
@@ -165,11 +172,54 @@ impl ISFRKeeper {
     ///
     /// Unknown `kind` values fall back to mock with a warning — this lets
     /// config for future live sources be written before the backend exists.
+    /// If an RPC endpoint is unreachable, alloy sources for that endpoint
+    /// are replaced with mocks so the keeper always produces data.
+    #[allow(clippy::too_many_lines)]
     pub fn from_config(
         keeper_id: &str,
         config: ISFRKeeperConfig,
         source_configs: &[SourceConfig],
     ) -> Self {
+        // Shared provider cache: one alloy provider per rpc_url (avoids redundant connections).
+        #[cfg(feature = "alloy-backend")]
+        let mut provider_cache: std::collections::HashMap<
+            String,
+            Arc<alloy::providers::DynProvider>,
+        > = std::collections::HashMap::new();
+
+        // Pre-check which RPC URLs are reachable (quick TCP connect test).
+        // Sources pointing to unreachable RPCs will fall back to mock.
+        #[cfg(feature = "alloy-backend")]
+        let reachable_rpcs: std::collections::HashSet<String> = {
+            let mut set = std::collections::HashSet::new();
+            let mut checked = std::collections::HashSet::new();
+            for sc in source_configs {
+                let url = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
+                if !checked.insert(url.to_string()) {
+                    continue;
+                }
+                if let Ok(parsed) = reqwest::Url::parse(url) {
+                    let host = parsed.host_str().unwrap_or("127.0.0.1");
+                    let port = parsed.port().unwrap_or(8545);
+                    match std::net::TcpStream::connect_timeout(
+                        &format!("{host}:{port}")
+                            .parse()
+                            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+                        std::time::Duration::from_millis(500),
+                    ) {
+                        Ok(_) => {
+                            info!(rpc = %url, "RPC endpoint reachable");
+                            set.insert(url.to_string());
+                        }
+                        Err(_) => {
+                            warn!(rpc = %url, "RPC endpoint unreachable, sources will use mock fallback");
+                        }
+                    }
+                }
+            }
+            set
+        };
+
         let sources: Vec<Box<dyn ISFRSource>> = source_configs
             .iter()
             .map(|sc| -> Box<dyn ISFRSource> {
@@ -188,7 +238,70 @@ impl ISFRKeeper {
                         sc.rate_bps,
                         sc.jitter_bps,
                     )),
-                    // Phase 2: "aave_v3", "compound_v3", "ethena", "staking" backends.
+                    #[cfg(feature = "alloy-backend")]
+                    "aave_v3" => {
+                        let rpc = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
+                        if !reachable_rpcs.contains(rpc) {
+                            info!(source = %sc.name, "RPC unreachable, using mock (base=620 bps)");
+                            Box::new(MockSource::new(&sc.name, class, sc.weight, 620, 15))
+                        } else {
+                            match build_alloy_source_aave_v3(sc, &mut provider_cache) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    warn!(source = %sc.name, error = %e, "failed to build aave_v3 source, falling back to mock");
+                                    Box::new(MockSource::new(&sc.name, class, sc.weight, 620, 15))
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(feature = "alloy-backend")]
+                    "compound_v3" => {
+                        let rpc = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
+                        if !reachable_rpcs.contains(rpc) {
+                            info!(source = %sc.name, "RPC unreachable, using mock (base=580 bps)");
+                            Box::new(MockSource::new(&sc.name, class, sc.weight, 580, 10))
+                        } else {
+                            match build_alloy_source_compound_v3(sc, &mut provider_cache) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    warn!(source = %sc.name, error = %e, "failed to build compound_v3 source, falling back to mock");
+                                    Box::new(MockSource::new(&sc.name, class, sc.weight, 580, 10))
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(feature = "alloy-backend")]
+                    "ethena" => {
+                        let rpc = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
+                        if !reachable_rpcs.contains(rpc) {
+                            info!(source = %sc.name, "RPC unreachable, using mock (base=850 bps)");
+                            Box::new(MockSource::new(&sc.name, class, sc.weight, 850, 25))
+                        } else {
+                            match build_alloy_source_ethena(sc, &mut provider_cache) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    warn!(source = %sc.name, error = %e, "failed to build ethena source, falling back to mock");
+                                    Box::new(MockSource::new(&sc.name, class, sc.weight, 850, 25))
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(feature = "alloy-backend")]
+                    "eth_staking" => {
+                        let rpc = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
+                        if !reachable_rpcs.contains(rpc) {
+                            info!(source = %sc.name, "RPC unreachable, using mock (base=350 bps)");
+                            Box::new(MockSource::new(&sc.name, class, sc.weight, 350, 5))
+                        } else {
+                            match build_alloy_source_lido(sc, &mut provider_cache) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    warn!(source = %sc.name, error = %e, "failed to build lido source, falling back to mock");
+                                    Box::new(MockSource::new(&sc.name, class, sc.weight, 350, 5))
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         warn!(
                             source = %sc.name,
@@ -238,6 +351,11 @@ impl ISFRKeeper {
 
     /// Single poll-compute-publish cycle. Public for direct testing.
     pub async fn tick(&self) {
+        // Update epoch from wall-clock drift since start.
+        let epoch_dur = self.config.epoch_duration_secs.max(1);
+        let new_epoch = self.start_time.elapsed().as_secs() / epoch_dur;
+        self.current_epoch.store(new_epoch, Ordering::Relaxed);
+
         let readings = self.poll_sources().await;
 
         let src_refs: Vec<&dyn ISFRSource> = self.sources.iter().map(|s| s.as_ref()).collect();
@@ -253,6 +371,7 @@ impl ISFRKeeper {
 
         info!(
             keeper = %self.keeper_id,
+            epoch = new_epoch,
             composite_bps = composite.composite_bps,
             confidence = composite.confidence_bps,
             sources = readings.len(),
@@ -319,12 +438,138 @@ impl ISFRKeeper {
     pub fn source_metas(&self) -> Vec<SourceMeta> {
         self.source_metas.read().clone()
     }
+
+    /// Current epoch number (derived from start_time and epoch_duration_secs).
+    pub fn current_epoch(&self) -> u64 {
+        self.current_epoch.load(Ordering::Relaxed)
+    }
+}
+
+// ─── Alloy source builders (feature-gated) ───────────────────────────────────
+
+#[cfg(feature = "alloy-backend")]
+fn get_or_create_provider(
+    sc: &SourceConfig,
+    cache: &mut std::collections::HashMap<String, Arc<alloy::providers::DynProvider>>,
+) -> anyhow::Result<Arc<alloy::providers::DynProvider>> {
+    use alloy::providers::Provider as _;
+    let rpc_url = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
+
+    if let Some(p) = cache.get(rpc_url) {
+        return Ok(Arc::clone(p));
+    }
+
+    let url: reqwest::Url = rpc_url
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid rpc_url '{}': {}", rpc_url, e))?;
+    let provider = alloy::providers::ProviderBuilder::new()
+        .connect_http(url)
+        .erased();
+    let provider = Arc::new(provider);
+    cache.insert(rpc_url.to_string(), Arc::clone(&provider));
+    Ok(provider)
+}
+
+#[cfg(feature = "alloy-backend")]
+fn parse_address(s: &str) -> anyhow::Result<alloy::primitives::Address> {
+    s.parse::<alloy::primitives::Address>()
+        .map_err(|e| anyhow::anyhow!("invalid address '{}': {}", s, e))
+}
+
+#[cfg(feature = "alloy-backend")]
+fn build_alloy_source_aave_v3(
+    sc: &SourceConfig,
+    cache: &mut std::collections::HashMap<String, Arc<alloy::providers::DynProvider>>,
+) -> anyhow::Result<Box<dyn ISFRSource>> {
+    use crate::isfr_sources::aave_v3::AaveV3Source;
+
+    let provider = get_or_create_provider(sc, cache)?;
+    let pool = parse_address(
+        sc.pool_address
+            .as_deref()
+            .unwrap_or("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"),
+    )?;
+    // Default USDC asset for Aave V3
+    let asset = parse_address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")?;
+
+    Ok(Box::new(AaveV3Source::new(
+        sc.name.clone(),
+        sc.weight,
+        provider,
+        pool,
+        asset,
+    )))
+}
+
+#[cfg(feature = "alloy-backend")]
+fn build_alloy_source_compound_v3(
+    sc: &SourceConfig,
+    cache: &mut std::collections::HashMap<String, Arc<alloy::providers::DynProvider>>,
+) -> anyhow::Result<Box<dyn ISFRSource>> {
+    use crate::isfr_sources::compound_v3::CompoundV3Source;
+
+    let provider = get_or_create_provider(sc, cache)?;
+    let comet = parse_address(
+        sc.pool_address
+            .as_deref()
+            .unwrap_or("0xc3d688B66703497DAA19211EEdff47f25384cdc3"),
+    )?;
+
+    Ok(Box::new(CompoundV3Source::new(
+        sc.name.clone(),
+        sc.weight,
+        provider,
+        comet,
+    )))
+}
+
+#[cfg(feature = "alloy-backend")]
+fn build_alloy_source_ethena(
+    sc: &SourceConfig,
+    cache: &mut std::collections::HashMap<String, Arc<alloy::providers::DynProvider>>,
+) -> anyhow::Result<Box<dyn ISFRSource>> {
+    use crate::isfr_sources::ethena::EthenaSource;
+
+    let provider = get_or_create_provider(sc, cache)?;
+    let susde = parse_address(
+        sc.pool_address
+            .as_deref()
+            .unwrap_or("0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"),
+    )?;
+
+    Ok(Box::new(EthenaSource::new(
+        sc.name.clone(),
+        sc.weight,
+        provider,
+        susde,
+    )))
+}
+
+#[cfg(feature = "alloy-backend")]
+fn build_alloy_source_lido(
+    sc: &SourceConfig,
+    cache: &mut std::collections::HashMap<String, Arc<alloy::providers::DynProvider>>,
+) -> anyhow::Result<Box<dyn ISFRSource>> {
+    use crate::isfr_sources::lido::LidoStakingSource;
+
+    let provider = get_or_create_provider(sc, cache)?;
+    let steth = parse_address(
+        sc.pool_address
+            .as_deref()
+            .unwrap_or("0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"),
+    )?;
+
+    Ok(Box::new(LidoStakingSource::new(
+        sc.name.clone(),
+        sc.weight,
+        provider,
+        steth,
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[tokio::test]
     async fn mock_keeper_produces_composite() {

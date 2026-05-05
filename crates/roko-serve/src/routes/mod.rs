@@ -22,6 +22,7 @@ mod integrations;
 mod isfr;
 mod jobs;
 mod learning;
+mod metrics;
 mod middleware;
 mod neuro;
 mod plans;
@@ -234,6 +235,8 @@ pub fn build_router(
         .route("/health", get(top_level_health))
         // Top-level readiness probe — no auth, no /api prefix.
         .route("/ready", get(top_level_ready))
+        // Standard Prometheus scrape endpoint — no auth, no /api prefix.
+        .route("/metrics", get(metrics::metrics_handler))
         .merge(webhooks::public_routes())
         // Public share-receipt reader: no auth required so recipients can
         // open share links without a roko API key.

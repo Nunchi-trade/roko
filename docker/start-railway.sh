@@ -219,6 +219,11 @@ start_child mirage mirage-rs "${mirage_args[@]}"
 mirage_pid="${CHILD_PIDS[-1]}"
 wait_http mirage "http://${MIRAGE_HEALTH_HOST}:${MIRAGE_PORT}/health" "${mirage_pid}" 60
 
+if command -v forge &>/dev/null && [ -d "$WORKDIR/contracts" ]; then
+    log "Building ISFR contracts..."
+    (cd "$WORKDIR/contracts" && forge build) || log "WARN: forge build failed, contract deployment may fail"
+fi
+
 start_child roko roko serve \
   --bind "${PUBLIC_BIND}" \
   --port "${PUBLIC_PORT}" \

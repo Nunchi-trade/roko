@@ -158,5 +158,8 @@ pub use task_runner::{
     AgentEvent, Anomaly, AnomalyDetector, BudgetAction, BudgetGuardrail, ConductorAction,
     ConductorBandit, CostTable, EventBus, ModelPricing, TaskResult, TaskRunner, TaskRunnerError,
 };
-pub use tool_loop::{OnTurnCallback, ToolLoopAgent, TurnProgress};
+pub use tool_loop::{
+    OnTurnCallback, StreamEvent, StreamEventKind, ToolLoopAgent, TurnConfig, TurnProgress,
+    collect_stream_to_response, response_to_synthetic_stream,
+};
 pub use usage::{Usage, UsageObservation, UsageSource};

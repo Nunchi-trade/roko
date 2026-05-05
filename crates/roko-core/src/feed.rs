@@ -154,6 +154,36 @@ impl FeedRegistry {
     }
 }
 
+// ── Runtime status ───────────────────────────────────────────────
+
+/// Runtime status snapshot for an active feed.
+///
+/// Returned by the `/api/feeds/runtime/{id}` endpoint and consumed by
+/// `roko feed status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedRuntimeStatus {
+    /// Stable feed identifier (e.g. `"file-watch-roko-dir"`).
+    pub id: String,
+    /// Topic string (e.g. `"fs.changed"`, `"provider.health"`).
+    pub topic: String,
+    /// Feed kind label (`"Raw"`, `"Derived"`, `"Composite"`, `"Meta"`).
+    pub kind: String,
+    /// Whether the feed is currently connected and producing pulses.
+    pub connected: bool,
+    /// Approximate output rate in Hz.
+    #[serde(default)]
+    pub rate_hz: f64,
+    /// Total number of pulses emitted since startup.
+    #[serde(default)]
+    pub pulses_produced: u64,
+    /// Epoch-ms timestamp of the last pulse, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update_ms: Option<u64>,
+    /// Error string if the feed is in a degraded state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

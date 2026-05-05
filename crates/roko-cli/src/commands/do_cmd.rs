@@ -556,13 +556,16 @@ async fn run_plan_execution(
         projection: Some(projection),
         http_event_sink: None,
         output_sink: if !cli.quiet && !cli.json {
-            std::sync::Arc::new(roko_cli::runner::output_sink::StderrSink::new())
+            std::sync::Arc::new(roko_cli::runner::output_sink::FormattedStderrSink::new(
+                cli.color.should_color(),
+            ))
                 as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
         } else {
             std::sync::Arc::new(roko_cli::runner::output_sink::NoopSink)
                 as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
         },
         warm_cache: true,
+        metrics: None,
     };
 
     let cancel = tokio_util::sync::CancellationToken::new();

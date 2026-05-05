@@ -3,6 +3,14 @@
 //! Each source fetches a rate observation from a DeFi protocol.
 //! The ISFRKeeper aggregates multiple sources via weighted median.
 
+#[cfg(feature = "alloy-backend")]
+pub mod aave_v3;
+#[cfg(feature = "alloy-backend")]
+pub mod compound_v3;
+#[cfg(feature = "alloy-backend")]
+pub mod ethena;
+#[cfg(feature = "alloy-backend")]
+pub mod lido;
 pub mod mock;
 
 use async_trait::async_trait;

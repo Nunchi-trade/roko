@@ -1,12 +1,20 @@
 //! Adapter for the Anthropic Messages API (direct HTTP, not Claude CLI subprocess).
 //!
-//! # STATUS: WIRED but GATED by config (not active in default `roko.toml`)
+//! # STATUS: GATED
 //!
-//! This adapter implements the full Anthropic Messages API tool loop via HTTP
-//! requests to `https://api.anthropic.com/v1/messages`. The code path is fully
-//! reachable at runtime: `ProviderRegistry` dispatches to `AnthropicApiAdapter`
-//! when a provider has `kind = "anthropic_api"`, and the tool loop activates
-//! when the model profile has `supports_tools = true`.
+//! `AnthropicApiAdapter` is reachable via `kind = "anthropic_api"` in `roko.toml`
+//! but no default model profile uses this kind. To activate: add
+//! `[providers.anthropic-api]` with `kind = "anthropic_api"` and `ANTHROPIC_API_KEY`.
+//!
+//! Advantages over `claude_cli`:
+//! - Proper token accounting (`claude_cli` always reports zero tokens).
+//! - `finish_reason` detection (`claude_cli` always returns `None`).
+//! - Streaming via Messages API, no subprocess overhead.
+//! - Concurrent request support.
+//!
+//! The code path is fully reachable at runtime: `ProviderRegistry` dispatches
+//! to `AnthropicApiAdapter` when a provider has `kind = "anthropic_api"`, and
+//! the tool loop activates when the model profile has `supports_tools = true`.
 //!
 //! It is NOT active in the default configuration because all Claude models in
 //! the shipped `roko.toml` route through `claude_cli` (subprocess-based).
@@ -14,14 +22,13 @@
 //! and prompt caching, which the direct HTTP path does not yet replicate.
 //!
 //! The tool loop sub-module (`tool_loop.rs`) IS exercised by integration tests
-//! and proven functional. It is NOT dead code -- it just requires explicit
-//! opt-in via config.
+//! and proven functional. It requires explicit opt-in via config.
 //!
 //! ## To activate
 //!
 //! Add a provider entry to `roko.toml`:
 //! ```toml
-//! [providers.anthropic_api_direct]
+//! [providers.anthropic-api]
 //! kind = "anthropic_api"
 //! base_url = "https://api.anthropic.com/v1"
 //! api_key_env = "ANTHROPIC_API_KEY"

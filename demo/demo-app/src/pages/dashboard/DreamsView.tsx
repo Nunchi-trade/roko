@@ -60,7 +60,7 @@ export default function DreamsView() {
   // SSE-triggered refetch
   const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
   useContextEventSubscription(
-    ['dream_started', 'dream_completed', 'dream_phase_changed'],
+    ['dream_started', 'dream_completed', 'dream_phase_changed', 'knowledge_ingested', 'knowledge_consumed'],
     debouncedRefetch,
   );
 

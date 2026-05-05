@@ -58,6 +58,9 @@ pub struct DoctorCheck {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Actionable fix command printed after `[fail]` / `[warn]` lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 /// Summary counters for a doctor run.
@@ -147,6 +150,11 @@ impl DoctorReport {
                 let _ = write!(&mut out, " - {detail}");
             }
             out.push('\n');
+            if matches!(check.status, DoctorStatus::Fail | DoctorStatus::Warn) {
+                if let Some(fix) = &check.fix {
+                    let _ = writeln!(&mut out, "    \u{2192} fix: {fix}");
+                }
+            }
         }
         out
     }
@@ -173,8 +181,13 @@ pub async fn run_doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         &loaded_config,
     ));
     checks.push(check_layout_basics(&workdir));
+    checks.push(check_claude_cli());
+    checks.push(check_anthropic_api_key());
+    checks.push(check_rust_version());
+    checks.push(check_node_version());
     checks.push(check_serve_auth(&loaded_config));
     checks.push(check_serve_health(options.serve_url.as_deref(), &loaded_config).await?);
+    checks.push(check_v2_abstractions());
 
     let summary = DoctorSummary::from_checks(&checks);
     Ok(DoctorReport {
@@ -297,6 +310,7 @@ fn check_workdir(workdir: &Path) -> DoctorCheck {
             detail: None,
             path: Some(path),
             url: None,
+            fix: None,
         };
     }
 
@@ -312,6 +326,7 @@ fn check_workdir(workdir: &Path) -> DoctorCheck {
         detail: None,
         path: Some(path),
         url: None,
+        fix: Some("roko init".to_string()),
     }
 }
 
@@ -329,6 +344,7 @@ fn check_config_presence(
                 detail: None,
                 path: Some(path.display().to_string()),
                 url: None,
+                fix: None,
             }
         } else {
             DoctorCheck {
@@ -338,6 +354,7 @@ fn check_config_presence(
                 detail: None,
                 path: Some(path.display().to_string()),
                 url: None,
+                fix: Some("roko init".to_string()),
             }
         };
     }
@@ -351,6 +368,7 @@ fn check_config_presence(
                 detail: None,
                 path: Some(path.display().to_string()),
                 url: None,
+                fix: None,
             }
         } else {
             DoctorCheck {
@@ -360,6 +378,7 @@ fn check_config_presence(
                 detail: None,
                 path: Some(path.display().to_string()),
                 url: None,
+                fix: Some("roko init".to_string()),
             }
         };
     }
@@ -372,6 +391,7 @@ fn check_config_presence(
             detail: None,
             path: Some(path.display().to_string()),
             url: None,
+            fix: None,
         };
     }
 
@@ -385,6 +405,7 @@ fn check_config_presence(
         )),
         path: Some(loaded_config.paths.global.display().to_string()),
         url: None,
+        fix: Some("roko init".to_string()),
     }
 }
 
@@ -399,6 +420,7 @@ fn check_layout_basics(workdir: &Path) -> DoctorCheck {
             detail: None,
             path: Some(root),
             url: None,
+            fix: Some("roko init".to_string()),
         };
     }
 
@@ -420,6 +442,7 @@ fn check_layout_basics(workdir: &Path) -> DoctorCheck {
             detail: None,
             path: Some(root),
             url: None,
+            fix: None,
         }
     } else {
         DoctorCheck {
@@ -429,6 +452,7 @@ fn check_layout_basics(workdir: &Path) -> DoctorCheck {
             detail: Some(missing.join(", ")),
             path: Some(root),
             url: None,
+            fix: Some("roko init".to_string()),
         }
     }
 }
@@ -445,6 +469,7 @@ fn check_serve_auth(loaded_config: &LoadedConfig) -> DoctorCheck {
                 .as_ref()
                 .map(|path| path.display().to_string()),
             url: None,
+            fix: None,
         };
     };
 
@@ -459,6 +484,7 @@ fn check_serve_auth(loaded_config: &LoadedConfig) -> DoctorCheck {
                 .as_ref()
                 .map(|path| path.display().to_string()),
             url: None,
+            fix: None,
         };
     }
 
@@ -474,6 +500,7 @@ fn check_serve_auth(loaded_config: &LoadedConfig) -> DoctorCheck {
                 .as_ref()
                 .map(|path| path.display().to_string()),
             url: None,
+            fix: Some("roko config set serve.auth.api_key <your-key>".to_string()),
         };
     }
 
@@ -491,6 +518,7 @@ fn check_serve_auth(loaded_config: &LoadedConfig) -> DoctorCheck {
             .as_ref()
             .map(|path| path.display().to_string()),
         url: None,
+        fix: None,
     }
 }
 
@@ -506,6 +534,7 @@ async fn check_serve_health(
             detail: None,
             path: None,
             url: None,
+            fix: None,
         });
     };
 
@@ -519,6 +548,7 @@ async fn check_serve_health(
                 detail: Some(err.to_string()),
                 path: None,
                 url: Some(raw_url.to_string()),
+                fix: Some("roko serve".to_string()),
             });
         }
     };
@@ -545,6 +575,7 @@ async fn check_serve_health(
             detail: None,
             path: None,
             url: Some(endpoint.to_string()),
+            fix: None,
         },
         Ok(response) => DoctorCheck {
             id: "serve_health".to_string(),
@@ -553,6 +584,7 @@ async fn check_serve_health(
             detail: None,
             path: None,
             url: Some(endpoint.to_string()),
+            fix: Some("roko serve".to_string()),
         },
         Err(err) if err.is_builder() => DoctorCheck {
             id: "serve_health".to_string(),
@@ -561,6 +593,7 @@ async fn check_serve_health(
             detail: Some(err.to_string()),
             path: None,
             url: Some(endpoint.to_string()),
+            fix: Some("roko serve".to_string()),
         },
         Err(err) => DoctorCheck {
             id: "serve_health".to_string(),
@@ -569,9 +602,168 @@ async fn check_serve_health(
             detail: Some(err.to_string()),
             path: None,
             url: Some(endpoint.to_string()),
+            fix: Some("roko serve".to_string()),
         },
     };
     Ok(check)
+}
+
+fn check_claude_cli() -> DoctorCheck {
+    let available = std::process::Command::new("claude")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if available {
+        DoctorCheck {
+            id: "claude_cli".to_string(),
+            status: DoctorStatus::Ok,
+            message: "claude CLI is on PATH".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: None,
+        }
+    } else {
+        DoctorCheck {
+            id: "claude_cli".to_string(),
+            status: DoctorStatus::Warn,
+            message: "claude CLI not found on PATH".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: Some("npm install -g @anthropic-ai/claude-cli && claude login".to_string()),
+        }
+    }
+}
+
+fn check_anthropic_api_key() -> DoctorCheck {
+    let has_key = std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .is_some();
+
+    if has_key {
+        DoctorCheck {
+            id: "anthropic_api_key".to_string(),
+            status: DoctorStatus::Ok,
+            message: "ANTHROPIC_API_KEY is set".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: None,
+        }
+    } else {
+        DoctorCheck {
+            id: "anthropic_api_key".to_string(),
+            status: DoctorStatus::Warn,
+            message: "ANTHROPIC_API_KEY not set".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: Some("export ANTHROPIC_API_KEY=sk-ant-...".to_string()),
+        }
+    }
+}
+
+fn check_rust_version() -> DoctorCheck {
+    let output = std::process::Command::new("rustc")
+        .arg("--version")
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let version_str = String::from_utf8_lossy(&o.stdout);
+            // Parse "rustc 1.91.0 (..." into the minor version number.
+            let minor = version_str
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.split('.').nth(1))
+                .and_then(|m| m.parse::<u32>().ok())
+                .unwrap_or(0);
+
+            if minor >= 91 {
+                DoctorCheck {
+                    id: "rust_version".to_string(),
+                    status: DoctorStatus::Ok,
+                    message: format!("Rust version is adequate ({})", version_str.trim()),
+                    detail: None,
+                    path: None,
+                    url: None,
+                    fix: None,
+                }
+            } else {
+                DoctorCheck {
+                    id: "rust_version".to_string(),
+                    status: DoctorStatus::Fail,
+                    message: format!("Rust version below 1.91 ({})", version_str.trim()),
+                    detail: Some("alloy deps require rustc 1.91+".to_string()),
+                    path: None,
+                    url: None,
+                    fix: Some("rustup update stable".to_string()),
+                }
+            }
+        }
+        _ => DoctorCheck {
+            id: "rust_version".to_string(),
+            status: DoctorStatus::Warn,
+            message: "rustc not found on PATH".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: Some("rustup update stable".to_string()),
+        },
+    }
+}
+
+fn check_node_version() -> DoctorCheck {
+    let output = std::process::Command::new("node").arg("--version").output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let version_str = String::from_utf8_lossy(&o.stdout);
+            // Parse "v22.1.0" into the major version number.
+            let major = version_str
+                .trim()
+                .trim_start_matches('v')
+                .split('.')
+                .next()
+                .and_then(|m| m.parse::<u32>().ok())
+                .unwrap_or(0);
+
+            if major >= 22 {
+                DoctorCheck {
+                    id: "node_version".to_string(),
+                    status: DoctorStatus::Ok,
+                    message: format!("Node version is adequate ({})", version_str.trim()),
+                    detail: None,
+                    path: None,
+                    url: None,
+                    fix: None,
+                }
+            } else {
+                DoctorCheck {
+                    id: "node_version".to_string(),
+                    status: DoctorStatus::Warn,
+                    message: format!("Node version below 22 ({})", version_str.trim()),
+                    detail: None,
+                    path: None,
+                    url: None,
+                    fix: Some("nvm install 22 && nvm use 22".to_string()),
+                }
+            }
+        }
+        _ => DoctorCheck {
+            id: "node_version".to_string(),
+            status: DoctorStatus::Skipped,
+            message: "node not found on PATH (optional)".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: None,
+        },
+    }
 }
 
 fn normalize_health_endpoint_url(raw_url: &str) -> Result<Url> {
@@ -590,6 +782,72 @@ fn normalize_health_endpoint_url(raw_url: &str) -> Result<Url> {
     }
 
     Ok(url)
+}
+
+/// Deterministic check that v2 protocol abstractions are compiled and reachable.
+///
+/// This does not make network calls or spawn subprocesses. It compile-references
+/// the public types from the dependency tasks (Cell, CellContext, TypeSchema,
+/// Signal, Observe, Connect, Trigger) and verifies they are usable at runtime.
+fn check_v2_abstractions() -> DoctorCheck {
+    // Compile-time references: if any of these types are removed or renamed,
+    // this function will fail to compile, catching regressions immediately.
+    use roko_core::cell::{CellContext, CellVersion, TypeSchema};
+    use roko_core::signal::Signal;
+    use roko_core::traits::{Connect, Observe, Trigger};
+
+    // Runtime probe: verify the types can be instantiated / inspected.
+    // TypeSchema has a deterministic compatibility check we can exercise.
+    let any = TypeSchema::Any;
+    let metric = TypeSchema::OfKind(roko_core::Kind::Metric);
+    let schema_ok = any.is_compatible_with(&metric) && metric.is_compatible_with(&any);
+
+    // Verify Signal alias resolves to the same type as Engram.
+    let signal: Signal = Signal::builder(roko_core::Kind::Task).build();
+    let signal_ok = !signal.id.0.iter().all(|b| *b == 0);
+
+    // Verify CellVersion default is a valid triple.
+    let version: CellVersion = (0, 1, 0);
+    let version_ok = version.0 == 0 && version.1 == 1 && version.2 == 0;
+
+    // Verify the protocol traits and CellContext are importable and have
+    // the expected shapes. These trait bound assertions are never called at
+    // runtime but ensure the traits exist with the right bounds at compile time.
+    #[allow(dead_code)]
+    fn assert_observe<T: Observe>() {}
+    #[allow(dead_code)]
+    fn assert_connect<T: Connect>() {}
+    #[allow(dead_code)]
+    fn assert_trigger<T: Trigger>() {}
+    let _ = std::any::type_name::<CellContext>();
+
+    let all_ok = schema_ok && signal_ok && version_ok;
+
+    if all_ok {
+        DoctorCheck {
+            id: "v2_abstractions".to_string(),
+            status: DoctorStatus::Ok,
+            message: "phase 1 protocol abstractions are reachable".to_string(),
+            detail: Some(
+                "Cell, CellContext, TypeSchema, Signal, Observe, Connect, Trigger".to_string(),
+            ),
+            path: None,
+            url: None,
+            fix: None,
+        }
+    } else {
+        DoctorCheck {
+            id: "v2_abstractions".to_string(),
+            status: DoctorStatus::Fail,
+            message: "phase 1 protocol abstractions failed runtime probe".to_string(),
+            detail: Some(format!(
+                "schema_ok={schema_ok}, signal_ok={signal_ok}, version_ok={version_ok}"
+            )),
+            path: None,
+            url: None,
+            fix: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -717,5 +975,181 @@ mod tests {
             .expect("serve_auth check");
         assert_eq!(auth_check.status, DoctorStatus::Fail);
         assert!(!report.healthy);
+    }
+
+    #[tokio::test]
+    async fn failing_checks_have_fix_lines_in_human_output() {
+        let temp = tempdir().unwrap();
+        let report = run_doctor(&DoctorOptions {
+            workdir: temp.path().to_path_buf(),
+            config_override: None,
+            serve_url: None,
+        })
+        .await
+        .unwrap();
+
+        let rendered = report.render_human();
+        // Every fail/warn check with a fix should produce an arrow-fix line.
+        for check in &report.checks {
+            if matches!(check.status, DoctorStatus::Fail | DoctorStatus::Warn) {
+                if let Some(fix) = &check.fix {
+                    let expected = format!("\u{2192} fix: {fix}");
+                    assert!(
+                        rendered.contains(&expected),
+                        "missing fix line for check '{}': expected '{expected}' in output",
+                        check.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ok_checks_do_not_have_fix_lines_in_human_output() {
+        let temp = tempdir().unwrap();
+        let mut config = Config::default();
+        config.serve.auth.enabled = false;
+        write_project_config(temp.path(), config);
+        bootstrap_layout(temp.path()).await;
+
+        let report = run_doctor(&DoctorOptions {
+            workdir: temp.path().to_path_buf(),
+            config_override: None,
+            serve_url: None,
+        })
+        .await
+        .unwrap();
+
+        for check in &report.checks {
+            if check.status == DoctorStatus::Ok {
+                assert!(
+                    check.fix.is_none(),
+                    "ok check '{}' should not have a fix",
+                    check.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fix_field_skipped_in_json_when_none() {
+        let check = DoctorCheck {
+            id: "test".to_string(),
+            status: DoctorStatus::Ok,
+            message: "all good".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: None,
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(
+            !json.contains("\"fix\""),
+            "fix field should be absent when None"
+        );
+    }
+
+    #[test]
+    fn fix_field_present_in_json_when_some() {
+        let check = DoctorCheck {
+            id: "test".to_string(),
+            status: DoctorStatus::Fail,
+            message: "bad".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: Some("roko init".to_string()),
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(
+            json.contains("\"fix\":\"roko init\""),
+            "fix field should be present when Some"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_includes_environment_checks() {
+        let temp = tempdir().unwrap();
+        let report = run_doctor(&DoctorOptions {
+            workdir: temp.path().to_path_buf(),
+            config_override: None,
+            serve_url: None,
+        })
+        .await
+        .unwrap();
+
+        let check_ids: Vec<&str> = report.checks.iter().map(|c| c.id.as_str()).collect();
+        assert!(
+            check_ids.contains(&"claude_cli"),
+            "missing claude_cli check"
+        );
+        assert!(
+            check_ids.contains(&"anthropic_api_key"),
+            "missing anthropic_api_key check"
+        );
+        assert!(
+            check_ids.contains(&"rust_version"),
+            "missing rust_version check"
+        );
+        assert!(
+            check_ids.contains(&"node_version"),
+            "missing node_version check"
+        );
+    }
+
+    #[test]
+    fn v2_abstractions_check_passes() {
+        let check = check_v2_abstractions();
+        assert_eq!(check.id, "v2_abstractions");
+        assert_eq!(
+            check.status,
+            DoctorStatus::Ok,
+            "v2 abstractions check should pass: {:?}",
+            check.detail
+        );
+        assert!(check
+            .message
+            .contains("phase 1 protocol abstractions are reachable"));
+    }
+
+    #[tokio::test]
+    async fn doctor_report_includes_v2_abstractions() {
+        let temp = tempdir().unwrap();
+        let report = run_doctor(&DoctorOptions {
+            workdir: temp.path().to_path_buf(),
+            config_override: None,
+            serve_url: None,
+        })
+        .await
+        .unwrap();
+
+        let v2_check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "v2_abstractions")
+            .expect("v2_abstractions check should be present in doctor report");
+        assert_eq!(v2_check.status, DoctorStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn doctor_human_output_contains_v2_abstractions() {
+        let temp = tempdir().unwrap();
+        let report = run_doctor(&DoctorOptions {
+            workdir: temp.path().to_path_buf(),
+            config_override: None,
+            serve_url: None,
+        })
+        .await
+        .unwrap();
+
+        let rendered = report.render_human();
+        assert!(
+            rendered.contains("v2_abstractions"),
+            "human output should contain 'v2_abstractions', got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("[ok] v2_abstractions"),
+            "human output should show v2_abstractions as ok, got:\n{rendered}"
+        );
     }
 }

@@ -25,6 +25,21 @@ pub const LABEL_PROVIDER: &str = "provider";
 pub const LABEL_MODEL: &str = "model";
 /// Common `direction` label key.
 pub const LABEL_DIRECTION: &str = "direction";
+/// Common `error_type` label key.
+pub const LABEL_ERROR_TYPE: &str = "error_type";
+
+/// Total LLM calls, by provider, model, and status.
+pub const ROKO_LLM_CALLS_TOTAL: &str = "roko_llm_calls_total";
+/// Total LLM errors, by provider, model, and error type.
+pub const ROKO_LLM_ERRORS_TOTAL: &str = "roko_llm_errors_total";
+/// LLM time-to-first-token in seconds, by provider and model.
+pub const ROKO_LLM_TTFT_SECONDS: &str = "roko_llm_ttft_seconds";
+/// LLM total request duration in seconds, by provider and model.
+pub const ROKO_LLM_REQUEST_DURATION_SECONDS: &str = "roko_llm_request_duration_seconds";
+/// Context window utilization in basis points, by provider and model.
+pub const ROKO_CONTEXT_UTILIZATION: &str = "roko_context_utilization";
+/// Output token throughput for the latest call (tokens/sec gauge), by provider and model.
+pub const ROKO_TOKEN_THROUGHPUT_PER_SECOND: &str = "roko_token_throughput_per_second";
 
 /// Total number of plans observed, by status.
 pub const ROKO_PLANS_TOTAL: &str = "roko_plans_total";
@@ -154,6 +169,54 @@ pub const ROKO_AGENT_SERVER_MESSAGE_REQUESTS_TOTAL_DESCRIPTOR: MetricDescriptor 
         labels: &[],
     };
 
+/// Canonical descriptor for `roko_llm_calls_total`.
+pub const ROKO_LLM_CALLS_TOTAL_DESCRIPTOR: MetricDescriptor = MetricDescriptor {
+    name: ROKO_LLM_CALLS_TOTAL,
+    help: "Total LLM calls by provider, model, and status",
+    kind: MetricKind::Counter,
+    labels: &[LABEL_PROVIDER, LABEL_MODEL, LABEL_STATUS],
+};
+
+/// Canonical descriptor for `roko_llm_errors_total`.
+pub const ROKO_LLM_ERRORS_TOTAL_DESCRIPTOR: MetricDescriptor = MetricDescriptor {
+    name: ROKO_LLM_ERRORS_TOTAL,
+    help: "Total LLM errors by provider, model, and error type",
+    kind: MetricKind::Counter,
+    labels: &[LABEL_PROVIDER, LABEL_MODEL, LABEL_ERROR_TYPE],
+};
+
+/// Canonical descriptor for `roko_llm_ttft_seconds`.
+pub const ROKO_LLM_TTFT_SECONDS_DESCRIPTOR: MetricDescriptor = MetricDescriptor {
+    name: ROKO_LLM_TTFT_SECONDS,
+    help: "LLM time-to-first-token in seconds",
+    kind: MetricKind::Histogram,
+    labels: &[LABEL_PROVIDER, LABEL_MODEL],
+};
+
+/// Canonical descriptor for `roko_llm_request_duration_seconds`.
+pub const ROKO_LLM_REQUEST_DURATION_SECONDS_DESCRIPTOR: MetricDescriptor = MetricDescriptor {
+    name: ROKO_LLM_REQUEST_DURATION_SECONDS,
+    help: "LLM total request duration in seconds",
+    kind: MetricKind::Histogram,
+    labels: &[LABEL_PROVIDER, LABEL_MODEL],
+};
+
+/// Canonical descriptor for `roko_context_utilization`.
+pub const ROKO_CONTEXT_UTILIZATION_DESCRIPTOR: MetricDescriptor = MetricDescriptor {
+    name: ROKO_CONTEXT_UTILIZATION,
+    help: "Context window utilization in basis points (1 bp = 0.01%)",
+    kind: MetricKind::Gauge,
+    labels: &[LABEL_PROVIDER, LABEL_MODEL],
+};
+
+/// Canonical descriptor for `roko_token_throughput_per_second`.
+pub const ROKO_TOKEN_THROUGHPUT_PER_SECOND_DESCRIPTOR: MetricDescriptor = MetricDescriptor {
+    name: ROKO_TOKEN_THROUGHPUT_PER_SECOND,
+    help: "Output token throughput for the latest call (integer tokens/sec)",
+    kind: MetricKind::Gauge,
+    labels: &[LABEL_PROVIDER, LABEL_MODEL],
+};
+
 /// Full canonical metric surface shared across the core registry and sidecars.
 pub const CANONICAL_METRICS: &[MetricDescriptor] = &[
     ROKO_PLANS_TOTAL_DESCRIPTOR,
@@ -165,4 +228,68 @@ pub const CANONICAL_METRICS: &[MetricDescriptor] = &[
     ROKO_LLM_COST_USD_TOTAL_DESCRIPTOR,
     ROKO_AGENT_SERVER_REQUESTS_TOTAL_DESCRIPTOR,
     ROKO_AGENT_SERVER_MESSAGE_REQUESTS_TOTAL_DESCRIPTOR,
+    ROKO_LLM_CALLS_TOTAL_DESCRIPTOR,
+    ROKO_LLM_ERRORS_TOTAL_DESCRIPTOR,
+    ROKO_LLM_TTFT_SECONDS_DESCRIPTOR,
+    ROKO_LLM_REQUEST_DURATION_SECONDS_DESCRIPTOR,
+    ROKO_CONTEXT_UTILIZATION_DESCRIPTOR,
+    ROKO_TOKEN_THROUGHPUT_PER_SECOND_DESCRIPTOR,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_metrics_includes_new_families() {
+        let names: Vec<&str> = CANONICAL_METRICS.iter().map(|d| d.name).collect();
+        assert!(
+            names.contains(&ROKO_LLM_CALLS_TOTAL),
+            "missing {ROKO_LLM_CALLS_TOTAL}"
+        );
+        assert!(
+            names.contains(&ROKO_LLM_ERRORS_TOTAL),
+            "missing {ROKO_LLM_ERRORS_TOTAL}"
+        );
+        assert!(
+            names.contains(&ROKO_LLM_TTFT_SECONDS),
+            "missing {ROKO_LLM_TTFT_SECONDS}"
+        );
+        assert!(
+            names.contains(&ROKO_LLM_REQUEST_DURATION_SECONDS),
+            "missing {ROKO_LLM_REQUEST_DURATION_SECONDS}"
+        );
+        assert!(
+            names.contains(&ROKO_CONTEXT_UTILIZATION),
+            "missing {ROKO_CONTEXT_UTILIZATION}"
+        );
+        assert!(
+            names.contains(&ROKO_TOKEN_THROUGHPUT_PER_SECOND),
+            "missing {ROKO_TOKEN_THROUGHPUT_PER_SECOND}"
+        );
+        assert!(
+            names.contains(&ROKO_GATE_VERDICTS_TOTAL),
+            "missing {ROKO_GATE_VERDICTS_TOTAL}"
+        );
+    }
+
+    #[test]
+    fn canonical_metrics_count_is_15() {
+        assert_eq!(
+            CANONICAL_METRICS.len(),
+            15,
+            "expected 15 canonical metrics"
+        );
+    }
+
+    #[test]
+    fn all_descriptors_have_labels() {
+        for desc in CANONICAL_METRICS {
+            assert!(
+                !desc.labels.is_empty(),
+                "metric {name} has no labels",
+                name = desc.name
+            );
+        }
+    }
+}

@@ -33,7 +33,7 @@
 //! (vacuous-change detection).
 
 use async_trait::async_trait;
-use roko_core::{Context, Signal, Verdict, Verify};
+use roko_core::{Body, CellContext, Context, Kind, Provenance, Signal, Verdict, Verify};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -115,6 +115,7 @@ impl Default for DiffGate {
     }
 }
 
+#[async_trait]
 impl roko_core::Cell for DiffGate {
     fn cell_id(&self) -> &str {
         "diff-gate"
@@ -124,6 +125,28 @@ impl roko_core::Cell for DiffGate {
     }
     fn protocols(&self) -> &[&str] {
         &["Verify"]
+    }
+
+    async fn execute(
+        &self,
+        input: Vec<Signal>,
+        _ctx: &CellContext,
+    ) -> roko_core::error::Result<Vec<Signal>> {
+        let fallback = Signal::builder(Kind::Task)
+            .body(Body::empty())
+            .provenance(Provenance::agent(self.name()))
+            .build();
+        let signal = input.first().unwrap_or(&fallback);
+        let verify_ctx = Context::now();
+        let verdict = self.verify(signal, &verify_ctx).await;
+        let body = Body::from_json(&verdict)?;
+        let output = signal
+            .derive_verdict(body)
+            .provenance(Provenance::agent(self.name()))
+            .tag("gate", verdict.gate.clone())
+            .tag("passed", verdict.passed.to_string())
+            .build();
+        Ok(vec![output])
     }
 }
 

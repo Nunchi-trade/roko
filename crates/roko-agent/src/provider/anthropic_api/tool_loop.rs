@@ -1,3 +1,8 @@
+// STATUS: GATED — Anthropic Messages API tool loop backend.
+// Reachable via kind = "anthropic_api" in roko.toml but no default model
+// profile uses this kind. To activate: add [providers.anthropic-api] with
+// kind = "anthropic_api" and ANTHROPIC_API_KEY. See parent module docs.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

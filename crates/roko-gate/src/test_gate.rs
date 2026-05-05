@@ -11,7 +11,7 @@
 use crate::compile_errors::{render_failure_classification, structured_gate_failure};
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Signal, TestCount, Verdict, Verify};
+use roko_core::{Body, CellContext, Context, Kind, Provenance, Signal, TestCount, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -98,6 +98,7 @@ impl TestGate {
     }
 }
 
+#[async_trait]
 impl roko_core::Cell for TestGate {
     fn cell_id(&self) -> &str {
         "test-gate"
@@ -107,6 +108,28 @@ impl roko_core::Cell for TestGate {
     }
     fn protocols(&self) -> &[&str] {
         &["Verify"]
+    }
+
+    async fn execute(
+        &self,
+        input: Vec<Signal>,
+        _ctx: &CellContext,
+    ) -> roko_core::error::Result<Vec<Signal>> {
+        let fallback = Signal::builder(Kind::Task)
+            .body(Body::empty())
+            .provenance(Provenance::agent(self.name()))
+            .build();
+        let signal = input.first().unwrap_or(&fallback);
+        let verify_ctx = Context::now();
+        let verdict = self.verify(signal, &verify_ctx).await;
+        let body = Body::from_json(&verdict)?;
+        let output = signal
+            .derive_verdict(body)
+            .provenance(Provenance::agent(self.name()))
+            .tag("gate", verdict.gate.clone())
+            .tag("passed", verdict.passed.to_string())
+            .build();
+        Ok(vec![output])
     }
 }
 

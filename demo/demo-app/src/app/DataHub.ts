@@ -72,11 +72,68 @@ export interface IsfrRate {
 
 export interface IsfrSource {
   id: string;
-  health: 'live' | 'stale' | 'offline';
+  name: string;
+  class: string;
+  weight: number;
   lastRateBps: number | null;
+  health: 'live' | 'stale' | 'offline';
+  lastPollMs: number | null;
 }
 
 export type IsfrKeeperStatus = 'unknown' | 'running' | 'stopped';
+
+export interface IsfrFieldHistory {
+  composite: number[];
+  lending: number[];
+  structured: number[];
+  funding: number[];
+  staking: number[];
+  confidence: number[];
+}
+
+export interface IsfrSourceSnapshot {
+  bps: number;
+  ts: number;
+}
+
+export interface IsfrEventEntry {
+  ts: number;
+  type: 'rate' | 'source' | 'keeper';
+  message: string;
+}
+
+// ── Chain types ──────────────────────────────────────────────────
+
+export interface ChainBlockEntry {
+  number: number;
+  hash: string;
+  parentHash: string;
+  timestamp: number;
+  gasUsed: number;
+  gasLimit: number;
+  txCount: number;
+  baseFeePerGas: number | null;
+}
+
+export interface ChainTxEntry {
+  blockNumber: number;
+  txHash: string;
+  from: string;
+  to: string | null;
+  valueWei: string;
+  gasUsed: number;
+  methodSig: string | null;
+  success: boolean;
+}
+
+export interface ChainEventEntry {
+  blockNumber: number;
+  txHash: string;
+  logIndex: number;
+  contract: string;
+  eventName: string;
+  decoded: Record<string, unknown>;
+}
 
 // ── Store interface ─────────────────────────────────────────────
 
@@ -120,6 +177,10 @@ export interface DataHub {
   isfrHistory: IsfrRate[];       // ring buffer, max 256
   isfrSources: IsfrSource[];
   isfrKeeperStatus: IsfrKeeperStatus;
+  isfrFieldHistory: IsfrFieldHistory;
+  isfrSourceHistory: Record<string, IsfrSourceSnapshot[]>;
+  isfrEventLog: IsfrEventEntry[];
+  isfrReadingsCache: Record<string, Record<string, unknown>>;
 
   // -- Actions: event handling -------------------------------------
   handleServerEvent: (event: ServerEvent) => void;
@@ -146,6 +207,20 @@ export interface DataHub {
   fetchIsfrCurrent: () => Promise<void>;
   fetchIsfrHistory: (limit?: number) => Promise<void>;
   fetchIsfrSources: () => Promise<void>;
+
+  // -- Chain slice ------------------------------------------------
+  chainBlocks: ChainBlockEntry[];
+  chainTxs: ChainTxEntry[];
+  chainEvents: ChainEventEntry[];
+  chainLatestBlock: ChainBlockEntry | null;
+  chainWatcherRunning: boolean;
+  chainGasHistory: number[];
+
+  // -- Actions: Chain REST fetches --------------------------------
+  fetchChainBlocks: () => Promise<void>;
+  fetchChainTxs: () => Promise<void>;
+  fetchChainEvents: () => Promise<void>;
+  fetchChainStatus: () => Promise<void>;
 }
 
 // ── Ring-buffer limits ──────────────────────────────────────────
@@ -153,6 +228,13 @@ export interface DataHub {
 const MAX_EPISODES = 500;
 const MAX_INFERENCES = 200;
 const MAX_ISFR_HISTORY = 256;
+const MAX_FIELD_HISTORY = 30;
+const MAX_SOURCE_HISTORY = 30;
+const MAX_EVENT_LOG = 500;
+const MAX_CHAIN_BLOCKS = 64;
+const MAX_CHAIN_TXS = 128;
+const MAX_CHAIN_EVENTS = 128;
+const MAX_CHAIN_GAS_HISTORY = 64;
 
 // ── Store implementation ────────────────────────────────────────
 
@@ -182,6 +264,16 @@ export const useDataHub = create<DataHub>()((set, get) => ({
   isfrHistory: [],
   isfrSources: [],
   isfrKeeperStatus: 'unknown',
+  isfrFieldHistory: { composite: [], lending: [], structured: [], funding: [], staking: [], confidence: [] },
+  isfrSourceHistory: {},
+  isfrEventLog: [],
+  isfrReadingsCache: {},
+  chainBlocks: [],
+  chainTxs: [],
+  chainEvents: [],
+  chainLatestBlock: null,
+  chainWatcherRunning: false,
+  chainGasHistory: [],
 
   // -- Event handling -----------------------------------------------
 
@@ -273,7 +365,9 @@ export const useDataHub = create<DataHub>()((set, get) => ({
         get().fetchBenchRuns();
         break;
 
-      case 'isfr_rate_computed':
+      case 'isfr_rate_computed': {
+        const capField = (arr: number[], v: number) =>
+          [...arr.slice(-(MAX_FIELD_HISTORY - 1)), v];
         set((s) => ({
           isfrCurrentRate: {
             compositeBps: event.compositeBps,
@@ -298,8 +392,27 @@ export const useDataHub = create<DataHub>()((set, get) => ({
               timestampMs: event.timestampMs,
             },
           ],
+          isfrFieldHistory: {
+            composite: capField(s.isfrFieldHistory.composite, event.compositeBps),
+            lending: capField(s.isfrFieldHistory.lending, event.lendingBps),
+            structured: capField(s.isfrFieldHistory.structured, event.structuredBps),
+            funding: capField(s.isfrFieldHistory.funding, event.fundingBps),
+            staking: capField(s.isfrFieldHistory.staking, event.stakingBps),
+            confidence: capField(s.isfrFieldHistory.confidence, event.confidenceBps),
+          },
+          isfrEventLog: [
+            {
+              ts: event.timestampMs,
+              type: 'rate' as const,
+              message: `Composite ${event.compositeBps} bps \u00b7 ${event.sourceCount} sources \u00b7 ${(event.confidenceBps / 100).toFixed(1)}% conf`,
+            },
+            ...s.isfrEventLog.slice(0, MAX_EVENT_LOG - 1),
+          ],
         }));
+        // Refetch current rate (with readings) to populate per-source history
+        get().fetchIsfrCurrent();
         break;
+      }
 
       case 'isfr_source_health_changed':
         set((s) => ({
@@ -311,13 +424,107 @@ export const useDataHub = create<DataHub>()((set, get) => ({
               )
             : [
                 ...s.isfrSources,
-                { id: event.sourceId, health: event.health, lastRateBps: event.lastRateBps },
+                {
+                  id: event.sourceId,
+                  name: event.sourceId,
+                  class: 'unknown',
+                  weight: 0,
+                  health: event.health,
+                  lastRateBps: event.lastRateBps,
+                  lastPollMs: null,
+                },
               ],
+          isfrEventLog: [
+            {
+              ts: Date.now(),
+              type: 'source' as const,
+              message: `${event.sourceId} \u2192 ${event.health}${event.lastRateBps != null ? ` (${event.lastRateBps} bps)` : ''}`,
+            },
+            ...s.isfrEventLog.slice(0, MAX_EVENT_LOG - 1),
+          ],
         }));
+        // Also refetch full source list to get complete metadata
+        get().fetchIsfrSources();
         break;
 
       case 'isfr_keeper_state_changed':
-        set({ isfrKeeperStatus: event.running ? 'running' : 'stopped' });
+        set((s) => ({
+          isfrKeeperStatus: event.running ? 'running' : 'stopped',
+          isfrEventLog: [
+            {
+              ts: Date.now(),
+              type: 'keeper' as const,
+              message: event.running ? 'Keeper started' : 'Keeper stopped',
+            },
+            ...s.isfrEventLog.slice(0, MAX_EVENT_LOG - 1),
+          ],
+        }));
+        break;
+
+      case 'chain_block':
+        set((s) => ({
+          chainLatestBlock: {
+            number: event.number,
+            hash: event.hash,
+            parentHash: event.parentHash,
+            timestamp: event.timestamp,
+            gasUsed: event.gasUsed,
+            gasLimit: event.gasLimit,
+            txCount: event.txCount,
+            baseFeePerGas: event.baseFeePerGas,
+          },
+          chainBlocks: [
+            {
+              number: event.number,
+              hash: event.hash,
+              parentHash: event.parentHash,
+              timestamp: event.timestamp,
+              gasUsed: event.gasUsed,
+              gasLimit: event.gasLimit,
+              txCount: event.txCount,
+              baseFeePerGas: event.baseFeePerGas,
+            },
+            ...s.chainBlocks.slice(0, MAX_CHAIN_BLOCKS - 1),
+          ],
+          chainGasHistory: [
+            ...s.chainGasHistory.slice(-(MAX_CHAIN_GAS_HISTORY - 1)),
+            event.gasUsed,
+          ],
+        }));
+        break;
+
+      case 'chain_tx':
+        set((s) => ({
+          chainTxs: [
+            {
+              blockNumber: event.blockNumber,
+              txHash: event.txHash,
+              from: event.from,
+              to: event.to,
+              valueWei: event.valueWei,
+              gasUsed: event.gasUsed,
+              methodSig: event.methodSig,
+              success: event.success,
+            },
+            ...s.chainTxs.slice(0, MAX_CHAIN_TXS - 1),
+          ],
+        }));
+        break;
+
+      case 'chain_contract_event':
+        set((s) => ({
+          chainEvents: [
+            {
+              blockNumber: event.blockNumber,
+              txHash: event.txHash,
+              logIndex: event.logIndex,
+              contract: event.contract,
+              eventName: event.eventName,
+              decoded: event.decoded,
+            },
+            ...s.chainEvents.slice(0, MAX_CHAIN_EVENTS - 1),
+          ],
+        }));
         break;
 
       case 'server_shutdown':
@@ -455,19 +662,43 @@ export const useDataHub = create<DataHub>()((set, get) => ({
         composite_bps: number; lending_bps: number; structured_bps: number;
         funding_bps: number; staking_bps: number; confidence_bps: number;
         source_count: number; timestamp_ms: number;
+        readings?: Array<{
+          source_id: string; source_name: string; rate_bps: number;
+          weight: number; class: string; metadata: Record<string, unknown> | null;
+        }>;
       }>('/api/isfr/current');
       if (res.ok && 'composite_bps' in res.data) {
-        set({
-          isfrCurrentRate: {
-            compositeBps: res.data.composite_bps,
-            lendingBps: res.data.lending_bps,
-            structuredBps: res.data.structured_bps,
-            fundingBps: res.data.funding_bps,
-            stakingBps: res.data.staking_bps,
-            confidenceBps: res.data.confidence_bps,
-            sourceCount: res.data.source_count,
-            timestampMs: res.data.timestamp_ms,
-          },
+        const d = res.data;
+        const capSrc = (arr: IsfrSourceSnapshot[] | undefined, v: IsfrSourceSnapshot) =>
+          [...(arr ?? []).slice(-(MAX_SOURCE_HISTORY - 1)), v];
+        set((s) => {
+          const nextSourceHistory = { ...s.isfrSourceHistory };
+          const nextReadingsCache = { ...s.isfrReadingsCache };
+          if (d.readings) {
+            for (const r of d.readings) {
+              nextSourceHistory[r.source_name] = capSrc(
+                nextSourceHistory[r.source_name],
+                { bps: r.rate_bps, ts: d.timestamp_ms },
+              );
+              if (r.metadata) {
+                nextReadingsCache[r.source_name] = r.metadata;
+              }
+            }
+          }
+          return {
+            isfrCurrentRate: {
+              compositeBps: d.composite_bps,
+              lendingBps: d.lending_bps,
+              structuredBps: d.structured_bps,
+              fundingBps: d.funding_bps,
+              stakingBps: d.staking_bps,
+              confidenceBps: d.confidence_bps,
+              sourceCount: d.source_count,
+              timestampMs: d.timestamp_ms,
+            },
+            isfrSourceHistory: nextSourceHistory,
+            isfrReadingsCache: nextReadingsCache,
+          };
         });
       }
     } catch (err) {
@@ -513,8 +744,10 @@ export const useDataHub = create<DataHub>()((set, get) => ({
   fetchIsfrSources: async () => {
     try {
       const res = await api.get<
-        | Array<{ id: string; health: string; last_rate_bps: number | null }>
-        | { sources: Array<{ id: string; health: string; last_rate_bps: number | null }> }
+        | Array<{ id: string; name: string; class: string; weight: number;
+                  health: string; last_rate_bps: number | null; last_poll_ms: number | null }>
+        | { sources: Array<{ id: string; name: string; class: string; weight: number;
+                             health: string; last_rate_bps: number | null; last_poll_ms: number | null }> }
       >('/api/isfr/sources');
       if (res.ok) {
         const data = res.data;
@@ -522,13 +755,103 @@ export const useDataHub = create<DataHub>()((set, get) => ({
         set({
           isfrSources: arr.map((s) => ({
             id: s.id,
+            name: s.name,
+            class: s.class,
+            weight: s.weight,
             health: s.health as IsfrSource['health'],
             lastRateBps: s.last_rate_bps,
+            lastPollMs: s.last_poll_ms,
           })),
         });
       }
     } catch (err) {
       console.warn('[DataHub] fetchIsfrSources failed:', err);
+    }
+  },
+
+  // -- Chain fetch actions -----------------------------------------
+
+  fetchChainBlocks: async () => {
+    try {
+      const res = await api.get<{ blocks: Array<{
+        number: number; hash: string; parent_hash: string; timestamp: number;
+        gas_used: number; gas_limit: number; tx_count: number; base_fee_per_gas: number | null;
+      }> }>('/api/chain/blocks?limit=64');
+      if (res.ok) {
+        set({
+          chainBlocks: res.data.blocks.map((b) => ({
+            number: b.number,
+            hash: b.hash,
+            parentHash: b.parent_hash,
+            timestamp: b.timestamp,
+            gasUsed: b.gas_used,
+            gasLimit: b.gas_limit,
+            txCount: b.tx_count,
+            baseFeePerGas: b.base_fee_per_gas,
+          })),
+        });
+      }
+    } catch (err) {
+      console.warn('[DataHub] fetchChainBlocks failed:', err);
+    }
+  },
+
+  fetchChainTxs: async () => {
+    try {
+      const res = await api.get<{ transactions: Array<{
+        block_number: number; tx_hash: string; from: string; to: string | null;
+        value_wei: string; gas_used: number; method_sig: string | null; success: boolean;
+      }> }>('/api/chain/transactions?limit=128');
+      if (res.ok) {
+        set({
+          chainTxs: res.data.transactions.map((t) => ({
+            blockNumber: t.block_number,
+            txHash: t.tx_hash,
+            from: t.from,
+            to: t.to,
+            valueWei: t.value_wei,
+            gasUsed: t.gas_used,
+            methodSig: t.method_sig,
+            success: t.success,
+          })),
+        });
+      }
+    } catch (err) {
+      console.warn('[DataHub] fetchChainTxs failed:', err);
+    }
+  },
+
+  fetchChainEvents: async () => {
+    try {
+      const res = await api.get<{ events: Array<{
+        block_number: number; tx_hash: string; log_index: number;
+        contract: string; event_name: string; decoded: Record<string, unknown>;
+      }> }>('/api/chain/events?limit=128');
+      if (res.ok) {
+        set({
+          chainEvents: res.data.events.map((e) => ({
+            blockNumber: e.block_number,
+            txHash: e.tx_hash,
+            logIndex: e.log_index,
+            contract: e.contract,
+            eventName: e.event_name,
+            decoded: e.decoded,
+          })),
+        });
+      }
+    } catch (err) {
+      console.warn('[DataHub] fetchChainEvents failed:', err);
+    }
+  },
+
+  fetchChainStatus: async () => {
+    try {
+      const res = await api.get<{ watcher_running: boolean; latest_block: number | null }>('/api/chain/watcher');
+      if (res.ok) {
+        set({ chainWatcherRunning: res.data.watcher_running });
+      }
+    } catch (err) {
+      console.warn('[DataHub] fetchChainStatus failed:', err);
     }
   },
 }));

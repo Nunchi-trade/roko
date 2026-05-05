@@ -135,7 +135,13 @@ impl AcpAdapter {
             | RuntimeEvent::KnowledgeIngested { .. }
             | RuntimeEvent::KnowledgeConsumed { .. }
             | RuntimeEvent::FeedbackRecorded { .. }
-            | RuntimeEvent::StateCheckpointed { .. } => None,
+            | RuntimeEvent::StateCheckpointed { .. }
+            | RuntimeEvent::InferenceFirstToken { .. }
+            | RuntimeEvent::ToolCallStarted { .. }
+            | RuntimeEvent::ToolCallCompleted { .. }
+            | RuntimeEvent::TaskStarted { .. }
+            | RuntimeEvent::TaskCompleted { .. }
+            | RuntimeEvent::PipelinePhase { .. } => None,
         }
     }
 

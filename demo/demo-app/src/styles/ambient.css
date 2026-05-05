@@ -90,10 +90,33 @@
   );
 }
 
+/* ── CRT subtle flicker ── */
+.ambient-crt {
+  animation: crt-flicker 8s steps(1) infinite;
+}
+
+/* ── Scanline drift overlay ── */
+.ambient-scanlines {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0px,
+    transparent 2px,
+    rgba(255,255,255,0.008) 2px,
+    rgba(255,255,255,0.008) 4px
+  );
+}
+
 /* ── Reduced motion ── */
 @media (prefers-reduced-motion: reduce) {
   .ambient-aurora {
     animation: none;
     background-position: 50% 50%, 50% 50%, 50% 50%;
+  }
+  .ambient-crt {
+    animation: none;
   }
 }

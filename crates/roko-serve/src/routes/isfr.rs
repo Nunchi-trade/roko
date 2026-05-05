@@ -40,10 +40,14 @@ struct ISFRStatusResponse {
     current_rate_bps: Option<u64>,
     /// Confidence as a 0.0–1.0 fraction (null when no rate yet).
     current_confidence: Option<f64>,
+    /// Current keeper epoch number.
+    current_epoch: u64,
     /// Source poll interval from config (seconds).
     poll_interval_secs: u64,
     /// Epoch duration from config (seconds).
     epoch_duration_secs: u64,
+    /// ISFROracle contract address (if deployed).
+    oracle_address: Option<String>,
 }
 
 async fn isfr_status(
@@ -59,6 +63,18 @@ async fn isfr_status(
         .keeper_running
         .load(std::sync::atomic::Ordering::Relaxed);
 
+    let epoch = state
+        .isfr
+        .current_epoch
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let oracle_addr = state
+        .isfr
+        .contract_addresses
+        .read()
+        .await
+        .as_ref()
+        .and_then(|c| c.isfr_oracle.clone());
+
     Ok(Json(ISFRStatusResponse {
         enabled: config.isfr.enabled,
         keeper_running: running,
@@ -66,8 +82,10 @@ async fn isfr_status(
         current_rate_bps: current.as_ref().map(|r| r.composite_bps),
         // confidence_bps is 0–10000 (basis points of confidence), convert to 0.0–1.0
         current_confidence: current.as_ref().map(|r| r.confidence_bps as f64 / 10_000.0),
+        current_epoch: epoch,
         poll_interval_secs: config.isfr.poll_interval_secs,
         epoch_duration_secs: config.isfr.epoch_duration_secs,
+        oracle_address: oracle_addr,
     }))
 }
 

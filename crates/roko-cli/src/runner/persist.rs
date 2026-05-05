@@ -14,6 +14,7 @@ use roko_core::defaults::{
 };
 use roko_fs::RokoLayout;
 use roko_orchestrator::{ExecutorSnapshot, OrchestratorSnapshot};
+use roko_runtime::StateSnapshot;
 use serde::{Deserialize, Serialize};
 
 use super::types::RunnerEvent;
@@ -41,6 +42,8 @@ pub struct PersistPaths {
     pub cascade_router_json: PathBuf,
     /// `.roko/learn/gate-thresholds.json` — adaptive gate thresholds.
     pub gate_thresholds_json: PathBuf,
+    /// `.roko/state/state-snapshot.json` — unified, checksummed state snapshot.
+    pub state_snapshot_json: PathBuf,
     /// `.roko/runtime/agent-pids.json` — live agent PIDs.
     pub agent_pids_json: PathBuf,
     /// `.roko/state/events.json` — event log for replay.
@@ -67,6 +70,7 @@ impl PersistPaths {
             executor_json: layout.executor_snapshot(),
             orchestrator_json: layout.orchestrator_snapshot(),
             run_state_json: layout.run_state_path(),
+            state_snapshot_json: state.join("state-snapshot.json"),
             episodes_jsonl: layout.root_episodes_path(),
             efficiency_jsonl: layout.efficiency_path(),
             cascade_router_json: layout.cascade_router_path(),
@@ -319,6 +323,28 @@ pub fn load_run_state(paths: &PersistPaths) -> Result<Option<RunStateSnapshot>> 
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err).with_context(|| format!("reading {}", paths.run_state_json.display())),
     }
+}
+
+/// Serialize and atomically write a [`StateSnapshot`] to disk.
+pub fn save_state_snapshot(paths: &PersistPaths, snapshot: &StateSnapshot) -> Result<()> {
+    let json = serde_json::to_vec_pretty(snapshot)?;
+    atomic_write(&paths.state_snapshot_json, &json)
+}
+
+/// Load a [`StateSnapshot`] from disk and validate its checksum.
+/// Returns `None` if the file does not exist.
+/// Returns `Err` if the file exists but is corrupt or the checksum fails.
+pub fn load_state_snapshot(paths: &PersistPaths) -> Result<Option<StateSnapshot>> {
+    let path = &paths.state_snapshot_json;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let json = fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let snapshot: StateSnapshot = serde_json::from_str(&json)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    snapshot.verify().map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(Some(snapshot))
 }
 
 /// Outcome of a JSONL recovery scan.
