@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use roko_fs::RokoLayout;
 use roko_orchestrator::{ExecutorSnapshot, OrchestratorSnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -47,26 +48,26 @@ pub struct PersistPaths {
 impl PersistPaths {
     /// Derive all paths from a workdir, creating parent directories as needed.
     pub fn from_workdir(workdir: &Path) -> Result<Self> {
-        let roko = workdir.join(".roko");
-        let state = roko.join("state");
-        let learn = roko.join("learn");
-        let runtime = roko.join("runtime");
+        let layout = RokoLayout::for_project(workdir);
+        let state = layout.state_dir();
+        let learn = layout.learn_dir();
+        let runtime = layout.runtime_dir();
 
         for dir in [&state, &learn, &runtime] {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
 
         Ok(Self {
-            executor_json: state.join("executor.json"),
-            orchestrator_json: state.join("orchestrator.json"),
-            run_state_json: state.join("run-state.json"),
-            episodes_jsonl: roko.join("episodes.jsonl"),
-            efficiency_jsonl: learn.join("efficiency.jsonl"),
-            cascade_router_json: learn.join("cascade-router.json"),
-            gate_thresholds_json: learn.join("gate-thresholds.json"),
-            agent_pids_json: runtime.join("agent-pids.json"),
-            events_json: state.join("events.json"),
-            events_jsonl: roko.join("events.jsonl"),
+            executor_json: layout.executor_snapshot(),
+            orchestrator_json: layout.orchestrator_snapshot(),
+            run_state_json: layout.run_state_path(),
+            episodes_jsonl: layout.root_episodes_path(),
+            efficiency_jsonl: layout.efficiency_path(),
+            cascade_router_json: layout.cascade_router_path(),
+            gate_thresholds_json: layout.gate_thresholds_path(),
+            agent_pids_json: layout.agent_pids_path(),
+            events_json: layout.event_log_snapshot(),
+            events_jsonl: layout.events_jsonl_path(),
         })
     }
 }

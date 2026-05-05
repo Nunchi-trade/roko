@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use roko_core::{Body, Engram, EngramBuilder, Kind, Provenance, Verdict, Verify};
+use roko_fs::RokoLayout;
 use roko_gate::classify_gate_failure;
 use roko_gate::rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung};
 use roko_gate::{GatePayload, ShellGate};
@@ -234,10 +235,8 @@ pub fn spawn_plan_verify(
 }
 
 fn gate_signal(plan_id: &str, task_id: &str, rung: u32, workdir: &std::path::Path) -> Engram {
-    let attempt_sentinel = workdir
-        .join(".roko")
-        .join("runtime")
-        .join("gate-attempts")
+    let attempt_sentinel = RokoLayout::for_project(workdir)
+        .gate_attempts_dir()
         .join(format!(
             "{}-{}-{rung}.seen",
             sanitize_gate_env_segment(plan_id),

@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use roko_fs::RokoLayout;
 use tracing::info;
 
 use crate::task_parser::TasksFile;
@@ -98,7 +99,7 @@ pub fn load_plans(dir: &Path) -> Result<Vec<Plan>> {
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
-        if current.join(".roko").is_dir() {
+        if RokoLayout::for_project(&current).root().is_dir() {
             return Some(current);
         }
         match current.parent() {
@@ -120,7 +121,7 @@ fn load_prd_excerpt_for_plan(workdir: Option<&Path>, plan_id: &str) -> String {
     let Some(root) = workdir else {
         return String::new();
     };
-    let prd_base = root.join(".roko").join("prd");
+    let prd_base = RokoLayout::for_project(root).prd_dir();
     let candidates = [
         prd_base.join("published").join(format!("{plan_id}.md")),
         prd_base.join("draft").join(format!("{plan_id}.md")),

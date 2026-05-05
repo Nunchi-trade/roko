@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use roko_core::config::schema::RokoConfig;
 use roko_core::defaults::{DEFAULT_MAX_AUTO_FIX_ITERATIONS, DEFAULT_PLAN_TIMEOUT_SECS};
+use roko_fs::RokoLayout;
 
 // ─── Agent Events ───────────────────────────────────────────────────────
 
@@ -1229,6 +1230,8 @@ fn new_run_id() -> String {
 /// Configuration for a runner v2 execution.
 #[derive(Clone)]
 pub struct RunConfig {
+    /// Typed layout for `.roko/` paths under [`Self::workdir`].
+    pub layout: RokoLayout,
     /// Working directory for the plan execution.
     pub workdir: PathBuf,
     /// Directory containing plan(s).
@@ -1307,10 +1310,8 @@ impl RunConfig {
             roko_config.agent.default_model.clone()
         };
 
-        let router_path = workdir
-            .join(".roko")
-            .join("learn")
-            .join("cascade-router.json");
+        let layout = RokoLayout::for_project(&workdir);
+        let router_path = layout.cascade_router_path();
         let mut model_slugs = roko_config
             .effective_models()
             .keys()
@@ -1340,6 +1341,7 @@ impl RunConfig {
         let max_concurrent_tasks = roko_config.runner.max_concurrent_tasks.unwrap_or(4).max(1);
 
         Self {
+            layout,
             workdir,
             plan_dir,
             model,
@@ -1390,6 +1392,7 @@ impl RunConfig {
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
+            layout: RokoLayout::for_project("."),
             workdir: PathBuf::from("."),
             plan_dir: PathBuf::from("plans"),
             model: "claude-sonnet-4-6".to_string(),
@@ -1426,6 +1429,7 @@ impl Default for RunConfig {
 impl std::fmt::Debug for RunConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RunConfig")
+            .field("layout", &self.layout)
             .field("workdir", &self.workdir)
             .field("plan_dir", &self.plan_dir)
             .field("model", &self.model)

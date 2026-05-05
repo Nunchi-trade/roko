@@ -11,6 +11,7 @@ use roko_core::extension::{
     Extension, ExtensionChain, ExtensionLayer, ExtensionMeta, GateEvent, InferenceRequest,
     InferenceResponse,
 };
+use roko_fs::RokoLayout;
 use tracing::{debug, info, warn};
 
 // ─── PluginExtension ────────────��───────────────────────────────────────
@@ -118,8 +119,9 @@ pub fn load_extensions(
     extension_names: &[String],
     chain: &mut ExtensionChain,
 ) -> usize {
+    let layout = RokoLayout::for_project(workdir);
     let scan_dirs = [
-        workdir.join(".roko").join("extensions"),
+        layout.extensions_dir(),
         workdir.join("plugins"),
     ];
 
@@ -214,7 +216,7 @@ mod tests {
     #[test]
     fn load_with_empty_dir_returns_zero() {
         let tmp = tempfile::tempdir().unwrap();
-        let ext_dir = tmp.path().join(".roko").join("extensions");
+        let ext_dir = RokoLayout::for_project(tmp.path()).extensions_dir();
         std::fs::create_dir_all(&ext_dir).unwrap();
 
         let mut chain = ExtensionChain::new();
@@ -225,7 +227,9 @@ mod tests {
     #[test]
     fn load_discovers_plugin_toml() {
         let tmp = tempfile::tempdir().unwrap();
-        let ext_dir = tmp.path().join(".roko").join("extensions").join("test-ext");
+        let ext_dir = RokoLayout::for_project(tmp.path())
+            .extensions_dir()
+            .join("test-ext");
         std::fs::create_dir_all(&ext_dir).unwrap();
 
         std::fs::write(
@@ -257,7 +261,8 @@ template = "Hello, world!"
     #[test]
     fn load_respects_allow_list() {
         let tmp = tempfile::tempdir().unwrap();
-        let ext_dir = tmp.path().join(".roko").join("extensions").join("allowed");
+        let layout = RokoLayout::for_project(tmp.path());
+        let ext_dir = layout.extensions_dir().join("allowed");
         std::fs::create_dir_all(&ext_dir).unwrap();
         std::fs::write(
             ext_dir.join("plugin.toml"),
@@ -269,7 +274,7 @@ version = "0.1.0"
         )
         .unwrap();
 
-        let skip_dir = tmp.path().join(".roko").join("extensions").join("skipped");
+        let skip_dir = layout.extensions_dir().join("skipped");
         std::fs::create_dir_all(&skip_dir).unwrap();
         std::fs::write(
             skip_dir.join("plugin.toml"),

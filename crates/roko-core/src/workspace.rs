@@ -1,19 +1,24 @@
-//! Workspace layout abstraction.
+//! Deprecated workspace layout abstraction.
 //!
 //! Provides a [`Workspace`] struct that validates and provides typed access to
-//! the `.roko/` directory hierarchy. This is the canonical way to discover paths
-//! for state, plans, runtime, learning, and other workspace artifacts.
+//! the `.roko/` directory hierarchy. New code should use
+//! `roko_fs::RokoLayout`, which is the canonical path abstraction.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 
 /// Represents a validated Roko workspace rooted at a directory containing `.roko/`.
+#[deprecated(
+    since = "0.1.0",
+    note = "use roko_fs::RokoLayout; Workspace remains for source compatibility"
+)]
 #[derive(Clone, Debug)]
 pub struct Workspace {
     root: PathBuf,
 }
 
+#[allow(deprecated)]
 impl Workspace {
     /// Open an existing workspace by validating that `.roko/` exists under `root`.
     ///
@@ -165,6 +170,7 @@ impl Workspace {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

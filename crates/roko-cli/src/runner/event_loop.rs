@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use roko_core::agent::ModelSpec;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{AgentRole, PhaseKind, PlanPhase};
+use roko_fs::RokoLayout;
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
@@ -130,7 +131,7 @@ pub async fn run(
     let mut gate_thresholds = persist::load_gate_thresholds(&paths).unwrap_or_default();
 
     // Ensure knowledge store directory exists for episode ingestion.
-    let neuro_dir = config.workdir.join(".roko").join("neuro");
+    let neuro_dir = config.layout.neuro_dir();
     if let Err(err) = std::fs::create_dir_all(&neuro_dir) {
         warn!(error = %err, "failed to create neuro directory");
     }
@@ -331,7 +332,7 @@ pub async fn run(
     }
 
     // Seed playbooks if the store is empty (bootstrap chicken-and-egg).
-    seed_playbooks_if_empty(&config.workdir).await;
+    seed_playbooks_if_empty(&config.layout).await;
 
     // Build prompt cache once — reused across all task dispatches.
     // Refreshed when stale (default 5 min) or after gate failures.
@@ -770,7 +771,7 @@ pub async fn run(
                         "duration_ms": completion.duration_ms,
                         "timestamp": chrono::Utc::now().to_rfc3339(),
                     });
-                    let signals_path = config.workdir.join(".roko/signals.jsonl");
+                    let signals_path = config.layout.signals_path();
                     if let Ok(mut f) = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -3241,11 +3242,7 @@ async fn shutdown_subsystems(config: &RunConfig, tui: &TuiBridge) {
 
     // Persist cascade router learned state.
     if let Some(router) = &config.cascade_router {
-        let router_path = config
-            .workdir
-            .join(".roko")
-            .join("learn")
-            .join("cascade-router.json");
+        let router_path = config.layout.cascade_router_path();
         if let Err(err) = router.save(&router_path) {
             warn!(error = %err, "failed to persist cascade router");
         } else {
@@ -3441,10 +3438,10 @@ fn register_agent_feed(
 /// This solves the chicken-and-egg problem: playbooks are normally only
 /// saved on task SUCCESS, but without playbooks the system has no guidance
 /// from the start. These seeds give the first few runs structured advice.
-async fn seed_playbooks_if_empty(workdir: &Path) {
+async fn seed_playbooks_if_empty(layout: &RokoLayout) {
     use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore};
 
-    let pb_dir = workdir.join(".roko").join("learn").join("playbooks");
+    let pb_dir = layout.playbooks_dir();
 
     // Quick check: if the directory exists and has any .json files, skip.
     if pb_dir.exists() {

@@ -305,4 +305,5 @@ pub use traits::{Bus, ColdStore, Compose, Connect, Observe, React, Route, Store,
 // the crate root to avoid colliding with the `Score` value struct. Access it
 // via `roko_core::traits::Score` or import with an alias.
 pub use verdict::{Outcome, Selection, TestCount, Verdict};
+#[allow(deprecated)]
 pub use workspace::Workspace;

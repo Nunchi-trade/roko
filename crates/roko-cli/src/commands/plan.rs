@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
+use roko_fs::RokoLayout;
 
 pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     match cmd {
@@ -221,6 +222,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             // Resolve workdir FIRST (before using plans_dir)
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let layout = RokoLayout::for_project(&wd);
 
             // Resolve plans_dir relative to workdir if not absolute
             let resolved_plans_dir = if plans_dir.is_absolute() {
@@ -241,14 +243,14 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
 
             // Acquire exclusive workspace lock before mutating state.
-            let _lock = roko_cli::workspace_lock::acquire_workspace_lock(&wd.join(".roko"))?;
+            let _lock = roko_cli::workspace_lock::acquire_workspace_lock(layout.root())?;
 
             if fresh {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis();
-                let state_dir = wd.join(".roko").join("state");
+                let state_dir = layout.state_dir();
                 for filename in &["executor.json", "orchestrator.json", "run-state.json"] {
                     let state_path = state_dir.join(filename);
                     if state_path.exists() {
@@ -329,7 +331,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     } else {
                         snap_path.clone()
                     };
-                    let standard = wd.join(".roko").join("state").join("executor.json");
+                    let standard = layout.executor_snapshot();
                     if snap_path != standard && snap_path.exists() {
                         let _ = std::fs::create_dir_all(standard.parent().unwrap());
                         let _ = std::fs::copy(&snap_path, &standard);
@@ -387,7 +389,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let roko_config = early_roko_config;
 
             // Initialize Phase 0 subsystems.
-            let router_path = wd.join(".roko").join("learn").join("cascade-router.json");
+            let router_path = layout.cascade_router_path();
             let mut model_slugs = roko_config
                 .effective_models()
                 .keys()
@@ -420,14 +422,13 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let projection = std::sync::Arc::new(roko_cli::runner::projection::Projection::new(
                 run_uuid.clone(),
             ));
-            let episodes_path = wd.join(".roko").join("episodes.jsonl");
-            let knowledge_path = wd
-                .join(".roko")
-                .join("learn")
+            let episodes_path = layout.root_episodes_path();
+            let knowledge_path = layout
+                .learn_dir()
                 .join(roko_neuro::admission::DEFAULT_KNOWLEDGE_CANDIDATES_FILE);
             // Best-effort directory creation — the sinks' own
             // `create_dir_all` will retry on first append.
-            let _ = std::fs::create_dir_all(wd.join(".roko").join("learn"));
+            let _ = std::fs::create_dir_all(layout.learn_dir());
             let feedback_facade = std::sync::Arc::new(
                 roko_cli::runtime_feedback::FeedbackFacade::new()
                     .with_sink(std::sync::Arc::new(
@@ -449,6 +450,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             );
 
             let run_config = roko_cli::runner::RunConfig {
+                layout: layout.clone(),
                 workdir: wd.clone(),
                 plan_dir: resolved_plans_dir.clone(),
                 model: roko_config.agent.default_model.clone(),
@@ -464,7 +466,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 mcp_config: {
                     // Resolve MCP config: .roko/mcp.json > auto-discovery
                     let mcp = {
-                        let roko_local = wd.join(".roko").join("mcp.json");
+                        let roko_local = layout.mcp_config_path();
                         if roko_local.is_file() {
                             Some(roko_local)
                         } else {
@@ -515,7 +517,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
                 // Redirect stderr to a log file so the runner's tracing output
                 // doesn't corrupt the TUI's raw terminal display.
-                let stderr_log_path = wd.join(".roko").join("runner-stderr.log");
+                let stderr_log_path = layout.runner_stderr_log();
                 let _ = std::fs::create_dir_all(stderr_log_path.parent().unwrap_or(&wd));
                 #[cfg(unix)]
                 if let Ok(log_file) = std::fs::File::create(&stderr_log_path) {
@@ -637,7 +639,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     }
                     eprintln!("\nhint: check .roko/roko.log for full failure output");
                 }
-                let state_path = wd.join(".roko").join("state").join("executor.json");
+                let state_path = layout.executor_snapshot();
                 if state_path.exists() {
                     eprintln!(
                         "hint: if tasks appear stuck or state looks wrong, try: roko plan run {} --fresh",
@@ -1251,7 +1253,7 @@ pub(crate) fn preserve_completed_task_status(
 pub(crate) fn read_executor_state(
     workdir: &std::path::Path,
 ) -> Option<Vec<(String, usize, usize)>> {
-    let executor_path = workdir.join(".roko").join("state").join("executor.json");
+    let executor_path = RokoLayout::for_project(workdir).executor_snapshot();
     if !executor_path.is_file() {
         return None;
     }
@@ -1357,7 +1359,7 @@ fn discovered_plan_totals(workdir: &std::path::Path) -> std::collections::HashMa
 fn read_run_state_completed_counts(
     workdir: &std::path::Path,
 ) -> std::collections::HashMap<String, usize> {
-    let run_state_path = workdir.join(".roko").join("state").join("run-state.json");
+    let run_state_path = RokoLayout::for_project(workdir).run_state_path();
     let Ok(contents) = std::fs::read_to_string(&run_state_path) else {
         return std::collections::HashMap::new();
     };
@@ -1395,7 +1397,7 @@ fn json_usize_field(value: &serde_json::Value, keys: &[&str]) -> Option<usize> {
 
 pub(crate) fn plan_path_exists(workdir: &std::path::Path, plan_id: &str) -> bool {
     let plan_dir = workdir.join("plans").join(plan_id);
-    let roko_plan_dir = workdir.join(".roko").join("plans").join(plan_id);
+    let roko_plan_dir = RokoLayout::for_project(workdir).plan_dir(plan_id);
     plan_dir.exists() || roko_plan_dir.exists()
 }
 
@@ -1444,7 +1446,7 @@ mod tests {
     #[test]
     fn read_executor_state_parses_plans_array() {
         let dir = tempdir().expect("tempdir");
-        let state_dir = dir.path().join(".roko").join("state");
+        let state_dir = RokoLayout::for_project(dir.path()).state_dir();
         std::fs::create_dir_all(&state_dir).expect("state dir");
         std::fs::write(
             state_dir.join("executor.json"),
